@@ -5667,9 +5667,11 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
         and user_states.get(m.from_user.id) is not None
         and m.text is not None
         and not is_menu_navigation_text(m.text)
+        and (m.text or "").strip() not in {"📺 Канал", "👥 Группа с темой", "📤 Источник", "📥 Получатель"}
         and not (m.text or "").startswith("Удалить ")
         and not (m.text or "").startswith("📤 ")
         and not (m.text or "").startswith("📥 ")
+        and not (m.text or "").strip().startswith("-100")
     )
 )
 async def handle_stateful_private_inputs(message: Message):
@@ -6242,38 +6244,110 @@ async def resolve_chat_title(chat_id: str) -> str:
 async def handle_chat_id_inputs(message: Message):
     if not await is_admin(message):
         return
+
     state = user_states.get(message.from_user.id)
     if not state:
         return
-    chat_id = message.text.strip()
+
+    chat_id = (message.text or "").strip()
     action = state.get("action")
+
+    # =========================================================
+    # 1. Добавление обычного канала / получателя
+    # =========================================================
     if action in {"add_source_channel", "add_target_channel"}:
         channel_type = "source" if action == "add_source_channel" else "target"
+
         try:
             title = await resolve_chat_title(chat_id)
 
             exists = await run_db(db.channel_exists, chat_id, None, channel_type)
 
             if exists:
-                await message.reply("Такая запись уже есть", reply_markup=get_main_menu())
+                await message.reply(
+                    "Такая запись уже есть",
+                    reply_markup=get_main_menu(),
+                )
             else:
-                await run_db(db.add_channel, chat_id, None, channel_type, title, settings.admin_id)
-                await message.reply(f"✅ Добавлен {channel_type}: {title}", reply_markup=get_main_menu())
+                created = await run_db(
+                    db.add_channel,
+                    chat_id,
+                    None,
+                    channel_type,
+                    title,
+                    settings.admin_id,
+                )
 
-                if channel_type == "source":
-                    asyncio.create_task(
-                        parse_channel_history(telethon_client, db, chat_id, clean_start=False)
+                if not created:
+                    await message.reply(
+                        "⚠️ Не удалось добавить запись в базу",
+                        reply_markup=get_main_menu(),
                     )
+                else:
+                    await message.reply(
+                        f"✅ Добавлен {'источник' if channel_type == 'source' else 'получатель'}: {title}",
+                        reply_markup=get_main_menu(),
+                    )
+
+                    if channel_type == "source":
+                        asyncio.create_task(
+                            parse_channel_history(
+                                telethon_client,
+                                db,
+                                chat_id,
+                                clean_start=False,
+                            )
+                        )
+
         except Exception as exc:
-            await message.reply(f"❌ Ошибка доступа к каналу: {exc}", reply_markup=get_main_menu())
+            logger.exception(
+                "Ошибка добавления канала | action=%s | chat_id=%s | error=%s",
+                action,
+                chat_id,
+                exc,
+            )
+            await message.reply(
+                f"❌ Ошибка доступа к каналу/чату: {exc}",
+                reply_markup=get_main_menu(),
+            )
         finally:
             reset_user_state(message.from_user.id)
         return
+
+    # =========================================================
+    # 2. Добавление группы с темой / получателя с темой
+    # =========================================================
     if action in {"add_source_group", "add_target_group"}:
-        state["chat_id"] = chat_id
-        state["title"] = await resolve_chat_title(chat_id)
-        state["action"] = "add_source_group_thread" if action == "add_source_group" else "add_target_group_thread"
-        await message.reply("Теперь отправьте ID темы", reply_markup=get_cancel_keyboard())
+        try:
+            title = await resolve_chat_title(chat_id)
+
+            state["chat_id"] = chat_id
+            state["title"] = title
+            state["action"] = (
+                "add_source_group_thread"
+                if action == "add_source_group"
+                else "add_target_group_thread"
+            )
+
+            await message.reply(
+                "Теперь отправьте ID темы",
+                reply_markup=get_cancel_keyboard(),
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "Ошибка доступа к группе перед вводом thread_id | action=%s | chat_id=%s | error=%s",
+                action,
+                chat_id,
+                exc,
+            )
+            await message.reply(
+                f"❌ Не удалось получить доступ к группе: {exc}",
+                reply_markup=get_main_menu(),
+            )
+            reset_user_state(message.from_user.id)
+
+        return
 
 @dp.message(lambda m: m.photo or m.video or m.document)
 async def handle_intro_file(message: Message):
