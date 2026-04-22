@@ -729,6 +729,7 @@ def build_dashboard_text() -> str:
     stats = db.get_queue_stats()
     next_rule = db.get_next_scheduled_rule()
     now_text = datetime.now(USER_TZ).strftime("%d.%m.%Y %H:%M:%S")
+    live_workers = sum(1 for task in posting_tasks.values() if not task.done())
 
     next_block = "⏭ **Ближайший пост:**\nне запланирован"
 
@@ -758,7 +759,7 @@ def build_dashboard_text() -> str:
         f"✅ Отправлено: {stats['sent']}\n"
         f"⚠️ С ошибками: {stats['faulty']}\n"
         f"🔄 Правил: {stats['rules']}\n"
-        f"🤖 Воркеров: {len(posting_tasks)}\n\n"
+        f"🤖 Воркеров: {live_workers}\n\n"
         f"{next_block}\n\n"
         f"Статус: {'✅ РАБОТАЕТ' if posting_active else '⏸ ОСТАНОВЛЕН'}\n"
         f"🕒 Обновлено: {now_text}"
@@ -766,9 +767,9 @@ def build_dashboard_text() -> str:
 
 def build_dashboard_keyboard(running: bool = True) -> InlineKeyboardMarkup:
     control_button = (
-        InlineKeyboardButton(text="⏸ Остановить", callback_data="dashboard_stop")
+        InlineKeyboardButton(text="⏸ Пауза обновления", callback_data="dashboard_stop")
         if running
-        else InlineKeyboardButton(text="▶️ Возобновить", callback_data="dashboard_resume")
+        else InlineKeyboardButton(text="▶️ Возобновить обновление", callback_data="dashboard_resume")
     )
 
     return InlineKeyboardMarkup(
@@ -1347,6 +1348,15 @@ def sources_inline_keyboard(sources: list[ChannelChoice]) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def ensure_rule_workers() -> None:
+    if not posting_active:
+        if posting_tasks:
+            logger.info(
+                "WORKER_MANAGER | SKIP_START | posting_active=%s -> stop running workers",
+                posting_active,
+            )
+            await stop_all_workers()
+        return
+
     rules = await run_db(db.get_all_rules)
 
     current_rules = {r.id: r for r in rules}
@@ -1410,6 +1420,16 @@ async def rule_worker(rule_id: int) -> None:
 
     while True:
         try:
+            if not posting_active:
+                decision = worker_policy.on_rule_inactive()
+                worker_policy.log_decision(
+                    rule_id=rule_id,
+                    decision=decision,
+                    extra="Глобальная пересылка выключена (posting_active=False)",
+                )
+                await asyncio.sleep(decision.sleep_seconds)
+                continue
+
             rule = await run_db(db.get_rule, rule_id)
 
             if not rule:
@@ -3498,11 +3518,21 @@ def _short_time_from_iso(iso_value: str | None) -> str | None:
     except Exception:
         return None
 
-def audit_row_time_local(created_at: str | None) -> str:
+def audit_row_time_local(created_at: Any | None) -> str:
     if not created_at:
         return "??.??.???? ??:??:??"
     try:
-        dt = datetime.fromisoformat(created_at).astimezone(USER_TZ)
+        if isinstance(created_at, datetime):
+            dt = created_at
+        elif isinstance(created_at, (int, float)):
+            dt = datetime.fromtimestamp(float(created_at), tz=timezone.utc)
+        else:
+            dt = datetime.fromisoformat(str(created_at))
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        dt = dt.astimezone(USER_TZ)
         return dt.strftime("%d.%m.%Y %H:%M:%S")
     except Exception:
         return "??.??.???? ??:??:??"
