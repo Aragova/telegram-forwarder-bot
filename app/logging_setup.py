@@ -1,5 +1,6 @@
 from __future__ import annotations
-import logging, sys
+import logging
+import sys
 from pathlib import Path
 
 def setup_logging(level: str = "INFO", log_file: str = "bot.log") -> logging.Logger:

@@ -1,10 +1,13 @@
 from __future__ import annotations
 import asyncio
 import html
-import logging, mimetypes, random, re, time
+import logging
+import mimetypes
+import random
+import re
+import time
 import json
 from typing import Any
-from telethon.tl import types as tl_types
 from pathlib import Path
 from aiogram.methods import CopyMessages
 from aiogram.types import MessageEntity
@@ -4385,7 +4388,8 @@ class SenderService:
             entity = int(source_channel) if str(source_channel).lstrip("-").isdigit() else source_channel
             return await self.telethon.get_messages(entity, ids=message_id)
         except Exception as exc:
-            logger.warning("Telethon не смог получить сообщение %s/%s: %s", source_channel, message_id, exc); return None
+            logger.warning("Telethon не смог получить сообщение %s/%s: %s", source_channel, message_id, exc)
+            return None
 
     async def _download_video_source(
         self,

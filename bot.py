@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from aiogram import Bot, Dispatcher
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -27,12 +26,6 @@ from app.repository_models import utc_now_iso
 from app.repository import RepositoryProtocol
 from app.repository_factory import create_repository
 from app.worker_policy import build_worker_policy
-from app.transport import wrap_bot, wrap_telethon_client
-from app.transport_policy import (
-    build_reaction_policy,
-    build_sender_bot_policy,
-    build_sender_telethon_policy,
-)
 from app.keyboards import (
     get_cancel_keyboard,
     get_channel_type_keyboard,
@@ -49,9 +42,10 @@ from app.keyboards import (
 from app.logging_setup import setup_logging
 from app.parser import parse_channel_history, parse_group_history
 from app.sender import SenderService
-telethon_client = None
 from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIErrorPolicy
+
+telethon_client = None
 
 settings.validate()
 logger = setup_logging(settings.log_level)
@@ -4478,7 +4472,7 @@ async def handle_video_caption_clear(callback: CallbackQuery):
 
     before_rule = await run_db(db.get_rule, rule_id)
     ok = await run_db(db.update_rule_video_caption, rule_id, None, None)
-    after_rule = await run_db(db.get_rule, rule_id)
+    await run_db(db.get_rule, rule_id)
 
     if ok:
         await run_db(

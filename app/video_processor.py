@@ -257,7 +257,7 @@ class VideoProcessor:
         try:
             total, used, free = shutil.disk_usage(self.temp_dir)
             return free // (2 ** 30)
-        except:
+        except Exception:
             return 0
 
     def _cleanup_cache(self):
@@ -594,7 +594,7 @@ class VideoProcessor:
                     denominator = float(fps_parts[1])
                     if denominator != 0:
                         fps = numerator / denominator
-            except:
+            except Exception:
                 pass
 
             format_info = info.get('format', {})
@@ -694,7 +694,7 @@ class VideoProcessor:
                             if new_time != last_out_time_ms:
                                 last_progress_update = time.time()
                             last_out_time_ms = new_time
-                        except:
+                        except Exception:
                             pass
                     elif key == "fps":
                         current_fps = value
@@ -703,7 +703,7 @@ class VideoProcessor:
                     elif key == "total_size":
                         try:
                             current_size = f"{int(value) / (1024 * 1024):.1f} MB"
-                        except:
+                        except Exception:
                             pass
                     elif key == "progress":
                         now = time.time()
@@ -758,7 +758,7 @@ class VideoProcessor:
                 await asyncio.sleep(30)
                 if timeout is None and process.returncode is None:
                     if time.time() - last_progress_update > 300:
-                        logger.error(f"   ⚠️ WATCHDOG: Нет прогресса >5 минут! Завершаю процесс.")
+                        logger.error("   ⚠️ WATCHDOG: Нет прогресса >5 минут! Завершаю процесс.")
                         watchdog_triggered = True
                         process.terminate()
                         try:
@@ -837,7 +837,7 @@ class VideoProcessor:
             process = await asyncio.create_subprocess_exec(*check_cmd, stdout=asyncio.subprocess.PIPE)
             stdout, _ = await process.communicate()
             if not stdout.strip():
-                logger.error(f"   ❌ Файл не содержит видеопоток")
+                logger.error("   ❌ Файл не содержит видеопоток")
                 os.remove(output_path)
                 return False, start_time, 0
             
@@ -947,7 +947,7 @@ class VideoProcessor:
         vf = self._build_video_filter(profile['target_width'], profile['target_height'], profile['target_fps'])
         
         if is_image:
-            logger.info(f"   🖼️ Заставка из изображения")
+            logger.info("   🖼️ Заставка из изображения")
             cmd = [
                 "ffmpeg", "-loop", "1", "-i", source_path,
                 "-vf", vf,
@@ -957,7 +957,7 @@ class VideoProcessor:
                 "-y", output_path
             ]
         else:
-            logger.info(f"   🎬 Заставка из видео")
+            logger.info("   🎬 Заставка из видео")
             cmd = [
                 "ffmpeg", "-i", source_path,
                 "-vf", vf,
@@ -1348,7 +1348,7 @@ class VideoProcessor:
     async def delayed_cleanup(self, file_paths, delay=300):
         async def cleanup():
             await asyncio.sleep(delay)
-            logger.info(f"🧹 Отложенная очистка...")
+            logger.info("🧹 Отложенная очистка...")
             deleted = 0
             for fp in file_paths:
                 try:
@@ -1642,7 +1642,7 @@ class VideoProcessor:
                         clipped_info.get('pix_fmt', 'yuv420p') != 'yuv420p'
                     )
                     if needs_normalize or profile['downscale']:
-                        logger.info(f"   🔄 Требуется нормализация")
+                        logger.info("   🔄 Требуется нормализация")
 
                         self._stage_started(
                             stage_logger,
@@ -1674,7 +1674,7 @@ class VideoProcessor:
                                 },
                             )
                         else:
-                            logger.error(f"❌ Нормализация не удалась, обработка прервана")
+                            logger.error("❌ Нормализация не удалась, обработка прервана")
 
                             self._stage_failed(
                                 stage_logger,
@@ -1713,7 +1713,7 @@ class VideoProcessor:
                     clipped_info.get('pix_fmt', 'yuv420p') != 'yuv420p'
                 )
                 if needs_normalize or profile['downscale']:
-                    logger.info(f"   🔄 Требуется нормализация")
+                    logger.info("   🔄 Требуется нормализация")
                     self._stage_started(
                         stage_logger,
                         "normalize",
@@ -1745,7 +1745,7 @@ class VideoProcessor:
                             },
                         )
                     else:
-                        logger.error(f"❌ Нормализация не удалась, обработка прервана")
+                        logger.error("❌ Нормализация не удалась, обработка прервана")
 
                         self._stage_failed(
                             stage_logger,
@@ -1937,7 +1937,7 @@ class VideoProcessor:
             logger.info(f"   ⏱ Длительность: {final_info['duration']:.1f} сек")
             logger.info(f"   📊 Размер: {final_info['file_size'] / (1024 * 1024):.1f} MB")
             logger.info(f"   💾 Свободно: {self._get_free_space_gb()} GB")
-            logger.info(f"   ✅ Проверка пройдена")
+            logger.info("   ✅ Проверка пройдена")
 
             # SEND
             logger.info(f"📤 [8/8] Отправка видео в канал {destination_channel}...")
@@ -2006,7 +2006,7 @@ class VideoProcessor:
                         os.remove(fp)
                     if fp in self.video_info_cache:
                         del self.video_info_cache[fp]
-                except:
+                except Exception:
                     pass
             return False
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
-import sqlite3, json
+import sqlite3
+import json
 import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -1553,7 +1554,8 @@ class Database:
         with self.connect() as conn:
             q = "SELECT 1 FROM channels WHERE channel_id = ?"
             params = [str(channel_id)]
-            if thread_id is None: q += " AND thread_id IS NULL"
+            if thread_id is None:
+                q += " AND thread_id IS NULL"
             else:
                 q += " AND thread_id = ?"
                 params.append(thread_id)
@@ -1708,15 +1710,19 @@ class Database:
                     row = conn.execute("SELECT id FROM posts WHERE message_id = ? AND source_channel = ? AND ((source_thread_id IS NULL AND ? IS NULL) OR source_thread_id = ?)", (message_id, str(source_channel), source_thread_id, source_thread_id)).fetchone()
                     post_id = int(row["id"])
                 else:
-                    post_id = int(cur.lastrowid); count += 1
+                    post_id = int(cur.lastrowid)
+                    count += 1
                 self._create_deliveries_for_post_conn(conn, post_id, str(source_channel), source_thread_id)
             conn.commit()
             return count
     def delete_channel_posts(self, channel_id: str, thread_id: int | None = None) -> int:
         with self.connect() as conn:
-            if thread_id is None: cur = conn.execute("DELETE FROM posts WHERE source_channel = ? AND source_thread_id IS NULL", (str(channel_id),))
-            else: cur = conn.execute("DELETE FROM posts WHERE source_channel = ? AND source_thread_id = ?", (str(channel_id), thread_id))
-            conn.commit(); return cur.rowcount
+            if thread_id is None:
+                cur = conn.execute("DELETE FROM posts WHERE source_channel = ? AND source_thread_id IS NULL", (str(channel_id),))
+            else:
+                cur = conn.execute("DELETE FROM posts WHERE source_channel = ? AND source_thread_id = ?", (str(channel_id), thread_id))
+            conn.commit()
+            return cur.rowcount
 
     def add_rule(self, source_id: str, source_thread_id: int | None, target_id: str, target_thread_id: int | None, interval: int, created_by: int) -> int | None:
         with self.connect() as conn:
@@ -1924,7 +1930,9 @@ class Database:
 
     def set_rule_active(self, rule_id: int, is_active: bool) -> bool:
         with self.connect() as conn:
-            cur = conn.execute("UPDATE routing SET is_active = ? WHERE id = ?", (1 if is_active else 0, rule_id)); conn.commit(); return cur.rowcount > 0
+            cur = conn.execute("UPDATE routing SET is_active = ? WHERE id = ?", (1 if is_active else 0, rule_id))
+            conn.commit()
+            return cur.rowcount > 0
 
     def activate_rule_with_backfill(self, rule_id: int) -> bool:
         with self.connect() as conn:
@@ -2557,14 +2565,22 @@ class Database:
                 source_thread_id,
                 media_group_id,
             )).fetchall()
-    def mark_delivery_sent(self, delivery_id: int): 
-        with self.connect() as conn: conn.execute("UPDATE deliveries SET status = 'sent', sent_at = ?, error_text = NULL WHERE id = ?", (utc_now_iso(), delivery_id)); conn.commit()
-    def mark_many_deliveries_sent(self, delivery_ids):
-        if not delivery_ids: return
+    def mark_delivery_sent(self, delivery_id: int):
         with self.connect() as conn:
-            conn.executemany("UPDATE deliveries SET status = 'sent', sent_at = ?, error_text = NULL WHERE id = ?", [(utc_now_iso(), d) for d in delivery_ids]); conn.commit()
+            conn.execute("UPDATE deliveries SET status = 'sent', sent_at = ?, error_text = NULL WHERE id = ?", (utc_now_iso(), delivery_id))
+            conn.commit()
+
+    def mark_many_deliveries_sent(self, delivery_ids):
+        if not delivery_ids:
+            return
+        with self.connect() as conn:
+            conn.executemany("UPDATE deliveries SET status = 'sent', sent_at = ?, error_text = NULL WHERE id = ?", [(utc_now_iso(), d) for d in delivery_ids])
+            conn.commit()
+
     def mark_delivery_faulty(self, delivery_id: int, error_text: str):
-        with self.connect() as conn: conn.execute("UPDATE deliveries SET status = 'faulty', error_text = ?, attempt_count = attempt_count + 1 WHERE id = ?", (error_text[:1000], delivery_id)); conn.commit()
+        with self.connect() as conn:
+            conn.execute("UPDATE deliveries SET status = 'faulty', error_text = ?, attempt_count = attempt_count + 1 WHERE id = ?", (error_text[:1000], delivery_id))
+            conn.commit()
 
     def mark_delivery_pending(self, delivery_id: int):
         with self.connect() as conn:
@@ -2610,7 +2626,8 @@ class Database:
                 cur = conn.execute("UPDATE deliveries SET status='pending', error_text=NULL, sent_at=NULL WHERE post_id IN (SELECT id FROM posts WHERE source_channel = ? AND source_thread_id IS NULL)", (str(source_id),))
             else:
                 cur = conn.execute("UPDATE deliveries SET status='pending', error_text=NULL, sent_at=NULL WHERE post_id IN (SELECT id FROM posts WHERE source_channel = ? AND source_thread_id = ?)", (str(source_id), source_thread_id))
-            conn.commit(); return cur.rowcount
+            conn.commit()
+            return cur.rowcount
     def get_queue_stats(self):
         with self.connect() as conn:
             return {
@@ -2864,7 +2881,8 @@ class Database:
         rows = conn.execute("SELECT id FROM posts WHERE source_channel = ? AND " + ("source_thread_id IS NULL" if source_thread_id is None else "source_thread_id = ?") + " ORDER BY id", (str(source_id),) if source_thread_id is None else (str(source_id), source_thread_id)).fetchall()
         inserted = 0
         for row in rows:
-            cur = conn.execute("INSERT OR IGNORE INTO deliveries(rule_id, post_id, status, created_at) VALUES(?,?,'pending',?)", (rule_id, int(row["id"]), utc_now_iso())); inserted += cur.rowcount
+            cur = conn.execute("INSERT OR IGNORE INTO deliveries(rule_id, post_id, status, created_at) VALUES(?,?,'pending',?)", (rule_id, int(row["id"]), utc_now_iso()))
+            inserted += cur.rowcount
         return inserted
     def _create_deliveries_for_post_conn(self, conn, post_id: int, source_channel: str, source_thread_id: int | None):
         rules = conn.execute("SELECT id FROM routing WHERE source_id = ? AND " + ("source_thread_id IS NULL" if source_thread_id is None else "source_thread_id = ?"), (str(source_channel),) if source_thread_id is None else (str(source_channel), source_thread_id)).fetchall()
