@@ -1,0 +1,57 @@
+# Секреты
+.env
+.env.*
+.envy
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Виртуальное окружение
+venv/
+.venv/
+
+# Логи
+*.log
+
+# Базы данных
+*.db
+*.sqlite
+*.sqlite3
+
+# Telegram sessions
+*.session
+*.session-journal
+*.session.bak*
+
+# Медиа полностью
+media/
+media_cache/
+
+# Временные файлы
+tmp/
+temp/
+
+# Системное и редакторы
+.DS_Store
+.idea/
+.vscode/
+
+# Кэш и тесты
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Архивы и бэкапы
+*.bak
+*.save
+*.save.*
+_archive*/
+
+# Локальные мусорные файлы
+ts
+ts p
+sage_id, source_channel
