@@ -39,6 +39,7 @@ def get_system_health(repo: RepositoryProtocol) -> dict[str, Any]:
     queue = repo.get_queue_stats()
     errors = repo.count_recent_errors(minutes=5)
     job_counts = repo.get_job_status_counts() if hasattr(repo, "get_job_status_counts") else {}
+    video_stage_counts = repo.get_video_stage_job_counts() if hasattr(repo, "get_video_stage_job_counts") else {}
     expired_count = len(repo.get_expired_leased_jobs()) if hasattr(repo, "get_expired_leased_jobs") else 0
     stuck_count = len(repo.get_stuck_processing_jobs(600)) if hasattr(repo, "get_stuck_processing_jobs") else 0
 
@@ -56,4 +57,5 @@ def get_system_health(repo: RepositoryProtocol) -> dict[str, Any]:
             "expired_leased": int(expired_count),
             "stuck_processing": int(stuck_count),
         },
+        "video_stages": video_stage_counts,
     }
