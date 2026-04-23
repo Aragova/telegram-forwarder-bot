@@ -2001,6 +2001,10 @@ def build_rule_card_text(row) -> str:
         total = int(row["logical_total"] or 0)
         current_position = row["logical_current_position"]
     else:
+        logger.warning(
+            "build_rule_card_text: snapshot-поля отсутствуют, используем аварийный fallback, rule_id=%s",
+            rule_id,
+        )
         try:
             pos_info = db.get_rule_position_info(rule_id)
         except Exception:
