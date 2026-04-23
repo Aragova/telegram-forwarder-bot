@@ -15,6 +15,9 @@ from .job_service import (
     enqueue_video_process,
     enqueue_video_send,
 )
+from .limit_service import LimitService
+from .subscription_service import SubscriptionService
+from .usage_service import UsageService
 from .worker_load_service import build_worker_load_snapshot
 from .worker_resource_policy import POLICY, WorkerResourcePolicy
 
@@ -232,6 +235,24 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     job_type = str(job["job_type"])
     payload = _safe_payload(job)
     payload.pop("job_id", None)
+    payload.pop("tenant_id", None)
+    tenant_id = int(payload.get("tenant_id") or getattr(repo, "get_rule_tenant_id", lambda _x: 1)(int(payload.get("rule_id") or 0)) or 1)
+    subscription_service = SubscriptionService(repo)
+    usage_service = UsageService(repo)
+    limit_service = LimitService(repo, subscription_service, usage_service)
+
+    can_enqueue, enqueue_reason = limit_service.can_enqueue_job(tenant_id)
+    if not can_enqueue:
+        logger.warning("Worker блокирует выполнение job #%s tenant_id=%s: %s", job_id, tenant_id, enqueue_reason)
+        await asyncio.to_thread(repo.fail_job, job_id, enqueue_reason or "Подписка неактивна")
+        return True
+
+    if str(job_type).startswith("video_"):
+        can_video, video_reason = limit_service.can_process_video(tenant_id)
+        if not can_video:
+            logger.warning("Лимит видео задач превышен | tenant_id=%s | job_id=%s", tenant_id, job_id)
+            await asyncio.to_thread(repo.fail_job, job_id, video_reason or "Лимит видео задач превышен")
+            return True
 
     can_start, reason = _can_start_job(queue, job_type, state, policy)
     if not can_start:
@@ -319,6 +340,8 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
 
         if ok:
             await asyncio.to_thread(repo.complete_job, job_id)
+            if str(job_type).startswith("video_"):
+                await asyncio.to_thread(usage_service.increment_video, tenant_id, 1)
             logger.info("JOB DONE | %s завершил задачу #%s", worker_id, job_id)
             await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
             return True

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Callable
 
 from app.job_service import (
@@ -13,10 +14,14 @@ from app.job_service import (
     enqueue_video_delivery,
 )
 from app.repository_models import utc_now_iso
+from app.limit_service import LimitService
+from app.subscription_service import SubscriptionService
+from app.usage_service import UsageService
 from app.worker_load_service import build_worker_load_snapshot
 from app.worker_resource_policy import POLICY
 
 logger = logging.getLogger("forwarder")
+_last_usage_reset_day: str | None = None
 
 
 async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = True) -> dict[str, int]:
@@ -27,6 +32,9 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
     duplicates = 0
     checked_rules = 0
     due_iso = now_iso or utc_now_iso()
+    subscription_service = SubscriptionService(repo)
+    usage_service = UsageService(repo)
+    limit_service = LimitService(repo, subscription_service, usage_service)
 
     rules = await asyncio.to_thread(repo.get_all_rules)
 
@@ -56,6 +64,12 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
         checked_rules += 1
         due = await asyncio.to_thread(repo.take_due_delivery, int(rule.id), due_iso)
         if not due:
+            continue
+        tenant_id = int(due.get("tenant_id") or getattr(repo, "get_rule_tenant_id", lambda _x: 1)(int(rule.id)) or 1)
+
+        can_enqueue, enqueue_reason = limit_service.can_enqueue_job(tenant_id)
+        if not can_enqueue:
+            logger.warning("Scheduler пропустил enqueue | rule_id=%s | tenant_id=%s | причина=%s", int(rule.id), tenant_id, enqueue_reason)
             continue
 
         delivery_id = int(due["delivery_id"])
@@ -103,6 +117,7 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
             continue
 
         created += 1
+        await asyncio.to_thread(usage_service.increment_jobs, tenant_id, 1)
         logger.info("Scheduler создал задачу #%s для delivery #%s", int(job_id), delivery_id)
 
     return {"created": created, "duplicates": duplicates, "checked_rules": checked_rules}
@@ -117,6 +132,11 @@ async def run_scheduler_loop(
     logger.info("Scheduler loop запущен")
     while True:
         try:
+            global _last_usage_reset_day
+            today = datetime.now(timezone.utc).date().isoformat()
+            if _last_usage_reset_day != today:
+                _last_usage_reset_day = today
+                await asyncio.to_thread(UsageService(repo).reset_daily_usage)
             enabled = is_enabled() if is_enabled else True
             await scheduler_tick(repo, enabled=enabled)
         except Exception as exc:
