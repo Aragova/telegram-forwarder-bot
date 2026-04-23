@@ -1404,6 +1404,33 @@ class VideoProcessor:
                 caption_send_mode,
                 input_file_path,
                 stage_logger,
+                send_output=True,
+            )
+
+    async def build_processed_video(
+        self,
+        *,
+        input_file_path,
+        add_intro=False,
+        intro_name_horizontal=None,
+        intro_name_vertical=None,
+        stage_logger=None,
+    ):
+        async with self.semaphore:
+            return await self._process_video_internal(
+                video_file_id=None,
+                context=None,
+                destination_channel=None,
+                target_thread_id=None,
+                add_intro=add_intro,
+                intro_name_horizontal=intro_name_horizontal,
+                intro_name_vertical=intro_name_vertical,
+                caption="",
+                caption_entities_json=None,
+                caption_send_mode="plain",
+                input_file_path=input_file_path,
+                stage_logger=stage_logger,
+                send_output=False,
             )
 
     async def _process_video_internal(
@@ -1420,6 +1447,7 @@ class VideoProcessor:
         caption_send_mode="plain",
         input_file_path=None,
         stage_logger=None,
+        send_output=True,
     ):
         logger.info("=" * 70)
         logger.info("🎬 НАЧАЛО ОБРАБОТКИ ВИДЕО")
@@ -1939,30 +1967,32 @@ class VideoProcessor:
             logger.info(f"   💾 Свободно: {self._get_free_space_gb()} GB")
             logger.info(f"   ✅ Проверка пройдена")
 
-            # SEND
-            logger.info(f"📤 [8/8] Отправка видео в канал {destination_channel}...")
-            sent_msg = await self.send_with_retry(
-                bot,
-                destination_channel,
-                target_thread_id,
-                final_output,
-                thumbnail_path if thumb_success else None,
-                caption,
-                final_info['duration'],
-                caption_entities_json=caption_entities_json,
-                caption_send_mode=caption_send_mode,
-                stage_logger=stage_logger,
-            )
-            if not sent_msg:
-                logger.error("❌ Не удалось отправить видео")
-                return sent_msg
+            if send_output:
+                # SEND
+                logger.info(f"📤 [8/8] Отправка видео в канал {destination_channel}...")
+                sent_msg = await self.send_with_retry(
+                    bot,
+                    destination_channel,
+                    target_thread_id,
+                    final_output,
+                    thumbnail_path if thumb_success else None,
+                    caption,
+                    final_info['duration'],
+                    caption_entities_json=caption_entities_json,
+                    caption_send_mode=caption_send_mode,
+                    stage_logger=stage_logger,
+                )
+                if not sent_msg:
+                    logger.error("❌ Не удалось отправить видео")
+                    return sent_msg
 
             for path in [input_path, clipped_main_path, intro_processed_path, final_output, normalized_main_path]:
                 if path in self.video_info_cache:
                     del self.video_info_cache[path]
 
-            logger.info("⏰ Планирование отложенной очистки...")
-            await self.delayed_cleanup(files_to_delete, delay=300)
+            if send_output:
+                logger.info("⏰ Планирование отложенной очистки...")
+                await self.delayed_cleanup(files_to_delete, delay=300)
 
             logger.info("=" * 70)
             logger.info("✅ ОБРАБОТКА ВИДЕО ЗАВЕРШЕНА")
@@ -1982,7 +2012,26 @@ class VideoProcessor:
                 },
             )
 
-            return sent_msg
+            if send_output:
+                return sent_msg
+
+            artifact_payload = {
+                "processed_video_path": final_output,
+                "thumbnail_path": thumbnail_path if thumb_success and os.path.isfile(thumbnail_path) else None,
+                "duration": final_info["duration"],
+                "width": final_info["width"],
+                "height": final_info["height"],
+                "has_intro": bool(intro_created),
+                "trim_applied": bool(video_info["duration"] > main_cut_duration),
+                "processing_summary": {
+                    "target_width": profile["target_width"],
+                    "target_height": profile["target_height"],
+                    "target_fps": profile["target_fps"],
+                    "downscale": profile["downscale"],
+                },
+                "cleanup_paths": [p for p in files_to_delete if p and p != final_output],
+            }
+            return artifact_payload
 
         except Exception as e:
             logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
