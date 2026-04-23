@@ -65,6 +65,8 @@ from app.tenant_service import TenantService
 from app.subscription_service import SubscriptionService
 from app.usage_service import UsageService
 from app.limit_service import LimitService
+from app.invoice_service import InvoiceService
+from app.billing_service import BillingService
 
 logger = setup_logging(settings.log_level)
 
@@ -76,6 +78,8 @@ tenant_service = TenantService(db)
 subscription_service = SubscriptionService(db)
 usage_service = UsageService(db)
 limit_service = LimitService(db, subscription_service, usage_service)
+invoice_service = InvoiceService(db)
+billing_service = BillingService(db)
 telethon_client = None
 reaction_clients = []
 sender_service = None
@@ -1494,6 +1498,86 @@ async def cmd_limits(message: Message):
                 f"• rules: {'ok' if can_rule else 'blocked'} {'' if can_rule else '- ' + str(reason_rule)}",
                 f"• jobs/day: {'ok' if can_job else 'blocked'} {'' if can_job else '- ' + str(reason_job)}",
                 f"• video/day: {'ok' if can_video else 'blocked'} {'' if can_video else '- ' + str(reason_video)}",
+            ]
+        )
+    )
+
+
+@dp.message(Command("subscription"))
+async def cmd_subscription(message: Message):
+    if not await is_admin(message):
+        return
+    admin_id = message.from_user.id if message.from_user else settings.admin_id
+    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+    tenant_id = int(tenant.get("id") or 1)
+    subscription = await run_db(subscription_service.get_active_subscription, tenant_id)
+    if not subscription and hasattr(db, "get_latest_subscription"):
+        subscription = await run_db(db.get_latest_subscription, tenant_id)
+    if not subscription:
+        await message.answer("❌ Подписка не назначена.")
+        return
+    await message.answer(
+        "\n".join(
+            [
+                "🧾 Подписка tenant:",
+                f"• План: {subscription.get('plan_name', 'UNKNOWN')}",
+                f"• Статус: {subscription.get('status', 'unknown')}",
+                f"• Старт: {subscription.get('started_at', '—')}",
+                f"• Окончание: {subscription.get('expires_at', '—')}",
+                f"• Grace до: {subscription.get('grace_ends_at', '—')}",
+            ]
+        )
+    )
+
+
+@dp.message(Command("billing"))
+async def cmd_billing(message: Message):
+    if not await is_admin(message):
+        return
+    admin_id = message.from_user.id if message.from_user else settings.admin_id
+    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+    tenant_id = int(tenant.get("id") or 1)
+    today = datetime.now(timezone.utc).date().isoformat()
+    period_start = datetime.now(timezone.utc).replace(day=1).date().isoformat()
+    usage_snapshot = await run_db(billing_service.build_billable_usage_snapshot, tenant_id, period_start, today)
+    events = await run_db(billing_service.get_recent_billing_events, tenant_id, 5)
+    event_lines = [f"• {event.get('event_type')} ({event.get('created_at')})" for event in events] or ["• событий пока нет"]
+    await message.answer(
+        "\n".join(
+            [
+                "💳 Billing snapshot:",
+                f"• Период: {period_start} — {today}",
+                f"• jobs: {usage_snapshot.get('jobs_count', 0)}",
+                f"• video: {usage_snapshot.get('video_count', 0)}",
+                f"• storage_mb: {usage_snapshot.get('storage_used_mb', 0)}",
+                f"• overage candidates: {', '.join(usage_snapshot.get('overage_candidates') or []) or 'нет'}",
+                "🕘 Последние события:",
+                *event_lines,
+            ]
+        )
+    )
+
+
+@dp.message(Command("invoice"))
+async def cmd_invoice(message: Message):
+    if not await is_admin(message):
+        return
+    admin_id = message.from_user.id if message.from_user else settings.admin_id
+    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+    tenant_id = int(tenant.get("id") or 1)
+    invoice = await run_db(db.get_last_invoice, tenant_id) if hasattr(db, "get_last_invoice") else None
+    if not invoice:
+        await message.answer("🧾 Инвойсов пока нет.")
+        return
+    await message.answer(
+        "\n".join(
+            [
+                "🧾 Последний invoice:",
+                f"• ID: {invoice.get('id')}",
+                f"• Статус: {invoice.get('status')}",
+                f"• Период: {invoice.get('period_start')} — {invoice.get('period_end')}",
+                f"• Сумма: {invoice.get('total')} {invoice.get('currency')}",
+                f"• Оплачен: {invoice.get('paid_at', 'нет')}",
             ]
         )
     )

@@ -463,10 +463,17 @@ class PostgresRepository(RepositoryProtocol):
             id BIGSERIAL PRIMARY KEY,
             tenant_id BIGINT NOT NULL,
             plan_id BIGINT NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('active','expired','trial')),
+            status TEXT NOT NULL CHECK(status IN ('trial','active','grace','expired','canceled')),
             started_at TEXT NOT NULL,
             expires_at TEXT NULL,
-            created_at TEXT NOT NULL
+            grace_started_at TEXT NULL,
+            grace_ends_at TEXT NULL,
+            canceled_at TEXT NULL,
+            pending_plan_id BIGINT NULL,
+            current_period_start TEXT NULL,
+            current_period_end TEXT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NULL
         );
 
         CREATE TABLE IF NOT EXISTS usage_stats(
@@ -477,6 +484,60 @@ class PostgresRepository(RepositoryProtocol):
             storage_used_mb BIGINT NOT NULL DEFAULT 0,
             api_calls BIGINT NOT NULL DEFAULT 0,
             PRIMARY KEY(tenant_id, date)
+        );
+
+        CREATE TABLE IF NOT EXISTS subscription_history(
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL,
+            old_plan_id BIGINT NULL,
+            new_plan_id BIGINT NULL,
+            old_status TEXT NULL,
+            new_status TEXT NULL,
+            changed_at TEXT NOT NULL,
+            changed_by TEXT NULL,
+            reason TEXT NULL,
+            effective_from TEXT NULL,
+            effective_to TEXT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS billing_events(
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_source TEXT NULL,
+            amount NUMERIC(12,2) NULL,
+            currency TEXT NULL,
+            metadata_json TEXT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS invoices(
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL,
+            subscription_id BIGINT NULL,
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('draft','open','paid','void','uncollectible')),
+            subtotal NUMERIC(12,2) NOT NULL DEFAULT 0,
+            total NUMERIC(12,2) NOT NULL DEFAULT 0,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            external_provider TEXT NULL,
+            external_reference TEXT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            due_at TEXT NULL,
+            paid_at TEXT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS invoice_items(
+            id BIGSERIAL PRIMARY KEY,
+            invoice_id BIGINT NOT NULL,
+            item_type TEXT NOT NULL CHECK(item_type IN ('base_plan','extra_jobs','extra_video','storage_overage','adjustment')),
+            description TEXT NOT NULL,
+            quantity BIGINT NOT NULL DEFAULT 1,
+            unit_price NUMERIC(12,2) NOT NULL DEFAULT 0,
+            amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+            metadata_json TEXT NULL
         );
 
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'repost';
@@ -496,6 +557,13 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
         ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
         ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
+        ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS grace_started_at TEXT NULL;
+        ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS grace_ends_at TEXT NULL;
+        ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS canceled_at TEXT NULL;
+        ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS pending_plan_id BIGINT NULL;
+        ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_start TEXT NULL;
+        ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_end TEXT NULL;
+        ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS updated_at TEXT NULL;
         """
 
         self.client.execute_script(init_sql)
@@ -616,6 +684,30 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     CREATE INDEX IF NOT EXISTS idx_jobs_status_run_at
                     ON jobs(status, run_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_subscription_history_tenant_changed
+                    ON subscription_history(tenant_id, changed_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_billing_events_tenant_created
+                    ON billing_events(tenant_id, created_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_invoices_tenant_status
+                    ON invoices(tenant_id, status, created_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice_id
+                    ON invoice_items(invoice_id)
                     """
                 )
                 cur.execute(
@@ -4609,6 +4701,21 @@ class PostgresRepository(RepositoryProtocol):
                 row = cur.fetchone()
         return dict(row) if row else None
 
+    def get_tenant_by_id(self, tenant_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, name, owner_admin_id, created_at, is_active
+                    FROM tenants
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (int(tenant_id),),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
     def set_tenant_active(self, tenant_id: int, is_active: bool) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -4669,6 +4776,7 @@ class PostgresRepository(RepositoryProtocol):
         return dict(row) if row else None
 
     def assign_subscription(self, tenant_id: int, plan_id: int, *, status: str = "active", expires_at: str | None = None) -> int | None:
+        now_iso = utc_now_iso()
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -4676,17 +4784,19 @@ class PostgresRepository(RepositoryProtocol):
                     UPDATE subscriptions
                     SET status = 'expired'
                     WHERE tenant_id = %s
-                      AND status IN ('active', 'trial')
+                      AND status IN ('active', 'trial', 'grace')
                     """,
                     (int(tenant_id),),
                 )
                 cur.execute(
                     """
-                    INSERT INTO subscriptions(tenant_id, plan_id, status, started_at, expires_at, created_at)
-                    VALUES(%s, %s, %s, %s, %s, %s)
+                    INSERT INTO subscriptions(
+                        tenant_id, plan_id, status, started_at, expires_at, created_at, updated_at, current_period_start, current_period_end
+                    )
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (int(tenant_id), int(plan_id), status, utc_now_iso(), expires_at, utc_now_iso()),
+                    (int(tenant_id), int(plan_id), status, now_iso, expires_at, now_iso, now_iso, now_iso, expires_at),
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -4701,7 +4811,24 @@ class PostgresRepository(RepositoryProtocol):
                     FROM subscriptions s
                     JOIN plans p ON p.id = s.plan_id
                     WHERE s.tenant_id = %s
-                      AND s.status IN ('active', 'trial')
+                      AND s.status IN ('active', 'trial', 'grace')
+                    ORDER BY s.id DESC
+                    LIMIT 1
+                    """,
+                    (int(tenant_id),),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_latest_subscription(self, tenant_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.*, p.name AS plan_name, p.max_rules, p.max_workers, p.max_jobs_per_day, p.max_video_per_day, p.max_storage_mb, p.priority_level, p.price
+                    FROM subscriptions s
+                    JOIN plans p ON p.id = s.plan_id
+                    WHERE s.tenant_id = %s
                     ORDER BY s.id DESC
                     LIMIT 1
                     """,
@@ -4718,9 +4845,76 @@ class PostgresRepository(RepositoryProtocol):
                     UPDATE subscriptions
                     SET status = 'expired'
                     WHERE tenant_id = %s
-                      AND status IN ('active', 'trial')
+                      AND status IN ('active', 'trial', 'grace')
                     """,
                     (int(tenant_id),),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def set_subscription_status(self, subscription_id: int, new_status: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE subscriptions
+                    SET status = %s,
+                        updated_at = %s,
+                        canceled_at = CASE WHEN %s = 'canceled' THEN %s ELSE canceled_at END
+                    WHERE id = %s
+                    """,
+                    (str(new_status), utc_now_iso(), str(new_status), utc_now_iso(), int(subscription_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def set_subscription_grace_window(self, subscription_id: int, grace_started_at: str, grace_ends_at: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE subscriptions
+                    SET grace_started_at = %s,
+                        grace_ends_at = %s,
+                        updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (grace_started_at, grace_ends_at, utc_now_iso(), int(subscription_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def set_subscription_pending_plan(self, subscription_id: int, pending_plan_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE subscriptions
+                    SET pending_plan_id = %s,
+                        updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (int(pending_plan_id), utc_now_iso(), int(subscription_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def replace_subscription_plan(self, subscription_id: int, plan_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE subscriptions
+                    SET plan_id = %s,
+                        pending_plan_id = NULL,
+                        updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (int(plan_id), utc_now_iso(), int(subscription_id)),
                 )
                 updated = cur.rowcount > 0
             conn.commit()
@@ -4761,6 +4955,34 @@ class PostgresRepository(RepositoryProtocol):
                 row = cur.fetchone()
         return dict(row) if row else {"tenant_id": int(tenant_id), "date": day, "jobs_count": 0, "video_count": 0, "storage_used_mb": 0, "api_calls": 0}
 
+    def get_usage_for_period(self, tenant_id: int, date_from: str, date_to: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(jobs_count), 0) AS jobs_count,
+                        COALESCE(SUM(video_count), 0) AS video_count,
+                        COALESCE(MAX(storage_used_mb), 0) AS storage_used_mb,
+                        COALESCE(SUM(api_calls), 0) AS api_calls
+                    FROM usage_stats
+                    WHERE tenant_id = %s
+                      AND date >= %s
+                      AND date <= %s
+                    """,
+                    (int(tenant_id), str(date_from), str(date_to)),
+                )
+                row = cur.fetchone() or {}
+        return {
+            "tenant_id": int(tenant_id),
+            "date_from": str(date_from),
+            "date_to": str(date_to),
+            "jobs_count": int(row.get("jobs_count") or 0),
+            "video_count": int(row.get("video_count") or 0),
+            "storage_used_mb": int(row.get("storage_used_mb") or 0),
+            "api_calls": int(row.get("api_calls") or 0),
+        }
+
     def reset_usage_for_day(self, day: str) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -4776,6 +4998,271 @@ class PostgresRepository(RepositoryProtocol):
                 count = cur.rowcount or 0
             conn.commit()
             return int(count)
+
+    def add_subscription_history(
+        self,
+        *,
+        tenant_id: int,
+        old_plan_id: int | None,
+        new_plan_id: int | None,
+        old_status: str | None,
+        new_status: str | None,
+        changed_by: str,
+        reason: str,
+        effective_from: str | None,
+        effective_to: str | None = None,
+    ) -> int | None:
+        with self.connect() as conn:
+            row_id = self._fetch_inserted_id(
+                conn,
+                """
+                INSERT INTO subscription_history(
+                    tenant_id, old_plan_id, new_plan_id, old_status, new_status,
+                    changed_at, changed_by, reason, effective_from, effective_to
+                )
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    int(tenant_id),
+                    old_plan_id,
+                    new_plan_id,
+                    old_status,
+                    new_status,
+                    utc_now_iso(),
+                    changed_by,
+                    reason,
+                    effective_from,
+                    effective_to,
+                ),
+            )
+            conn.commit()
+            return row_id
+
+    def get_subscription_history(self, tenant_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM subscription_history
+                    WHERE tenant_id = %s
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (int(tenant_id), int(limit)),
+                )
+                rows = cur.fetchall() or []
+        return [dict(r) for r in rows]
+
+    def create_billing_event(
+        self,
+        tenant_id: int,
+        event_type: str,
+        *,
+        event_source: str | None = None,
+        amount: float | None = None,
+        currency: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> int | None:
+        with self.connect() as conn:
+            row_id = self._fetch_inserted_id(
+                conn,
+                """
+                INSERT INTO billing_events(tenant_id, event_type, event_source, amount, currency, metadata_json, created_at)
+                VALUES(%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    int(tenant_id),
+                    str(event_type),
+                    event_source,
+                    amount,
+                    currency,
+                    _json_dumps(metadata),
+                    utc_now_iso(),
+                ),
+            )
+            conn.commit()
+            return row_id
+
+    def get_billing_events(self, tenant_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM billing_events
+                    WHERE tenant_id = %s
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (int(tenant_id), int(limit)),
+                )
+                rows = cur.fetchall() or []
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["metadata_json"] = _safe_json_loads(item.get("metadata_json"), {})
+            result.append(item)
+        return result
+
+    def create_invoice(
+        self,
+        *,
+        tenant_id: int,
+        subscription_id: int,
+        period_start: str,
+        period_end: str,
+        status: str,
+        currency: str,
+        due_at: str | None,
+    ) -> int | None:
+        now_iso = utc_now_iso()
+        with self.connect() as conn:
+            row_id = self._fetch_inserted_id(
+                conn,
+                """
+                INSERT INTO invoices(
+                    tenant_id, subscription_id, period_start, period_end, status,
+                    subtotal, total, currency, created_at, updated_at, due_at
+                )
+                VALUES(%s, %s, %s, %s, %s, 0, 0, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    int(tenant_id),
+                    int(subscription_id),
+                    str(period_start),
+                    str(period_end),
+                    str(status),
+                    str(currency).upper(),
+                    now_iso,
+                    now_iso,
+                    due_at,
+                ),
+            )
+            conn.commit()
+            return row_id
+
+    def add_invoice_item(
+        self,
+        invoice_id: int,
+        *,
+        item_type: str,
+        description: str,
+        quantity: int,
+        unit_price: float,
+        amount: float,
+        metadata: dict[str, Any] | None = None,
+    ) -> int | None:
+        with self.connect() as conn:
+            row_id = self._fetch_inserted_id(
+                conn,
+                """
+                INSERT INTO invoice_items(invoice_id, item_type, description, quantity, unit_price, amount, metadata_json)
+                VALUES(%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    int(invoice_id),
+                    str(item_type),
+                    str(description),
+                    int(quantity),
+                    unit_price,
+                    amount,
+                    _json_dumps(metadata or {}),
+                ),
+            )
+            conn.commit()
+            return row_id
+
+    def recalculate_invoice_totals(self, invoice_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH sums AS (
+                        SELECT COALESCE(SUM(amount), 0) AS amount_sum
+                        FROM invoice_items
+                        WHERE invoice_id = %s
+                    )
+                    UPDATE invoices
+                    SET subtotal = sums.amount_sum,
+                        total = sums.amount_sum,
+                        updated_at = %s
+                    FROM sums
+                    WHERE id = %s
+                    """,
+                    (int(invoice_id), utc_now_iso(), int(invoice_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def set_invoice_status(
+        self,
+        invoice_id: int,
+        status: str,
+        *,
+        updated_at: str | None = None,
+        paid_at: str | None = None,
+        external_reference: str | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE invoices
+                    SET status = %s,
+                        updated_at = %s,
+                        paid_at = COALESCE(%s, paid_at),
+                        external_reference = COALESCE(%s, external_reference)
+                    WHERE id = %s
+                    """,
+                    (str(status), updated_at or utc_now_iso(), paid_at, external_reference, int(invoice_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def get_invoice(self, invoice_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM invoices WHERE id = %s LIMIT 1", (int(invoice_id),))
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_last_invoice(self, tenant_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM invoices
+                    WHERE tenant_id = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (int(tenant_id),),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def count_open_invoices(self, tenant_id: int) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM invoices
+                    WHERE tenant_id = %s
+                      AND status IN ('draft', 'open', 'uncollectible')
+                    """,
+                    (int(tenant_id),),
+                )
+                row = cur.fetchone()
+        return int((row or {}).get("cnt") or 0)
 
     def count_rules_for_tenant(self, tenant_id: int) -> int:
         with self.connect() as conn:
@@ -4813,6 +5300,14 @@ class PostgresRepository(RepositoryProtocol):
                 active = int((cur.fetchone() or {}).get("cnt") or 0)
                 cur.execute("SELECT COUNT(*) AS cnt FROM tenants WHERE is_active = FALSE")
                 blocked = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute("SELECT COUNT(*) AS cnt FROM subscriptions WHERE status = 'active'")
+                subscriptions_active = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute("SELECT COUNT(*) AS cnt FROM subscriptions WHERE status = 'grace'")
+                subscriptions_in_grace = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute("SELECT COUNT(*) AS cnt FROM subscriptions WHERE status = 'expired'")
+                subscriptions_expired = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute("SELECT COUNT(*) AS cnt FROM invoices WHERE status IN ('draft', 'open', 'uncollectible')")
+                invoices_open = int((cur.fetchone() or {}).get("cnt") or 0)
                 cur.execute(
                     """
                     SELECT COUNT(DISTINCT u.tenant_id) AS cnt
@@ -4826,7 +5321,33 @@ class PostgresRepository(RepositoryProtocol):
                     (datetime.now(timezone.utc).date().isoformat(),),
                 )
                 over = int((cur.fetchone() or {}).get("cnt") or 0)
-        return {"tenants_active": active, "tenants_blocked": blocked, "tenants_over_limits": over}
+                cur.execute(
+                    """
+                    SELECT COUNT(DISTINCT tenant_id) AS cnt
+                    FROM billing_events
+                    WHERE event_type IN ('invoice_marked_void', 'subscription_expired')
+                    """
+                )
+                billing_issues = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute(
+                    """
+                    SELECT COUNT(DISTINCT tenant_id) AS cnt
+                    FROM billing_events
+                    WHERE event_type = 'usage_threshold_reached'
+                    """
+                )
+                overage_candidates = int((cur.fetchone() or {}).get("cnt") or 0)
+        return {
+            "tenants_active": active,
+            "tenants_blocked": blocked,
+            "tenants_over_limits": over,
+            "subscriptions_active": subscriptions_active,
+            "subscriptions_in_grace": subscriptions_in_grace,
+            "subscriptions_expired": subscriptions_expired,
+            "invoices_open": invoices_open,
+            "tenants_with_billing_issues": billing_issues,
+            "tenants_with_overage_candidates": overage_candidates,
+        }
 
     def log_event(
         self,

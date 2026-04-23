@@ -86,6 +86,12 @@ def get_system_health(repo: RepositoryProtocol) -> dict[str, Any]:
             "tenants_active": int(saas.get("tenants_active") or 0),
             "tenants_blocked": int(saas.get("tenants_blocked") or 0),
             "tenants_over_limits": int(saas.get("tenants_over_limits") or 0),
+            "subscriptions_active": int(saas.get("subscriptions_active") or 0),
+            "subscriptions_in_grace": int(saas.get("subscriptions_in_grace") or 0),
+            "subscriptions_expired": int(saas.get("subscriptions_expired") or 0),
+            "invoices_open": int(saas.get("invoices_open") or 0),
+            "tenants_with_billing_issues": int(saas.get("tenants_with_billing_issues") or 0),
+            "tenants_with_overage_candidates": int(saas.get("tenants_with_overage_candidates") or 0),
             "usage_snapshot": usage_snapshot,
         },
     }
