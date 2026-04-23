@@ -52,6 +52,7 @@ from app.sender import SenderService
 telethon_client = None
 from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIErrorPolicy
+from app.scheduler_service import SchedulerService
 
 settings.validate()
 logger = setup_logging(settings.log_level)
@@ -59,6 +60,7 @@ logger = setup_logging(settings.log_level)
 dp = Dispatcher()
 bot: Bot | None = None
 db: RepositoryProtocol = create_repository()
+scheduler_service = SchedulerService(db)
 telethon_client = None
 reaction_clients = []
 sender_service = None
@@ -304,7 +306,7 @@ async def _run_rescan_rule_fresh_job(
 
         rebuilt_count = await run_db(db.backfill_rule, rule_id)
         invalidate_preview_cache(rule_id)
-        await run_db(db.update_rule_next_run_at, rule_id, utc_now_iso())
+        await run_db(scheduler_service.set_next_run, rule_id, utc_now_iso())
 
         await run_db(
             db.log_rule_change,
@@ -436,7 +438,7 @@ async def _run_rescan_rule_keep_job(
                 message_id=saved_first_pending_message_id,
             )
 
-        await run_db(db.update_rule_next_run_at, rule_id, old_next_run_at)
+        await run_db(scheduler_service.set_next_run, rule_id, old_next_run_at)
 
         await run_db(
             db.log_rule_change,
@@ -2547,7 +2549,7 @@ def _change_next_run_sync(
     admin_id: int,
 ) -> dict[str, Any]:
     before_rule = db.get_rule(rule_id)
-    ok = db.update_rule_next_run_at(rule_id, next_run_iso)
+    ok = scheduler_service.set_next_run(rule_id, next_run_iso)
     after_rule = db.get_rule(rule_id)
 
     if ok:
@@ -2574,7 +2576,7 @@ def _change_fixed_times_sync(
     admin_id: int,
 ) -> dict[str, Any]:
     before_rule = db.get_rule(rule_id)
-    ok = db.update_rule_fixed_times(rule_id, normalized_times)
+    ok = scheduler_service.update_fixed_times(rule_id, normalized_times)
     after_rule = db.get_rule(rule_id)
 
     if ok:
@@ -2603,11 +2605,11 @@ def _change_interval_sync(
     before_rule = db.get_rule(rule_id)
 
     if action == "set_interval_mode":
-        ok = db.set_rule_interval_mode(rule_id, interval)
+        ok = scheduler_service.update_interval(rule_id, interval, set_interval_mode=True)
         event_type = "rule_set_interval_mode"
         success_text = "✅ Правило переведено в плавающий режим."
     else:
-        ok = db.update_rule_interval(rule_id, interval)
+        ok = scheduler_service.update_interval(rule_id, interval, set_interval_mode=False)
         event_type = "rule_interval_changed"
         success_text = "✅ Интервал обновлён."
 
@@ -2669,7 +2671,7 @@ def _enable_rule_sync(
     admin_id: int,
 ) -> dict[str, Any]:
     before_rule = db.get_rule(rule_id)
-    ok = db.activate_rule_with_backfill(rule_id)
+    ok = scheduler_service.activate_with_backfill(rule_id)
     after_rule = db.get_rule(rule_id)
 
     if ok:
@@ -2737,7 +2739,7 @@ def _disable_rule_sync(
 
 def _trigger_rule_now_sync(rule_id: int, admin_id: int):
     before_rule = db.get_rule(rule_id)
-    ok = db.trigger_rule_now(rule_id)
+    ok = scheduler_service.trigger_now(rule_id)
     after_rule = db.get_rule(rule_id)
 
     if ok:
