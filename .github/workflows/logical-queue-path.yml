@@ -26,4 +26,3 @@ jobs:
 
       - name: Run all tests
         run: pytest -q tests/
-

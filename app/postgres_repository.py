@@ -4258,7 +4258,8 @@ class PostgresRepository(RepositoryProtocol):
                     SELECT COUNT(*) AS cnt
                     FROM deliveries
                     WHERE status = 'faulty'
-                      AND created_at >= (NOW() - (%s * INTERVAL '1 minute'))::text
+                      AND CAST(created_at AS timestamptz) >= NOW() - (%s * INTERVAL '1 minute')
+
                     """,
                     (max(int(minutes), 1),),
                 )
