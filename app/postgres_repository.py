@@ -4259,6 +4259,7 @@ class PostgresRepository(RepositoryProtocol):
                     FROM deliveries
                     WHERE status = 'faulty'
                       AND CAST(created_at AS timestamptz) >= NOW() - (%s * INTERVAL '1 minute')
+
                     """,
                     (max(int(minutes), 1),),
                 )
