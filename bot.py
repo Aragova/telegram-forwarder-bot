@@ -1049,7 +1049,7 @@ async def notify_admin_once(
             pass
 
     try:
-        await send_message_safe(settings.admin_id, text)
+        await send_message_safe(chat_id=settings.admin_id, text=text)
         await run_db(db.mark_problem_notified, key)
     except Exception as e:
         logger.exception("Ошибка отправки уведомления админу: %s", e)
