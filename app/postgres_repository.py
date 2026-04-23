@@ -279,6 +279,11 @@ class PostgresRepository(RepositoryProtocol):
             extra_json TEXT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS runtime_heartbeat(
+            role TEXT PRIMARY KEY,
+            last_seen_at TIMESTAMP NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS intros(
             id BIGSERIAL PRIMARY KEY,
             display_name TEXT NOT NULL UNIQUE,
@@ -2766,6 +2771,9 @@ class PostgresRepository(RepositoryProtocol):
                 cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'pending'")
                 pending = int(cur.fetchone()["cnt"])
 
+                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'processing'")
+                processing = int(cur.fetchone()["cnt"])
+
                 cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'sent'")
                 sent = int(cur.fetchone()["cnt"])
 
@@ -2782,6 +2790,7 @@ class PostgresRepository(RepositoryProtocol):
             "posts": posts,
             "deliveries": deliveries,
             "pending": pending,
+            "processing": processing,
             "sent": sent,
             "faulty": faulty,
             "rules": rules,
@@ -4215,3 +4224,43 @@ class PostgresRepository(RepositoryProtocol):
                 row = cur.fetchone()
 
         return dict(row) if row else None
+
+    def update_runtime_heartbeat(self, role: str) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO runtime_heartbeat (role, last_seen_at)
+                    VALUES (%s, NOW())
+                    ON CONFLICT (role) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at
+                    """,
+                    (str(role),),
+                )
+            conn.commit()
+
+    def get_runtime_heartbeats(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role, last_seen_at
+                    FROM runtime_heartbeat
+                    """
+                )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def count_recent_errors(self, minutes: int = 5) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM deliveries
+                    WHERE status = 'faulty'
+                      AND CAST(created_at AS timestamptz) >= NOW() - (%s * INTERVAL '1 minute')
+                    """,
+                    (max(int(minutes), 1),),
+                )
+                row = cur.fetchone()
+        return int(row["cnt"] if row else 0)

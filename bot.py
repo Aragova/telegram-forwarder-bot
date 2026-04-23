@@ -55,6 +55,7 @@ from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIErrorPolicy
 from app.scheduler_service import SchedulerService
 from app.runtime_roles import normalize_runtime_role, run_role as run_runtime_role
+from app.health_service import get_system_health, update_heartbeat
 
 settings.validate()
 logger = setup_logging(settings.log_level)
@@ -224,6 +225,42 @@ async def run_db(callable_obj, *args, **kwargs):
     Уводит sync DB/CPU работу из event loop в thread pool.
     """
     return await asyncio.to_thread(callable_obj, *args, **kwargs)
+
+
+async def heartbeat_loop(role: str, repo: RepositoryProtocol):
+    while True:
+        try:
+            await run_db(update_heartbeat, repo, role)
+        except Exception as exc:
+            logger.warning("HEARTBEAT | ошибка обновления роли %s: %s", role, exc)
+        await asyncio.sleep(5)
+
+
+def _fmt_health_status(status: str) -> str:
+    return "🟢 работает" if status == "ok" else "🔴 не отвечает"
+
+
+async def watchdog_loop(repo: RepositoryProtocol):
+    last_state: dict[str, str] = {}
+
+    while True:
+        try:
+            health = await run_db(get_system_health, repo)
+            roles = health.get("roles") or {}
+
+            for role, state in roles.items():
+                if state == "down" and last_state.get(role) != "down":
+                    await notify_admin_once(
+                        f"role_{role}_down",
+                        f"❌ Роль {role} не отвечает",
+                        problem_type="runtime_role_down",
+                    )
+
+            last_state = dict(roles)
+        except Exception as exc:
+            logger.warning("WATCHDOG | ошибка проверки health: %s", exc)
+
+        await asyncio.sleep(10)
 
 async def build_rule_card_payload_cached(rule_id: int) -> tuple[str | None, InlineKeyboardMarkup | None, str]:
     cached = _get_cached_rule_card(rule_id)
@@ -732,6 +769,7 @@ def build_video_caption_mode_menu_text(rule_id: int) -> str:
 
 def build_dashboard_text() -> str:
     stats = db.get_queue_stats()
+    health = get_system_health(db)
     next_rule = db.get_next_scheduled_rule()
     now_text = datetime.now(USER_TZ).strftime("%d.%m.%Y %H:%M:%S")
     live_workers = sum(1 for task in posting_tasks.values() if not task.done())
@@ -765,6 +803,14 @@ def build_dashboard_text() -> str:
         f"⚠️ С ошибками: {stats['faulty']}\n"
         f"🔄 Правил: {stats['rules']}\n"
         f"🤖 Воркеров: {live_workers}\n\n"
+        "📊 **СОСТОЯНИЕ СИСТЕМЫ**\n"
+        f"🤖 Бот: {_fmt_health_status(health['roles']['bot'])}\n"
+        f"🧠 Планировщик: {_fmt_health_status(health['roles']['scheduler'])}\n"
+        f"⚙️ Воркер: {_fmt_health_status(health['roles']['worker'])}\n\n"
+        "📦 **ОЧЕРЕДЬ**\n"
+        f"В ожидании: {health['pending']}\n"
+        f"В обработке: {health['processing']}\n\n"
+        f"⚠️ Ошибки за 5 минут: {health['errors']}\n\n"
         f"{next_block}\n\n"
         f"Статус: {'✅ РАБОТАЕТ' if posting_active else '⏸ ОСТАНОВЛЕН'}\n"
         f"🕒 Обновлено: {now_text}"
@@ -7234,6 +7280,8 @@ async def _start_bot_role() -> None:
     posting_active = False
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=True)
+    asyncio.create_task(heartbeat_loop("bot", db))
+    asyncio.create_task(watchdog_loop(db))
     logger.info("🚀 Режим bot запущен")
     await dp.start_polling(
         bot,
@@ -7247,6 +7295,7 @@ async def _start_scheduler_role() -> None:
     workers_runtime_enabled = False
     posting_active = False
     await _init_db_runtime()
+    asyncio.create_task(heartbeat_loop("scheduler", db))
     await _run_scheduler_role_loop()
 
 
@@ -7255,6 +7304,7 @@ async def _start_worker_role() -> None:
     workers_runtime_enabled = True
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=False)
+    asyncio.create_task(heartbeat_loop("worker", db))
     await _run_worker_role_loop()
 
 
@@ -7264,6 +7314,9 @@ async def _start_all_role() -> None:
     posting_active = False
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=True)
+    asyncio.create_task(heartbeat_loop("bot", db))
+    asyncio.create_task(heartbeat_loop("worker", db))
+    asyncio.create_task(watchdog_loop(db))
     await ensure_rule_workers()
     logger.info("🚀 Бот запущен")
     await dp.start_polling(
