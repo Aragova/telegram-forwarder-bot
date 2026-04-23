@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
 import json
 import time
 from html import escape
@@ -53,6 +54,7 @@ telethon_client = None
 from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIErrorPolicy
 from app.scheduler_service import SchedulerService
+from app.runtime_roles import normalize_runtime_role, run_role as run_runtime_role
 
 settings.validate()
 logger = setup_logging(settings.log_level)
@@ -66,6 +68,7 @@ reaction_clients = []
 sender_service = None
 posting_active = False
 posting_tasks: dict[int, asyncio.Task] = {}
+workers_runtime_enabled = True
 GLOBAL_RULE_PROCESS_SEMAPHORE = asyncio.Semaphore(1)
 user_states: dict[int, dict[str, Any]] = {}
 dashboard_tasks: dict[int, asyncio.Task] = {}
@@ -1350,6 +1353,11 @@ def sources_inline_keyboard(sources: list[ChannelChoice]) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def ensure_rule_workers() -> None:
+    if not workers_runtime_enabled:
+        if posting_tasks:
+            await stop_all_workers()
+        return
+
     if not posting_active:
         if posting_tasks:
             logger.info(
@@ -7118,80 +7126,186 @@ async def handle_new_message(message: Message):
 async def handle_channel_post(message: Message):
     await handle_new_message(message)
 
-async def main():
-    global bot, telethon_client, reaction_clients, sender_service
+async def _init_db_runtime() -> None:
+    await run_db(db.init)
+    ok, msg = await run_db(db.integrity_check)
+    if not ok:
+        raise RuntimeError(f"PostgreSQL недоступен: {msg}")
+
+    reset_count = await run_db(db.reset_stuck_processing)
+    logger.warning(f"♻️ Сброшено зависших processing задач: {reset_count}")
+
+
+async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
+    global bot, telethon_client, reaction_clients, sender_service, ui_policy
 
     bot = Bot(
         token=settings.bot_token,
         base_url=f"{settings.bot_api_base}/bot",
     )
 
-    global ui_policy
-    ui_policy = UIErrorPolicy(bot)
+    if create_ui_policy:
+        ui_policy = UIErrorPolicy(bot)
+    else:
+        ui_policy = None
 
     try:
-        try:
-            await bot.delete_webhook(drop_pending_updates=True, request_timeout=90)
-        except Exception as e:
-            logger.warning("Webhook skip (network issue): %s", e)
+        await bot.delete_webhook(drop_pending_updates=True, request_timeout=90)
+    except Exception as e:
+        logger.warning("Webhook skip (network issue): %s", e)
 
-        await run_db(db.init)
+    telethon_client = await create_telethon_client()
+    reaction_clients = await create_reaction_clients()
 
-        ok, msg = await run_db(db.integrity_check)
-        if not ok:
-            raise RuntimeError(f"PostgreSQL недоступен: {msg}")
+    sender_service = SenderService(
+        bot=bot,
+        db=db,
+        telethon_client=telethon_client,
+        reaction_clients=reaction_clients,
+    )
 
-        reset_count = await run_db(db.reset_stuck_processing)
-        logger.warning(f"♻️ Сброшено зависших processing задач: {reset_count}")
 
-        telethon_client = await create_telethon_client()
-        reaction_clients = await create_reaction_clients()
+async def _shutdown_runtime(
+    *,
+    stop_workers_runtime: bool,
+    close_dashboard_tasks: bool,
+    close_telegram_clients: bool,
+    close_bot_session: bool,
+) -> None:
+    global telethon_client, reaction_clients, sender_service, bot
 
-        sender_service = SenderService(
-            bot=bot,
-            db=db,
-            telethon_client=telethon_client,
-            reaction_clients=reaction_clients,
-        )
-
-        await ensure_rule_workers()
-
-        logger.info("🚀 Бот запущен")
-
-        await dp.start_polling(
-            bot,
-            polling_timeout=30,
-            handle_as_tasks=True,
-        )
-    finally:
+    if stop_workers_runtime:
         await stop_all_workers()
 
+    if close_dashboard_tasks:
         for task in dashboard_tasks.values():
             task.cancel()
         dashboard_tasks.clear()
 
-        if telethon_client:
-            try:
-                raw_telethon = getattr(telethon_client, "raw", telethon_client)
-                await raw_telethon.disconnect()
-            except Exception as exc:
-                logger.warning("Ошибка при закрытии Telethon: %s", exc)
+    if close_telegram_clients and telethon_client:
+        try:
+            raw_telethon = getattr(telethon_client, "raw", telethon_client)
+            await raw_telethon.disconnect()
+        except Exception as exc:
+            logger.warning("Ошибка при закрытии Telethon: %s", exc)
+        telethon_client = None
 
+    if close_telegram_clients:
         for reactor in reaction_clients:
             try:
                 raw_client = getattr(reactor.client, "raw", reactor.client)
                 await raw_client.disconnect()
             except Exception as exc:
                 logger.warning("Ошибка при закрытии реактора %s: %s", reactor.session_name, exc)
+        reaction_clients = []
+        sender_service = None
 
-        if bot:
-            try:
-                await bot.session.close()
-            except Exception as exc:
-                logger.warning("Ошибка при закрытии Bot session: %s", exc)
+    if close_bot_session and bot:
+        try:
+            await bot.session.close()
+        except Exception as exc:
+            logger.warning("Ошибка при закрытии Bot session: %s", exc)
+        bot = None
+
+
+async def _run_scheduler_role_loop() -> None:
+    logger.info("🚀 Режим scheduler запущен")
+    while True:
+        try:
+            await run_db(db.get_rule_stats)
+        except Exception as exc:
+            logger.warning("SCHEDULER_LOOP | ошибка тика: %s", exc)
+        await asyncio.sleep(30)
+
+
+async def _run_worker_role_loop() -> None:
+    global posting_active
+    posting_active = True
+    await ensure_rule_workers()
+    logger.info("🚀 Режим worker запущен")
+    while True:
+        await ensure_rule_workers()
+        await asyncio.sleep(10)
+
+
+async def _start_bot_role() -> None:
+    global workers_runtime_enabled, posting_active
+    workers_runtime_enabled = False
+    posting_active = False
+    await _init_db_runtime()
+    await _init_sender_runtime(create_ui_policy=True)
+    logger.info("🚀 Режим bot запущен")
+    await dp.start_polling(
+        bot,
+        polling_timeout=30,
+        handle_as_tasks=True,
+    )
+
+
+async def _start_scheduler_role() -> None:
+    global workers_runtime_enabled, posting_active
+    workers_runtime_enabled = False
+    posting_active = False
+    await _init_db_runtime()
+    await _run_scheduler_role_loop()
+
+
+async def _start_worker_role() -> None:
+    global workers_runtime_enabled
+    workers_runtime_enabled = True
+    await _init_db_runtime()
+    await _init_sender_runtime(create_ui_policy=False)
+    await _run_worker_role_loop()
+
+
+async def _start_all_role() -> None:
+    global workers_runtime_enabled, posting_active
+    workers_runtime_enabled = True
+    posting_active = False
+    await _init_db_runtime()
+    await _init_sender_runtime(create_ui_policy=True)
+    await ensure_rule_workers()
+    logger.info("🚀 Бот запущен")
+    await dp.start_polling(
+        bot,
+        polling_timeout=30,
+        handle_as_tasks=True,
+    )
+
+
+async def main(role: str = "all"):
+    normalized_role = normalize_runtime_role(role)
+    try:
+        await run_runtime_role(
+            normalized_role,
+            run_bot=_start_bot_role,
+            run_scheduler=_start_scheduler_role,
+            run_worker=_start_worker_role,
+            run_all=_start_all_role,
+        )
+    finally:
+        await _shutdown_runtime(
+            stop_workers_runtime=(normalized_role in {"worker", "all"}),
+            close_dashboard_tasks=(normalized_role in {"bot", "all"}),
+            close_telegram_clients=(normalized_role in {"bot", "worker", "all"}),
+            close_bot_session=(normalized_role in {"bot", "worker", "all"}),
+        )
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Telegram forwarder bot runtime")
+    parser.add_argument(
+        "--role",
+        choices=["bot", "scheduler", "worker", "all"],
+        default="all",
+        help="Роль процесса: bot|scheduler|worker|all",
+    )
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
+    args = _parse_args()
     try:
-        asyncio.run(main())
+        asyncio.run(main(role=args.role))
     except KeyboardInterrupt:
         logger.info("👋 Бот остановлен")
