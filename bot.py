@@ -780,7 +780,7 @@ def build_dashboard_text() -> str:
     health = get_system_health(db)
     next_rule = db.get_next_scheduled_rule()
     now_text = datetime.now(USER_TZ).strftime("%d.%m.%Y %H:%M:%S")
-    live_workers = sum(1 for task in posting_tasks.values() if not task.done())
+    live_workers = sum(1 for task in job_worker_tasks if not task.done())
 
     next_block = "⏭ **Ближайший пост:**\nне запланирован"
 
