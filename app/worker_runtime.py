@@ -2,6 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from datetime import datetime, timezone
+
+from .job_service import (
+    enqueue_video_delivery_fallback,
+    enqueue_video_process,
+    enqueue_video_send,
+)
 
 logger = logging.getLogger("forwarder")
 
@@ -13,11 +21,15 @@ def _safe_payload(job: dict) -> dict:
 
 def compute_retry_delay_seconds(queue: str, attempts: int, job_type: str) -> int:
     step = max(1, int(attempts))
-    if (queue or "").strip().lower() == "heavy" or job_type == "video_delivery":
+    if (queue or "").strip().lower() == "heavy" or job_type.startswith("video_"):
         schedule = [30, 90, 180]
     else:
         schedule = [10, 30, 60]
     return schedule[min(step - 1, len(schedule) - 1)]
+
+
+def _log_video_stage_event(event_text: str, delivery_id: int) -> None:
+    logger.info("%s | delivery_id=%s | ts=%s", event_text, int(delivery_id), datetime.now(timezone.utc).isoformat())
 
 
 async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool:
@@ -43,6 +55,60 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool
             ok = await sender_service.execute_repost_single_from_job(**payload)
         elif job_type == "repost_album":
             ok = await sender_service.execute_repost_album_from_job(**payload)
+        elif job_type == "video_download":
+            _log_video_stage_event("VIDEO DOWNLOAD START | запуск стадии скачивания", int(payload.get("delivery_id") or 0))
+            result = await sender_service.execute_video_download_from_job(**payload)
+            if result.get("fallback_to_legacy"):
+                enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
+                await asyncio.to_thread(repo.complete_job, job_id)
+                _log_video_stage_event("VIDEO STAGE FAILED | fallback в video_delivery", int(payload.get("delivery_id") or 0))
+                return True
+            if result.get("ok"):
+                next_payload = dict(payload)
+                next_payload["video_file_path"] = result.get("video_file_path")
+                next_payload["processed_file_path"] = None
+                enqueue_video_process(repo, next_payload)
+                await asyncio.to_thread(repo.complete_job, job_id)
+                _log_video_stage_event("VIDEO DOWNLOAD DONE | стадия скачивания завершена", int(payload.get("delivery_id") or 0))
+                return True
+            ok = False
+        elif job_type == "video_process":
+            _log_video_stage_event("VIDEO PROCESS START | запуск стадии обработки", int(payload.get("delivery_id") or 0))
+            result = await sender_service.execute_video_process_from_job(**payload)
+            if result.get("fallback_to_legacy"):
+                enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
+                await asyncio.to_thread(repo.complete_job, job_id)
+                _log_video_stage_event("VIDEO STAGE FAILED | fallback в video_delivery", int(payload.get("delivery_id") or 0))
+                return True
+            if result.get("ok"):
+                next_payload = dict(payload)
+                next_payload["video_file_path"] = payload.get("video_file_path")
+                next_payload["processed_file_path"] = result.get("processed_file_path")
+                enqueue_video_send(repo, next_payload)
+                await asyncio.to_thread(repo.complete_job, job_id)
+                _log_video_stage_event("VIDEO PROCESS DONE | стадия обработки завершена", int(payload.get("delivery_id") or 0))
+                return True
+            ok = False
+        elif job_type == "video_send":
+            _log_video_stage_event("VIDEO SEND START | запуск стадии отправки", int(payload.get("delivery_id") or 0))
+            result = await sender_service.execute_video_send_from_job(**payload)
+            if result.get("fallback_to_legacy"):
+                enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
+                await asyncio.to_thread(repo.complete_job, job_id)
+                _log_video_stage_event("VIDEO STAGE FAILED | fallback в video_delivery", int(payload.get("delivery_id") or 0))
+                return True
+            ok = bool(result.get("ok"))
+            if ok:
+                for path in (payload.get("video_file_path"), payload.get("processed_file_path")):
+                    if not path:
+                        continue
+                    try:
+                        os.remove(path)
+                    except FileNotFoundError:
+                        continue
+                    except Exception as cleanup_exc:
+                        logger.warning("Не удалось удалить временный файл после video_send: %s", cleanup_exc)
+                _log_video_stage_event("VIDEO SEND DONE | стадия отправки завершена", int(payload.get("delivery_id") or 0))
         elif job_type == "video_delivery":
             ok = await sender_service.execute_video_delivery_from_job(**payload)
         else:

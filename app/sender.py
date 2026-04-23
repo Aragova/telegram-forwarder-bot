@@ -2700,6 +2700,94 @@ class SenderService:
             )
             raise
 
+    async def execute_video_download_from_job(
+        self,
+        *,
+        rule_id: int,
+        delivery_id: int,
+        message_id: int,
+        source_channel: str,
+        target_id: str,
+        **_: object,
+    ) -> dict:
+        logger.info("VIDEO DOWNLOAD START | старт скачивания для delivery_id=%s", delivery_id)
+        message = await self._fetch_message(source_channel, message_id)
+        if not message:
+            logger.warning("VIDEO STAGE FAILED | не удалось получить сообщение для delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": True}
+
+        path = await self._download_video_source(
+            message,
+            delivery_id=int(delivery_id),
+            rule_id=int(rule_id),
+            source_channel=str(source_channel),
+            target_id=str(target_id),
+            source_message_id=int(message_id),
+        )
+        if not path:
+            logger.warning("VIDEO STAGE FAILED | не удалось скачать видео для delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": True}
+        logger.info("VIDEO DOWNLOAD DONE | скачивание завершено для delivery_id=%s", delivery_id)
+        return {"ok": True, "video_file_path": str(path), "fallback_to_legacy": False}
+
+    async def execute_video_process_from_job(
+        self,
+        *,
+        delivery_id: int,
+        video_file_path: str | None = None,
+        **_: object,
+    ) -> dict:
+        logger.info("VIDEO PROCESS START | старт обработки для delivery_id=%s", delivery_id)
+        if not video_file_path:
+            logger.warning("VIDEO STAGE FAILED | отсутствует video_file_path для delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": True}
+        if not Path(video_file_path).is_file():
+            logger.warning("VIDEO STAGE FAILED | исходный файл не найден для delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": True}
+
+        video_info = await self.video_processor.get_video_info(video_file_path, use_cache=False)
+        if not video_info:
+            logger.warning("VIDEO STAGE FAILED | VideoProcessor не смог прочитать файл для delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": True}
+        logger.info("VIDEO PROCESS DONE | обработка стадии завершена для delivery_id=%s", delivery_id)
+        return {"ok": True, "processed_file_path": str(video_file_path), "fallback_to_legacy": False}
+
+    async def execute_video_send_from_job(
+        self,
+        *,
+        processed_file_path: str | None = None,
+        **payload: object,
+    ) -> dict:
+        delivery_id = int(payload.get("delivery_id") or 0)
+        logger.info("VIDEO SEND START | старт отправки для delivery_id=%s", delivery_id)
+        if not processed_file_path:
+            logger.warning("VIDEO STAGE FAILED | отсутствует processed_file_path для delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": True}
+        if not Path(processed_file_path).is_file():
+            logger.warning("VIDEO STAGE FAILED | обработанный файл не найден для delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": True}
+
+        legacy_payload = {
+            "rule_id": payload.get("rule_id"),
+            "delivery_id": payload.get("delivery_id"),
+            "message_id": payload.get("message_id"),
+            "source_channel": payload.get("source_channel"),
+            "source_thread_id": payload.get("source_thread_id"),
+            "target_id": payload.get("target_id"),
+            "target_thread_id": payload.get("target_thread_id"),
+            "mode": payload.get("mode", "video"),
+            "interval": payload.get("interval", 0),
+            "schedule_mode": payload.get("schedule_mode", "interval"),
+            "media_group_id": payload.get("media_group_id"),
+            "job_type": payload.get("job_type"),
+        }
+        ok = await self.execute_video_delivery_from_job(**legacy_payload)
+        if not ok:
+            logger.warning("VIDEO STAGE FAILED | неуспешная отправка для delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": False}
+        logger.info("VIDEO SEND DONE | отправка завершена для delivery_id=%s", delivery_id)
+        return {"ok": True, "fallback_to_legacy": False}
+
     async def _deliver_single(self, rule, delivery_id, message_id, source_channel, target_id, target_thread_id):
         post_id = await run_db(self._get_post_id_by_delivery_sync, delivery_id)
         delivery_ids = [int(delivery_id)]

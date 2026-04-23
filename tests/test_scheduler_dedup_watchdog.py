@@ -156,7 +156,7 @@ def test_scheduler_no_duplicate_video_delivery() -> None:
     repo = _Repo()
     asyncio.run(scheduler_tick(repo, enabled=True))
     asyncio.run(scheduler_tick(repo, enabled=True))
-    video_jobs = [j for j in repo.jobs.values() if j["job_type"] == "video_delivery"]
+    video_jobs = [j for j in repo.jobs.values() if j["job_type"] == "video_download"]
     assert len(video_jobs) == 1
 
 
@@ -176,7 +176,7 @@ def test_scheduler_no_duplicate_album_logical_item() -> None:
 
 def test_dedup_key_is_built_correctly() -> None:
     assert build_dedup_key_for_single(10) == "repost_single:delivery:10"
-    assert build_dedup_key_for_video(20) == "video_delivery:delivery:20"
+    assert build_dedup_key_for_video(20) == "video_download:delivery:20"
     assert build_dedup_key_for_album(1, "alb", [11, 12]) == "repost_album:rule:1:media_group:alb"
     assert build_dedup_key_for_album(1, None, [12, 11]) == "repost_album:rule:1:deliveries:11,12"
 
@@ -186,7 +186,7 @@ def test_lease_jobs_respects_priority() -> None:
     enqueue_video_delivery(repo, 20)
     enqueue_repost_single(repo, 10)
     leased = repo.lease_jobs("heavy", "w1", 1)
-    assert leased[0]["job_type"] == "video_delivery"
+    assert leased[0]["job_type"] == "video_download"
 
     repo.create_job("repost_album", {"delivery_id": 10}, "light", priority=90, dedup_key="custom-1")
     leased_light = repo.lease_jobs("light", "w2", 1)
@@ -220,7 +220,7 @@ def test_watchdog_detects_stuck_processing() -> None:
 
 def test_retry_delay_differs_for_light_and_heavy() -> None:
     assert compute_retry_delay_seconds("light", 1, "repost_single") == 10
-    assert compute_retry_delay_seconds("heavy", 1, "video_delivery") == 30
+    assert compute_retry_delay_seconds("heavy", 1, "video_download") == 30
 
 
 def test_repeated_scheduler_tick_is_idempotent() -> None:
