@@ -3206,6 +3206,64 @@ class PostgresRepository(RepositoryProtocol):
                 result[job_type][status] = int(row.get("cnt") or 0)
         return result
 
+    def get_job_queue_counts(self) -> dict[str, int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        queue,
+                        status,
+                        COUNT(*) AS cnt
+                    FROM jobs
+                    GROUP BY queue, status
+                    """
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+
+        result = {
+            "light_pending": 0,
+            "light_processing": 0,
+            "light_retry": 0,
+            "heavy_pending": 0,
+            "heavy_processing": 0,
+            "heavy_retry": 0,
+        }
+        for row in rows:
+            queue = str(row.get("queue") or "").strip().lower()
+            status = str(row.get("status") or "").strip().lower()
+            if queue not in {"light", "heavy"}:
+                continue
+            key = f"{queue}_{status}"
+            if key in result:
+                result[key] = int(row.get("cnt") or 0)
+        return result
+
+    def get_oldest_pending_job_ages(self) -> dict[str, int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        queue,
+                        EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::BIGINT AS age_sec
+                    FROM jobs
+                    WHERE status = 'pending'
+                    GROUP BY queue
+                    """
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+
+        result = {"light": 0, "heavy": 0}
+        for row in rows:
+            queue = str(row.get("queue") or "").strip().lower()
+            if queue not in result:
+                continue
+            result[queue] = max(int(row.get("age_sec") or 0), 0)
+        return result
+
     def get_expired_leased_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as conn:
             with conn.cursor() as cur:

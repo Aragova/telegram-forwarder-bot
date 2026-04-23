@@ -13,6 +13,8 @@ from app.job_service import (
     enqueue_video_delivery,
 )
 from app.repository_models import utc_now_iso
+from app.worker_load_service import build_worker_load_snapshot
+from app.worker_resource_policy import POLICY
 
 logger = logging.getLogger("forwarder")
 
@@ -32,6 +34,25 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
         if not bool(getattr(rule, "is_active", False)):
             continue
 
+        rule_mode = (getattr(rule, "mode", "repost") or "repost").strip().lower()
+        if rule_mode == "video":
+            load = await asyncio.to_thread(build_worker_load_snapshot, repo, POLICY)
+            if load.heavy_hard_limit_exceeded:
+                logger.warning(
+                    "Новый heavy job не поставлен из-за saturation | rule_id=%s | heavy_pending=%s | hard_limit=%s",
+                    int(rule.id),
+                    load.heavy_pending,
+                    POLICY.backlog_hard_limit_heavy,
+                )
+                continue
+            if load.heavy_soft_limit_exceeded:
+                logger.warning(
+                    "Heavy backlog превысил мягкий порог | rule_id=%s | heavy_pending=%s | soft_limit=%s",
+                    int(rule.id),
+                    load.heavy_pending,
+                    POLICY.backlog_soft_limit_heavy,
+                )
+
         checked_rules += 1
         due = await asyncio.to_thread(repo.take_due_delivery, int(rule.id), due_iso)
         if not due:
@@ -39,7 +60,6 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
 
         delivery_id = int(due["delivery_id"])
         media_group_id = due.get("media_group_id")
-        rule_mode = (getattr(rule, "mode", "repost") or "repost").strip().lower()
 
         if rule_mode == "video":
             dedup_key = build_dedup_key_for_video(delivery_id)
