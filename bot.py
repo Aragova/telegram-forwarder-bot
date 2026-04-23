@@ -245,16 +245,22 @@ def _fmt_health_status(status: str) -> str:
     return "🟢 работает" if status == "ok" else "🔴 не отвечает"
 
 
-async def watchdog_loop(repo: RepositoryProtocol):
+async def watchdog_loop(
+    repo: RepositoryProtocol,
+    *,
+    startup_grace_seconds: float = 20.0,
+):
     last_state: dict[str, str] = {}
+    started_at = time.monotonic()
 
     while True:
         try:
             health = await run_db(get_system_health, repo)
             roles = health.get("roles") or {}
+            in_startup_grace = (time.monotonic() - started_at) < startup_grace_seconds
 
             for role, state in roles.items():
-                if state == "down" and last_state.get(role) != "down":
+                if state == "down" and last_state.get(role) != "down" and not in_startup_grace:
                     await notify_admin_once(
                         f"role_{role}_down",
                         f"❌ Роль {role} не отвечает",
