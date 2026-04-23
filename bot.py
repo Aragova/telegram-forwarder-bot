@@ -7315,6 +7315,7 @@ async def _start_all_role() -> None:
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=True)
     asyncio.create_task(heartbeat_loop("bot", db))
+    asyncio.create_task(heartbeat_loop("scheduler", db))
     asyncio.create_task(heartbeat_loop("worker", db))
     asyncio.create_task(watchdog_loop(db))
     await ensure_rule_workers()
