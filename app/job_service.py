@@ -24,10 +24,12 @@ JOB_QUEUE_BY_TYPE = {
 JOB_PRIORITY_BY_TYPE = {
     JOB_TYPE_REPOST_ALBUM: 90,
     JOB_TYPE_REPOST_SINGLE: 100,
-    JOB_TYPE_VIDEO_DELIVERY: 200,
+    # Для heavy video pipeline важен "проток": сначала догоняем process/send уже начатых delivery,
+    # и только потом берём новые download.
+    JOB_TYPE_VIDEO_SEND: 170,
+    JOB_TYPE_VIDEO_PROCESS: 180,
     JOB_TYPE_VIDEO_DOWNLOAD: 200,
-    JOB_TYPE_VIDEO_PROCESS: 200,
-    JOB_TYPE_VIDEO_SEND: 200,
+    JOB_TYPE_VIDEO_DELIVERY: 200,
 }
 
 
