@@ -56,6 +56,9 @@ from app.ui_error_policy import UIErrorPolicy
 from app.scheduler_service import SchedulerService
 from app.runtime_roles import normalize_runtime_role, run_role as run_runtime_role
 from app.health_service import get_system_health, update_heartbeat
+from app.runtime_context import RuntimeContext
+from app.worker_runtime import run_heavy_worker, run_light_worker
+from app.job_service import enqueue_repost_album, enqueue_repost_single, enqueue_video_delivery
 
 settings.validate()
 logger = setup_logging(settings.log_level)
@@ -67,8 +70,10 @@ scheduler_service = SchedulerService(db)
 telethon_client = None
 reaction_clients = []
 sender_service = None
+runtime_context: RuntimeContext | None = None
 posting_active = False
 posting_tasks: dict[int, asyncio.Task] = {}
+job_worker_tasks: list[asyncio.Task] = []
 workers_runtime_enabled = True
 GLOBAL_RULE_PROCESS_SEMAPHORE = asyncio.Semaphore(1)
 user_states: dict[int, dict[str, Any]] = {}
@@ -1509,15 +1514,44 @@ async def rule_worker(rule_id: int) -> None:
                 continue
 
             async with GLOBAL_RULE_PROCESS_SEMAPHORE:
+                due = await run_db(db.take_due_delivery, rule.id, utc_now_iso())
+                if not due:
+                    processed = False
+                else:
+                    delivery_id = int(due["delivery_id"])
+                    media_group_id = due["media_group_id"]
+                    rule_mode = (getattr(rule, "mode", "repost") or "repost").strip().lower()
 
-                processed = await sender_service.process_rule_once(rule)
+                    if rule_mode == "video":
+                        job_id = await run_db(enqueue_video_delivery, db, delivery_id)
+                    elif media_group_id:
+                        album_rows = await run_db(
+                            db.get_album_pending_for_rule,
+                            rule.id,
+                            str(due["source_channel"]),
+                            due["source_thread_id"],
+                            str(media_group_id),
+                        )
+                        delivery_ids = [int(row["delivery_id"]) for row in (album_rows or [])]
+                        if not delivery_ids:
+                            delivery_ids = [delivery_id]
+                        job_id = await run_db(
+                            enqueue_repost_album,
+                            db,
+                            delivery_ids,
+                            str(media_group_id),
+                        )
+                    else:
+                        job_id = await run_db(enqueue_repost_single, db, delivery_id)
+
+                    processed = job_id is not None
 
             if processed is True:
                 decision = worker_policy.on_processed_success()
                 worker_policy.log_decision(
                     rule_id=rule_id,
                     decision=decision,
-                    extra="Доставка обработана",
+                    extra="Задача поставлена в job-очередь",
                 )
                 await asyncio.sleep(decision.sleep_seconds)
                 continue
@@ -7183,7 +7217,7 @@ async def _init_db_runtime() -> None:
 
 
 async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
-    global bot, telethon_client, reaction_clients, sender_service, ui_policy
+    global bot, telethon_client, reaction_clients, sender_service, ui_policy, runtime_context
 
     bot = Bot(
         token=settings.bot_token,
@@ -7209,6 +7243,14 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
         telethon_client=telethon_client,
         reaction_clients=reaction_clients,
     )
+    runtime_context = RuntimeContext(
+        repo=db,
+        sender_service=sender_service,
+        scheduler_service=scheduler_service,
+        bot=bot,
+        telethon_client=telethon_client,
+        reaction_clients=reaction_clients,
+    )
 
 
 async def _shutdown_runtime(
@@ -7218,9 +7260,10 @@ async def _shutdown_runtime(
     close_telegram_clients: bool,
     close_bot_session: bool,
 ) -> None:
-    global telethon_client, reaction_clients, sender_service, bot
+    global telethon_client, reaction_clients, sender_service, bot, runtime_context
 
     if stop_workers_runtime:
+        await stop_job_workers_runtime()
         await stop_all_workers()
 
     if close_dashboard_tasks:
@@ -7245,6 +7288,7 @@ async def _shutdown_runtime(
                 logger.warning("Ошибка при закрытии реактора %s: %s", reactor.session_name, exc)
         reaction_clients = []
         sender_service = None
+        runtime_context = None
 
     if close_bot_session and bot:
         try:
@@ -7267,6 +7311,7 @@ async def _run_scheduler_role_loop() -> None:
 async def _run_worker_role_loop() -> None:
     global posting_active
     posting_active = True
+    await start_job_workers_runtime()
     await ensure_rule_workers()
     logger.info("🚀 Режим worker запущен")
     while True:
@@ -7318,6 +7363,7 @@ async def _start_all_role() -> None:
     asyncio.create_task(heartbeat_loop("scheduler", db))
     asyncio.create_task(heartbeat_loop("worker", db))
     asyncio.create_task(watchdog_loop(db))
+    await start_job_workers_runtime()
     await ensure_rule_workers()
     logger.info("🚀 Бот запущен")
     await dp.start_polling(
@@ -7325,6 +7371,32 @@ async def _start_all_role() -> None:
         polling_timeout=30,
         handle_as_tasks=True,
     )
+
+
+async def start_job_workers_runtime() -> None:
+    global job_worker_tasks
+    if not sender_service:
+        return
+    if any(not task.done() for task in job_worker_tasks):
+        return
+
+    job_worker_tasks = [
+        asyncio.create_task(run_light_worker(db, sender_service, "light-worker-1")),
+        asyncio.create_task(run_heavy_worker(db, sender_service, "heavy-worker-1")),
+    ]
+    logger.info("JOB WORKERS | запущены light/heavy воркеры")
+
+
+async def stop_job_workers_runtime() -> None:
+    global job_worker_tasks
+    if not job_worker_tasks:
+        return
+    tasks = list(job_worker_tasks)
+    job_worker_tasks = []
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    logger.info("JOB WORKERS | остановлены")
 
 
 async def main(role: str = "all"):
