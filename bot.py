@@ -27,7 +27,6 @@ from app.config import settings
 from app.repository_models import utc_now_iso
 from app.repository import RepositoryProtocol
 from app.repository_factory import create_repository
-from app.worker_policy import build_worker_policy
 from app.transport import wrap_bot, wrap_telethon_client
 from app.transport_policy import (
     build_reaction_policy,
@@ -73,15 +72,12 @@ reaction_clients = []
 sender_service = None
 runtime_context: RuntimeContext | None = None
 posting_active = False
-posting_tasks: dict[int, asyncio.Task] = {}
 job_worker_tasks: list[asyncio.Task] = []
 scheduler_runtime_task: asyncio.Task | None = None
 job_watchdog_task: asyncio.Task | None = None
 workers_runtime_enabled = True
-GLOBAL_RULE_PROCESS_SEMAPHORE = asyncio.Semaphore(1)
 user_states: dict[int, dict[str, Any]] = {}
 dashboard_tasks: dict[int, asyncio.Task] = {}
-worker_policy = build_worker_policy()
 ui_policy: UIErrorPolicy | None = None
 last_notifications: dict[str, datetime] = {}
 rule_ui_tasks: dict[str, asyncio.Task] = {}
@@ -780,7 +776,7 @@ def build_dashboard_text() -> str:
     health = get_system_health(db)
     next_rule = db.get_next_scheduled_rule()
     now_text = datetime.now(USER_TZ).strftime("%d.%m.%Y %H:%M:%S")
-    live_workers = sum(1 for task in posting_tasks.values() if not task.done())
+    live_workers = sum(1 for task in job_worker_tasks if not task.done())
 
     next_block = "⏭ **Ближайший пост:**\nне запланирован"
 
@@ -1407,140 +1403,12 @@ def sources_inline_keyboard(sources: list[ChannelChoice]) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def ensure_rule_workers() -> None:
-    if posting_tasks:
-        await stop_all_workers()
+    # Историческое имя функции: теперь в проекте используются только job workers.
+    await start_job_workers_runtime()
 
 async def stop_all_workers() -> None:
-    if not posting_tasks:
-        return
-
-    tasks = list(posting_tasks.items())
-    posting_tasks.clear()
-
-    for rule_id, task in tasks:
-        if not task.done():
-            logger.info("WORKER_MANAGER | STOP_REQUEST | rule_id=%s", rule_id)
-            task.cancel()
-
-    await asyncio.gather(
-        *(task for _, task in tasks),
-        return_exceptions=True,
-    )
-
-    logger.info("WORKER_MANAGER | ALL_STOPPED | count=%s", len(tasks))
-
-async def rule_worker(rule_id: int) -> None:
-    logger.info("WORKER | START | rule_id=%s", rule_id)
-
-    while True:
-        try:
-            if not posting_active:
-                decision = worker_policy.on_rule_inactive()
-                worker_policy.log_decision(
-                    rule_id=rule_id,
-                    decision=decision,
-                    extra="Глобальная пересылка выключена (posting_active=False)",
-                )
-                await asyncio.sleep(decision.sleep_seconds)
-                continue
-
-            rule = await run_db(db.get_rule, rule_id)
-
-            if not rule:
-                decision = worker_policy.on_rule_missing()
-                worker_policy.log_decision(
-                    rule_id=rule_id,
-                    decision=decision,
-                    extra="Правило не найдено, воркер ждёт обновления списка правил",
-                )
-                await asyncio.sleep(decision.sleep_seconds)
-                continue
-
-            if not bool(getattr(rule, "is_active", False)):
-                decision = worker_policy.on_rule_inactive()
-                worker_policy.log_decision(
-                    rule_id=rule_id,
-                    decision=decision,
-                    extra="Правило выключено",
-                )
-                await asyncio.sleep(decision.sleep_seconds)
-                continue
-
-            async with GLOBAL_RULE_PROCESS_SEMAPHORE:
-                due = await run_db(db.take_due_delivery, rule.id, utc_now_iso())
-                if not due:
-                    processed = False
-                else:
-                    delivery_id = int(due["delivery_id"])
-                    media_group_id = due["media_group_id"]
-                    rule_mode = (getattr(rule, "mode", "repost") or "repost").strip().lower()
-
-                    if rule_mode == "video":
-                        job_id = await run_db(enqueue_video_delivery, db, delivery_id)
-                    elif media_group_id:
-                        album_rows = await run_db(
-                            db.get_album_pending_for_rule,
-                            rule.id,
-                            str(due["source_channel"]),
-                            due["source_thread_id"],
-                            str(media_group_id),
-                        )
-                        delivery_ids = [int(row["delivery_id"]) for row in (album_rows or [])]
-                        if not delivery_ids:
-                            delivery_ids = [delivery_id]
-                        job_id = await run_db(
-                            enqueue_repost_album,
-                            db,
-                            delivery_ids,
-                            str(media_group_id),
-                        )
-                    else:
-                        job_id = await run_db(enqueue_repost_single, db, delivery_id)
-
-                    processed = job_id is not None
-
-            if processed is True:
-                decision = worker_policy.on_processed_success()
-                worker_policy.log_decision(
-                    rule_id=rule_id,
-                    decision=decision,
-                    extra="Задача поставлена в job-очередь",
-                )
-                await asyncio.sleep(decision.sleep_seconds)
-                continue
-
-            if processed is False:
-                decision = worker_policy.on_nothing_processed()
-                worker_policy.log_decision(
-                    rule_id=rule_id,
-                    decision=decision,
-                    extra="Подходящих due delivery сейчас нет",
-                )
-                await asyncio.sleep(decision.sleep_seconds)
-                continue
-
-            decision = worker_policy.on_nothing_processed()
-            worker_policy.log_decision(
-                rule_id=rule_id,
-                decision=decision,
-                extra=f"Неожиданный результат process_rule_once={processed!r}",
-            )
-            await asyncio.sleep(decision.sleep_seconds)
-
-        except asyncio.CancelledError:
-            logger.info("WORKER | STOP | rule_id=%s | reason=cancelled", rule_id)
-            raise
-
-        except Exception as exc:
-            logger.exception("WORKER | CRASH | rule_id=%s | error=%s", rule_id, exc)
-
-            decision = worker_policy.on_worker_crash()
-            worker_policy.log_decision(
-                rule_id=rule_id,
-                decision=decision,
-                extra=f"Ошибка воркера: {exc}",
-            )
-            await asyncio.sleep(decision.sleep_seconds)
+    # Историческое имя функции: останавливаем текущий runtime job workers.
+    await stop_job_workers_runtime()
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
