@@ -4,11 +4,16 @@ from typing import Awaitable, Callable
 
 RuntimeCallable = Callable[[], Awaitable[None]]
 
-_ALLOWED_ROLES = {"bot", "scheduler", "worker", "all"}
+_ALLOWED_ROLES = {"bot", "ui", "scheduler", "worker", "all"}
+
+PRODUCTION_SPLIT_ROLES: tuple[str, ...] = ("bot", "scheduler", "worker")
+LEGACY_COMPAT_ROLE = "all"
 
 
 def normalize_runtime_role(role: str | None) -> str:
     normalized = (role or "all").strip().lower()
+    if normalized == "ui":
+        return "bot"
     if normalized not in _ALLOWED_ROLES:
         return "all"
     return normalized

@@ -55,12 +55,13 @@ from app.ui_error_policy import UIErrorPolicy
 from app.scheduler_service import SchedulerService
 from app.runtime_roles import normalize_runtime_role, run_role as run_runtime_role
 from app.health_service import get_system_health, update_heartbeat
+from app.ops_health_service import build_operational_snapshot
+from app.preflight_checks import PreflightError, run_preflight_checks
 from app.runtime_context import RuntimeContext
 from app.worker_runtime import run_heavy_worker, run_light_worker
 from app.scheduler_runtime import run_scheduler_loop
 from app.job_watchdog import run_watchdog_loop
 
-settings.validate()
 logger = setup_logging(settings.log_level)
 
 dp = Dispatcher()
@@ -7162,7 +7163,7 @@ async def _start_bot_role() -> None:
     await _init_sender_runtime(create_ui_policy=True)
     asyncio.create_task(heartbeat_loop("bot", db))
     asyncio.create_task(watchdog_loop(db))
-    logger.info("🚀 Режим bot запущен")
+    logger.info("STARTUP | Роль UI (bot) запущена")
     await dp.start_polling(
         bot,
         polling_timeout=30,
@@ -7175,6 +7176,7 @@ async def _start_scheduler_role() -> None:
     workers_runtime_enabled = False
     posting_active = False
     await _init_db_runtime()
+    logger.info("STARTUP | Запуск роли scheduler")
     asyncio.create_task(heartbeat_loop("scheduler", db))
     watchdog_task = asyncio.create_task(run_watchdog_loop(db, interval_seconds=10.0))
     try:
@@ -7193,6 +7195,7 @@ async def _start_worker_role() -> None:
     workers_runtime_enabled = True
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=False)
+    logger.info("STARTUP | Запуск роли worker")
     asyncio.create_task(heartbeat_loop("worker", db))
     await _run_worker_role_loop()
 
@@ -7218,7 +7221,7 @@ async def _start_all_role() -> None:
     if job_watchdog_task is None or job_watchdog_task.done():
         job_watchdog_task = asyncio.create_task(run_watchdog_loop(db, interval_seconds=10.0))
     await start_job_workers_runtime()
-    logger.info("🚀 Бот запущен")
+    logger.info("STARTUP | Legacy режим all запущен")
     await dp.start_polling(
         bot,
         polling_timeout=30,
@@ -7258,6 +7261,15 @@ async def stop_job_workers_runtime() -> None:
 
 async def main(role: str = "all"):
     normalized_role = normalize_runtime_role(role)
+    logger.info("STARTUP | Инициализация роли %s", normalized_role)
+    try:
+        preflight_result = run_preflight_checks(normalized_role, settings_obj=settings)
+        for message in preflight_result.messages:
+            logger.info("PREFLIGHT | %s", message)
+    except PreflightError as exc:
+        logger.error("PREFLIGHT | Критическая ошибка: %s", exc)
+        raise SystemExit(2) from exc
+
     try:
         await run_runtime_role(
             normalized_role,
@@ -7267,28 +7279,76 @@ async def main(role: str = "all"):
             run_all=_start_all_role,
         )
     finally:
+        logger.info("SHUTDOWN | Остановка роли %s", normalized_role)
         await _shutdown_runtime(
             stop_workers_runtime=(normalized_role in {"worker", "all"}),
             close_dashboard_tasks=(normalized_role in {"bot", "all"}),
             close_telegram_clients=(normalized_role in {"bot", "worker", "all"}),
             close_bot_session=(normalized_role in {"bot", "worker", "all"}),
         )
+        logger.info("SHUTDOWN | Роль %s остановлена", normalized_role)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Telegram forwarder bot runtime")
     parser.add_argument(
         "--role",
-        choices=["bot", "scheduler", "worker", "all"],
+        choices=["bot", "ui", "scheduler", "worker", "all"],
         default="all",
-        help="Роль процесса: bot|scheduler|worker|all",
+        help="Роль процесса: bot|ui|scheduler|worker|all",
+    )
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Проверить preflight и завершить процесс без запуска роли",
+    )
+    parser.add_argument(
+        "--ops-status",
+        action="store_true",
+        help="Показать operational статус (для smoke-check/runbook) и завершить процесс",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Вывести результат в JSON (используется для operational-скриптов)",
     )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
+    role = normalize_runtime_role(args.role)
+    if args.ops_status:
+        snapshot = build_operational_snapshot(db).as_dict()
+        if args.json:
+            print(json.dumps(snapshot, ensure_ascii=False))
+        else:
+            print(
+                "OPS STATUS\n"
+                f"- overall_status: {snapshot['overall_status']}\n"
+                f"- system_mode: {snapshot['system_mode']}\n"
+                f"- roles: {snapshot['roles']}\n"
+                f"- role_problems: {snapshot['role_problems']}\n"
+                f"- backlog: {snapshot['backlog']}\n"
+                f"- restart_loop_symptoms: {snapshot['restart_loop_symptoms']}"
+            )
+        raise SystemExit(0)
+
+    if args.preflight_only:
+        try:
+            result = run_preflight_checks(role, settings_obj=settings)
+            if args.json:
+                print(json.dumps({"ok": result.ok, "role": result.role, "messages": result.messages}, ensure_ascii=False))
+            else:
+                print(f"PREFLIGHT OK ({result.role})")
+                for item in result.messages:
+                    print(f"- {item}")
+            raise SystemExit(0)
+        except PreflightError as exc:
+            print(f"PREFLIGHT ERROR: {exc}")
+            raise SystemExit(2) from exc
+
     try:
-        asyncio.run(main(role=args.role))
+        asyncio.run(main(role=role))
     except KeyboardInterrupt:
         logger.info("👋 Бот остановлен")
