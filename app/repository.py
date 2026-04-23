@@ -158,6 +158,13 @@ class RepositoryProtocol(Protocol):
     # =========================================================
     def get_due_delivery(self, rule_id: int, due_iso: str): ...
     def take_due_delivery(self, rule_id: int, due_iso: str): ...
+    def get_processing_album_for_rule(
+        self,
+        rule_id: int,
+        source_channel: str,
+        source_thread_id: int | None,
+        media_group_id: str,
+    ): ...
     def get_album_pending_for_rule(
         self,
         rule_id: int,
@@ -165,6 +172,24 @@ class RepositoryProtocol(Protocol):
         source_thread_id: int | None,
         media_group_id: str,
     ): ...
+
+    # =========================================================
+    # JOB QUEUE
+    # =========================================================
+    def create_job(
+        self,
+        job_type: str,
+        payload: dict[str, Any],
+        queue: str,
+        priority: int = 100,
+        run_at: str | None = None,
+    ) -> int | None: ...
+    def lease_jobs(self, queue: str, worker_id: str, limit: int = 1, lease_seconds: int = 30) -> list[dict[str, Any]]: ...
+    def mark_job_processing(self, job_id: int, worker_id: str) -> bool: ...
+    def complete_job(self, job_id: int) -> bool: ...
+    def retry_job(self, job_id: int, error_text: str, delay_seconds: int) -> bool: ...
+    def fail_job(self, job_id: int, error_text: str) -> bool: ...
+    def get_job(self, job_id: int) -> dict[str, Any] | None: ...
 
     # =========================================================
     # DELIVERY STATUS

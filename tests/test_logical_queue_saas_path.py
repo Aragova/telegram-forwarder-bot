@@ -188,3 +188,20 @@ def test_start_from_position_marks_previous_logical_items_sent():
     assert len(updates) == 1
     assert [x[1] for x in updates[0][1]] == [1, 2, 3]
     assert repo.fake_conn.committed is True
+
+
+def test_logical_summary_keeps_processing_inside_queue():
+    repo = _RepoForTests()
+    items = [
+        {"position": 1, "is_done": False, "pending_count": 0, "processing_count": 1, "faulty_count": 0},
+        {"position": 2, "is_done": False, "pending_count": 1, "processing_count": 0, "faulty_count": 0},
+        {"position": 3, "is_done": True, "pending_count": 0, "processing_count": 0, "faulty_count": 0},
+    ]
+
+    summary = repo._summarize_rule_logical_items(items)
+
+    assert summary["total"] == 3
+    assert summary["completed"] == 1
+    assert summary["processing"] == 1
+    assert summary["pending"] == 2
+    assert summary["current_position"] == 1

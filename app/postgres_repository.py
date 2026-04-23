@@ -304,6 +304,23 @@ class PostgresRepository(RepositoryProtocol):
             sent_at TEXT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS jobs(
+            id BIGSERIAL PRIMARY KEY,
+            job_type TEXT NOT NULL,
+            payload_json JSONB NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','leased','processing','done','retry','failed')),
+            priority INT NOT NULL DEFAULT 100,
+            queue TEXT NOT NULL DEFAULT 'default',
+            attempts INT NOT NULL DEFAULT 0,
+            max_attempts INT NOT NULL DEFAULT 3,
+            lease_until TIMESTAMPTZ NULL,
+            locked_by TEXT NULL,
+            run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            error_text TEXT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
         CREATE TABLE IF NOT EXISTS audit_log(
             id BIGSERIAL PRIMARY KEY,
             created_at TEXT NOT NULL,
@@ -455,6 +472,18 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     CREATE INDEX IF NOT EXISTS idx_deliveries_post_id
                     ON deliveries(post_id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_jobs_status_run_at
+                    ON jobs(status, run_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_jobs_queue_status_run_at
+                    ON jobs(queue, status, run_at)
                     """
                 )
             conn.commit()
@@ -2861,6 +2890,204 @@ class PostgresRepository(RepositoryProtocol):
                 )
                 return cur.fetchall()
 
+    def get_processing_album_for_rule(
+        self,
+        rule_id: int,
+        source_channel: str,
+        source_thread_id: int | None,
+        media_group_id: str,
+    ):
+        return self.get_album_pending_for_rule(
+            rule_id=rule_id,
+            source_channel=source_channel,
+            source_thread_id=source_thread_id,
+            media_group_id=media_group_id,
+        )
+
+    # =========================================================
+    # JOB QUEUE
+    # =========================================================
+
+    def create_job(
+        self,
+        job_type: str,
+        payload: dict[str, Any],
+        queue: str,
+        priority: int = 100,
+        run_at: str | None = None,
+    ) -> int | None:
+        queue_name = (queue or "default").strip().lower()
+        if queue_name not in {"light", "heavy"}:
+            queue_name = "default"
+
+        dedup_probe: dict[str, Any] = {}
+        if "delivery_id" in payload:
+            dedup_probe["delivery_id"] = payload["delivery_id"]
+        elif "delivery_ids" in payload:
+            dedup_probe["delivery_ids"] = payload["delivery_ids"]
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if dedup_probe:
+                    cur.execute(
+                        """
+                        SELECT id
+                        FROM jobs
+                        WHERE job_type = %s
+                          AND status IN ('pending', 'leased', 'processing', 'retry')
+                          AND payload_json @> %s::jsonb
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (job_type, _json_dumps(dedup_probe)),
+                    )
+                    existing = cur.fetchone()
+                    if existing:
+                        conn.commit()
+                        return int(existing["id"])
+
+                cur.execute(
+                    """
+                    INSERT INTO jobs(job_type, payload_json, status, priority, queue, run_at, created_at, updated_at)
+                    VALUES(%s, %s::jsonb, 'pending', %s, %s, COALESCE(%s::timestamptz, NOW()), NOW(), NOW())
+                    RETURNING id
+                    """,
+                    (job_type, _json_dumps(payload) or "{}", int(priority), queue_name, run_at),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return int(row["id"]) if row else None
+
+    def lease_jobs(self, queue: str, worker_id: str, limit: int = 1, lease_seconds: int = 30) -> list[dict]:
+        queue_name = (queue or "").strip().lower()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH picked AS (
+                        SELECT id
+                        FROM jobs
+                        WHERE queue = %s
+                          AND status IN ('pending', 'retry')
+                          AND run_at <= NOW()
+                          AND (lease_until IS NULL OR lease_until < NOW())
+                        ORDER BY priority ASC, run_at ASC, id ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT %s
+                    )
+                    UPDATE jobs j
+                    SET status = 'leased',
+                        locked_by = %s,
+                        lease_until = NOW() + make_interval(secs => %s),
+                        updated_at = NOW()
+                    FROM picked
+                    WHERE j.id = picked.id
+                    RETURNING j.*
+                    """,
+                    (queue_name, max(1, int(limit)), worker_id, max(1, int(lease_seconds))),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return [dict(r) for r in rows]
+
+    def mark_job_processing(self, job_id: int, worker_id: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'processing',
+                        updated_at = NOW()
+                    WHERE id = %s
+                      AND status = 'leased'
+                      AND locked_by = %s
+                    """,
+                    (int(job_id), worker_id),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+            return ok
+
+    def complete_job(self, job_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'done',
+                        lease_until = NULL,
+                        locked_by = NULL,
+                        error_text = NULL,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (int(job_id),),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+            return ok
+
+    def retry_job(self, job_id: int, error_text: str, delay_seconds: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'retry',
+                        attempts = attempts + 1,
+                        lease_until = NULL,
+                        locked_by = NULL,
+                        run_at = NOW() + make_interval(secs => %s),
+                        error_text = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (max(1, int(delay_seconds)), (error_text or "")[:1000], int(job_id)),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+            return ok
+
+    def fail_job(self, job_id: int, error_text: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'failed',
+                        attempts = attempts + 1,
+                        lease_until = NULL,
+                        locked_by = NULL,
+                        error_text = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    ((error_text or "")[:1000], int(job_id)),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+            return ok
+
+    def get_job(self, job_id: int) -> dict | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (int(job_id),),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            if not row:
+                return None
+            item = dict(row)
+            item["payload_json"] = _safe_json_loads(item.get("payload_json"), {})
+            return item
+
     def get_delivery(self, delivery_id: int):
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -3187,6 +3414,8 @@ class PostgresRepository(RepositoryProtocol):
             logical_total = logical_summary["total"]
             logical_completed = logical_summary["completed"]
             logical_pending = logical_summary["pending"]
+            logical_processing = logical_summary["processing"]
+            logical_faulty = logical_summary["faulty"]
             logical_current_position = logical_summary["current_position"]
 
             snapshot = {
@@ -3219,19 +3448,23 @@ class PostgresRepository(RepositoryProtocol):
                 "sent": physical_sent,
                 "faulty": physical_faulty,
                 "logical_pending": logical_pending,
+                "logical_processing": logical_processing,
                 "logical_completed": logical_completed,
+                "logical_faulty": logical_faulty,
                 "logical_total": logical_total,
                 "logical_current_position": logical_current_position,
             }
 
             logger.info(
-                "get_rule_card_snapshot: rule_id=%s, mode=%s, raw_rows=%s, logical_total=%s, logical_pending=%s, logical_completed=%s, logical_current_position=%s",
+                "get_rule_card_snapshot: rule_id=%s, mode=%s, raw_rows=%s, logical_total=%s, logical_pending=%s, logical_processing=%s, logical_completed=%s, logical_faulty=%s, logical_current_position=%s",
                 rule_id,
                 mode,
                 len(rows),
                 logical_total,
                 logical_pending,
+                logical_processing,
                 logical_completed,
+                logical_faulty,
                 logical_current_position,
             )
 
@@ -3252,7 +3485,16 @@ class PostgresRepository(RepositoryProtocol):
         items = list(logical_items or [])
         total = len(items)
         completed = sum(1 for item in items if item.get("is_done"))
-        pending = sum(1 for item in items if int(item.get("pending_count") or 0) > 0)
+        processing = sum(1 for item in items if int(item.get("processing_count") or 0) > 0 and not item.get("is_done"))
+        faulty = sum(
+            1
+            for item in items
+            if not item.get("is_done")
+            and int(item.get("faulty_count") or 0) > 0
+            and int(item.get("pending_count") or 0) == 0
+            and int(item.get("processing_count") or 0) == 0
+        )
+        pending = sum(1 for item in items if not item.get("is_done") and int(item.get("faulty_count") or 0) == 0)
 
         current_position = None
         for item in items:
@@ -3267,6 +3509,8 @@ class PostgresRepository(RepositoryProtocol):
             "total": total,
             "completed": completed,
             "pending": pending,
+            "processing": processing,
+            "faulty": faulty,
             "current_position": current_position,
         }
 
