@@ -4,6 +4,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.repository import RepositoryProtocol
+from app.worker_load_service import build_worker_load_snapshot
+from app.worker_resource_policy import POLICY
+from app.worker_runtime import get_worker_runtime_metrics_snapshot_sync
 
 
 def update_heartbeat(repo: RepositoryProtocol, role: str) -> None:
@@ -42,6 +45,8 @@ def get_system_health(repo: RepositoryProtocol) -> dict[str, Any]:
     video_stage_counts = repo.get_video_stage_job_counts() if hasattr(repo, "get_video_stage_job_counts") else {}
     expired_count = len(repo.get_expired_leased_jobs()) if hasattr(repo, "get_expired_leased_jobs") else 0
     stuck_count = len(repo.get_stuck_processing_jobs(600)) if hasattr(repo, "get_stuck_processing_jobs") else 0
+    load = build_worker_load_snapshot(repo, POLICY)
+    throughput = get_worker_runtime_metrics_snapshot_sync()
 
     return {
         "roles": status,
@@ -57,5 +62,22 @@ def get_system_health(repo: RepositoryProtocol) -> dict[str, Any]:
             "expired_leased": int(expired_count),
             "stuck_processing": int(stuck_count),
         },
+        "system_mode": load.mode,
+        "load": {
+            "backlog_light": load.light_pending,
+            "backlog_heavy": load.heavy_pending,
+            "processing_light": load.light_processing,
+            "processing_heavy": load.heavy_processing,
+            "oldest_pending_age_light_sec": load.oldest_pending_age_light_sec,
+            "oldest_pending_age_heavy_sec": load.oldest_pending_age_heavy_sec,
+            "active_light_slots": min(load.light_processing, POLICY.light_max_concurrency),
+            "active_heavy_stage_slots": {
+                "download": min(load.pending_video_download + load.heavy_processing, POLICY.heavy_download_max_concurrency),
+                "process": min(load.pending_video_process + load.heavy_processing, POLICY.heavy_process_max_concurrency),
+                "send": min(load.pending_video_send + load.heavy_processing, POLICY.heavy_send_max_concurrency),
+            },
+            "retry_storm_warning": load.retry_storm_warning,
+        },
+        "throughput": throughput,
         "video_stages": video_stage_counts,
     }

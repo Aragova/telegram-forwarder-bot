@@ -55,6 +55,20 @@ class Settings:
     max_input_duration: int = int(os.getenv("MAX_INPUT_DURATION", "3600") or 3600)
     max_input_bitrate_mbps: int = int(os.getenv("MAX_INPUT_BITRATE_MBPS", "50") or 50)
 
+    # --- ресурсная модель workers / throughput ---
+    light_max_concurrency: int = int(os.getenv("LIGHT_MAX_CONCURRENCY", "4") or 4)
+    heavy_max_concurrency: int = int(os.getenv("HEAVY_MAX_CONCURRENCY", "2") or 2)
+    heavy_download_max_concurrency: int = int(os.getenv("HEAVY_DOWNLOAD_MAX_CONCURRENCY", "1") or 1)
+    heavy_process_max_concurrency: int = int(os.getenv("HEAVY_PROCESS_MAX_CONCURRENCY", "1") or 1)
+    heavy_send_max_concurrency: int = int(os.getenv("HEAVY_SEND_MAX_CONCURRENCY", "1") or 1)
+    lease_batch_size_light: int = int(os.getenv("LEASE_BATCH_SIZE_LIGHT", "4") or 4)
+    lease_batch_size_heavy: int = int(os.getenv("LEASE_BATCH_SIZE_HEAVY", "2") or 2)
+    backlog_soft_limit_light: int = int(os.getenv("BACKLOG_SOFT_LIMIT_LIGHT", "200") or 200)
+    backlog_soft_limit_heavy: int = int(os.getenv("BACKLOG_SOFT_LIMIT_HEAVY", "100") or 100)
+    backlog_hard_limit_heavy: int = int(os.getenv("BACKLOG_HARD_LIMIT_HEAVY", "250") or 250)
+    max_heavy_retries_in_flight: int = int(os.getenv("MAX_HEAVY_RETRIES_IN_FLIGHT", "20") or 20)
+    graceful_shutdown_timeout_sec: int = int(os.getenv("GRACEFUL_SHUTDOWN_TIMEOUT_SEC", "20") or 20)
+
     def validate(self) -> None:
         missing = []
         for key in ("bot_token", "admin_id", "api_id", "api_hash", "phone_number"):

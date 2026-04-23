@@ -73,6 +73,7 @@ sender_service = None
 runtime_context: RuntimeContext | None = None
 posting_active = False
 job_worker_tasks: list[asyncio.Task] = []
+job_workers_stop_event: asyncio.Event | None = None
 scheduler_runtime_task: asyncio.Task | None = None
 job_watchdog_task: asyncio.Task | None = None
 workers_runtime_enabled = True
@@ -7220,25 +7221,29 @@ async def _start_all_role() -> None:
 
 
 async def start_job_workers_runtime() -> None:
-    global job_worker_tasks
+    global job_worker_tasks, job_workers_stop_event
     if not sender_service:
         return
     if any(not task.done() for task in job_worker_tasks):
         return
 
+    job_workers_stop_event = asyncio.Event()
     job_worker_tasks = [
-        asyncio.create_task(run_light_worker(db, sender_service, "light-worker-1")),
-        asyncio.create_task(run_heavy_worker(db, sender_service, "heavy-worker-1")),
+        asyncio.create_task(run_light_worker(db, sender_service, "light-worker-1", stop_event=job_workers_stop_event)),
+        asyncio.create_task(run_heavy_worker(db, sender_service, "heavy-worker-1", stop_event=job_workers_stop_event)),
     ]
     logger.info("JOB WORKERS | запущены light/heavy воркеры")
 
 
 async def stop_job_workers_runtime() -> None:
-    global job_worker_tasks
+    global job_worker_tasks, job_workers_stop_event
     if not job_worker_tasks:
         return
     tasks = list(job_worker_tasks)
     job_worker_tasks = []
+    if job_workers_stop_event is not None:
+        job_workers_stop_event.set()
+    job_workers_stop_event = None
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
