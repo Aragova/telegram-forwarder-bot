@@ -2250,7 +2250,7 @@ class PostgresRepository(RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT schedule_mode, fixed_times_json, interval
+                    SELECT mode, schedule_mode, fixed_times_json, interval
                     FROM routing
                     WHERE id = %s
                     """,
@@ -2273,10 +2273,11 @@ class PostgresRepository(RepositoryProtocol):
                 pending_row = cur.fetchone()
                 pending_count = int(pending_row["cnt"] or 0) if pending_row else 0
 
+                schedule_mode = row["schedule_mode"] or "interval"
+                rule_mode = (row.get("mode") or "repost").strip().lower()
                 if pending_count <= 0:
                     next_run_iso = None
                 else:
-                    schedule_mode = row["schedule_mode"] or "interval"
                     if schedule_mode == "fixed":
                         fixed_times_json = row["fixed_times_json"]
                         try:
@@ -2301,6 +2302,16 @@ class PostgresRepository(RepositoryProtocol):
                     WHERE id = %s
                     """,
                     (now_iso, next_run_iso, rule_id),
+                )
+                logger.info(
+                    "RULE NEXT RUN UPDATED | rule_id=%s | mode=%s | schedule_mode=%s | interval=%s | pending=%s | last_sent_at=%s | next_run_at=%s",
+                    rule_id,
+                    rule_mode,
+                    schedule_mode,
+                    int(row["interval"] or interval or 0),
+                    pending_count,
+                    now_iso,
+                    next_run_iso,
                 )
             conn.commit()
 
@@ -2359,6 +2370,18 @@ class PostgresRepository(RepositoryProtocol):
                 rule_mode = (rule_row["mode"] or "repost").strip().lower()
 
                 # --- выбираем следующую задачу ---
+                cur.execute(
+                    """
+                    SELECT r.next_run_at
+                    FROM routing r
+                    WHERE r.id = %s
+                    LIMIT 1
+                    """,
+                    (rule_id,),
+                )
+                routing_row = cur.fetchone()
+                next_run_at_before = routing_row["next_run_at"] if routing_row else None
+
                 cur.execute(
                     """
                     SELECT
@@ -2428,6 +2451,13 @@ class PostgresRepository(RepositoryProtocol):
                 row = cur.fetchone()
 
                 if not row:
+                    if next_run_at_before:
+                        logger.debug(
+                            "TAKE DUE DELIVERY SKIP | rule_id=%s | due_iso=%s | next_run_at=%s",
+                            rule_id,
+                            due_iso,
+                            next_run_at_before,
+                        )
                     conn.commit()
                     return None
 
@@ -2542,6 +2572,13 @@ class PostgresRepository(RepositoryProtocol):
                     (delivery_id,),
                 )
                 taken = cur.fetchone()
+                logger.info(
+                    "TAKE DUE DELIVERY | rule_id=%s | delivery_id=%s | due_iso=%s | next_run_at_before=%s",
+                    rule_id,
+                    delivery_id,
+                    due_iso,
+                    next_run_at_before,
+                )
 
             conn.commit()
             return taken
