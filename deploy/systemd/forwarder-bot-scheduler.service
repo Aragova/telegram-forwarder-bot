@@ -1,0 +1,19 @@
+[Unit]
+Description=Telegram Forwarder Bot Scheduler Role
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=forwarder
+Group=forwarder
+WorkingDirectory=/opt/telegram-forwarder-bot
+EnvironmentFile=/etc/forwarder-bot/forwarder.env
+ExecStart=/usr/bin/python3 /opt/telegram-forwarder-bot/bot.py --role scheduler
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
