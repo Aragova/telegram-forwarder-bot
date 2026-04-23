@@ -162,6 +162,37 @@ class PostgresRepository(RepositoryProtocol):
             if not conflict_found:
                 return candidate.isoformat()
 
+    def _compute_next_run_after_send(
+        self,
+        conn,
+        *,
+        rule_id: int,
+        schedule_mode: str,
+        fixed_times_json: str | None,
+        interval_value: int,
+        now_dt: datetime,
+    ) -> tuple[str | None, str]:
+        mode = (schedule_mode or "interval").strip().lower()
+        if mode == "fixed":
+            fixed_times = normalize_fixed_times(_safe_json_loads(fixed_times_json, []))
+            next_run_iso = get_next_fixed_run_utc(fixed_times, now_dt)
+            if next_run_iso is not None:
+                return next_run_iso, "fixed"
+
+            fallback_interval = int(interval_value or 0)
+            fallback_base_dt = datetime.fromtimestamp(
+                now_dt.timestamp() + max(fallback_interval, 1),
+                tz=timezone.utc,
+            )
+            return self._find_next_interval_slot(conn, fallback_base_dt, exclude_rule_id=rule_id), "fixed_fallback_interval"
+
+        actual_interval = int(interval_value or 0)
+        base_dt = datetime.fromtimestamp(
+            now_dt.timestamp() + max(actual_interval, 1),
+            tz=timezone.utc,
+        )
+        return self._find_next_interval_slot(conn, base_dt, exclude_rule_id=rule_id), "interval"
+
     def _compute_next_run_for_rule_conn(self, conn, rule_id: int) -> str | None:
         with conn.cursor() as cur:
             cur.execute(
@@ -2278,34 +2309,22 @@ class PostgresRepository(RepositoryProtocol):
                 if pending_count <= 0:
                     next_run_iso = None
                 else:
-                    if schedule_mode == "fixed":
-                        fixed_times_json = row["fixed_times_json"]
-                        try:
-                            fixed_times = json.loads(fixed_times_json) if fixed_times_json else []
-                        except Exception:
-                            fixed_times = []
-
-                        next_run_iso = get_next_fixed_run_utc(fixed_times, now_dt)
-                        if next_run_iso is None:
-                            fallback_interval = int(row["interval"] or interval or 0)
-                            fallback_base_dt = datetime.fromtimestamp(
-                                now_dt.timestamp() + max(fallback_interval, 1),
-                                tz=timezone.utc,
-                            )
-                            next_run_iso = self._find_next_interval_slot(conn, fallback_base_dt, exclude_rule_id=rule_id)
-                            logger.warning(
-                                "RULE NEXT RUN FIXED FALLBACK | rule_id=%s | fixed_times пустые/некорректные, используем interval=%s | next_run_at=%s",
-                                rule_id,
-                                fallback_interval,
-                                next_run_iso,
-                            )
-                    else:
-                        actual_interval = int(row["interval"] or interval or 0)
-                        base_dt = datetime.fromtimestamp(
-                            now_dt.timestamp() + max(actual_interval, 1),
-                            tz=timezone.utc,
+                    actual_interval = int(row["interval"] or interval or 0)
+                    next_run_iso, resolution = self._compute_next_run_after_send(
+                        conn,
+                        rule_id=rule_id,
+                        schedule_mode=str(schedule_mode),
+                        fixed_times_json=row["fixed_times_json"],
+                        interval_value=actual_interval,
+                        now_dt=now_dt,
+                    )
+                    if resolution == "fixed_fallback_interval":
+                        logger.warning(
+                            "RULE NEXT RUN FIXED FALLBACK | rule_id=%s | fixed_times пустые/некорректные, используем interval=%s | next_run_at=%s",
+                            rule_id,
+                            actual_interval,
+                            next_run_iso,
                         )
-                        next_run_iso = self._find_next_interval_slot(conn, base_dt, exclude_rule_id=rule_id)
 
                 cur.execute(
                     """
@@ -2367,7 +2386,7 @@ class PostgresRepository(RepositoryProtocol):
                 # --- получаем режим правила ---
                 cur.execute(
                     """
-                    SELECT mode
+                    SELECT mode, schedule_mode, fixed_times_json, interval, next_run_at
                     FROM routing
                     WHERE id = %s
                     LIMIT 1
@@ -2381,20 +2400,50 @@ class PostgresRepository(RepositoryProtocol):
                     return None
 
                 rule_mode = (rule_row["mode"] or "repost").strip().lower()
+                schedule_mode = (rule_row["schedule_mode"] or "interval").strip().lower()
+                next_run_at_before = rule_row["next_run_at"]
+
+                if next_run_at_before is None:
+                    cur.execute(
+                        """
+                        SELECT COUNT(*) AS cnt
+                        FROM deliveries
+                        WHERE rule_id = %s
+                          AND status = 'pending'
+                        """,
+                        (rule_id,),
+                    )
+                    pending_row = cur.fetchone()
+                    pending_count = int(pending_row["cnt"] or 0) if pending_row else 0
+                    if pending_count > 0:
+                        next_run_iso, resolution = self._compute_next_run_after_send(
+                            conn,
+                            rule_id=rule_id,
+                            schedule_mode=schedule_mode,
+                            fixed_times_json=rule_row["fixed_times_json"],
+                            interval_value=int(rule_row["interval"] or 0),
+                            now_dt=datetime.now(timezone.utc),
+                        )
+                        cur.execute(
+                            """
+                            UPDATE routing
+                            SET next_run_at = %s
+                            WHERE id = %s
+                            """,
+                            (next_run_iso, rule_id),
+                        )
+                        conn.commit()
+                        logger.warning(
+                            "TAKE DUE DELIVERY GUARD | rule_id=%s | pending=%s | schedule_mode=%s | previous_next_run_at=NULL | repaired_next_run_at=%s | resolution=%s",
+                            rule_id,
+                            pending_count,
+                            schedule_mode,
+                            next_run_iso,
+                            resolution,
+                        )
+                        return None
 
                 # --- выбираем следующую задачу ---
-                cur.execute(
-                    """
-                    SELECT r.next_run_at
-                    FROM routing r
-                    WHERE r.id = %s
-                    LIMIT 1
-                    """,
-                    (rule_id,),
-                )
-                routing_row = cur.fetchone()
-                next_run_at_before = routing_row["next_run_at"] if routing_row else None
-
                 cur.execute(
                     """
                     SELECT

@@ -42,7 +42,8 @@ USER_TZ = timezone(timedelta(hours=3))
 GLOBAL_INTERVAL_GAP_SECONDS = 180  # 3 минуты между плавающими правилами
 
 def get_next_fixed_run_utc(fixed_times: list[str], now_utc: datetime | None = None) -> str | None:
-    if not fixed_times:
+    normalized = normalize_fixed_times([str(v) for v in (fixed_times or [])])
+    if not normalized:
         return None
 
     now_utc = now_utc or datetime.now(timezone.utc)
@@ -53,7 +54,7 @@ def get_next_fixed_run_utc(fixed_times: list[str], now_utc: datetime | None = No
     for day_shift in (0, 1, 2):
         base_day = now_local + timedelta(days=day_shift)
 
-        for time_str in fixed_times:
+        for time_str in normalized:
             hour, minute = map(int, time_str.split(":"))
 
             local_dt = base_day.replace(
@@ -125,6 +126,40 @@ class IntroItem:
     created_at: str
 
 class Database:
+    def _compute_next_run_after_send(
+        self,
+        conn,
+        *,
+        rule_id: int,
+        schedule_mode: str,
+        fixed_times_json: str | None,
+        interval_value: int,
+        now_dt: datetime,
+    ) -> tuple[str | None, str]:
+        mode = (schedule_mode or "interval").strip().lower()
+        if mode == "fixed":
+            try:
+                fixed_times = json.loads(fixed_times_json) if fixed_times_json else []
+            except Exception:
+                fixed_times = []
+
+            next_run_iso = get_next_fixed_run_utc(fixed_times, now_dt)
+            if next_run_iso is not None:
+                return next_run_iso, "fixed"
+
+            fallback_interval = int(interval_value or 0)
+            fallback_base_dt = datetime.fromtimestamp(
+                now_dt.timestamp() + max(fallback_interval, 1),
+                tz=timezone.utc,
+            )
+            return self._find_next_interval_slot(conn, fallback_base_dt, exclude_rule_id=rule_id), "fixed_fallback_interval"
+
+        base_dt = datetime.fromtimestamp(
+            now_dt.timestamp() + max(int(interval_value or 0), 1),
+            tz=timezone.utc,
+        )
+        return self._find_next_interval_slot(conn, base_dt, exclude_rule_id=rule_id), "interval"
+
     def reset_queue_for_source(self, source_id: str, source_thread_id: int | None = None) -> int:
         with self.connect() as conn:
             if source_thread_id is None:
@@ -2315,29 +2350,37 @@ class Database:
             if pending_count <= 0:
                 next_run_iso = None
             else:
-                schedule_mode = row["schedule_mode"] or "interval"
-
-                if schedule_mode == "fixed":
-                    fixed_times_json = row["fixed_times_json"]
-                    try:
-                        fixed_times = json.loads(fixed_times_json) if fixed_times_json else []
-                    except Exception:
-                        fixed_times = []
-
-                    next_run_iso = get_next_fixed_run_utc(fixed_times, now_dt)
-                else:
-                    actual_interval = int(row["interval"] or interval or 0)
-                    base_dt = datetime.fromtimestamp(
-                        now_dt.timestamp() + max(actual_interval, 1),
-                        tz=timezone.utc,
+                actual_interval = int(row["interval"] or interval or 0)
+                next_run_iso, resolution = self._compute_next_run_after_send(
+                    conn,
+                    rule_id=rule_id,
+                    schedule_mode=str(row["schedule_mode"] or "interval"),
+                    fixed_times_json=row["fixed_times_json"],
+                    interval_value=actual_interval,
+                    now_dt=now_dt,
+                )
+                if resolution == "fixed_fallback_interval":
+                    logger.warning(
+                        "RULE NEXT RUN FIXED FALLBACK | rule_id=%s | fixed_times пустые/некорректные, используем interval=%s | next_run_at=%s",
+                        rule_id,
+                        actual_interval,
+                        next_run_iso,
                     )
-                    next_run_iso = self._find_next_interval_slot(conn, base_dt, exclude_rule_id=rule_id)
 
             conn.execute("""
                 UPDATE routing
                 SET last_sent_at = ?, next_run_at = ?
                 WHERE id = ?
             """, (now_iso, next_run_iso, rule_id))
+            logger.info(
+                "RULE NEXT RUN UPDATED | rule_id=%s | schedule_mode=%s | interval=%s | pending=%s | last_sent_at=%s | next_run_at=%s",
+                rule_id,
+                row["schedule_mode"] or "interval",
+                int(row["interval"] or interval or 0),
+                pending_count,
+                now_iso,
+                next_run_iso,
+            )
             conn.commit()
 
     def get_due_delivery(self, rule_id: int, due_iso: str):
@@ -2355,7 +2398,7 @@ class Database:
         with self.connect() as conn:
             # --- получаем режим правила ---
             rule_row = conn.execute("""
-                SELECT mode
+                SELECT mode, schedule_mode, fixed_times_json, interval, next_run_at
                 FROM routing
                 WHERE id = ?
                 LIMIT 1
@@ -2365,6 +2408,41 @@ class Database:
                 return None
 
             rule_mode = (rule_row["mode"] or "repost").strip().lower()
+            schedule_mode = (rule_row["schedule_mode"] or "interval").strip().lower()
+            next_run_at_before = rule_row["next_run_at"]
+
+            if next_run_at_before is None:
+                pending_row = conn.execute("""
+                    SELECT COUNT(*) AS cnt
+                    FROM deliveries
+                    WHERE rule_id = ?
+                      AND status = 'pending'
+                """, (rule_id,)).fetchone()
+                pending_count = int(pending_row["cnt"] or 0) if pending_row else 0
+                if pending_count > 0:
+                    next_run_iso, resolution = self._compute_next_run_after_send(
+                        conn,
+                        rule_id=rule_id,
+                        schedule_mode=schedule_mode,
+                        fixed_times_json=rule_row["fixed_times_json"],
+                        interval_value=int(rule_row["interval"] or 0),
+                        now_dt=datetime.now(timezone.utc),
+                    )
+                    conn.execute("""
+                        UPDATE routing
+                        SET next_run_at = ?
+                        WHERE id = ?
+                    """, (next_run_iso, rule_id))
+                    conn.commit()
+                    logger.warning(
+                        "TAKE DUE DELIVERY GUARD | rule_id=%s | pending=%s | schedule_mode=%s | previous_next_run_at=NULL | repaired_next_run_at=%s | resolution=%s",
+                        rule_id,
+                        pending_count,
+                        schedule_mode,
+                        next_run_iso,
+                        resolution,
+                    )
+                    return None
 
             # --- выбираем следующую задачу ---
             row = conn.execute("""
