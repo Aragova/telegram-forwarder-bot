@@ -2948,17 +2948,24 @@ class PostgresRepository(RepositoryProtocol):
                     existing = cur.fetchone()
                     if existing:
                         conn.commit()
-                        return int(existing["id"])
+                        return None
 
-                cur.execute(
-                    """
-                    INSERT INTO jobs(job_type, payload_json, dedup_key, status, priority, queue, run_at, created_at, updated_at)
-                    VALUES(%s, %s::jsonb, %s, 'pending', %s, %s, COALESCE(%s::timestamptz, NOW()), NOW(), NOW())
-                    RETURNING id
-                    """,
-                    (job_type, _json_dumps(payload) or "{}", dedup_key, int(priority), queue_name, run_at),
-                )
-                row = cur.fetchone()
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO jobs(job_type, payload_json, dedup_key, status, priority, queue, run_at, created_at, updated_at)
+                        VALUES(%s, %s::jsonb, %s, 'pending', %s, %s, COALESCE(%s::timestamptz, NOW()), NOW(), NOW())
+                        RETURNING id
+                        """,
+                        (job_type, _json_dumps(payload) or "{}", dedup_key, int(priority), queue_name, run_at),
+                    )
+                    row = cur.fetchone()
+                except Exception as exc:
+                    if "duplicate key value violates unique constraint" not in str(exc).lower():
+                        raise
+                    conn.rollback()
+                    logger.info("Scheduler пропустил дубль задачи по dedup_key=%s", dedup_key)
+                    return None
             conn.commit()
             return int(row["id"]) if row else None
 

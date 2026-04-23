@@ -17,9 +17,12 @@ async def watchdog_tick(
 
     requeued = 0
     if expired_jobs:
+        for job in expired_jobs:
+            logger.warning("Lease задачи истёк | job #%s", job.get("id"))
         requeued = int(await asyncio.to_thread(repo.requeue_expired_leases, int(requeue_delay_seconds)) or 0)
         if requeued > 0:
             logger.warning("Watchdog вернул задачу в очередь: %s шт.", requeued)
+            logger.warning("Задача переведена в retry после истечения lease: %s шт.", requeued)
 
     for job in stuck_jobs:
         logger.warning(

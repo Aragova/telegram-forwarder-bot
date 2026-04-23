@@ -78,6 +78,8 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
             job_id = await asyncio.to_thread(enqueue_repost_single, repo, delivery_id)
 
         if job_id is None:
+            duplicates += 1
+            logger.info("Scheduler пропустил дубль задачи для delivery #%s", delivery_id)
             continue
 
         created += 1
