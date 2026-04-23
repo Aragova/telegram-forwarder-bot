@@ -31,6 +31,21 @@ class _FakeRepo:
     def count_recent_errors(self, minutes: int = 5) -> int:
         return 2
 
+    def get_job_status_counts(self) -> dict[str, int]:
+        return {
+            "pending": 1,
+            "leased": 0,
+            "processing": 0,
+            "retry": 0,
+            "failed": 0,
+        }
+
+    def get_expired_leased_jobs(self, limit: int = 100):
+        return []
+
+    def get_stuck_processing_jobs(self, stuck_seconds: int = 600, limit: int = 100):
+        return []
+
 
 def test_update_heartbeat_updates_timestamp() -> None:
     repo = _FakeRepo()

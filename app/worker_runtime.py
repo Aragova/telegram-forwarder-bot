@@ -11,6 +11,15 @@ def _safe_payload(job: dict) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def compute_retry_delay_seconds(queue: str, attempts: int, job_type: str) -> int:
+    step = max(1, int(attempts))
+    if (queue or "").strip().lower() == "heavy" or job_type == "video_delivery":
+        schedule = [30, 90, 180]
+    else:
+        schedule = [10, 30, 60]
+    return schedule[min(step - 1, len(schedule) - 1)]
+
+
 async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool:
     leased = await asyncio.to_thread(repo.lease_jobs, queue, worker_id, 1, 30)
     if not leased:
@@ -52,8 +61,9 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool
             await asyncio.to_thread(repo.fail_job, job_id, "Исполнитель вернул неуспешный результат")
             logger.warning("JOB FAILED | Задача #%s помечена как failed", job_id)
         else:
-            await asyncio.to_thread(repo.retry_job, job_id, "Исполнитель вернул неуспешный результат", 30)
-            logger.warning("JOB RETRY | Задача #%s переведена в retry через 30 сек", job_id)
+            delay = compute_retry_delay_seconds(queue, attempts, job_type)
+            await asyncio.to_thread(repo.retry_job, job_id, "Исполнитель вернул неуспешный результат", delay)
+            logger.warning("Задача переведена в retry | #%s | через %s сек", job_id, delay)
         return True
 
     except Exception as exc:
@@ -63,8 +73,9 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool
             await asyncio.to_thread(repo.fail_job, job_id, str(exc))
             logger.warning("JOB FAILED | Задача #%s завершилась ошибкой: %s", job_id, exc)
         else:
-            await asyncio.to_thread(repo.retry_job, job_id, str(exc), 30)
-            logger.warning("JOB RETRY | Задача #%s переведена в retry через 30 сек: %s", job_id, exc)
+            delay = compute_retry_delay_seconds(queue, attempts, job_type)
+            await asyncio.to_thread(repo.retry_job, job_id, str(exc), delay)
+            logger.warning("Задача переведена в retry | #%s | через %s сек: %s", job_id, delay, exc)
         return True
 
 
