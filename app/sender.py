@@ -2486,6 +2486,97 @@ class SenderService:
             )
             return False
 
+    async def execute_repost_single_from_job(
+        self,
+        *,
+        rule_id: int,
+        delivery_id: int,
+        message_id: int,
+        source_channel: str,
+        target_id: str,
+        target_thread_id: int | None,
+        interval: int,
+        schedule_mode: str,
+    ) -> bool:
+        rule = await run_db(self.db.get_rule, int(rule_id))
+        if not rule:
+            raise RuntimeError(f"Правило #{rule_id} не найдено для repost_single")
+        ok = await self._deliver_single(
+            rule,
+            int(delivery_id),
+            int(message_id),
+            str(source_channel),
+            str(target_id),
+            target_thread_id,
+        )
+        if ok or (schedule_mode or "interval") == "fixed":
+            await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
+        return bool(ok)
+
+    async def execute_repost_album_from_job(
+        self,
+        *,
+        rule_id: int,
+        source_channel: str,
+        source_thread_id: int | None,
+        media_group_id: str,
+        target_id: str,
+        target_thread_id: int | None,
+        interval: int,
+        schedule_mode: str,
+    ) -> bool:
+        rule = await run_db(self.db.get_rule, int(rule_id))
+        if not rule:
+            raise RuntimeError(f"Правило #{rule_id} не найдено для repost_album")
+
+        album_rows = await run_db(
+            self.db.get_processing_album_for_rule,
+            int(rule_id),
+            str(source_channel),
+            source_thread_id,
+            str(media_group_id),
+        )
+        if not album_rows:
+            raise RuntimeError(f"Не найден processing-альбом media_group_id={media_group_id}")
+
+        ok = await self._deliver_album(
+            rule,
+            album_rows,
+            str(source_channel),
+            str(target_id),
+            target_thread_id,
+        )
+        if ok or (schedule_mode or "interval") == "fixed":
+            await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
+        return bool(ok)
+
+    async def execute_video_delivery_from_job(
+        self,
+        *,
+        rule_id: int,
+        delivery_id: int,
+        message_id: int,
+        source_channel: str,
+        target_id: str,
+        target_thread_id: int | None,
+        interval: int,
+        schedule_mode: str,
+    ) -> bool:
+        rule = await run_db(self.db.get_rule, int(rule_id))
+        if not rule:
+            raise RuntimeError(f"Правило #{rule_id} не найдено для video_delivery")
+        ok = await self._deliver_single_video(
+            rule,
+            int(delivery_id),
+            int(message_id),
+            str(source_channel),
+            str(target_id),
+            target_thread_id,
+        )
+        if ok or (schedule_mode or "interval") == "fixed":
+            await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
+        return bool(ok)
+
     async def _deliver_single(self, rule, delivery_id, message_id, source_channel, target_id, target_thread_id):
         post_id = await run_db(self._get_post_id_by_delivery_sync, delivery_id)
         delivery_ids = [int(delivery_id)]
