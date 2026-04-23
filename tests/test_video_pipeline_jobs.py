@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from app.job_service import (
     JOB_TYPE_VIDEO_DELIVERY,
     JOB_TYPE_VIDEO_DOWNLOAD,
     JOB_TYPE_VIDEO_PROCESS,
     JOB_TYPE_VIDEO_SEND,
+    VIDEO_ARTIFACT_VERSION,
+    VIDEO_PIPELINE_VERSION,
     build_dedup_key_for_video_stage,
     enqueue_video_delivery,
     enqueue_video_process,
     enqueue_video_send,
 )
-from app.worker_runtime import _run_one_job
+from app.worker_runtime import _run_one_job, cleanup_video_artifacts
 
 
 class _Rule:
@@ -107,7 +110,12 @@ class _Repo:
 class _Sender:
     def __init__(self) -> None:
         self.send_ok = True
+        self.retryable = True
         self.fallback_process = False
+        self.send_calls = 0
+        self.legacy_calls = 0
+        self.download_calls = 0
+        self.process_calls = 0
 
     async def execute_repost_single_from_job(self, **payload):
         return True
@@ -116,17 +124,38 @@ class _Sender:
         return True
 
     async def execute_video_download_from_job(self, **payload):
-        return {"ok": True, "video_file_path": "/tmp/input20.mp4", "fallback_to_legacy": False}
+        self.download_calls += 1
+        return {
+            "ok": True,
+            "source_video_path": "/tmp/input20.mp4",
+            "fallback_to_legacy": False,
+            "retryable": True,
+        }
 
     async def execute_video_process_from_job(self, **payload):
+        self.process_calls += 1
         if self.fallback_process:
-            return {"ok": False, "fallback_to_legacy": True}
-        return {"ok": True, "processed_file_path": payload.get("video_file_path"), "fallback_to_legacy": False}
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+        return {
+            "ok": True,
+            "processed_video_path": "/tmp/processed20.mp4",
+            "thumbnail_path": "/tmp/thumb20.jpg",
+            "cleanup_paths": ["/tmp/input20.mp4", "/tmp/processed20.mp4", "/tmp/thumb20.jpg"],
+            "duration": 10.0,
+            "width": 1280,
+            "height": 720,
+            "has_intro": False,
+            "trim_applied": True,
+            "processing_summary": {"ok": True},
+            "fallback_to_legacy": False,
+        }
 
     async def execute_video_send_from_job(self, **payload):
-        return {"ok": self.send_ok, "fallback_to_legacy": False}
+        self.send_calls += 1
+        return {"ok": self.send_ok, "fallback_to_legacy": False, "retryable": self.retryable}
 
     async def execute_video_delivery_from_job(self, **payload):
+        self.legacy_calls += 1
         return True
 
 
@@ -140,7 +169,9 @@ def test_video_download_creates_video_process() -> None:
     assert repo.jobs[download_job_id]["job_type"] == JOB_TYPE_VIDEO_DOWNLOAD
     process_jobs = [j for j in repo.jobs.values() if j["job_type"] == JOB_TYPE_VIDEO_PROCESS]
     assert len(process_jobs) == 1
-    assert process_jobs[0]["payload_json"]["video_file_path"] == "/tmp/input20.mp4"
+    payload = process_jobs[0]["payload_json"]
+    assert payload["source_video_path"] == "/tmp/input20.mp4"
+    assert payload["artifact_version"] == VIDEO_ARTIFACT_VERSION
 
 
 def test_video_process_creates_video_send() -> None:
@@ -153,9 +184,10 @@ def test_video_process_creates_video_send() -> None:
             "rule_id": 2,
             "source_channel": "src",
             "target_id": "dst",
-            "video_file_path": "/tmp/input20.mp4",
-            "processed_file_path": None,
+            "source_video_path": "/tmp/input20.mp4",
             "job_type": JOB_TYPE_VIDEO_DELIVERY,
+            "artifact_version": 1,
+            "pipeline_version": 1,
         },
     )
 
@@ -163,7 +195,9 @@ def test_video_process_creates_video_send() -> None:
 
     send_jobs = [j for j in repo.jobs.values() if j["job_type"] == JOB_TYPE_VIDEO_SEND]
     assert len(send_jobs) == 1
-    assert send_jobs[0]["payload_json"]["processed_file_path"] == "/tmp/input20.mp4"
+    payload = send_jobs[0]["payload_json"]
+    assert payload["processed_video_path"] == "/tmp/processed20.mp4"
+    assert payload["thumbnail_path"] == "/tmp/thumb20.jpg"
 
 
 def test_video_send_completes_delivery_job() -> None:
@@ -176,8 +210,8 @@ def test_video_send_completes_delivery_job() -> None:
             "rule_id": 2,
             "source_channel": "src",
             "target_id": "dst",
-            "video_file_path": "/tmp/input20.mp4",
-            "processed_file_path": "/tmp/input20.mp4",
+            "source_video_path": "/tmp/input20.mp4",
+            "processed_video_path": "/tmp/processed20.mp4",
             "job_type": JOB_TYPE_VIDEO_DELIVERY,
         },
     )
@@ -185,9 +219,11 @@ def test_video_send_completes_delivery_job() -> None:
     asyncio.run(_run_one_job(repo, sender, "heavy-1", "heavy"))
 
     assert repo.jobs[job_id]["status"] == "done"
+    assert sender.send_calls == 1
+    assert sender.legacy_calls == 0
 
 
-def test_retry_is_stage_specific() -> None:
+def test_retry_is_stage_specific_for_video_send() -> None:
     repo = _Repo()
     sender = _Sender()
     sender.send_ok = False
@@ -198,8 +234,8 @@ def test_retry_is_stage_specific() -> None:
             "rule_id": 2,
             "source_channel": "src",
             "target_id": "dst",
-            "video_file_path": "/tmp/input20.mp4",
-            "processed_file_path": "/tmp/input20.mp4",
+            "source_video_path": "/tmp/input20.mp4",
+            "processed_video_path": "/tmp/processed20.mp4",
             "job_type": JOB_TYPE_VIDEO_DELIVERY,
         },
     )
@@ -208,6 +244,42 @@ def test_retry_is_stage_specific() -> None:
 
     assert repo.jobs[send_job_id]["status"] == "retry"
     assert all(j["job_type"] != JOB_TYPE_VIDEO_PROCESS for j in repo.jobs.values())
+
+
+def test_retry_is_stage_specific_for_video_download() -> None:
+    repo = _Repo()
+
+    class _DownloadFails(_Sender):
+        async def execute_video_download_from_job(self, **payload):
+            return {"ok": False, "fallback_to_legacy": False, "retryable": True}
+
+    sender = _DownloadFails()
+    job_id = enqueue_video_delivery(repo, 20)
+    asyncio.run(_run_one_job(repo, sender, "heavy-1", "heavy"))
+    assert repo.jobs[job_id]["status"] == "retry"
+    assert all(j["job_type"] != JOB_TYPE_VIDEO_PROCESS for j in repo.jobs.values())
+
+
+def test_retry_is_stage_specific_for_video_process() -> None:
+    repo = _Repo()
+
+    class _ProcessFails(_Sender):
+        async def execute_video_process_from_job(self, **payload):
+            return {"ok": False, "fallback_to_legacy": False, "retryable": True}
+
+    sender = _ProcessFails()
+    job_id = enqueue_video_process(
+        repo,
+        {
+            "delivery_id": 20,
+            "rule_id": 2,
+            "source_video_path": "/tmp/in.mp4",
+            "job_type": JOB_TYPE_VIDEO_DELIVERY,
+        },
+    )
+    asyncio.run(_run_one_job(repo, sender, "heavy-1", "heavy"))
+    assert repo.jobs[job_id]["status"] == "retry"
+    assert all(j["job_type"] != JOB_TYPE_VIDEO_SEND for j in repo.jobs.values())
 
 
 def test_dedup_works_for_video_stages() -> None:
@@ -219,8 +291,7 @@ def test_dedup_works_for_video_stages() -> None:
             "rule_id": 2,
             "source_channel": "src",
             "target_id": "dst",
-            "video_file_path": "/tmp/input20.mp4",
-            "processed_file_path": None,
+            "source_video_path": "/tmp/input20.mp4",
             "job_type": JOB_TYPE_VIDEO_DELIVERY,
         },
     )
@@ -231,8 +302,7 @@ def test_dedup_works_for_video_stages() -> None:
             "rule_id": 2,
             "source_channel": "src",
             "target_id": "dst",
-            "video_file_path": "/tmp/input20.mp4",
-            "processed_file_path": None,
+            "source_video_path": "/tmp/input20.mp4",
             "job_type": JOB_TYPE_VIDEO_DELIVERY,
         },
     )
@@ -241,7 +311,7 @@ def test_dedup_works_for_video_stages() -> None:
     assert repo.jobs[second_id]["dedup_key"] == build_dedup_key_for_video_stage(JOB_TYPE_VIDEO_PROCESS, 20)
 
 
-def test_fallback_to_legacy_video_delivery() -> None:
+def test_fallback_to_legacy_video_delivery_only_on_emergency() -> None:
     repo = _Repo()
     sender = _Sender()
     sender.fallback_process = True
@@ -252,8 +322,7 @@ def test_fallback_to_legacy_video_delivery() -> None:
             "rule_id": 2,
             "source_channel": "src",
             "target_id": "dst",
-            "video_file_path": None,
-            "processed_file_path": None,
+            "source_video_path": None,
             "job_type": JOB_TYPE_VIDEO_DELIVERY,
         },
     )
@@ -276,5 +345,103 @@ def test_payload_is_transferred_between_stages() -> None:
     assert len(send_jobs) == 1
     payload = send_jobs[0]["payload_json"]
     assert payload["delivery_id"] == 20
-    assert payload["video_file_path"] == "/tmp/input20.mp4"
-    assert payload["processed_file_path"] == "/tmp/input20.mp4"
+    assert payload["source_video_path"] == "/tmp/input20.mp4"
+    assert payload["processed_video_path"] == "/tmp/processed20.mp4"
+    assert payload["pipeline_version"] == VIDEO_PIPELINE_VERSION
+
+
+def test_cleanup_after_success_deletes_files(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    processed = tmp_path / "processed.mp4"
+    thumb = tmp_path / "thumb.jpg"
+    source.write_bytes(b"1")
+    processed.write_bytes(b"2")
+    thumb.write_bytes(b"3")
+
+    cleanup_video_artifacts(
+        {
+            "source_video_path": str(source),
+            "processed_video_path": str(processed),
+            "thumbnail_path": str(thumb),
+            "cleanup_paths": [],
+        },
+        mode="success",
+    )
+
+    assert not source.exists()
+    assert not processed.exists()
+    assert not thumb.exists()
+
+
+def test_cleanup_not_run_on_retryable_failure(tmp_path: Path) -> None:
+    repo = _Repo()
+
+    class _SendRetry(_Sender):
+        async def execute_video_send_from_job(self, **payload):
+            return {"ok": False, "fallback_to_legacy": False, "retryable": True}
+
+    sender = _SendRetry()
+    processed = tmp_path / "processed.mp4"
+    processed.write_bytes(b"ok")
+    job_id = enqueue_video_send(
+        repo,
+        {
+            "delivery_id": 20,
+            "rule_id": 2,
+            "source_video_path": "/tmp/input20.mp4",
+            "processed_video_path": str(processed),
+            "job_type": JOB_TYPE_VIDEO_DELIVERY,
+        },
+    )
+
+    asyncio.run(_run_one_job(repo, sender, "heavy-1", "heavy"))
+    assert repo.jobs[job_id]["status"] == "retry"
+    assert processed.exists()
+
+
+def test_non_retryable_failure_marks_failed() -> None:
+    repo = _Repo()
+
+    class _ContractBroken(_Sender):
+        async def execute_video_send_from_job(self, **payload):
+            return {"ok": False, "fallback_to_legacy": False, "retryable": False}
+
+    sender = _ContractBroken()
+    job_id = enqueue_video_send(
+        repo,
+        {
+            "delivery_id": 20,
+            "rule_id": 2,
+            "source_video_path": "/tmp/input20.mp4",
+            "processed_video_path": "/tmp/processed20.mp4",
+            "job_type": JOB_TYPE_VIDEO_DELIVERY,
+        },
+    )
+
+    asyncio.run(_run_one_job(repo, sender, "heavy-1", "heavy"))
+    assert repo.jobs[job_id]["status"] == "failed"
+
+
+def test_caption_contract_payload_survives_to_send_job() -> None:
+    repo = _Repo()
+    sender = _Sender()
+    enqueue_video_process(
+        repo,
+        {
+            "delivery_id": 20,
+            "rule_id": 2,
+            "source_channel": "src",
+            "target_id": "dst",
+            "source_video_path": "/tmp/input20.mp4",
+            "job_type": JOB_TYPE_VIDEO_DELIVERY,
+            "caption_delivery_mode": "builder_first",
+            "caption_entities_json": "[{\"type\":\"bold\",\"offset\":0,\"length\":3}]",
+        },
+    )
+
+    asyncio.run(_run_one_job(repo, sender, "heavy-1", "heavy"))
+    send_jobs = [j for j in repo.jobs.values() if j["job_type"] == JOB_TYPE_VIDEO_SEND]
+    assert len(send_jobs) == 1
+    payload = send_jobs[0]["payload_json"]
+    assert payload["caption_delivery_mode"] == "builder_first"
+    assert payload["caption_entities_json"] is not None

@@ -32,6 +32,29 @@ def _log_video_stage_event(event_text: str, delivery_id: int) -> None:
     logger.info("%s | delivery_id=%s | ts=%s", event_text, int(delivery_id), datetime.now(timezone.utc).isoformat())
 
 
+def cleanup_video_artifacts(payload: dict, *, mode: str) -> None:
+    unique_paths: list[str] = []
+    for path in [
+        payload.get("source_video_path") or payload.get("video_file_path"),
+        payload.get("processed_video_path") or payload.get("processed_file_path"),
+        payload.get("thumbnail_path"),
+        *(payload.get("cleanup_paths") or []),
+    ]:
+        if not path:
+            continue
+        value = str(path)
+        if value not in unique_paths:
+            unique_paths.append(value)
+
+    for path in unique_paths:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            continue
+        except Exception as cleanup_exc:
+            logger.warning("VIDEO CLEANUP WARNING | mode=%s | path=%s | error=%s", mode, path, cleanup_exc)
+
+
 async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool:
     leased = await asyncio.to_thread(repo.lease_jobs, queue, worker_id, 1, 30)
     if not leased:
@@ -41,6 +64,7 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool
     job_id = int(job["id"])
     job_type = str(job["job_type"])
     payload = _safe_payload(job)
+    payload["job_id"] = job_id
 
     logger.info("JOB LEASED | %s взял задачу #%s (%s)", worker_id, job_id, job_type)
 
@@ -61,12 +85,14 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool
             if result.get("fallback_to_legacy"):
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
                 await asyncio.to_thread(repo.complete_job, job_id)
-                _log_video_stage_event("VIDEO STAGE FAILED | fallback в video_delivery", int(payload.get("delivery_id") or 0))
+                _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 return True
             if result.get("ok"):
                 next_payload = dict(payload)
-                next_payload["video_file_path"] = result.get("video_file_path")
-                next_payload["processed_file_path"] = None
+                next_payload["source_video_path"] = result.get("source_video_path")
+                next_payload["processed_video_path"] = None
+                next_payload["thumbnail_path"] = None
+                next_payload["cleanup_paths"] = [result.get("source_video_path")] if result.get("source_video_path") else []
                 enqueue_video_process(repo, next_payload)
                 await asyncio.to_thread(repo.complete_job, job_id)
                 _log_video_stage_event("VIDEO DOWNLOAD DONE | стадия скачивания завершена", int(payload.get("delivery_id") or 0))
@@ -78,12 +104,14 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool
             if result.get("fallback_to_legacy"):
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
                 await asyncio.to_thread(repo.complete_job, job_id)
-                _log_video_stage_event("VIDEO STAGE FAILED | fallback в video_delivery", int(payload.get("delivery_id") or 0))
+                _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 return True
             if result.get("ok"):
                 next_payload = dict(payload)
-                next_payload["video_file_path"] = payload.get("video_file_path")
-                next_payload["processed_file_path"] = result.get("processed_file_path")
+                next_payload["source_video_path"] = payload.get("source_video_path") or payload.get("video_file_path")
+                next_payload["processed_video_path"] = result.get("processed_video_path")
+                next_payload["thumbnail_path"] = result.get("thumbnail_path")
+                next_payload["cleanup_paths"] = result.get("cleanup_paths") or payload.get("cleanup_paths") or []
                 enqueue_video_send(repo, next_payload)
                 await asyncio.to_thread(repo.complete_job, job_id)
                 _log_video_stage_event("VIDEO PROCESS DONE | стадия обработки завершена", int(payload.get("delivery_id") or 0))
@@ -95,19 +123,11 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool
             if result.get("fallback_to_legacy"):
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
                 await asyncio.to_thread(repo.complete_job, job_id)
-                _log_video_stage_event("VIDEO STAGE FAILED | fallback в video_delivery", int(payload.get("delivery_id") or 0))
+                _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 return True
             ok = bool(result.get("ok"))
             if ok:
-                for path in (payload.get("video_file_path"), payload.get("processed_file_path")):
-                    if not path:
-                        continue
-                    try:
-                        os.remove(path)
-                    except FileNotFoundError:
-                        continue
-                    except Exception as cleanup_exc:
-                        logger.warning("Не удалось удалить временный файл после video_send: %s", cleanup_exc)
+                cleanup_video_artifacts(payload, mode="success")
                 _log_video_stage_event("VIDEO SEND DONE | стадия отправки завершена", int(payload.get("delivery_id") or 0))
         elif job_type == "video_delivery":
             ok = await sender_service.execute_video_delivery_from_job(**payload)
@@ -121,15 +141,20 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool
             logger.info("JOB DONE | %s завершил задачу #%s", worker_id, job_id)
             return True
 
+        retryable = bool(payload.get("retryable", True))
+        if isinstance(result, dict):
+            retryable = bool(result.get("retryable", True))
         attempts = int(job.get("attempts") or 0) + 1
         max_attempts = int(job.get("max_attempts") or 3)
-        if attempts >= max_attempts:
+        if (not retryable) or attempts >= max_attempts:
             await asyncio.to_thread(repo.fail_job, job_id, "Исполнитель вернул неуспешный результат")
+            if job_type.startswith("video_"):
+                cleanup_video_artifacts(payload, mode="final_failure")
             logger.warning("JOB FAILED | Задача #%s помечена как failed", job_id)
         else:
             delay = compute_retry_delay_seconds(queue, attempts, job_type)
             await asyncio.to_thread(repo.retry_job, job_id, "Исполнитель вернул неуспешный результат", delay)
-            logger.warning("Задача переведена в retry | #%s | через %s сек", job_id, delay)
+            logger.warning("VIDEO STAGE RETRY | задача переведена в retry | #%s | через %s сек", job_id, delay)
         return True
 
     except Exception as exc:

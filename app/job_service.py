@@ -24,10 +24,12 @@ JOB_QUEUE_BY_TYPE = {
 JOB_PRIORITY_BY_TYPE = {
     JOB_TYPE_REPOST_ALBUM: 90,
     JOB_TYPE_REPOST_SINGLE: 100,
-    JOB_TYPE_VIDEO_DELIVERY: 200,
+    # Для heavy video pipeline важен "проток": сначала догоняем process/send уже начатых delivery,
+    # и только потом берём новые download.
+    JOB_TYPE_VIDEO_SEND: 170,
+    JOB_TYPE_VIDEO_PROCESS: 180,
     JOB_TYPE_VIDEO_DOWNLOAD: 200,
-    JOB_TYPE_VIDEO_PROCESS: 200,
-    JOB_TYPE_VIDEO_SEND: 200,
+    JOB_TYPE_VIDEO_DELIVERY: 200,
 }
 
 
@@ -152,12 +154,40 @@ def enqueue_video_delivery_fallback(repo, delivery_id: int) -> int | None:
     return job_id
 
 
-def _build_video_stage_payload(payload: dict[str, Any], attempt_stage: str, *, video_file_path: str | None = None, processed_file_path: str | None = None) -> dict[str, Any]:
+VIDEO_ARTIFACT_VERSION = 1
+VIDEO_PIPELINE_VERSION = 1
+
+
+def _build_video_stage_payload(
+    payload: dict[str, Any],
+    attempt_stage: str,
+    *,
+    source_video_path: str | None = None,
+    processed_video_path: str | None = None,
+    thumbnail_path: str | None = None,
+    cleanup_paths: list[str] | None = None,
+) -> dict[str, Any]:
     next_payload = dict(payload)
     next_payload["job_type"] = payload.get("job_type") or JOB_TYPE_VIDEO_DELIVERY
     next_payload["attempt_stage"] = str(attempt_stage)
-    next_payload["video_file_path"] = video_file_path
-    next_payload["processed_file_path"] = processed_file_path
+    if source_video_path is None:
+        source_video_path = payload.get("source_video_path") or payload.get("video_file_path")
+    if processed_video_path is None:
+        processed_video_path = payload.get("processed_video_path") or payload.get("processed_file_path")
+    if thumbnail_path is None:
+        thumbnail_path = payload.get("thumbnail_path")
+    if cleanup_paths is None:
+        cleanup_paths = list(payload.get("cleanup_paths") or [])
+
+    next_payload["source_video_path"] = source_video_path
+    next_payload["processed_video_path"] = processed_video_path
+    next_payload["thumbnail_path"] = thumbnail_path
+    next_payload["cleanup_paths"] = cleanup_paths
+    # Backward-compatible aliases.
+    next_payload["video_file_path"] = source_video_path
+    next_payload["processed_file_path"] = processed_video_path
+    next_payload["artifact_version"] = int(payload.get("artifact_version") or VIDEO_ARTIFACT_VERSION)
+    next_payload["pipeline_version"] = int(payload.get("pipeline_version") or VIDEO_PIPELINE_VERSION)
     return next_payload
 
 
@@ -185,8 +215,10 @@ def enqueue_video_process(repo, payload: dict[str, Any]) -> int | None:
     stage_payload = _build_video_stage_payload(
         payload,
         "process",
-        video_file_path=payload.get("video_file_path"),
-        processed_file_path=payload.get("processed_file_path"),
+        source_video_path=payload.get("source_video_path") or payload.get("video_file_path"),
+        processed_video_path=payload.get("processed_video_path") or payload.get("processed_file_path"),
+        thumbnail_path=payload.get("thumbnail_path"),
+        cleanup_paths=list(payload.get("cleanup_paths") or []),
     )
     dedup_key = build_dedup_key_for_video_stage(JOB_TYPE_VIDEO_PROCESS, delivery_id)
     job_id = repo.create_job(
@@ -206,8 +238,10 @@ def enqueue_video_send(repo, payload: dict[str, Any]) -> int | None:
     stage_payload = _build_video_stage_payload(
         payload,
         "send",
-        video_file_path=payload.get("video_file_path"),
-        processed_file_path=payload.get("processed_file_path"),
+        source_video_path=payload.get("source_video_path") or payload.get("video_file_path"),
+        processed_video_path=payload.get("processed_video_path") or payload.get("processed_file_path"),
+        thumbnail_path=payload.get("thumbnail_path"),
+        cleanup_paths=list(payload.get("cleanup_paths") or []),
     )
     dedup_key = build_dedup_key_for_video_stage(JOB_TYPE_VIDEO_SEND, delivery_id)
     job_id = repo.create_job(
