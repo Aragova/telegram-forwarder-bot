@@ -3157,6 +3157,7 @@ class PostgresRepository(RepositoryProtocol):
                 rows=rows,
                 mode=mode,
             )
+            logical_summary = self._summarize_rule_logical_items(logical_items)
 
             physical_pending = 0
             physical_processing = 0
@@ -3174,18 +3175,10 @@ class PostgresRepository(RepositoryProtocol):
                 elif status == "faulty":
                     physical_faulty += 1
 
-            logical_total = len(logical_items)
-            logical_completed = sum(1 for item in logical_items if item.get("is_done"))
-            logical_pending = sum(1 for item in logical_items if int(item.get("pending_count") or 0) > 0)
-
-            logical_current_position = None
-            for item in logical_items:
-                if not item.get("is_done"):
-                    logical_current_position = int(item["position"])
-                    break
-
-            if logical_current_position is None and logical_total > 0:
-                logical_current_position = logical_total
+            logical_total = logical_summary["total"]
+            logical_completed = logical_summary["completed"]
+            logical_pending = logical_summary["pending"]
+            logical_current_position = logical_summary["current_position"]
 
             snapshot = {
                 "id": rule.id,
@@ -3242,6 +3235,31 @@ class PostgresRepository(RepositoryProtocol):
                 exc,
             )
             return None
+
+    def _summarize_rule_logical_items(self, logical_items) -> dict[str, Any]:
+        """
+        Единая сводка по logical items для snapshot/position.
+        """
+        items = list(logical_items or [])
+        total = len(items)
+        completed = sum(1 for item in items if item.get("is_done"))
+        pending = sum(1 for item in items if int(item.get("pending_count") or 0) > 0)
+
+        current_position = None
+        for item in items:
+            if not item.get("is_done"):
+                current_position = int(item["position"])
+                break
+
+        if current_position is None and total > 0:
+            current_position = total
+
+        return {
+            "total": total,
+            "completed": completed,
+            "pending": pending,
+            "current_position": current_position,
+        }
 
     def get_rule_faulty_count(self, rule_id: int) -> int:
         with self.connect() as conn:
@@ -3773,8 +3791,9 @@ class PostgresRepository(RepositoryProtocol):
                 rows=rows,
                 mode=mode,
             )
+            logical_summary = self._summarize_rule_logical_items(logical_items)
 
-            total = len(logical_items)
+            total = logical_summary["total"]
             if total <= 0:
                 logger.info(
                     "get_rule_position_info: после builder очередь пуста, rule_id=%s, mode=%s, raw_rows=%s",
@@ -3784,16 +3803,8 @@ class PostgresRepository(RepositoryProtocol):
                 )
                 return empty_result
 
-            completed = sum(1 for item in logical_items if item.get("is_done"))
-            current_position = None
-
-            for item in logical_items:
-                if not item.get("is_done"):
-                    current_position = int(item["position"])
-                    break
-
-            if current_position is None:
-                current_position = total
+            completed = logical_summary["completed"]
+            current_position = logical_summary["current_position"]
 
             result = {
                 "total": total,
