@@ -24,8 +24,6 @@ jobs:
       - name: Compile logical queue path files
         run: python -m compileall app/postgres_repository.py bot.py tests/test_logical_queue_saas_path.py
 
-      - name: Run logical queue path tests
-        run: pytest -q tests/test_logical_queue_saas_path.py
+      - name: Run all tests
+        run: pytest -q tests/
 
-      - name: Run health service tests
-        run: pytest -q tests/test_health_service.py
