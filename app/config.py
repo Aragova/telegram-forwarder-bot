@@ -30,7 +30,9 @@ class Settings:
     temp_dir_raw: str = os.getenv("TEMP_DIR", "media/temp")
 
     # --- backend базы данных ---
-    data_read_backend: str = os.getenv("DATA_READ_BACKEND", "sqlite").strip().lower()
+    # LEGACY: в текущей архитектуре repository_factory всегда использует PostgresRepository.
+    # Флаг сохранён только для обратной совместимости окружений и не влияет на выбор репозитория.
+    data_read_backend: str = os.getenv("DATA_READ_BACKEND", "postgres").strip().lower()
 
     # --- параметры видеоредактора ---
     intro_duration: int = int(os.getenv("INTRO_DURATION", "2") or 2)
@@ -64,7 +66,7 @@ class Settings:
         if self.data_read_backend not in ("sqlite", "postgres"):
             raise RuntimeError(
                 "Некорректная переменная DATA_READ_BACKEND. "
-                "Допустимо только: sqlite или postgres"
+                "Допустимо только: sqlite или postgres (legacy-параметр, репозиторий всё равно Postgres)"
             )
 
     @property
