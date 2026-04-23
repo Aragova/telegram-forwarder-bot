@@ -80,7 +80,7 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool
             ok = await sender_service.execute_repost_album_from_job(**payload)
         elif job_type == "video_download":
             _log_video_stage_event("VIDEO DOWNLOAD START | запуск стадии скачивания", int(payload.get("delivery_id") or 0))
-            result = await sender_service.execute_video_download_from_job(job_id=job_id, **payload)
+            result = await sender_service.execute_video_download_from_job(**payload)
             if result.get("fallback_to_legacy"):
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
                 await asyncio.to_thread(repo.complete_job, job_id)
@@ -99,7 +99,7 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool
             ok = False
         elif job_type == "video_process":
             _log_video_stage_event("VIDEO PROCESS START | запуск стадии обработки", int(payload.get("delivery_id") or 0))
-            result = await sender_service.execute_video_process_from_job(job_id=job_id, **payload)
+            result = await sender_service.execute_video_process_from_job(**payload)
             if result.get("fallback_to_legacy"):
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
                 await asyncio.to_thread(repo.complete_job, job_id)
@@ -118,7 +118,7 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool
             ok = False
         elif job_type == "video_send":
             _log_video_stage_event("VIDEO SEND START | запуск стадии отправки", int(payload.get("delivery_id") or 0))
-            result = await sender_service.execute_video_send_from_job(job_id=job_id, **payload)
+            result = await sender_service.execute_video_send_from_job(**payload)
             if result.get("fallback_to_legacy"):
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
                 await asyncio.to_thread(repo.complete_job, job_id)
