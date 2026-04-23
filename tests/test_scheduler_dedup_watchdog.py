@@ -13,7 +13,7 @@ from app.job_service import (
 )
 from app.scheduler_runtime import scheduler_tick
 from app.job_watchdog import watchdog_tick
-from app.worker_runtime import compute_retry_delay_seconds
+from app.worker_runtime import _run_one_job, compute_retry_delay_seconds
 
 
 class _Rule:
@@ -111,6 +111,42 @@ class _Repo:
             job["lease_until"] = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
             out.append(dict(job))
         return out
+
+    def mark_job_processing(self, job_id: int, worker_id: str) -> bool:
+        job = self.jobs[int(job_id)]
+        if job["status"] != "leased":
+            return False
+        job["status"] = "processing"
+        job["locked_by"] = worker_id
+        job["updated_at"] = datetime.now(timezone.utc)
+        return True
+
+    def complete_job(self, job_id: int) -> bool:
+        job = self.jobs[int(job_id)]
+        job["status"] = "done"
+        job["lease_until"] = None
+        job["locked_by"] = None
+        job["updated_at"] = datetime.now(timezone.utc)
+        return True
+
+    def retry_job(self, job_id: int, error_text: str, delay_seconds: int) -> bool:
+        now = datetime.now(timezone.utc)
+        job = self.jobs[int(job_id)]
+        job["status"] = "retry"
+        job["run_at"] = now + timedelta(seconds=max(1, int(delay_seconds)))
+        job["updated_at"] = now
+        job["error_text"] = error_text
+        job["attempts"] += 1
+        return True
+
+    def fail_job(self, job_id: int, error_text: str) -> bool:
+        now = datetime.now(timezone.utc)
+        job = self.jobs[int(job_id)]
+        job["status"] = "failed"
+        job["updated_at"] = now
+        job["error_text"] = error_text
+        job["attempts"] += 1
+        return True
 
     def get_expired_leased_jobs(self, limit: int = 100):
         now = datetime.now(timezone.utc)
@@ -249,3 +285,45 @@ def test_repeated_scheduler_tick_is_idempotent() -> None:
     assert first["created"] >= 1
     assert second["duplicates"] >= 1
     assert len(repo.jobs) == 2
+
+
+def test_repost_worker_does_not_inject_job_id_kwarg() -> None:
+    repo = _Repo()
+    repost_job_id = enqueue_repost_single(repo, 10)
+
+    class _StrictSender:
+        async def execute_repost_single_from_job(
+            self,
+            *,
+            rule_id: int,
+            delivery_id: int,
+            message_id: int,
+            source_channel: str,
+            source_thread_id: int | None = None,
+            target_id: str,
+            target_thread_id: int | None = None,
+            mode: str = "repost",
+            interval: int = 0,
+            schedule_mode: str = "interval",
+            media_group_id: str | None = None,
+            job_type: str | None = None,
+        ) -> bool:
+            return True
+
+        async def execute_repost_album_from_job(self, **payload):
+            return True
+
+        async def execute_video_download_from_job(self, **payload):
+            return {"ok": False, "fallback_to_legacy": False}
+
+        async def execute_video_process_from_job(self, **payload):
+            return {"ok": False, "fallback_to_legacy": False}
+
+        async def execute_video_send_from_job(self, **payload):
+            return {"ok": False, "fallback_to_legacy": False}
+
+        async def execute_video_delivery_from_job(self, **payload):
+            return True
+
+    asyncio.run(_run_one_job(repo, _StrictSender(), "light-1", "light"))
+    assert repo.jobs[repost_job_id]["status"] == "done"
