@@ -2250,7 +2250,7 @@ class PostgresRepository(RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT mode, schedule_mode, fixed_times_json, interval
+                    SELECT mode, schedule_mode, fixed_times_json, interval, next_run_at
                     FROM routing
                     WHERE id = %s
                     """,
@@ -2286,6 +2286,19 @@ class PostgresRepository(RepositoryProtocol):
                             fixed_times = []
 
                         next_run_iso = get_next_fixed_run_utc(fixed_times, now_dt)
+                        if next_run_iso is None:
+                            fallback_interval = int(row["interval"] or interval or 0)
+                            fallback_base_dt = datetime.fromtimestamp(
+                                now_dt.timestamp() + max(fallback_interval, 1),
+                                tz=timezone.utc,
+                            )
+                            next_run_iso = self._find_next_interval_slot(conn, fallback_base_dt, exclude_rule_id=rule_id)
+                            logger.warning(
+                                "RULE NEXT RUN FIXED FALLBACK | rule_id=%s | fixed_times пустые/некорректные, используем interval=%s | next_run_at=%s",
+                                rule_id,
+                                fallback_interval,
+                                next_run_iso,
+                            )
                     else:
                         actual_interval = int(row["interval"] or interval or 0)
                         base_dt = datetime.fromtimestamp(
