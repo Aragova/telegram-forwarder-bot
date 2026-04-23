@@ -2862,8 +2862,7 @@ class SenderService:
         if sent_message_id:
             await self._add_reaction_if_possible(payload.get("target_id"), int(sent_message_id))
         await run_db(self._mark_delivery_sent_sync, delivery_id)
-        if str(payload.get("schedule_mode") or "interval") == "fixed":
-            await run_db(self._touch_rule_after_send_sync, rule_id, int(payload.get("interval") or 0))
+        await run_db(self._touch_rule_after_send_sync, rule_id, int(payload.get("interval") or 0))
         logger.info("VIDEO SEND DONE | отправка завершена для delivery_id=%s", delivery_id)
         return {"ok": True, "fallback_to_legacy": False}
 
