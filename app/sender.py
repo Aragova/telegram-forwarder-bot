@@ -14,6 +14,7 @@ from .config import settings
 from .repository_models import utc_now_iso
 from .telegram_client import ReactionClientInfo
 from .video_processor import VideoProcessor
+from .scheduler_service import SchedulerService
 from telethon.tl.types import (
     MessageEntityBold,
     MessageEntityItalic,
@@ -286,6 +287,7 @@ class SenderService:
         self.telethon = telethon_client
         self.reaction_clients = reaction_clients or []
         self.db = db
+        self.scheduler_service = SchedulerService(self.db)
 
         self.video_processor = VideoProcessor(
             bot=self.bot,
@@ -1312,10 +1314,10 @@ class SenderService:
         self.db.mark_delivery_faulty(delivery_id, error_text)
 
         if schedule_mode == "fixed":
-            self.db.touch_rule_after_send(rule_id, interval)
+            self.scheduler_service.touch_after_send(rule_id, interval)
 
     def _touch_rule_after_send_sync(self, rule_id: int, interval: int) -> None:
-        self.db.touch_rule_after_send(rule_id, interval)
+        self.scheduler_service.touch_after_send(rule_id, interval)
 
     def _prepare_album_delivery_sync(
         self,
