@@ -7,6 +7,8 @@ from app.job_service import (
     JOB_TYPE_REPOST_SINGLE,
     JOB_TYPE_VIDEO_DOWNLOAD,
     JOB_TYPE_VIDEO_DELIVERY,
+    JOB_TYPE_VIDEO_PROCESS,
+    JOB_TYPE_VIDEO_SEND,
     enqueue_repost_album,
     enqueue_repost_single,
     enqueue_video_delivery,
@@ -191,6 +193,8 @@ def test_job_type_to_queue_mapping() -> None:
     assert JOB_QUEUE_BY_TYPE[JOB_TYPE_VIDEO_DELIVERY] == "heavy"
     assert JOB_QUEUE_BY_TYPE[JOB_TYPE_VIDEO_DOWNLOAD] == "heavy"
     assert JOB_PRIORITY_BY_TYPE[JOB_TYPE_REPOST_ALBUM] == 90
+    assert JOB_PRIORITY_BY_TYPE[JOB_TYPE_VIDEO_SEND] < JOB_PRIORITY_BY_TYPE[JOB_TYPE_VIDEO_PROCESS]
+    assert JOB_PRIORITY_BY_TYPE[JOB_TYPE_VIDEO_PROCESS] < JOB_PRIORITY_BY_TYPE[JOB_TYPE_VIDEO_DOWNLOAD]
 
 
 def test_atomic_lease_baseline_no_double_take() -> None:

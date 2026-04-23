@@ -3141,6 +3141,34 @@ class PostgresRepository(RepositoryProtocol):
                 counts[status] = int(row.get("cnt") or 0)
         return counts
 
+    def get_video_stage_job_counts(self) -> dict[str, dict[str, int]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT job_type, status, COUNT(*) AS cnt
+                    FROM jobs
+                    WHERE job_type IN ('video_download', 'video_process', 'video_send', 'video_delivery')
+                    GROUP BY job_type, status
+                    """
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+
+        status_keys = ("pending", "leased", "processing", "retry", "failed", "done")
+        result = {
+            "video_download": {k: 0 for k in status_keys},
+            "video_process": {k: 0 for k in status_keys},
+            "video_send": {k: 0 for k in status_keys},
+            "video_delivery": {k: 0 for k in status_keys},
+        }
+        for row in rows:
+            job_type = str(row.get("job_type") or "")
+            status = str(row.get("status") or "")
+            if job_type in result and status in result[job_type]:
+                result[job_type][status] = int(row.get("cnt") or 0)
+        return result
+
     def get_expired_leased_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -3200,6 +3228,28 @@ class PostgresRepository(RepositoryProtocol):
                 rows = cur.fetchall() or []
             conn.commit()
         return [dict(r) for r in rows]
+
+    def requeue_stuck_processing_jobs(self, stuck_seconds: int = 600, delay_seconds: int = 15) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'retry',
+                        attempts = attempts + 1,
+                        run_at = NOW() + make_interval(secs => %s),
+                        locked_by = NULL,
+                        lease_until = NULL,
+                        error_text = 'Watchdog: задача зависла в processing и возвращена в retry',
+                        updated_at = NOW()
+                    WHERE status = 'processing'
+                      AND updated_at < NOW() - make_interval(secs => %s)
+                    """,
+                    (max(1, int(delay_seconds)), max(1, int(stuck_seconds))),
+                )
+                count = cur.rowcount or 0
+            conn.commit()
+        return int(count)
 
     def get_delivery(self, delivery_id: int):
         with self.connect() as conn:

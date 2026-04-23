@@ -2703,6 +2703,7 @@ class SenderService:
     async def execute_video_download_from_job(
         self,
         *,
+        job_id: int | None = None,
         rule_id: int,
         delivery_id: int,
         message_id: int,
@@ -2710,11 +2711,16 @@ class SenderService:
         target_id: str,
         **_: object,
     ) -> dict:
-        logger.info("VIDEO DOWNLOAD START | старт скачивания для delivery_id=%s", delivery_id)
+        logger.info(
+            "VIDEO DOWNLOAD START | delivery_id=%s | rule_id=%s | job_id=%s | stage=download",
+            delivery_id,
+            rule_id,
+            job_id,
+        )
         message = await self._fetch_message(source_channel, message_id)
         if not message:
             logger.warning("VIDEO STAGE FAILED | не удалось получить сообщение для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": True}
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
 
         path = await self._download_video_source(
             message,
@@ -2726,65 +2732,138 @@ class SenderService:
         )
         if not path:
             logger.warning("VIDEO STAGE FAILED | не удалось скачать видео для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": True}
-        logger.info("VIDEO DOWNLOAD DONE | скачивание завершено для delivery_id=%s", delivery_id)
-        return {"ok": True, "video_file_path": str(path), "fallback_to_legacy": False}
+            return {"ok": False, "fallback_to_legacy": False, "retryable": True}
+        downloaded_size = Path(path).stat().st_size if Path(path).is_file() else 0
+        video_info = await self.video_processor.get_video_info(str(path), use_cache=False)
+        logger.info(
+            "VIDEO DOWNLOAD DONE | скачивание завершено для delivery_id=%s | path=%s | size=%s | duration=%s",
+            delivery_id,
+            path,
+            downloaded_size,
+            round(float(video_info.get("duration") or 0.0), 2) if isinstance(video_info, dict) else None,
+        )
+        return {"ok": True, "source_video_path": str(path), "fallback_to_legacy": False}
 
     async def execute_video_process_from_job(
         self,
         *,
+        job_id: int | None = None,
+        rule_id: int,
         delivery_id: int,
-        video_file_path: str | None = None,
+        source_video_path: str | None = None,
+        artifact_version: int | None = None,
         **_: object,
     ) -> dict:
-        logger.info("VIDEO PROCESS START | старт обработки для delivery_id=%s", delivery_id)
-        if not video_file_path:
+        logger.info(
+            "VIDEO PROCESS START | delivery_id=%s | rule_id=%s | job_id=%s | stage=process",
+            delivery_id,
+            rule_id,
+            job_id,
+        )
+        if int(artifact_version or 1) != 1:
+            logger.warning("VIDEO FALLBACK TO LEGACY | неподдерживаемая artifact_version=%s | delivery_id=%s", artifact_version, delivery_id)
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+        if not source_video_path:
             logger.warning("VIDEO STAGE FAILED | отсутствует video_file_path для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": True}
-        if not Path(video_file_path).is_file():
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+        if not Path(source_video_path).is_file():
             logger.warning("VIDEO STAGE FAILED | исходный файл не найден для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": True}
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
 
-        video_info = await self.video_processor.get_video_info(video_file_path, use_cache=False)
-        if not video_info:
-            logger.warning("VIDEO STAGE FAILED | VideoProcessor не смог прочитать файл для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": True}
-        logger.info("VIDEO PROCESS DONE | обработка стадии завершена для delivery_id=%s", delivery_id)
-        return {"ok": True, "processed_file_path": str(video_file_path), "fallback_to_legacy": False}
+        rule = await run_db(self.db.get_rule, int(rule_id))
+        if not rule:
+            logger.warning("VIDEO FALLBACK TO LEGACY | правило не найдено для process | delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+
+        horizontal_intro, vertical_intro = await run_db(self._get_rule_intro_items_sync, rule)
+        processed_result = await self.video_processor.build_processed_video(
+            input_file_path=str(source_video_path),
+            add_intro=bool(getattr(rule, "video_add_intro", False)),
+            intro_name_horizontal=getattr(horizontal_intro, "file_name", None) if horizontal_intro else None,
+            intro_name_vertical=getattr(vertical_intro, "file_name", None) if vertical_intro else None,
+        )
+        if not processed_result:
+            logger.warning("VIDEO STAGE FAILED | VideoProcessor не смог обработать файл для delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": False, "retryable": True}
+        logger.info(
+            "VIDEO PROCESS DONE | обработка стадии завершена для delivery_id=%s | source=%s | processed=%s",
+            delivery_id,
+            source_video_path,
+            processed_result.get("processed_video_path"),
+        )
+        return {"ok": True, "fallback_to_legacy": False, **processed_result}
 
     async def execute_video_send_from_job(
         self,
         *,
-        processed_file_path: str | None = None,
+        processed_video_path: str | None = None,
+        thumbnail_path: str | None = None,
+        **payload: object,
+    ) -> dict:
+        return await self.execute_video_send_from_processed_job(
+            processed_video_path=processed_video_path or payload.get("processed_file_path"),
+            thumbnail_path=thumbnail_path,
+            **payload,
+        )
+
+    async def execute_video_send_from_processed_job(
+        self,
+        *,
+        processed_video_path: str | None = None,
+        thumbnail_path: str | None = None,
+        artifact_version: int | None = None,
+        pipeline_version: int | None = None,
         **payload: object,
     ) -> dict:
         delivery_id = int(payload.get("delivery_id") or 0)
-        logger.info("VIDEO SEND START | старт отправки для delivery_id=%s", delivery_id)
-        if not processed_file_path:
+        rule_id = int(payload.get("rule_id") or 0)
+        logger.info("VIDEO SEND START | старт отправки для delivery_id=%s | rule_id=%s | stage=send", delivery_id, rule_id)
+        if int(artifact_version or 1) != 1 or int(pipeline_version or 1) != 1:
+            logger.warning(
+                "VIDEO FALLBACK TO LEGACY | неподдерживаемая версия контракта artifact=%s pipeline=%s | delivery_id=%s",
+                artifact_version,
+                pipeline_version,
+                delivery_id,
+            )
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+        if not processed_video_path:
             logger.warning("VIDEO STAGE FAILED | отсутствует processed_file_path для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": True}
-        if not Path(processed_file_path).is_file():
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+        if not Path(processed_video_path).is_file():
             logger.warning("VIDEO STAGE FAILED | обработанный файл не найден для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": True}
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
 
-        legacy_payload = {
-            "rule_id": payload.get("rule_id"),
-            "delivery_id": payload.get("delivery_id"),
-            "message_id": payload.get("message_id"),
-            "source_channel": payload.get("source_channel"),
-            "source_thread_id": payload.get("source_thread_id"),
-            "target_id": payload.get("target_id"),
-            "target_thread_id": payload.get("target_thread_id"),
-            "mode": payload.get("mode", "video"),
-            "interval": payload.get("interval", 0),
-            "schedule_mode": payload.get("schedule_mode", "interval"),
-            "media_group_id": payload.get("media_group_id"),
-            "job_type": payload.get("job_type"),
-        }
-        ok = await self.execute_video_delivery_from_job(**legacy_payload)
-        if not ok:
-            logger.warning("VIDEO STAGE FAILED | неуспешная отправка для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": False}
+        rule = await run_db(self.db.get_rule, rule_id)
+        if not rule:
+            logger.warning("VIDEO FALLBACK TO LEGACY | правило не найдено для send | delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+
+        caption_payload = self._build_video_caption_delivery_payload(rule)
+        video_info = await self.video_processor.get_video_info(str(processed_video_path), use_cache=False)
+        if not video_info:
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+
+        sent_msg = await self.video_processor.send_with_retry(
+            self.bot,
+            payload.get("target_id"),
+            payload.get("target_thread_id"),
+            str(processed_video_path),
+            str(thumbnail_path) if thumbnail_path else None,
+            caption_payload["caption"] or "",
+            video_info["duration"],
+            caption_entities_json=caption_payload["caption_entities_json"],
+            caption_send_mode=caption_payload["selected_mode"],
+        )
+        if not sent_msg:
+            logger.warning("VIDEO STAGE RETRY | неуспешная отправка для delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": False, "retryable": True}
+
+        sent_message_id = self._extract_sent_message_id(sent_msg)
+        if sent_message_id:
+            await self._add_reaction_if_possible(payload.get("target_id"), int(sent_message_id))
+        await run_db(self._mark_delivery_sent_sync, delivery_id)
+        if str(payload.get("schedule_mode") or "interval") == "fixed":
+            await run_db(self._touch_rule_after_send_sync, rule_id, int(payload.get("interval") or 0))
         logger.info("VIDEO SEND DONE | отправка завершена для delivery_id=%s", delivery_id)
         return {"ok": True, "fallback_to_legacy": False}
 
