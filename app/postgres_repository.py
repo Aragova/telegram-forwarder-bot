@@ -3229,6 +3229,28 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
         return [dict(r) for r in rows]
 
+    def requeue_stuck_processing_jobs(self, stuck_seconds: int = 600, delay_seconds: int = 15) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'retry',
+                        attempts = attempts + 1,
+                        run_at = NOW() + make_interval(secs => %s),
+                        locked_by = NULL,
+                        lease_until = NULL,
+                        error_text = 'Watchdog: задача зависла в processing и возвращена в retry',
+                        updated_at = NOW()
+                    WHERE status = 'processing'
+                      AND updated_at < NOW() - make_interval(secs => %s)
+                    """,
+                    (max(1, int(delay_seconds)), max(1, int(stuck_seconds))),
+                )
+                count = cur.rowcount or 0
+            conn.commit()
+        return int(count)
+
     def get_delivery(self, delivery_id: int):
         with self.connect() as conn:
             with conn.cursor() as cur:

@@ -143,6 +143,22 @@ class _Repo:
             if j["status"] == "processing" and j["updated_at"] < border
         ][:limit]
 
+    def requeue_stuck_processing_jobs(self, stuck_seconds: int = 600, delay_seconds: int = 15):
+        border = datetime.now(timezone.utc) - timedelta(seconds=stuck_seconds)
+        now = datetime.now(timezone.utc)
+        count = 0
+        for job in self.jobs.values():
+            if job["status"] == "processing" and job["updated_at"] < border:
+                job["status"] = "retry"
+                job["locked_by"] = None
+                job["lease_until"] = None
+                job["run_at"] = now + timedelta(seconds=delay_seconds)
+                job["updated_at"] = now
+                job["error_text"] = "Watchdog: задача зависла в processing и возвращена в retry"
+                job["attempts"] += 1
+                count += 1
+        return count
+
 
 def test_scheduler_no_duplicate_repost_single() -> None:
     repo = _Repo()
@@ -216,6 +232,8 @@ def test_watchdog_detects_stuck_processing() -> None:
     result = asyncio.run(watchdog_tick(repo, stuck_processing_seconds=600))
 
     assert result["stuck_processing"] == 1
+    assert result["requeued_stuck_processing"] == 1
+    assert repo.jobs[job_id]["status"] == "retry"
 
 
 def test_retry_delay_differs_for_light_and_heavy() -> None:

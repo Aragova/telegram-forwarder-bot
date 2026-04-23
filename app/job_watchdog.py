@@ -31,10 +31,24 @@ async def watchdog_tick(
             job.get("updated_at"),
         )
 
+    requeued_stuck = 0
+    if stuck_jobs and hasattr(repo, "requeue_stuck_processing_jobs"):
+        requeued_stuck = int(
+            await asyncio.to_thread(
+                repo.requeue_stuck_processing_jobs,
+                int(stuck_processing_seconds),
+                int(requeue_delay_seconds),
+            )
+            or 0
+        )
+        if requeued_stuck > 0:
+            logger.warning("Watchdog вернул зависшие processing-задачи в retry: %s шт.", requeued_stuck)
+
     return {
         "expired_leased": len(expired_jobs),
         "requeued": requeued,
         "stuck_processing": len(stuck_jobs),
+        "requeued_stuck_processing": requeued_stuck,
     }
 
 
