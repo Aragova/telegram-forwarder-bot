@@ -8,17 +8,26 @@ logger = logging.getLogger("forwarder")
 JOB_TYPE_REPOST_SINGLE = "repost_single"
 JOB_TYPE_REPOST_ALBUM = "repost_album"
 JOB_TYPE_VIDEO_DELIVERY = "video_delivery"
+JOB_TYPE_VIDEO_DOWNLOAD = "video_download"
+JOB_TYPE_VIDEO_PROCESS = "video_process"
+JOB_TYPE_VIDEO_SEND = "video_send"
 
 JOB_QUEUE_BY_TYPE = {
     JOB_TYPE_REPOST_SINGLE: "light",
     JOB_TYPE_REPOST_ALBUM: "light",
     JOB_TYPE_VIDEO_DELIVERY: "heavy",
+    JOB_TYPE_VIDEO_DOWNLOAD: "heavy",
+    JOB_TYPE_VIDEO_PROCESS: "heavy",
+    JOB_TYPE_VIDEO_SEND: "heavy",
 }
 
 JOB_PRIORITY_BY_TYPE = {
     JOB_TYPE_REPOST_ALBUM: 90,
     JOB_TYPE_REPOST_SINGLE: 100,
     JOB_TYPE_VIDEO_DELIVERY: 200,
+    JOB_TYPE_VIDEO_DOWNLOAD: 200,
+    JOB_TYPE_VIDEO_PROCESS: 200,
+    JOB_TYPE_VIDEO_SEND: 200,
 }
 
 
@@ -27,7 +36,11 @@ def build_dedup_key_for_single(delivery_id: int) -> str:
 
 
 def build_dedup_key_for_video(delivery_id: int) -> str:
-    return f"{JOB_TYPE_VIDEO_DELIVERY}:delivery:{int(delivery_id)}"
+    return f"{JOB_TYPE_VIDEO_DOWNLOAD}:delivery:{int(delivery_id)}"
+
+
+def build_dedup_key_for_video_stage(job_type: str, delivery_id: int) -> str:
+    return f"{job_type}:delivery:{int(delivery_id)}"
 
 
 def build_dedup_key_for_album(rule_id: int, media_group_id: str | None, delivery_ids: list[int]) -> str:
@@ -117,12 +130,16 @@ def enqueue_repost_album(repo, delivery_ids: list[int], media_group_id: str | No
 
 
 def enqueue_video_delivery(repo, delivery_id: int) -> int | None:
+    return enqueue_video_download(repo, delivery_id)
+
+
+def enqueue_video_delivery_fallback(repo, delivery_id: int) -> int | None:
     payload = _delivery_payload(repo, delivery_id)
     if not payload:
         return None
 
     payload["job_type"] = JOB_TYPE_VIDEO_DELIVERY
-    dedup_key = build_dedup_key_for_video(delivery_id)
+    dedup_key = f"{JOB_TYPE_VIDEO_DELIVERY}:delivery:{int(delivery_id)}"
     job_id = repo.create_job(
         job_type=JOB_TYPE_VIDEO_DELIVERY,
         payload=payload,
@@ -131,5 +148,75 @@ def enqueue_video_delivery(repo, delivery_id: int) -> int | None:
         dedup_key=dedup_key,
     )
     if job_id is not None:
-        logger.info("JOB CREATED | Создана задача video_delivery для delivery #%s (job #%s)", delivery_id, job_id)
+        logger.info("JOB CREATED | Создана fallback-задача video_delivery для delivery #%s (job #%s)", delivery_id, job_id)
+    return job_id
+
+
+def _build_video_stage_payload(payload: dict[str, Any], attempt_stage: str, *, video_file_path: str | None = None, processed_file_path: str | None = None) -> dict[str, Any]:
+    next_payload = dict(payload)
+    next_payload["job_type"] = payload.get("job_type") or JOB_TYPE_VIDEO_DELIVERY
+    next_payload["attempt_stage"] = str(attempt_stage)
+    next_payload["video_file_path"] = video_file_path
+    next_payload["processed_file_path"] = processed_file_path
+    return next_payload
+
+
+def enqueue_video_download(repo, delivery_id: int) -> int | None:
+    payload = _delivery_payload(repo, delivery_id)
+    if not payload:
+        return None
+
+    payload = _build_video_stage_payload(payload, "download")
+    dedup_key = build_dedup_key_for_video_stage(JOB_TYPE_VIDEO_DOWNLOAD, delivery_id)
+    job_id = repo.create_job(
+        job_type=JOB_TYPE_VIDEO_DOWNLOAD,
+        payload=payload,
+        queue=JOB_QUEUE_BY_TYPE[JOB_TYPE_VIDEO_DOWNLOAD],
+        priority=JOB_PRIORITY_BY_TYPE[JOB_TYPE_VIDEO_DOWNLOAD],
+        dedup_key=dedup_key,
+    )
+    if job_id is not None:
+        logger.info("JOB CREATED | Создана задача video_download для delivery #%s (job #%s)", delivery_id, job_id)
+    return job_id
+
+
+def enqueue_video_process(repo, payload: dict[str, Any]) -> int | None:
+    delivery_id = int(payload.get("delivery_id") or 0)
+    stage_payload = _build_video_stage_payload(
+        payload,
+        "process",
+        video_file_path=payload.get("video_file_path"),
+        processed_file_path=payload.get("processed_file_path"),
+    )
+    dedup_key = build_dedup_key_for_video_stage(JOB_TYPE_VIDEO_PROCESS, delivery_id)
+    job_id = repo.create_job(
+        job_type=JOB_TYPE_VIDEO_PROCESS,
+        payload=stage_payload,
+        queue=JOB_QUEUE_BY_TYPE[JOB_TYPE_VIDEO_PROCESS],
+        priority=JOB_PRIORITY_BY_TYPE[JOB_TYPE_VIDEO_PROCESS],
+        dedup_key=dedup_key,
+    )
+    if job_id is not None:
+        logger.info("JOB CREATED | Создана задача video_process для delivery #%s (job #%s)", delivery_id, job_id)
+    return job_id
+
+
+def enqueue_video_send(repo, payload: dict[str, Any]) -> int | None:
+    delivery_id = int(payload.get("delivery_id") or 0)
+    stage_payload = _build_video_stage_payload(
+        payload,
+        "send",
+        video_file_path=payload.get("video_file_path"),
+        processed_file_path=payload.get("processed_file_path"),
+    )
+    dedup_key = build_dedup_key_for_video_stage(JOB_TYPE_VIDEO_SEND, delivery_id)
+    job_id = repo.create_job(
+        job_type=JOB_TYPE_VIDEO_SEND,
+        payload=stage_payload,
+        queue=JOB_QUEUE_BY_TYPE[JOB_TYPE_VIDEO_SEND],
+        priority=JOB_PRIORITY_BY_TYPE[JOB_TYPE_VIDEO_SEND],
+        dedup_key=dedup_key,
+    )
+    if job_id is not None:
+        logger.info("JOB CREATED | Создана задача video_send для delivery #%s (job #%s)", delivery_id, job_id)
     return job_id

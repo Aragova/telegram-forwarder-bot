@@ -5,6 +5,7 @@ from app.job_service import (
     JOB_QUEUE_BY_TYPE,
     JOB_TYPE_REPOST_ALBUM,
     JOB_TYPE_REPOST_SINGLE,
+    JOB_TYPE_VIDEO_DOWNLOAD,
     JOB_TYPE_VIDEO_DELIVERY,
     enqueue_repost_album,
     enqueue_repost_single,
@@ -188,6 +189,7 @@ def test_job_type_to_queue_mapping() -> None:
     assert JOB_QUEUE_BY_TYPE[JOB_TYPE_REPOST_SINGLE] == "light"
     assert JOB_QUEUE_BY_TYPE[JOB_TYPE_REPOST_ALBUM] == "light"
     assert JOB_QUEUE_BY_TYPE[JOB_TYPE_VIDEO_DELIVERY] == "heavy"
+    assert JOB_QUEUE_BY_TYPE[JOB_TYPE_VIDEO_DOWNLOAD] == "heavy"
     assert JOB_PRIORITY_BY_TYPE[JOB_TYPE_REPOST_ALBUM] == 90
 
 
