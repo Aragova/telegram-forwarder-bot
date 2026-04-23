@@ -26,3 +26,6 @@ jobs:
 
       - name: Run logical queue path tests
         run: pytest -q tests/test_logical_queue_saas_path.py
+
+      - name: Run health service tests
+        run: pytest -q tests/test_health_service.py
