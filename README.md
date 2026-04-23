@@ -22,6 +22,31 @@
 Теперь доставка вынесена в таблицу `deliveries`, и каждая связка source -> target имеет свою очередь.
 
 ## Запуск
+
+### Production (рекомендуется): split-runtime
+
+- UI: `python bot.py --role bot` (или `--role ui`)
+- Scheduler: `python bot.py --role scheduler`
+- Worker: `python bot.py --role worker`
+
+Перед стартом роли:
+
+```bash
+python bot.py --role bot --preflight-only
+python bot.py --role scheduler --preflight-only
+python bot.py --role worker --preflight-only
+```
+
+Systemd и smoke-check: `docs/systemd-runtime-roles.md`.
+Rollout: `docs/deployment-rollout.md`.
+Rollback: `docs/deployment-rollback.md`.
+Runbook: `docs/operations-runbook.md`.
+
+### Legacy/dev fallback
+
+`python bot.py` или `python bot.py --role all` — совместимый режим, но не основной production путь.
+
+### Локальный старт (dev)
 ```bash
 python -m venv .venv
 source .venv/bin/activate

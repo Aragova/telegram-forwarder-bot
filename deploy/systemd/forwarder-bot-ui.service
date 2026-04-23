@@ -1,5 +1,5 @@
 [Unit]
-Description=Telegram Forwarder Bot UI Role
+Description=Telegram Forwarder Bot Runtime Role: UI
 After=network-online.target
 Wants=network-online.target
 
@@ -10,9 +10,9 @@ Group=forwarder
 WorkingDirectory=/opt/telegram-forwarder-bot
 EnvironmentFile=/etc/forwarder-bot/forwarder.env
 ExecStart=/usr/bin/python3 /opt/telegram-forwarder-bot/bot.py --role bot
-Restart=always
+Restart=on-failure
 RestartSec=5
-TimeoutStopSec=30
+TimeoutStopSec=45
 KillSignal=SIGINT
 
 [Install]
