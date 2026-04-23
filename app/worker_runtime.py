@@ -64,7 +64,10 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str) -> bool
     job_id = int(job["id"])
     job_type = str(job["job_type"])
     payload = _safe_payload(job)
-    payload["job_id"] = job_id
+
+    # Защита от "грязных" payload из старых версий, где мог сохраниться служебный job_id.
+    payload.pop("job_id", None)
+
 
     logger.info("JOB LEASED | %s взял задачу #%s (%s)", worker_id, job_id, job_type)
 
