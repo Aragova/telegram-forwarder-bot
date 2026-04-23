@@ -11,7 +11,7 @@ from aiogram.types import MessageEntity
 from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo
 from telethon import functions, types
 from .config import settings
-from .db import utc_now_iso
+from .repository_models import utc_now_iso
 from .telegram_client import ReactionClientInfo
 from .video_processor import VideoProcessor
 from telethon.tl.types import (
