@@ -61,6 +61,10 @@ from app.runtime_context import RuntimeContext
 from app.worker_runtime import run_heavy_worker, run_light_worker
 from app.scheduler_runtime import run_scheduler_loop
 from app.job_watchdog import run_watchdog_loop
+from app.tenant_service import TenantService
+from app.subscription_service import SubscriptionService
+from app.usage_service import UsageService
+from app.limit_service import LimitService
 
 logger = setup_logging(settings.log_level)
 
@@ -68,6 +72,10 @@ dp = Dispatcher()
 bot: Bot | None = None
 db: RepositoryProtocol = create_repository()
 scheduler_service = SchedulerService(db)
+tenant_service = TenantService(db)
+subscription_service = SubscriptionService(db)
+usage_service = UsageService(db)
+limit_service = LimitService(db, subscription_service, usage_service)
 telethon_client = None
 reaction_clients = []
 sender_service = None
@@ -1425,6 +1433,71 @@ async def cmd_start(message: Message):
         reply_markup=get_start_keyboard(),
     )
 
+
+@dp.message(Command("plan"))
+async def cmd_plan(message: Message):
+    if not await is_admin(message):
+        return
+    admin_id = message.from_user.id if message.from_user else settings.admin_id
+    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+    subscription = await run_db(subscription_service.get_active_subscription, int(tenant.get("id") or 1))
+    if not subscription:
+        await message.answer("❌ Подписка не назначена.")
+        return
+    await message.answer(
+        "\n".join(
+            [
+                f"🏷 Тариф: {subscription.get('plan_name', 'UNKNOWN')}",
+                f"📌 Статус подписки: {subscription.get('status', 'unknown')}",
+                f"🧱 Лимит правил: {subscription.get('max_rules', '∞')}",
+                f"⚙️ Лимит задач/день: {subscription.get('max_jobs_per_day', '∞')}",
+                f"🎬 Лимит видео/день: {subscription.get('max_video_per_day', '∞')}",
+            ]
+        )
+    )
+
+
+@dp.message(Command("usage"))
+async def cmd_usage(message: Message):
+    if not await is_admin(message):
+        return
+    admin_id = message.from_user.id if message.from_user else settings.admin_id
+    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+    usage = await run_db(usage_service.get_today_usage, int(tenant.get("id") or 1))
+    await message.answer(
+        "\n".join(
+            [
+                "📊 Текущее использование за сегодня:",
+                f"• jobs: {int(usage.get('jobs_count') or 0)}",
+                f"• video: {int(usage.get('video_count') or 0)}",
+                f"• storage_mb: {int(usage.get('storage_used_mb') or 0)}",
+                f"• api_calls: {int(usage.get('api_calls') or 0)}",
+            ]
+        )
+    )
+
+
+@dp.message(Command("limits"))
+async def cmd_limits(message: Message):
+    if not await is_admin(message):
+        return
+    admin_id = message.from_user.id if message.from_user else settings.admin_id
+    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+    tenant_id = int(tenant.get("id") or 1)
+    can_rule, reason_rule = await run_db(limit_service.can_create_rule, tenant_id)
+    can_job, reason_job = await run_db(limit_service.can_enqueue_job, tenant_id)
+    can_video, reason_video = await run_db(limit_service.can_process_video, tenant_id)
+    await message.answer(
+        "\n".join(
+            [
+                "🚦 Статус лимитов:",
+                f"• rules: {'ok' if can_rule else 'blocked'} {'' if can_rule else '- ' + str(reason_rule)}",
+                f"• jobs/day: {'ok' if can_job else 'blocked'} {'' if can_job else '- ' + str(reason_job)}",
+                f"• video/day: {'ok' if can_video else 'blocked'} {'' if can_video else '- ' + str(reason_video)}",
+            ]
+        )
+    )
+
 @dp.message(lambda m: m.text == "📋 Меню")
 async def handle_start(message: Message):
     reset_user_state(message.from_user.id if message.from_user else None)
@@ -2557,6 +2630,12 @@ def _create_rule_sync(
     interval: int,
     admin_id: int,
 ) -> int | None:
+    tenant = tenant_service.ensure_tenant_exists(admin_id)
+    can_create, reason = limit_service.can_create_rule(int(tenant.get("id") or 1))
+    if not can_create:
+        logger.warning("Лимит создания правил достигнут | admin_id=%s | tenant_id=%s | reason=%s", admin_id, tenant.get("id"), reason)
+        return None
+
     rule_id = db.add_rule(
         choice["source_id"],
         choice["source_thread_id"],
@@ -6107,7 +6186,7 @@ async def handle_stateful_private_inputs(message: Message):
             )
         else:
             await message.answer(
-                "⚠️ Такое правило уже существует",
+                "⚠️ Не удалось создать правило: возможно, оно уже существует или достигнут лимит тарифа.",
                 reply_markup=get_main_menu(),
             )
 

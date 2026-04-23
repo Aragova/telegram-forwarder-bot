@@ -64,6 +64,7 @@ def _delivery_payload(repo, delivery_id: int) -> dict[str, Any] | None:
     return {
         "rule_id": int(row["rule_id"]),
         "delivery_id": int(row["id"]),
+        "tenant_id": int(row.get("tenant_id") or getattr(repo, "get_rule_tenant_id", lambda _x: 1)(int(row["rule_id"])) or 1),
         "message_id": int(row["message_id"]),
         "source_channel": str(row["source_channel"]),
         "source_thread_id": row["source_thread_id"],

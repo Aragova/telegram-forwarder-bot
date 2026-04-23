@@ -233,6 +233,58 @@ class PostgresRepository(RepositoryProtocol):
                 return None
             return int(row["id"])
 
+    def _ensure_tenant_for_admin_conn(self, conn, admin_id: int) -> int:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM tenants
+                WHERE owner_admin_id = %s
+                LIMIT 1
+                """,
+                (int(admin_id),),
+            )
+            row = cur.fetchone()
+            if row:
+                return int(row["id"])
+
+            cur.execute(
+                """
+                INSERT INTO tenants(name, owner_admin_id, created_at, is_active)
+                VALUES(%s, %s, %s, TRUE)
+                RETURNING id
+                """,
+                (f"tenant-{int(admin_id)}", int(admin_id), utc_now_iso()),
+            )
+            created = cur.fetchone()
+            tenant_id = int(created["id"]) if created else 1
+
+            cur.execute(
+                """
+                INSERT INTO tenant_users(tenant_id, telegram_id, role, created_at)
+                VALUES(%s, %s, 'owner', %s)
+                ON CONFLICT(tenant_id, telegram_id) DO NOTHING
+                """,
+                (tenant_id, int(admin_id), utc_now_iso()),
+            )
+            cur.execute(
+                """
+                INSERT INTO subscriptions(tenant_id, plan_id, status, started_at, expires_at, created_at)
+                SELECT %s, p.id, 'active', %s, NULL, %s
+                FROM plans p
+                WHERE p.name = 'FREE'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM subscriptions s
+                    WHERE s.tenant_id = %s
+                      AND s.status IN ('active', 'trial')
+                  )
+                LIMIT 1
+                """,
+                (tenant_id, utc_now_iso(), utc_now_iso(), tenant_id),
+            )
+            return tenant_id
+
     # =========================================================
     # INIT / MIGRATIONS
     # =========================================================
@@ -377,6 +429,56 @@ class PostgresRepository(RepositoryProtocol):
             extra_json TEXT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS tenants(
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            owner_admin_id BIGINT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE
+        );
+
+        CREATE TABLE IF NOT EXISTS tenant_users(
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL,
+            telegram_id BIGINT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('owner','admin','viewer')),
+            created_at TEXT NOT NULL,
+            UNIQUE(tenant_id, telegram_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS plans(
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            max_rules BIGINT NOT NULL,
+            max_workers BIGINT NOT NULL,
+            max_jobs_per_day BIGINT NOT NULL,
+            max_video_per_day BIGINT NOT NULL,
+            max_storage_mb BIGINT NOT NULL,
+            priority_level BIGINT NOT NULL,
+            price NUMERIC(10,2) NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE
+        );
+
+        CREATE TABLE IF NOT EXISTS subscriptions(
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL,
+            plan_id BIGINT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('active','expired','trial')),
+            started_at TEXT NOT NULL,
+            expires_at TEXT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS usage_stats(
+            tenant_id BIGINT NOT NULL,
+            date TEXT NOT NULL,
+            jobs_count BIGINT NOT NULL DEFAULT 0,
+            video_count BIGINT NOT NULL DEFAULT 0,
+            storage_used_mb BIGINT NOT NULL DEFAULT 0,
+            api_calls BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY(tenant_id, date)
+        );
+
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'repost';
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_trim_seconds BIGINT DEFAULT 120;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_add_intro BOOLEAN DEFAULT FALSE;
@@ -391,6 +493,9 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_horizontal_id BIGINT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_vertical_id BIGINT NULL;
         ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dedup_key TEXT NULL;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
+        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
+        ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
         """
 
         self.client.execute_script(init_sql)
@@ -527,6 +632,48 @@ class PostgresRepository(RepositoryProtocol):
                       AND status IN ('pending', 'leased', 'processing', 'retry')
                     """
                 )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_routing_tenant_id
+                    ON routing(tenant_id, id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_deliveries_tenant_id
+                    ON deliveries(tenant_id, id)
+                    """
+                )
+            conn.commit()
+
+        self._ensure_default_plans()
+
+    def _ensure_default_plans(self) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                for row in [
+                    ("FREE", 3, 1, 100, 10, 512, 1, "0.00"),
+                    ("BASIC", 15, 2, 1000, 100, 5120, 2, "19.99"),
+                    ("PRO", 100, 4, 10000, 1000, 51200, 3, "99.99"),
+                ]:
+                    cur.execute(
+                        """
+                        INSERT INTO plans(
+                            name,
+                            max_rules,
+                            max_workers,
+                            max_jobs_per_day,
+                            max_video_per_day,
+                            max_storage_mb,
+                            priority_level,
+                            price,
+                            is_active
+                        )
+                        VALUES(%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                        ON CONFLICT(name) DO NOTHING
+                        """,
+                        row,
+                    )
             conn.commit()
 
     # =========================================================
@@ -1152,11 +1299,11 @@ class PostgresRepository(RepositoryProtocol):
             for rule in rules:
                 cur.execute(
                     """
-                    INSERT INTO deliveries(rule_id, post_id, status, created_at)
-                    VALUES(%s, %s, 'pending', %s)
+                    INSERT INTO deliveries(rule_id, post_id, status, created_at, tenant_id)
+                    VALUES(%s, %s, 'pending', %s, (SELECT tenant_id FROM routing WHERE id = %s))
                     ON CONFLICT DO NOTHING
                     """,
-                    (int(rule["id"]), int(post_id), now_iso),
+                    (int(rule["id"]), int(post_id), now_iso, int(rule["id"])),
                 )
 
     def _backfill_deliveries_for_rule_conn(
@@ -1196,11 +1343,11 @@ class PostgresRepository(RepositoryProtocol):
             for row in rows:
                 cur.execute(
                     """
-                    INSERT INTO deliveries(rule_id, post_id, status, created_at)
-                    VALUES(%s, %s, 'pending', %s)
+                    INSERT INTO deliveries(rule_id, post_id, status, created_at, tenant_id)
+                    VALUES(%s, %s, 'pending', %s, (SELECT tenant_id FROM routing WHERE id = %s))
                     ON CONFLICT DO NOTHING
                     """,
-                    (int(rule_id), int(row["id"]), now_iso),
+                    (int(rule_id), int(row["id"]), now_iso, int(rule_id)),
                 )
                 inserted += int(cur.rowcount or 0)
 
@@ -1449,6 +1596,7 @@ class PostgresRepository(RepositoryProtocol):
         created_by: int,
     ) -> int | None:
         with self.connect() as conn:
+            tenant_id = self._ensure_tenant_for_admin_conn(conn, int(created_by))
             base_dt = datetime.fromtimestamp(
                 datetime.now(timezone.utc).timestamp() + max(int(interval), 1),
                 tz=timezone.utc,
@@ -1479,13 +1627,14 @@ class PostgresRepository(RepositoryProtocol):
                         video_caption,
                         video_caption_entities_json,
                         video_intro_horizontal_id,
-                        video_intro_vertical_id
+                        video_intro_vertical_id,
+                        tenant_id
                     )
                     VALUES(
                         %s, %s, %s, %s,
                         %s, %s, %s, FALSE, %s, NULL,
                         'interval', NULL, 'repost',
-                        120, FALSE, NULL, NULL, NULL, NULL, NULL, NULL
+                        120, FALSE, NULL, NULL, NULL, NULL, NULL, NULL, %s
                     )
                     ON CONFLICT DO NOTHING
                     RETURNING id
@@ -1499,6 +1648,7 @@ class PostgresRepository(RepositoryProtocol):
                         created_by,
                         utc_now_iso(),
                         next_run_iso,
+                        tenant_id,
                     ),
                 )
                 row = cur.fetchone()
@@ -2365,7 +2515,8 @@ class PostgresRepository(RepositoryProtocol):
                         p.media_group_id,
                         r.target_id,
                         r.target_thread_id,
-                        r.interval
+                        r.interval,
+                        COALESCE(r.tenant_id, d.tenant_id, 1) AS tenant_id
                     FROM deliveries d
                     JOIN posts p ON p.id = d.post_id
                     JOIN routing r ON r.id = d.rule_id
@@ -2456,7 +2607,8 @@ class PostgresRepository(RepositoryProtocol):
                         p.media_group_id,
                         r.target_id,
                         r.target_thread_id,
-                        r.interval
+                        r.interval,
+                        COALESCE(r.tenant_id, d.tenant_id, 1) AS tenant_id
                     FROM deliveries d
                     JOIN routing r ON r.id = d.rule_id
                     JOIN posts p ON p.id = d.post_id
@@ -2958,6 +3110,7 @@ class PostgresRepository(RepositoryProtocol):
 
                         r.target_id,
                         r.target_thread_id,
+                        COALESCE(r.tenant_id, d.tenant_id, 1) AS tenant_id,
 
                         s.title AS source_title,
                         t.title AS target_title,
@@ -4412,6 +4565,269 @@ class PostgresRepository(RepositoryProtocol):
     # AUDIT
     # =========================================================
 
+    def create_tenant(self, owner_admin_id: int, name: str) -> int | None:
+        with self.connect() as conn:
+            tenant_id = self._ensure_tenant_for_admin_conn(conn, int(owner_admin_id))
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE tenants
+                    SET name = COALESCE(NULLIF(%s, ''), name)
+                    WHERE id = %s
+                    """,
+                    (name, tenant_id),
+                )
+            conn.commit()
+            return tenant_id
+
+    def get_tenant_by_admin(self, admin_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, name, owner_admin_id, created_at, is_active
+                    FROM tenants
+                    WHERE owner_admin_id = %s
+                    LIMIT 1
+                    """,
+                    (int(admin_id),),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_default_tenant(self) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, name, owner_admin_id, created_at, is_active
+                    FROM tenants
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def set_tenant_active(self, tenant_id: int, is_active: bool) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE tenants SET is_active = %s WHERE id = %s",
+                    (bool(is_active), int(tenant_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def add_tenant_user(self, tenant_id: int, telegram_id: int, role: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO tenant_users(tenant_id, telegram_id, role, created_at)
+                    VALUES(%s, %s, %s, %s)
+                    ON CONFLICT(tenant_id, telegram_id)
+                    DO UPDATE SET role = EXCLUDED.role
+                    """,
+                    (int(tenant_id), int(telegram_id), str(role), utc_now_iso()),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+            return ok
+
+    def get_tenant_user_role(self, tenant_id: int, telegram_id: int) -> str | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role
+                    FROM tenant_users
+                    WHERE tenant_id = %s
+                      AND telegram_id = %s
+                    LIMIT 1
+                    """,
+                    (int(tenant_id), int(telegram_id)),
+                )
+                row = cur.fetchone()
+        return str(row["role"]) if row else None
+
+    def get_plan_by_name(self, plan_name: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM plans
+                    WHERE name = %s
+                      AND is_active = TRUE
+                    LIMIT 1
+                    """,
+                    (str(plan_name).upper(),),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def assign_subscription(self, tenant_id: int, plan_id: int, *, status: str = "active", expires_at: str | None = None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE subscriptions
+                    SET status = 'expired'
+                    WHERE tenant_id = %s
+                      AND status IN ('active', 'trial')
+                    """,
+                    (int(tenant_id),),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO subscriptions(tenant_id, plan_id, status, started_at, expires_at, created_at)
+                    VALUES(%s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (int(tenant_id), int(plan_id), status, utc_now_iso(), expires_at, utc_now_iso()),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return int(row["id"]) if row else None
+
+    def get_active_subscription(self, tenant_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.*, p.name AS plan_name, p.max_rules, p.max_workers, p.max_jobs_per_day, p.max_video_per_day, p.max_storage_mb, p.priority_level
+                    FROM subscriptions s
+                    JOIN plans p ON p.id = s.plan_id
+                    WHERE s.tenant_id = %s
+                      AND s.status IN ('active', 'trial')
+                    ORDER BY s.id DESC
+                    LIMIT 1
+                    """,
+                    (int(tenant_id),),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def expire_subscription(self, tenant_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE subscriptions
+                    SET status = 'expired'
+                    WHERE tenant_id = %s
+                      AND status IN ('active', 'trial')
+                    """,
+                    (int(tenant_id),),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def bump_usage(self, tenant_id: int, *, jobs_delta: int = 0, video_delta: int = 0, storage_delta_mb: int = 0, api_calls_delta: int = 0) -> None:
+        day = datetime.now(timezone.utc).date().isoformat()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO usage_stats(tenant_id, date, jobs_count, video_count, storage_used_mb, api_calls)
+                    VALUES(%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(tenant_id, date)
+                    DO UPDATE SET
+                        jobs_count = usage_stats.jobs_count + EXCLUDED.jobs_count,
+                        video_count = usage_stats.video_count + EXCLUDED.video_count,
+                        storage_used_mb = usage_stats.storage_used_mb + EXCLUDED.storage_used_mb,
+                        api_calls = usage_stats.api_calls + EXCLUDED.api_calls
+                    """,
+                    (int(tenant_id), day, int(jobs_delta), int(video_delta), int(storage_delta_mb), int(api_calls_delta)),
+                )
+            conn.commit()
+
+    def get_usage_for_date(self, tenant_id: int, day: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT tenant_id, date, jobs_count, video_count, storage_used_mb, api_calls
+                    FROM usage_stats
+                    WHERE tenant_id = %s
+                      AND date = %s
+                    LIMIT 1
+                    """,
+                    (int(tenant_id), day),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else {"tenant_id": int(tenant_id), "date": day, "jobs_count": 0, "video_count": 0, "storage_used_mb": 0, "api_calls": 0}
+
+    def reset_usage_for_day(self, day: str) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE usage_stats
+                    SET jobs_count = 0,
+                        video_count = 0
+                    WHERE date = %s
+                    """,
+                    (day,),
+                )
+                count = cur.rowcount or 0
+            conn.commit()
+            return int(count)
+
+    def count_rules_for_tenant(self, tenant_id: int) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM routing
+                    WHERE COALESCE(tenant_id, 1) = %s
+                    """,
+                    (int(tenant_id),),
+                )
+                row = cur.fetchone()
+        return int(row["cnt"] or 0) if row else 0
+
+    def get_rule_tenant_id(self, rule_id: int) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(tenant_id, 1) AS tenant_id
+                    FROM routing
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (int(rule_id),),
+                )
+                row = cur.fetchone()
+        return int(row["tenant_id"]) if row else 1
+
+    def get_saas_health_snapshot(self) -> dict[str, Any]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS cnt FROM tenants WHERE is_active = TRUE")
+                active = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute("SELECT COUNT(*) AS cnt FROM tenants WHERE is_active = FALSE")
+                blocked = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute(
+                    """
+                    SELECT COUNT(DISTINCT u.tenant_id) AS cnt
+                    FROM usage_stats u
+                    JOIN subscriptions s ON s.tenant_id = u.tenant_id
+                    JOIN plans p ON p.id = s.plan_id
+                    WHERE u.date = %s
+                      AND s.status IN ('active', 'trial')
+                      AND (u.jobs_count >= p.max_jobs_per_day OR u.video_count >= p.max_video_per_day)
+                    """,
+                    (datetime.now(timezone.utc).date().isoformat(),),
+                )
+                over = int((cur.fetchone() or {}).get("cnt") or 0)
+        return {"tenants_active": active, "tenants_blocked": blocked, "tenants_over_limits": over}
+
     def log_event(
         self,
         event_type: str,
@@ -4428,7 +4844,11 @@ class PostgresRepository(RepositoryProtocol):
         old_value: dict[str, Any] | None = None,
         new_value: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
+        tenant_id: int | None = None,
     ) -> None:
+        resolved_tenant_id = tenant_id
+        if resolved_tenant_id is None and rule_id is not None:
+            resolved_tenant_id = self.get_rule_tenant_id(int(rule_id))
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -4448,9 +4868,10 @@ class PostgresRepository(RepositoryProtocol):
                         error_text,
                         old_value_json,
                         new_value_json,
-                        extra_json
+                        extra_json,
+                        tenant_id
                     )
-                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         utc_now_iso(),
@@ -4468,6 +4889,7 @@ class PostgresRepository(RepositoryProtocol):
                         _json_dumps(old_value),
                         _json_dumps(new_value),
                         _json_dumps(extra),
+                        resolved_tenant_id,
                     ),
                 )
             conn.commit()

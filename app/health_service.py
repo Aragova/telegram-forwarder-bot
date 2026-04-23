@@ -47,6 +47,8 @@ def get_system_health(repo: RepositoryProtocol) -> dict[str, Any]:
     stuck_count = len(repo.get_stuck_processing_jobs(600)) if hasattr(repo, "get_stuck_processing_jobs") else 0
     load = build_worker_load_snapshot(repo, POLICY)
     throughput = get_worker_runtime_metrics_snapshot_sync()
+    saas = repo.get_saas_health_snapshot() if hasattr(repo, "get_saas_health_snapshot") else {}
+    usage_snapshot = repo.get_usage_for_date(1, datetime.now(timezone.utc).date().isoformat()) if hasattr(repo, "get_usage_for_date") else {}
 
     return {
         "roles": status,
@@ -80,4 +82,10 @@ def get_system_health(repo: RepositoryProtocol) -> dict[str, Any]:
         },
         "throughput": throughput,
         "video_stages": video_stage_counts,
+        "saas": {
+            "tenants_active": int(saas.get("tenants_active") or 0),
+            "tenants_blocked": int(saas.get("tenants_blocked") or 0),
+            "tenants_over_limits": int(saas.get("tenants_over_limits") or 0),
+            "usage_snapshot": usage_snapshot,
+        },
     }
