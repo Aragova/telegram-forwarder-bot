@@ -3414,6 +3414,8 @@ class PostgresRepository(RepositoryProtocol):
             logical_total = logical_summary["total"]
             logical_completed = logical_summary["completed"]
             logical_pending = logical_summary["pending"]
+            logical_processing = logical_summary["processing"]
+            logical_faulty = logical_summary["faulty"]
             logical_current_position = logical_summary["current_position"]
 
             snapshot = {
@@ -3446,19 +3448,23 @@ class PostgresRepository(RepositoryProtocol):
                 "sent": physical_sent,
                 "faulty": physical_faulty,
                 "logical_pending": logical_pending,
+                "logical_processing": logical_processing,
                 "logical_completed": logical_completed,
+                "logical_faulty": logical_faulty,
                 "logical_total": logical_total,
                 "logical_current_position": logical_current_position,
             }
 
             logger.info(
-                "get_rule_card_snapshot: rule_id=%s, mode=%s, raw_rows=%s, logical_total=%s, logical_pending=%s, logical_completed=%s, logical_current_position=%s",
+                "get_rule_card_snapshot: rule_id=%s, mode=%s, raw_rows=%s, logical_total=%s, logical_pending=%s, logical_processing=%s, logical_completed=%s, logical_faulty=%s, logical_current_position=%s",
                 rule_id,
                 mode,
                 len(rows),
                 logical_total,
                 logical_pending,
+                logical_processing,
                 logical_completed,
+                logical_faulty,
                 logical_current_position,
             )
 
@@ -3479,7 +3485,20 @@ class PostgresRepository(RepositoryProtocol):
         items = list(logical_items or [])
         total = len(items)
         completed = sum(1 for item in items if item.get("is_done"))
-        pending = sum(1 for item in items if int(item.get("pending_count") or 0) > 0)
+        processing = sum(
+            1
+            for item in items
+            if (not item.get("is_done")) and int(item.get("processing_count") or 0) > 0
+        )
+        faulty = sum(
+            1
+            for item in items
+            if (not item.get("is_done"))
+            and int(item.get("processing_count") or 0) <= 0
+            and int(item.get("pending_count") or 0) <= 0
+            and int(item.get("faulty_count") or 0) > 0
+        )
+        pending = max(total - completed - processing - faulty, 0)
 
         current_position = None
         for item in items:
@@ -3494,6 +3513,8 @@ class PostgresRepository(RepositoryProtocol):
             "total": total,
             "completed": completed,
             "pending": pending,
+            "processing": processing,
+            "faulty": faulty,
             "current_position": current_position,
         }
 

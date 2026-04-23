@@ -2493,62 +2493,145 @@ class SenderService:
         delivery_id: int,
         message_id: int,
         source_channel: str,
+        source_thread_id: int | None = None,
         target_id: str,
-        target_thread_id: int | None,
-        interval: int,
-        schedule_mode: str,
+        target_thread_id: int | None = None,
+        mode: str = "repost",
+        interval: int = 0,
+        schedule_mode: str = "interval",
+        media_group_id: str | None = None,
+        job_type: str | None = None,
     ) -> bool:
-        rule = await run_db(self.db.get_rule, int(rule_id))
-        if not rule:
-            raise RuntimeError(f"Правило #{rule_id} не найдено для repost_single")
-        ok = await self._deliver_single(
-            rule,
-            int(delivery_id),
-            int(message_id),
-            str(source_channel),
-            str(target_id),
-            target_thread_id,
+        normalized_schedule_mode = str(schedule_mode or "interval")
+        normalized_mode = str(mode or "repost")
+        logger.info(
+            "JOB EXECUTOR | repost_single | start | rule_id=%s | delivery_id=%s | message_id=%s | mode=%s | schedule_mode=%s",
+            rule_id,
+            delivery_id,
+            message_id,
+            normalized_mode,
+            normalized_schedule_mode,
         )
-        if ok or (schedule_mode or "interval") == "fixed":
-            await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
-        return bool(ok)
+        try:
+            rule = await run_db(self.db.get_rule, int(rule_id))
+            if not rule:
+                raise RuntimeError(f"Правило #{rule_id} не найдено для repost_single")
+            ok = await self._deliver_single(
+                rule,
+                int(delivery_id),
+                int(message_id),
+                str(source_channel),
+                str(target_id),
+                target_thread_id,
+            )
+            if ok or normalized_schedule_mode == "fixed":
+                await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
+            if ok:
+                logger.info(
+                    "JOB EXECUTOR | repost_single | success | rule_id=%s | delivery_id=%s",
+                    rule_id,
+                    delivery_id,
+                )
+            else:
+                logger.warning(
+                    "JOB EXECUTOR | repost_single | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат",
+                    rule_id,
+                    delivery_id,
+                )
+            return bool(ok)
+        except Exception as exc:
+            logger.warning(
+                "JOB EXECUTOR | repost_single | failed | rule_id=%s | delivery_id=%s | error=%s",
+                rule_id,
+                delivery_id,
+                exc,
+            )
+            logger.exception(
+                "JOB EXECUTOR | repost_single | ошибка выполнения rule_id=%s delivery_id=%s",
+                rule_id,
+                delivery_id,
+            )
+            raise
 
     async def execute_repost_album_from_job(
         self,
         *,
         rule_id: int,
+        delivery_id: int | None = None,
+        message_id: int | None = None,
         source_channel: str,
         source_thread_id: int | None,
-        media_group_id: str,
+        media_group_id: str | None = None,
         target_id: str,
         target_thread_id: int | None,
-        interval: int,
-        schedule_mode: str,
+        mode: str = "repost",
+        interval: int = 0,
+        schedule_mode: str = "interval",
+        job_type: str | None = None,
+        delivery_ids: list[int] | None = None,
     ) -> bool:
-        rule = await run_db(self.db.get_rule, int(rule_id))
-        if not rule:
-            raise RuntimeError(f"Правило #{rule_id} не найдено для repost_album")
-
-        album_rows = await run_db(
-            self.db.get_processing_album_for_rule,
-            int(rule_id),
-            str(source_channel),
-            source_thread_id,
-            str(media_group_id),
+        normalized_schedule_mode = str(schedule_mode or "interval")
+        normalized_mode = str(mode or "repost")
+        logger.info(
+            "JOB EXECUTOR | repost_album | start | rule_id=%s | delivery_id=%s | message_id=%s | mode=%s | schedule_mode=%s",
+            rule_id,
+            delivery_id,
+            message_id,
+            normalized_mode,
+            normalized_schedule_mode,
         )
-        if not album_rows:
-            raise RuntimeError(f"Не найден processing-альбом media_group_id={media_group_id}")
+        try:
+            rule = await run_db(self.db.get_rule, int(rule_id))
+            if not rule:
+                raise RuntimeError(f"Правило #{rule_id} не найдено для repost_album")
+            if not media_group_id:
+                raise RuntimeError("Не указан media_group_id для repost_album")
 
-        ok = await self._deliver_album(
-            rule,
-            album_rows,
-            str(source_channel),
-            str(target_id),
-            target_thread_id,
-        )
-        if ok or (schedule_mode or "interval") == "fixed":
-            await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
-        return bool(ok)
+            album_rows = await run_db(
+                self.db.get_processing_album_for_rule,
+                int(rule_id),
+                str(source_channel),
+                source_thread_id,
+                str(media_group_id),
+            )
+            if not album_rows:
+                raise RuntimeError(f"Не найден processing-альбом media_group_id={media_group_id}")
+
+            ok = await self._deliver_album(
+                rule,
+                album_rows,
+                str(source_channel),
+                str(target_id),
+                target_thread_id,
+            )
+            if ok or normalized_schedule_mode == "fixed":
+                await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
+            if ok:
+                logger.info(
+                    "JOB EXECUTOR | repost_album | success | rule_id=%s | delivery_id=%s",
+                    rule_id,
+                    delivery_id,
+                )
+            else:
+                logger.warning(
+                    "JOB EXECUTOR | repost_album | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат",
+                    rule_id,
+                    delivery_id,
+                )
+            return bool(ok)
+        except Exception as exc:
+            logger.warning(
+                "JOB EXECUTOR | repost_album | failed | rule_id=%s | delivery_id=%s | error=%s",
+                rule_id,
+                delivery_id,
+                exc,
+            )
+            logger.exception(
+                "JOB EXECUTOR | repost_album | ошибка выполнения rule_id=%s delivery_id=%s",
+                rule_id,
+                delivery_id,
+            )
+            raise
 
     async def execute_video_delivery_from_job(
         self,
@@ -2557,25 +2640,65 @@ class SenderService:
         delivery_id: int,
         message_id: int,
         source_channel: str,
+        source_thread_id: int | None = None,
         target_id: str,
-        target_thread_id: int | None,
-        interval: int,
-        schedule_mode: str,
+        target_thread_id: int | None = None,
+        mode: str = "video",
+        interval: int = 0,
+        schedule_mode: str = "interval",
+        media_group_id: str | None = None,
+        job_type: str | None = None,
     ) -> bool:
-        rule = await run_db(self.db.get_rule, int(rule_id))
-        if not rule:
-            raise RuntimeError(f"Правило #{rule_id} не найдено для video_delivery")
-        ok = await self._deliver_single_video(
-            rule,
-            int(delivery_id),
-            int(message_id),
-            str(source_channel),
-            str(target_id),
-            target_thread_id,
+        normalized_schedule_mode = str(schedule_mode or "interval")
+        normalized_mode = str(mode or "video")
+        logger.info(
+            "JOB EXECUTOR | video_delivery | start | rule_id=%s | delivery_id=%s | message_id=%s | mode=%s | schedule_mode=%s",
+            rule_id,
+            delivery_id,
+            message_id,
+            normalized_mode,
+            normalized_schedule_mode,
         )
-        if ok or (schedule_mode or "interval") == "fixed":
-            await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
-        return bool(ok)
+        try:
+            rule = await run_db(self.db.get_rule, int(rule_id))
+            if not rule:
+                raise RuntimeError(f"Правило #{rule_id} не найдено для video_delivery")
+            ok = await self._deliver_single_video(
+                rule,
+                int(delivery_id),
+                int(message_id),
+                str(source_channel),
+                str(target_id),
+                target_thread_id,
+            )
+            if ok or normalized_schedule_mode == "fixed":
+                await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
+            if ok:
+                logger.info(
+                    "JOB EXECUTOR | video_delivery | success | rule_id=%s | delivery_id=%s",
+                    rule_id,
+                    delivery_id,
+                )
+            else:
+                logger.warning(
+                    "JOB EXECUTOR | video_delivery | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат",
+                    rule_id,
+                    delivery_id,
+                )
+            return bool(ok)
+        except Exception as exc:
+            logger.warning(
+                "JOB EXECUTOR | video_delivery | failed | rule_id=%s | delivery_id=%s | error=%s",
+                rule_id,
+                delivery_id,
+                exc,
+            )
+            logger.exception(
+                "JOB EXECUTOR | video_delivery | ошибка выполнения rule_id=%s delivery_id=%s",
+                rule_id,
+                delivery_id,
+            )
+            raise
 
     async def _deliver_single(self, rule, delivery_id, message_id, source_channel, target_id, target_thread_id):
         post_id = await run_db(self._get_post_id_by_delivery_sync, delivery_id)
