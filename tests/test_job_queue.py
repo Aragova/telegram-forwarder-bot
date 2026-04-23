@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.job_service import (
+    JOB_PRIORITY_BY_TYPE,
     JOB_QUEUE_BY_TYPE,
     JOB_TYPE_REPOST_ALBUM,
     JOB_TYPE_REPOST_SINGLE,
@@ -62,9 +63,17 @@ class _FakeRepo:
             return rule
         return None
 
-    def create_job(self, job_type: str, payload: dict, queue: str, priority: int = 100, run_at: str | None = None):
+    def create_job(
+        self,
+        job_type: str,
+        payload: dict,
+        queue: str,
+        priority: int = 100,
+        run_at: str | None = None,
+        dedup_key: str | None = None,
+    ):
         for job in self.jobs.values():
-            if job["job_type"] == job_type and job["payload_json"].get("delivery_id") == payload.get("delivery_id") and job["status"] in {"pending", "retry", "leased", "processing"}:
+            if dedup_key and job.get("dedup_key") == dedup_key and job["status"] in {"pending", "retry", "leased", "processing"}:
                 return job["id"]
 
         job_id = self.next_id
@@ -76,6 +85,7 @@ class _FakeRepo:
             "queue": queue,
             "priority": priority,
             "status": "pending",
+            "dedup_key": dedup_key,
             "attempts": 0,
             "max_attempts": 3,
             "locked_by": None,
@@ -178,6 +188,7 @@ def test_job_type_to_queue_mapping() -> None:
     assert JOB_QUEUE_BY_TYPE[JOB_TYPE_REPOST_SINGLE] == "light"
     assert JOB_QUEUE_BY_TYPE[JOB_TYPE_REPOST_ALBUM] == "light"
     assert JOB_QUEUE_BY_TYPE[JOB_TYPE_VIDEO_DELIVERY] == "heavy"
+    assert JOB_PRIORITY_BY_TYPE[JOB_TYPE_REPOST_ALBUM] == 90
 
 
 def test_atomic_lease_baseline_no_double_take() -> None:

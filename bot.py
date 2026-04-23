@@ -58,7 +58,8 @@ from app.runtime_roles import normalize_runtime_role, run_role as run_runtime_ro
 from app.health_service import get_system_health, update_heartbeat
 from app.runtime_context import RuntimeContext
 from app.worker_runtime import run_heavy_worker, run_light_worker
-from app.job_service import enqueue_repost_album, enqueue_repost_single, enqueue_video_delivery
+from app.scheduler_runtime import run_scheduler_loop
+from app.job_watchdog import run_watchdog_loop
 
 settings.validate()
 logger = setup_logging(settings.log_level)
@@ -74,6 +75,8 @@ runtime_context: RuntimeContext | None = None
 posting_active = False
 posting_tasks: dict[int, asyncio.Task] = {}
 job_worker_tasks: list[asyncio.Task] = []
+scheduler_runtime_task: asyncio.Task | None = None
+job_watchdog_task: asyncio.Task | None = None
 workers_runtime_enabled = True
 GLOBAL_RULE_PROCESS_SEMAPHORE = asyncio.Semaphore(1)
 user_states: dict[int, dict[str, Any]] = {}
@@ -1404,58 +1407,8 @@ def sources_inline_keyboard(sources: list[ChannelChoice]) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def ensure_rule_workers() -> None:
-    if not workers_runtime_enabled:
-        if posting_tasks:
-            await stop_all_workers()
-        return
-
-    if not posting_active:
-        if posting_tasks:
-            logger.info(
-                "WORKER_MANAGER | SKIP_START | posting_active=%s -> stop running workers",
-                posting_active,
-            )
-            await stop_all_workers()
-        return
-
-    rules = await run_db(db.get_all_rules)
-
-    current_rules = {r.id: r for r in rules}
-    current_rule_ids = set(current_rules.keys())
-    running_rule_ids = set(posting_tasks.keys())
-
-    for rule_id in sorted(running_rule_ids - current_rule_ids):
-        task = posting_tasks.pop(rule_id, None)
-        if task:
-            logger.info("WORKER_MANAGER | CANCEL_REMOVED | rule_id=%s", rule_id)
-            task.cancel()
-
-    for rule_id in sorted(current_rule_ids):
-        task = posting_tasks.get(rule_id)
-
-        if task and not task.done():
-            continue
-
-        if task and task.done():
-            try:
-                exc = task.exception()
-            except asyncio.CancelledError:
-                exc = None
-
-            if exc:
-                logger.warning(
-                    "WORKER_MANAGER | RESTART_DONE_WITH_ERROR | rule_id=%s | error=%s",
-                    rule_id,
-                    exc,
-                )
-            else:
-                logger.info(
-                    "WORKER_MANAGER | RESTART_DONE_TASK | rule_id=%s",
-                    rule_id,
-                )
-
-        logger.info("WORKER_MANAGER | START | rule_id=%s", rule_id)
-        posting_tasks[rule_id] = asyncio.create_task(rule_worker(rule_id))
+    if posting_tasks:
+        await stop_all_workers()
 
 async def stop_all_workers() -> None:
     if not posting_tasks:
@@ -7260,7 +7213,7 @@ async def _shutdown_runtime(
     close_telegram_clients: bool,
     close_bot_session: bool,
 ) -> None:
-    global telethon_client, reaction_clients, sender_service, bot, runtime_context
+    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task
 
     if stop_workers_runtime:
         await stop_job_workers_runtime()
@@ -7270,6 +7223,16 @@ async def _shutdown_runtime(
         for task in dashboard_tasks.values():
             task.cancel()
         dashboard_tasks.clear()
+
+    if scheduler_runtime_task and not scheduler_runtime_task.done():
+        scheduler_runtime_task.cancel()
+        await asyncio.gather(scheduler_runtime_task, return_exceptions=True)
+    scheduler_runtime_task = None
+
+    if job_watchdog_task and not job_watchdog_task.done():
+        job_watchdog_task.cancel()
+        await asyncio.gather(job_watchdog_task, return_exceptions=True)
+    job_watchdog_task = None
 
     if close_telegram_clients and telethon_client:
         try:
@@ -7310,12 +7273,9 @@ async def _run_scheduler_role_loop() -> None:
 
 async def _run_worker_role_loop() -> None:
     global posting_active
-    posting_active = True
     await start_job_workers_runtime()
-    await ensure_rule_workers()
     logger.info("🚀 Режим worker запущен")
     while True:
-        await ensure_rule_workers()
         await asyncio.sleep(10)
 
 
@@ -7341,7 +7301,16 @@ async def _start_scheduler_role() -> None:
     posting_active = False
     await _init_db_runtime()
     asyncio.create_task(heartbeat_loop("scheduler", db))
-    await _run_scheduler_role_loop()
+    watchdog_task = asyncio.create_task(run_watchdog_loop(db, interval_seconds=10.0))
+    try:
+        await run_scheduler_loop(
+            db,
+            interval_seconds=1.0,
+            is_enabled=lambda: True,
+        )
+    finally:
+        watchdog_task.cancel()
+        await asyncio.gather(watchdog_task, return_exceptions=True)
 
 
 async def _start_worker_role() -> None:
@@ -7354,7 +7323,7 @@ async def _start_worker_role() -> None:
 
 
 async def _start_all_role() -> None:
-    global workers_runtime_enabled, posting_active
+    global workers_runtime_enabled, posting_active, scheduler_runtime_task, job_watchdog_task
     workers_runtime_enabled = True
     posting_active = False
     await _init_db_runtime()
@@ -7363,8 +7332,17 @@ async def _start_all_role() -> None:
     asyncio.create_task(heartbeat_loop("scheduler", db))
     asyncio.create_task(heartbeat_loop("worker", db))
     asyncio.create_task(watchdog_loop(db))
+    if scheduler_runtime_task is None or scheduler_runtime_task.done():
+        scheduler_runtime_task = asyncio.create_task(
+            run_scheduler_loop(
+                db,
+                interval_seconds=1.0,
+                is_enabled=lambda: posting_active,
+            )
+        )
+    if job_watchdog_task is None or job_watchdog_task.done():
+        job_watchdog_task = asyncio.create_task(run_watchdog_loop(db, interval_seconds=10.0))
     await start_job_workers_runtime()
-    await ensure_rule_workers()
     logger.info("🚀 Бот запущен")
     await dp.start_polling(
         bot,

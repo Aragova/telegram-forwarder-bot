@@ -308,6 +308,7 @@ class PostgresRepository(RepositoryProtocol):
             id BIGSERIAL PRIMARY KEY,
             job_type TEXT NOT NULL,
             payload_json JSONB NOT NULL,
+            dedup_key TEXT NULL,
             status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','leased','processing','done','retry','failed')),
             priority INT NOT NULL DEFAULT 100,
             queue TEXT NOT NULL DEFAULT 'default',
@@ -358,6 +359,7 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS fixed_times_json TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_horizontal_id BIGINT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_vertical_id BIGINT NULL;
+        ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dedup_key TEXT NULL;
         """
 
         self.client.execute_script(init_sql)
@@ -484,6 +486,14 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     CREATE INDEX IF NOT EXISTS idx_jobs_queue_status_run_at
                     ON jobs(queue, status, run_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_dedup_key_unique
+                    ON jobs(dedup_key)
+                    WHERE dedup_key IS NOT NULL
+                      AND status IN ('pending', 'leased', 'processing', 'retry')
                     """
                 )
             conn.commit()
@@ -2915,31 +2925,25 @@ class PostgresRepository(RepositoryProtocol):
         queue: str,
         priority: int = 100,
         run_at: str | None = None,
+        dedup_key: str | None = None,
     ) -> int | None:
         queue_name = (queue or "default").strip().lower()
         if queue_name not in {"light", "heavy"}:
             queue_name = "default"
 
-        dedup_probe: dict[str, Any] = {}
-        if "delivery_id" in payload:
-            dedup_probe["delivery_id"] = payload["delivery_id"]
-        elif "delivery_ids" in payload:
-            dedup_probe["delivery_ids"] = payload["delivery_ids"]
-
         with self.connect() as conn:
             with conn.cursor() as cur:
-                if dedup_probe:
+                if dedup_key:
                     cur.execute(
                         """
                         SELECT id
                         FROM jobs
-                        WHERE job_type = %s
+                        WHERE dedup_key = %s
                           AND status IN ('pending', 'leased', 'processing', 'retry')
-                          AND payload_json @> %s::jsonb
                         ORDER BY id DESC
                         LIMIT 1
                         """,
-                        (job_type, _json_dumps(dedup_probe)),
+                        (dedup_key,),
                     )
                     existing = cur.fetchone()
                     if existing:
@@ -2948,15 +2952,37 @@ class PostgresRepository(RepositoryProtocol):
 
                 cur.execute(
                     """
-                    INSERT INTO jobs(job_type, payload_json, status, priority, queue, run_at, created_at, updated_at)
-                    VALUES(%s, %s::jsonb, 'pending', %s, %s, COALESCE(%s::timestamptz, NOW()), NOW(), NOW())
+                    INSERT INTO jobs(job_type, payload_json, dedup_key, status, priority, queue, run_at, created_at, updated_at)
+                    VALUES(%s, %s::jsonb, %s, 'pending', %s, %s, COALESCE(%s::timestamptz, NOW()), NOW(), NOW())
                     RETURNING id
                     """,
-                    (job_type, _json_dumps(payload) or "{}", int(priority), queue_name, run_at),
+                    (job_type, _json_dumps(payload) or "{}", dedup_key, int(priority), queue_name, run_at),
                 )
                 row = cur.fetchone()
             conn.commit()
             return int(row["id"]) if row else None
+
+    def get_active_job_by_dedup_key(self, dedup_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE dedup_key = %s
+                      AND status IN ('pending', 'leased', 'processing', 'retry')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (dedup_key,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            if not row:
+                return None
+            item = dict(row)
+            item["payload_json"] = _safe_json_loads(item.get("payload_json"), {})
+            return item
 
     def lease_jobs(self, queue: str, worker_id: str, limit: int = 1, lease_seconds: int = 30) -> list[dict]:
         queue_name = (queue or "").strip().lower()
@@ -2971,7 +2997,7 @@ class PostgresRepository(RepositoryProtocol):
                           AND status IN ('pending', 'retry')
                           AND run_at <= NOW()
                           AND (lease_until IS NULL OR lease_until < NOW())
-                        ORDER BY priority ASC, run_at ASC, id ASC
+                        ORDER BY priority ASC, run_at ASC, created_at ASC
                         FOR UPDATE SKIP LOCKED
                         LIMIT %s
                     )
@@ -3087,6 +3113,86 @@ class PostgresRepository(RepositoryProtocol):
             item = dict(row)
             item["payload_json"] = _safe_json_loads(item.get("payload_json"), {})
             return item
+
+    def get_job_status_counts(self) -> dict[str, int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT status, COUNT(*) AS cnt
+                    FROM jobs
+                    GROUP BY status
+                    """
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+
+        counts = {status: 0 for status in ("pending", "leased", "processing", "retry", "failed", "done")}
+        for row in rows:
+            status = str(row.get("status") or "")
+            if status in counts:
+                counts[status] = int(row.get("cnt") or 0)
+        return counts
+
+    def get_expired_leased_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE status = 'leased'
+                      AND lease_until IS NOT NULL
+                      AND lease_until < NOW()
+                    ORDER BY lease_until ASC
+                    LIMIT %s
+                    """,
+                    (max(1, int(limit)),),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return [dict(r) for r in rows]
+
+    def requeue_expired_leases(self, delay_seconds: int = 15) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'retry',
+                        attempts = attempts + 1,
+                        run_at = NOW() + make_interval(secs => %s),
+                        locked_by = NULL,
+                        lease_until = NULL,
+                        error_text = 'Истёк lease задачи, задача возвращена в очередь',
+                        updated_at = NOW()
+                    WHERE status = 'leased'
+                      AND lease_until IS NOT NULL
+                      AND lease_until < NOW()
+                    """,
+                    (max(1, int(delay_seconds)),),
+                )
+                count = cur.rowcount or 0
+            conn.commit()
+        return int(count)
+
+    def get_stuck_processing_jobs(self, stuck_seconds: int = 600, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE status = 'processing'
+                      AND updated_at < NOW() - make_interval(secs => %s)
+                    ORDER BY updated_at ASC
+                    LIMIT %s
+                    """,
+                    (max(1, int(stuck_seconds)), max(1, int(limit))),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return [dict(r) for r in rows]
 
     def get_delivery(self, delivery_id: int):
         with self.connect() as conn:
