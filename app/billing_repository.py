@@ -215,3 +215,100 @@ class BillingRepository(RepositorySplitBase):
                 )
                 row = cur.fetchone()
         return int((row or {}).get("cnt") or 0)
+
+    def get_invoice_for_period(self, tenant_id: int, period_start: str, period_end: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM invoices
+                    WHERE tenant_id = %s
+                      AND period_start = %s
+                      AND period_end = %s
+                      AND status != 'void'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (int(tenant_id), str(period_start), str(period_end)),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def list_invoice_items(self, invoice_id: int) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM invoice_items
+                    WHERE invoice_id = %s
+                    ORDER BY id ASC
+                    """,
+                    (int(invoice_id),),
+                )
+                rows = cur.fetchall() or []
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["metadata_json"] = self.safe_json_loads(item.get("metadata_json"), {})
+            result.append(item)
+        return result
+
+    def count_invoices_by_status(self, status: str) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS cnt FROM invoices WHERE status = %s", (str(status),))
+                row = cur.fetchone()
+        return int((row or {}).get("cnt") or 0)
+
+    def get_billing_periods_due(self, now_iso: str) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM subscriptions
+                    WHERE status IN ('active', 'trial', 'grace')
+                      AND current_period_end IS NOT NULL
+                      AND current_period_end <= %s
+                    """,
+                    (str(now_iso),),
+                )
+                row = cur.fetchone()
+        return int((row or {}).get("cnt") or 0)
+
+    def count_tenants_with_overage_current_period(self) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH usage_period AS (
+                        SELECT
+                            s.tenant_id,
+                            COALESCE(SUM(u.jobs_count), 0) AS jobs_count,
+                            COALESCE(SUM(u.video_count), 0) AS video_count,
+                            COALESCE(MAX(u.storage_used_mb), 0) AS storage_used_mb,
+                            p.max_jobs_per_day,
+                            p.max_video_per_day,
+                            p.max_storage_mb
+                        FROM subscriptions s
+                        JOIN plans p ON p.id = s.plan_id
+                        LEFT JOIN usage_stats u
+                          ON u.tenant_id = s.tenant_id
+                         AND s.current_period_start IS NOT NULL
+                         AND s.current_period_end IS NOT NULL
+                         AND u.date >= s.current_period_start
+                         AND u.date <= s.current_period_end
+                        WHERE s.status IN ('active', 'trial', 'grace')
+                        GROUP BY s.tenant_id, p.max_jobs_per_day, p.max_video_per_day, p.max_storage_mb
+                    )
+                    SELECT COUNT(*) AS cnt
+                    FROM usage_period
+                    WHERE (max_jobs_per_day > 0 AND jobs_count > max_jobs_per_day)
+                       OR (max_video_per_day > 0 AND video_count > max_video_per_day)
+                       OR (max_storage_mb > 0 AND storage_used_mb > max_storage_mb)
+                    """
+                )
+                row = cur.fetchone()
+        return int((row or {}).get("cnt") or 0)

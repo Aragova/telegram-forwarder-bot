@@ -17,13 +17,13 @@ class _SpyRepo:
             self.calls.append((name, kwargs))
             if name == "get_rule_tenant_id":
                 return 1
-            if name.startswith("get_"):
+            if name.startswith("get_") or name.startswith("list_") or name.startswith("build_"):
                 return {"ok": True, "method": name}
             if name.startswith("count_"):
                 return 1
             if name.startswith("reset_"):
                 return 1
-            if name.startswith("set_") or name.startswith("expire_") or name.startswith("replace_") or name.startswith("recalculate_"):
+            if name.startswith("set_") or name.startswith("expire_") or name.startswith("replace_") or name.startswith("recalculate_") or name.startswith("update_"):
                 return True
             if name == "create_tenant":
                 return 10
@@ -64,6 +64,7 @@ def test_subscription_facade_compatibility(monkeypatch):
     assert repo.assign_subscription(1, 2) == 11
     assert repo.get_active_subscription(1)["method"] == "get_active_subscription"
     assert repo.get_latest_subscription(1)["method"] == "get_latest_subscription"
+    assert repo.get_subscription_by_id(1)["method"] == "get_subscription_by_id"
     assert repo.expire_subscription(1) is True
     assert repo.set_subscription_status(1, "active") is True
     assert repo.set_subscription_grace_window(1, "a", "b") is True
@@ -80,6 +81,8 @@ def test_subscription_facade_compatibility(monkeypatch):
         effective_from="2026-01-01",
     ) == 11
     assert repo.get_subscription_history(1)["method"] == "get_subscription_history"
+    assert repo.get_subscriptions_due_for_billing("2026-01-31T00:00:00+00:00")["method"] == "get_subscriptions_due_for_billing"
+    assert repo.update_billing_period(1, "2026-01-01", "2026-01-31") is True
 
 
 def test_billing_and_usage_facade_compatibility(monkeypatch):
@@ -106,9 +109,15 @@ def test_billing_and_usage_facade_compatibility(monkeypatch):
     assert repo.get_invoice(1)["method"] == "get_invoice"
     assert repo.get_last_invoice(1)["method"] == "get_last_invoice"
     assert repo.count_open_invoices(1) == 1
+    assert repo.get_invoice_for_period(1, "2026-01-01", "2026-01-31")["method"] == "get_invoice_for_period"
+    assert repo.list_invoice_items(1)["method"] == "list_invoice_items"
+    assert repo.count_invoices_by_status("draft") == 1
+    assert repo.get_billing_periods_due("2026-01-31T00:00:00+00:00")["method"] == "get_billing_periods_due"
+    assert repo.count_tenants_with_overage_current_period() == 1
     repo.bump_usage(1, jobs_delta=2)
     assert repo.get_usage_for_date(1, "2026-01-01")["method"] == "get_usage_for_date"
     assert repo.get_usage_for_period(1, "2026-01-01", "2026-01-31")["method"] == "get_usage_for_period"
+    assert repo.build_billing_usage_data(1, "2026-01-01", "2026-01-31")["method"] == "build_billing_usage_data"
     assert repo.reset_usage_for_day("2026-01-01") == 1
     assert repo.count_rules_for_tenant(1) == 1
     assert repo.get_rule_tenant_id(1) == 1

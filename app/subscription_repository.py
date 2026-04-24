@@ -7,6 +7,22 @@ from app.repository_split_base import RepositorySplitBase
 
 
 class SubscriptionRepository(RepositorySplitBase):
+    def get_subscription_by_id(self, subscription_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.*, p.name AS plan_name, p.max_rules, p.max_workers, p.max_jobs_per_day, p.max_video_per_day, p.max_storage_mb, p.priority_level, p.price
+                    FROM subscriptions s
+                    JOIN plans p ON p.id = s.plan_id
+                    WHERE s.id = %s
+                    LIMIT 1
+                    """,
+                    (int(subscription_id),),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
     def ensure_default_plans(self) -> None:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -252,3 +268,39 @@ class SubscriptionRepository(RepositorySplitBase):
                 )
                 rows = cur.fetchall() or []
         return [dict(r) for r in rows]
+
+    def get_subscriptions_due_for_billing(self, due_before: str, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.*, p.name AS plan_name, p.max_jobs_per_day, p.max_video_per_day, p.max_storage_mb, p.price
+                    FROM subscriptions s
+                    JOIN plans p ON p.id = s.plan_id
+                    WHERE s.status IN ('active', 'trial', 'grace')
+                      AND s.current_period_end IS NOT NULL
+                      AND s.current_period_end <= %s
+                    ORDER BY s.current_period_end ASC, s.id ASC
+                    LIMIT %s
+                    """,
+                    (str(due_before), int(limit)),
+                )
+                rows = cur.fetchall() or []
+        return [dict(row) for row in rows]
+
+    def update_billing_period(self, subscription_id: int, period_start: str, period_end: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE subscriptions
+                    SET current_period_start = %s,
+                        current_period_end = %s,
+                        updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (str(period_start), str(period_end), utc_now_iso(), int(subscription_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated

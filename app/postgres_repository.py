@@ -4673,6 +4673,9 @@ class PostgresRepository(RepositoryProtocol):
     def get_latest_subscription(self, tenant_id: int) -> dict[str, Any] | None:
         return self.subscription_repo.get_latest_subscription(tenant_id=tenant_id)
 
+    def get_subscription_by_id(self, subscription_id: int) -> dict[str, Any] | None:
+        return self.subscription_repo.get_subscription_by_id(subscription_id=subscription_id)
+
     def expire_subscription(self, tenant_id: int) -> bool:
         return self.subscription_repo.expire_subscription(tenant_id=tenant_id)
 
@@ -4707,6 +4710,9 @@ class PostgresRepository(RepositoryProtocol):
     def get_usage_for_period(self, tenant_id: int, date_from: str, date_to: str) -> dict[str, Any]:
         return self.usage_repo.get_usage_for_period(tenant_id=tenant_id, date_from=date_from, date_to=date_to)
 
+    def build_billing_usage_data(self, tenant_id: int, period_start: str, period_end: str) -> dict[str, Any]:
+        return self.usage_repo.build_billing_usage_data(tenant_id=tenant_id, period_start=period_start, period_end=period_end)
+
     def reset_usage_for_day(self, day: str) -> int:
         return self.usage_repo.reset_usage_for_day(day=day)
 
@@ -4737,6 +4743,16 @@ class PostgresRepository(RepositoryProtocol):
 
     def get_subscription_history(self, tenant_id: int, limit: int = 20) -> list[dict[str, Any]]:
         return self.subscription_repo.get_subscription_history(tenant_id=tenant_id, limit=limit)
+
+    def get_subscriptions_due_for_billing(self, due_before: str, limit: int = 100) -> list[dict[str, Any]]:
+        return self.subscription_repo.get_subscriptions_due_for_billing(due_before=due_before, limit=limit)
+
+    def update_billing_period(self, subscription_id: int, period_start: str, period_end: str) -> bool:
+        return self.subscription_repo.update_billing_period(
+            subscription_id=subscription_id,
+            period_start=period_start,
+            period_end=period_end,
+        )
 
     def create_billing_event(
         self,
@@ -4830,6 +4846,25 @@ class PostgresRepository(RepositoryProtocol):
 
     def count_open_invoices(self, tenant_id: int) -> int:
         return self.billing_repo.count_open_invoices(tenant_id=tenant_id)
+
+    def get_invoice_for_period(self, tenant_id: int, period_start: str, period_end: str) -> dict[str, Any] | None:
+        return self.billing_repo.get_invoice_for_period(
+            tenant_id=tenant_id,
+            period_start=period_start,
+            period_end=period_end,
+        )
+
+    def list_invoice_items(self, invoice_id: int) -> list[dict[str, Any]]:
+        return self.billing_repo.list_invoice_items(invoice_id=invoice_id)
+
+    def count_invoices_by_status(self, status: str) -> int:
+        return self.billing_repo.count_invoices_by_status(status=status)
+
+    def get_billing_periods_due(self, now_iso: str) -> int:
+        return self.billing_repo.get_billing_periods_due(now_iso=now_iso)
+
+    def count_tenants_with_overage_current_period(self) -> int:
+        return self.billing_repo.count_tenants_with_overage_current_period()
 
     def count_rules_for_tenant(self, tenant_id: int) -> int:
         return self.usage_repo.count_rules_for_tenant(tenant_id=tenant_id)
