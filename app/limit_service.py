@@ -17,8 +17,14 @@ class LimitService:
             return {}
         return dict(sub)
 
+    @staticmethod
+    def _is_unlimited_plan(limits: dict) -> bool:
+        return str(limits.get("plan_name") or "").strip().upper() == "OWNER"
+
     def can_create_rule(self, tenant_id: int) -> tuple[bool, str | None]:
         limits = self._get_plan_limits(tenant_id)
+        if self._is_unlimited_plan(limits):
+            return True, None
         max_rules = int(limits.get("max_rules") or 0)
         if max_rules <= 0:
             return True, None
@@ -30,9 +36,11 @@ class LimitService:
         return True, None
 
     def can_enqueue_job(self, tenant_id: int) -> tuple[bool, str | None]:
+        limits = self._get_plan_limits(tenant_id)
+        if self._is_unlimited_plan(limits):
+            return True, None
         if not self._subscription_service.is_subscription_active(int(tenant_id)):
             return False, "Подписка неактивна"
-        limits = self._get_plan_limits(tenant_id)
         max_jobs = int(limits.get("max_jobs_per_day") or 0)
         if max_jobs <= 0:
             return True, None
@@ -43,9 +51,11 @@ class LimitService:
         return True, None
 
     def can_process_video(self, tenant_id: int) -> tuple[bool, str | None]:
+        limits = self._get_plan_limits(tenant_id)
+        if self._is_unlimited_plan(limits):
+            return True, None
         if not self._subscription_service.is_subscription_active(int(tenant_id)):
             return False, "Подписка неактивна"
-        limits = self._get_plan_limits(tenant_id)
         max_video = int(limits.get("max_video_per_day") or 0)
         if max_video <= 0:
             return True, None

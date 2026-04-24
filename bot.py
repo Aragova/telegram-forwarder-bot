@@ -67,6 +67,7 @@ from app.usage_service import UsageService
 from app.limit_service import LimitService
 from app.invoice_service import InvoiceService
 from app.billing_service import BillingService
+from app.saas_bootstrap import ensure_owner_and_default_tenant_bootstrap
 
 logger = setup_logging(settings.log_level)
 
@@ -7200,6 +7201,7 @@ async def handle_channel_post(message: Message):
 
 async def _init_db_runtime() -> None:
     await run_db(db.init)
+    await run_db(ensure_owner_and_default_tenant_bootstrap, db, settings.admin_id)
     ok, msg = await run_db(db.integrity_check)
     if not ok:
         raise RuntimeError(f"PostgreSQL недоступен: {msg}")

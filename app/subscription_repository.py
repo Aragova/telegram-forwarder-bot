@@ -14,6 +14,7 @@ class SubscriptionRepository(RepositorySplitBase):
                     ("FREE", 3, 1, 100, 10, 512, 1, "0.00"),
                     ("BASIC", 15, 2, 1000, 100, 5120, 2, "19.99"),
                     ("PRO", 100, 4, 10000, 1000, 51200, 3, "99.99"),
+                    ("OWNER", 0, 32, 0, 0, 0, 10, "0.00"),
                 ]:
                     cur.execute(
                         """
