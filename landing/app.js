@@ -48,7 +48,7 @@ const CONTENT = {
     pickPlan: "Выбрать в боте",
     paymentsTitle: "Способы оплаты",
     payments: ["Telegram", "PayPal", "Карты", "Крипта", "СБП", "Tribute / Lava"],
-    manualNote: "⚠️ Некоторые методы работают вручную",
+    manualNote: "Некоторые способы оплаты работают автоматически, некоторые — через ручное подтверждение.",
     finalTitle: "Готовы автоматизировать ваши каналы?",
     finalSubtitle: "Откройте ViMi в Telegram и начните уже сегодня.",
     footerDesc: "ViMi — premium Telegram SaaS для роста и автоматизации каналов.",
@@ -101,7 +101,7 @@ const CONTENT = {
     pickPlan: "Choose in bot",
     paymentsTitle: "Payment methods",
     payments: ["Telegram", "PayPal", "Cards", "Crypto", "SBP", "Tribute / Lava"],
-    manualNote: "⚠️ Some methods require manual processing",
+    manualNote: "Some payment methods work automatically, while others may require manual confirmation.",
     finalTitle: "Ready to automate your channels?",
     finalSubtitle: "Open ViMi in Telegram and launch today.",
     footerDesc: "ViMi is a premium Telegram SaaS for channel growth and automation.",
@@ -190,7 +190,7 @@ function fillFaq(lang) {
 }
 
 function applyLinks(lang) {
-  ["header-open-bot", "hero-open-bot", "footer-open-bot"].forEach((id) => {
+  ["header-open-bot", "cta-open-bot", "footer-open-bot"].forEach((id) => {
     const link = document.getElementById(id);
     if (link) {
       link.href = SITE_CONFIG.botUrl;
@@ -206,6 +206,8 @@ function applyLinks(lang) {
   document.getElementById("link-terms").href = `${lang}/terms.html`;
   document.getElementById("link-privacy").href = `${lang}/privacy.html`;
   document.getElementById("link-refund").href = `${lang}/refund.html`;
+  document.getElementById("link-contacts").href = `${lang}/contacts.html`;
+  document.getElementById("link-help").href = `${lang}/instructions.html`;
 }
 
 function revealOnScroll() {
