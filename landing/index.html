@@ -3,26 +3,33 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ViMi — AI-помощник для Telegram</title>
-  <meta name="description" content="ViMi — AI-помощник для Telegram: автопостинг, видео, тарифы, счета и оплата в одном боте." />
+  <title>ViMi — премиум автоматизация Telegram-каналов</title>
+  <meta name="description" content="ViMi автоматизирует Telegram-каналы: публикации, видео, тарифы и оплату в одном боте." />
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="site-header">
     <div class="container header-inner">
       <a class="brand" href="#" aria-label="ViMi home">
-        <img src="assets/vimi-logo.svg" alt="ViMi" />
+        <img src="assets/vimi-logo.svg" alt="ViMi" loading="lazy" />
       </a>
-      <nav class="main-nav">
+
+      <button id="menuToggle" class="menu-toggle" aria-label="Открыть меню">☰</button>
+
+      <nav id="mainNav" class="main-nav">
         <a href="#features" data-i18n="navFeatures"></a>
-        <a href="#how" data-i18n="navHow"></a>
         <a href="#plans" data-i18n="navPlans"></a>
-        <a href="#payments" data-i18n="navPayments"></a>
+        <a href="#how" data-i18n="navHow"></a>
         <a href="#faq" data-i18n="navFaq"></a>
+        <a href="#support" data-i18n="navSupport"></a>
       </nav>
+
       <div class="header-actions">
-        <div class="lang-switch">
+        <div class="lang-switch" role="group" aria-label="Language switch">
           <button class="lang-btn active" data-lang="ru">RU</button>
           <button class="lang-btn" data-lang="en">EN</button>
         </div>
@@ -34,31 +41,30 @@
   <main>
     <section class="hero">
       <div class="container hero-grid">
-        <div class="hero-copy fade-in">
-          <span class="badge" data-i18n="positioning"></span>
+        <div class="hero-copy reveal">
+          <p class="hero-badge" data-i18n="heroBadge"></p>
           <h1 data-i18n="heroTitle"></h1>
           <p class="hero-subtitle" data-i18n="heroSubtitle"></p>
-          <div class="hero-cta">
-            <a id="cta-open-bot" class="btn btn-primary" href="#" target="_blank" rel="noopener" data-i18n="openBot"></a>
-            <a class="btn btn-secondary" href="#plans" data-i18n="viewPlans"></a>
+          <div class="hero-actions">
+            <a id="hero-open-bot" class="btn btn-primary" href="#" target="_blank" rel="noopener" data-i18n="openBot"></a>
+            <a class="btn btn-ghost" href="#plans" data-i18n="viewPlans"></a>
           </div>
-          <p class="micro-trust" data-i18n="microTrust"></p>
         </div>
 
-        <div class="hero-visual fade-in">
-          <img class="hero-robot" src="assets/vimi-robot-hero.svg" alt="ViMi hero robot" />
-          <div class="floating-card card-a" data-i18n="floatAuto"></div>
-          <div class="floating-card card-b" data-i18n="floatVideo"></div>
-          <div class="floating-card card-c" data-i18n="floatAnalytics"></div>
-          <div class="floating-card card-d" data-i18n="floatMonet"></div>
+        <div class="hero-visual reveal">
+          <img class="hero-scene" src="assets/vimi-hero-scene.png" alt="ViMi hero scene" loading="lazy" />
+          <article class="float-card f1">📣 <span data-i18n="floatAuto"></span></article>
+          <article class="float-card f2">🎬 <span data-i18n="floatVideo"></span></article>
+          <article class="float-card f3">📈 <span data-i18n="floatAnalytics"></span></article>
+          <article class="float-card f4">₿ <span data-i18n="floatMonet"></span></article>
         </div>
       </div>
     </section>
 
-    <section class="payment-strip">
-      <div class="container strip-inner">
-        <div id="stripBadges" class="strip-badges"></div>
-        <p class="strip-note" data-i18n="paymentsDisclaimer"></p>
+    <section class="trust-strip">
+      <div class="container trust-inner reveal">
+        <p class="trust-label" data-i18n="trustLabel"></p>
+        <img src="assets/vimi-payment-strip.png" alt="Поддерживаем платежи" loading="lazy" />
       </div>
     </section>
 
@@ -69,77 +75,62 @@
       </div>
     </section>
 
-    <section id="how" class="section">
+    <section id="how" class="section how-section">
       <div class="container">
         <h2 data-i18n="howTitle"></h2>
         <div id="stepsGrid" class="steps-grid"></div>
       </div>
     </section>
 
-    <section id="plans" class="section">
-      <div class="container pricing-layout">
+    <section id="plans" class="section plans-section">
+      <div class="container plans-layout">
         <div>
           <h2 data-i18n="plansTitle"></h2>
           <div id="plansGrid" class="plans-grid"></div>
         </div>
-        <aside id="payments" class="payment-card">
+
+        <aside class="payments-side reveal">
           <h3 data-i18n="paymentsTitle"></h3>
+          <img src="assets/vimi-payment-methods-card.png" alt="Способы оплаты ViMi" loading="lazy" />
           <div id="paymentsGrid" class="payments-grid"></div>
-          <p class="note" data-i18n="paymentsDisclaimer"></p>
+          <p class="manual-note" data-i18n="manualNote"></p>
         </aside>
+      </div>
+    </section>
+
+    <section class="section final-cta">
+      <div class="container final-cta-inner reveal">
+        <img class="final-cta-bg" src="assets/vimi-final-cta.png" alt="ViMi CTA" loading="lazy" />
+        <div class="final-cta-content">
+          <h2 data-i18n="finalTitle"></h2>
+          <p data-i18n="finalSubtitle"></p>
+          <a id="footer-open-bot" class="btn btn-primary" href="#" target="_blank" rel="noopener" data-i18n="openBot"></a>
+        </div>
       </div>
     </section>
 
     <section id="faq" class="section">
       <div class="container">
-        <h2 data-i18n="faqTitle"></h2>
+        <h2>FAQ</h2>
         <div id="faqList" class="faq-list"></div>
-      </div>
-    </section>
-
-    <section class="section final-cta">
-      <div class="container final-cta-inner">
-        <img src="assets/vimi-robot-small.svg" alt="ViMi small robot" />
-        <div>
-          <h2 data-i18n="finalCtaTitle"></h2>
-          <p data-i18n="finalCtaSubtitle"></p>
-        </div>
-        <a id="cta-open-bot-bottom" class="btn btn-primary" href="#" target="_blank" rel="noopener" data-i18n="openBot"></a>
       </div>
     </section>
   </main>
 
-  <footer class="site-footer">
+  <footer id="support" class="site-footer">
     <div class="container footer-grid">
       <div>
-        <img class="footer-logo" src="assets/vimi-logo.svg" alt="ViMi" />
+        <img src="assets/vimi-logo.svg" alt="ViMi" loading="lazy" class="footer-logo" />
         <p data-i18n="footerDesc"></p>
       </div>
-      <div>
-        <h3 data-i18n="footerProduct"></h3>
-        <a href="#features" data-i18n="navFeatures"></a>
-        <a href="#how" data-i18n="navHow"></a>
-        <a href="#plans" data-i18n="navPlans"></a>
-      </div>
-      <div>
-        <h3 data-i18n="footerLegal"></h3>
+      <div class="footer-links">
         <a id="link-terms" href="ru/terms.html">Terms</a>
         <a id="link-privacy" href="ru/privacy.html">Privacy</a>
         <a id="link-refund" href="ru/refund.html">Refund</a>
-        <a id="link-contacts" href="ru/contacts.html">Contacts</a>
-        <a id="link-help" href="ru/instructions.html">Instructions</a>
       </div>
-      <div>
-        <h3 data-i18n="footerSupport"></h3>
-        <a id="supportLink" href="#" target="_blank" rel="noopener">Telegram Support</a>
+      <div class="footer-links">
+        <a id="supportLink" href="#" target="_blank" rel="noopener">Telegram support</a>
         <a id="supportEmail" href="#">support@example.com</a>
-        <div class="footer-meta">
-          <div class="lang-switch">
-            <button class="lang-btn active" data-lang="ru">RU</button>
-            <button class="lang-btn" data-lang="en">EN</button>
-          </div>
-          <p>© <span id="year"></span> ViMi</p>
-        </div>
       </div>
     </div>
   </footer>
