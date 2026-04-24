@@ -1,10 +1,6 @@
-const SITE_CONFIG = {
-  botUrl: "https://t.me/topposter69_bot",
-  supportUrl: "https://t.me/YOUR_SUPPORT_USERNAME",
-  supportEmail: "support@example.com",
-  legalOwner: "YOUR LEGAL ENTITY / NAME"
-};
-
-document.querySelectorAll('[data-link="bot"]').forEach((link) => {
-  link.href = SITE_CONFIG.botUrl;
-});
+const burger = document.querySelector('[data-burger]');
+const nav = document.querySelector('.nav');
+burger?.addEventListener('click', () => nav.classList.toggle('open'));
+nav?.querySelectorAll('a').forEach(a => a.addEventListener('click', () => nav.classList.remove('open')));
+const io = new IntersectionObserver(entries => entries.forEach(e => e.isIntersecting && e.target.classList.add('in')), { threshold: .12 });
+document.querySelectorAll('.reveal, .card, .price-card').forEach(el => io.observe(el));

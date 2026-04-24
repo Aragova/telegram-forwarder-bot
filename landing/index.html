@@ -4,34 +4,86 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ViMi — автоматизация Telegram-каналов</title>
-  <meta name="description" content="ViMi — ваш робот-помощник для Telegram: автопостинг, видео, тарифы, счета и оплата в одном боте." />
-  <meta property="og:title" content="ViMi — автоматизация Telegram-каналов" />
-  <meta property="og:description" content="Автопостинг, видео, тарифы, счета и оплата — всё внутри Telegram." />
-  <meta property="og:type" content="website" />
-  <meta property="og:image" content="assets/vimi-reference-landing.png" />
-  <link rel="icon" href="assets/vimi-reference-landing.png" />
+  <meta name="description" content="ViMi автоматизирует Telegram-каналы: автопостинг, видео, тарифы, счета, аналитика и монетизация в одном боте." />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <main class="page-shell" aria-label="ViMi landing">
-    <img class="landing-reference" src="assets/vimi-reference-landing.png" alt="ViMi — ваш помощник в Telegram" />
+  <header class="site-header" data-header>
+    <a class="brand" href="#top" aria-label="ViMi"><span class="brand-bot">⌁</span><span>ViMi</span></a>
+    <nav class="nav" aria-label="Главное меню">
+      <a href="#features">Возможности</a><a href="#pricing">Тарифы</a><a href="#steps">Инструкции</a><a href="#faq">FAQ</a><a href="#support">Поддержка</a>
+    </nav>
+    <div class="header-actions"><button class="lang">RU⌄</button><a class="btn btn-primary" href="https://t.me/" target="_blank" rel="noreferrer">✈ Открыть бота</a><button class="burger" data-burger aria-label="Открыть меню">☰</button></div>
+  </header>
 
-    <!-- Click overlays: keep the visual exactly as the approved design, but make CTA zones usable. -->
-    <a class="hotspot hotspot-header-bot" data-link="bot" aria-label="Открыть бота" href="https://t.me/YOUR_BOT_USERNAME"></a>
-    <a class="hotspot hotspot-hero-bot" data-link="bot" aria-label="Открыть бота" href="https://t.me/YOUR_BOT_USERNAME"></a>
-    <a class="hotspot hotspot-hero-plans" href="#pricing" aria-label="Смотреть тарифы"></a>
-    <a class="hotspot hotspot-free" data-link="bot" aria-label="Выбрать FREE" href="https://t.me/YOUR_BOT_USERNAME"></a>
-    <a class="hotspot hotspot-basic" data-link="bot" aria-label="Выбрать BASIC" href="https://t.me/YOUR_BOT_USERNAME"></a>
-    <a class="hotspot hotspot-pro" data-link="bot" aria-label="Выбрать PRO" href="https://t.me/YOUR_BOT_USERNAME"></a>
-    <a class="hotspot hotspot-final-bot" data-link="bot" aria-label="Открыть бота" href="https://t.me/YOUR_BOT_USERNAME"></a>
+  <main id="top">
+    <section class="hero section-pad">
+      <div class="hero-copy reveal">
+        <span class="eyebrow">✺ Ваш помощник в Telegram</span>
+        <h1>Автоматизация Telegram-каналов <span>в одном боте</span></h1>
+        <p class="hero-text">Публикации, видео, тарифы, счета и оплата — всё внутри Telegram. Экономьте время и развивайте ваши каналы.</p>
+        <div class="hero-buttons"><a class="btn btn-primary btn-lg" href="https://t.me/" target="_blank" rel="noreferrer">✈ Открыть бота</a><a class="btn btn-ghost btn-lg" href="#pricing">Смотреть тарифы</a></div>
+        <div class="trust"><span>🛡️ Надёжно и безопасно</span><span>🎧 Поддержка 24/7</span><span>✈ Работает в Telegram</span></div>
+      </div>
+      <div class="hero-visual reveal">
+        <img src="assets/hero-robot.svg" alt="Робот ViMi с ноутбуком" />
+        <div class="float-cards" aria-hidden="true">
+          <article><b>✈ Автопостинг</b><small>Аккуратные публикации по расписанию.</small></article>
+          <article><b>🎥 Видео</b><small>Обработка и очередь видео-контента.</small></article>
+          <article><b>📊 Аналитика</b><small>Статистика и отчёты в реальном времени.</small></article>
+          <article><b>₿ Монетизация</b><small>Тарифы, счета и приём оплат.</small></article>
+        </div>
+      </div>
+    </section>
 
-    <span id="pricing" class="anchor"></span>
+    <section class="payment-strip reveal" aria-label="Поддерживаемые платежи">
+      <b>Поддерживаем</b><span>✈ Telegram Payments</span><span>PayPal</span><span>VISA</span><span>Mastercard</span><span>МИР</span><span>СБП</span><span>₿ TRC20</span><span>LAVA</span><span>TRIBUTE</span><small>и другие</small>
+    </section>
+
+    <section id="features" class="section section-pad">
+      <div class="section-title"><h2>Что умеет <span>ViMi</span></h2><p>Все инструменты для эффективной работы с вашими каналами в одном боте.</p></div>
+      <div class="feature-grid">
+        <article class="card feature-card"><i>✈</i><h3>Автопостинг</h3><p>Публикуйте записи из источников по расписанию без ручной работы.</p></article>
+        <article class="card feature-card"><i>🎥</i><h3>Видео</h3><p>Обрабатывайте видео, добавляйте обложки, подписи и запускайте очередь.</p></article>
+        <article class="card feature-card"><i>💎</i><h3>Тарифы</h3><p>Гибкие тарифы с лимитами для вас и ваших каналов.</p></article>
+        <article class="card feature-card"><i>📄</i><h3>Счета и оплата</h3><p>Создавайте счета и принимайте оплату удобным способом.</p></article>
+        <article class="card feature-card"><i>📊</i><h3>Статистика</h3><p>Следите за активностью, использованием и эффективностью.</p></article>
+        <article class="card feature-card"><i>⚙</i><h3>Автоматизация</h3><p>Меньше рутины — больше времени на развитие.</p></article>
+      </div>
+    </section>
+
+    <section id="steps" class="section section-pad">
+      <div class="section-title"><h2>Как это работает</h2></div>
+      <div class="steps">
+        <article class="card step-card"><span>1</span><div class="mini-robot">🤖</div><h3>Откройте бота</h3><p>Запустите ViMi в Telegram за пару секунд.</p></article>
+        <article class="card step-card"><span>2</span><div class="mini-robot">➕</div><h3>Добавьте источники и каналы</h3><p>Укажите откуда брать контент и куда публиковать.</p></article>
+        <article class="card step-card"><span>3</span><div class="mini-robot">🗓️</div><h3>Создайте правило публикации</h3><p>Настройте расписание и параметры публикаций.</p></article>
+        <article class="card step-card"><span>4</span><div class="mini-robot">💎</div><h3>Подключите тариф или оплату</h3><p>Выберите тариф и оплатите удобным способом.</p></article>
+        <article class="card step-card"><span>5</span><div class="mini-robot">🤖</div><h3>Бот выполняет рутину за вас</h3><p>ViMi работает 24/7, вы экономите время.</p></article>
+      </div>
+    </section>
+
+    <section id="pricing" class="section section-pad pricing-section">
+      <div class="section-title"><h2>Тарифы</h2><p>Выберите тариф, который подходит именно вам.</p></div>
+      <div class="pricing-layout">
+        <div class="prices">
+          <article class="price-card"><h3>FREE</h3><p>Для теста и знакомства</p><div class="price"><b>0</b> USD / месяц</div><ul><li>3 правила</li><li>5 видео / день</li><li>100 задач / день</li></ul><a class="btn btn-soft" href="https://t.me/">Выбрать в боте</a></article>
+          <article class="price-card popular"><em>Популярный</em><h3>BASIC</h3><p>Для стабильной работы</p><div class="price"><b>9</b> USD / месяц</div><ul><li>15 правил</li><li>30 видео / день</li><li>1000 задач / день</li></ul><a class="btn btn-soft" href="https://t.me/">Выбрать в боте</a></article>
+          <article class="price-card"><h3>PRO</h3><p>Для больших каналов и команд</p><div class="price"><b>29</b> USD / месяц</div><ul><li>50 правил</li><li>100 видео / день</li><li>5000 задач / день</li></ul><a class="btn btn-soft violet" href="https://t.me/">Выбрать в боте</a></article>
+        </div>
+        <aside class="payment-card card"><h2>Способы оплаты</h2><div class="pay-grid"><span>✈ Telegram Payments / Stars</span><span>PayPal</span><span>💳 Банковские карты</span><span>СБП</span><span>₿ Криптовалюта</span><span>Tribute</span><span>Lava.top</span><span>Ручное подтверждение</span></div><p>Некоторые способы оплаты могут работать автоматически, а некоторые — через ручное подтверждение администратором.</p></aside>
+      </div>
+    </section>
+
+    <section class="cta section-pad reveal"><div><h2>Готовы автоматизировать ваши каналы?</h2><p>Откройте ViMi в Telegram и начните прямо сейчас.</p></div><a class="btn btn-white btn-lg" href="https://t.me/">✈ Открыть бота</a></section>
+
+    <section id="faq" class="section section-pad faq"><div class="section-title"><h2>FAQ</h2></div><details><summary>Можно ли настроить расписание?</summary><p>Да, можно публиковать по интервалу или в фиксированное время.</p></details><details><summary>Работает ли бот с видео?</summary><p>Да, доступна обработка, подписи, заставки и очередь публикаций.</p></details><details><summary>Можно ли подключить оплату?</summary><p>Да, доступны тарифы, счета и разные способы оплаты.</p></details></section>
   </main>
 
-  <noscript>
-    <p class="noscript">ViMi работает как статический сайт. Откройте бота: https://t.me/YOUR_BOT_USERNAME</p>
-  </noscript>
-
+  <footer id="support" class="footer section-pad"><a class="brand" href="#top"><span class="brand-bot">⌁</span><span>ViMi</span></a><p>Ваш помощник в Telegram для автопостинга, роста и монетизации каналов.</p><div><b>Связаться с нами</b><a href="https://t.me/">Поддержка в Telegram</a><a href="mailto:support@vimi.bot">support@vimi.bot</a></div></footer>
   <script src="app.js"></script>
 </body>
 </html>
