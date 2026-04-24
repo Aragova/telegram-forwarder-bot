@@ -28,11 +28,20 @@ def test_instructions_pages_exist():
     assert (LANDING / "en" / "instructions.html").exists()
 
 
-def test_index_contains_bot_cta_and_legal_links():
+def test_brand_present_and_old_brand_removed():
+    joined = read(LANDING / "index.html") + read(LANDING / "app.js")
+    assert "ViMi" in joined
+    assert "ChannelPilot" not in joined
+
+
+def test_cta_legal_links_and_ru_en_switch_exist():
     index_text = read(LANDING / "index.html")
     app_text = read(LANDING / "app.js")
     assert "cta-open-bot" in index_text
+    assert "header-open-bot" in index_text
     assert "botUrl" in app_text
+    assert 'data-lang="ru"' in index_text
+    assert 'data-lang="en"' in index_text
     for link_id in ("link-terms", "link-privacy", "link-refund", "link-contacts", "link-help"):
         assert link_id in index_text
 
@@ -55,8 +64,14 @@ def test_owner_plan_not_visible():
 
 def test_payment_honesty_statement_exists_ru_en():
     text = read(LANDING / "app.js")
-    assert "Некоторые способы оплаты могут работать автоматически, а некоторые — через ручное подтверждение администратором." in text
-    assert "Some payment methods may work automatically, while others may require manual administrator confirmation." in text
+    assert "Некоторые способы оплаты работают автоматически, а некоторые могут требовать ручного подтверждения администратором." in text
+    assert "Some payment methods work automatically, while others may require manual administrator confirmation." in text
+
+
+def test_landing_has_pricing_and_payment_blocks():
+    index_text = read(LANDING / "index.html") + read(LANDING / "app.js")
+    assert "plans" in index_text.lower()
+    assert "payments" in index_text.lower()
 
 
 def test_internal_terms_not_exposed_on_landing():
