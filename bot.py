@@ -20,6 +20,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     Message,
+    PreCheckoutQuery,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     FSInputFile,
@@ -69,6 +70,7 @@ from app.usage_service import UsageService
 from app.limit_service import LimitService
 from app.invoice_service import InvoiceService
 from app.billing_service import BillingService
+from app.payment_service import PaymentService
 from app.saas_bootstrap import ensure_owner_and_default_tenant_bootstrap
 from app.i18n import get_user_language, set_user_language, t as tr
 from app import product_ui
@@ -85,6 +87,7 @@ usage_service = UsageService(db)
 limit_service = LimitService(db, subscription_service, usage_service)
 invoice_service = InvoiceService(db)
 billing_service = BillingService(db)
+payment_service = PaymentService(db)
 telethon_client = None
 reaction_clients = []
 sender_service = None
@@ -1904,11 +1907,132 @@ async def handle_invoice_pay_stub(callback: CallbackQuery):
         return
     lang = _resolve_language(callback.from_user.id if callback.from_user else None)
     await answer_callback_safe_once(callback)
+    admin_id = callback.from_user.id if callback.from_user else settings.admin_id
+    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+    tenant_id = int(tenant.get("id") or 1)
+    summary = await run_db(billing_service.get_last_invoice_summary, tenant_id)
+    invoice = (summary or {}).get("invoice") or {}
+    providers = await run_db(
+        lambda: [m["provider"] for m in payment_service.get_available_payment_methods(tenant_id, int(invoice.get("id") or 0))]
+    )
+    if not providers:
+        await edit_message_text_safe(
+            message=callback.message,
+            text=product_ui.payment_stub_screen(lang),
+            reply_markup=product_ui.invoice_keyboard(lang),
+        )
+        return
     await edit_message_text_safe(
         message=callback.message,
-        text=product_ui.payment_stub_screen(lang),
+        text=product_ui.payment_methods_screen(lang),
+        reply_markup=product_ui.payment_methods_keyboard(lang, providers),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("invoice:provider:"))
+async def handle_invoice_provider_callback(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    admin_id = callback.from_user.id if callback.from_user else settings.admin_id
+    lang = _resolve_language(admin_id)
+    provider = (callback.data or "").split(":", 2)[2]
+    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+    tenant_id = int(tenant.get("id") or 1)
+    summary = await run_db(billing_service.get_last_invoice_summary, tenant_id)
+    invoice = (summary or {}).get("invoice") or {}
+    result = await run_db(payment_service.create_payment_for_invoice, int(invoice.get("id") or 0), provider)
+    await answer_callback_safe_once(callback)
+    if not result.get("ok"):
+        await edit_message_text_safe(
+            message=callback.message,
+            text=("❌ Не удалось создать оплату." if lang == "ru" else "❌ Failed to create payment."),
+            reply_markup=product_ui.invoice_keyboard(lang),
+        )
+        return
+    message_text = (result.get("message_ru") if lang == "ru" else result.get("message_en")) or "OK"
+    if result.get("checkout_url"):
+        message_text += "\n\n" + str(result["checkout_url"])
+    kb = product_ui.invoice_keyboard(lang)
+    if str(result.get("status")) == "waiting_confirmation":
+        kb = product_ui.payment_manual_confirm_keyboard(lang, int(result.get("payment_intent_id") or 0))
+    await edit_message_text_safe(message=callback.message, text=message_text, reply_markup=kb)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("payment:manual_sent:"))
+async def handle_manual_payment_sent(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    admin_id = callback.from_user.id if callback.from_user else settings.admin_id
+    lang = _resolve_language(admin_id)
+    payment_intent_id = int((callback.data or "0").split(":")[-1] or 0)
+    await run_db(payment_service.save_manual_confirmation_payload, payment_intent_id, {"requested_by": admin_id, "requested_at": utc_now_iso()})
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=product_ui._msg(lang, "payment.manual.sent"),
         reply_markup=product_ui.invoice_keyboard(lang),
     )
+    if admin_id != settings.admin_id and bot:
+        await bot.send_message(
+            settings.admin_id,
+            (
+                "💳 Новая ручная оплата\n\n"
+                f"Пользователь: {admin_id}\n"
+                f"PaymentIntent: #{payment_intent_id}\n\n"
+                "Подтвердить?\n"
+                f"/payment_confirm {payment_intent_id}\n"
+                f"/payment_reject {payment_intent_id}"
+            ),
+        )
+
+
+@dp.pre_checkout_query()
+async def handle_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
+    await pre_checkout_query.answer(ok=True)
+
+
+@dp.message(lambda m: bool(getattr(m, "successful_payment", None)))
+async def handle_successful_payment(message: Message):
+    successful = getattr(message, "successful_payment", None)
+    if not successful:
+        return
+    external_id = str(getattr(successful, "invoice_payload", "") or getattr(successful, "provider_payment_charge_id", ""))
+    if not external_id:
+        return
+    intent = await run_db(db.get_payment_intent_by_external_id, external_id) if hasattr(db, "get_payment_intent_by_external_id") else None
+    if not intent:
+        return
+    if str(intent.get("status") or "") != "paid":
+        await run_db(db.mark_payment_paid, int(intent.get("id") or 0), confirmation_payload={"source": "telegram_successful_payment"})
+        await run_db(payment_service.activate_subscription_after_payment, int(intent.get("id") or 0))
+
+
+@dp.message(Command("payment_confirm"))
+async def handle_payment_confirm(message: Message):
+    if not await is_admin(message):
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer("Использование: /payment_confirm <payment_intent_id>")
+        return
+    payment_intent_id = int(parts[1])
+    note = parts[2] if len(parts) > 2 else "manual_admin_confirmation"
+    ok = await run_db(payment_service.confirm_manual_payment, payment_intent_id, message.from_user.id, note)
+    await message.answer("✅ Оплата подтверждена" if ok else "❌ Не удалось подтвердить оплату")
+
+
+@dp.message(Command("payment_reject"))
+async def handle_payment_reject(message: Message):
+    if not await is_admin(message):
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer("Использование: /payment_reject <payment_intent_id>")
+        return
+    payment_intent_id = int(parts[1])
+    reason = parts[2] if len(parts) > 2 else "manual_rejected_by_admin"
+    ok = await run_db(db.mark_payment_failed, payment_intent_id, reason, payload={"rejected_by": message.from_user.id})
+    await message.answer("❌ Оплата отклонена" if ok else "❌ Не удалось отклонить оплату")
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("start:"))
