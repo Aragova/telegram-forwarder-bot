@@ -7,6 +7,7 @@ from app.repository import RepositoryProtocol
 from app.worker_load_service import build_worker_load_snapshot
 from app.worker_resource_policy import POLICY
 from app.worker_runtime import get_worker_runtime_metrics_snapshot_sync
+from app.tenant_fairness_service import TenantFairnessService
 
 
 def update_heartbeat(repo: RepositoryProtocol, role: str) -> None:
@@ -49,6 +50,9 @@ def get_system_health(repo: RepositoryProtocol) -> dict[str, Any]:
     throughput = get_worker_runtime_metrics_snapshot_sync()
     saas = repo.get_saas_health_snapshot() if hasattr(repo, "get_saas_health_snapshot") else {}
     usage_snapshot = repo.get_usage_for_date(1, datetime.now(timezone.utc).date().isoformat()) if hasattr(repo, "get_usage_for_date") else {}
+    fairness_service = TenantFairnessService(repo)
+    fairness_snapshot = fairness_service.build_tenant_fairness_snapshot(system_mode=load.mode)
+    throttled_count = sum(1 for row in fairness_snapshot if bool(row.get("throttled")))
 
     return {
         "roles": status,
@@ -81,6 +85,23 @@ def get_system_health(repo: RepositoryProtocol) -> dict[str, Any]:
             "retry_storm_warning": load.retry_storm_warning,
         },
         "throughput": throughput,
+        "tenant_fairness": {
+            "tenant_fairness_mode": load.mode,
+            "tenants_with_pending_jobs": len([row for row in fairness_snapshot if int(row.get("pending") or 0) > 0]),
+            "top_tenants_by_backlog": sorted(
+                [{"tenant_id": int(row.get("tenant_id") or 0), "pending": int(row.get("pending") or 0)} for row in fairness_snapshot],
+                key=lambda item: (-item["pending"], item["tenant_id"]),
+            )[:5],
+            "top_tenants_by_oldest_pending": sorted(
+                [{"tenant_id": int(row.get("tenant_id") or 0), "oldest_pending_age_sec": int(row.get("oldest_pending_age_sec") or 0)} for row in fairness_snapshot],
+                key=lambda item: (-item["oldest_pending_age_sec"], item["tenant_id"]),
+            )[:5],
+            "top_tenants_by_processing": sorted(
+                [{"tenant_id": int(row.get("tenant_id") or 0), "processing": int(row.get("processing") or 0)} for row in fairness_snapshot],
+                key=lambda item: (-item["processing"], item["tenant_id"]),
+            )[:5],
+            "throttled_tenants_count": throttled_count,
+        },
         "video_stages": video_stage_counts,
         "saas": {
             "tenants_active": int(saas.get("tenants_active") or 0),

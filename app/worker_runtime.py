@@ -387,7 +387,10 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str, *, poli
     queue_cap = cfg.light_max_concurrency if queue == "light" else cfg.heavy_max_concurrency
     active_now = active_state.light_active if queue == "light" else active_state.heavy_active
     lease_limit = max(1, min(int(lease_batch), max(int(queue_cap) - int(active_now), 1)))
-    leased = await asyncio.to_thread(repo.lease_jobs, queue, worker_id, lease_limit, 30)
+    if hasattr(repo, "lease_fair_jobs"):
+        leased = await asyncio.to_thread(repo.lease_fair_jobs, queue, worker_id, lease_limit, 30)
+    else:
+        leased = await asyncio.to_thread(repo.lease_jobs, queue, worker_id, lease_limit, 30)
     if not leased:
         return False
 
@@ -448,7 +451,19 @@ async def _worker_loop(repo, sender_service, *, queue: str, worker_id: str, poli
             available = max(queue_limit - len(in_flight), 0)
             batch_size = policy.lease_batch_size_light if queue == "light" else policy.lease_batch_size_heavy
             lease_limit = max(1, min(available, int(batch_size)))
-            leased = await asyncio.to_thread(repo.lease_jobs, queue, worker_id, lease_limit, 30)
+            leased: list[dict[str, Any]] = []
+            if hasattr(repo, "lease_fair_jobs"):
+                try:
+                    leased = await asyncio.to_thread(repo.lease_fair_jobs, queue, worker_id, lease_limit, 30)
+                except Exception as exc:
+                    logger.warning(
+                        "Fair leasing недоступен, используем fallback к обычному lease | queue=%s | ошибка=%s",
+                        queue,
+                        exc,
+                    )
+                    leased = await asyncio.to_thread(repo.lease_jobs, queue, worker_id, lease_limit, 30)
+            else:
+                leased = await asyncio.to_thread(repo.lease_jobs, queue, worker_id, lease_limit, 30)
             if not leased:
                 await asyncio.sleep(0.2 if queue == "light" else 0.6)
                 continue
