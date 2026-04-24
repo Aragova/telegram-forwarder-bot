@@ -17,6 +17,10 @@ from app.repository_models import (
 )
 from app.postgres_client import PostgresClient
 from app.repository import RepositoryProtocol
+from app.tenant_repository import TenantRepository
+from app.subscription_repository import SubscriptionRepository
+from app.billing_repository import BillingRepository
+from app.usage_repository import UsageRepository
 
 logger = logging.getLogger("forwarder.postgres")
 
@@ -70,6 +74,10 @@ def _safe_json_loads(raw: Any, default: Any) -> Any:
 class PostgresRepository(RepositoryProtocol):
     def __init__(self) -> None:
         self.client = PostgresClient()
+        self.tenant_repo = TenantRepository(self)
+        self.subscription_repo = SubscriptionRepository(self)
+        self.billing_repo = BillingRepository(self)
+        self.usage_repo = UsageRepository(self)
 
     # =========================================================
     # LOW LEVEL
@@ -741,32 +749,7 @@ class PostgresRepository(RepositoryProtocol):
         self._ensure_default_plans()
 
     def _ensure_default_plans(self) -> None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                for row in [
-                    ("FREE", 3, 1, 100, 10, 512, 1, "0.00"),
-                    ("BASIC", 15, 2, 1000, 100, 5120, 2, "19.99"),
-                    ("PRO", 100, 4, 10000, 1000, 51200, 3, "99.99"),
-                ]:
-                    cur.execute(
-                        """
-                        INSERT INTO plans(
-                            name,
-                            max_rules,
-                            max_workers,
-                            max_jobs_per_day,
-                            max_video_per_day,
-                            max_storage_mb,
-                            priority_level,
-                            price,
-                            is_active
-                        )
-                        VALUES(%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
-                        ON CONFLICT(name) DO NOTHING
-                        """,
-                        row,
-                    )
-            conn.commit()
+        self.subscription_repo.ensure_default_plans()
 
     # =========================================================
     # SERVICE / MAINTENANCE
@@ -4658,346 +4641,74 @@ class PostgresRepository(RepositoryProtocol):
     # =========================================================
 
     def create_tenant(self, owner_admin_id: int, name: str) -> int | None:
-        with self.connect() as conn:
-            tenant_id = self._ensure_tenant_for_admin_conn(conn, int(owner_admin_id))
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE tenants
-                    SET name = COALESCE(NULLIF(%s, ''), name)
-                    WHERE id = %s
-                    """,
-                    (name, tenant_id),
-                )
-            conn.commit()
-            return tenant_id
+        return self.tenant_repo.create_tenant(owner_admin_id=owner_admin_id, name=name)
 
     def get_tenant_by_admin(self, admin_id: int) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id, name, owner_admin_id, created_at, is_active
-                    FROM tenants
-                    WHERE owner_admin_id = %s
-                    LIMIT 1
-                    """,
-                    (int(admin_id),),
-                )
-                row = cur.fetchone()
-        return dict(row) if row else None
+        return self.tenant_repo.get_tenant_by_admin(admin_id=admin_id)
 
     def get_default_tenant(self) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id, name, owner_admin_id, created_at, is_active
-                    FROM tenants
-                    ORDER BY id ASC
-                    LIMIT 1
-                    """
-                )
-                row = cur.fetchone()
-        return dict(row) if row else None
+        return self.tenant_repo.get_default_tenant()
 
     def get_tenant_by_id(self, tenant_id: int) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id, name, owner_admin_id, created_at, is_active
-                    FROM tenants
-                    WHERE id = %s
-                    LIMIT 1
-                    """,
-                    (int(tenant_id),),
-                )
-                row = cur.fetchone()
-        return dict(row) if row else None
+        return self.tenant_repo.get_tenant_by_id(tenant_id=tenant_id)
 
     def set_tenant_active(self, tenant_id: int, is_active: bool) -> bool:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE tenants SET is_active = %s WHERE id = %s",
-                    (bool(is_active), int(tenant_id)),
-                )
-                updated = cur.rowcount > 0
-            conn.commit()
-            return updated
+        return self.tenant_repo.set_tenant_active(tenant_id=tenant_id, is_active=is_active)
 
     def add_tenant_user(self, tenant_id: int, telegram_id: int, role: str) -> bool:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO tenant_users(tenant_id, telegram_id, role, created_at)
-                    VALUES(%s, %s, %s, %s)
-                    ON CONFLICT(tenant_id, telegram_id)
-                    DO UPDATE SET role = EXCLUDED.role
-                    """,
-                    (int(tenant_id), int(telegram_id), str(role), utc_now_iso()),
-                )
-                ok = cur.rowcount > 0
-            conn.commit()
-            return ok
+        return self.tenant_repo.add_tenant_user(tenant_id=tenant_id, telegram_id=telegram_id, role=role)
 
     def get_tenant_user_role(self, tenant_id: int, telegram_id: int) -> str | None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT role
-                    FROM tenant_users
-                    WHERE tenant_id = %s
-                      AND telegram_id = %s
-                    LIMIT 1
-                    """,
-                    (int(tenant_id), int(telegram_id)),
-                )
-                row = cur.fetchone()
-        return str(row["role"]) if row else None
+        return self.tenant_repo.get_tenant_user_role(tenant_id=tenant_id, telegram_id=telegram_id)
 
     def get_plan_by_name(self, plan_name: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM plans
-                    WHERE name = %s
-                      AND is_active = TRUE
-                    LIMIT 1
-                    """,
-                    (str(plan_name).upper(),),
-                )
-                row = cur.fetchone()
-        return dict(row) if row else None
+        return self.subscription_repo.get_plan_by_name(plan_name=plan_name)
 
     def assign_subscription(self, tenant_id: int, plan_id: int, *, status: str = "active", expires_at: str | None = None) -> int | None:
-        now_iso = utc_now_iso()
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE subscriptions
-                    SET status = 'expired'
-                    WHERE tenant_id = %s
-                      AND status IN ('active', 'trial', 'grace')
-                    """,
-                    (int(tenant_id),),
-                )
-                cur.execute(
-                    """
-                    INSERT INTO subscriptions(
-                        tenant_id, plan_id, status, started_at, expires_at, created_at, updated_at, current_period_start, current_period_end
-                    )
-                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                    """,
-                    (int(tenant_id), int(plan_id), status, now_iso, expires_at, now_iso, now_iso, now_iso, expires_at),
-                )
-                row = cur.fetchone()
-            conn.commit()
-            return int(row["id"]) if row else None
+        return self.subscription_repo.assign_subscription(tenant_id=tenant_id, plan_id=plan_id, status=status, expires_at=expires_at)
 
     def get_active_subscription(self, tenant_id: int) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT s.*, p.name AS plan_name, p.max_rules, p.max_workers, p.max_jobs_per_day, p.max_video_per_day, p.max_storage_mb, p.priority_level
-                    FROM subscriptions s
-                    JOIN plans p ON p.id = s.plan_id
-                    WHERE s.tenant_id = %s
-                      AND s.status IN ('active', 'trial', 'grace')
-                    ORDER BY s.id DESC
-                    LIMIT 1
-                    """,
-                    (int(tenant_id),),
-                )
-                row = cur.fetchone()
-        return dict(row) if row else None
+        return self.subscription_repo.get_active_subscription(tenant_id=tenant_id)
 
     def get_latest_subscription(self, tenant_id: int) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT s.*, p.name AS plan_name, p.max_rules, p.max_workers, p.max_jobs_per_day, p.max_video_per_day, p.max_storage_mb, p.priority_level, p.price
-                    FROM subscriptions s
-                    JOIN plans p ON p.id = s.plan_id
-                    WHERE s.tenant_id = %s
-                    ORDER BY s.id DESC
-                    LIMIT 1
-                    """,
-                    (int(tenant_id),),
-                )
-                row = cur.fetchone()
-        return dict(row) if row else None
+        return self.subscription_repo.get_latest_subscription(tenant_id=tenant_id)
 
     def expire_subscription(self, tenant_id: int) -> bool:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE subscriptions
-                    SET status = 'expired'
-                    WHERE tenant_id = %s
-                      AND status IN ('active', 'trial', 'grace')
-                    """,
-                    (int(tenant_id),),
-                )
-                updated = cur.rowcount > 0
-            conn.commit()
-            return updated
+        return self.subscription_repo.expire_subscription(tenant_id=tenant_id)
 
     def set_subscription_status(self, subscription_id: int, new_status: str) -> bool:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE subscriptions
-                    SET status = %s,
-                        updated_at = %s,
-                        canceled_at = CASE WHEN %s = 'canceled' THEN %s ELSE canceled_at END
-                    WHERE id = %s
-                    """,
-                    (str(new_status), utc_now_iso(), str(new_status), utc_now_iso(), int(subscription_id)),
-                )
-                updated = cur.rowcount > 0
-            conn.commit()
-            return updated
+        return self.subscription_repo.set_subscription_status(subscription_id=subscription_id, new_status=new_status)
 
     def set_subscription_grace_window(self, subscription_id: int, grace_started_at: str, grace_ends_at: str) -> bool:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE subscriptions
-                    SET grace_started_at = %s,
-                        grace_ends_at = %s,
-                        updated_at = %s
-                    WHERE id = %s
-                    """,
-                    (grace_started_at, grace_ends_at, utc_now_iso(), int(subscription_id)),
-                )
-                updated = cur.rowcount > 0
-            conn.commit()
-            return updated
+        return self.subscription_repo.set_subscription_grace_window(
+            subscription_id=subscription_id,
+            grace_started_at=grace_started_at,
+            grace_ends_at=grace_ends_at,
+        )
 
     def set_subscription_pending_plan(self, subscription_id: int, pending_plan_id: int) -> bool:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE subscriptions
-                    SET pending_plan_id = %s,
-                        updated_at = %s
-                    WHERE id = %s
-                    """,
-                    (int(pending_plan_id), utc_now_iso(), int(subscription_id)),
-                )
-                updated = cur.rowcount > 0
-            conn.commit()
-            return updated
+        return self.subscription_repo.set_subscription_pending_plan(subscription_id=subscription_id, pending_plan_id=pending_plan_id)
 
     def replace_subscription_plan(self, subscription_id: int, plan_id: int) -> bool:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE subscriptions
-                    SET plan_id = %s,
-                        pending_plan_id = NULL,
-                        updated_at = %s
-                    WHERE id = %s
-                    """,
-                    (int(plan_id), utc_now_iso(), int(subscription_id)),
-                )
-                updated = cur.rowcount > 0
-            conn.commit()
-            return updated
+        return self.subscription_repo.replace_subscription_plan(subscription_id=subscription_id, plan_id=plan_id)
 
     def bump_usage(self, tenant_id: int, *, jobs_delta: int = 0, video_delta: int = 0, storage_delta_mb: int = 0, api_calls_delta: int = 0) -> None:
-        day = datetime.now(timezone.utc).date().isoformat()
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO usage_stats(tenant_id, date, jobs_count, video_count, storage_used_mb, api_calls)
-                    VALUES(%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT(tenant_id, date)
-                    DO UPDATE SET
-                        jobs_count = usage_stats.jobs_count + EXCLUDED.jobs_count,
-                        video_count = usage_stats.video_count + EXCLUDED.video_count,
-                        storage_used_mb = usage_stats.storage_used_mb + EXCLUDED.storage_used_mb,
-                        api_calls = usage_stats.api_calls + EXCLUDED.api_calls
-                    """,
-                    (int(tenant_id), day, int(jobs_delta), int(video_delta), int(storage_delta_mb), int(api_calls_delta)),
-                )
-            conn.commit()
+        self.usage_repo.bump_usage(
+            tenant_id=tenant_id,
+            jobs_delta=jobs_delta,
+            video_delta=video_delta,
+            storage_delta_mb=storage_delta_mb,
+            api_calls_delta=api_calls_delta,
+        )
 
     def get_usage_for_date(self, tenant_id: int, day: str) -> dict[str, Any]:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT tenant_id, date, jobs_count, video_count, storage_used_mb, api_calls
-                    FROM usage_stats
-                    WHERE tenant_id = %s
-                      AND date = %s
-                    LIMIT 1
-                    """,
-                    (int(tenant_id), day),
-                )
-                row = cur.fetchone()
-        return dict(row) if row else {"tenant_id": int(tenant_id), "date": day, "jobs_count": 0, "video_count": 0, "storage_used_mb": 0, "api_calls": 0}
+        return self.usage_repo.get_usage_for_date(tenant_id=tenant_id, day=day)
 
     def get_usage_for_period(self, tenant_id: int, date_from: str, date_to: str) -> dict[str, Any]:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                        COALESCE(SUM(jobs_count), 0) AS jobs_count,
-                        COALESCE(SUM(video_count), 0) AS video_count,
-                        COALESCE(MAX(storage_used_mb), 0) AS storage_used_mb,
-                        COALESCE(SUM(api_calls), 0) AS api_calls
-                    FROM usage_stats
-                    WHERE tenant_id = %s
-                      AND date >= %s
-                      AND date <= %s
-                    """,
-                    (int(tenant_id), str(date_from), str(date_to)),
-                )
-                row = cur.fetchone() or {}
-        return {
-            "tenant_id": int(tenant_id),
-            "date_from": str(date_from),
-            "date_to": str(date_to),
-            "jobs_count": int(row.get("jobs_count") or 0),
-            "video_count": int(row.get("video_count") or 0),
-            "storage_used_mb": int(row.get("storage_used_mb") or 0),
-            "api_calls": int(row.get("api_calls") or 0),
-        }
+        return self.usage_repo.get_usage_for_period(tenant_id=tenant_id, date_from=date_from, date_to=date_to)
 
     def reset_usage_for_day(self, day: str) -> int:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE usage_stats
-                    SET jobs_count = 0,
-                        video_count = 0
-                    WHERE date = %s
-                    """,
-                    (day,),
-                )
-                count = cur.rowcount or 0
-            conn.commit()
-            return int(count)
+        return self.usage_repo.reset_usage_for_day(day=day)
 
     def add_subscription_history(
         self,
@@ -5012,48 +4723,20 @@ class PostgresRepository(RepositoryProtocol):
         effective_from: str | None,
         effective_to: str | None = None,
     ) -> int | None:
-        with self.connect() as conn:
-            row_id = self._fetch_inserted_id(
-                conn,
-                """
-                INSERT INTO subscription_history(
-                    tenant_id, old_plan_id, new_plan_id, old_status, new_status,
-                    changed_at, changed_by, reason, effective_from, effective_to
-                )
-                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-                """,
-                (
-                    int(tenant_id),
-                    old_plan_id,
-                    new_plan_id,
-                    old_status,
-                    new_status,
-                    utc_now_iso(),
-                    changed_by,
-                    reason,
-                    effective_from,
-                    effective_to,
-                ),
-            )
-            conn.commit()
-            return row_id
+        return self.subscription_repo.add_subscription_history(
+            tenant_id=tenant_id,
+            old_plan_id=old_plan_id,
+            new_plan_id=new_plan_id,
+            old_status=old_status,
+            new_status=new_status,
+            changed_by=changed_by,
+            reason=reason,
+            effective_from=effective_from,
+            effective_to=effective_to,
+        )
 
     def get_subscription_history(self, tenant_id: int, limit: int = 20) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM subscription_history
-                    WHERE tenant_id = %s
-                    ORDER BY id DESC
-                    LIMIT %s
-                    """,
-                    (int(tenant_id), int(limit)),
-                )
-                rows = cur.fetchall() or []
-        return [dict(r) for r in rows]
+        return self.subscription_repo.get_subscription_history(tenant_id=tenant_id, limit=limit)
 
     def create_billing_event(
         self,
@@ -5065,47 +4748,17 @@ class PostgresRepository(RepositoryProtocol):
         currency: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> int | None:
-        with self.connect() as conn:
-            row_id = self._fetch_inserted_id(
-                conn,
-                """
-                INSERT INTO billing_events(tenant_id, event_type, event_source, amount, currency, metadata_json, created_at)
-                VALUES(%s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-                """,
-                (
-                    int(tenant_id),
-                    str(event_type),
-                    event_source,
-                    amount,
-                    currency,
-                    _json_dumps(metadata),
-                    utc_now_iso(),
-                ),
-            )
-            conn.commit()
-            return row_id
+        return self.billing_repo.create_billing_event(
+            tenant_id=tenant_id,
+            event_type=event_type,
+            event_source=event_source,
+            amount=amount,
+            currency=currency,
+            metadata=metadata,
+        )
 
     def get_billing_events(self, tenant_id: int, limit: int = 20) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM billing_events
-                    WHERE tenant_id = %s
-                    ORDER BY id DESC
-                    LIMIT %s
-                    """,
-                    (int(tenant_id), int(limit)),
-                )
-                rows = cur.fetchall() or []
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            item["metadata_json"] = _safe_json_loads(item.get("metadata_json"), {})
-            result.append(item)
-        return result
+        return self.billing_repo.get_billing_events(tenant_id=tenant_id, limit=limit)
 
     def create_invoice(
         self,
@@ -5118,32 +4771,15 @@ class PostgresRepository(RepositoryProtocol):
         currency: str,
         due_at: str | None,
     ) -> int | None:
-        now_iso = utc_now_iso()
-        with self.connect() as conn:
-            row_id = self._fetch_inserted_id(
-                conn,
-                """
-                INSERT INTO invoices(
-                    tenant_id, subscription_id, period_start, period_end, status,
-                    subtotal, total, currency, created_at, updated_at, due_at
-                )
-                VALUES(%s, %s, %s, %s, %s, 0, 0, %s, %s, %s, %s)
-                RETURNING id
-                """,
-                (
-                    int(tenant_id),
-                    int(subscription_id),
-                    str(period_start),
-                    str(period_end),
-                    str(status),
-                    str(currency).upper(),
-                    now_iso,
-                    now_iso,
-                    due_at,
-                ),
-            )
-            conn.commit()
-            return row_id
+        return self.billing_repo.create_invoice(
+            tenant_id=tenant_id,
+            subscription_id=subscription_id,
+            period_start=period_start,
+            period_end=period_end,
+            status=status,
+            currency=currency,
+            due_at=due_at,
+        )
 
     def add_invoice_item(
         self,
@@ -5156,49 +4792,18 @@ class PostgresRepository(RepositoryProtocol):
         amount: float,
         metadata: dict[str, Any] | None = None,
     ) -> int | None:
-        with self.connect() as conn:
-            row_id = self._fetch_inserted_id(
-                conn,
-                """
-                INSERT INTO invoice_items(invoice_id, item_type, description, quantity, unit_price, amount, metadata_json)
-                VALUES(%s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-                """,
-                (
-                    int(invoice_id),
-                    str(item_type),
-                    str(description),
-                    int(quantity),
-                    unit_price,
-                    amount,
-                    _json_dumps(metadata or {}),
-                ),
-            )
-            conn.commit()
-            return row_id
+        return self.billing_repo.add_invoice_item(
+            invoice_id=invoice_id,
+            item_type=item_type,
+            description=description,
+            quantity=quantity,
+            unit_price=unit_price,
+            amount=amount,
+            metadata=metadata,
+        )
 
     def recalculate_invoice_totals(self, invoice_id: int) -> bool:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    WITH sums AS (
-                        SELECT COALESCE(SUM(amount), 0) AS amount_sum
-                        FROM invoice_items
-                        WHERE invoice_id = %s
-                    )
-                    UPDATE invoices
-                    SET subtotal = sums.amount_sum,
-                        total = sums.amount_sum,
-                        updated_at = %s
-                    FROM sums
-                    WHERE id = %s
-                    """,
-                    (int(invoice_id), utc_now_iso(), int(invoice_id)),
-                )
-                updated = cur.rowcount > 0
-            conn.commit()
-            return updated
+        return self.billing_repo.recalculate_invoice_totals(invoice_id=invoice_id)
 
     def set_invoice_status(
         self,
@@ -5209,145 +4814,31 @@ class PostgresRepository(RepositoryProtocol):
         paid_at: str | None = None,
         external_reference: str | None = None,
     ) -> bool:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE invoices
-                    SET status = %s,
-                        updated_at = %s,
-                        paid_at = COALESCE(%s, paid_at),
-                        external_reference = COALESCE(%s, external_reference)
-                    WHERE id = %s
-                    """,
-                    (str(status), updated_at or utc_now_iso(), paid_at, external_reference, int(invoice_id)),
-                )
-                updated = cur.rowcount > 0
-            conn.commit()
-            return updated
+        return self.billing_repo.set_invoice_status(
+            invoice_id=invoice_id,
+            status=status,
+            updated_at=updated_at,
+            paid_at=paid_at,
+            external_reference=external_reference,
+        )
 
     def get_invoice(self, invoice_id: int) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM invoices WHERE id = %s LIMIT 1", (int(invoice_id),))
-                row = cur.fetchone()
-        return dict(row) if row else None
+        return self.billing_repo.get_invoice(invoice_id=invoice_id)
 
     def get_last_invoice(self, tenant_id: int) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM invoices
-                    WHERE tenant_id = %s
-                    ORDER BY id DESC
-                    LIMIT 1
-                    """,
-                    (int(tenant_id),),
-                )
-                row = cur.fetchone()
-        return dict(row) if row else None
+        return self.billing_repo.get_last_invoice(tenant_id=tenant_id)
 
     def count_open_invoices(self, tenant_id: int) -> int:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT COUNT(*) AS cnt
-                    FROM invoices
-                    WHERE tenant_id = %s
-                      AND status IN ('draft', 'open', 'uncollectible')
-                    """,
-                    (int(tenant_id),),
-                )
-                row = cur.fetchone()
-        return int((row or {}).get("cnt") or 0)
+        return self.billing_repo.count_open_invoices(tenant_id=tenant_id)
 
     def count_rules_for_tenant(self, tenant_id: int) -> int:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT COUNT(*) AS cnt
-                    FROM routing
-                    WHERE COALESCE(tenant_id, 1) = %s
-                    """,
-                    (int(tenant_id),),
-                )
-                row = cur.fetchone()
-        return int(row["cnt"] or 0) if row else 0
+        return self.usage_repo.count_rules_for_tenant(tenant_id=tenant_id)
 
     def get_rule_tenant_id(self, rule_id: int) -> int:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT COALESCE(tenant_id, 1) AS tenant_id
-                    FROM routing
-                    WHERE id = %s
-                    LIMIT 1
-                    """,
-                    (int(rule_id),),
-                )
-                row = cur.fetchone()
-        return int(row["tenant_id"]) if row else 1
+        return self.usage_repo.get_rule_tenant_id(rule_id=rule_id)
 
     def get_saas_health_snapshot(self) -> dict[str, Any]:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS cnt FROM tenants WHERE is_active = TRUE")
-                active = int((cur.fetchone() or {}).get("cnt") or 0)
-                cur.execute("SELECT COUNT(*) AS cnt FROM tenants WHERE is_active = FALSE")
-                blocked = int((cur.fetchone() or {}).get("cnt") or 0)
-                cur.execute("SELECT COUNT(*) AS cnt FROM subscriptions WHERE status = 'active'")
-                subscriptions_active = int((cur.fetchone() or {}).get("cnt") or 0)
-                cur.execute("SELECT COUNT(*) AS cnt FROM subscriptions WHERE status = 'grace'")
-                subscriptions_in_grace = int((cur.fetchone() or {}).get("cnt") or 0)
-                cur.execute("SELECT COUNT(*) AS cnt FROM subscriptions WHERE status = 'expired'")
-                subscriptions_expired = int((cur.fetchone() or {}).get("cnt") or 0)
-                cur.execute("SELECT COUNT(*) AS cnt FROM invoices WHERE status IN ('draft', 'open', 'uncollectible')")
-                invoices_open = int((cur.fetchone() or {}).get("cnt") or 0)
-                cur.execute(
-                    """
-                    SELECT COUNT(DISTINCT u.tenant_id) AS cnt
-                    FROM usage_stats u
-                    JOIN subscriptions s ON s.tenant_id = u.tenant_id
-                    JOIN plans p ON p.id = s.plan_id
-                    WHERE u.date = %s
-                      AND s.status IN ('active', 'trial')
-                      AND (u.jobs_count >= p.max_jobs_per_day OR u.video_count >= p.max_video_per_day)
-                    """,
-                    (datetime.now(timezone.utc).date().isoformat(),),
-                )
-                over = int((cur.fetchone() or {}).get("cnt") or 0)
-                cur.execute(
-                    """
-                    SELECT COUNT(DISTINCT tenant_id) AS cnt
-                    FROM billing_events
-                    WHERE event_type IN ('invoice_marked_void', 'subscription_expired')
-                    """
-                )
-                billing_issues = int((cur.fetchone() or {}).get("cnt") or 0)
-                cur.execute(
-                    """
-                    SELECT COUNT(DISTINCT tenant_id) AS cnt
-                    FROM billing_events
-                    WHERE event_type = 'usage_threshold_reached'
-                    """
-                )
-                overage_candidates = int((cur.fetchone() or {}).get("cnt") or 0)
-        return {
-            "tenants_active": active,
-            "tenants_blocked": blocked,
-            "tenants_over_limits": over,
-            "subscriptions_active": subscriptions_active,
-            "subscriptions_in_grace": subscriptions_in_grace,
-            "subscriptions_expired": subscriptions_expired,
-            "invoices_open": invoices_open,
-            "tenants_with_billing_issues": billing_issues,
-            "tenants_with_overage_candidates": overage_candidates,
-        }
+        return self.usage_repo.get_saas_health_snapshot()
 
     def log_event(
         self,
