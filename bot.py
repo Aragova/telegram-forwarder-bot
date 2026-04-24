@@ -13,6 +13,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
 from aiogram.types import (
+    BotCommand,
+    BotCommandScopeDefault,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -68,6 +70,8 @@ from app.limit_service import LimitService
 from app.invoice_service import InvoiceService
 from app.billing_service import BillingService
 from app.saas_bootstrap import ensure_owner_and_default_tenant_bootstrap
+from app.i18n import get_user_language, set_user_language, t as tr
+from app import product_ui
 
 logger = setup_logging(settings.log_level)
 
@@ -116,6 +120,11 @@ MENU_NAVIGATION_TEXTS = {
     "📦 Очередь",
     "⚠️ Диагностика",
     "⚙️ Система",
+    "💎 Тарифы",
+    "👤 Мой аккаунт",
+    "🌐 Язык",
+    "📈 Использование",
+    "🧾 Счета",
     "📜 Список",
     "📜 Список правил",
     "📜 Список каналов",
@@ -605,6 +614,79 @@ async def is_admin_callback(callback: CallbackQuery) -> bool:
 
     await answer_callback_safe(callback, "⛔ Нет прав", show_alert=True)
     return False
+
+
+def _resolve_language(user_id: int | None) -> str:
+    if user_id is None:
+        return "ru"
+    return get_user_language(int(user_id), db)
+
+
+def _default_plan_catalog(lang: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "FREE",
+            "description": "Для теста и маленьких каналов" if lang == "ru" else "For testing and small channels",
+            "max_rules": 3,
+            "max_video_per_day": 5,
+            "max_jobs_per_day": 100,
+            "price": 0,
+        },
+        {
+            "name": "BASIC",
+            "description": "Для стабильной автопубликации" if lang == "ru" else "For stable autopublishing",
+            "max_rules": 15,
+            "max_video_per_day": 30,
+            "max_jobs_per_day": 1000,
+            "price": 9,
+        },
+        {
+            "name": "PRO",
+            "description": "Для больших каналов и видео" if lang == "ru" else "For large channels and video workflows",
+            "max_rules": 50,
+            "max_video_per_day": 100,
+            "max_jobs_per_day": 5000,
+            "price": 29,
+        },
+    ]
+
+
+def _get_plan_info(plan_name: str, lang: str) -> dict[str, Any]:
+    normalized = str(plan_name or "FREE").upper()
+    for item in _default_plan_catalog(lang):
+        if item["name"] == normalized:
+            return item
+    return _default_plan_catalog(lang)[0]
+
+
+def _build_invoice_for_plan_sync(tenant_id: int, plan_name: str) -> dict[str, Any] | None:
+    sub = subscription_service.get_active_subscription(int(tenant_id))
+    if not sub:
+        return None
+    sub = billing_service.ensure_billing_period(sub)
+    plan = _get_plan_info(plan_name, "ru")
+    invoice_id = invoice_service.create_draft_invoice(
+        int(tenant_id),
+        int(sub.get("id") or 0),
+        str(sub.get("current_period_start")),
+        str(sub.get("current_period_end")),
+        currency="USD",
+    )
+    if not invoice_id:
+        return None
+    flow_item = product_ui.build_upgrade_invoice_flow(plan_name=plan_name, price=float(plan.get("price") or 0))
+    invoice_service.add_invoice_item(
+        int(invoice_id),
+        item_type=str(flow_item["item_type"]),
+        description=str(flow_item["description"]),
+        quantity=int(flow_item["quantity"]),
+        unit_price=float(flow_item["unit_price"]),
+        metadata={"plan_name": str(plan_name).upper()},
+    )
+    invoice_service.finalize_invoice(int(invoice_id))
+    invoice = db.get_invoice(int(invoice_id)) if hasattr(db, "get_invoice") else None
+    items = db.list_invoice_items(int(invoice_id)) if hasattr(db, "list_invoice_items") else []
+    return {"invoice": invoice, "items": items}
 
 
 def interval_to_text(seconds: int) -> str:
@@ -1433,9 +1515,73 @@ async def stop_all_workers() -> None:
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
+    user_id = message.from_user.id if message.from_user else settings.admin_id
+    lang = _resolve_language(user_id)
+    tenant_before = await run_db(tenant_service.get_tenant_by_admin, user_id)
+    await run_db(tenant_service.ensure_tenant_exists, user_id)
+    is_new = tenant_before is None
     await message.reply(
-        "🚀 Бот запущен.\n\nНажми кнопку ниже для входа в меню.",
-        reply_markup=get_start_keyboard(),
+        product_ui.start_screen(lang, is_new),
+        reply_markup=product_ui.start_keyboard(lang),
+    )
+
+
+@dp.message(Command("menu"))
+async def cmd_menu(message: Message):
+    await handle_start(message)
+
+
+@dp.message(Command("language"))
+async def cmd_language(message: Message):
+    if not await is_admin(message):
+        return
+    lang = _resolve_language(message.from_user.id if message.from_user else None)
+    await message.answer(tr("language.select", lang), reply_markup=product_ui.language_keyboard())
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    if not await is_admin(message):
+        return
+    lang = _resolve_language(message.from_user.id if message.from_user else None)
+    await message.answer(product_ui.help_screen(lang))
+
+
+@dp.message(Command("plans"))
+async def cmd_plans(message: Message):
+    if not await is_admin(message):
+        return
+    lang = _resolve_language(message.from_user.id if message.from_user else None)
+    await message.answer(
+        product_ui.plans_screen(lang=lang, plans=_default_plan_catalog(lang)),
+        reply_markup=product_ui.plans_keyboard(lang),
+    )
+
+
+@dp.message(Command("account"))
+async def cmd_account(message: Message):
+    if not await is_admin(message):
+        return
+    admin_id = message.from_user.id if message.from_user else settings.admin_id
+    lang = _resolve_language(admin_id)
+    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+    tenant_id = int(tenant.get("id") or 1)
+    subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", lang)
+    usage_today = await run_db(usage_service.get_today_usage, tenant_id)
+    billing = await run_db(billing_service.build_billing_summary, tenant_id)
+    usage_period = billing.get("usage") or {}
+    last_invoice = billing.get("last_invoice_summary")
+    rules_count = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
+    await message.answer(
+        product_ui.account_screen(
+            lang=lang,
+            subscription=subscription,
+            usage_today=usage_today,
+            usage_period=usage_period,
+            last_invoice=last_invoice,
+            rules_count=int(rules_count or 0),
+        ),
+        reply_markup=product_ui.account_keyboard(lang),
     )
 
 
@@ -1467,19 +1613,13 @@ async def cmd_usage(message: Message):
     if not await is_admin(message):
         return
     admin_id = message.from_user.id if message.from_user else settings.admin_id
+    lang = _resolve_language(admin_id)
     tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
-    usage = await run_db(usage_service.get_today_usage, int(tenant.get("id") or 1))
-    await message.answer(
-        "\n".join(
-            [
-                "📊 Текущее использование за сегодня:",
-                f"• jobs: {int(usage.get('jobs_count') or 0)}",
-                f"• video: {int(usage.get('video_count') or 0)}",
-                f"• storage_mb: {int(usage.get('storage_used_mb') or 0)}",
-                f"• api_calls: {int(usage.get('api_calls') or 0)}",
-            ]
-        )
-    )
+    tenant_id = int(tenant.get("id") or 1)
+    today = await run_db(usage_service.get_today_usage, tenant_id)
+    billing = await run_db(billing_service.build_billing_summary, tenant_id)
+    limits = await run_db(subscription_service.get_active_subscription, tenant_id) or {}
+    await message.answer(product_ui.usage_screen(lang=lang, today=today, period=billing.get("usage") or {}, limits=limits))
 
 
 @dp.message(Command("limits"))
@@ -1569,29 +1709,16 @@ async def cmd_invoice(message: Message):
     if not await is_admin(message):
         return
     admin_id = message.from_user.id if message.from_user else settings.admin_id
+    lang = _resolve_language(admin_id)
     tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
     tenant_id = int(tenant.get("id") or 1)
     summary = await run_db(billing_service.get_last_invoice_summary, tenant_id)
     if not summary:
-        await message.answer("🧾 Счёт за текущий период ещё не создан.")
+        await message.answer("🧾 Счёт за текущий период ещё не создан." if lang == "ru" else "🧾 There is no invoice yet.")
         return
     invoice = summary.get("invoice") or {}
     items = summary.get("items") or []
-    item_lines = [f"• {item.get('item_type')}: {item.get('description')} = {item.get('amount')} {invoice.get('currency')}" for item in items] or ["• items отсутствуют"]
-    await message.answer(
-        "\n".join(
-            [
-                "🧾 Последний invoice:",
-                f"• ID: {invoice.get('id')}",
-                f"• Статус: {invoice.get('status')}",
-                f"• Период: {invoice.get('period_start')} — {invoice.get('period_end')}",
-                f"• Сумма: {invoice.get('total')} {invoice.get('currency')}",
-                f"• Оплачен: {invoice.get('paid_at', 'нет')}",
-                "• Позиции:",
-                *item_lines,
-            ]
-        )
-    )
+    await message.answer(product_ui.invoice_screen(lang=lang, invoice=invoice, items=items), reply_markup=product_ui.invoice_keyboard(lang))
 
 @dp.message(lambda m: m.text == "📋 Меню")
 async def handle_start(message: Message):
@@ -1601,6 +1728,31 @@ async def handle_start(message: Message):
         "📋 Главное меню",
         reply_markup=get_main_menu(),
     )
+
+
+@dp.message(lambda m: m.text == "👤 Мой аккаунт")
+async def handle_account_button(message: Message):
+    await cmd_account(message)
+
+
+@dp.message(lambda m: m.text == "💎 Тарифы")
+async def handle_plans_button(message: Message):
+    await cmd_plans(message)
+
+
+@dp.message(lambda m: m.text == "🌐 Язык")
+async def handle_language_button(message: Message):
+    await cmd_language(message)
+
+
+@dp.message(lambda m: m.text == "📈 Использование")
+async def handle_usage_button(message: Message):
+    await cmd_usage(message)
+
+
+@dp.message(lambda m: m.text == "🧾 Счета")
+async def handle_invoices_button(message: Message):
+    await cmd_invoice(message)
 
 @dp.message(lambda m: m.text in ("🔙 Главное меню", "⬅️ Назад в меню"))
 async def handle_main_menu(message: Message):
@@ -1640,6 +1792,142 @@ async def handle_cancel(message: Message):
 
     if not refreshed:
         await message.answer("❌ Отменено", reply_markup=get_main_menu())
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("lang:"))
+async def handle_language_callback(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    code = (callback.data or "").split(":", 1)[1]
+    lang = set_user_language(callback.from_user.id, code, db)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=tr(f"language.changed.{lang}", lang),
+        reply_markup=product_ui.product_menu_keyboard(lang),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("product:"))
+async def handle_product_callback(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    action = (callback.data or "").split(":", 1)[1]
+    lang = _resolve_language(callback.from_user.id if callback.from_user else None)
+    if action == "menu":
+        text = "💼 Аккаунт" if lang == "ru" else "💼 Account"
+        kb = product_ui.product_menu_keyboard(lang)
+    elif action == "plans":
+        text = product_ui.plans_screen(lang=lang, plans=_default_plan_catalog(lang))
+        kb = product_ui.plans_keyboard(lang)
+    elif action == "account":
+        admin_id = callback.from_user.id if callback.from_user else settings.admin_id
+        tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+        tenant_id = int(tenant.get("id") or 1)
+        subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", lang)
+        today = await run_db(usage_service.get_today_usage, tenant_id)
+        summary = await run_db(billing_service.build_billing_summary, tenant_id)
+        rules_count = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
+        text = product_ui.account_screen(
+            lang=lang,
+            subscription=subscription,
+            usage_today=today,
+            usage_period=summary.get("usage") or {},
+            last_invoice=summary.get("last_invoice_summary"),
+            rules_count=int(rules_count or 0),
+        )
+        kb = product_ui.account_keyboard(lang)
+    elif action == "usage":
+        admin_id = callback.from_user.id if callback.from_user else settings.admin_id
+        tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+        tenant_id = int(tenant.get("id") or 1)
+        today = await run_db(usage_service.get_today_usage, tenant_id)
+        summary = await run_db(billing_service.build_billing_summary, tenant_id)
+        limits = await run_db(subscription_service.get_active_subscription, tenant_id) or {}
+        text = product_ui.usage_screen(lang=lang, today=today, period=summary.get("usage") or {}, limits=limits)
+        kb = product_ui.account_keyboard(lang)
+    elif action == "invoice":
+        admin_id = callback.from_user.id if callback.from_user else settings.admin_id
+        tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+        tenant_id = int(tenant.get("id") or 1)
+        summary = await run_db(billing_service.get_last_invoice_summary, tenant_id)
+        if not summary:
+            text = "🧾 Счетов пока нет." if lang == "ru" else "🧾 No invoices yet."
+            kb = product_ui.product_menu_keyboard(lang)
+        else:
+            text = product_ui.invoice_screen(lang=lang, invoice=summary.get("invoice") or {}, items=summary.get("items") or [])
+            kb = product_ui.invoice_keyboard(lang)
+    else:
+        text = tr("language.select", lang)
+        kb = product_ui.language_keyboard()
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("plan_select:"))
+async def handle_plan_select_callback(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    lang = _resolve_language(callback.from_user.id if callback.from_user else None)
+    plan_name = (callback.data or "").split(":", 1)[1].upper()
+    plan = _get_plan_info(plan_name, lang)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=product_ui.upgrade_confirm_screen(lang, plan),
+        reply_markup=product_ui.upgrade_confirm_keyboard(lang, plan_name),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("plan_confirm:"))
+async def handle_plan_confirm_callback(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    admin_id = callback.from_user.id if callback.from_user else settings.admin_id
+    lang = _resolve_language(admin_id)
+    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
+    result = await run_db(_build_invoice_for_plan_sync, int(tenant.get("id") or 1), (callback.data or "").split(":", 1)[1].upper())
+    await answer_callback_safe_once(callback)
+    if not result or not result.get("invoice"):
+        await edit_message_text_safe(message=callback.message, text=("❌ Не удалось создать счёт." if lang == "ru" else "❌ Failed to create invoice."))
+        return
+    await edit_message_text_safe(
+        message=callback.message,
+        text=product_ui.invoice_screen(lang=lang, invoice=result["invoice"], items=result.get("items") or []),
+        reply_markup=product_ui.invoice_keyboard(lang),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "invoice:pay")
+async def handle_invoice_pay_stub(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    lang = _resolve_language(callback.from_user.id if callback.from_user else None)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=product_ui.payment_stub_screen(lang),
+        reply_markup=product_ui.invoice_keyboard(lang),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("start:"))
+async def handle_start_shortcuts(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    action = (callback.data or "").split(":", 1)[1]
+    await answer_callback_safe_once(callback)
+    if action == "add_channel":
+        await edit_message_text_safe(
+            message=callback.message,
+            text="Выберите тип записи",
+            reply_markup=None,
+        )
+        await callback.message.answer("Выберите тип записи", reply_markup=get_channel_type_keyboard())
+        return
+    if action == "create_rule":
+        await callback.message.answer("Раздел правил", reply_markup=get_rules_menu())
+        return
 
 @dp.message(lambda m: m.text == "📈 Живой статус")
 async def handle_live_status(message: Message):
@@ -6280,6 +6568,24 @@ async def handle_stateful_private_inputs(message: Message):
                 reply_markup=get_main_menu(),
             )
         else:
+            tenant = await run_db(tenant_service.ensure_tenant_exists, message.from_user.id if message.from_user else settings.admin_id)
+            tenant_id = int(tenant.get("id") or 1)
+            can_create, _reason = await run_db(limit_service.can_create_rule, tenant_id)
+            lang = _resolve_language(message.from_user.id if message.from_user else None)
+            if not can_create:
+                sub = await run_db(subscription_service.get_active_subscription, tenant_id) or {}
+                created_rules = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
+                await message.answer(
+                    product_ui.rule_limit_error(
+                        lang=lang,
+                        plan_name=str(sub.get("plan_name") or "FREE"),
+                        allowed_rules=int(sub.get("max_rules") or 0),
+                        created_rules=int(created_rules or 0),
+                    ),
+                    reply_markup=product_ui.limit_error_keyboard(lang),
+                )
+                reset_user_state(user_id)
+                return
             await message.answer(
                 "⚠️ Не удалось создать правило: возможно, оно уже существует или достигнут лимит тарифа.",
                 reply_markup=get_main_menu(),
@@ -7237,6 +7543,23 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
         await bot.delete_webhook(drop_pending_updates=True, request_timeout=90)
     except Exception as e:
         logger.warning("Webhook skip (network issue): %s", e)
+    try:
+        await bot.set_my_commands(
+            [
+                BotCommand(command="start", description="Старт / Start"),
+                BotCommand(command="menu", description="Главное меню / Main menu"),
+                BotCommand(command="account", description="Мой аккаунт / My account"),
+                BotCommand(command="plans", description="Тарифы / Plans"),
+                BotCommand(command="usage", description="Использование / Usage"),
+                BotCommand(command="billing", description="Биллинг / Billing"),
+                BotCommand(command="invoice", description="Счета / Invoices"),
+                BotCommand(command="language", description="Язык / Language"),
+                BotCommand(command="help", description="Помощь / Help"),
+            ],
+            scope=BotCommandScopeDefault(),
+        )
+    except Exception as exc:
+        logger.warning("Не удалось установить команды бота: %s", exc)
 
     telethon_client = await create_telethon_client()
     reaction_clients = await create_reaction_clients()
