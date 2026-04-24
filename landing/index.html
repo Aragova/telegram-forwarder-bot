@@ -4,106 +4,144 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ViMi — автоматизация Telegram-каналов</title>
-  <meta name="description" content="ViMi — автопостинг, видео, тарифы, счета и аналитика для Telegram-каналов в одном боте." />
+  <meta name="description" content="ViMi — помощник в Telegram для автопостинга, видео, тарифов, счетов и аналитики." />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="site-header">
+  <header class="header">
     <div class="container nav">
-      <a class="logo" href="#top" aria-label="ViMi"><span class="logo-bot">⌁</span><span>ViMi</span></a>
-      <nav class="nav-links" aria-label="Основная навигация">
+      <a class="logo" href="#top" aria-label="ViMi">
+        <img src="assets/logo.svg" alt="" />
+        <span>ViMi</span>
+      </a>
+      <nav class="nav-links" aria-label="Главное меню">
         <a href="#features" data-i18n="nav_features">Возможности</a>
         <a href="#pricing" data-i18n="nav_pricing">Тарифы</a>
-        <a href="ru/instructions.html" data-i18n="nav_instructions">Инструкции</a>
+        <a href="#how" data-i18n="nav_instructions">Инструкции</a>
         <a href="#faq" data-i18n="nav_faq">FAQ</a>
-        <a href="ru/contacts.html" data-i18n="nav_support">Поддержка</a>
+        <a href="#support" data-i18n="nav_support">Поддержка</a>
       </nav>
       <div class="nav-actions">
-        <button class="lang-btn" id="langToggle" type="button" aria-label="Сменить язык"><span id="currentLang">RU</span><span class="chevron">⌄</span></button>
-        <a class="btn btn-primary btn-small" href="https://t.me/ViMiBot" target="_blank" rel="noopener"><span class="ico">✈</span><span data-i18n="open_bot">Открыть бота</span></a>
+        <button class="lang" id="langToggle" type="button" aria-label="Сменить язык"><span id="langLabel">RU</span><svg viewBox="0 0 20 20"><path d="M5.5 7.5 10 12l4.5-4.5"/></svg></button>
+        <a class="btn btn-primary nav-btn" href="https://t.me/ViMiBot" target="_blank" rel="noopener"><span class="tg-icon">✈</span><span data-i18n="open_bot">Открыть бота</span></a>
       </div>
     </div>
   </header>
 
   <main id="top">
-    <section class="hero section-glow">
+    <section class="hero">
       <div class="container hero-grid">
         <div class="hero-copy">
-          <div class="eyebrow"><span>✺</span><span data-i18n="eyebrow">Ваш помощник в Telegram</span></div>
-          <h1><span data-i18n="hero_title_1">Автоматизация</span><br><span data-i18n="hero_title_2">Telegram-каналов</span><br><strong data-i18n="hero_title_3">в одном боте</strong></h1>
-          <p data-i18n="hero_text">Публикации, видео, тарифы, счета и оплата — всё внутри Telegram. Экономьте время и развивайте ваши каналы.</p>
-          <div class="hero-actions">
-            <a class="btn btn-primary" href="https://t.me/ViMiBot" target="_blank" rel="noopener"><span class="ico">✈</span><span data-i18n="open_bot">Открыть бота</span></a>
+          <div class="badge"><span>✺</span><span data-i18n="badge">Ваш помощник в Telegram</span></div>
+          <h1><span data-i18n="hero_title_1">Автоматизация</span><br><span data-i18n="hero_title_2">Telegram-каналов</span><br><em data-i18n="hero_title_3">в одном боте</em></h1>
+          <p class="lead" data-i18n="hero_text">Публикации, видео, тарифы, счета и оплата — всё внутри Telegram. Экономьте время и развивайте ваши каналы.</p>
+          <div class="hero-buttons">
+            <a class="btn btn-primary" href="https://t.me/ViMiBot" target="_blank" rel="noopener"><span class="tg-icon">✈</span><span data-i18n="open_bot">Открыть бота</span></a>
             <a class="btn btn-secondary" href="#pricing" data-i18n="watch_pricing">Смотреть тарифы</a>
           </div>
           <div class="trust-row">
-            <span><i>♡</i><b data-i18n="trust_safe">Надёжно и безопасно</b></span>
-            <span><i>◌</i><b data-i18n="trust_support">Поддержка 24/7</b></span>
-            <span><i>✈</i><b data-i18n="trust_telegram">Работает в Telegram</b></span>
+            <span><img src="assets/icon-shield.svg" alt="" data-i18n-alt="trust_1_alt"><span data-i18n="trust_1">Надёжно и безопасно</span></span>
+            <span><img src="assets/icon-support.svg" alt=""><span data-i18n="trust_2">Поддержка 24/7</span></span>
+            <span><img src="assets/icon-telegram.svg" alt=""><span data-i18n="trust_3">Работает в Telegram</span></span>
           </div>
         </div>
 
-        <div class="hero-art" aria-label="ViMi robot assistant">
-          <div class="speech" data-i18n="robot_speech">Привет! 👋<br>Я ViMi, ваш помощник<br>в работе с каналами!</div>
-          <img class="robot-img" src="assets/hero-robot.svg" alt="ViMi robot" />
-          <div class="hero-card card-one"><span class="feature-icon blue">✈</span><div><b data-i18n="hc_auto_title">Автопостинг</b><small data-i18n="hc_auto_text">Аккуратные публикации по расписанию.</small></div></div>
-          <div class="hero-card card-two"><span class="feature-icon purple">●</span><div><b data-i18n="hc_video_title">Видео</b><small data-i18n="hc_video_text">Обработка и очередь видео-контента.</small></div></div>
-          <div class="hero-card card-three"><span class="feature-icon green">▥</span><div><b data-i18n="hc_analytics_title">Аналитика</b><small data-i18n="hc_analytics_text">Статистика и отчёты в реальном времени.</small></div></div>
-          <div class="hero-card card-four"><span class="feature-icon orange">₿</span><div><b data-i18n="hc_money_title">Монетизация</b><small data-i18n="hc_money_text">Тарифы, счета и приём оплат.</small></div></div>
+        <div class="hero-art" aria-label="ViMi robot scene">
+          <div class="hero-blob"></div>
+          <div class="speech" data-i18n="speech">Привет! 👋<br>Я ViMi, ваш помощник<br>в работе с каналами!</div>
+          <img class="robot" src="assets/hero-robot.svg" alt="ViMi robot" />
+          <div class="hero-card card-1"><img src="assets/icon-telegram.svg" alt=""><b data-i18n="hero_card_1_t">Автопостинг</b><span data-i18n="hero_card_1_d">Аккуратные публикации по расписанию.</span></div>
+          <div class="hero-card card-2"><img src="assets/icon-video.svg" alt=""><b data-i18n="hero_card_2_t">Видео</b><span data-i18n="hero_card_2_d">Обработка и очередь видео-контента.</span></div>
+          <div class="hero-card card-3"><img src="assets/icon-analytics.svg" alt=""><b data-i18n="hero_card_3_t">Аналитика</b><span data-i18n="hero_card_3_d">Статистика и отчёты в реальном времени.</span></div>
+          <div class="hero-card card-4"><img src="assets/icon-btc.svg" alt=""><b data-i18n="hero_card_4_t">Монетизация</b><span data-i18n="hero_card_4_d">Тарифы, счета и приём оплат.</span></div>
         </div>
       </div>
     </section>
 
-    <section class="container payment-strip" aria-label="Поддерживаемые оплаты">
-      <b data-i18n="payments_supported">Поддерживаем</b>
-      <span><i>✈</i> Telegram Payments</span><span>PayPal</span><span>VISA</span><span>Mastercard</span><span>МИР</span><span>СБП</span><span>₿ TRC20</span><span>LAVA</span><span>TRIBUTE</span><small data-i18n="payments_more">и другие</small>
+    <section class="container pay-strip" aria-label="payments">
+      <b data-i18n="supported">Поддерживаем</b>
+      <span><img src="assets/icon-telegram.svg" alt="">Telegram Payments</span>
+      <span><img src="assets/icon-paypal.svg" alt="">PayPal</span>
+      <span class="brand">VISA</span>
+      <span><span class="mc"><i></i><i></i></span>Mastercard</span>
+      <span class="brand green">МИР</span>
+      <span><img src="assets/icon-sbp.svg" alt="">СБП</span>
+      <span><img src="assets/icon-btc.svg" alt="">TRC20</span>
+      <span class="brand">LAVA</span>
+      <span class="brand">TRIBUTE</span>
+      <small data-i18n="and_more">и другие</small>
     </section>
 
     <section class="container section" id="features">
-      <div class="section-head"><h2><span data-i18n="features_title_1">Что умеет</span> <em>ViMi</em></h2><p data-i18n="features_text">Все инструменты для эффективной работы с вашими каналами в одном боте</p></div>
+      <div class="section-head">
+        <h2><span data-i18n="features_title_1">Что умеет</span> <em>ViMi</em></h2>
+        <p data-i18n="features_text">Все инструменты для эффективной работы с вашими каналами в одном боте</p>
+      </div>
       <div class="features-grid">
-        <article class="feature-card"><span class="icon-badge paper">✈</span><h3 data-i18n="f1_title">Автопостинг</h3><p data-i18n="f1_text">Публикуйте записи из источников по расписанию без ручной работы.</p></article>
-        <article class="feature-card"><span class="icon-badge video">▶</span><h3 data-i18n="f2_title">Видео</h3><p data-i18n="f2_text">Обрабатывайте видео, добавляйте обложки, подписи и запускайте в очередь.</p></article>
-        <article class="feature-card"><span class="icon-badge diamond">◇</span><h3 data-i18n="f3_title">Тарифы</h3><p data-i18n="f3_text">Гибкие тарифы с лимитами для вас и ваших каналов.</p></article>
-        <article class="feature-card"><span class="icon-badge bill">▤</span><h3 data-i18n="f4_title">Счета и оплата</h3><p data-i18n="f4_text">Создавайте счета и принимайте оплату удобным способом.</p></article>
-        <article class="feature-card"><span class="icon-badge chart">▥</span><h3 data-i18n="f5_title">Статистика</h3><p data-i18n="f5_text">Следите за активностью, использованием и эффективностью.</p></article>
-        <article class="feature-card"><span class="icon-badge gear">⚙</span><h3 data-i18n="f6_title">Автоматизация</h3><p data-i18n="f6_text">Меньше рутины — больше времени на развитие.</p></article>
+        <article class="feature"><img src="assets/icon-telegram-big.svg" alt=""><h3 data-i18n="f1_t">Автопостинг</h3><p data-i18n="f1_d">Публикуйте записи из источников по расписанию без ручной работы.</p></article>
+        <article class="feature"><img src="assets/icon-video-big.svg" alt=""><h3 data-i18n="f2_t">Видео</h3><p data-i18n="f2_d">Обрабатывайте видео, добавляйте обложки, подписи и запускайте в очередь.</p></article>
+        <article class="feature"><img src="assets/icon-diamond.svg" alt=""><h3 data-i18n="f3_t">Тарифы</h3><p data-i18n="f3_d">Гибкие тарифы с лимитами для вас и ваших каналов.</p></article>
+        <article class="feature"><img src="assets/icon-doc.svg" alt=""><h3 data-i18n="f4_t">Счета и оплата</h3><p data-i18n="f4_d">Создавайте счета и принимайте оплату удобным способом.</p></article>
+        <article class="feature"><img src="assets/icon-stats.svg" alt=""><h3 data-i18n="f5_t">Статистика</h3><p data-i18n="f5_d">Следите за активностью, использованием и эффективностью.</p></article>
+        <article class="feature"><img src="assets/icon-gear.svg" alt=""><h3 data-i18n="f6_t">Автоматизация</h3><p data-i18n="f6_d">Меньше рутины — больше времени на развитие.</p></article>
       </div>
     </section>
 
-    <section class="container section how">
+    <section class="container section" id="how">
       <h2 data-i18n="how_title">Как это работает</h2>
-      <div class="steps-grid">
-        <article class="step-card"><span class="step-num">1</span><img src="assets/mini-robot.svg" alt=""><h3 data-i18n="s1_title">Откройте бота</h3><p data-i18n="s1_text">Запустите ViMi в Telegram за пару секунд.</p></article>
-        <article class="step-card"><span class="step-num">2</span><div class="step-visual sources"><span>＋</span><small>Блог</small><small>Новости</small><small>YouTube</small></div><h3 data-i18n="s2_title">Добавьте источники и каналы</h3><p data-i18n="s2_text">Укажите откуда брать контент и куда публиковать.</p></article>
-        <article class="step-card"><span class="step-num">3</span><div class="step-visual calendar">▦<b>◷</b></div><h3 data-i18n="s3_title">Создайте правило публикации</h3><p data-i18n="s3_text">Настройте расписание и параметры публикаций.</p></article>
-        <article class="step-card"><span class="step-num">4</span><div class="step-visual tariff">◇</div><h3 data-i18n="s4_title">Подключите тариф или оплату</h3><p data-i18n="s4_text">Выберите тариф и оплатите удобным способом.</p></article>
-        <article class="step-card"><span class="step-num">5</span><img src="assets/mini-robot.svg" alt=""><h3 data-i18n="s5_title">Бот выполняет рутину за вас</h3><p data-i18n="s5_text">ViMi работает 24/7, вы экономите время и растите быстрее.</p></article>
+      <div class="steps">
+        <article class="step"><span class="num">1</span><img src="assets/step-robot.svg" alt=""><h3 data-i18n="s1_t">Откройте бота</h3><p data-i18n="s1_d">Запустите ViMi в Telegram за пару секунд.</p></article>
+        <article class="step"><span class="num">2</span><img src="assets/step-sources.svg" alt=""><h3 data-i18n="s2_t">Добавьте источники и каналы</h3><p data-i18n="s2_d">Укажите откуда брать контент и куда публиковать.</p></article>
+        <article class="step"><span class="num">3</span><img src="assets/step-calendar.svg" alt=""><h3 data-i18n="s3_t">Создайте правило публикации</h3><p data-i18n="s3_d">Настройте расписание и параметры публикаций.</p></article>
+        <article class="step"><span class="num">4</span><img src="assets/step-card.svg" alt=""><h3 data-i18n="s4_t">Подключите тариф или оплату</h3><p data-i18n="s4_d">Выберите тариф и оплатите удобным способом.</p></article>
+        <article class="step"><span class="num">5</span><img src="assets/step-done.svg" alt=""><h3 data-i18n="s5_t">Бот выполняет рутину за вас</h3><p data-i18n="s5_d">ViMi работает 24/7, вы экономите время и растите быстрее.</p></article>
       </div>
     </section>
 
-    <section class="container section pricing-section" id="pricing">
-      <div class="pricing-left"><div class="section-head"><h2 data-i18n="pricing_title">Тарифы</h2><p data-i18n="pricing_text">Выберите тариф, который подходит именно вам</p></div><div class="pricing-grid">
-        <article class="price-card free"><h3>FREE</h3><p data-i18n="free_text">Для теста и знакомства</p><div class="price">0 <small>USD / <span data-i18n="month">месяц</span></small></div><ul><li>3 <span data-i18n="rules">правила</span></li><li>5 <span data-i18n="videos_day">видео / день</span></li><li>100 <span data-i18n="tasks_day">задач / день</span></li></ul><a href="https://t.me/ViMiBot" class="plan-btn" data-i18n="choose_bot">Выбрать в боте</a></article>
-        <article class="price-card popular"><span class="popular-badge" data-i18n="popular">Популярный</span><h3>BASIC</h3><p data-i18n="basic_text">Для стабильной работы</p><div class="price">9 <small>USD / <span data-i18n="month">месяц</span></small></div><ul><li>15 <span data-i18n="rules">правила</span></li><li>30 <span data-i18n="videos_day">видео / день</span></li><li>1000 <span data-i18n="tasks_day">задач / день</span></li></ul><a href="https://t.me/ViMiBot" class="plan-btn" data-i18n="choose_bot">Выбрать в боте</a></article>
-        <article class="price-card pro"><h3>PRO</h3><p data-i18n="pro_text">Для больших каналов и команд</p><div class="price">29 <small>USD / <span data-i18n="month">месяц</span></small></div><ul><li>50 <span data-i18n="rules">правила</span></li><li>100 <span data-i18n="videos_day">видео / день</span></li><li>5000 <span data-i18n="tasks_day">задач / день</span></li></ul><a href="https://t.me/ViMiBot" class="plan-btn" data-i18n="choose_bot">Выбрать в боте</a></article>
-      </div></div>
-      <aside class="payment-card"><h2 data-i18n="payment_methods">Способы оплаты</h2><div class="pay-grid"><span>✈ Telegram Payments / Stars</span><span>PayPal</span><span>▣ Банковские карты</span><span>СБП</span><span>₿ Криптовалюта</span><span>Tribute</span><span>Lava.top</span><span>◉ Ручное подтверждение</span></div><p data-i18n="payment_note">Некоторые способы оплаты могут работать автоматически, а некоторые — через ручное подтверждение администратором.</p></aside>
+    <section class="container section pricing-pay" id="pricing">
+      <div class="pricing-col">
+        <div class="section-head compact"><h2 data-i18n="pricing_title">Тарифы</h2><p data-i18n="pricing_text">Выберите тариф, который подходит именно вам</p></div>
+        <div class="pricing-grid">
+          <article class="price free"><h3>FREE</h3><p data-i18n="free_d">Для теста и знакомства</p><div class="price-num">0 <span>USD / <span data-i18n="month">месяц</span></span></div><ul><li data-i18n="free_1">3 правила</li><li data-i18n="free_2">5 видео / день</li><li data-i18n="free_3">100 задач / день</li></ul><a href="https://t.me/ViMiBot" class="plan-btn" data-i18n="choose_bot">Выбрать в боте</a></article>
+          <article class="price basic"><div class="popular" data-i18n="popular">Популярный</div><h3>BASIC</h3><p data-i18n="basic_d">Для стабильной работы</p><div class="price-num">9 <span>USD / <span data-i18n="month">месяц</span></span></div><ul><li data-i18n="basic_1">15 правил</li><li data-i18n="basic_2">30 видео / день</li><li data-i18n="basic_3">1000 задач / день</li></ul><a href="https://t.me/ViMiBot" class="plan-btn" data-i18n="choose_bot">Выбрать в боте</a></article>
+          <article class="price pro"><h3>PRO</h3><p data-i18n="pro_d">Для больших каналов и команд</p><div class="price-num">29 <span>USD / <span data-i18n="month">месяц</span></span></div><ul><li data-i18n="pro_1">50 правил</li><li data-i18n="pro_2">100 видео / день</li><li data-i18n="pro_3">5000 задач / день</li></ul><a href="https://t.me/ViMiBot" class="plan-btn" data-i18n="choose_bot">Выбрать в боте</a></article>
+        </div>
+      </div>
+      <aside class="payment-card">
+        <h2 data-i18n="payments_title">Способы оплаты</h2>
+        <div class="payment-grid">
+          <span><img src="assets/icon-telegram.svg" alt="">Telegram Payments / Stars</span>
+          <span><img src="assets/icon-paypal.svg" alt="">PayPal</span>
+          <span><img src="assets/icon-card.svg" alt=""><span data-i18n="bank_cards">Банковские карты</span></span>
+          <span><img src="assets/icon-sbp.svg" alt="">СБП</span>
+          <span><img src="assets/icon-btc.svg" alt=""><span data-i18n="crypto">Криптовалюта</span></span>
+          <span><img src="assets/icon-tribute.svg" alt="">Tribute</span>
+          <span><img src="assets/icon-lava.svg" alt="">Lava.top</span>
+          <span><img src="assets/icon-manual.svg" alt=""><span data-i18n="manual">Ручное подтверждение</span></span>
+        </div>
+        <p data-i18n="payments_note">Некоторые способы оплаты могут работать автоматически, а некоторые — через ручное подтверждение администратором.</p>
+      </aside>
     </section>
 
-    <section class="container final-cta">
-      <img src="assets/mini-robot.svg" alt="" class="cta-robot left"><div><h2 data-i18n="cta_title">Готовы автоматизировать ваши каналы?</h2><p data-i18n="cta_text">Откройте ViMi в Telegram и начните прямо сейчас.</p></div><a class="btn btn-white" href="https://t.me/ViMiBot"><span>✈</span><span data-i18n="open_bot">Открыть бота</span></a><img src="assets/mini-robot.svg" alt="" class="cta-robot right">
+    <section class="container cta">
+      <img class="cta-robot-left" src="assets/cta-robot-left.svg" alt="">
+      <div><h2 data-i18n="cta_title">Готовы автоматизировать ваши каналы?</h2><p data-i18n="cta_text">Откройте ViMi в Telegram и начните прямо сейчас.</p></div>
+      <a class="btn cta-btn" href="https://t.me/ViMiBot" target="_blank" rel="noopener"><span class="tg-icon">✈</span><span data-i18n="open_bot">Открыть бота</span></a>
+      <img class="cta-robot-right" src="assets/cta-robot-right.svg" alt="">
     </section>
   </main>
 
-  <footer class="container footer">
-    <div><a class="logo" href="#top"><span class="logo-bot">⌁</span><span>ViMi</span></a><p data-i18n="footer_text">Ваш помощник в Telegram для автопубликации, роста и монетизации каналов.</p></div>
-    <div><b data-i18n="footer_product">Продукт</b><a href="#features" data-i18n="nav_features">Возможности</a><a href="#pricing" data-i18n="nav_pricing">Тарифы</a><a href="ru/instructions.html" data-i18n="nav_instructions">Инструкции</a></div>
-    <div><b data-i18n="footer_company">Компания</b><a href="ru/contacts.html" data-i18n="nav_support">Поддержка</a><a href="ru/terms.html" data-i18n="terms">Условия</a><a href="ru/privacy.html" data-i18n="privacy">Политика конфиденциальности</a></div>
-    <div><b data-i18n="footer_contact">Связаться с нами</b><a href="https://t.me/ViMiBot">✈ Telegram</a><a href="mailto:support@vimi.bot">support@vimi.bot</a></div>
+  <footer class="footer" id="support">
+    <div class="container footer-grid">
+      <div><a class="logo footer-logo" href="#top"><img src="assets/logo.svg" alt=""><span>ViMi</span></a><p data-i18n="footer_text">Ваш помощник в Telegram для автоматизации, роста и монетизации каналов.</p></div>
+      <div><b data-i18n="footer_product">Продукт</b><a href="#features" data-i18n="nav_features">Возможности</a><a href="#pricing" data-i18n="nav_pricing">Тарифы</a><a href="#how" data-i18n="nav_instructions">Инструкции</a></div>
+      <div><b data-i18n="footer_company">Компания</b><a href="ru/contacts.html" data-i18n="about">О нас</a><a href="#support" data-i18n="nav_support">Поддержка</a><a href="ru/contacts.html" data-i18n="contacts">Контакты</a></div>
+      <div><b data-i18n="footer_docs">Документы</b><a href="ru/terms.html" data-i18n="terms">Пользовательское соглашение</a><a href="ru/privacy.html" data-i18n="privacy">Политика конфиденциальности</a><a href="ru/refund.html" data-i18n="refund">Возврат средств</a></div>
+      <div><b data-i18n="contact_us">Связаться с нами</b><a href="https://t.me/ViMiBot">✈ <span data-i18n="telegram_support">Поддержка в Telegram</span></a><a href="mailto:support@vimi.bot">✉ support@vimi.bot</a></div>
+    </div>
   </footer>
 
   <script src="app.js"></script>
