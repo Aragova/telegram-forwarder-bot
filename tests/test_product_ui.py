@@ -43,6 +43,19 @@ def test_en_account_screen_formatting():
     assert "Rules: 8 / 50" in text
 
 
+def test_es_de_pt_account_screen_formatting():
+    for lang, marker in (("es", "Mi cuenta"), ("de", "Mein Konto"), ("pt", "Minha conta")):
+        text = product_ui.account_screen(
+            lang=lang,
+            subscription=_subscription("PRO"),
+            usage_today={"jobs_count": 1, "video_count": 2, "storage_used_mb": 3},
+            usage_period={"jobs_count": 10},
+            last_invoice=None,
+            rules_count=1,
+        )
+        assert marker in text
+
+
 def test_plans_screen_hides_owner():
     text = product_ui.plans_screen(lang="ru", plans=[{"name": "OWNER", "description": "", "max_rules": 0, "max_video_per_day": 0, "max_jobs_per_day": 0, "price": 0}, {"name": "FREE", "description": "x", "max_rules": 3, "max_video_per_day": 5, "max_jobs_per_day": 100, "price": 0}])
     assert "OWNER" not in text
@@ -80,6 +93,17 @@ def test_invoice_screen_formatting():
     )
     assert "Invoice #15" in text
     assert "Total: 29.00 USD" in text
+
+
+def test_invoice_screen_multilang_titles():
+    titles = {"es": "Factura #15", "de": "Rechnung #15", "pt": "Fatura #15"}
+    for lang, title in titles.items():
+        text = product_ui.invoice_screen(
+            lang=lang,
+            invoice={"id": 15, "status": "open", "period_start": "2026-04-01", "period_end": "2026-04-30", "total": 29, "currency": "USD"},
+            items=[{"description": "PRO plan", "amount": 29, "metadata": {"plan_name": "PRO"}}],
+        )
+        assert title in text
 
 
 def test_limit_error_messages_ru_en():
@@ -131,3 +155,12 @@ def test_language_keyboard_has_es_de_pt():
     assert "lang:es" in callbacks
     assert "lang:de" in callbacks
     assert "lang:pt" in callbacks
+
+
+def test_start_and_help_are_translated_for_es_de_pt():
+    assert "Bienvenido" in product_ui.start_screen("es", True)
+    assert "Willkommen" in product_ui.start_screen("de", True)
+    assert "Bem-vindo" in product_ui.start_screen("pt", True)
+    assert "Ayuda" in product_ui.help_screen("es")
+    assert "Hilfe" in product_ui.help_screen("de")
+    assert "Ajuda" in product_ui.help_screen("pt")

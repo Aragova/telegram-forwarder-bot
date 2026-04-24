@@ -623,10 +623,34 @@ def _resolve_language(user_id: int | None) -> str:
 
 
 def _default_plan_catalog(lang: str) -> list[dict[str, Any]]:
+    desc_map = {
+        "FREE": {
+            "ru": "Для теста и маленьких каналов",
+            "en": "For testing and small channels",
+            "es": "Para pruebas y canales pequeños",
+            "de": "Für Tests und kleine Kanäle",
+            "pt": "Para testes e canais pequenos",
+        },
+        "BASIC": {
+            "ru": "Для стабильной автопубликации",
+            "en": "For stable autopublishing",
+            "es": "Para autopublicación estable",
+            "de": "Für stabile Autopublikation",
+            "pt": "Para autopublicação estável",
+        },
+        "PRO": {
+            "ru": "Для больших каналов и видео",
+            "en": "For large channels and video workflows",
+            "es": "Para canales grandes y flujos de video",
+            "de": "Für große Kanäle und Video-Workflows",
+            "pt": "Para canais grandes e fluxos de vídeo",
+        },
+    }
+    language = lang if lang in {"ru", "en", "es", "de", "pt"} else "ru"
     return [
         {
             "name": "FREE",
-            "description": "Для теста и маленьких каналов" if lang == "ru" else "For testing and small channels",
+            "description": desc_map["FREE"][language],
             "max_rules": 3,
             "max_video_per_day": 5,
             "max_jobs_per_day": 100,
@@ -634,7 +658,7 @@ def _default_plan_catalog(lang: str) -> list[dict[str, Any]]:
         },
         {
             "name": "BASIC",
-            "description": "Для стабильной автопубликации" if lang == "ru" else "For stable autopublishing",
+            "description": desc_map["BASIC"][language],
             "max_rules": 15,
             "max_video_per_day": 30,
             "max_jobs_per_day": 1000,
@@ -642,7 +666,7 @@ def _default_plan_catalog(lang: str) -> list[dict[str, Any]]:
         },
         {
             "name": "PRO",
-            "description": "Для больших каналов и видео" if lang == "ru" else "For large channels and video workflows",
+            "description": desc_map["PRO"][language],
             "max_rules": 50,
             "max_video_per_day": 100,
             "max_jobs_per_day": 5000,
@@ -1714,7 +1738,14 @@ async def cmd_invoice(message: Message):
     tenant_id = int(tenant.get("id") or 1)
     summary = await run_db(billing_service.get_last_invoice_summary, tenant_id)
     if not summary:
-        await message.answer("🧾 Счёт за текущий период ещё не создан." if lang == "ru" else "🧾 There is no invoice yet.")
+        no_invoice_text = {
+            "ru": "🧾 Счёт за текущий период ещё не создан.",
+            "en": "🧾 There is no invoice yet.",
+            "es": "🧾 Aún no hay factura.",
+            "de": "🧾 Es gibt noch keine Rechnung.",
+            "pt": "🧾 Ainda não há fatura.",
+        }
+        await message.answer(no_invoice_text.get(lang, no_invoice_text["en"]))
         return
     invoice = summary.get("invoice") or {}
     items = summary.get("items") or []
@@ -1815,7 +1846,14 @@ async def handle_product_callback(callback: CallbackQuery):
     action = (callback.data or "").split(":", 1)[1]
     lang = _resolve_language(callback.from_user.id if callback.from_user else None)
     if action == "menu":
-        text = "💼 Аккаунт" if lang == "ru" else "💼 Account"
+        menu_titles = {
+            "ru": "💼 Аккаунт",
+            "en": "💼 Account",
+            "es": "💼 Cuenta",
+            "de": "💼 Konto",
+            "pt": "💼 Conta",
+        }
+        text = menu_titles.get(lang, menu_titles["en"])
         kb = product_ui.product_menu_keyboard(lang)
     elif action == "plans":
         text = product_ui.plans_screen(lang=lang, plans=_default_plan_catalog(lang))
@@ -1852,7 +1890,14 @@ async def handle_product_callback(callback: CallbackQuery):
         tenant_id = int(tenant.get("id") or 1)
         summary = await run_db(billing_service.get_last_invoice_summary, tenant_id)
         if not summary:
-            text = "🧾 Счетов пока нет." if lang == "ru" else "🧾 No invoices yet."
+            no_invoice_text = {
+                "ru": "🧾 Счетов пока нет.",
+                "en": "🧾 No invoices yet.",
+                "es": "🧾 Aún no hay facturas.",
+                "de": "🧾 Noch keine Rechnungen.",
+                "pt": "🧾 Ainda não há faturas.",
+            }
+            text = no_invoice_text.get(lang, no_invoice_text["en"])
             kb = product_ui.product_menu_keyboard(lang)
         else:
             text = product_ui.invoice_screen(lang=lang, invoice=summary.get("invoice") or {}, items=summary.get("items") or [])
@@ -1918,15 +1963,32 @@ async def handle_start_shortcuts(callback: CallbackQuery):
     action = (callback.data or "").split(":", 1)[1]
     await answer_callback_safe_once(callback)
     if action == "add_channel":
+        add_channel_text = {
+            "ru": "Выберите тип записи",
+            "en": "Choose entry type",
+            "es": "Elige el tipo de registro",
+            "de": "Wähle den Eintragstyp",
+            "pt": "Escolha o tipo de registro",
+        }
         await edit_message_text_safe(
             message=callback.message,
-            text="Выберите тип записи",
+            text=add_channel_text.get(_resolve_language(callback.from_user.id if callback.from_user else None), add_channel_text["en"]),
             reply_markup=None,
         )
-        await callback.message.answer("Выберите тип записи", reply_markup=get_channel_type_keyboard())
+        await callback.message.answer(
+            add_channel_text.get(_resolve_language(callback.from_user.id if callback.from_user else None), add_channel_text["en"]),
+            reply_markup=get_channel_type_keyboard(),
+        )
         return
     if action == "create_rule":
-        await callback.message.answer("Раздел правил", reply_markup=get_rules_menu())
+        rules_text = {
+            "ru": "Раздел правил",
+            "en": "Rules section",
+            "es": "Sección de reglas",
+            "de": "Regelbereich",
+            "pt": "Seção de regras",
+        }
+        await callback.message.answer(rules_text.get(_resolve_language(callback.from_user.id if callback.from_user else None), rules_text["en"]), reply_markup=get_rules_menu())
         return
 
 @dp.message(lambda m: m.text == "📈 Живой статус")
