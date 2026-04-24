@@ -251,7 +251,12 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         can_video, video_reason = limit_service.can_process_video(tenant_id)
         if not can_video:
             logger.warning("Лимит видео задач превышен | tenant_id=%s | job_id=%s", tenant_id, job_id)
-            await asyncio.to_thread(repo.fail_job, job_id, video_reason or "Лимит видео задач превышен")
+            friendly = (
+                "🎬 Лимит видео на сегодня исчерпан. "
+                "Новые видео будут доступны после обновления дневного лимита "
+                "или после перехода на PRO."
+            )
+            await asyncio.to_thread(repo.fail_job, job_id, video_reason or friendly)
             return True
 
     can_start, reason = _can_start_job(queue, job_type, state, policy)
