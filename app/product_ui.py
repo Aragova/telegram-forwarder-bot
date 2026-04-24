@@ -47,6 +47,12 @@ _TR = {
     "invoice.total": {"ru": "Итого: {v:.2f} {ccy}", "en": "Total: {v:.2f} {ccy}", "es": "Total: {v:.2f} {ccy}", "de": "Gesamt: {v:.2f} {ccy}", "pt": "Total: {v:.2f} {ccy}"},
     "invoice.next_step": {"ru": "Оплата будет подключена следующим этапом.", "en": "Payment will be connected in the next step.", "es": "El pago se conectará en el siguiente paso.", "de": "Die Zahlung wird im nächsten Schritt angebunden.", "pt": "O pagamento será conectado na próxima etapa."},
     "menu.pay": {"ru": "💳 Оплатить", "en": "💳 Pay", "es": "💳 Pagar", "de": "💳 Bezahlen", "pt": "💳 Pagar"},
+    "payment.methods.title": {"ru": "💳 Способы оплаты", "en": "💳 Payment methods"},
+    "payment.methods.pick": {"ru": "Выберите удобный способ:", "en": "Choose a payment method:"},
+    "payment.manual.sent": {
+        "ru": "📩 Заявка на проверку оплаты отправлена\n\nМы проверим оплату и активируем тариф.",
+        "en": "📩 Payment confirmation request sent\n\nWe will verify the payment and activate your plan.",
+    },
     "payment.stub": {
         "ru": "💳 Оплата ещё не подключена\n\nСчёт создан и готов к оплате.\nСледующий этап — подключение платёжного провайдера.",
         "en": "💳 Payments are not connected yet\n\nThe invoice has been created and is ready for payment.\nThe next step is payment provider integration.",
@@ -290,6 +296,39 @@ def invoice_keyboard(lang: str) -> InlineKeyboardMarkup:
 
 def payment_stub_screen(lang: str) -> str:
     return _msg(lang, "payment.stub")
+
+
+def payment_methods_screen(lang: str) -> str:
+    return "\n".join([
+        _msg(lang, "payment.methods.title"),
+        "",
+        _msg(lang, "payment.methods.pick"),
+    ])
+
+
+def payment_methods_keyboard(lang: str, providers: list[str]) -> InlineKeyboardMarkup:
+    labels = {
+        "telegram_stars": {"ru": "⭐ Telegram Stars", "en": "⭐ Telegram Stars"},
+        "telegram_payments": {"ru": "💳 Telegram Payments", "en": "💳 Telegram Payments"},
+        "paypal": {"ru": "🅿️ PayPal", "en": "🅿️ PayPal"},
+        "card_provider": {"ru": "💳 Банковская карта", "en": "💳 Bank card"},
+        "manual_bank_card": {"ru": "💳 Банковская карта", "en": "💳 Bank card"},
+        "sbp_provider": {"ru": "⚡ СБП", "en": "⚡ Fast payment system"},
+        "crypto_manual": {"ru": "🪙 Криптовалюта", "en": "🪙 Cryptocurrency"},
+        "tribute": {"ru": "🎁 Tribute", "en": "🎁 Tribute"},
+        "lava_top": {"ru": "🌋 Lava.top", "en": "🌋 Lava.top"},
+    }
+    rows = []
+    for provider in providers:
+        row_label = (labels.get(provider) or {}).get(lang) or (labels.get(provider) or {}).get("en") or provider
+        rows.append([InlineKeyboardButton(text=row_label, callback_data=f"invoice:provider:{provider}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Back" if lang != "ru" else "⬅️ Назад", callback_data="product:invoice")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def payment_manual_confirm_keyboard(lang: str, payment_intent_id: int) -> InlineKeyboardMarkup:
+    text = "📩 Я оплатил" if lang == "ru" else "📩 I have paid"
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=f"payment:manual_sent:{payment_intent_id}")]])
 
 
 def usage_screen(*, lang: str, today: dict[str, Any], period: dict[str, Any], limits: dict[str, Any]) -> str:

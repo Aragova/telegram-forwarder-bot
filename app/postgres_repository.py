@@ -20,6 +20,7 @@ from app.repository import RepositoryProtocol
 from app.tenant_repository import TenantRepository
 from app.subscription_repository import SubscriptionRepository
 from app.billing_repository import BillingRepository
+from app.payment_repository import PaymentRepository
 from app.usage_repository import UsageRepository
 from app.tenant_fairness_service import TenantFairnessService
 
@@ -81,6 +82,7 @@ class PostgresRepository(RepositoryProtocol):
         self.tenant_repo = TenantRepository(self)
         self.subscription_repo = SubscriptionRepository(self)
         self.billing_repo = BillingRepository(self)
+        self.payment_repo = PaymentRepository(self)
         self.usage_repo = UsageRepository(self)
 
     # =========================================================
@@ -552,6 +554,29 @@ class PostgresRepository(RepositoryProtocol):
             metadata_json TEXT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS payment_intents(
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL,
+            invoice_id BIGINT NOT NULL,
+            provider TEXT NOT NULL CHECK(provider IN (
+                'telegram_stars','telegram_payments','paypal','card_provider','sbp_provider',
+                'crypto_manual','tribute','lava_top','manual_bank_card'
+            )),
+            status TEXT NOT NULL CHECK(status IN ('created','pending','waiting_confirmation','paid','failed','expired','canceled')),
+            amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            external_payment_id TEXT NULL,
+            external_checkout_url TEXT NULL,
+            provider_payload_json TEXT NULL,
+            confirmation_payload_json TEXT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            expires_at TEXT NULL,
+            paid_at TEXT NULL,
+            failed_at TEXT NULL,
+            error_text TEXT NULL
+        );
+
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'repost';
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_trim_seconds BIGINT DEFAULT 120;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_add_intro BOOLEAN DEFAULT FALSE;
@@ -720,6 +745,19 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice_id
                     ON invoice_items(invoice_id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_payment_intents_invoice_id
+                    ON payment_intents(invoice_id, status, id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_intents_external_id
+                    ON payment_intents(external_payment_id)
+                    WHERE external_payment_id IS NOT NULL
                     """
                 )
                 cur.execute(
@@ -5076,6 +5114,61 @@ class PostgresRepository(RepositoryProtocol):
 
     def count_tenants_with_overage_current_period(self) -> int:
         return self.billing_repo.count_tenants_with_overage_current_period()
+
+    def create_payment_intent(
+        self,
+        *,
+        tenant_id: int,
+        invoice_id: int,
+        provider: str,
+        status: str,
+        amount: float,
+        currency: str,
+        expires_at: str | None = None,
+    ) -> int | None:
+        return self.payment_repo.create_payment_intent(
+            tenant_id=tenant_id,
+            invoice_id=invoice_id,
+            provider=provider,
+            status=status,
+            amount=amount,
+            currency=currency,
+            expires_at=expires_at,
+        )
+
+    def get_payment_intent(self, payment_intent_id: int) -> dict[str, Any] | None:
+        return self.payment_repo.get_payment_intent(payment_intent_id=payment_intent_id)
+
+    def get_payment_intent_by_invoice(self, invoice_id: int) -> dict[str, Any] | None:
+        return self.payment_repo.get_payment_intent_by_invoice(invoice_id=invoice_id)
+
+    def get_payment_intent_by_external_id(self, external_payment_id: str) -> dict[str, Any] | None:
+        return self.payment_repo.get_payment_intent_by_external_id(external_payment_id=external_payment_id)
+
+    def update_payment_intent_status(self, payment_intent_id: int, status: str, *, error_text: str | None = None) -> bool:
+        return self.payment_repo.update_payment_intent_status(payment_intent_id=payment_intent_id, status=status, error_text=error_text)
+
+    def attach_checkout_url(self, payment_intent_id: int, checkout_url: str, *, external_payment_id: str | None = None) -> bool:
+        return self.payment_repo.attach_checkout_url(
+            payment_intent_id=payment_intent_id,
+            checkout_url=checkout_url,
+            external_payment_id=external_payment_id,
+        )
+
+    def attach_provider_payload(self, payment_intent_id: int, payload: dict[str, Any]) -> bool:
+        return self.payment_repo.attach_provider_payload(payment_intent_id=payment_intent_id, payload=payload)
+
+    def mark_payment_paid(self, payment_intent_id: int, *, confirmation_payload: dict[str, Any] | None = None) -> bool:
+        return self.payment_repo.mark_payment_paid(payment_intent_id=payment_intent_id, confirmation_payload=confirmation_payload)
+
+    def mark_payment_failed(self, payment_intent_id: int, error_text: str, *, payload: dict[str, Any] | None = None) -> bool:
+        return self.payment_repo.mark_payment_failed(payment_intent_id=payment_intent_id, error_text=error_text, payload=payload)
+
+    def list_payment_intents_for_tenant(self, tenant_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        return self.payment_repo.list_payment_intents_for_tenant(tenant_id=tenant_id, limit=limit)
+
+    def attach_confirmation_payload(self, payment_intent_id: int, payload: dict[str, Any]) -> bool:
+        return self.payment_repo.attach_confirmation_payload(payment_intent_id=payment_intent_id, payload=payload)
 
     def count_rules_for_tenant(self, tenant_id: int) -> int:
         return self.usage_repo.count_rules_for_tenant(tenant_id=tenant_id)
