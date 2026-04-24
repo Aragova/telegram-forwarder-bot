@@ -19,6 +19,7 @@ from app.subscription_service import SubscriptionService
 from app.usage_service import UsageService
 from app.worker_load_service import build_worker_load_snapshot
 from app.worker_resource_policy import POLICY
+from app.tenant_fairness_service import TenantFairnessService
 
 logger = logging.getLogger("forwarder")
 _last_usage_reset_day: str | None = None
@@ -35,6 +36,7 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
     subscription_service = SubscriptionService(repo)
     usage_service = UsageService(repo)
     limit_service = LimitService(repo, subscription_service, usage_service)
+    fairness_service = TenantFairnessService(repo)
 
     rules = await asyncio.to_thread(repo.get_all_rules)
 
@@ -74,6 +76,25 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
 
         delivery_id = int(due["delivery_id"])
         media_group_id = due.get("media_group_id")
+
+        queue_name = "heavy" if rule_mode == "video" else "light"
+        pending_by_tenant = repo.get_tenant_job_counts(queue=queue_name) if hasattr(repo, "get_tenant_job_counts") else {}
+        processing_by_tenant = repo.get_tenant_processing_counts(queue=queue_name) if hasattr(repo, "get_tenant_processing_counts") else {}
+        retry_by_tenant = repo.get_tenant_retry_counts(queue=queue_name) if hasattr(repo, "get_tenant_retry_counts") else {}
+        heavy_pending_by_tenant = repo.get_tenant_job_counts(queue="heavy") if hasattr(repo, "get_tenant_job_counts") else {}
+
+        tenant_is_throttled = fairness_service.should_throttle_tenant(
+            tenant_id=tenant_id,
+            system_mode=(load.mode if rule_mode == "video" else "normal"),
+            queue=queue_name,
+            tenant_pending=int(pending_by_tenant.get(tenant_id) or 0),
+            tenant_processing=int(processing_by_tenant.get(tenant_id) or 0),
+            tenant_retry=int(retry_by_tenant.get(tenant_id) or 0),
+            tenant_heavy_pending=int(heavy_pending_by_tenant.get(tenant_id) or 0),
+        )
+        if tenant_is_throttled and rule_mode == "video":
+            logger.warning("Scheduler временно ограничил tenant #%s: превышена нагрузка", tenant_id)
+            continue
 
         if rule_mode == "video":
             dedup_key = build_dedup_key_for_video(delivery_id)

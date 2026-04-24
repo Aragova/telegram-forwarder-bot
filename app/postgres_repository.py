@@ -21,6 +21,7 @@ from app.tenant_repository import TenantRepository
 from app.subscription_repository import SubscriptionRepository
 from app.billing_repository import BillingRepository
 from app.usage_repository import UsageRepository
+from app.tenant_fairness_service import TenantFairnessService
 
 logger = logging.getLogger("forwarder.postgres")
 
@@ -69,6 +70,9 @@ def _safe_json_loads(raw: Any, default: Any) -> Any:
             return default
 
     return default
+
+
+_JOB_TENANT_SQL = "COALESCE(NULLIF(j.payload_json->>'tenant_id', '')::BIGINT, 1)"
 
 
 class PostgresRepository(RepositoryProtocol):
@@ -3350,6 +3354,107 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
         return [dict(r) for r in rows]
 
+    def lease_jobs_for_tenant(
+        self,
+        tenant_id: int,
+        queue: str,
+        worker_id: str,
+        limit: int = 1,
+        lease_seconds: int = 30,
+    ) -> list[dict]:
+        queue_name = (queue or "").strip().lower()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH picked AS (
+                        SELECT j.id
+                        FROM jobs j
+                        WHERE j.queue = %s
+                          AND {_JOB_TENANT_SQL} = %s
+                          AND j.status IN ('pending', 'retry')
+                          AND j.run_at <= NOW()
+                          AND (j.lease_until IS NULL OR j.lease_until < NOW())
+                        ORDER BY j.priority ASC, j.run_at ASC, j.created_at ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT %s
+                    )
+                    UPDATE jobs j
+                    SET status = 'leased',
+                        locked_by = %s,
+                        lease_until = NOW() + make_interval(secs => %s),
+                        updated_at = NOW()
+                    FROM picked
+                    WHERE j.id = picked.id
+                    RETURNING j.*
+                    """,
+                    (
+                        queue_name,
+                        int(tenant_id),
+                        max(1, int(limit)),
+                        worker_id,
+                        max(1, int(lease_seconds)),
+                    ),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return [dict(r) for r in rows]
+
+    def lease_fair_jobs(self, queue: str, worker_id: str, limit: int = 1, lease_seconds: int = 30) -> list[dict]:
+        queue_name = (queue or "").strip().lower()
+        target_limit = max(1, int(limit))
+        fair_service = TenantFairnessService(self)
+        leased: list[dict] = []
+        picked_tenant_ids: set[int] = set()
+
+        for _ in range(target_limit):
+            pending_map = self.get_tenant_job_counts(queue=queue_name)
+            if not pending_map:
+                break
+
+            processing_map = self.get_tenant_processing_counts(queue=queue_name)
+            retry_map = self.get_tenant_retry_counts(queue=queue_name)
+            oldest_map = self.get_tenant_oldest_pending_ages(queue=queue_name)
+            candidates: list[tuple[float, int]] = []
+
+            for tenant_id_raw, pending_count in pending_map.items():
+                tenant_id = int(tenant_id_raw)
+                if int(pending_count) <= 0:
+                    continue
+                processing = int(processing_map.get(tenant_id) or 0)
+                retry = int(retry_map.get(tenant_id) or 0)
+                oldest_age = int(oldest_map.get(tenant_id) or 0)
+                score = fair_service.compute_fairness_score(
+                    tenant_id=tenant_id,
+                    pending=int(pending_count),
+                    processing=processing,
+                    retry=retry,
+                    oldest_pending_age_sec=oldest_age,
+                )
+                if tenant_id in picked_tenant_ids:
+                    score -= 20.0
+                candidates.append((score, tenant_id))
+
+            if not candidates:
+                break
+
+            candidates.sort(key=lambda item: (-item[0], item[1]))
+            selected_tenant = int(candidates[0][1])
+            batch = self.lease_jobs_for_tenant(
+                selected_tenant,
+                queue_name,
+                worker_id,
+                limit=1,
+                lease_seconds=lease_seconds,
+            )
+            if not batch:
+                # tenant мог быть перехвачен конкурентным worker; пробуем следующий слот
+                continue
+            leased.extend(batch)
+            picked_tenant_ids.add(selected_tenant)
+
+        return leased
+
     def mark_job_processing(self, job_id: int, worker_id: str) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -3467,6 +3572,112 @@ class PostgresRepository(RepositoryProtocol):
             if status in counts:
                 counts[status] = int(row.get("cnt") or 0)
         return counts
+
+    def get_tenant_job_counts(self, queue: str | None = None) -> dict[int, int]:
+        queue_name = str(queue or "").strip().lower()
+        use_queue_filter = queue_name in {"light", "heavy"}
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        {_JOB_TENANT_SQL} AS tenant_id,
+                        COUNT(*) AS cnt
+                    FROM jobs j
+                    WHERE j.status IN ('pending', 'retry')
+                      AND (%s = FALSE OR j.queue = %s)
+                    GROUP BY {_JOB_TENANT_SQL}
+                    """,
+                    (use_queue_filter, queue_name),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return {int(row["tenant_id"]): int(row.get("cnt") or 0) for row in rows}
+
+    def get_tenant_oldest_pending_ages(self, queue: str | None = None) -> dict[int, int]:
+        queue_name = str(queue or "").strip().lower()
+        use_queue_filter = queue_name in {"light", "heavy"}
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        {_JOB_TENANT_SQL} AS tenant_id,
+                        EXTRACT(EPOCH FROM (NOW() - MIN(j.created_at)))::BIGINT AS age_sec
+                    FROM jobs j
+                    WHERE j.status IN ('pending', 'retry')
+                      AND (%s = FALSE OR j.queue = %s)
+                    GROUP BY {_JOB_TENANT_SQL}
+                    """,
+                    (use_queue_filter, queue_name),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return {int(row["tenant_id"]): max(int(row.get("age_sec") or 0), 0) for row in rows}
+
+    def get_tenant_processing_counts(self, queue: str | None = None) -> dict[int, int]:
+        queue_name = str(queue or "").strip().lower()
+        use_queue_filter = queue_name in {"light", "heavy"}
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        {_JOB_TENANT_SQL} AS tenant_id,
+                        COUNT(*) AS cnt
+                    FROM jobs j
+                    WHERE j.status IN ('leased', 'processing')
+                      AND (%s = FALSE OR j.queue = %s)
+                    GROUP BY {_JOB_TENANT_SQL}
+                    """,
+                    (use_queue_filter, queue_name),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return {int(row["tenant_id"]): int(row.get("cnt") or 0) for row in rows}
+
+    def get_tenant_retry_counts(self, queue: str | None = None) -> dict[int, int]:
+        queue_name = str(queue or "").strip().lower()
+        use_queue_filter = queue_name in {"light", "heavy"}
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        {_JOB_TENANT_SQL} AS tenant_id,
+                        COUNT(*) AS cnt
+                    FROM jobs j
+                    WHERE j.status = 'retry'
+                      AND (%s = FALSE OR j.queue = %s)
+                    GROUP BY {_JOB_TENANT_SQL}
+                    """,
+                    (use_queue_filter, queue_name),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return {int(row["tenant_id"]): int(row.get("cnt") or 0) for row in rows}
+
+    def get_tenant_throughput_snapshot(self, *, window_minutes: int = 15, queue: str | None = None) -> dict[int, int]:
+        queue_name = str(queue or "").strip().lower()
+        use_queue_filter = queue_name in {"light", "heavy"}
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        {_JOB_TENANT_SQL} AS tenant_id,
+                        COUNT(*) AS cnt
+                    FROM jobs j
+                    WHERE j.status = 'done'
+                      AND j.updated_at >= NOW() - make_interval(mins => %s)
+                      AND (%s = FALSE OR j.queue = %s)
+                    GROUP BY {_JOB_TENANT_SQL}
+                    """,
+                    (max(1, int(window_minutes)), use_queue_filter, queue_name),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return {int(row["tenant_id"]): int(row.get("cnt") or 0) for row in rows}
 
     def get_video_stage_job_counts(self) -> dict[str, dict[str, int]]:
         with self.connect() as conn:
