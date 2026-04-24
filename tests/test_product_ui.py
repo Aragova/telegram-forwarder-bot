@@ -92,6 +92,12 @@ def test_limit_error_messages_ru_en():
 def test_language_selection_changes_language():
     assert set_user_language(123, "en") == "en"
     assert get_user_language(123) == "en"
+    assert set_user_language(123, "es") == "es"
+    assert get_user_language(123) == "es"
+    assert set_user_language(123, "de") == "de"
+    assert get_user_language(123) == "de"
+    assert set_user_language(123, "pt") == "pt"
+    assert get_user_language(123) == "pt"
     assert set_user_language(123, "ru") == "ru"
     assert get_user_language(123) == "ru"
 
@@ -117,3 +123,47 @@ def test_callbacks_do_not_expose_internal_terms():
     )
     for bad in ("tenant_id", "job_id", "dedup", "worker"):
         assert bad not in joined
+
+
+def test_product_screens_translated_for_es_de_pt():
+    langs = ("es", "de", "pt")
+    for lang in langs:
+        account = product_ui.account_screen(
+            lang=lang,
+            subscription=_subscription("PRO"),
+            usage_today={"jobs_count": 320, "video_count": 12, "storage_used_mb": 120},
+            usage_period={"jobs_count": 8240},
+            last_invoice={"id": 15, "status": "open", "total": 29.0, "currency": "USD"},
+            rules_count=8,
+        )
+        usage = product_ui.usage_screen(
+            lang=lang,
+            today={"jobs_count": 320, "video_count": 12},
+            period={"jobs_count": 8240, "video_count": 215, "storage_used_mb": 420},
+            limits={"max_jobs_per_day": 1000, "max_video_per_day": 100},
+        )
+        invoice = product_ui.invoice_screen(
+            lang=lang,
+            invoice={"id": 15, "status": "open", "period_start": "2026-04-01", "period_end": "2026-04-30", "total": 29, "currency": "USD"},
+            items=[{"description": "PRO plan", "amount": 29, "metadata": {"plan_name": "PRO"}}],
+        )
+        help_text = product_ui.help_screen(lang)
+        onboarding = product_ui.start_screen(lang, is_new=True)
+
+        joined = "\n".join([account, usage, invoice, help_text, onboarding])
+        assert "Последний счёт" not in joined
+        assert "Last invoice" not in joined
+
+
+def test_language_keyboard_contains_all_product_languages():
+    keyboard = product_ui.language_keyboard()
+    callbacks = [
+        button.callback_data or ""
+        for row in keyboard.inline_keyboard
+        for button in row
+    ]
+    assert "lang:ru" in callbacks
+    assert "lang:en" in callbacks
+    assert "lang:es" in callbacks
+    assert "lang:de" in callbacks
+    assert "lang:pt" in callbacks
