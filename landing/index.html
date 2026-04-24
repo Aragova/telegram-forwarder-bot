@@ -3,92 +3,146 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ChannelPilot — автоматизация Telegram-каналов</title>
-  <meta name="description" content="ChannelPilot — автоматизация Telegram-каналов: публикации, видео, очереди, тарифы, счета и оплата внутри Telegram-бота." />
+  <title>ViMi — автоматизация Telegram-каналов</title>
+  <meta name="description" content="ViMi — автоматизация Telegram-каналов: публикации, видео, тарифы, счета и оплата внутри Telegram-бота." />
   <link rel="canonical" href="https://example.com/" />
   <meta property="og:type" content="website" />
-  <meta property="og:title" content="ChannelPilot — Telegram channel automation" />
-  <meta property="og:description" content="Publishing, video processing, queues, plans, invoices and payments — all inside Telegram." />
+  <meta property="og:title" content="ViMi — Telegram channel automation" />
+  <meta property="og:description" content="Publishing, video processing, plans, invoices and payments — all inside Telegram." />
   <meta property="og:url" content="https://example.com/" />
   <meta property="og:image" content="https://example.com/og-image.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="ChannelPilot — Telegram channel automation" />
+  <meta name="twitter:title" content="ViMi — Telegram channel automation" />
   <meta name="twitter:description" content="Automate your Telegram channels from one bot." />
   <meta name="twitter:image" content="https://example.com/og-image.png" />
-  <link rel="icon" href="/favicon.ico" />
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="site-header">
     <div class="container header-inner">
-      <div class="logo">ChannelPilot</div>
-      <div class="lang-switch">
-        <button class="lang-btn active" data-lang="ru">RU</button>
-        <button class="lang-btn" data-lang="en">EN</button>
+      <a class="brand" href="#">
+        <img src="assets/vimi-logo.svg" alt="ViMi" />
+      </a>
+      <nav class="main-nav">
+        <a href="#features" data-i18n="navFeatures"></a>
+        <a href="#how" data-i18n="navHow"></a>
+        <a href="#plans" data-i18n="navPlans"></a>
+        <a href="#payments" data-i18n="navPayments"></a>
+        <a href="#faq" data-i18n="navFaq"></a>
+      </nav>
+      <div class="header-actions">
+        <div class="lang-switch">
+          <button class="lang-btn active" data-lang="ru">RU</button>
+          <button class="lang-btn" data-lang="en">EN</button>
+        </div>
+        <a id="header-open-bot" class="btn btn-primary" href="#" target="_blank" rel="noopener" data-i18n="openBot"></a>
       </div>
     </div>
   </header>
 
   <main>
     <section class="hero">
-      <div class="container">
-        <h1 data-i18n="heroTitle"></h1>
-        <p data-i18n="heroSubtitle"></p>
-        <div class="hero-cta">
-          <a id="cta-open-bot" class="btn btn-primary" href="#" target="_blank" rel="noopener" data-i18n="openBot"></a>
-          <a class="btn btn-secondary" href="#plans" data-i18n="viewPlans"></a>
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <span class="badge" data-i18n="positioning"></span>
+          <h1 data-i18n="heroTitle"></h1>
+          <p data-i18n="heroSubtitle"></p>
+          <div class="hero-cta">
+            <a id="cta-open-bot" class="btn btn-primary" href="#" target="_blank" rel="noopener" data-i18n="openBot"></a>
+            <a class="btn btn-secondary" href="#plans" data-i18n="viewPlans"></a>
+          </div>
+        </div>
+        <div class="hero-visual">
+          <img class="robot" src="assets/vimi-robot.svg" alt="ViMi robot" />
+          <div class="floating-card card-a" data-i18n="floatAuto"></div>
+          <div class="floating-card card-b" data-i18n="floatVideo"></div>
+          <div class="floating-card card-c" data-i18n="floatPlans"></div>
+          <div class="floating-card card-d" data-i18n="floatPayments"></div>
         </div>
       </div>
     </section>
 
-    <section class="section" id="modules"><div class="container"><h2 data-i18n="modulesTitle"></h2><div id="modulesGrid" class="grid"></div></div></section>
-    <section class="section" id="audience"><div class="container"><h2 data-i18n="audienceTitle"></h2><ul id="audienceList" class="list"></ul></div></section>
-    <section class="section" id="flow"><div class="container"><h2 data-i18n="flowTitle"></h2><ol id="flowList" class="list"></ol></div></section>
-    <section class="section" id="features"><div class="container"><h2 data-i18n="featuresTitle"></h2><div id="featuresGrid" class="grid"></div></div></section>
-
-    <section class="section" id="plans">
-      <div class="container"><h2 data-i18n="plansTitle"></h2><div id="plansGrid" class="grid plans-grid"></div></div>
+    <section class="trust-strip">
+      <div class="container">
+        <p data-i18n="trustStrip"></p>
+      </div>
     </section>
 
-    <section class="section" id="payments">
+    <section id="features" class="section">
       <div class="container">
+        <h2 data-i18n="featuresTitle"></h2>
+        <div id="featuresGrid" class="grid"></div>
+      </div>
+    </section>
+
+    <section id="how" class="section">
+      <div class="container">
+        <h2 data-i18n="howTitle"></h2>
+        <div id="stepsGrid" class="steps-grid"></div>
+      </div>
+    </section>
+
+    <section id="plans" class="section">
+      <div class="container">
+        <h2 data-i18n="plansTitle"></h2>
+        <div id="plansGrid" class="plans-grid"></div>
+      </div>
+    </section>
+
+    <section id="payments" class="section">
+      <div class="container payment-block">
         <h2 data-i18n="paymentsTitle"></h2>
-        <ul id="paymentsList" class="list"></ul>
+        <div id="paymentsGrid" class="payments-grid"></div>
         <p class="note" data-i18n="paymentsDisclaimer"></p>
       </div>
     </section>
 
-    <section class="section" id="instructions">
+    <section id="faq" class="section">
       <div class="container">
-        <h2 data-i18n="instructionsTitle"></h2>
-        <ol id="instructionsList" class="list"></ol>
-        <a id="instructionsLink" class="btn btn-secondary" href="ru/instructions.html" data-i18n="instructionsPage"></a>
+        <h2 data-i18n="faqTitle"></h2>
+        <div id="faqList" class="faq-list"></div>
       </div>
     </section>
 
-    <section class="section" id="faq"><div class="container"><h2 data-i18n="faqTitle"></h2><div id="faqList" class="faq"></div></div></section>
-    <section class="section" id="trust"><div class="container"><h2 data-i18n="trustTitle"></h2><ul id="trustList" class="list"></ul></div></section>
-
-    <section class="section cta-final">
-      <div class="container">
-        <h2 data-i18n="finalCtaTitle"></h2>
+    <section class="section final-cta">
+      <div class="container final-cta-inner">
+        <img src="assets/vimi-robot.svg" alt="ViMi robot" />
+        <div>
+          <h2 data-i18n="finalCtaTitle"></h2>
+          <p data-i18n="finalCtaSubtitle"></p>
+        </div>
         <a id="cta-open-bot-bottom" class="btn btn-primary" href="#" target="_blank" rel="noopener" data-i18n="openBot"></a>
       </div>
     </section>
   </main>
 
   <footer class="site-footer">
-    <div class="container">
-      <p>© <span id="year"></span> ChannelPilot</p>
-      <p><span data-i18n="ownerLabel"></span>: <span id="legalOwner"></span></p>
-      <nav class="footer-links">
+    <div class="container footer-grid">
+      <div>
+        <img class="footer-logo" src="assets/vimi-logo.svg" alt="ViMi" />
+        <p data-i18n="footerDesc"></p>
+      </div>
+      <div>
+        <h3 data-i18n="footerProduct"></h3>
+        <a href="#features" data-i18n="navFeatures"></a>
+        <a href="#plans" data-i18n="navPlans"></a>
+        <a href="#faq" data-i18n="navFaq"></a>
+      </div>
+      <div>
+        <h3 data-i18n="footerDocs"></h3>
         <a id="link-terms" href="ru/terms.html">Terms</a>
         <a id="link-privacy" href="ru/privacy.html">Privacy</a>
         <a id="link-refund" href="ru/refund.html">Refund</a>
         <a id="link-contacts" href="ru/contacts.html">Contacts</a>
         <a id="link-help" href="ru/instructions.html">Instructions</a>
-      </nav>
-      <p><a id="supportLink" href="#" target="_blank" rel="noopener">Telegram Support</a> · <a id="supportEmail" href="#">support@example.com</a></p>
+      </div>
+      <div>
+        <h3 data-i18n="footerSupport"></h3>
+        <a id="supportLink" href="#" target="_blank" rel="noopener">Telegram Support</a>
+        <a id="supportEmail" href="#">support@example.com</a>
+        <p>© <span id="year"></span> ViMi</p>
+      </div>
     </div>
   </footer>
 
