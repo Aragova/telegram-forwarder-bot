@@ -1,256 +1,36 @@
 const SITE_CONFIG = {
   botUrl: "https://t.me/YOUR_BOT_USERNAME",
   supportUrl: "https://t.me/YOUR_SUPPORT_USERNAME",
-  supportEmail: "support@vimi.bot",
+  supportEmail: "support@example.com",
+  legalOwner: "YOUR LEGAL ENTITY / NAME"
 };
 
-const CONTENT = {
+const dict = {
   ru: {
-    navFeatures: "Возможности",
-    navPlans: "Тарифы",
-    navHow: "Инструкции",
-    navFaq: "FAQ",
-    navSupport: "Поддержка",
-    openBot: "Открыть бота",
-    viewPlans: "Смотреть тарифы",
-    heroBadge: "Ваш помощник в Telegram",
-    heroTitle: "Автоматизация Telegram-каналов в одном боте",
-    heroSubtitle: "Публикации, видео, тарифы, счета и приём оплаты — в современной SaaS-платформе ViMi.",
-    floatAuto: "Автопостинг",
-    floatVideo: "Видео",
-    floatAnalytics: "Статистика",
-    floatMonet: "Монетизация",
-    trustLabel: "Поддерживаем платежи",
-    featuresTitle: "Что умеет ViMi",
-    features: [
-      ["📣", "Автопостинг", "Публикует записи из источников по расписанию."],
-      ["🎬", "Видео", "Очередь, обложки и подготовка видео-контента."],
-      ["💎", "Тарифы", "Гибкие планы под объём вашего канала."],
-      ["💳", "Оплата", "Счета и оплата прямо внутри Telegram."],
-      ["📊", "Статистика", "Метрики активности и отчёты по публикациям."],
-      ["⚙️", "Автоматизация", "Меньше рутины и больше времени на развитие."],
-    ],
-    howTitle: "Как это работает",
-    steps: [
-      ["Открыть бота", "Запустите ViMi в Telegram.", "assets/vimi-step-robot-open.png"],
-      ["Добавить каналы", "Подключите источники и целевые каналы.", "assets/vimi-robot-head.png"],
-      ["Настроить правила", "Определите формат и расписание публикации.", "assets/vimi-hero-robot.png"],
-      ["Подключить тариф", "Выберите подходящий план и оплату.", "assets/vimi-pricing-cards.png"],
-      ["Бот работает", "ViMi запускает поток задач автоматически.", "assets/vimi-step-robot-done.png"],
-    ],
-    plansTitle: "Тарифы",
-    plans: [
-      { name: "FREE", price: "0 USD / месяц", points: ["3 правила", "5 видео / день", "100 задач / день"] },
-      { name: "BASIC", price: "9 USD / месяц", points: ["15 правил", "30 видео / день", "1000 задач / день"], highlight: true },
-      { name: "PRO", price: "29 USD / месяц", points: ["50 правил", "100 видео / день", "5000 задач / день"] },
-    ],
-    popular: "Популярный",
-    pickPlan: "Выбрать в боте",
-    paymentsTitle: "Способы оплаты",
-    payments: ["Telegram", "PayPal", "Карты", "Крипта", "СБП", "Tribute / Lava"],
-    manualNote: "Некоторые способы оплаты работают автоматически, некоторые — через ручное подтверждение.",
-    finalTitle: "Готовы автоматизировать ваши каналы?",
-    finalSubtitle: "Откройте ViMi в Telegram и начните уже сегодня.",
-    footerDesc: "ViMi — premium Telegram SaaS для роста и автоматизации каналов.",
-    faq: [
-      ["Как быстро запустить?", "Откройте бота, добавьте каналы и включите первое правило."],
-      ["Можно ли работать с видео?", "Да, доступны подготовка видео и публикация по расписанию."],
-      ["Какие варианты оплаты?", "Telegram, PayPal, карты, крипта, СБП, Tribute/Lava."],
-    ],
+    navFeatures:"Возможности",navPlans:"Тарифы",navInstructions:"Инструкции",navFaq:"FAQ",navSupport:"Поддержка",openBot:"Открыть бота",viewPlans:"Смотреть тарифы",eyebrow:"Ваш помощник в Telegram",heroTitle:"Автоматизация Telegram-каналов <span>в одном боте</span>",heroLead:"Публикации, видео, тарифы, счета и оплата — всё внутри Telegram. Экономьте время и развивайте ваши каналы.",trustReliable:"Надёжно и безопасно",trustSupport:"Поддержка 24/7",trustTelegram:"Работает в Telegram",heroBubble:"Привет! 👋<br>Я ViMi, ваш помощник в работе с каналами!",floatAutopost:"Автопостинг",floatAutopostDesc:"Публикации по расписанию",floatVideo:"Видео",floatVideoDesc:"Обработка и очередь",floatAnalytics:"Аналитика",floatAnalyticsDesc:"Статистика и отчёты",floatMoney:"Монетизация",floatMoneyDesc:"Тарифы, счета и оплата",paymentSupported:"Поддерживаем",featuresTitle:"Что умеет <span>ViMi</span>",featuresLead:"Все инструменты для эффективной работы с вашими каналами в одном боте.",f1Title:"Автопостинг",f1Text:"Публикуйте записи из источников по расписанию без ручной работы.",f2Title:"Видео",f2Text:"Обрабатывайте видео, добавляйте обложки, подписи и запускайте в очередь.",f3Title:"Тарифы",f3Text:"Гибкие тарифы с лимитами для вас и ваших каналов.",f4Title:"Счета и оплата",f4Text:"Создавайте счета и принимайте оплату удобным способом.",f5Title:"Статистика",f5Text:"Следите за активностью, использованием и эффективностью.",f6Title:"Автоматизация",f6Text:"Меньше рутины — больше времени на развитие.",howTitle:"Как это работает",s1Title:"Откройте бота",s1Text:"Запустите ViMi в Telegram за пару секунд.",s2Title:"Добавьте источники и каналы",s2Text:"Укажите откуда брать контент и куда публиковать.",s3Title:"Создайте правило публикации",s3Text:"Настройте расписание и параметры публикаций.",s4Title:"Подключите тариф или оплату",s4Text:"Выберите тариф и оплатите удобным способом.",s5Title:"Бот выполняет рутину за вас",s5Text:"ViMi работает 24/7, экономит время и растит каналы быстрее.",pricingTitle:"Тарифы",pricingLead:"Выберите тариф, который подходит именно вам.",month:"месяц",freeDesc:"Для теста и знакомства",free1:"3 правила",free2:"5 видео / день",free3:"100 задач / день",basicDesc:"Для стабильной работы",basic1:"15 правил",basic2:"30 видео / день",basic3:"1000 задач / день",proDesc:"Для больших каналов и команд",pro1:"50 правил",pro2:"100 видео / день",pro3:"5000 задач / день",chooseBot:"Выбрать в боте",popular:"Популярный",payTitle:"Способы оплаты",bankCards:"Банковские карты",crypto:"Криптовалюта",manual:"Ручное подтверждение",paymentNote:"Некоторые способы оплаты работают автоматически, а некоторые — через ручное подтверждение администратором.",q1:"Что такое ViMi?",a1:"ViMi — Telegram-бот для автоматизации публикаций, видео, тарифов, счетов и оплаты.",q2:"Это сайт или Telegram-бот?",a2:"Сайт объясняет продукт, а вся работа происходит внутри Telegram-бота.",q3:"Можно ли использовать несколько каналов?",a3:"Да, вы можете подключать несколько источников и получателей в рамках выбранного тарифа.",q4:"Что происходит при превышении лимитов?",a4:"ViMi покажет понятное уведомление и предложит перейти на подходящий тариф.",q5:"Как работает оплата?",a5:"Вы создаёте счёт в боте и выбираете удобный способ оплаты.",q6:"Можно ли вернуть деньги?",a6:"Условия возврата описаны в Refund Policy. Перед публикацией проверьте документы с юристом.",ctaTitle:"Готовы автоматизировать ваши каналы?",ctaText:"Откройте ViMi в Telegram и начните прямо сейчас.",footerDesc:"Ваш помощник в Telegram для автоматизации, роста и монетизации каналов.",footerProduct:"Продукт",footerDocs:"Документы",footerSupport:"Связаться"
   },
   en: {
-    navFeatures: "Features",
-    navPlans: "Pricing",
-    navHow: "How it works",
-    navFaq: "FAQ",
-    navSupport: "Support",
-    openBot: "Open bot",
-    viewPlans: "View pricing",
-    heroBadge: "Your Telegram assistant",
-    heroTitle: "Automate Telegram channels in one bot",
-    heroSubtitle: "Publishing, video processing, plans, invoices and payments in modern ViMi SaaS.",
-    floatAuto: "Autoposting",
-    floatVideo: "Video",
-    floatAnalytics: "Analytics",
-    floatMonet: "Monetization",
-    trustLabel: "Supported payments",
-    featuresTitle: "What ViMi can do",
-    features: [
-      ["📣", "Autoposting", "Schedules channel posts from your sources."],
-      ["🎬", "Video", "Queue, covers and video content preparation."],
-      ["💎", "Pricing", "Flexible plans for your channel scale."],
-      ["💳", "Payments", "Invoices and payments directly in Telegram."],
-      ["📊", "Statistics", "Live metrics and publication reports."],
-      ["⚙️", "Automation", "Less routine, more growth time."],
-    ],
-    howTitle: "How it works",
-    steps: [
-      ["Open the bot", "Launch ViMi in Telegram.", "assets/vimi-step-robot-open.png"],
-      ["Add channels", "Connect sources and destination channels.", "assets/vimi-robot-head.png"],
-      ["Set rules", "Configure publication format and schedule.", "assets/vimi-hero-robot.png"],
-      ["Pick plan", "Select the best plan and payment method.", "assets/vimi-pricing-cards.png"],
-      ["Bot runs", "ViMi handles routine operations automatically.", "assets/vimi-step-robot-done.png"],
-    ],
-    plansTitle: "Pricing",
-    plans: [
-      { name: "FREE", price: "0 USD / month", points: ["3 rules", "5 videos / day", "100 tasks / day"] },
-      { name: "BASIC", price: "9 USD / month", points: ["15 rules", "30 videos / day", "1000 tasks / day"], highlight: true },
-      { name: "PRO", price: "29 USD / month", points: ["50 rules", "100 videos / day", "5000 tasks / day"] },
-    ],
-    popular: "Popular",
-    pickPlan: "Choose in bot",
-    paymentsTitle: "Payment methods",
-    payments: ["Telegram", "PayPal", "Cards", "Crypto", "SBP", "Tribute / Lava"],
-    manualNote: "Some payment methods work automatically, while others may require manual confirmation.",
-    finalTitle: "Ready to automate your channels?",
-    finalSubtitle: "Open ViMi in Telegram and launch today.",
-    footerDesc: "ViMi is a premium Telegram SaaS for channel growth and automation.",
-    faq: [
-      ["How fast can I start?", "Open bot, add channels and launch your first rule."],
-      ["Can I process videos?", "Yes, video preparation and scheduled publishing are supported."],
-      ["What payment options exist?", "Telegram, PayPal, cards, crypto, SBP, Tribute/Lava."],
-    ],
+    navFeatures:"Features",navPlans:"Plans",navInstructions:"Instructions",navFaq:"FAQ",navSupport:"Support",openBot:"Open bot",viewPlans:"View plans",eyebrow:"Your Telegram assistant",heroTitle:"Telegram channel automation <span>in one bot</span>",heroLead:"Publishing, video processing, plans, invoices and payments — all inside Telegram. Save time and grow your channels.",trustReliable:"Reliable and secure",trustSupport:"24/7 support",trustTelegram:"Works in Telegram",heroBubble:"Hi! 👋<br>I’m ViMi, your channel assistant!",floatAutopost:"Autopublishing",floatAutopostDesc:"Scheduled publishing",floatVideo:"Video",floatVideoDesc:"Processing and queue",floatAnalytics:"Analytics",floatAnalyticsDesc:"Stats and reports",floatMoney:"Monetization",floatMoneyDesc:"Plans, invoices and payments",paymentSupported:"Supported",featuresTitle:"What <span>ViMi</span> can do",featuresLead:"All tools for efficient Telegram channel work in one bot.",f1Title:"Autopublishing",f1Text:"Publish posts from sources on schedule without manual work.",f2Title:"Video",f2Text:"Process videos, add covers, captions and send them to the queue.",f3Title:"Plans",f3Text:"Flexible plans with limits for you and your channels.",f4Title:"Invoices and payments",f4Text:"Create invoices and accept payments in a convenient way.",f5Title:"Statistics",f5Text:"Track activity, usage and performance.",f6Title:"Automation",f6Text:"Less routine — more time for growth.",howTitle:"How it works",s1Title:"Open the bot",s1Text:"Start ViMi in Telegram in seconds.",s2Title:"Add sources and channels",s2Text:"Choose where content comes from and where it goes.",s3Title:"Create a publishing rule",s3Text:"Set schedule and publishing parameters.",s4Title:"Connect a plan or payment",s4Text:"Choose a plan and pay with a convenient method.",s5Title:"The bot handles routine work",s5Text:"ViMi works 24/7, saves time and grows channels faster.",pricingTitle:"Plans",pricingLead:"Choose the plan that fits you.",month:"month",freeDesc:"For testing and getting started",free1:"3 rules",free2:"5 videos / day",free3:"100 tasks / day",basicDesc:"For stable work",basic1:"15 rules",basic2:"30 videos / day",basic3:"1000 tasks / day",proDesc:"For large channels and teams",pro1:"50 rules",pro2:"100 videos / day",pro3:"5000 tasks / day",chooseBot:"Choose in bot",popular:"Popular",payTitle:"Payment methods",bankCards:"Bank cards",crypto:"Cryptocurrency",manual:"Manual confirmation",paymentNote:"Some payment methods work automatically, while others may require manual administrator confirmation.",q1:"What is ViMi?",a1:"ViMi is a Telegram bot for publishing automation, video processing, plans, invoices and payments.",q2:"Is it a website or a Telegram bot?",a2:"The website explains the product, and all work happens inside the Telegram bot.",q3:"Can I use multiple channels?",a3:"Yes, you can connect multiple sources and destinations within your plan limits.",q4:"What happens when limits are reached?",a4:"ViMi shows a clear notification and suggests a suitable upgrade.",q5:"How do payments work?",a5:"You create an invoice in the bot and choose a convenient payment method.",q6:"Can I get a refund?",a6:"Refund terms are described in the Refund Policy. Review documents with a lawyer before publishing.",ctaTitle:"Ready to automate your channels?",ctaText:"Open ViMi in Telegram and start right now.",footerDesc:"Your Telegram assistant for channel automation, growth and monetization.",footerProduct:"Product",footerDocs:"Documents",footerSupport:"Contact"
   }
 };
 
-function fillI18n(lang) {
+function applyLang(lang){
   document.documentElement.lang = lang;
-  document.querySelectorAll("[data-i18n]").forEach((node) => {
-    const key = node.dataset.i18n;
-    if (CONTENT[lang][key]) {
-      node.textContent = CONTENT[lang][key];
-    }
+  localStorage.setItem('vimi_lang', lang);
+  document.querySelectorAll('[data-i18n]').forEach(el=>{
+    const key = el.dataset.i18n;
+    if(dict[lang][key]) el.innerHTML = dict[lang][key];
   });
+  document.querySelectorAll('[data-config-link="bot"]').forEach(a=>a.href=SITE_CONFIG.botUrl);
+  document.querySelectorAll('[data-config-link="support"]').forEach(a=>a.href=SITE_CONFIG.supportUrl);
+  document.querySelectorAll('[data-config-mail]').forEach(a=>{a.href='mailto:'+SITE_CONFIG.supportEmail;a.textContent=SITE_CONFIG.supportEmail});
+  document.querySelectorAll('[data-link]').forEach(a=>{a.href=`${lang}/${a.dataset.link}.html`});
+  const select = document.getElementById('langSelect');
+  if(select) select.value = lang;
 }
 
-function fillFeatures(lang) {
-  const grid = document.querySelector("#featuresGrid");
-  grid.innerHTML = "";
-  CONTENT[lang].features.forEach((item) => {
-    const card = document.createElement("article");
-    card.className = "feature-card reveal";
-    card.innerHTML = `<div class="feature-ico">${item[0]}</div><h3>${item[1]}</h3><p>${item[2]}</p>`;
-    grid.appendChild(card);
-  });
-}
-
-function fillSteps(lang) {
-  const grid = document.querySelector("#stepsGrid");
-  grid.innerHTML = "";
-  CONTENT[lang].steps.forEach((step, index) => {
-    const card = document.createElement("article");
-    card.className = "step-card reveal";
-    card.innerHTML = `<div class="step-index">${index + 1}</div><img src="${step[2]}" alt="${step[0]}" loading="lazy"/><h3>${step[0]}</h3><p>${step[1]}</p>`;
-    grid.appendChild(card);
-  });
-}
-
-function fillPlans(lang) {
-  const grid = document.querySelector("#plansGrid");
-  grid.innerHTML = "";
-  CONTENT[lang].plans.forEach((plan) => {
-    const card = document.createElement("article");
-    card.className = `plan-card reveal ${plan.highlight ? "highlight" : ""}`.trim();
-    card.innerHTML = `
-      ${plan.highlight ? `<span class="plan-pill">${CONTENT[lang].popular}</span>` : ""}
-      <h3>${plan.name}</h3>
-      <div class="plan-price">${plan.price}</div>
-      <ul>${plan.points.map((point) => `<li>${point}</li>`).join("")}</ul>
-      <a class="btn btn-ghost" href="${SITE_CONFIG.botUrl}" target="_blank" rel="noopener">${CONTENT[lang].pickPlan}</a>
-    `;
-    grid.appendChild(card);
-  });
-}
-
-function fillPayments(lang) {
-  const grid = document.querySelector("#paymentsGrid");
-  grid.innerHTML = "";
-  CONTENT[lang].payments.forEach((method) => {
-    const node = document.createElement("div");
-    node.className = "pay-item";
-    node.textContent = method;
-    grid.appendChild(node);
-  });
-}
-
-function fillFaq(lang) {
-  const list = document.querySelector("#faqList");
-  list.innerHTML = "";
-  CONTENT[lang].faq.forEach((entry) => {
-    const item = document.createElement("article");
-    item.className = "faq-item";
-    item.innerHTML = `<button class="faq-q" type="button">${entry[0]}</button><div class="faq-a"><p>${entry[1]}</p></div>`;
-    list.appendChild(item);
-  });
-  list.querySelectorAll(".faq-q").forEach((button) => {
-    button.addEventListener("click", () => {
-      button.closest(".faq-item").classList.toggle("open");
-    });
-  });
-}
-
-function applyLinks(lang) {
-  ["header-open-bot", "cta-open-bot", "footer-open-bot"].forEach((id) => {
-    const link = document.getElementById(id);
-    if (link) {
-      link.href = SITE_CONFIG.botUrl;
-    }
-  });
-
-  const supportLink = document.getElementById("supportLink");
-  const supportEmail = document.getElementById("supportEmail");
-  supportLink.href = SITE_CONFIG.supportUrl;
-  supportEmail.href = `mailto:${SITE_CONFIG.supportEmail}`;
-  supportEmail.textContent = SITE_CONFIG.supportEmail;
-
-  document.getElementById("link-terms").href = `${lang}/terms.html`;
-  document.getElementById("link-privacy").href = `${lang}/privacy.html`;
-  document.getElementById("link-refund").href = `${lang}/refund.html`;
-  document.getElementById("link-contacts").href = `${lang}/contacts.html`;
-  document.getElementById("link-help").href = `${lang}/instructions.html`;
-}
-
-function revealOnScroll() {
-  const observer = new IntersectionObserver((entries) => {
-    entries.forEach((entry) => {
-      if (entry.isIntersecting) {
-        entry.target.classList.add("on");
-      }
-    });
-  }, { threshold: 0.2 });
-
-  document.querySelectorAll(".reveal").forEach((node) => observer.observe(node));
-}
-
-function setLanguage(lang) {
-  fillI18n(lang);
-  fillFeatures(lang);
-  fillSteps(lang);
-  fillPlans(lang);
-  fillPayments(lang);
-  fillFaq(lang);
-  applyLinks(lang);
-
-  document.querySelectorAll(".lang-btn").forEach((button) => {
-    button.classList.toggle("active", button.dataset.lang === lang);
-  });
-
-  localStorage.setItem("vimi-lang", lang);
-  requestAnimationFrame(revealOnScroll);
-}
-
-function setupUI() {
-  const toggle = document.getElementById("menuToggle");
-  const nav = document.getElementById("mainNav");
-
-  toggle.addEventListener("click", () => {
-    nav.classList.toggle("open");
-  });
-
-  document.querySelectorAll(".lang-btn").forEach((button) => {
-    button.addEventListener("click", () => setLanguage(button.dataset.lang));
-  });
-}
-
-setupUI();
-setLanguage(localStorage.getItem("vimi-lang") || "ru");
+document.addEventListener('DOMContentLoaded',()=>{
+  const initial = localStorage.getItem('vimi_lang') || 'ru';
+  applyLang(initial);
+  document.getElementById('langSelect')?.addEventListener('change',e=>applyLang(e.target.value));
+});

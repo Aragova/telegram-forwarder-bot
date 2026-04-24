@@ -1,0 +1,69 @@
+{
+  "source": "Generated/cropped from the ViMi landing visual reference shared in chat",
+  "usage": {
+    "vimi-logo.svg": "Header/footer wordmark",
+    "vimi-logo-reference.png": "Original cropped logo reference from mockup",
+    "vimi-hero-robot.png": "Main hero robot, transparent-ish background",
+    "vimi-hero-scene.png": "Main hero scene with robot and floating cards, no transparency",
+    "vimi-robot-head.png": "Small icon / favicon candidate",
+    "vimi-step-robot-open.png": "How it works step 1 image",
+    "vimi-step-robot-done.png": "How it works final step image",
+    "vimi-cta-robot-left.png": "Final CTA left robot",
+    "vimi-cta-robot-right.png": "Final CTA right robot/head",
+    "vimi-payment-strip.png": "Payment trust strip reference/crop",
+    "vimi-payment-methods-card.png": "Payments section visual reference/crop",
+    "vimi-pricing-cards.png": "Pricing cards visual reference/crop",
+    "vimi-final-cta.png": "Final CTA full reference/crop"
+  },
+  "sizes": {
+    "vimi-logo-reference.png": [
+      111,
+      38
+    ],
+    "vimi-hero-robot.png": [
+      445,
+      360
+    ],
+    "vimi-hero-scene.png": [
+      565,
+      375
+    ],
+    "vimi-robot-head.png": [
+      35,
+      34
+    ],
+    "vimi-step-robot-open.png": [
+      112,
+      125
+    ],
+    "vimi-step-robot-done.png": [
+      103,
+      125
+    ],
+    "vimi-cta-robot-left.png": [
+      155,
+      107
+    ],
+    "vimi-cta-robot-right.png": [
+      105,
+      90
+    ],
+    "vimi-payment-strip.png": [
+      944,
+      48
+    ],
+    "vimi-payment-methods-card.png": [
+      343,
+      247
+    ],
+    "vimi-pricing-cards.png": [
+      576,
+      205
+    ],
+    "vimi-final-cta.png": [
+      949,
+      98
+    ],
+    "vimi-logo.svg": "220x64"
+  }
+}
