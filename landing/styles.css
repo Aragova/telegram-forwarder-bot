@@ -1,0 +1,44 @@
+:root {
+  --bg: #f5f7ff;
+  --text: #151a2d;
+  --primary: #4c5eff;
+  --primary-dark: #303fe0;
+  --card: #ffffff;
+  --hero: #11162d;
+  --hero-text: #e6ebff;
+  --border: #dde3ff;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif; color: var(--text); background: var(--bg); line-height: 1.5; }
+.container { width: min(1080px, 92%); margin: 0 auto; }
+.site-header { background: #fff; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
+.header-inner { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; }
+.logo { font-weight: 700; }
+.lang-btn { border: 1px solid var(--border); background: #fff; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
+.lang-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+.hero { background: linear-gradient(135deg, #10152a, #222f62); color: var(--hero-text); padding: 70px 0; }
+.hero h1 { margin: 0 0 16px; font-size: clamp(1.8rem, 4vw, 2.7rem); }
+.hero p { margin: 0 0 24px; max-width: 760px; }
+.hero-cta { display: flex; gap: 12px; flex-wrap: wrap; }
+.section { padding: 52px 0; }
+h2 { margin-top: 0; font-size: 1.8rem; }
+.grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+.list { margin: 0; padding-left: 22px; }
+.plans-grid .card { position: relative; }
+.price { font-size: 1.4rem; font-weight: 700; margin: 8px 0; }
+.note { background: #eef2ff; border: 1px solid #cfd7ff; border-radius: 10px; padding: 10px 12px; }
+.faq-item { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+.faq-item strong { display: block; margin-bottom: 6px; }
+.btn { display: inline-block; text-decoration: none; padding: 10px 14px; border-radius: 10px; font-weight: 600; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-dark); }
+.btn-secondary { border: 1px solid var(--border); color: var(--text); background: #fff; }
+.cta-final { text-align: center; }
+.site-footer { border-top: 1px solid var(--border); padding: 24px 0 36px; background: #fff; }
+.footer-links { display: flex; flex-wrap: wrap; gap: 10px; }
+.footer-links a { color: var(--primary-dark); text-decoration: none; }
+@media (max-width: 640px) {
+  .section { padding: 38px 0; }
+  h2 { font-size: 1.5rem; }
+}

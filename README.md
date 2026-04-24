@@ -41,6 +41,7 @@ Systemd и smoke-check: `docs/systemd-runtime-roles.md`.
 Rollout: `docs/deployment-rollout.md`.
 Rollback: `docs/deployment-rollback.md`.
 Runbook: `docs/operations-runbook.md`.
+Landing deployment: `docs/landing-deployment.md`.
 
 ### Legacy/dev fallback
 
