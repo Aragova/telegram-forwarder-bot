@@ -1582,22 +1582,6 @@ class VideoProcessor:
                 },
             )
 
-            max_duration = config.max_input_duration
-            if video_info['duration'] > max_duration:
-                logger.error(f"❌ Видео слишком длинное: {video_info['duration']:.0f} сек")
-
-                self._stage_failed(
-                    stage_logger,
-                    "pipeline",
-                    error_text="Видео превышает допустимую длительность",
-                    extra={
-                        "duration": video_info["duration"],
-                        "max_duration": max_duration,
-                    },
-                )
-
-                return False
-
             logger.info(f"   📐 Разрешение: {video_info['width']}x{video_info['height']}")
             logger.info(f"   🎞️ FPS: {video_info['fps']:.2f} (норм: {video_info['fps_normalized']})")
             logger.info(f"   🎥 Кодек: {video_info.get('codec_name', 'unknown')}")
