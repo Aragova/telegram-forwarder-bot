@@ -72,6 +72,18 @@ class UsageRepository(RepositorySplitBase):
             "api_calls": int(row.get("api_calls") or 0),
         }
 
+    def build_billing_usage_data(self, tenant_id: int, period_start: str, period_end: str) -> dict[str, Any]:
+        usage = self.get_usage_for_period(int(tenant_id), str(period_start), str(period_end))
+        return {
+            "tenant_id": int(tenant_id),
+            "period_start": str(period_start),
+            "period_end": str(period_end),
+            "jobs_count": int(usage.get("jobs_count") or 0),
+            "video_count": int(usage.get("video_count") or 0),
+            "storage_used_mb": int(usage.get("storage_used_mb") or 0),
+            "api_calls": int(usage.get("api_calls") or 0),
+        }
+
     def reset_usage_for_day(self, day: str) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -132,6 +144,23 @@ class UsageRepository(RepositorySplitBase):
                 subscriptions_expired = int((cur.fetchone() or {}).get("cnt") or 0)
                 cur.execute("SELECT COUNT(*) AS cnt FROM invoices WHERE status IN ('draft', 'open', 'uncollectible')")
                 invoices_open = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute("SELECT COUNT(*) AS cnt FROM invoices WHERE status = 'draft'")
+                invoices_draft = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute("SELECT COUNT(*) AS cnt FROM invoices WHERE status = 'open'")
+                invoices_open_exact = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute("SELECT COUNT(*) AS cnt FROM invoices WHERE status = 'paid'")
+                invoices_paid = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM subscriptions
+                    WHERE status IN ('active', 'trial', 'grace')
+                      AND current_period_end IS NOT NULL
+                      AND current_period_end <= %s
+                    """,
+                    (datetime.now(timezone.utc).isoformat(),),
+                )
+                billing_periods_due = int((cur.fetchone() or {}).get("cnt") or 0)
                 cur.execute(
                     """
                     SELECT COUNT(DISTINCT u.tenant_id) AS cnt
@@ -161,6 +190,44 @@ class UsageRepository(RepositorySplitBase):
                     """
                 )
                 overage_candidates = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM billing_events
+                    WHERE event_type = 'invoice_generation_error'
+                    """
+                )
+                billing_generation_errors = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute(
+                    """
+                    WITH usage_period AS (
+                        SELECT
+                            s.tenant_id,
+                            COALESCE(SUM(u.jobs_count), 0) AS jobs_count,
+                            COALESCE(SUM(u.video_count), 0) AS video_count,
+                            COALESCE(MAX(u.storage_used_mb), 0) AS storage_used_mb,
+                            p.max_jobs_per_day,
+                            p.max_video_per_day,
+                            p.max_storage_mb
+                        FROM subscriptions s
+                        JOIN plans p ON p.id = s.plan_id
+                        LEFT JOIN usage_stats u
+                          ON u.tenant_id = s.tenant_id
+                         AND s.current_period_start IS NOT NULL
+                         AND s.current_period_end IS NOT NULL
+                         AND u.date >= s.current_period_start
+                         AND u.date <= s.current_period_end
+                        WHERE s.status IN ('active', 'trial', 'grace')
+                        GROUP BY s.tenant_id, p.max_jobs_per_day, p.max_video_per_day, p.max_storage_mb
+                    )
+                    SELECT COUNT(*) AS cnt
+                    FROM usage_period
+                    WHERE (max_jobs_per_day > 0 AND jobs_count > max_jobs_per_day)
+                       OR (max_video_per_day > 0 AND video_count > max_video_per_day)
+                       OR (max_storage_mb > 0 AND storage_used_mb > max_storage_mb)
+                    """
+                )
+                tenants_with_overage_current_period = int((cur.fetchone() or {}).get("cnt") or 0)
         return {
             "tenants_active": active,
             "tenants_blocked": blocked,
@@ -169,6 +236,12 @@ class UsageRepository(RepositorySplitBase):
             "subscriptions_in_grace": subscriptions_in_grace,
             "subscriptions_expired": subscriptions_expired,
             "invoices_open": invoices_open,
+            "invoices_draft": invoices_draft,
+            "invoices_open_exact": invoices_open_exact,
+            "invoices_paid": invoices_paid,
+            "billing_periods_due": billing_periods_due,
+            "billing_generation_errors": billing_generation_errors,
+            "tenants_with_overage_current_period": tenants_with_overage_current_period,
             "tenants_with_billing_issues": billing_issues,
             "tenants_with_overage_candidates": overage_candidates,
         }

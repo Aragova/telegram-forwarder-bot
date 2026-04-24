@@ -1538,20 +1538,25 @@ async def cmd_billing(message: Message):
     admin_id = message.from_user.id if message.from_user else settings.admin_id
     tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
     tenant_id = int(tenant.get("id") or 1)
-    today = datetime.now(timezone.utc).date().isoformat()
-    period_start = datetime.now(timezone.utc).replace(day=1).date().isoformat()
-    usage_snapshot = await run_db(billing_service.build_billable_usage_snapshot, tenant_id, period_start, today)
+    summary = await run_db(billing_service.build_billing_summary, tenant_id)
     events = await run_db(billing_service.get_recent_billing_events, tenant_id, 5)
     event_lines = [f"• {event.get('event_type')} ({event.get('created_at')})" for event in events] or ["• событий пока нет"]
+    usage_snapshot = summary.get("usage") or {}
+    overage_items = summary.get("overage_items") or []
+    overage_lines = [f"• {item.get('description')}: {item.get('amount')} USD" for item in overage_items] or ["• нет"]
     await message.answer(
         "\n".join(
             [
-                "💳 Billing snapshot:",
-                f"• Период: {period_start} — {today}",
+                "💳 Billing summary:",
+                f"• Период: {summary.get('period_start')} — {summary.get('period_end')}",
+                f"• Тариф: {summary.get('plan_name')}",
+                f"• Базовая цена: {summary.get('base_price')} USD",
                 f"• jobs: {usage_snapshot.get('jobs_count', 0)}",
                 f"• video: {usage_snapshot.get('video_count', 0)}",
                 f"• storage_mb: {usage_snapshot.get('storage_used_mb', 0)}",
-                f"• overage candidates: {', '.join(usage_snapshot.get('overage_candidates') or []) or 'нет'}",
+                "• Overage:",
+                *overage_lines,
+                f"• Прогноз суммы: {summary.get('forecast_total', 0)} USD",
                 "🕘 Последние события:",
                 *event_lines,
             ]
@@ -1566,10 +1571,13 @@ async def cmd_invoice(message: Message):
     admin_id = message.from_user.id if message.from_user else settings.admin_id
     tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
     tenant_id = int(tenant.get("id") or 1)
-    invoice = await run_db(db.get_last_invoice, tenant_id) if hasattr(db, "get_last_invoice") else None
-    if not invoice:
-        await message.answer("🧾 Инвойсов пока нет.")
+    summary = await run_db(billing_service.get_last_invoice_summary, tenant_id)
+    if not summary:
+        await message.answer("🧾 Счёт за текущий период ещё не создан.")
         return
+    invoice = summary.get("invoice") or {}
+    items = summary.get("items") or []
+    item_lines = [f"• {item.get('item_type')}: {item.get('description')} = {item.get('amount')} {invoice.get('currency')}" for item in items] or ["• items отсутствуют"]
     await message.answer(
         "\n".join(
             [
@@ -1579,6 +1587,8 @@ async def cmd_invoice(message: Message):
                 f"• Период: {invoice.get('period_start')} — {invoice.get('period_end')}",
                 f"• Сумма: {invoice.get('total')} {invoice.get('currency')}",
                 f"• Оплачен: {invoice.get('paid_at', 'нет')}",
+                "• Позиции:",
+                *item_lines,
             ]
         )
     )
