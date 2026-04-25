@@ -304,3 +304,39 @@ body {
   }
 }
 
+
+/* === FIX PRICING CARDS ALIGNMENT === */
+
+.plans {
+  align-items: stretch !important;
+}
+
+.plans .plan {
+  display: grid !important;
+  grid-template-rows: 34px 56px 76px 112px 44px !important;
+  min-height: 360px !important;
+}
+
+.plans .plan h3,
+.plans .plan p,
+.plans .plan .price,
+.plans .plan ul {
+  margin: 0 !important;
+}
+
+.plans .plan .price {
+  display: flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+}
+
+.plans .plan ul {
+  align-content: start !important;
+}
+
+.plans .plan .plan-btn {
+  align-self: end !important;
+  width: 100% !important;
+  height: 44px !important;
+}
+
