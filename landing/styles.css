@@ -677,3 +677,51 @@
   margin-top: auto !important;
   width: 100% !important;
 }
+cd ~/project
+cat << 'EOF' >> landing/styles.css
+
+/* === REAL FIX: pricing cards equal vertical rhythm === */
+
+.pricing-grid > *,
+.tariffs-grid > *,
+.plans-grid > * {
+  display: grid !important;
+  grid-template-rows:
+    34px
+    54px
+    72px
+    112px
+    auto !important;
+  align-items: start !important;
+  min-height: 360px !important;
+}
+
+.pricing-grid > * h3,
+.tariffs-grid > * h3,
+.plans-grid > * h3 {
+  margin: 0 !important;
+  min-height: 34px !important;
+}
+
+.pricing-grid > * h3 + p,
+.tariffs-grid > * h3 + p,
+.plans-grid > * h3 + p {
+  margin: 0 !important;
+  min-height: 54px !important;
+}
+
+.pricing-grid > * ul,
+.tariffs-grid > * ul,
+.plans-grid > * ul {
+  margin: 0 !important;
+  min-height: 112px !important;
+}
+
+.pricing-grid > * a:last-child,
+.tariffs-grid > * a:last-child,
+.plans-grid > * a:last-child {
+  align-self: end !important;
+  margin-top: auto !important;
+}
+
+EOF
