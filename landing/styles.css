@@ -487,3 +487,16 @@ body {
   right: 14px !important;
 }
 
+
+/* === FINAL: real ViMi logo image === */
+.brand-logo-img {
+  height: 46px !important;
+  width: auto !important;
+  display: block !important;
+  object-fit: contain !important;
+}
+
+.brand {
+  gap: 0 !important;
+}
+
