@@ -45,17 +45,6 @@
   overflow: visible !important;
 }
 
-.hero-robot,
-.robot,
-#robot {
-  position: absolute !important;
-  right: 64px !important;
-  bottom: 8px !important;
-  width: 560px !important;
-  max-width: none !important;
-  z-index: 2 !important;
-}
-
 .hero-card,
 .feature-card-floating,
 .float-card {
@@ -912,4 +901,11 @@
     width: 600px !important;
     max-width: 115% !important;
   }
+}
+.hero-scene {
+  width: 100%;
+  max-width: 760px;
+  height: auto;
+  display: block;
+  object-fit: contain;
 }
