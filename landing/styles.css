@@ -650,112 +650,174 @@ body {
     display: none !important;
   }
 }
-/* HOW IT WORKS FINAL */
+/* HOW IT WORKS — FINAL PREMIUM */
 
 .how-section {
   padding: 100px 20px;
-  background: #f5f9ff;
+  background: linear-gradient(180deg, #ffffff 0%, #f5f9ff 100%);
 }
 
 .how-container {
-  max-width: 1200px;
+  max-width: 1180px;
   margin: 0 auto;
+  padding: 60px;
+  border-radius: 40px;
+  background: rgba(255,255,255,0.9);
+  box-shadow: 0 40px 120px rgba(77,163,255,0.12);
+  position: relative;
+}
+
+.how-container::before {
+  content: "";
+  position: absolute;
+  inset: 20px;
+  border-radius: 30px;
+  border: 1px solid rgba(77,163,255,0.15);
 }
 
 .how-head {
   display: grid;
-  grid-template-columns: 1fr 400px;
+  grid-template-columns: 1.2fr 0.8fr;
   gap: 40px;
-  margin-bottom: 60px;
+  margin-bottom: 50px;
+  align-items: end;
 }
 
 .how-head h1 {
-  font-size: 56px;
+  font-size: clamp(42px,5vw,64px);
   line-height: 1;
   margin: 0;
+  letter-spacing: -0.04em;
 }
 
 .lead {
   font-size: 18px;
   color: #5b6b82;
+  line-height: 1.6;
 }
 
 .how-grid {
   display: grid;
-  grid-template-columns: 1fr 400px;
+  grid-template-columns: 1.1fr 0.9fr;
   gap: 30px;
 }
 
 .steps {
   display: grid;
-  gap: 15px;
+  gap: 16px;
 }
 
 .step-card {
   display: grid;
-  grid-template-columns: 60px 1fr 40px;
+  grid-template-columns: 56px 1fr auto;
+  gap: 16px;
   align-items: center;
-  padding: 20px;
+  padding: 22px;
   border-radius: 24px;
   background: white;
-  box-shadow: 0 20px 50px rgba(0,0,0,0.05);
+  box-shadow: 0 25px 60px rgba(0,0,0,0.05);
+  transition: all .2s ease;
+}
+
+.step-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 35px 80px rgba(0,0,0,0.08);
 }
 
 .step-num {
-  background: #4da3ff;
+  width: 56px;
+  height: 56px;
+  border-radius: 18px;
+  background: linear-gradient(135deg,#4da3ff,#2b7ed6);
   color: white;
-  width: 50px;
-  height: 50px;
-  border-radius: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: bold;
+  font-weight: 900;
+  font-size: 18px;
 }
 
 .step-chip {
-  opacity: 0.6;
+  opacity: 0.5;
+  font-size: 14px;
 }
 
+.step-card h3 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+
+.step-card p {
+  margin: 0;
+  font-size: 14.5px;
+  color: #5b6b82;
+}
+
+/* ПРАВАЯ КАРТОЧКА */
+
 .demo-card {
-  background: #0b1220;
-  color: white;
+  border-radius: 32px;
   padding: 30px;
-  border-radius: 30px;
+  background:
+    radial-gradient(circle at 85% 10%, rgba(77,163,255,0.35), transparent 35%),
+    linear-gradient(180deg,#111a2b,#0b1220);
+  color: white;
+  box-shadow: 0 40px 100px rgba(0,0,0,0.2);
 }
 
 .demo-top {
   display: flex;
-  gap: 10px;
-  margin-bottom: 20px;
+  gap: 12px;
+  margin-bottom: 24px;
 }
 
 .demo-logo {
-  width: 40px;
-  height: 40px;
-  background: #4da3ff;
+  width: 42px;
+  height: 42px;
   border-radius: 12px;
+  background: linear-gradient(135deg,#4da3ff,#8cc7ff);
   display: flex;
   align-items: center;
   justify-content: center;
+  font-weight: 900;
+  color: #0b1220;
+}
+
+.demo-online {
+  font-size: 13px;
+  opacity: 0.7;
 }
 
 .demo-message {
-  background: rgba(255,255,255,0.1);
-  padding: 12px;
-  border-radius: 12px;
-  margin-bottom: 10px;
+  background: rgba(255,255,255,0.08);
+  padding: 14px;
+  border-radius: 14px;
+  margin-bottom: 12px;
 }
 
 .demo-status {
   margin-top: 20px;
   background: white;
-  color: black;
-  padding: 15px;
-  border-radius: 12px;
+  color: #111;
+  padding: 16px;
+  border-radius: 14px;
 }
 
 .demo-status div {
   display: flex;
   justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+/* MOBILE */
+
+@media (max-width: 900px) {
+  .how-container {
+    padding: 30px;
+  }
+
+  .how-head,
+  .how-grid {
+    grid-template-columns: 1fr;
+  }
 }
