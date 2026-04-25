@@ -606,3 +606,10 @@ body {
     min-width: 0 !important;
   }
 }
+.feature-logo {
+  width: 64px !important;
+  height: 64px !important;
+  object-fit: contain !important;
+  display: block !important;
+  margin: 0 auto 12px !important;
+}
