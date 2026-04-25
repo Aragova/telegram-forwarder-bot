@@ -40,44 +40,43 @@
 
   <main id="top">
     <section class="hero section-shell">
-      <div class="hero-copy">
-        <div class="eyebrow"><span></span><b data-i18n="eyebrow">Ваш помощник в Telegram</b></div>
-        <h1 data-i18n-html="hero_title">Автоматизация<br>Telegram-каналов<br><em>в одном боте</em></h1>
-        <p class="hero-lead" data-i18n="hero_lead">Публикации, видео, тарифы, счета и оплата — всё внутри Telegram. Экономьте время и развивайте ваши каналы.</p>
+
+    <!-- 🔹 ЗАГОЛОВОК СВЕРХУ -->
+    <div class="hero-top">
+        <h1 data-i18n-html="hero_title"></h1>
+    </div>
+
+    <!-- 🔹 НИЖНИЙ БЛОК -->
+    <div class="hero-row">
+
+        <!-- ЛЕВАЯ ЧАСТЬ -->
+        <div class="hero-left">
+        <p class="hero-lead" data-i18n="hero_lead"></p>
 
         <div class="hero-buttons">
-          <a id="cta-open-bot" class="btn btn-primary btn-xl" href="https://t.me/" target="_blank" rel="noopener"><span class="icon-plane"></span><span data-i18n="open_bot">Открыть бота</span></a>
-          <a class="btn btn-secondary btn-xl" href="#pricing" data-i18n="view_pricing">Смотреть тарифы</a>
+            <a class="btn btn-primary btn-xl" href="https://t.me/" target="_blank">
+            <span data-i18n="open_bot">Открыть бота</span>
+            </a>
+
+            <a class="btn btn-secondary btn-xl" href="#pricing" data-i18n="view_pricing">
+            Смотреть тарифы
+            </a>
         </div>
 
         <div class="trust-row">
-          <span><i class="mini shield"></i><b data-i18n="trust_safe">Надёжно и безопасно</b></span>
-          <span><i class="mini headset"></i><b data-i18n="trust_support">Поддержка 24/7</b></span>
-          <span><i class="mini tg"></i><b data-i18n="trust_telegram">Работает в Telegram</b></span>
+            <span data-i18n="trust_safe">Надёжно и безопасно</span>
+            <span data-i18n="trust_support">Поддержка 24/7</span>
+            <span data-i18n="trust_telegram">Работает в Telegram</span>
         </div>
-      </div>
+        </div>
 
-      <div class="hero-stage" aria-label="ViMi robot">
-        <div class="orb orb-a"></div>
-        <div class="orb orb-b"></div>
-        <img id="heroRobot" class="hero-scene" src="assets/hero-scene-ru.png" alt="" />
-        <div class="hero-feature-card card-auto">
-          <span class="feature-icon blue"><svg viewBox="0 0 24 24"><path d="M21 3L3.8 10.2c-.8.3-.8 1.5.1 1.8l4.5 1.4 1.7 5.4c.3.9 1.5 1 1.9.1L21 3z"/></svg></span>
-          <div><strong data-i18n="hero_card_1_title">Автопостинг</strong><small data-i18n="hero_card_1_text">Аккуратные публикации по расписанию.</small></div>
+        <!-- ПРАВАЯ ЧАСТЬ (РОБОТ) -->
+        <div class="hero-right">
+        <img id="heroRobot" class="hero-scene" src="assets/hero-scene-ru.png" alt="">
         </div>
-        <div class="hero-feature-card card-video">
-          <span class="feature-icon violet"><svg viewBox="0 0 24 24"><path d="M4 7a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V7zm13.5 3.2 3.2-2c.6-.4 1.3.1 1.3.8v6c0 .7-.8 1.1-1.3.8l-3.2-2v-3.6z"/></svg></span>
-          <div><strong data-i18n="hero_card_2_title">Видео</strong><small data-i18n="hero_card_2_text">Обработка и очередь видео-контента.</small></div>
-        </div>
-        <div class="hero-feature-card card-analytics">
-          <span class="feature-icon green"><svg viewBox="0 0 24 24"><path d="M5 12h3v7H5v-7zm6-5h3v12h-3V7zm6-3h3v15h-3V4z"/></svg></span>
-          <div><strong data-i18n="hero_card_3_title">Аналитика</strong><small data-i18n="hero_card_3_text">Статистика и отчёты в реальном времени.</small></div>
-        </div>
-        <div class="hero-feature-card card-money">
-          <span class="feature-icon orange"><svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 5v1.1c1.7.3 2.7 1.2 2.7 2.5 0 1-.6 1.8-1.6 2.2 1.2.4 1.9 1.2 1.9 2.4 0 1.6-1.2 2.7-3 3V19h-1.6v-.8H9.7V19H8.2v-2h1V8.9h-1V7h1V6h1.5v1h1.7V6H13zm-2.2 3v2.3h1.4c1 0 1.6-.4 1.6-1.2s-.6-1.1-1.6-1.1h-1.4zm0 4v2.8h1.7c1.1 0 1.8-.5 1.8-1.4s-.7-1.4-1.9-1.4h-1.6z"/></svg></span>
-          <div><strong data-i18n="hero_card_4_title">Монетизация</strong><small data-i18n="hero_card_4_text">Тарифы, счета и приём оплат.</small></div>
-        </div>
-      </div>
+
+    </div>
+
     </section>
 
     <section class="payments-strip section-shell" aria-label="Payment methods">

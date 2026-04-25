@@ -1064,3 +1064,79 @@ body {
   }
 }
 
+/* === HERO FINAL STRUCTURE (TITLE TOP, ROW BELOW) === */
+
+.hero {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 28px !important;
+  padding-top: 60px !important;
+  padding-bottom: 40px !important;
+  background: #fbfcff !important;
+}
+
+/* Заголовок */
+.hero-top {
+  text-align: center !important;
+}
+
+.hero-top h1 {
+  max-width: 900px !important;
+  margin: 0 auto !important;
+  font-size: clamp(42px, 5vw, 64px) !important;
+  line-height: 1.05 !important;
+}
+
+/* Нижний ряд */
+.hero-row {
+  display: grid !important;
+  grid-template-columns: 1fr 1fr !important;
+  align-items: center !important;
+  gap: 40px !important;
+}
+
+/* Левая часть */
+.hero-left {
+  max-width: 520px !important;
+}
+
+.hero-lead {
+  font-size: 18px !important;
+  line-height: 1.5 !important;
+}
+
+/* Кнопки */
+.hero-buttons {
+  margin-top: 18px !important;
+}
+
+/* Правая часть */
+.hero-right {
+  display: flex !important;
+  justify-content: center !important;
+}
+
+/* Робот */
+.hero-scene {
+  width: auto !important;
+  max-width: 680px !important;
+  height: auto !important;
+  object-fit: contain !important;
+}
+
+/* Адаптив */
+@media (max-width: 1050px) {
+  .hero-row {
+    grid-template-columns: 1fr !important;
+    text-align: center !important;
+  }
+
+  .hero-left {
+    margin: 0 auto !important;
+  }
+
+  .hero-buttons,
+  .trust-row {
+    justify-content: center !important;
+  }
+}
