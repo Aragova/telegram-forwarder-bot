@@ -161,6 +161,32 @@ def _log_video_stage_event(event_text: str, delivery_id: int) -> None:
     logger.info("%s | delivery_id=%s | ts=%s", event_text, int(delivery_id), datetime.now(timezone.utc).isoformat())
 
 
+def _finalize_invalid_source_file(repo, *, payload: dict, job_id: int, error_text: str, result: dict[str, Any] | None = None) -> None:
+    delivery_id = int(payload.get("delivery_id") or 0)
+    rule_id = int(payload.get("rule_id") or 0)
+    post_id = repo.get_post_id_by_delivery(delivery_id)
+    details = dict(result or {})
+    repo.mark_delivery_faulty(delivery_id, error_text)
+    repo.log_video_event(
+        event_type="video_invalid_source_file",
+        delivery_id=delivery_id,
+        rule_id=rule_id,
+        post_id=post_id,
+        status="faulty",
+        error_text=error_text,
+        extra={
+            "delivery_id": delivery_id,
+            "rule_id": rule_id,
+            "job_id": int(job_id),
+            "path": details.get("path"),
+            "size": details.get("size"),
+            "ffprobe_stderr": details.get("ffprobe_stderr"),
+            "validation_attempt": details.get("validation_attempt"),
+            "max_validation_attempts": details.get("max_validation_attempts"),
+        },
+    )
+
+
 def cleanup_video_artifacts(payload: dict, *, mode: str) -> None:
     unique_paths: list[str] = []
     for path in [
@@ -284,7 +310,10 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             ok = await sender_service.execute_repost_album_from_job(**payload)
         elif job_type == "video_download":
             _log_video_stage_event("VIDEO DOWNLOAD START | запуск стадии скачивания", int(payload.get("delivery_id") or 0))
-            result = await sender_service.execute_video_download_from_job(**payload)
+            result = await sender_service.execute_video_download_from_job(
+                **payload,
+                job_attempt=int(job.get("attempts") or 0) + 1,
+            )
             if result.get("fallback_to_legacy"):
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
                 await asyncio.to_thread(repo.complete_job, job_id)
@@ -305,7 +334,10 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             ok = False
         elif job_type == "video_process":
             _log_video_stage_event("VIDEO PROCESS START | запуск стадии обработки", int(payload.get("delivery_id") or 0))
-            result = await sender_service.execute_video_process_from_job(**payload)
+            result = await sender_service.execute_video_process_from_job(
+                **payload,
+                job_attempt=int(job.get("attempts") or 0) + 1,
+            )
             if result.get("fallback_to_legacy"):
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
                 await asyncio.to_thread(repo.complete_job, job_id)
@@ -325,7 +357,13 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 return True
             if result.get("restart_download"):
                 delivery_id = int(payload.get("delivery_id") or 0)
-                enqueue_video_download(repo, delivery_id)
+                enqueue_video_download(
+                    repo,
+                    delivery_id,
+                    extra_payload={
+                        "invalid_file_attempts": int(result.get("invalid_file_attempts") or int(payload.get("invalid_file_attempts") or 0) + 1),
+                    },
+                )
                 await asyncio.to_thread(repo.complete_job, job_id)
                 cleanup_video_artifacts(payload, mode="restart_download")
                 _log_video_stage_event(
@@ -370,6 +408,15 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             result_error_text = str(result.get("error_text") or "").strip()
             if result_error_text:
                 error_text = result_error_text
+            if bool(result.get("final_invalid_source_file")):
+                await asyncio.to_thread(
+                    _finalize_invalid_source_file,
+                    repo,
+                    payload=payload,
+                    job_id=job_id,
+                    error_text=error_text,
+                    result=result,
+                )
         attempts = int(job.get("attempts") or 0) + 1
         max_attempts = int(job.get("max_attempts") or 3)
         if (not retryable) or attempts >= max_attempts:

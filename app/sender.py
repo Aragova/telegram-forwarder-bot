@@ -29,6 +29,7 @@ from telethon.tl.types import (
 )
 
 logger = logging.getLogger("forwarder")
+MAX_INVALID_MP4_RETRY = 1
 
 async def run_db(callable_obj, *args, **kwargs):
     """
@@ -2704,11 +2705,13 @@ class SenderService:
         self,
         *,
         job_id: int | None = None,
+        job_attempt: int | None = None,
         rule_id: int,
         delivery_id: int,
         message_id: int,
         source_channel: str,
         target_id: str,
+        invalid_file_attempts: int | None = None,
         **_: object,
     ) -> dict:
         logger.info(
@@ -2745,11 +2748,52 @@ class SenderService:
             stage="download",
         )
         if not probe_ok:
+            previous_invalid_attempts = max(0, int(invalid_file_attempts or 0))
+            current_job_attempt = max(1, int(job_attempt or 1))
+            validation_attempt = previous_invalid_attempts + current_job_attempt
+            final_failed = validation_attempt > MAX_INVALID_MP4_RETRY
+            compact_error = (probe_error or "битый MP4").replace("битый MP4: ", "", 1)
+            current_size = Path(path).stat().st_size if Path(path).is_file() else 0
+            if final_failed:
+                logger.warning(
+                    "VIDEO FILE VALIDATION FINAL FAILED | stage=download | delivery_id=%s | rule_id=%s | job_id=%s | path=%s | size=%s | ffprobe_stderr=%s | action=delivery_faulty_and_job_failed | validation_attempt=%s | max_validation_attempts=%s",
+                    delivery_id,
+                    rule_id,
+                    job_id,
+                    path,
+                    current_size,
+                    compact_error,
+                    validation_attempt,
+                    MAX_INVALID_MP4_RETRY,
+                )
+            else:
+                logger.warning(
+                    "VIDEO FILE VALIDATION FAILED | stage=download | delivery_id=%s | rule_id=%s | job_id=%s | path=%s | size=%s | ffprobe_stderr=%s | action=удалён_файл_и_retry | validation_attempt=%s | max_validation_attempts=%s",
+                    delivery_id,
+                    rule_id,
+                    job_id,
+                    path,
+                    current_size,
+                    compact_error,
+                    validation_attempt,
+                    MAX_INVALID_MP4_RETRY,
+                )
+            if final_failed:
+                error_text = f"Битый MP4 после повторной загрузки: {compact_error}"
+            else:
+                error_text = f"Битый MP4: {compact_error}, повторная загрузка 1/{MAX_INVALID_MP4_RETRY}"
             return {
                 "ok": False,
                 "fallback_to_legacy": False,
-                "retryable": True,
-                "error_text": probe_error or "битый MP4",
+                "retryable": not final_failed,
+                "error_text": error_text,
+                "invalid_source_file": True,
+                "final_invalid_source_file": final_failed,
+                "ffprobe_stderr": compact_error,
+                "validation_attempt": validation_attempt,
+                "max_validation_attempts": MAX_INVALID_MP4_RETRY,
+                "path": str(path),
+                "size": current_size,
             }
         downloaded_size = Path(path).stat().st_size if Path(path).is_file() else 0
         video_info = await self.video_processor.get_video_info(str(path), use_cache=False)
@@ -2766,10 +2810,12 @@ class SenderService:
         self,
         *,
         job_id: int | None = None,
+        job_attempt: int | None = None,
         rule_id: int,
         delivery_id: int,
         source_video_path: str | None = None,
         artifact_version: int | None = None,
+        invalid_file_attempts: int | None = None,
         **_: object,
     ) -> dict:
         logger.info(
@@ -2795,12 +2841,53 @@ class SenderService:
             stage="process",
         )
         if not probe_ok:
+            previous_invalid_attempts = max(0, int(invalid_file_attempts or 0))
+            validation_attempt = previous_invalid_attempts + 1
+            final_failed = validation_attempt > MAX_INVALID_MP4_RETRY
+            compact_error = (probe_error or "битый MP4").replace("битый MP4: ", "", 1)
+            current_size = source_path.stat().st_size if source_path.is_file() else 0
+            if final_failed:
+                logger.warning(
+                    "VIDEO FILE VALIDATION FINAL FAILED | stage=process | delivery_id=%s | rule_id=%s | job_id=%s | path=%s | size=%s | ffprobe_stderr=%s | action=delivery_faulty_and_job_failed | validation_attempt=%s | max_validation_attempts=%s",
+                    delivery_id,
+                    rule_id,
+                    job_id,
+                    source_path,
+                    current_size,
+                    compact_error,
+                    validation_attempt,
+                    MAX_INVALID_MP4_RETRY,
+                )
+            else:
+                logger.warning(
+                    "VIDEO FILE VALIDATION FAILED | stage=process | delivery_id=%s | rule_id=%s | job_id=%s | path=%s | size=%s | ffprobe_stderr=%s | action=удалён_файл_и_retry | validation_attempt=%s | max_validation_attempts=%s",
+                    delivery_id,
+                    rule_id,
+                    job_id,
+                    source_path,
+                    current_size,
+                    compact_error,
+                    validation_attempt,
+                    MAX_INVALID_MP4_RETRY,
+                )
+            if final_failed:
+                error_text = f"Битый MP4 после повторной загрузки: {compact_error}"
+            else:
+                error_text = f"Битый MP4: {compact_error}, повторная загрузка 1/{MAX_INVALID_MP4_RETRY}"
             return {
                 "ok": False,
                 "fallback_to_legacy": False,
                 "retryable": False,
-                "restart_download": True,
-                "error_text": probe_error or "битый MP4",
+                "restart_download": not final_failed,
+                "error_text": error_text,
+                "invalid_source_file": True,
+                "final_invalid_source_file": final_failed,
+                "ffprobe_stderr": compact_error,
+                "validation_attempt": validation_attempt,
+                "max_validation_attempts": MAX_INVALID_MP4_RETRY,
+                "invalid_file_attempts": validation_attempt,
+                "path": str(source_path),
+                "size": current_size,
             }
 
         rule = await run_db(self.db.get_rule, int(rule_id))
@@ -2852,10 +2939,10 @@ class SenderService:
             "ffprobe",
             "-v",
             "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
+            "-show_format",
+            "-show_streams",
+            "-print_format",
+            "json",
             str(file_path),
         ]
         process = await asyncio.create_subprocess_exec(
@@ -2863,17 +2950,35 @@ class SenderService:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await process.communicate()
+        stdout, stderr = await process.communicate()
         stderr_text = stderr.decode("utf-8", errors="ignore").strip()
+        stdout_text = stdout.decode("utf-8", errors="ignore").strip()
 
-        if process.returncode == 0:
+        probe_payload = {}
+        if stdout_text:
+            try:
+                probe_payload = json.loads(stdout_text)
+            except Exception:
+                probe_payload = {}
+
+        streams = probe_payload.get("streams") if isinstance(probe_payload, dict) else None
+        format_info = probe_payload.get("format") if isinstance(probe_payload, dict) else None
+        empty_probe_data = (not isinstance(streams, list) or not streams) or (not isinstance(format_info, dict) or not format_info)
+
+        if process.returncode == 0 and not empty_probe_data:
             return True, None
 
-        compact_stderr = (stderr_text or "ffprobe завершился с ошибкой").replace("\n", " | ")
-        if "moov atom not found" in compact_stderr.lower():
+        compact_stderr = (stderr_text or "").replace("\n", " | ").strip()
+        lower_stderr = compact_stderr.lower()
+        if "moov atom not found" in lower_stderr:
             reason = "битый MP4: moov atom not found"
+        elif "invalid data found when processing input" in lower_stderr:
+            reason = "битый MP4: Invalid data found when processing input"
+        elif empty_probe_data:
+            reason = "битый MP4: ffprobe вернул пустые stream/format данные"
         else:
-            reason = f"битый MP4: {compact_stderr[:500]}"
+            fallback = compact_stderr or "ffprobe завершился с ошибкой"
+            reason = f"битый MP4: {fallback[:500]}"
 
         removed = False
         try:
