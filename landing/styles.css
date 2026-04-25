@@ -629,53 +629,74 @@
     text-align: center !important;
   }
 }
-cd ~/project
 
-cat << 'EOF' >> landing/styles.css
 
-/* === TRUE FIX: real .plans / .plan card alignment === */
+/* === FINAL: pricing plans 1:1 alignment === */
 
 .plans {
   align-items: stretch !important;
 }
 
 .plans .plan {
-  display: grid !important;
-  grid-template-rows: 28px 48px 68px 104px 42px !important;
+  padding: 28px 24px 24px !important;
   min-height: 330px !important;
-}
-
-.plans .plan mark {
-  position: absolute !important;
+  display: grid !important;
+  grid-template-rows: 30px 46px 72px 104px 44px !important;
+  row-gap: 0 !important;
 }
 
 .plans .plan h3 {
   margin: 0 !important;
-  align-self: start !important;
+  font-size: 22px !important;
+  line-height: 30px !important;
 }
 
 .plans .plan h3 + p {
   margin: 0 !important;
-  min-height: 48px !important;
-  align-self: start !important;
+  font-size: 14px !important;
+  line-height: 1.35 !important;
+  color: #657294 !important;
+  font-weight: 700 !important;
 }
 
 .plans .plan .price {
   margin: 0 !important;
-  min-height: 68px !important;
   display: flex !important;
   align-items: center !important;
+  gap: 12px !important;
+  font-size: 42px !important;
+  line-height: 1 !important;
+  letter-spacing: -0.055em !important;
+}
+
+.plans .plan .price span {
+  display: inline-flex !important;
+  align-items: center !important;
+  font-size: 17px !important;
+  line-height: 1 !important;
+  letter-spacing: 0 !important;
+  font-weight: 800 !important;
+  white-space: nowrap !important;
 }
 
 .plans .plan ul {
   margin: 0 !important;
-  min-height: 104px !important;
-  align-self: start !important;
+  padding: 0 !important;
+  display: grid !important;
+  gap: 10px !important;
+  align-content: start !important;
+  font-size: 15px !important;
 }
 
 .plans .plan .plan-btn {
+  width: 100% !important;
+  height: 44px !important;
   align-self: end !important;
-  height: 42px !important;
+  border-radius: 11px !important;
+  font-size: 16px !important;
 }
 
-EOF
+.plans .plan mark {
+  top: -16px !important;
+  right: 14px !important;
+}
