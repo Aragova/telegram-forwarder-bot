@@ -96,88 +96,103 @@
     </section>
 
     <section class="how-section" id="how">
-    <div class="how-head">
+    <div class="how-container">
+
+        <div class="how-head">
         <div>
-        <div class="eyebrow">
+            <div class="eyebrow">
             <span></span>
             <span data-i18n="how_title">Как это работает</span>
-        </div>
+            </div>
 
-        <h1 data-i18n="how_main_title">ViMi берёт канал под автопилот за 5 шагов</h1>
+            <h1 data-i18n="how_main_title">
+            ViMi берёт канал под автопилот за 5 шагов
+            </h1>
         </div>
 
         <p class="lead" data-i18n="how_main_lead">
-        Подключаете источник и получателя, выбираете режим работы, задаёте расписание — дальше бот сам ведёт очередь и публикации.
+            Подключаете источник и получателя, выбираете режим работы — дальше бот всё делает сам.
         </p>
-    </div>
+        </div>
 
-    <div class="how-grid">
+        <div class="how-grid">
+
         <div class="steps">
-        <div class="step-card">
+
+            <div class="step-card">
             <div class="step-num">1</div>
             <div>
-            <h3 data-i18n="step_1_t">Откройте бота</h3>
-            <p data-i18n="step_1_d">Запустите ViMi в Telegram за пару секунд.</p>
+                <h3 data-i18n="step_1_t">Откройте бота</h3>
+                <p data-i18n="step_1_d">Запустите ViMi в Telegram</p>
             </div>
-        </div>
+            <div class="step-chip">⚡</div>
+            </div>
 
-        <div class="step-card">
+            <div class="step-card">
             <div class="step-num">2</div>
             <div>
-            <h3 data-i18n="step_2_t">Добавьте источники и каналы</h3>
-            <p data-i18n="step_2_d">Укажите откуда брать контент и куда публиковать.</p>
+                <h3 data-i18n="step_2_t">Добавьте каналы</h3>
+                <p data-i18n="step_2_d">Источник и получатель</p>
             </div>
-        </div>
+            <div class="step-chip">📡</div>
+            </div>
 
-        <div class="step-card">
+            <div class="step-card">
             <div class="step-num">3</div>
             <div>
-            <h3 data-i18n="step_3_t">Создайте правило публикации</h3>
-            <p data-i18n="step_3_d">Настройте расписание и параметры публикаций.</p>
+                <h3 data-i18n="step_3_t">Создайте правило</h3>
+                <p data-i18n="step_3_d">Режим и расписание</p>
             </div>
-        </div>
+            <div class="step-chip">🕒</div>
+            </div>
 
-        <div class="step-card">
+            <div class="step-card">
             <div class="step-num">4</div>
             <div>
-            <h3 data-i18n="step_4_t">Подключите тариф или оплату</h3>
-            <p data-i18n="step_4_d">Выберите тариф и оплатите удобным способом.</p>
+                <h3 data-i18n="step_4_t">Оплатите тариф</h3>
+                <p data-i18n="step_4_d">Под ваши лимиты</p>
             </div>
-        </div>
+            <div class="step-chip">💳</div>
+            </div>
 
-        <div class="step-card">
+            <div class="step-card">
             <div class="step-num">5</div>
             <div>
-            <h3 data-i18n="step_5_t">Бот выполняет рутину за вас</h3>
-            <p data-i18n="step_5_d">ViMi работает 24/7, вы экономите время и растите быстрее.</p>
+                <h3 data-i18n="step_5_t">Бот работает</h3>
+                <p data-i18n="step_5_d">24/7 автоматизация</p>
             </div>
-        </div>
+            <div class="step-chip">✅</div>
+            </div>
+
         </div>
 
         <div class="demo-card">
-        <div class="demo-title">
+
+            <div class="demo-top">
             <div class="demo-logo">Vi</div>
             <div>
-            <strong>ViMi</strong>
-            <span data-i18n="demo_online">работает 24/7</span>
+                <strong>ViMi</strong>
+                <div class="demo-online" data-i18n="demo_online">работает 24/7</div>
             </div>
+            </div>
+
+            <div class="demo-message">
+            <strong data-i18n="demo_rule_title">Правило</strong>
+            <span data-i18n="demo_rule_text">Источник → канал</span>
+            </div>
+
+            <div class="demo-message">
+            <strong data-i18n="demo_video_title">Видео готово</strong>
+            <span data-i18n="demo_video_text">Добавлена заставка</span>
+            </div>
+
+            <div class="demo-status">
+            <div><span data-i18n="demo_status">Статус</span><b>🟢</b></div>
+            <div><span data-i18n="demo_queue">Очередь</span><b>12</b></div>
+            </div>
+
         </div>
 
-        <div class="demo-message">
-            <strong data-i18n="demo_rule_title">Правило публикации</strong>
-            <span data-i18n="demo_rule_text">Источник → Канал получатель · Интервал: 30 мин</span>
-        </div>
-
-        <div class="demo-message">
-            <strong data-i18n="demo_video_title">Видео обработано</strong>
-            <span data-i18n="demo_video_text">Заставка добавлена, подпись сохранена, публикация в очереди.</span>
-        </div>
-
-        <div class="demo-status">
-            <div><span data-i18n="demo_status">Статус</span><b data-i18n="demo_status_value">Работает</b></div>
-            <div><span data-i18n="demo_queue">В очереди</span><b data-i18n="demo_queue_value">12 публикаций</b></div>
-            <div><span data-i18n="demo_next">Следующий пост</span><b>20:25</b></div>
-        </div>
         </div>
     </div>
     </section>
