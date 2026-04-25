@@ -50,12 +50,16 @@ function setLanguage(lang){
     }
   });
 
-  const src = lang === 'en'
+  const heroSrc = lang === 'en'
+    ? 'assets/hero-scene-en.png'
+    : 'assets/hero-scene-ru.png';
+
+  const ctaSrc = lang === 'en'
     ? 'assets/hero-robot-en.png'
     : 'assets/hero-robot-ru.png';
 
-  if (robot) robot.src = src;
-  if (ctaRobot) ctaRobot.src = src;
+  if (robot) robot.src = heroSrc;
+  if (ctaRobot) ctaRobot.src = ctaSrc;
 
   localStorage.setItem('vimi_lang', lang);
 }
