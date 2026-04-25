@@ -823,3 +823,14 @@ body {
     height: 46px;
   }
 }
+/* HOW final polish */
+
+.how-section .eyebrow {
+  width: fit-content;
+  min-width: 168px;
+  white-space: nowrap;
+}
+
+.how-head h1 {
+  font-size: clamp(34px, 4.1vw, 52px);
+}
