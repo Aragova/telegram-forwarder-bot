@@ -2732,7 +2732,25 @@ class SenderService:
         )
         if not path:
             logger.warning("VIDEO STAGE FAILED | не удалось скачать видео для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": False, "retryable": True}
+            return {
+                "ok": False,
+                "fallback_to_legacy": False,
+                "retryable": True,
+                "error_text": "Не удалось скачать видео",
+            }
+        probe_ok, probe_error = await self._validate_mp4_file_for_pipeline(
+            Path(path),
+            delivery_id=int(delivery_id),
+            job_id=job_id,
+            stage="download",
+        )
+        if not probe_ok:
+            return {
+                "ok": False,
+                "fallback_to_legacy": False,
+                "retryable": True,
+                "error_text": probe_error or "битый MP4",
+            }
         downloaded_size = Path(path).stat().st_size if Path(path).is_file() else 0
         video_info = await self.video_processor.get_video_info(str(path), use_cache=False)
         logger.info(
@@ -2765,10 +2783,25 @@ class SenderService:
             return {"ok": False, "fallback_to_legacy": True, "retryable": False}
         if not source_video_path:
             logger.warning("VIDEO STAGE FAILED | отсутствует video_file_path для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False, "error_text": "Отсутствует путь к исходному файлу"}
         if not Path(source_video_path).is_file():
             logger.warning("VIDEO STAGE FAILED | исходный файл не найден для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False, "error_text": "Исходный файл не найден"}
+        source_path = Path(source_video_path)
+        probe_ok, probe_error = await self._validate_mp4_file_for_pipeline(
+            source_path,
+            delivery_id=int(delivery_id),
+            job_id=job_id,
+            stage="process",
+        )
+        if not probe_ok:
+            return {
+                "ok": False,
+                "fallback_to_legacy": False,
+                "retryable": False,
+                "restart_download": True,
+                "error_text": probe_error or "битый MP4",
+            }
 
         rule = await run_db(self.db.get_rule, int(rule_id))
         if not rule:
@@ -2792,6 +2825,82 @@ class SenderService:
             processed_result.get("processed_video_path"),
         )
         return {"ok": True, "fallback_to_legacy": False, **processed_result}
+
+    async def _validate_mp4_file_for_pipeline(
+        self,
+        file_path: Path,
+        *,
+        delivery_id: int,
+        job_id: int | None,
+        stage: str,
+    ) -> tuple[bool, str | None]:
+        if not file_path.exists() or not file_path.is_file():
+            error_text = "Файл для проверки не найден"
+            logger.warning(
+                "VIDEO FILE VALIDATION FAILED | stage=%s | delivery_id=%s | job_id=%s | path=%s | size=%s | ffprobe_stderr=%s | action=retry",
+                stage,
+                delivery_id,
+                job_id,
+                str(file_path),
+                0,
+                error_text,
+            )
+            return False, error_text
+
+        file_size = file_path.stat().st_size
+        probe_cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(file_path),
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *probe_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        stderr_text = stderr.decode("utf-8", errors="ignore").strip()
+
+        if process.returncode == 0:
+            return True, None
+
+        compact_stderr = (stderr_text or "ffprobe завершился с ошибкой").replace("\n", " | ")
+        if "moov atom not found" in compact_stderr.lower():
+            reason = "битый MP4: moov atom not found"
+        else:
+            reason = f"битый MP4: {compact_stderr[:500]}"
+
+        removed = False
+        try:
+            file_path.unlink(missing_ok=True)
+            removed = True
+        except Exception as cleanup_exc:
+            logger.warning(
+                "VIDEO FILE VALIDATION CLEANUP FAILED | stage=%s | delivery_id=%s | job_id=%s | path=%s | error=%s",
+                stage,
+                delivery_id,
+                job_id,
+                str(file_path),
+                cleanup_exc,
+            )
+
+        action = "удалён_файл_и_retry" if removed else "retry_без_удаления"
+        logger.warning(
+            "VIDEO FILE VALIDATION FAILED | stage=%s | delivery_id=%s | job_id=%s | path=%s | size=%s | ffprobe_stderr=%s | action=%s",
+            stage,
+            delivery_id,
+            job_id,
+            str(file_path),
+            file_size,
+            compact_stderr,
+            action,
+        )
+        return False, reason
 
     async def execute_video_send_from_job(
         self,

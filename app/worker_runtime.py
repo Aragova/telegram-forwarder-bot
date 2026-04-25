@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .job_service import (
+    enqueue_video_download,
     enqueue_video_delivery_fallback,
     enqueue_video_process,
     enqueue_video_send,
@@ -322,6 +323,17 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 _log_video_stage_event("VIDEO PROCESS DONE | стадия обработки завершена", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
+            if result.get("restart_download"):
+                delivery_id = int(payload.get("delivery_id") or 0)
+                enqueue_video_download(repo, delivery_id)
+                await asyncio.to_thread(repo.complete_job, job_id)
+                cleanup_video_artifacts(payload, mode="restart_download")
+                _log_video_stage_event(
+                    "VIDEO PROCESS RETRY DOWNLOAD | обнаружен битый файл, создана повторная download-задача",
+                    delivery_id,
+                )
+                await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
+                return True
             ok = False
         elif job_type == "video_send":
             _log_video_stage_event("VIDEO SEND START | запуск стадии отправки", int(payload.get("delivery_id") or 0))
@@ -352,18 +364,22 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             return True
 
         retryable = bool(payload.get("retryable", True))
+        error_text = "Исполнитель вернул неуспешный результат"
         if isinstance(result, dict):
             retryable = bool(result.get("retryable", True))
+            result_error_text = str(result.get("error_text") or "").strip()
+            if result_error_text:
+                error_text = result_error_text
         attempts = int(job.get("attempts") or 0) + 1
         max_attempts = int(job.get("max_attempts") or 3)
         if (not retryable) or attempts >= max_attempts:
-            await asyncio.to_thread(repo.fail_job, job_id, "Исполнитель вернул неуспешный результат")
+            await asyncio.to_thread(repo.fail_job, job_id, error_text)
             if job_type.startswith("video_"):
                 cleanup_video_artifacts(payload, mode="final_failure")
             logger.warning("JOB FAILED | Задача #%s помечена как failed", job_id)
         else:
             delay = compute_retry_delay_seconds(queue, attempts, job_type, policy)
-            await asyncio.to_thread(repo.retry_job, job_id, "Исполнитель вернул неуспешный результат", delay)
+            await asyncio.to_thread(repo.retry_job, job_id, error_text, delay)
             logger.warning("VIDEO STAGE RETRY | задача переведена в retry | #%s | через %s сек", job_id, delay)
             await _runtime_metrics.record_retry(job_type=job_type)
         return True
