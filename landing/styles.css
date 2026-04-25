@@ -244,3 +244,63 @@ body {
   }
 }
 
+
+/* === FIX CTA BANNER CLEAN === */
+
+.cta {
+  position: relative !important;
+  min-height: 150px !important;
+  height: 150px !important;
+  padding: 0 56px 0 250px !important;
+  display: grid !important;
+  grid-template-columns: 1fr auto !important;
+  align-items: center !important;
+  gap: 44px !important;
+  overflow: hidden !important;
+}
+
+.cta-robot {
+  position: absolute !important;
+  left: 28px !important;
+  bottom: -18px !important;
+  width: 175px !important;
+  max-width: 175px !important;
+  height: auto !important;
+}
+
+.cta h2 {
+  margin: 0 0 8px !important;
+  font-size: 30px !important;
+  line-height: 1.1 !important;
+}
+
+.cta p {
+  margin: 0 !important;
+  font-size: 16px !important;
+  line-height: 1.35 !important;
+}
+
+.cta-btn {
+  width: 300px !important;
+  height: 64px !important;
+}
+
+@media (max-width: 900px) {
+  .cta {
+    height: auto !important;
+    min-height: 260px !important;
+    padding: 32px 24px 130px !important;
+    grid-template-columns: 1fr !important;
+    text-align: center !important;
+  }
+
+  .cta-robot {
+    width: 130px !important;
+    left: 20px !important;
+  }
+
+  .cta-btn {
+    width: 100% !important;
+  }
+}
+
