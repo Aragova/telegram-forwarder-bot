@@ -865,3 +865,51 @@
   }
 }
 
+
+/* === FINAL: hero scene as one image === */
+
+.hero-stage .orb,
+.hero-stage .hero-feature-card {
+  display: none !important;
+}
+
+.hero-stage {
+  height: 430px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  overflow: visible !important;
+}
+
+.hero-stage .hero-robot {
+  position: relative !important;
+  right: auto !important;
+  bottom: auto !important;
+  transform: none !important;
+  width: min(720px, 100%) !important;
+  max-width: 100% !important;
+  height: auto !important;
+  z-index: 2 !important;
+  filter: none !important;
+  mix-blend-mode: normal !important;
+}
+
+@media (max-width: 1050px) {
+  .hero-stage {
+    height: auto !important;
+    min-height: 360px !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .hero-stage {
+    height: 260px !important;
+    min-height: 260px !important;
+    margin-inline: 0 !important;
+  }
+
+  .hero-stage .hero-robot {
+    width: 600px !important;
+    max-width: 115% !important;
+  }
+}
