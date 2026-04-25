@@ -340,3 +340,41 @@ body {
   height: 44px !important;
 }
 
+
+/* === FINAL ONLY: pricing button alignment === */
+
+.plans {
+  align-items: stretch !important;
+}
+
+.plans .plan {
+  display: flex !important;
+  flex-direction: column !important;
+  min-height: 360px !important;
+}
+
+.plans .plan h3 {
+  min-height: 34px !important;
+}
+
+.plans .plan > p {
+  min-height: 56px !important;
+}
+
+.plans .plan .price {
+  min-height: 76px !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+}
+
+.plans .plan ul {
+  min-height: 112px !important;
+}
+
+.plans .plan .plan-btn {
+  margin-top: auto !important;
+  width: 100% !important;
+  height: 44px !important;
+}
+
