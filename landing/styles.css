@@ -909,3 +909,42 @@
   display: block;
   object-fit: contain;
 }
+
+/* === FINAL HERO SCENE SIZE TUNE === */
+
+.hero-stage {
+  height: 560px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.hero-scene {
+  width: 860px !important;
+  max-width: 118% !important;
+  height: auto !important;
+  object-fit: contain !important;
+}
+
+@media (max-width: 1050px) {
+  .hero-stage {
+    height: 500px !important;
+  }
+
+  .hero-scene {
+    width: 760px !important;
+    max-width: 110% !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .hero-stage {
+    height: 360px !important;
+  }
+
+  .hero-scene {
+    width: 560px !important;
+    max-width: 125% !important;
+  }
+}
+
