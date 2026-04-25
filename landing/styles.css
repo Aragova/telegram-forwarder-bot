@@ -948,3 +948,47 @@
   }
 }
 
+
+/* === FORCE HERO SCENE BIGGER === */
+
+.hero {
+  grid-template-columns: 0.82fr 1.18fr !important;
+  gap: 18px !important;
+}
+
+.hero-stage {
+  width: 820px !important;
+  max-width: none !important;
+  height: 560px !important;
+  margin-left: -40px !important;
+  overflow: visible !important;
+}
+
+.hero-scene,
+#heroRobot {
+  width: 820px !important;
+  max-width: none !important;
+  height: auto !important;
+  display: block !important;
+  object-fit: contain !important;
+}
+
+@media (max-width: 1050px) {
+  .hero {
+    grid-template-columns: 1fr !important;
+  }
+
+  .hero-stage {
+    width: 100% !important;
+    height: auto !important;
+    margin-left: 0 !important;
+  }
+
+  .hero-scene,
+  #heroRobot {
+    width: 100% !important;
+    max-width: 760px !important;
+    margin: 0 auto !important;
+  }
+}
+
