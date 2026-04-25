@@ -629,99 +629,53 @@
     text-align: center !important;
   }
 }
-/* === FIX: pricing cards equal layout RU/EN === */
-
-.pricing-card,
-.tariff-card,
-.plan-card {
-  display: flex !important;
-  flex-direction: column !important;
-  min-height: 360px !important;
-}
-
-.pricing-card h3,
-.tariff-card h3,
-.plan-card h3 {
-  min-height: 32px !important;
-}
-
-.pricing-card .plan-desc,
-.tariff-card .plan-desc,
-.plan-card .plan-desc,
-.pricing-card p,
-.tariff-card p,
-.plan-card p {
-  min-height: 52px !important;
-}
-
-.pricing-card .price,
-.tariff-card .price,
-.plan-card .price {
-  min-height: 60px !important;
-  display: flex !important;
-  align-items: flex-end !important;
-}
-
-.pricing-card ul,
-.tariff-card ul,
-.plan-card ul {
-  min-height: 96px !important;
-}
-
-.pricing-card .btn,
-.tariff-card .btn,
-.plan-card .btn,
-.pricing-card a,
-.tariff-card a,
-.plan-card a {
-  margin-top: auto !important;
-  width: 100% !important;
-}
 cd ~/project
+
 cat << 'EOF' >> landing/styles.css
 
-/* === REAL FIX: pricing cards equal vertical rhythm === */
+/* === TRUE FIX: real .plans / .plan card alignment === */
 
-.pricing-grid > *,
-.tariffs-grid > *,
-.plans-grid > * {
+.plans {
+  align-items: stretch !important;
+}
+
+.plans .plan {
   display: grid !important;
-  grid-template-rows:
-    34px
-    54px
-    72px
-    112px
-    auto !important;
-  align-items: start !important;
-  min-height: 360px !important;
+  grid-template-rows: 28px 48px 68px 104px 42px !important;
+  min-height: 330px !important;
 }
 
-.pricing-grid > * h3,
-.tariffs-grid > * h3,
-.plans-grid > * h3 {
+.plans .plan mark {
+  position: absolute !important;
+}
+
+.plans .plan h3 {
   margin: 0 !important;
-  min-height: 34px !important;
+  align-self: start !important;
 }
 
-.pricing-grid > * h3 + p,
-.tariffs-grid > * h3 + p,
-.plans-grid > * h3 + p {
+.plans .plan h3 + p {
   margin: 0 !important;
-  min-height: 54px !important;
+  min-height: 48px !important;
+  align-self: start !important;
 }
 
-.pricing-grid > * ul,
-.tariffs-grid > * ul,
-.plans-grid > * ul {
+.plans .plan .price {
   margin: 0 !important;
-  min-height: 112px !important;
+  min-height: 68px !important;
+  display: flex !important;
+  align-items: center !important;
 }
 
-.pricing-grid > * a:last-child,
-.tariffs-grid > * a:last-child,
-.plans-grid > * a:last-child {
+.plans .plan ul {
+  margin: 0 !important;
+  min-height: 104px !important;
+  align-self: start !important;
+}
+
+.plans .plan .plan-btn {
   align-self: end !important;
-  margin-top: auto !important;
+  height: 42px !important;
 }
 
 EOF
