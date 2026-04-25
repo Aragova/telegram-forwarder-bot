@@ -500,3 +500,109 @@ body {
   gap: 0 !important;
 }
 
+/* === FINAL CTA: logo outside, gradient panel inside === */
+
+.cta-wrap {
+  display: grid !important;
+  grid-template-columns: 220px 1fr !important;
+  align-items: center !important;
+  gap: 24px !important;
+  margin: 34px auto 46px !important;
+}
+
+.cta-logo-side {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: transparent !important;
+}
+
+.cta-logo-img {
+  width: 190px !important;
+  height: auto !important;
+  display: block !important;
+  object-fit: contain !important;
+}
+
+.cta-panel {
+  min-height: 132px !important;
+  padding: 0 46px !important;
+  border-radius: 24px !important;
+  background: linear-gradient(100deg, #5d7cff 0%, #6a5cff 46%, #7b45f5 100%) !important;
+  box-shadow: 0 18px 45px rgba(91, 76, 230, 0.22) !important;
+
+  display: grid !important;
+  grid-template-columns: 1fr auto !important;
+  align-items: center !important;
+  gap: 36px !important;
+  overflow: hidden !important;
+  position: relative !important;
+}
+
+.cta-panel::after {
+  content: "" !important;
+  position: absolute !important;
+  right: -70px !important;
+  top: -80px !important;
+  width: 300px !important;
+  height: 300px !important;
+  border-radius: 50% !important;
+  background: rgba(255, 255, 255, 0.12) !important;
+}
+
+.cta-text {
+  position: relative !important;
+  z-index: 2 !important;
+}
+
+.cta-text h2 {
+  margin: 0 0 6px !important;
+  color: #ffffff !important;
+  font-size: 30px !important;
+  line-height: 1.12 !important;
+  font-weight: 800 !important;
+  letter-spacing: -0.025em !important;
+}
+
+.cta-text p {
+  margin: 0 !important;
+  color: rgba(255, 255, 255, 0.92) !important;
+  font-size: 16px !important;
+  line-height: 1.4 !important;
+  font-weight: 600 !important;
+}
+
+.cta-panel .cta-btn {
+  position: relative !important;
+  z-index: 2 !important;
+  min-width: 250px !important;
+  height: 62px !important;
+  border-radius: 16px !important;
+  background: #ffffff !important;
+  color: #6b55f5 !important;
+  font-size: 19px !important;
+  font-weight: 800 !important;
+  box-shadow: 0 14px 28px rgba(25, 31, 65, 0.12) !important;
+}
+
+@media (max-width: 900px) {
+  .cta-wrap {
+    grid-template-columns: 1fr !important;
+    gap: 16px !important;
+  }
+
+  .cta-logo-img {
+    width: 170px !important;
+  }
+
+  .cta-panel {
+    grid-template-columns: 1fr !important;
+    padding: 28px 24px !important;
+    text-align: center !important;
+  }
+
+  .cta-panel .cta-btn {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+}
