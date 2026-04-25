@@ -165,3 +165,82 @@ body {
   }
 }
 
+
+/* === EMERGENCY FIX: payment logos and CTA === */
+
+.payment-grid .pay-logo {
+  width: 30px !important;
+  height: 30px !important;
+  min-width: 30px !important;
+  max-width: 30px !important;
+  max-height: 30px !important;
+  flex: 0 0 30px !important;
+  display: block !important;
+  object-fit: contain !important;
+}
+
+.payment-grid span {
+  height: 54px !important;
+  overflow: hidden !important;
+}
+
+.payment-grid span b {
+  font-size: 15px !important;
+  line-height: 1.18 !important;
+  font-weight: 700 !important;
+}
+
+.cta {
+  position: relative !important;
+  min-height: 150px !important;
+  height: 150px !important;
+  padding: 0 56px 0 260px !important;
+  display: grid !important;
+  grid-template-columns: 1fr auto !important;
+  align-items: center !important;
+  gap: 48px !important;
+  overflow: hidden !important;
+}
+
+.cta-robot {
+  position: absolute !important;
+  left: 32px !important;
+  bottom: -18px !important;
+  width: 180px !important;
+  max-width: 180px !important;
+  height: auto !important;
+  z-index: 2 !important;
+}
+
+.cta h2 {
+  font-size: 31px !important;
+  line-height: 1.12 !important;
+  margin: 0 0 8px !important;
+}
+
+.cta p {
+  margin: 0 !important;
+  font-size: 17px !important;
+  line-height: 1.35 !important;
+}
+
+.cta-btn {
+  min-width: 285px !important;
+  height: 68px !important;
+}
+
+@media (max-width: 900px) {
+  .cta {
+    height: auto !important;
+    min-height: 280px !important;
+    padding: 32px 24px 130px !important;
+    grid-template-columns: 1fr !important;
+    text-align: center !important;
+  }
+
+  .cta-robot {
+    width: 130px !important;
+    left: 20px !important;
+  }
+}
+
