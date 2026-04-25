@@ -948,47 +948,28 @@
   }
 }
 
-
-/* === FORCE HERO SCENE BIGGER === */
-
-.hero {
-  grid-template-columns: 0.82fr 1.18fr !important;
-  gap: 18px !important;
-}
+/* === HERO SCENE CLEAN SIZE === */
 
 .hero-stage {
-  width: 820px !important;
-  max-width: none !important;
-  height: 560px !important;
-  margin-left: -40px !important;
+  height: auto !important;
+  min-height: 500px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
   overflow: visible !important;
 }
 
 .hero-scene,
-#heroRobot {
-  width: 820px !important;
-  max-width: none !important;
+#heroRobot.hero-scene {
+  width: 100% !important;
+  max-width: 760px !important;
   height: auto !important;
-  display: block !important;
   object-fit: contain !important;
+  display: block !important;
 }
 
-@media (max-width: 1050px) {
-  .hero {
-    grid-template-columns: 1fr !important;
-  }
-
-  .hero-stage {
-    width: 100% !important;
-    height: auto !important;
-    margin-left: 0 !important;
-  }
-
-  .hero-scene,
-  #heroRobot {
-    width: 100% !important;
-    max-width: 760px !important;
-    margin: 0 auto !important;
-  }
+.hero-stage .orb,
+.hero-stage .hero-feature-card {
+  display: none !important;
 }
 
