@@ -32,13 +32,31 @@ const toggle = document.getElementById('langToggle');
 
 function setLanguage(lang){
   const pack = dict[lang] || dict.ru;
+
   document.documentElement.lang = lang;
   currentLang.textContent = lang.toUpperCase();
-  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = pack[el.dataset.i18n] || el.textContent; });
-  document.querySelectorAll('[data-i18n-html]').forEach(el => { el.innerHTML = pack[el.dataset.i18nHtml] || el.innerHTML; });
-  const src = lang === 'en' ? 'assets/hero-robot-en.png' : 'assets/hero-robot-ru.png';
-  robot.src = src;
-  ctaRobot.src = src;
+
+  document.querySelectorAll('[data-i18n], [data-i18n-html]').forEach(el => {
+    const key = el.dataset.i18n || el.dataset.i18nHtml;
+    const value = pack[key];
+
+    if (!value) return;
+
+    // 🔥 если есть HTML — вставляем как HTML
+    if (value.includes('<')) {
+      el.innerHTML = value;
+    } else {
+      el.textContent = value;
+    }
+  });
+
+  const src = lang === 'en'
+    ? 'assets/hero-robot-en.png'
+    : 'assets/hero-robot-ru.png';
+
+  if (robot) robot.src = src;
+  if (ctaRobot) ctaRobot.src = src;
+
   localStorage.setItem('vimi_lang', lang);
 }
 
