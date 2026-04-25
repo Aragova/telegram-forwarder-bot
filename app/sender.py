@@ -4893,6 +4893,16 @@ class SenderService:
         last_emit_at = 0.0
         last_emit_percent = -1
 
+        cache_dir = settings.media_cache_path
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        message_id = source_message_id or getattr(message, "id", None) or "unknown"
+        delivery_part = delivery_id if delivery_id is not None else "manual"
+        ext = getattr(getattr(message, "file", None), "ext", None) or ".mp4"
+        if not str(ext).startswith("."):
+            ext = f".{ext}"
+        download_target_path = cache_dir / f"video_src_{delivery_part}_{message_id}_{int(time.time() * 1000)}{ext}"
+
         def progress_callback(current: int, total: int):
             nonlocal last_emit_at, last_emit_percent
 
@@ -4958,7 +4968,7 @@ class SenderService:
 
             file_path = await self.telethon.download_media(
                 message,
-                file=str(settings.media_cache_path),
+                file=str(download_target_path),
                 progress_callback=progress_callback,
             )
 
