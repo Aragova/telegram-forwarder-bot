@@ -973,3 +973,94 @@
   display: none !important;
 }
 
+
+/* === HERO REBUILD AROUND SCENE IMAGE === */
+
+body {
+  background: #fbfcff !important;
+}
+
+.hero {
+  background: #fbfcff !important;
+  display: grid !important;
+  grid-template-columns: minmax(420px, 0.9fr) minmax(680px, 1.1fr) !important;
+  align-items: center !important;
+  gap: 36px !important;
+  min-height: 620px !important;
+  padding-top: 54px !important;
+  padding-bottom: 54px !important;
+}
+
+.hero-copy {
+  position: relative !important;
+  z-index: 3 !important;
+}
+
+.hero-stage {
+  position: relative !important;
+  width: 100% !important;
+  min-height: 520px !important;
+  height: auto !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  overflow: visible !important;
+  background: #fbfcff !important;
+}
+
+.hero-stage .orb,
+.hero-stage .hero-feature-card {
+  display: none !important;
+}
+
+.hero-scene,
+#heroRobot.hero-scene {
+  position: relative !important;
+  inset: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  transform: none !important;
+  display: block !important;
+  width: auto !important;
+  max-width: 100% !important;
+  height: auto !important;
+  max-height: 560px !important;
+  object-fit: contain !important;
+  filter: none !important;
+  mix-blend-mode: normal !important;
+}
+
+@media (max-width: 1050px) {
+  .hero {
+    grid-template-columns: 1fr !important;
+    text-align: center !important;
+    min-height: auto !important;
+  }
+
+  .hero-buttons,
+  .trust-row {
+    justify-content: center !important;
+  }
+
+  .hero-stage {
+    min-height: 430px !important;
+  }
+
+  .hero-scene,
+  #heroRobot.hero-scene {
+    max-height: 460px !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .hero-stage {
+    min-height: 300px !important;
+  }
+
+  .hero-scene,
+  #heroRobot.hero-scene {
+    max-height: 320px !important;
+    max-width: 110% !important;
+  }
+}
+
