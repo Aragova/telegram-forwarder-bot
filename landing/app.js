@@ -9,7 +9,7 @@ pay_tribute: "Tribute",
 pay_lava: "Lava.top",
 pay_manual: "Ручная оплата",
 payments_title: "Способы оплаты",
-payments_note: "Некоторые способы оплаты могут работать автоматически, а некоторые — через ручное подтверждение администратором.",
+payments_note: "Некоторые способы оплаты работают автоматически, некоторые — через ручное подтверждение.",
   },
   en: {
     nav_features:'Features',nav_pricing:'Pricing',nav_instructions:'Instructions',nav_faq:'FAQ',nav_support:'Support',open_bot:'Open bot',view_pricing:'View pricing',eyebrow:'Your Telegram assistant',hero_title:'Telegram channel<br>automation<br><em>in one bot</em>',hero_lead:'Posts, videos, plans, invoices and payments — all inside Telegram. Save time and grow your channels.',trust_safe:'Reliable and secure',trust_support:'24/7 support',trust_telegram:'Works in Telegram',hero_card_1_title:'Autoposting',hero_card_1_text:'Clean scheduled publishing.',hero_card_2_title:'Video',hero_card_2_text:'Video processing and queue.',hero_card_3_title:'Analytics',hero_card_3_text:'Stats and reports in real time.',hero_card_4_title:'Monetization',hero_card_4_text:'Plans, invoices and payment intake.',we_support:'We support',and_more:'and more',features_title:'What <em>ViMi</em> can do',features_sub:'All tools for efficient work with your channels in one bot',feat_1_t:'Autoposting',feat_1_d:'Publish posts from sources on schedule without manual work.',feat_2_t:'Video',feat_2_d:'Process videos, add covers, captions and queue them.',feat_3_t:'Plans',feat_3_d:'Flexible plans with limits for you and your channels.',feat_4_t:'Invoices and payments',feat_4_d:'Create invoices and accept payments in a convenient way.',feat_5_t:'Statistics',feat_5_d:'Track activity, usage and performance.',feat_6_t:'Automation',feat_6_d:'Less routine — more time for growth.',how_title:'How it works',step_1_t:'Open the bot',step_1_d:'Launch ViMi in Telegram in seconds.',step_2_t:'Add sources and channels',step_2_d:'Choose where to get content and where to publish it.',step_3_t:'Create a publishing rule',step_3_d:'Set schedule and publishing parameters.',step_4_t:'Connect a plan or payment',step_4_d:'Choose a plan and pay conveniently.',step_5_t:'The bot handles routine for you',step_5_d:'ViMi works 24/7 while you save time and grow faster.',pricing_title:'Pricing',pricing_sub:'Choose the plan that fits you',free_sub:'For testing and getting started',basic_sub:'For stable work',pro_sub:'For large channels and teams',month:'month',free_1:'3 rules',free_2:'5 videos / day',free_3:'100 tasks / day',basic_1:'15 rules',basic_2:'30 videos / day',basic_3:'1000 tasks / day',pro_1:'50 rules',pro_2:'100 videos / day',pro_3:'5000 tasks / day',choose_bot:'Choose in bot',popular:'Popular',payment_title:'Payment methods',bank_cards:'Bank cards',crypto:'Cryptocurrency',manual_payment:'Manual confirmation',payment_note:'Some payment methods can work automatically, while others require manual confirmation by an administrator.',cta_title:'Ready to automate your channels?',cta_text:'Open ViMi in Telegram and start right now.',footer_desc:'Your Telegram assistant for automation, growth and channel monetization.',footer_product:'Product',footer_company:'Company',footer_docs:'Documents',footer_contact:'Contact us',about:'About us',contacts:'Contacts',terms:'Terms of service',privacy:'Privacy policy',refund:'Refund policy',pay_telegram: "Telegram Stars",
@@ -21,10 +21,14 @@ pay_tribute: "Tribute",
 pay_lava: "Lava.top",
 pay_manual: "Manual payment",
 payments_title: "Payment methods",
-payments_note: "Some payment methods work automatically, while others require manual confirmation.",
+payments_note: "Some payment methods work automatically, while others may require manual confirmation.",
   }
 };
 
+const botUrl = 'https://t.me/';
+const faqItems = [
+  { q: 'FAQ', a: 'ViMi работает в Telegram.' }
+];
 const robot = document.getElementById('heroRobot');
 const ctaRobot = document.getElementById('ctaRobot');
 const currentLang = document.getElementById('currentLang');
@@ -60,6 +64,11 @@ function setLanguage(lang){
 
   if (robot) robot.src = heroSrc;
   if (ctaRobot) ctaRobot.src = ctaSrc;
+
+  const openBotLinks = [document.getElementById('header-open-bot'), document.getElementById('cta-open-bot')];
+  openBotLinks.forEach(link => {
+    if (link) link.href = botUrl;
+  });
 
   localStorage.setItem('vimi_lang', lang);
 }
