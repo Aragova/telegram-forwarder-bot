@@ -35,6 +35,7 @@ function setLanguage(lang){
   const pack = dict[lang] || dict.ru;
 
   document.documentElement.lang = lang;
+  document.documentElement.dataset.lang = lang;
   currentLang.textContent = lang.toUpperCase();
 
   document.querySelectorAll('[data-i18n], [data-i18n-html]').forEach(el => {

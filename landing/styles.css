@@ -746,7 +746,7 @@ html[data-lang="en"] .i18n-en { display: inline; }
   box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
 }
 
-.message {
+.how-section .message {
   padding: 15px 16px;
   border-radius: 18px;
   background: rgba(255,255,255,0.08);
@@ -754,7 +754,7 @@ html[data-lang="en"] .i18n-en { display: inline; }
   margin-bottom: 12px;
 }
 
-.message strong {
+.how-section .message strong {
   display: block;
   margin-bottom: 6px;
 }
