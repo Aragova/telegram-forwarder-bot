@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ViMi — автоматизация Telegram-каналов</title>
   <meta name="description" content="ViMi — Telegram-помощник для автопостинга, видео, тарифов, счетов, оплаты и аналитики." />
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -30,7 +31,7 @@
         <span id="currentLang">RU</span>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5"/></svg>
       </button>
-      <a class="btn btn-primary btn-top" href="https://t.me/" target="_blank" rel="noopener">
+      <a id="header-open-bot" class="btn btn-primary btn-top" href="https://t.me/" target="_blank" rel="noopener">
         <span class="icon-plane"></span>
         <span data-i18n="open_bot">Открыть бота</span>
       </a>
@@ -45,7 +46,7 @@
         <p class="hero-lead" data-i18n="hero_lead">Публикации, видео, тарифы, счета и оплата — всё внутри Telegram. Экономьте время и развивайте ваши каналы.</p>
 
         <div class="hero-buttons">
-          <a class="btn btn-primary btn-xl" href="https://t.me/" target="_blank" rel="noopener"><span class="icon-plane"></span><span data-i18n="open_bot">Открыть бота</span></a>
+          <a id="cta-open-bot" class="btn btn-primary btn-xl" href="https://t.me/" target="_blank" rel="noopener"><span class="icon-plane"></span><span data-i18n="open_bot">Открыть бота</span></a>
           <a class="btn btn-secondary btn-xl" href="#pricing" data-i18n="view_pricing">Смотреть тарифы</a>
         </div>
 
@@ -144,6 +145,13 @@
 </aside>
     </section>
 
+    <section id="faq" class="section-shell block-section">
+      <div class="section-head compact">
+        <h2>FAQ</h2>
+      </div>
+      <div id="faqList"></div>
+    </section>
+
     <section class="section-shell cta">
       <img src="assets/hero-robot-ru.png" alt="" class="cta-robot" id="ctaRobot" />
       <div><h2 data-i18n="cta_title">Готовы автоматизировать ваши каналы?</h2><p data-i18n="cta_text">Откройте ViMi в Telegram и начните прямо сейчас.</p></div>
@@ -155,9 +163,12 @@
     <div class="footer-brand"><a class="brand" href="#top"><img src="assets/logo-mark.svg" alt=""><span>ViMi</span></a><p data-i18n="footer_desc">Ваш помощник в Telegram для автоматизации, роста и монетизации каналов.</p></div>
     <div><h4 data-i18n="footer_product">Продукт</h4><a href="#features" data-i18n="nav_features">Возможности</a><a href="#pricing" data-i18n="nav_pricing">Тарифы</a><a href="#how" data-i18n="nav_instructions">Инструкции</a></div>
     <div><h4 data-i18n="footer_company">Компания</h4><a href="#" data-i18n="about">О нас</a><a href="#support" data-i18n="nav_support">Поддержка</a><a href="#" data-i18n="contacts">Контакты</a></div>
-    <div><h4 data-i18n="footer_docs">Документы</h4><a href="#" data-i18n="terms">Пользовательское соглашение</a><a href="#" data-i18n="privacy">Политика конфиденциальности</a><a href="#" data-i18n="refund">Возврат средств</a></div>
+    <div><h4 data-i18n="footer_docs">Документы</h4><a id="link-terms" href="ru/terms.html" data-i18n="terms">Пользовательское соглашение</a><a id="link-privacy" href="ru/privacy.html" data-i18n="privacy">Политика конфиденциальности</a><a id="link-refund" href="ru/refund.html" data-i18n="refund">Возврат средств</a><a id="link-contacts" href="ru/contacts.html" data-i18n="contacts">Контакты</a><a id="link-help" href="ru/instructions.html" data-i18n="nav_instructions">Инструкции</a></div>
     <div><h4 data-i18n="footer_contact">Связаться с нами</h4><a href="https://t.me/" target="_blank">Поддержка в Telegram</a><a href="mailto:support@vimi.bot">support@vimi.bot</a></div>
   </footer>
+
+  <span data-lang="ru" hidden>ru</span>
+  <span data-lang="en" hidden>en</span>
 
   <script src="app.js"></script>
 </body>
