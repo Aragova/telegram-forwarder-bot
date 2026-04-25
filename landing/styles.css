@@ -650,112 +650,136 @@ body {
     display: none !important;
   }
 }
-/* HOW IT WORKS — compact ViMi style */
-
-.i18n-en { display: none; }
-html[data-lang="en"] .i18n-ru { display: none; }
-html[data-lang="en"] .i18n-en { display: inline; }
+/* HOW IT WORKS — PREMIUM */
 
 .how-section {
-  padding: 64px 20px;
-  background: #f7fbff;
+  padding: 80px 20px;
+  background: linear-gradient(180deg, #ffffff 0%, #f5f9ff 100%);
 }
 
 .how-head {
-  max-width: 1120px;
-  margin: 0 auto 34px;
+  max-width: 1100px;
+  margin: 0 auto 50px;
   display: grid;
-  grid-template-columns: 1.1fr 0.9fr;
-  gap: 32px;
+  grid-template-columns: 1.2fr 0.8fr;
+  gap: 40px;
   align-items: end;
 }
 
 .how-head h1 {
-  font-size: clamp(34px, 4vw, 54px);
+  font-size: clamp(40px, 5vw, 64px);
   line-height: 1;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.05em;
   margin: 0;
 }
 
 .how-head .lead {
-  margin: 0;
-  font-size: 17px;
-  line-height: 1.55;
+  font-size: 18px;
+  line-height: 1.6;
   color: #5b6b82;
 }
 
 .how-grid {
-  max-width: 1120px;
+  max-width: 1100px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: 1.05fr 0.95fr;
-  gap: 24px;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 28px;
 }
 
 .steps {
   display: grid;
-  gap: 12px;
+  gap: 14px;
 }
 
 .step-card {
   display: grid;
-  grid-template-columns: 48px 1fr;
-  gap: 16px;
+  grid-template-columns: 56px 1fr;
+  gap: 18px;
   align-items: center;
-  min-height: 82px;
-  padding: 16px 18px;
-  border-radius: 22px;
-  background: #ffffff;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  box-shadow: 0 12px 34px rgba(24, 58, 110, 0.07);
+  padding: 20px;
+  border-radius: 24px;
+  background: rgba(255,255,255,0.9);
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  box-shadow: 0 20px 50px rgba(24, 58, 110, 0.08);
+  transition: all 0.2s ease;
+}
+
+.step-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 30px 60px rgba(24, 58, 110, 0.12);
+}
+
+.step-num {
+  width: 56px;
+  height: 56px;
+  border-radius: 18px;
+  display: grid;
+  place-items: center;
+  font-weight: 900;
+  color: #fff;
+  background: linear-gradient(135deg, #4da3ff, #2b7ed6);
+  box-shadow: 0 12px 26px rgba(77,163,255,0.3);
 }
 
 .step-card h3 {
-  margin: 0 0 5px;
-  font-size: 18px;
-  line-height: 1.2;
+  margin: 0 0 6px;
+  font-size: 19px;
 }
 
 .step-card p {
   margin: 0;
-  font-size: 14.5px;
-  line-height: 1.45;
+  font-size: 15px;
   color: #5b6b82;
 }
 
-.step-num {
-  width: 48px;
-  height: 48px;
-  border-radius: 16px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(135deg, #4da3ff, #2b7ed6);
-  color: #ffffff;
-  font-weight: 900;
-  box-shadow: 0 10px 24px rgba(77, 163, 255, 0.25);
-}
-
 .demo-card {
-  min-height: 100%;
-  padding: 24px;
-  border-radius: 28px;
+  padding: 28px;
+  border-radius: 30px;
   background:
-    radial-gradient(circle at 85% 10%, rgba(77, 163, 255, 0.36), transparent 34%),
+    radial-gradient(circle at 85% 10%, rgba(77,163,255,0.35), transparent 35%),
     linear-gradient(180deg, #111a2b, #0b1220);
-  color: #ffffff;
-  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+  color: #fff;
+  box-shadow: 0 30px 70px rgba(0,0,0,0.2);
 }
 
-.how-section .message {
-  padding: 15px 16px;
-  border-radius: 18px;
+.demo-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.demo-logo {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #4da3ff, #8cc7ff);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 900;
+  color: #0b1220;
+}
+
+.demo-message {
   background: rgba(255,255,255,0.08);
-  border: 1px solid rgba(255,255,255,0.1);
+  padding: 14px;
+  border-radius: 16px;
   margin-bottom: 12px;
 }
 
-.how-section .message strong {
-  display: block;
+.demo-status {
+  margin-top: 20px;
+  background: #fff;
+  color: #111;
+  padding: 16px;
+  border-radius: 16px;
+}
+
+.demo-status div {
+  display: flex;
+  justify-content: space-between;
   margin-bottom: 6px;
 }
 
@@ -763,9 +787,5 @@ html[data-lang="en"] .i18n-en { display: inline; }
   .how-head,
   .how-grid {
     grid-template-columns: 1fr;
-  }
-
-  .how-section {
-    padding: 52px 16px;
   }
 }
