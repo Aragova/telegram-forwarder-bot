@@ -192,12 +192,14 @@ def _build_video_stage_payload(
     return next_payload
 
 
-def enqueue_video_download(repo, delivery_id: int) -> int | None:
+def enqueue_video_download(repo, delivery_id: int, extra_payload: dict[str, Any] | None = None) -> int | None:
     payload = _delivery_payload(repo, delivery_id)
     if not payload:
         return None
 
     payload = _build_video_stage_payload(payload, "download")
+    if isinstance(extra_payload, dict):
+        payload.update(extra_payload)
     dedup_key = build_dedup_key_for_video_stage(JOB_TYPE_VIDEO_DOWNLOAD, delivery_id)
     job_id = repo.create_job(
         job_type=JOB_TYPE_VIDEO_DOWNLOAD,
