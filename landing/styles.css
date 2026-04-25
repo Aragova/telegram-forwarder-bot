@@ -650,3 +650,40 @@ body {
     display: none !important;
   }
 }
+/* === FINAL: how it works premium icons === */
+
+.step-card {
+  overflow: visible !important;
+}
+
+.step-logo {
+  position: absolute !important;
+  left: 50% !important;
+  top: 28px !important;
+  transform: translateX(-50%) !important;
+  width: 92px !important;
+  height: 72px !important;
+  object-fit: contain !important;
+  display: block !important;
+}
+
+.step-card h3 {
+  margin-top: 108px !important;
+}
+
+.step-card:not(:last-child)::after {
+  content: "" !important;
+  position: absolute !important;
+  right: -28px !important;
+  top: 80px !important;
+  width: 36px !important;
+  height: 12px !important;
+  background:
+    radial-gradient(circle, #9a8cff 2px, transparent 3px) 0 50% / 10px 10px repeat-x !important;
+}
+
+@media (max-width: 1050px) {
+  .step-card:not(:last-child)::after {
+    display: none !important;
+  }
+}
