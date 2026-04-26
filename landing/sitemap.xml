@@ -29,4 +29,15 @@
     <priority>0.5</priority>
   </url>
 
+  <url>
+    <loc>https://usevimi.ru/autoposting.html</loc>
+  </url>
+
+  <url>
+    <loc>https://usevimi.ru/telegram-bot.html</loc>
+  </url>
+
+  <url>
+    <loc>https://usevimi.ru/video-repost.html</loc>
+  </url>
 </urlset>
