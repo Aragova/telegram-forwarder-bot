@@ -1582,3 +1582,44 @@ body.legal-simple-page .legal-simple-footer a {
     line-height: 1.75 !important;
   }
 }
+/* === LEGAL TOC (Stripe-style navigation) === */
+
+.legal-toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 auto 24px;
+  justify-content: center;
+}
+
+.legal-toc a {
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.7);
+  border: 1px solid rgba(120,140,190,0.2);
+  font-size: 14px;
+  font-weight: 800;
+  color: #33405f;
+  text-decoration: none;
+  transition: .2s;
+}
+
+.legal-toc a:hover {
+  color: #5366ff;
+  transform: translateY(-2px);
+  box-shadow: 0 12px 30px rgba(83,102,255,0.18);
+}
+html {
+  scroll-behavior: smooth;
+}
+.legal-simple-card h2:hover {
+  color: #5366ff;
+  transition: .2s;
+}
+.legal-simple-card p {
+  max-width: 720px;
+}
+.legal-simple-card:hover {
+  transform: translateY(-4px);
+  transition: .3s;
+}
