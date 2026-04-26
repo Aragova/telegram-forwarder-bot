@@ -1,28 +1,406 @@
 <!doctype html>
 <html lang="ru">
 <head>
-<meta charset="utf-8">
-<title>Репост видео Telegram | ViMi</title>
-<meta name="description" content="Автоматический репост видео в Telegram с обработкой и публикацией.">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <title>Репост видео Telegram — бот для обработки и публикации | ViMi</title>
+  <meta name="description" content="ViMi — бот для автоматического репоста видео в Telegram: обработка роликов, обрезка, заставки, подписи, очередь и публикация по расписанию." />
+  <meta name="robots" content="index, follow" />
+  <link rel="canonical" href="https://usevimi.ru/video-repost.html" />
+
+  <meta property="og:title" content="Репост видео Telegram — ViMi" />
+  <meta property="og:description" content="Автоматизируйте обработку и публикацию видео в Telegram: обрезка, заставки, подписи и очередь." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://usevimi.ru/video-repost.html" />
+  <meta property="og:image" content="https://usevimi.ru/assets/preview.png" />
+
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+
+  <style>
+    .seo-hero {
+      padding: 78px 0 54px;
+      text-align: center;
+      background:
+        radial-gradient(circle at 18% 0%, rgba(83,102,255,.14), transparent 34%),
+        radial-gradient(circle at 84% 10%, rgba(57,223,247,.14), transparent 30%),
+        linear-gradient(180deg, #fbfcff 0%, #f5f8ff 100%);
+    }
+
+    .seo-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      padding: 9px 15px;
+      border-radius: 999px;
+      background: rgba(83,102,255,.09);
+      color: #5366ff;
+      font-weight: 900;
+      font-size: 14px;
+      margin-bottom: 22px;
+    }
+
+    .seo-badge::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: linear-gradient(135deg,#39dff7,#7453f6);
+      box-shadow: 0 0 0 6px rgba(83,102,255,.08);
+    }
+
+    .seo-hero h1 {
+      max-width: 980px;
+      margin: 0 auto;
+      font-size: clamp(42px, 6vw, 76px);
+      line-height: .98;
+      letter-spacing: -.065em;
+      color: #111936;
+    }
+
+    .seo-hero h1 em {
+      color: #7155f6;
+      font-style: normal;
+    }
+
+    .seo-hero p {
+      max-width: 760px;
+      margin: 24px auto 0;
+      color: #5d6b91;
+      font-size: 20px;
+      line-height: 1.65;
+      font-weight: 600;
+    }
+
+    .seo-actions {
+      margin-top: 32px;
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .seo-section {
+      padding: 48px 0;
+    }
+
+    .seo-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 22px;
+    }
+
+    .seo-card {
+      min-height: 210px;
+      padding: 28px;
+      border-radius: 26px;
+      background: rgba(255,255,255,.88);
+      border: 1px solid rgba(120,140,190,.18);
+      box-shadow: 0 20px 60px rgba(78,95,150,.10);
+    }
+
+    .seo-card .num {
+      width: 46px;
+      height: 46px;
+      border-radius: 16px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-weight: 900;
+      background: linear-gradient(135deg,#5366ff,#7453f6);
+      margin-bottom: 18px;
+    }
+
+    .seo-card h2,
+    .seo-card h3 {
+      margin: 0 0 12px;
+      font-size: 22px;
+      line-height: 1.15;
+      letter-spacing: -.03em;
+      color: #111936;
+    }
+
+    .seo-card p {
+      margin: 0;
+      color: #5f6e90;
+      line-height: 1.65;
+      font-weight: 600;
+    }
+
+    .seo-wide {
+      display: grid;
+      grid-template-columns: .9fr 1.1fr;
+      gap: 30px;
+      align-items: center;
+      padding: 42px;
+      border-radius: 34px;
+      background:
+        radial-gradient(circle at 92% 8%, rgba(57,223,247,.18), transparent 34%),
+        linear-gradient(135deg, rgba(255,255,255,.96), rgba(246,249,255,.92));
+      border: 1px solid #e7ebf5;
+      box-shadow: 0 30px 90px rgba(35,44,88,.10);
+    }
+
+    .seo-wide h2 {
+      margin: 0 0 16px;
+      font-size: clamp(30px, 4vw, 48px);
+      line-height: 1.04;
+      letter-spacing: -.055em;
+      color: #111936;
+    }
+
+    .seo-wide p {
+      margin: 0;
+      color: #5d6b91;
+      font-size: 18px;
+      line-height: 1.7;
+      font-weight: 600;
+    }
+
+    .seo-list {
+      display: grid;
+      gap: 14px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .seo-list li {
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: #fff;
+      border: 1px solid rgba(120,140,190,.16);
+      color: #263454;
+      font-weight: 800;
+      box-shadow: 0 12px 32px rgba(78,95,150,.07);
+    }
+
+    .seo-list li::before {
+      content: "✓";
+      color: #5366ff;
+      margin-right: 10px;
+      font-weight: 900;
+    }
+
+    .seo-cta {
+      margin: 40px auto 56px;
+      padding: 42px;
+      border-radius: 34px;
+      color: #fff;
+      background:
+        radial-gradient(circle at 88% 0%, rgba(255,255,255,.18), transparent 30%),
+        linear-gradient(100deg, #5d7cff 0%, #6a5cff 46%, #7b45f5 100%);
+      box-shadow: 0 24px 70px rgba(91,76,230,.25);
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 28px;
+      align-items: center;
+    }
+
+    .seo-cta h2 {
+      margin: 0 0 8px;
+      font-size: 34px;
+      line-height: 1.1;
+      letter-spacing: -.035em;
+    }
+
+    .seo-cta p {
+      margin: 0;
+      color: rgba(255,255,255,.9);
+      font-weight: 650;
+      font-size: 17px;
+    }
+
+    .seo-cta .btn {
+      min-width: 240px;
+      height: 62px;
+      background: #fff;
+      color: #6b55f5;
+      border-radius: 16px;
+      font-size: 18px;
+      box-shadow: 0 14px 28px rgba(25,31,65,.12);
+    }
+
+    @media (max-width: 900px) {
+      .seo-grid,
+      .seo-wide,
+      .seo-cta {
+        grid-template-columns: 1fr;
+      }
+
+      .seo-hero {
+        padding-top: 46px;
+      }
+
+      .seo-wide,
+      .seo-cta {
+        padding: 28px 22px;
+      }
+
+      .seo-cta {
+        text-align: center;
+      }
+
+      .seo-cta .btn {
+        width: 100%;
+      }
+    }
+  </style>
 </head>
 
-<body style="font-family: Arial; max-width: 800px; margin: 40px auto;">
+<body>
+  <header class="topbar">
+    <a class="brand" href="index.html#top" aria-label="ViMi">
+      <img src="assets/vimi-logo.png" alt="ViMi" class="brand-logo-img">
+    </a>
 
-<h1>Репост видео в Telegram</h1>
+    <nav class="nav" aria-label="Главное меню">
+      <a href="index.html#features">Возможности</a>
+      <a href="index.html#how">Инструкции</a>
+      <a href="index.html#pricing">Тарифы</a>
+    </nav>
 
-<p>
-ViMi умеет автоматически обрабатывать и публиковать видео.
-</p>
+    <div class="header-actions">
+      <a class="btn btn-primary btn-top" href="https://t.me/topposter69_bot" target="_blank" rel="noopener">
+        <span class="icon-plane"></span>
+        <span>Открыть бота</span>
+      </a>
+    </div>
+  </header>
 
-<h2>Функции</h2>
-<ul>
-<li>Обработка видео</li>
-<li>Обрезка</li>
-<li>Добавление интро</li>
-</ul>
+  <main>
+    <section class="seo-hero">
+      <div class="section-shell">
+        <div class="seo-badge">Репост видео Telegram</div>
 
-<a href="https://t.me/topposter69_bot">Открыть бота</a>
+        <h1>
+          Видео для Telegram-каналов <em>на автомате</em>
+        </h1>
 
+        <p>
+          ViMi помогает автоматизировать обработку и публикацию видео:
+          бот может вести очередь, готовить ролики, добавлять заставки, сохранять подписи и публиковать видео по правилам.
+        </p>
+
+        <div class="seo-actions">
+          <a class="btn btn-primary btn-xl" href="https://t.me/topposter69_bot" target="_blank" rel="noopener">
+            Открыть бота
+          </a>
+          <a class="btn btn-secondary btn-xl" href="index.html#pricing">
+            Смотреть тарифы
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <section class="seo-section section-shell">
+      <div class="seo-grid">
+        <article class="seo-card">
+          <div class="num">1</div>
+          <h2>Обработка видео</h2>
+          <p>
+            ViMi помогает готовить видео к публикации:
+            обрезать ролики, нормализовать формат и отправлять результат в Telegram.
+          </p>
+        </article>
+
+        <article class="seo-card">
+          <div class="num">2</div>
+          <h2>Заставки и подписи</h2>
+          <p>
+            Добавляйте intro-заставки, сохраняйте подписи и делайте публикации визуально узнаваемыми.
+          </p>
+        </article>
+
+        <article class="seo-card">
+          <div class="num">3</div>
+          <h2>Очередь видео</h2>
+          <p>
+            Бот управляет очередью публикаций, показывает статусы и помогает контролировать ошибки доставки.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section class="seo-section section-shell">
+      <div class="seo-wide">
+        <div>
+          <h2>Кому нужен видео-репост в Telegram</h2>
+          <p>
+            Функция подходит каналам с регулярным видео-контентом, медиа-проектам,
+            авторским каналам, сеткам Telegram-каналов и командам,
+            которым нужно публиковать видео стабильно и без ручной рутины.
+          </p>
+        </div>
+
+        <ul class="seo-list">
+          <li>каналы с короткими роликами</li>
+          <li>медиа-проекты и развлекательные каналы</li>
+          <li>команды с регулярными публикациями</li>
+          <li>проекты с фирменными заставками</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="seo-section section-shell">
+      <div class="seo-wide">
+        <ul class="seo-list">
+          <li>выберите источник видео</li>
+          <li>задайте параметры обработки</li>
+          <li>добавьте заставку при необходимости</li>
+          <li>запустите публикацию по очереди</li>
+        </ul>
+
+        <div>
+          <h2>Как работает видео-автоматизация ViMi</h2>
+          <p>
+            Вы создаёте правило, выбираете режим видео, задаёте параметры обработки
+            и канал назначения. После этого ViMi берёт техническую часть на себя:
+            готовит видео и публикует его по заданной логике.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section-shell">
+      <div class="seo-cta">
+        <div>
+          <h2>Хотите автоматизировать публикацию видео?</h2>
+          <p>
+            Откройте ViMi в Telegram и настройте первое видео-правило.
+          </p>
+        </div>
+
+        <a class="btn" href="https://t.me/topposter69_bot" target="_blank" rel="noopener">
+          Открыть бота
+        </a>
+      </div>
+    </section>
+  </main>
+
+  <footer id="support" class="footer-clean">
+    <div class="footer-clean-links">
+      <a href="index.html#top">Главная</a>
+      <a href="ru/privacy.html">Политика конфиденциальности</a>
+      <a href="ru/terms.html">Пользовательское соглашение</a>
+      <a href="ru/refund.html">Возврат средств</a>
+      <a href="ru/contacts.html">Контакты</a>
+      <a href="https://t.me/vimi_support_bot" target="_blank" rel="noopener">Поддержка</a>
+    </div>
+
+    <a class="footer-clean-logo" href="https://t.me/topposter69_bot" target="_blank" rel="noopener">
+      <img src="assets/vimi-logo.png" alt="ViMi">
+    </a>
+
+    <div class="footer-clean-copy">
+      © 2026 ViMi Bot · <a href="mailto:vimi.support@gmail.com">vimi.support@gmail.com</a>
+    </div>
+  </footer>
+
+  <script src="scroll-top.js"></script>
 </body>
 </html>
