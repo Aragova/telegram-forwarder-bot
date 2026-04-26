@@ -1585,41 +1585,42 @@ body.legal-simple-page .legal-simple-footer a {
 /* === LEGAL TOC (Stripe-style navigation) === */
 
 .legal-toc {
+  margin: 0 auto 28px;
+  padding: 18px 22px;
+  border-radius: 22px;
+  background: rgba(255,255,255,.72);
+  border: 1px solid rgba(120,140,190,.18);
+  box-shadow: 0 18px 46px rgba(78,95,150,.10);
+  backdrop-filter: blur(18px);
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  margin: 0 auto 24px;
   justify-content: center;
+  gap: 10px;
 }
 
 .legal-toc a {
-  padding: 8px 14px;
+  padding: 8px 13px;
   border-radius: 999px;
-  background: rgba(255,255,255,0.7);
-  border: 1px solid rgba(120,140,190,0.2);
-  font-size: 14px;
-  font-weight: 800;
+  background: rgba(83,102,255,.06);
+  border: 1px solid rgba(83,102,255,.10);
   color: #33405f;
+  font-size: 13px;
+  font-weight: 850;
   text-decoration: none;
-  transition: .2s;
+  transition: .2s ease;
 }
 
 .legal-toc a:hover {
   color: #5366ff;
+  background: rgba(83,102,255,.10);
   transform: translateY(-2px);
-  box-shadow: 0 12px 30px rgba(83,102,255,0.18);
-}
-html {
-  scroll-behavior: smooth;
+  box-shadow: 0 12px 28px rgba(83,102,255,.14);
 }
 .legal-simple-card h2:hover {
   color: #5366ff;
   transition: .2s;
 }
+
 .legal-simple-card p {
   max-width: 720px;
-}
-.legal-simple-card:hover {
-  transform: translateY(-4px);
-  transition: .3s;
 }
