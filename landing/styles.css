@@ -1672,3 +1672,88 @@ body.legal-simple-page .legal-simple-footer a {
   visibility: visible;
   transform: translateY(0);
 }
+/* === PREMIUM SCROLL TO TOP === */
+
+.scroll-top-btn {
+  position: fixed;
+  right: 28px;
+  bottom: 28px;
+  width: 58px;
+  height: 58px;
+  border: 0;
+  border-radius: 22px;
+  cursor: pointer;
+  z-index: 9999;
+
+  display: grid;
+  place-items: center;
+
+  color: #ffffff;
+  background:
+    radial-gradient(circle at 32% 22%, rgba(255,255,255,.42), transparent 28%),
+    linear-gradient(135deg, #5366ff 0%, #7453f6 100%);
+  box-shadow:
+    0 22px 54px rgba(83,102,255,.34),
+    inset 0 1px 0 rgba(255,255,255,.35);
+
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(14px) scale(.94);
+  transition:
+    opacity .24s ease,
+    visibility .24s ease,
+    transform .24s ease,
+    box-shadow .24s ease;
+}
+
+.scroll-top-btn::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border-radius: 26px;
+  background: radial-gradient(circle, rgba(83,102,255,.24), transparent 66%);
+  filter: blur(8px);
+  z-index: -1;
+}
+
+.scroll-top-btn svg {
+  width: 25px;
+  height: 25px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.scroll-top-btn.show {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0) scale(1);
+}
+
+.scroll-top-btn:hover {
+  transform: translateY(-4px) scale(1.04);
+  box-shadow:
+    0 28px 68px rgba(83,102,255,.42),
+    inset 0 1px 0 rgba(255,255,255,.42);
+}
+
+.scroll-top-btn:active {
+  transform: translateY(-1px) scale(.98);
+}
+
+@media (max-width: 640px) {
+  .scroll-top-btn {
+    right: 18px;
+    bottom: 18px;
+    width: 52px;
+    height: 52px;
+    border-radius: 19px;
+  }
+
+  .scroll-top-btn svg {
+    width: 23px;
+    height: 23px;
+  }
+}
