@@ -1221,3 +1221,41 @@ body {
     font-size: 15.5px;
   }
 }
+/* === FINAL FIX: legal pages centered layout === */
+
+body.legal-simple-page {
+  display: block !important;
+  width: 100% !important;
+  overflow-x: hidden !important;
+}
+
+body.legal-simple-page .legal-simple-shell {
+  width: min(820px, calc(100% - 32px)) !important;
+  max-width: 820px !important;
+  margin: 0 auto !important;
+  padding: 28px 0 54px !important;
+}
+
+body.legal-simple-page .legal-simple-card {
+  width: 100% !important;
+  max-width: 820px !important;
+  margin: 0 auto !important;
+}
+
+body.legal-simple-page .legal-simple-hero {
+  max-width: 820px !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
+
+body.legal-simple-page .legal-simple-header {
+  max-width: 820px !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
+
+body.legal-simple-page .legal-simple-footer {
+  max-width: 820px !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
