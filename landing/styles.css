@@ -1624,3 +1624,51 @@ body.legal-simple-page .legal-simple-footer a {
 .legal-simple-card p {
   max-width: 720px;
 }
+/* === SCROLL TO TOP (premium) === */
+
+#scrollTopBtn {
+  position: fixed;
+  right: 28px;
+  bottom: 28px;
+
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+
+  border: 1px solid rgba(120,140,190,0.25);
+  background: rgba(255,255,255,0.82);
+  backdrop-filter: blur(16px);
+
+  box-shadow: 0 18px 40px rgba(78,95,150,0.18);
+
+  color: #5366ff;
+  font-size: 22px;
+  font-weight: 900;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  cursor: pointer;
+
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(10px);
+
+  transition: all .25s ease;
+  z-index: 999;
+}
+
+#scrollTopBtn:hover {
+  transform: translateY(-4px);
+  background: linear-gradient(135deg,#5366ff,#7453f6);
+  color: #fff;
+  box-shadow: 0 24px 60px rgba(83,102,255,0.35);
+}
+
+/* показать кнопку */
+#scrollTopBtn.show {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
