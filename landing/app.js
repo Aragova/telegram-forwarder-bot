@@ -21,8 +21,6 @@ demo_status_value:'Работает',
 demo_queue:'В очереди',
 demo_queue_value:'12 публикаций',
 demo_next:'Следующий пост',nav_home: 'Главная',
-refund: 'Возврат средств',
-support: 'Поддержка',nav_home: 'Главная',
 privacy: 'Политика конфиденциальности',
 terms: 'Пользовательское соглашение',
 refund: 'Возврат средств',
@@ -65,15 +63,7 @@ const ctaRobot = document.getElementById('ctaRobot');
 const currentLang = document.getElementById('currentLang');
 const toggle = document.getElementById('langToggle');
 
-const privacyLink = document.getElementById('footer-link-privacy');
-const termsLink = document.getElementById('footer-link-terms');
-const refundLink = document.getElementById('footer-link-refund');
-const contactsLink = document.getElementById('footer-link-contacts');
 
-if (privacyLink) privacyLink.href = lang === 'en' ? 'en/privacy.html' : 'ru/privacy.html';
-if (termsLink) termsLink.href = lang === 'en' ? 'en/terms.html' : 'ru/terms.html';
-if (refundLink) refundLink.href = lang === 'en' ? 'en/refund.html' : 'ru/refund.html';
-if (contactsLink) contactsLink.href = lang === 'en' ? 'en/contacts.html' : 'ru/contacts.html';
 
 function setLanguage(lang){
   const pack = dict[lang] || dict.ru;
@@ -106,7 +96,15 @@ function setLanguage(lang){
 
   if (robot) robot.src = heroSrc;
   if (ctaRobot) ctaRobot.src = ctaSrc;
+  const privacyLink = document.getElementById('footer-link-privacy');
+  const termsLink = document.getElementById('footer-link-terms');
+  const refundLink = document.getElementById('footer-link-refund');
+  const contactsLink = document.getElementById('footer-link-contacts');
 
+  if (privacyLink) privacyLink.href = lang === 'en' ? 'en/privacy.html' : 'ru/privacy.html';
+  if (termsLink) termsLink.href = lang === 'en' ? 'en/terms.html' : 'ru/terms.html';
+  if (refundLink) refundLink.href = lang === 'en' ? 'en/refund.html' : 'ru/refund.html';
+  if (contactsLink) contactsLink.href = lang === 'en' ? 'en/contacts.html' : 'ru/contacts.html';
   const openBotLinks = [document.getElementById('header-open-bot'), document.getElementById('cta-open-bot')];
   openBotLinks.forEach(link => {
     if (link) link.href = botUrl;
