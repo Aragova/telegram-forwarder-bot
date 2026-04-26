@@ -900,10 +900,13 @@ body {
   }
 }
 .footer-clean {
-  background: #252525;
-  padding: 44px 20px 38px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(91, 111, 255, 0.12), transparent 38%),
+    linear-gradient(180deg, #f8fbff 0%, #eef4ff 100%);
+  padding: 56px 20px 44px;
   text-align: center;
-  color: #d7d7d7;
+  color: #24304f;
+  border-top: 1px solid rgba(120, 140, 190, 0.18);
 }
 
 .footer-clean-links {
@@ -912,18 +915,18 @@ body {
   align-items: center;
   gap: 34px;
   flex-wrap: wrap;
-  margin-bottom: 28px;
+  margin-bottom: 30px;
 }
 
 .footer-clean-links a {
-  color: #ffffff;
+  color: #263454;
   text-decoration: none;
-  font-size: 18px;
-  font-weight: 500;
+  font-size: 17px;
+  font-weight: 600;
 }
 
 .footer-clean-links a:hover {
-  opacity: 0.8;
+  color: #5366ff;
 }
 
 .footer-clean-logo {
@@ -931,31 +934,60 @@ body {
   align-items: center;
   justify-content: center;
   margin-bottom: 24px;
+  padding: 14px 18px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 18px 45px rgba(74, 92, 170, 0.13);
 }
 
 .footer-clean-logo img {
-  width: 92px;
+  width: 104px;
   height: auto;
   display: block;
   transition: transform 0.2s ease;
 }
 
 .footer-clean-logo:hover img {
-  transform: scale(1.06);
+  transform: scale(1.05);
 }
 
 .footer-clean-copy {
-  font-size: 17px;
-  color: #d0d0d0;
+  font-size: 16px;
+  color: #5c6685;
 }
 
 .footer-clean-copy a {
-  color: #d0d0d0;
+  color: #5c6685;
   text-decoration: none;
 }
 
 .footer-clean-copy a:hover {
-  color: #ffffff;
+  color: #5366ff;
+}
+
+@media (max-width: 640px) {
+  .footer-clean {
+    padding: 40px 16px 34px;
+  }
+
+  .footer-clean-links {
+    gap: 16px;
+    flex-direction: column;
+    margin-bottom: 24px;
+  }
+
+  .footer-clean-links a {
+    font-size: 16px;
+  }
+
+  .footer-clean-logo img {
+    width: 92px;
+  }
+
+  .footer-clean-copy {
+    font-size: 14px;
+    line-height: 1.6;
+  }
 }
 
 @media (max-width: 640px) {
@@ -980,5 +1012,46 @@ body {
   .footer-clean-copy {
     font-size: 14px;
     line-height: 1.6;
+  }
+}
+.footer-clean-logo {
+  position: relative;
+  animation: vimiLogoFloat 3.2s ease-in-out infinite;
+}
+
+.footer-clean-logo::before {
+  content: "";
+  position: absolute;
+  inset: -10px;
+  border-radius: 30px;
+  background: radial-gradient(circle, rgba(83, 102, 255, 0.28), transparent 62%);
+  opacity: 0.75;
+  filter: blur(10px);
+  z-index: 0;
+  animation: vimiLogoGlow 2.6s ease-in-out infinite;
+}
+
+.footer-clean-logo img {
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes vimiLogoFloat {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes vimiLogoGlow {
+  0%, 100% {
+    opacity: 0.45;
+    transform: scale(0.96);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1.06);
   }
 }
