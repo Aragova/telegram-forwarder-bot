@@ -74,6 +74,7 @@ from app.payment_service import PaymentService
 from app.saas_bootstrap import ensure_owner_and_default_tenant_bootstrap
 from app.i18n import get_user_language, set_user_language, t as tr
 from app import product_ui
+from app import access_control, user_ui
 
 logger = setup_logging(settings.log_level)
 
@@ -639,29 +640,22 @@ def _resolve_language(user_id: int | None) -> str:
 
 
 def _is_admin_user(user_id: int | None) -> bool:
-    if user_id is None:
-        return False
-    return int(user_id) == int(settings.admin_id)
+    return access_control.is_admin_user(user_id)
 
 def is_admin_user(user_id: int | None) -> bool:
-    return _is_admin_user(user_id)
+    return access_control.is_admin_user(user_id)
 
 
 def get_current_tenant_for_user(user_id: int) -> int:
-    tenant = tenant_service.ensure_tenant_exists(int(user_id))
-    return int(tenant.get("id") or 1)
+    return access_control.get_current_tenant_for_user(user_id, tenant_service)
 
 
 def ensure_user_tenant(user_id: int) -> int:
-    return get_current_tenant_for_user(user_id)
+    return access_control.ensure_user_tenant(user_id, tenant_service)
 
 
 def is_rule_owned_by_user(rule_id: int, user_id: int) -> bool:
-    if is_admin_user(user_id):
-        return True
-    if not hasattr(db, "get_rule_tenant_id"):
-        return False
-    return int(db.get_rule_tenant_id(int(rule_id)) or 1) == ensure_user_tenant(int(user_id))
+    return access_control.is_rule_owned_by_user(rule_id, user_id, db, tenant_service)
 
 
 def is_channel_owned_by_user(
@@ -670,46 +664,26 @@ def is_channel_owned_by_user(
     channel_type: str,
     user_id: int,
 ) -> bool:
-    if is_admin_user(user_id):
-        return True
-    tenant_id = ensure_user_tenant(int(user_id))
-    if not hasattr(db, "get_channels_for_tenant"):
-        return False
-    rows = db.get_channels_for_tenant(tenant_id, channel_type)
-    return any(
-        str(row["channel_id"]) == str(channel_id)
-        and ((row["thread_id"] is None and thread_id is None) or int(row["thread_id"]) == int(thread_id or 0))
-        for row in rows
+    return access_control.is_channel_owned_by_user(
+        channel_id,
+        thread_id,
+        channel_type,
+        user_id,
+        db,
+        tenant_service,
     )
 
 
 def _public_user_menu_text() -> str:
-    return (
-        "👋 Добро пожаловать в ViMi\n\n"
-        "ViMi помогает автоматизировать Telegram-каналы: источники, получатели, правила публикации, очередь и статус — внутри Telegram.\n\n"
-        "Выберите действие:"
-    )
+    return user_ui.build_user_main_text()
 
 
 def _public_user_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📡 Источники", callback_data="user_sources")],
-            [InlineKeyboardButton(text="🎯 Получатели", callback_data="user_targets")],
-            [InlineKeyboardButton(text="⚙️ Мои правила", callback_data="user_rules")],
-            [InlineKeyboardButton(text="📊 Статус", callback_data="user_status")],
-            [InlineKeyboardButton(text="👤 Мой аккаунт", callback_data="user_account")],
-            [InlineKeyboardButton(text="💎 Тарифы", callback_data="user_plans")],
-            [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
-            [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
-        ]
-    )
+    return user_ui.build_user_main_keyboard()
 
 
 def _public_user_back_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")]]
-    )
+    return user_ui.build_user_back_keyboard()
 
 
 async def _show_public_user_menu_message(message: Message) -> None:
@@ -724,86 +698,34 @@ def _build_public_account_text(
     usage_today: dict[str, Any] | None,
     rules_count: int,
 ) -> str:
-    sub = subscription or {}
-    usage = usage_today or {}
-    plan_name = str(sub.get("plan_name") or "FREE").upper()
-    status = str(sub.get("status") or "active")
-    max_rules = int(sub.get("max_rules") or 0)
-    max_video = int(sub.get("max_video_per_day") or 0)
-    max_jobs = int(sub.get("max_jobs_per_day") or 0)
-    video_today = int(usage.get("video_count") or 0)
-    jobs_today = int(usage.get("jobs_count") or 0)
-    return (
-        "👤 Мой аккаунт\n\n"
-        f"Telegram ID: {int(user_id)}\n"
-        f"Аккаунт: #{int(tenant_id)}\n\n"
-        f"Тариф: {plan_name}\n"
-        f"Статус: {status}\n\n"
-        "Лимиты:\n"
-        f"📌 Правила: {int(rules_count)} / {max_rules}\n"
-        f"🎬 Видео сегодня: {video_today} / {max_video}\n"
-        f"📦 Задачи сегодня: {jobs_today} / {max_jobs}"
+    return user_ui.build_user_account_text(
+        user_id=user_id,
+        tenant_id=tenant_id,
+        subscription=subscription,
+        usage_today=usage_today,
+        rules_count=rules_count,
     )
 
 
 def _public_account_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
-            [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
-        ]
-    )
+    return user_ui.build_user_account_keyboard()
 
 
-def _user_sources_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📜 Мои источники")],
-            [KeyboardButton(text="➕ Добавить источник"), KeyboardButton(text="➖ Удалить источник")],
-            [KeyboardButton(text="⬅️ Назад в меню")],
-        ],
-        resize_keyboard=True,
-    )
+def _user_sources_keyboard() -> InlineKeyboardMarkup:
+    return user_ui.build_user_sources_keyboard()
 
 
-def _user_targets_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📜 Мои получатели")],
-            [KeyboardButton(text="➕ Добавить получатель"), KeyboardButton(text="➖ Удалить получатель")],
-            [KeyboardButton(text="⬅️ Назад в меню")],
-        ],
-        resize_keyboard=True,
-    )
+def _user_targets_keyboard() -> InlineKeyboardMarkup:
+    return user_ui.build_user_targets_keyboard()
 
 
 def _build_public_plans_text() -> str:
     plans = [item for item in _default_plan_catalog("ru") if str(item.get("name")).upper() != "OWNER"]
-    lines = ["💎 Тарифы\n"]
-    for plan in plans:
-        lines.extend(
-            [
-                f"{plan['name']}",
-                f"{plan['description']}",
-                f"📌 Правила: {int(plan.get('max_rules') or 0)}",
-                f"🎬 Видео/день: {int(plan.get('max_video_per_day') or 0)}",
-                f"📦 Задачи/день: {int(plan.get('max_jobs_per_day') or 0)}",
-                f"💰 Цена: ${float(plan.get('price') or 0):.0f}/мес",
-                "",
-            ]
-        )
-    return "\n".join(lines).strip()
+    return user_ui.build_user_plans_text(plans)
 
 
 def _public_plans_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="BASIC — выбрать", callback_data="user_select_plan:BASIC")],
-            [InlineKeyboardButton(text="PRO — выбрать", callback_data="user_select_plan:PRO")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
-        ]
-    )
+    return user_ui.build_user_plans_keyboard()
 
 
 def _default_plan_catalog(lang: str) -> list[dict[str, Any]]:
@@ -1763,6 +1685,7 @@ async def cmd_start(message: Message):
         logger.info("Создан tenant для user_id=%s tenant_id=%s", user_id, tenant_id)
     else:
         logger.info("Получен tenant для user_id=%s tenant_id=%s", user_id, tenant_id)
+    await message.answer("✅ Пользовательский режим включён", reply_markup=ReplyKeyboardRemove())
     await _show_public_user_menu_message(message)
 
 
@@ -1969,6 +1892,7 @@ async def handle_start(message: Message):
             reply_markup=get_main_menu(),
         )
         return
+    await message.answer("✅ Пользовательский режим включён", reply_markup=ReplyKeyboardRemove())
     await _show_public_user_menu_message(message)
 
 
@@ -2008,6 +1932,7 @@ async def handle_main_menu(message: Message):
     if _is_admin_user(message.from_user.id if message.from_user else None):
         await message.reply("📋 Главное меню", reply_markup=get_main_menu())
         return
+    await message.answer("✅ Пользовательский режим включён", reply_markup=ReplyKeyboardRemove())
     await _show_public_user_menu_message(message)
 
 @dp.message(lambda m: m.text == "❌ Отмена")
@@ -2160,7 +2085,11 @@ async def handle_user_sources_callback(callback: CallbackQuery):
     tenant_id = await run_db(ensure_user_tenant, user_id)
     logger.info("пользователь открыл список источников user_id=%s tenant_id=%s", user_id, tenant_id)
     await answer_callback_safe_once(callback)
-    await callback.message.answer("📡 Источники\n\nВыберите действие:", reply_markup=_user_sources_keyboard())
+    await edit_message_text_safe(
+        message=callback.message,
+        text="📡 Источники\n\nВыберите действие:",
+        reply_markup=_user_sources_keyboard(),
+    )
 
 
 @dp.callback_query(lambda c: c.data == "user_targets")
@@ -2172,7 +2101,131 @@ async def handle_user_targets_callback(callback: CallbackQuery):
     tenant_id = await run_db(ensure_user_tenant, user_id)
     logger.info("пользователь открыл список получателей user_id=%s tenant_id=%s", user_id, tenant_id)
     await answer_callback_safe_once(callback)
-    await callback.message.answer("🎯 Получатели\n\nВыберите действие:", reply_markup=_user_targets_keyboard())
+    await edit_message_text_safe(
+        message=callback.message,
+        text="🎯 Получатели\n\nВыберите действие:",
+        reply_markup=_user_targets_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_sources_list")
+async def handle_user_sources_list_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    rows = await run_db(db.get_channels_for_tenant, tenant_id, "source") if hasattr(db, "get_channels_for_tenant") else []
+    await answer_callback_safe_once(callback)
+    if not rows:
+        await edit_message_text_safe(
+            message=callback.message,
+            text="📡 Источники\n\nСписок пока пуст.",
+            reply_markup=_user_sources_keyboard(),
+        )
+        return
+    lines = ["📡 Источники\n"]
+    for idx, row in enumerate(rows, 1):
+        title = row["title"] or row["channel_id"]
+        suffix = f" (тема {row['thread_id']})" if row["thread_id"] else ""
+        lines.append(f"{idx}. {title}{suffix}")
+    await edit_message_text_safe(
+        message=callback.message,
+        text="\n".join(lines),
+        reply_markup=_user_sources_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_targets_list")
+async def handle_user_targets_list_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    rows = await run_db(db.get_channels_for_tenant, tenant_id, "target") if hasattr(db, "get_channels_for_tenant") else []
+    await answer_callback_safe_once(callback)
+    if not rows:
+        await edit_message_text_safe(
+            message=callback.message,
+            text="🎯 Получатели\n\nСписок пока пуст.",
+            reply_markup=_user_targets_keyboard(),
+        )
+        return
+    lines = ["🎯 Получатели\n"]
+    for idx, row in enumerate(rows, 1):
+        title = row["title"] or row["channel_id"]
+        suffix = f" (тема {row['thread_id']})" if row["thread_id"] else ""
+        lines.append(f"{idx}. {title}{suffix}")
+    await edit_message_text_safe(
+        message=callback.message,
+        text="\n".join(lines),
+        reply_markup=_user_targets_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_sources_add")
+async def handle_user_sources_add_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    if callback.from_user:
+        user_states[callback.from_user.id] = {"action": "choose_source_kind"}
+    await callback.message.answer("Выберите: канал или группа с темой", reply_markup=get_entity_kind_keyboard())
+
+
+@dp.callback_query(lambda c: c.data == "user_targets_add")
+async def handle_user_targets_add_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    if callback.from_user:
+        user_states[callback.from_user.id] = {"action": "choose_target_kind"}
+    await callback.message.answer("Выберите: канал или группа с темой", reply_markup=get_entity_kind_keyboard())
+
+
+@dp.callback_query(lambda c: c.data in ("user_sources_remove", "user_targets_remove"))
+async def handle_user_channel_remove_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    channel_type = "source" if callback.data == "user_sources_remove" else "target"
+    rows = await run_db(db.get_channels_for_tenant, tenant_id, channel_type) if hasattr(db, "get_channels_for_tenant") else []
+    await answer_callback_safe_once(callback)
+    if not rows:
+        title = "📡 Источники" if channel_type == "source" else "🎯 Получатели"
+        kb = _user_sources_keyboard() if channel_type == "source" else _user_targets_keyboard()
+        await edit_message_text_safe(
+            message=callback.message,
+            text=f"{title}\n\nСписок пока пуст.",
+            reply_markup=kb,
+        )
+        return
+
+    keyboard = []
+    mapping = []
+    text = "Выберите запись для удаления\n\n"
+    for idx, row in enumerate(rows, 1):
+        title = row["title"] or row["channel_id"]
+        suffix = f" (тема {row['thread_id']})" if row["thread_id"] else ""
+        keyboard.append([KeyboardButton(text=f"Удалить {idx}")])
+        mapping.append((row["channel_id"], row["thread_id"], row["channel_type"]))
+        text += f"{idx}. [{row['channel_type']}] {title}{suffix}\n"
+    keyboard.append([KeyboardButton(text="❌ Отмена")])
+    if callback.from_user:
+        user_states[callback.from_user.id] = {
+            "action": "remove_channel",
+            "mapping": mapping,
+            "tenant_id": tenant_id,
+        }
+    await callback.message.answer(
+        text[:4000],
+        reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True),
+    )
 
 
 @dp.callback_query(lambda c: c.data == "user_rules")
