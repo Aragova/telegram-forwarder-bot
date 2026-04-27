@@ -2814,6 +2814,7 @@ async def handle_user_upload_receipt_callback(callback: CallbackQuery):
         message=callback.message,
         text=user_ui.build_user_manual_receipt_request_text(invoice, intent),
         reply_markup=user_ui.build_user_manual_receipt_keyboard(invoice_id),
+        parse_mode="HTML",
     )
 
 
@@ -2879,6 +2880,7 @@ async def handle_user_manual_paid_callback(callback: CallbackQuery):
             message=callback.message,
             text=user_ui.build_user_manual_receipt_request_text(invoice, intent),
             reply_markup=user_ui.build_user_manual_receipt_keyboard(invoice_id),
+            parse_mode="HTML",
         )
         return
     payload.update(
