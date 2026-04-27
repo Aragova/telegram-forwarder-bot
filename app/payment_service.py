@@ -17,7 +17,7 @@ from app.payment_providers import (
 )
 from app.subscription_service import SubscriptionService
 
-MANUAL_PROVIDER_TYPES = {"manual_bank_card", "sbp_provider", "crypto_manual"}
+MANUAL_PROVIDER_TYPES = {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual"}
 
 
 class PaymentService:

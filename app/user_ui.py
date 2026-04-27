@@ -281,7 +281,7 @@ def build_user_payment_result_keyboard(invoice_id: int, payment_result: dict[str
     if checkout_url:
         rows.append([InlineKeyboardButton(text="Открыть оплату", url=checkout_url)])
     if provider in {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual"}:
-        rows.append([InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_manual_paid_stub:{int(invoice_id)}")])
+        rows.append([InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_manual_paid:{int(invoice_id)}")])
     rows.extend(
         [
             [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],

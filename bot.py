@@ -2721,37 +2721,200 @@ async def handle_invoice_provider_callback(callback: CallbackQuery):
     await edit_message_text_safe(message=callback.message, text=message_text, reply_markup=kb)
 
 
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_manual_paid_stub:"))
-async def handle_user_manual_paid_stub_callback(callback: CallbackQuery):
-    await answer_callback_safe(callback, "Подтверждение ручной оплаты будет подключено следующим этапом.", show_alert=True)
+MANUAL_PAYMENT_PROVIDERS = {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual"}
+MANUAL_PAYMENT_ACTIVE_STATUSES = {"created", "pending", "waiting_confirmation"}
+
+
+async def find_active_manual_payment_intent_for_invoice(invoice_id: int) -> dict[str, Any] | None:
+    if hasattr(db, "get_active_manual_payment_intent_for_invoice"):
+        return await run_db(db.get_active_manual_payment_intent_for_invoice, int(invoice_id))
+    intent = await run_db(db.get_payment_intent_by_invoice, int(invoice_id)) if hasattr(db, "get_payment_intent_by_invoice") else None
+    if not intent:
+        return None
+    if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
+        return None
+    if str(intent.get("status") or "") not in MANUAL_PAYMENT_ACTIVE_STATUSES:
+        return None
+    return intent
+
+
+def _admin_manual_payment_keyboard(payment_intent_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin_confirm_manual_payment:{int(payment_intent_id)}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"admin_reject_manual_payment:{int(payment_intent_id)}"),
+            ]
+        ]
+    )
+
+
+@dp.callback_query(lambda c: c.data and (c.data.startswith("user_manual_paid:") or c.data.startswith("user_manual_paid_stub:")))
+async def handle_user_manual_paid_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id if callback.from_user else 0
+    if _is_admin_user(user_id):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    raw = (callback.data or "").split(":", 1)
+    invoice_id = int(raw[1] or 0) if len(raw) > 1 else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
+    if not invoice:
+        await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
+        return
+    if int(invoice.get("tenant_id") or 0) != int(tenant_id):
+        logger.warning("попытка чужой заявки user_id=%s invoice_id=%s", user_id, invoice_id)
+        await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+        return
+    if str(invoice.get("status") or "") == "paid":
+        await answer_callback_safe(callback, "✅ Этот счёт уже оплачен.", show_alert=True)
+        return
+    intent = await find_active_manual_payment_intent_for_invoice(int(invoice_id))
+    if not intent:
+        await answer_callback_safe(
+            callback,
+            "❌ Не найдена активная ручная оплата по этому счёту.\nВернитесь к счёту и выберите способ оплаты.",
+            show_alert=True,
+        )
+        return
+    payment_intent_id = int(intent.get("id") or 0)
+    payload = {
+        "user_id": int(user_id),
+        "tenant_id": int(tenant_id),
+        "invoice_id": int(invoice_id),
+        "payment_intent_id": payment_intent_id,
+        "provider": str(intent.get("provider") or ""),
+        "amount": float(intent.get("amount") or 0),
+        "currency": str(intent.get("currency") or "USD").upper(),
+        "submitted_at": utc_now_iso(),
+        "status": "submitted_by_user",
+    }
+    await run_db(payment_service.save_manual_confirmation_payload, payment_intent_id, payload)
+    logger.info("пользователь отправил заявку ручной оплаты user_id=%s invoice_id=%s intent_id=%s", user_id, invoice_id, payment_intent_id)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=(
+            "✅ Заявка на оплату отправлена\n\n"
+            "Администратор проверит платёж и подтвердит тариф.\n"
+            "Обычно это занимает некоторое время."
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
+            ]
+        ),
+    )
+    if bot:
+        provider_title = user_ui.payment_provider_title(str(intent.get("provider") or ""))
+        try:
+            await bot.send_message(
+                settings.admin_id,
+                (
+                    "💳 Новая ручная оплата\n\n"
+                    f"Пользователь: {user_id}\n"
+                    f"Аккаунт: #{tenant_id}\n"
+                    f"Счёт: #{invoice_id}\n"
+                    f"Payment intent: #{payment_intent_id}\n"
+                    f"Способ: {provider_title}\n"
+                    f"Сумма: {payload['amount']} {payload['currency']}\n"
+                    f"Статус: {str(intent.get('status') or 'waiting_confirmation')}\n\n"
+                    "Проверьте поступление платежа и выберите действие."
+                ),
+                reply_markup=_admin_manual_payment_keyboard(payment_intent_id),
+            )
+            logger.info("администратору отправлено уведомление intent_id=%s", payment_intent_id)
+        except Exception as exc:
+            logger.warning("не удалось отправить уведомление администратору intent_id=%s: %s", payment_intent_id, exc)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("admin_confirm_manual_payment:"))
+async def handle_admin_confirm_manual_payment_callback(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    admin_id = callback.from_user.id if callback.from_user else settings.admin_id
+    payment_intent_id = int((callback.data or "0").split(":", 1)[1] or 0)
+    intent = await run_db(db.get_payment_intent, payment_intent_id) if hasattr(db, "get_payment_intent") else None
+    if not intent:
+        await answer_callback_safe(callback, "❌ Платёж не найден", show_alert=True)
+        return
+    if str(intent.get("status") or "") == "paid":
+        await answer_callback_safe(callback, "✅ Уже оплачено", show_alert=True)
+        return
+    if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
+        await answer_callback_safe(callback, "❌ Это не ручная оплата", show_alert=True)
+        return
+    ok = await run_db(payment_service.confirm_manual_payment, payment_intent_id, admin_id, "manual_payment_confirmed_by_admin")
+    await answer_callback_safe_once(callback)
+    if not ok:
+        await answer_callback_safe(callback, "❌ Не удалось подтвердить оплату", show_alert=True)
+        return
+    logger.info("админ подтвердил ручную оплату intent_id=%s", payment_intent_id)
+    await edit_message_text_safe(message=callback.message, text=f"✅ Оплата #{payment_intent_id} подтверждена.", reply_markup=None)
+    confirmation_payload = intent.get("confirmation_payload_json") if isinstance(intent.get("confirmation_payload_json"), dict) else {}
+    user_id = int(confirmation_payload.get("user_id") or 0)
+    if user_id and bot:
+        try:
+            await bot.send_message(user_id, "✅ Оплата подтверждена\nВаш тариф активирован.")
+        except Exception as exc:
+            logger.warning("не удалось уведомить пользователя user_id=%s intent_id=%s: %s", user_id, payment_intent_id, exc)
+    elif not user_id:
+        logger.warning("не удалось уведомить пользователя user_id=%s intent_id=%s", user_id, payment_intent_id)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("admin_reject_manual_payment:"))
+async def handle_admin_reject_manual_payment_callback(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    admin_id = callback.from_user.id if callback.from_user else settings.admin_id
+    payment_intent_id = int((callback.data or "0").split(":", 1)[1] or 0)
+    intent = await run_db(db.get_payment_intent, payment_intent_id) if hasattr(db, "get_payment_intent") else None
+    if not intent:
+        await answer_callback_safe(callback, "❌ Платёж не найден", show_alert=True)
+        return
+    if str(intent.get("status") or "") == "paid":
+        await answer_callback_safe(callback, "❌ Оплата уже подтверждена, отклонение недоступно", show_alert=True)
+        return
+    if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
+        await answer_callback_safe(callback, "❌ Это не ручная оплата", show_alert=True)
+        return
+    payload = dict(intent.get("confirmation_payload_json") or {})
+    payload.update(
+        {
+            "status": "rejected_by_admin",
+            "rejected_by": int(admin_id),
+            "rejected_at": utc_now_iso(),
+            "reason": "manual_payment_rejected_by_admin",
+        }
+    )
+    ok = await run_db(db.mark_payment_failed, payment_intent_id, "manual_payment_rejected_by_admin", payload=payload)
+    await answer_callback_safe_once(callback)
+    if not ok:
+        await answer_callback_safe(callback, "❌ Не удалось отклонить оплату", show_alert=True)
+        return
+    logger.info("админ отклонил ручную оплату intent_id=%s", payment_intent_id)
+    await edit_message_text_safe(message=callback.message, text=f"❌ Оплата #{payment_intent_id} отклонена.", reply_markup=None)
+    user_id = int(payload.get("user_id") or 0)
+    if user_id and bot:
+        try:
+            await bot.send_message(
+                user_id,
+                (
+                    "❌ Оплата не подтверждена\n"
+                    "Платёж не найден или данные не совпали.\n"
+                    "Если вы уверены, что оплатили, свяжитесь с поддержкой."
+                ),
+            )
+        except Exception as exc:
+            logger.warning("не удалось уведомить пользователя user_id=%s intent_id=%s: %s", user_id, payment_intent_id, exc)
+    elif not user_id:
+        logger.warning("не удалось уведомить пользователя user_id=%s intent_id=%s", user_id, payment_intent_id)
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("payment:manual_sent:"))
 async def handle_manual_payment_sent(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    admin_id = callback.from_user.id if callback.from_user else settings.admin_id
-    lang = _resolve_language(admin_id)
-    payment_intent_id = int((callback.data or "0").split(":")[-1] or 0)
-    await run_db(payment_service.save_manual_confirmation_payload, payment_intent_id, {"requested_by": admin_id, "requested_at": utc_now_iso()})
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=product_ui._msg(lang, "payment.manual.sent"),
-        reply_markup=product_ui.invoice_keyboard(lang),
-    )
-    if admin_id != settings.admin_id and bot:
-        await bot.send_message(
-            settings.admin_id,
-            (
-                "💳 Новая ручная оплата\n\n"
-                f"Пользователь: {admin_id}\n"
-                f"PaymentIntent: #{payment_intent_id}\n\n"
-                "Подтвердить?\n"
-                f"/payment_confirm {payment_intent_id}\n"
-                f"/payment_reject {payment_intent_id}"
-            ),
-        )
+    await answer_callback_safe(callback, "Используйте кнопку «✅ Я оплатил» в пользовательском меню счёта.", show_alert=True)
 
 
 @dp.pre_checkout_query()
