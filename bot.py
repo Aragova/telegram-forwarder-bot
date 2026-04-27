@@ -8341,15 +8341,9 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
     try:
         await bot.set_my_commands(
             [
-                BotCommand(command="start", description="Старт / Start"),
-                BotCommand(command="menu", description="Главное меню / Main menu"),
-                BotCommand(command="account", description="Мой аккаунт / My account"),
-                BotCommand(command="plans", description="Тарифы / Plans"),
-                BotCommand(command="usage", description="Использование / Usage"),
-                BotCommand(command="billing", description="Биллинг / Billing"),
-                BotCommand(command="invoice", description="Счета / Invoices"),
-                BotCommand(command="language", description="Язык / Language"),
-                BotCommand(command="help", description="Помощь / Help"),
+                BotCommand(command="start", description="Старт"),
+                BotCommand(command="menu", description="Главное меню"),
+                BotCommand(command="help", description="Помощь"),
             ],
             scope=BotCommandScopeDefault(),
         )
