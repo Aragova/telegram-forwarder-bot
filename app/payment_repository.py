@@ -68,6 +68,24 @@ class PaymentRepository(RepositorySplitBase):
                 row = cur.fetchone()
         return self._norm_row(row)
 
+    def get_active_payment_intent_for_invoice_provider(self, invoice_id: int, provider: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM payment_intents
+                    WHERE invoice_id = %s
+                      AND provider = %s
+                      AND status IN ('created', 'pending', 'waiting_confirmation')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (int(invoice_id), str(provider)),
+                )
+                row = cur.fetchone()
+        return self._norm_row(row)
+
     def get_payment_intent_by_external_id(self, external_payment_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:

@@ -4,6 +4,18 @@ from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+PAYMENT_PROVIDER_TITLES_RU: dict[str, str] = {
+    "telegram_stars": "⭐ Telegram Stars",
+    "telegram_payments": "💳 Telegram Payments",
+    "paypal": "PayPal",
+    "card_provider": "💳 Банковская карта",
+    "manual_bank_card": "💳 Банковская карта",
+    "sbp_provider": "⚡ СБП",
+    "crypto_manual": "₿ Криптовалюта",
+    "tribute": "Tribute",
+    "lava_top": "Lava.top",
+}
+
 
 def build_user_main_text() -> str:
     return (
@@ -194,4 +206,86 @@ def build_user_invoices_keyboard(invoices: list[dict[str, Any]]) -> InlineKeyboa
             invoice_id = int(invoice.get("id") or 0)
             rows.append([InlineKeyboardButton(text=f"Открыть счёт #{invoice_id}", callback_data=f"user_invoice:{invoice_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def payment_provider_title(provider: str) -> str:
+    key = str(provider or "")
+    return PAYMENT_PROVIDER_TITLES_RU.get(key, key)
+
+
+def build_user_payment_methods_text(invoice: dict[str, Any], methods: list[dict[str, Any]]) -> str:
+    invoice_id = int(invoice.get("id") or 0)
+    if not methods:
+        return (
+            f"💳 Оплата счёта #{invoice_id}\n\n"
+            "Сейчас нет доступных способов оплаты.\n"
+            "Попробуйте позже или обратитесь в поддержку."
+        )
+    total = float(invoice.get("total") or 0)
+    currency = str(invoice.get("currency") or "USD").upper()
+    status = str(invoice.get("status") or "draft")
+    return (
+        f"💳 Оплата счёта #{invoice_id}\n\n"
+        f"Сумма: {total:.0f} {currency}\n"
+        f"Статус счёта: {status}\n\n"
+        "Выберите способ оплаты:"
+    )
+
+
+def build_user_payment_methods_keyboard(invoice_id: int, methods: list[dict[str, Any]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for method in methods:
+        provider = str(method.get("provider") or "")
+        if not provider:
+            continue
+        rows.append([InlineKeyboardButton(text=payment_provider_title(provider), callback_data=f"user_pay_provider:{int(invoice_id)}:{provider}")])
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_invoices")],
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_user_payment_result_text(invoice: dict[str, Any], payment_result: dict[str, Any]) -> str:
+    invoice_id = int(invoice.get("id") or 0)
+    provider_title = payment_provider_title(str(payment_result.get("provider") or ""))
+    status = str(payment_result.get("status") or "created")
+    lines = [
+        "💳 Оплата создана",
+        "",
+        f"Счёт: #{invoice_id}",
+        f"Способ: {provider_title}",
+        f"Статус: {status}",
+    ]
+    checkout_url = str(payment_result.get("checkout_url") or "").strip()
+    message_ru = str(payment_result.get("message_ru") or "").strip()
+    if checkout_url:
+        lines.extend(["", "Перейдите по ссылке для оплаты."])
+    elif message_ru:
+        lines.extend(["", message_ru])
+    payload = payment_result.get("payload") or {}
+    if isinstance(payload, dict):
+        instruction = str(payload.get("instruction_ru") or payload.get("instructions_ru") or "").strip()
+        if instruction:
+            lines.extend(["", instruction])
+    return "\n".join(lines)
+
+
+def build_user_payment_result_keyboard(invoice_id: int, payment_result: dict[str, Any]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    checkout_url = str(payment_result.get("checkout_url") or "").strip()
+    provider = str(payment_result.get("provider") or "")
+    if checkout_url:
+        rows.append([InlineKeyboardButton(text="Открыть оплату", url=checkout_url)])
+    if provider in {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual"}:
+        rows.append([InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_manual_paid_stub:{int(invoice_id)}")])
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
