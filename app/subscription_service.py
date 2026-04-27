@@ -49,8 +49,20 @@ class SubscriptionService:
         sub = self.get_active_subscription(tenant_id)
         if not sub:
             return False
-        if str(sub.get("status") or "") not in {"active", "trial"}:
+        status = str(sub.get("status") or "")
+        if status not in {"active", "trial", "grace"}:
             return False
+        if status == "grace":
+            grace_ends_at = sub.get("grace_ends_at")
+            if grace_ends_at:
+                try:
+                    grace_dt = datetime.fromisoformat(str(grace_ends_at).replace("Z", "+00:00"))
+                    if grace_dt.tzinfo is None:
+                        grace_dt = grace_dt.replace(tzinfo=timezone.utc)
+                    if grace_dt < datetime.now(timezone.utc):
+                        return False
+                except Exception:
+                    pass
         expires_at = sub.get("expires_at")
         if not expires_at:
             return True

@@ -716,6 +716,55 @@ def _public_account_keyboard() -> InlineKeyboardMarkup:
     return user_ui.build_user_account_keyboard()
 
 
+def _build_public_usage_text(
+    *,
+    subscription: dict[str, Any] | None,
+    usage_today: dict[str, Any] | None,
+    rules_count: int,
+) -> str:
+    return user_ui.build_user_usage_text(subscription, usage_today, rules_count)
+
+
+def _public_usage_keyboard() -> InlineKeyboardMarkup:
+    return user_ui.build_user_usage_keyboard()
+
+
+def _is_subscription_blocked_status(status: str | None) -> bool:
+    return str(status or "").strip().lower() in {"expired", "canceled"}
+
+
+def _write_billing_event(
+    tenant_id: int,
+    event_type: str,
+    *,
+    action: str,
+    reason: str | None = None,
+    plan_name: str | None = None,
+    usage_today: dict[str, Any] | None = None,
+) -> None:
+    if not hasattr(db, "create_billing_event"):
+        return
+    metadata: dict[str, Any] = {
+        "tenant_id": int(tenant_id),
+        "action": str(action),
+    }
+    if plan_name:
+        metadata["plan_name"] = str(plan_name)
+    if reason:
+        metadata["reason"] = str(reason)
+    if usage_today is not None:
+        metadata["usage_snapshot"] = {
+            "jobs_count": int((usage_today or {}).get("jobs_count") or 0),
+            "video_count": int((usage_today or {}).get("video_count") or 0),
+        }
+    db.create_billing_event(
+        int(tenant_id),
+        str(event_type),
+        event_source="ui_enforcement",
+        metadata=metadata,
+    )
+
+
 def _user_sources_keyboard() -> InlineKeyboardMarkup:
     return user_ui.build_user_sources_keyboard()
 
@@ -2288,9 +2337,15 @@ async def handle_user_status_callback(callback: CallbackQuery):
     user_id = callback.from_user.id if callback.from_user else 0
     tenant_id = await run_db(ensure_user_tenant, user_id)
     sub = await run_db(subscription_service.get_active_subscription, tenant_id) or {}
+    status = str(sub.get("status") or "active")
+    usage_today = await run_db(usage_service.get_today_usage, tenant_id)
     rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
     active_rules = sum(1 for row in rules if bool(getattr(row, "is_active", False)))
     rule_limit = int(sub.get("max_rules") or 0)
+    max_video = int(sub.get("max_video_per_day") or 0)
+    max_jobs = int(sub.get("max_jobs_per_day") or 0)
+    video_today = int((usage_today or {}).get("video_count") or 0)
+    jobs_today = int((usage_today or {}).get("jobs_count") or 0)
     queue_total = 0
     errors_total = 0
     next_publication = "—"
@@ -2303,14 +2358,32 @@ async def handle_user_status_callback(callback: CallbackQuery):
         next_run = snapshot.get("next_run_at")
         if next_run and next_publication == "—":
             next_publication = str(next_run)[11:16]
+    state_line = "🟢 Доступ активен"
+    if status == "grace":
+        state_line = "⚠️ Льготный период"
+        await run_db(_write_billing_event, tenant_id, "subscription_grace_warning_shown", action="user_status", plan_name=str(sub.get("plan_name") or "FREE"), usage_today=usage_today)
+    elif _is_subscription_blocked_status(status):
+        state_line = "🔒 Подписка неактивна"
+    can_rule, _rule_reason = await run_db(limit_service.can_create_rule, tenant_id)
+    can_job, _job_reason = await run_db(limit_service.can_enqueue_job, tenant_id)
+    can_video, _video_reason = await run_db(limit_service.can_process_video, tenant_id)
+    if not (can_rule and can_job and can_video):
+        state_line = "🚫 Лимит достигнут"
+
     text = (
         "📊 Статус\n\n"
+        f"Состояние: {state_line}\n"
+        f"Тариф: {str(sub.get('plan_name') or 'FREE').upper()}\n"
+        f"Статус подписки: {status}\n\n"
+        "Использование:\n"
+        f"📌 Правила: {len(rules)} / {rule_limit}\n"
+        f"🎬 Видео сегодня: {video_today} / {max_video}\n"
+        f"📦 Публикации сегодня: {jobs_today} / {max_jobs}\n\n"
         f"Правил: {len(rules)} / {rule_limit}\n"
         f"Активных правил: {active_rules}\n"
         f"Публикаций в очереди: {queue_total}\n"
         f"Ошибок: {errors_total}\n"
-        f"Следующая публикация: {next_publication}\n\n"
-        f"Тариф: {str(sub.get('plan_name') or 'FREE').upper()}"
+        f"Следующая публикация: {next_publication}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚙️ Мои правила", callback_data="user_rules")],
@@ -2332,18 +2405,31 @@ async def handle_user_account_callback(callback: CallbackQuery):
     subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", "ru")
     usage_today = await run_db(usage_service.get_today_usage, tenant_id)
     rules_count = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
+    status = str((subscription or {}).get("status") or "active")
     logger.info("Пользователь открыл user_account user_id=%s tenant_id=%s", user_id, tenant_id)
+    text = _build_public_account_text(
+        user_id=user_id,
+        tenant_id=tenant_id,
+        subscription=subscription,
+        usage_today=usage_today,
+        rules_count=int(rules_count or 0),
+    )
+    if status == "grace":
+        await run_db(_write_billing_event, tenant_id, "subscription_grace_warning_shown", action="user_account", plan_name=str(subscription.get("plan_name") or "FREE"), usage_today=usage_today)
+        text += (
+            "\n\n⚠️ Льготный период\n\n"
+            "Оплата ещё не подтверждена. Функции временно доступны до окончания льготного периода."
+        )
+    elif _is_subscription_blocked_status(status):
+        text += (
+            "\n\n🔒 Подписка неактивна\n\n"
+            "Чтобы продолжить пользоваться автоматизацией, выберите тариф и оплатите счёт."
+        )
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(
         message=callback.message,
-        text=_build_public_account_text(
-            user_id=user_id,
-            tenant_id=tenant_id,
-            subscription=subscription,
-            usage_today=usage_today,
-            rules_count=int(rules_count or 0),
-        ),
-        reply_markup=_public_account_keyboard(),
+        text=text,
+        reply_markup=_public_usage_keyboard(),
     )
 
 
@@ -3583,6 +3669,50 @@ async def handle_user_rules_page(callback: CallbackQuery):
 async def handle_user_rules_add(callback: CallbackQuery):
     user_id = callback.from_user.id if callback.from_user else 0
     tenant_id = await run_db(ensure_user_tenant, user_id)
+    subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", "ru")
+    usage_today = await run_db(usage_service.get_today_usage, tenant_id)
+    rules_count = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
+    can_create, reason = await run_db(limit_service.can_create_rule, tenant_id)
+    if not can_create:
+        if str(reason or "").strip().lower() == "подписка неактивна":
+            await run_db(
+                _write_billing_event,
+                tenant_id,
+                "subscription_blocked_action",
+                action="create_rule",
+                reason=reason,
+                plan_name=str(subscription.get("plan_name") or "FREE"),
+                usage_today=usage_today,
+            )
+            await answer_callback_safe_once(callback)
+            await edit_message_text_safe(
+                message=callback.message,
+                text=user_ui.build_user_subscription_blocked_text(subscription),
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="💎 Тарифы", callback_data="user_plans")],
+                        [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
+                        [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
+                    ]
+                ),
+            )
+            return
+        await run_db(
+            _write_billing_event,
+            tenant_id,
+            "limit_rule_blocked",
+            action="create_rule",
+            reason=reason,
+            plan_name=str(subscription.get("plan_name") or "FREE"),
+            usage_today=usage_today,
+        )
+        await answer_callback_safe_once(callback)
+        await edit_message_text_safe(
+            message=callback.message,
+            text=user_ui.build_user_limit_exceeded_text(reason, subscription, usage_today, int(rules_count or 0)),
+            reply_markup=_public_usage_keyboard(),
+        )
+        return
     source_rows = await run_db(db.get_channels_for_tenant, tenant_id, "source") if hasattr(db, "get_channels_for_tenant") else []
     sources = [ChannelChoice(r["channel_id"], r["thread_id"], r["title"] or r["channel_id"]) for r in source_rows]
     if not sources:
@@ -7965,25 +8095,29 @@ async def handle_stateful_private_inputs(message: Message):
         else:
             tenant = await run_db(tenant_service.ensure_tenant_exists, message.from_user.id if message.from_user else settings.admin_id)
             tenant_id = int(tenant.get("id") or 1)
-            can_create, _reason = await run_db(limit_service.can_create_rule, tenant_id)
-            lang = _resolve_language(message.from_user.id if message.from_user else None)
+            can_create, reason = await run_db(limit_service.can_create_rule, tenant_id)
             if not can_create:
                 sub = await run_db(subscription_service.get_active_subscription, tenant_id) or {}
+                usage_today = await run_db(usage_service.get_today_usage, tenant_id)
                 created_rules = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
-                await message.answer(
-                    (
-                        "🚫 Лимит тарифа достигнут\n\n"
-                        f"На вашем тарифе доступно: {int(sub.get('max_rules') or 0)} правил.\n"
-                        f"Сейчас создано: {int(created_rules or 0)}.\n\n"
-                        "Чтобы добавить больше правил, смените тариф."
-                    ),
-                    reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
-                            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
-                        ]
-                    ),
-                )
+                if str(reason or "").strip().lower() == "подписка неактивна":
+                    await run_db(_write_billing_event, tenant_id, "subscription_blocked_action", action="create_rule", reason=reason, plan_name=str(sub.get("plan_name") or "FREE"), usage_today=usage_today)
+                    await message.answer(
+                        user_ui.build_user_subscription_blocked_text(sub),
+                        reply_markup=InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [InlineKeyboardButton(text="💎 Тарифы", callback_data="user_plans")],
+                                [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
+                                [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
+                            ]
+                        ),
+                    )
+                else:
+                    await run_db(_write_billing_event, tenant_id, "limit_rule_blocked", action="create_rule", reason=reason, plan_name=str(sub.get("plan_name") or "FREE"), usage_today=usage_today)
+                    await message.answer(
+                        user_ui.build_user_limit_exceeded_text(reason, sub, usage_today, int(created_rules or 0)),
+                        reply_markup=_public_usage_keyboard(),
+                    )
                 reset_user_state(user_id)
                 return
             await message.answer(

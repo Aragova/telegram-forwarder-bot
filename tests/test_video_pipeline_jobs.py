@@ -28,6 +28,7 @@ class _Repo:
     def __init__(self) -> None:
         self.next_job_id = 1
         self.jobs: dict[int, dict] = {}
+        self.usage = {"jobs_count": 0, "video_count": 0}
         self.deliveries = {
             20: {
                 "id": 20,
@@ -105,6 +106,13 @@ class _Repo:
         job["attempts"] += 1
         job["error_text"] = error_text
         return True
+
+    def bump_usage(self, tenant_id: int, *, jobs_delta: int = 0, video_delta: int = 0, storage_delta_mb: int = 0, api_calls_delta: int = 0):
+        self.usage["jobs_count"] += int(jobs_delta or 0)
+        self.usage["video_count"] += int(video_delta or 0)
+
+    def get_usage_for_date(self, tenant_id: int, day: str):
+        return dict(self.usage)
 
 
 class _Sender:
@@ -258,6 +266,18 @@ def test_retry_is_stage_specific_for_video_download() -> None:
     asyncio.run(_run_one_job(repo, sender, "heavy-1", "heavy"))
     assert repo.jobs[job_id]["status"] == "retry"
     assert all(j["job_type"] != JOB_TYPE_VIDEO_PROCESS for j in repo.jobs.values())
+
+
+def test_video_usage_increments_once_on_final_stage() -> None:
+    repo = _Repo()
+    sender = _Sender()
+    enqueue_video_delivery(repo, 20)
+
+    asyncio.run(_run_one_job(repo, sender, "heavy-1", "heavy"))
+    asyncio.run(_run_one_job(repo, sender, "heavy-1", "heavy"))
+    asyncio.run(_run_one_job(repo, sender, "heavy-1", "heavy"))
+
+    assert repo.usage["video_count"] == 1
 
 
 def test_retry_is_stage_specific_for_video_process() -> None:
