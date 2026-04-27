@@ -119,3 +119,79 @@ def build_user_targets_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
         ]
     )
+
+
+def build_user_invoice_text(invoice: dict[str, Any], items: list[dict[str, Any]]) -> str:
+    invoice_id = int(invoice.get("id") or 0)
+    status = str(invoice.get("status") or "draft")
+    currency = str(invoice.get("currency") or "USD").upper()
+    total = float(invoice.get("total") or 0)
+    plan_name = "UNKNOWN"
+    lines = [f"🧾 Счёт #{invoice_id}", ""]
+    for item in items:
+        meta = item.get("metadata_json") or {}
+        if isinstance(meta, dict) and meta.get("plan_name"):
+            plan_name = str(meta.get("plan_name")).upper()
+            break
+    lines.extend(
+        [
+            f"Тариф: {plan_name}",
+            f"Сумма: {total:.0f} {currency}",
+            f"Статус: {status}",
+            "",
+            "Позиции:",
+        ]
+    )
+    if not items:
+        lines.append("• Позиции пока отсутствуют")
+    for item in items:
+        description = str(item.get("description") or item.get("item_type") or "Позиция")
+        amount = float(item.get("amount") or 0)
+        item_currency = str(invoice.get("currency") or "USD").upper()
+        lines.append(f"• {description} — {amount:.0f} {item_currency}")
+    return "\n".join(lines)
+
+
+def build_user_invoice_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Перейти к оплате", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_plans")],
+        ]
+    )
+
+
+def build_user_invoices_text(invoices: list[dict[str, Any]]) -> str:
+    lines = ["🧾 Мои счета", ""]
+    if not invoices:
+        lines.extend(
+            [
+                "У вас пока нет счетов.",
+                "Выберите тариф, чтобы создать счёт.",
+            ]
+        )
+        return "\n".join(lines)
+    for invoice in invoices:
+        plan_name = "UNKNOWN"
+        for item in invoice.get("items") or []:
+            meta = item.get("metadata_json") or {}
+            if isinstance(meta, dict) and meta.get("plan_name"):
+                plan_name = str(meta.get("plan_name")).upper()
+                break
+        lines.append(
+            f"#{int(invoice.get('id') or 0)} — {plan_name} — {float(invoice.get('total') or 0):.0f} {str(invoice.get('currency') or 'USD').upper()} — {str(invoice.get('status') or 'draft')}"
+        )
+    return "\n".join(lines)
+
+
+def build_user_invoices_keyboard(invoices: list[dict[str, Any]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if not invoices:
+        rows.append([InlineKeyboardButton(text="💎 Тарифы", callback_data="user_plans")])
+    else:
+        for invoice in invoices:
+            invoice_id = int(invoice.get("id") or 0)
+            rows.append([InlineKeyboardButton(text=f"Открыть счёт #{invoice_id}", callback_data=f"user_invoice:{invoice_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

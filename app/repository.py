@@ -318,6 +318,11 @@ class RepositoryProtocol(Protocol):
     def get_recent_video_audit(self, limit: int = 200): ...
     def get_video_audit_for_delivery(self, delivery_id: int, limit: int = 100): ...
 
+    # =========================================================
+    # BILLING / INVOICES
+    # =========================================================
+    def list_invoices_for_tenant(self, tenant_id: int, limit: int = 10) -> list[dict[str, Any]]: ...
+
     def log_rule_change(
         self,
         event_type: str,

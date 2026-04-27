@@ -733,6 +733,40 @@ def _public_plans_keyboard() -> InlineKeyboardMarkup:
     return user_ui.build_user_plans_keyboard()
 
 
+def _public_invoice_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
+    return user_ui.build_user_invoice_keyboard(invoice_id)
+
+
+def _invoice_plan_name(invoice: dict[str, Any], items: list[dict[str, Any]]) -> str:
+    for item in items:
+        meta = item.get("metadata_json") or {}
+        if isinstance(meta, dict) and meta.get("plan_name"):
+            return str(meta.get("plan_name")).upper()
+    for key in ("plan_name", "selected_plan"):
+        if invoice.get(key):
+            return str(invoice.get(key)).upper()
+    return "UNKNOWN"
+
+
+def _build_user_invoice_payload(invoice: dict[str, Any]) -> dict[str, Any]:
+    invoice_id = int(invoice.get("id") or 0)
+    items = db.list_invoice_items(invoice_id) if hasattr(db, "list_invoice_items") else []
+    return {"invoice": invoice, "items": items}
+
+
+def _get_user_invoices_payload(tenant_id: int, limit: int = 10) -> list[dict[str, Any]]:
+    if not hasattr(db, "list_invoices_for_tenant"):
+        last_invoice = db.get_last_invoice(int(tenant_id)) if hasattr(db, "get_last_invoice") else None
+        invoices = [last_invoice] if last_invoice else []
+    else:
+        invoices = db.list_invoices_for_tenant(int(tenant_id), limit=int(limit))
+    payload: list[dict[str, Any]] = []
+    for invoice in invoices:
+        item_rows = db.list_invoice_items(int(invoice.get("id") or 0)) if hasattr(db, "list_invoice_items") else []
+        payload.append({**invoice, "items": item_rows})
+    return payload
+
+
 def _default_plan_catalog(lang: str) -> list[dict[str, Any]]:
     return [
         {
@@ -2044,7 +2078,13 @@ async def handle_user_invoices_text(message: Message):
     if _is_admin_user(message.from_user.id if message.from_user else None):
         await cmd_invoice(message)
         return
-    await message.answer("Раздел счетов будет подключён следующим этапом.", reply_markup=_public_user_back_keyboard())
+    user_id = message.from_user.id if message.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    invoices = await run_db(_get_user_invoices_payload, tenant_id, 10)
+    await message.answer(
+        user_ui.build_user_invoices_text(invoices),
+        reply_markup=user_ui.build_user_invoices_keyboard(invoices),
+    )
 
 
 @dp.message(lambda m: m.text == "💳 Оплата")
@@ -2326,11 +2366,74 @@ async def handle_user_select_plan_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
         await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
         return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    plan_name = str((callback.data or "").split(":", 1)[1] if ":" in (callback.data or "") else "").upper()
+    logger.info("пользователь выбрал тариф plan_name=%s user_id=%s tenant_id=%s", plan_name, user_id, tenant_id)
+    if plan_name == "OWNER":
+        await answer_callback_safe(callback, "Тариф OWNER недоступен", show_alert=True)
+        return
+    if plan_name == "FREE":
+        await answer_callback_safe_once(callback)
+        await edit_message_text_safe(
+            message=callback.message,
+            text="Тариф FREE не требует создания счёта.",
+            reply_markup=_public_plans_keyboard(),
+        )
+        return
+    if plan_name not in {"BASIC", "PRO"}:
+        await answer_callback_safe(callback, "Разрешены только тарифы BASIC и PRO", show_alert=True)
+        return
+
+    invoices = await run_db(_get_user_invoices_payload, tenant_id, 10)
+    for invoice in invoices:
+        status = str(invoice.get("status") or "")
+        if status not in {"open", "draft"}:
+            continue
+        if _invoice_plan_name(invoice, invoice.get("items") or []) == plan_name:
+            await answer_callback_safe_once(callback)
+            await edit_message_text_safe(
+                message=callback.message,
+                text=user_ui.build_user_invoice_text(invoice, invoice.get("items") or []),
+                reply_markup=_public_invoice_keyboard(int(invoice.get("id") or 0)),
+            )
+            return
+
+    sub = await run_db(subscription_service.get_active_subscription, tenant_id)
+    if not sub:
+        await answer_callback_safe(callback, "Не удалось найти активную подписку", show_alert=True)
+        return
+    sub = await run_db(billing_service.ensure_billing_period, sub)
+    plan = _get_plan_info(plan_name, "ru")
+    invoice_id = await run_db(
+        invoice_service.create_draft_invoice,
+        int(tenant_id),
+        int(sub.get("id") or 0),
+        str(sub.get("current_period_start")),
+        str(sub.get("current_period_end")),
+        currency="USD",
+    )
+    if not invoice_id:
+        await answer_callback_safe(callback, "Не удалось создать счёт", show_alert=True)
+        return
+    await run_db(
+        invoice_service.add_invoice_item,
+        int(invoice_id),
+        item_type="base_plan",
+        description=plan_name,
+        quantity=1,
+        unit_price=float(plan.get("price") or 0),
+        metadata={"plan_name": plan_name},
+    )
+    await run_db(invoice_service.finalize_invoice, int(invoice_id))
+    invoice = await run_db(db.get_invoice, int(invoice_id)) if hasattr(db, "get_invoice") else {"id": int(invoice_id), "status": "open", "total": float(plan.get("price") or 0), "currency": "USD"}
+    items = await run_db(db.list_invoice_items, int(invoice_id)) if hasattr(db, "list_invoice_items") else []
+    logger.info("создан счёт invoice_id=%s tenant_id=%s plan=%s", invoice_id, tenant_id, plan_name)
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(
         message=callback.message,
-        text="Создание счёта будет добавлено следующим этапом.",
-        reply_markup=_public_user_back_keyboard(),
+        text=user_ui.build_user_invoice_text(invoice, items),
+        reply_markup=_public_invoice_keyboard(int(invoice_id)),
     )
 
 
@@ -2339,11 +2442,70 @@ async def handle_user_invoices_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
         await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
         return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    invoices = await run_db(_get_user_invoices_payload, tenant_id, 10)
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(
         message=callback.message,
-        text="Раздел счетов будет подключён следующим этапом.",
-        reply_markup=_public_user_back_keyboard(),
+        text=user_ui.build_user_invoices_text(invoices),
+        reply_markup=user_ui.build_user_invoices_keyboard(invoices),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice:"))
+async def handle_user_invoice_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id if callback.from_user else 0
+    invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
+    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
+    if not invoice:
+        await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
+        return
+    is_admin = _is_admin_user(user_id)
+    if not is_admin:
+        tenant_id = await run_db(ensure_user_tenant, user_id)
+        if int(invoice.get("tenant_id") or 0) != int(tenant_id):
+            logger.warning("попытка открыть чужой счёт user_id=%s invoice_id=%s", user_id, invoice_id)
+            await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+            return
+    items = await run_db(db.list_invoice_items, invoice_id) if hasattr(db, "list_invoice_items") else []
+    logger.info("пользователь открыл счёт invoice_id=%s", invoice_id)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_invoice_text(invoice, items),
+        reply_markup=_public_invoice_keyboard(invoice_id),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice_pay:"))
+async def handle_user_invoice_pay_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id if callback.from_user else 0
+    invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
+    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
+    if not invoice:
+        await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
+        return
+    is_admin = _is_admin_user(user_id)
+    if not is_admin:
+        tenant_id = await run_db(ensure_user_tenant, user_id)
+        if int(invoice.get("tenant_id") or 0) != int(tenant_id):
+            logger.warning("попытка открыть чужой счёт user_id=%s invoice_id=%s", user_id, invoice_id)
+            await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+            return
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=(
+            f"💳 Оплата счёта #{invoice_id}\n\n"
+            "Выбор способа оплаты будет подключён следующим этапом."
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{invoice_id}")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_invoices")],
+            ]
+        ),
     )
 
 

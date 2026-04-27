@@ -108,6 +108,7 @@ def test_billing_and_usage_facade_compatibility(monkeypatch):
     assert repo.set_invoice_status(1, "open") is True
     assert repo.get_invoice(1)["method"] == "get_invoice"
     assert repo.get_last_invoice(1)["method"] == "get_last_invoice"
+    assert repo.list_invoices_for_tenant(1, limit=5)["method"] == "list_invoices_for_tenant"
     assert repo.count_open_invoices(1) == 1
     assert repo.get_invoice_for_period(1, "2026-01-01", "2026-01-31")["method"] == "get_invoice_for_period"
     assert repo.list_invoice_items(1)["method"] == "list_invoice_items"
