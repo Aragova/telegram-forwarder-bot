@@ -1668,14 +1668,8 @@ async def stop_all_workers() -> None:
 async def cmd_start(message: Message):
     user_id = message.from_user.id if message.from_user else settings.admin_id
     if _is_admin_user(user_id):
-        lang = _resolve_language(user_id)
-        tenant_before = await run_db(tenant_service.get_tenant_by_admin, user_id)
-        await run_db(tenant_service.ensure_tenant_exists, user_id)
-        is_new = tenant_before is None
-        await message.reply(
-            product_ui.start_screen(lang, is_new),
-            reply_markup=product_ui.start_keyboard(lang),
-        )
+        reset_user_state(user_id)
+        await message.reply("📋 Главное меню", reply_markup=get_main_menu())
         return
 
     tenant_before = await run_db(tenant_service.get_tenant_by_admin, user_id)
