@@ -15,7 +15,9 @@ class ManualTransferProvider:
         self._enabled = bool(enabled)
 
     def is_available(self) -> bool:
-        return self._enabled and bool(settings.payment_enabled)
+        # Ручные методы оплаты используются как базовый fallback для invoice-level UI
+        # и доступны даже если глобальный payment_enabled выключен.
+        return self._enabled
 
     def create_payment(self, invoice: dict[str, Any], tenant: dict[str, Any], return_url: str | None = None) -> PaymentProviderResult:
         _ = return_url

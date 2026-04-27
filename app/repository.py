@@ -322,6 +322,21 @@ class RepositoryProtocol(Protocol):
     # BILLING / INVOICES
     # =========================================================
     def list_invoices_for_tenant(self, tenant_id: int, limit: int = 10) -> list[dict[str, Any]]: ...
+    def create_payment_intent(
+        self,
+        *,
+        tenant_id: int,
+        invoice_id: int,
+        provider: str,
+        status: str,
+        amount: float,
+        currency: str,
+        expires_at: str | None = None,
+    ) -> int | None: ...
+    def get_payment_intent(self, payment_intent_id: int) -> dict[str, Any] | None: ...
+    def get_payment_intent_by_invoice(self, invoice_id: int) -> dict[str, Any] | None: ...
+    def get_active_payment_intent_for_invoice_provider(self, invoice_id: int, provider: str) -> dict[str, Any] | None: ...
+    def list_payment_intents_for_tenant(self, tenant_id: int, limit: int = 20) -> list[dict[str, Any]]: ...
 
     def log_rule_change(
         self,
