@@ -603,6 +603,7 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_horizontal_id BIGINT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_vertical_id BIGINT NULL;
         ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dedup_key TEXT NULL;
+        ALTER TABLE channels ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
         ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
         ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
@@ -621,8 +622,20 @@ class PostgresRepository(RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(
                     """
+                    UPDATE channels
+                    SET tenant_id = 1
+                    WHERE tenant_id IS NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    DROP INDEX IF EXISTS idx_channels_unique
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_channels_unique
-                    ON channels(channel_id, COALESCE(thread_id, -1), channel_type)
+                    ON channels(COALESCE(tenant_id, 1), channel_id, COALESCE(thread_id, -1), channel_type)
                     """
                 )
                 cur.execute(
@@ -853,14 +866,43 @@ class PostgresRepository(RepositoryProtocol):
         added_by: int,
     ) -> bool:
         with self.connect() as conn:
+            tenant_id = self._ensure_tenant_for_admin_conn(conn, int(added_by))
+        return self.add_channel_for_tenant(
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            channel_type=channel_type,
+            title=title,
+            added_by=added_by,
+        )
+
+    def add_channel_for_tenant(
+        self,
+        tenant_id: int,
+        channel_id: str,
+        thread_id: int | None,
+        channel_type: str,
+        title: str,
+        added_by: int,
+    ) -> bool:
+        with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO channels(channel_id, thread_id, channel_type, title, added_by, added_date, is_active)
-                    VALUES(%s, %s, %s, %s, %s, %s, TRUE)
+                    INSERT INTO channels(
+                        channel_id,
+                        thread_id,
+                        channel_type,
+                        title,
+                        added_by,
+                        added_date,
+                        is_active,
+                        tenant_id
+                    )
+                    VALUES(%s, %s, %s, %s, %s, %s, TRUE, %s)
                     ON CONFLICT DO NOTHING
                     """,
-                    (str(channel_id), thread_id, channel_type, title, added_by, utc_now_iso()),
+                    (str(channel_id), thread_id, channel_type, title, added_by, utc_now_iso(), int(tenant_id)),
                 )
                 created = cur.rowcount > 0
             conn.commit()
@@ -1878,6 +1920,34 @@ class PostgresRepository(RepositoryProtocol):
                 )
                 rows = cur.fetchall()
 
+        return [self._row_to_rule(row) for row in rows]
+
+    def get_rules_for_tenant(self, tenant_id: int):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        r.*,
+                        s.title AS source_title,
+                        t.title AS target_title
+                    FROM routing r
+                    LEFT JOIN channels s
+                      ON s.channel_id = r.source_id
+                     AND ((s.thread_id IS NULL AND r.source_thread_id IS NULL) OR s.thread_id = r.source_thread_id)
+                     AND s.channel_type = 'source'
+                     AND COALESCE(s.tenant_id, 1) = COALESCE(r.tenant_id, 1)
+                    LEFT JOIN channels t
+                      ON t.channel_id = r.target_id
+                     AND ((t.thread_id IS NULL AND r.target_thread_id IS NULL) OR t.thread_id = r.target_thread_id)
+                     AND t.channel_type = 'target'
+                     AND COALESCE(t.tenant_id, 1) = COALESCE(r.tenant_id, 1)
+                    WHERE COALESCE(r.tenant_id, 1) = %s
+                    ORDER BY r.created_date, r.id
+                    """,
+                    (int(tenant_id),),
+                )
+                rows = cur.fetchall()
         return [self._row_to_rule(row) for row in rows]
 
     def get_rule(self, rule_id: int):
@@ -3535,6 +3605,135 @@ class PostgresRepository(RepositoryProtocol):
                     (limit,),
                 )
                 return cur.fetchall()
+
+    def get_channels_for_tenant(self, tenant_id: int, channel_type: str | None = None):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if channel_type:
+                    cur.execute(
+                        """
+                        SELECT channel_id, thread_id, title, channel_type
+                        FROM channels
+                        WHERE channel_type = %s
+                          AND is_active = TRUE
+                          AND COALESCE(tenant_id, 1) = %s
+                        ORDER BY added_date
+                        """,
+                        (channel_type, int(tenant_id)),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT channel_id, thread_id, title, channel_type
+                        FROM channels
+                        WHERE is_active = TRUE
+                          AND COALESCE(tenant_id, 1) = %s
+                        ORDER BY channel_type, added_date
+                        """,
+                        (int(tenant_id),),
+                    )
+                return cur.fetchall()
+
+    def remove_channel_for_tenant(
+        self,
+        tenant_id: int,
+        channel_id: str,
+        thread_id: int | None,
+        channel_type: str | None = None,
+    ) -> bool:
+        channel_id = str(channel_id)
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                params: list[Any] = [channel_id, int(tenant_id)]
+                q = "DELETE FROM channels WHERE channel_id = %s AND COALESCE(tenant_id, 1) = %s"
+
+                if thread_id is None:
+                    q += " AND thread_id IS NULL"
+                else:
+                    q += " AND thread_id = %s"
+                    params.append(thread_id)
+
+                if channel_type:
+                    q += " AND channel_type = %s"
+                    params.append(channel_type)
+
+                cur.execute(q, tuple(params))
+                removed = cur.rowcount > 0
+                if not removed:
+                    conn.commit()
+                    return False
+
+                if thread_id is None:
+                    cur.execute(
+                        """
+                        DELETE FROM routing
+                        WHERE COALESCE(tenant_id, 1) = %s
+                          AND ((source_id = %s AND source_thread_id IS NULL)
+                            OR (target_id = %s AND target_thread_id IS NULL))
+                        """,
+                        (int(tenant_id), channel_id, channel_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        DELETE FROM routing
+                        WHERE COALESCE(tenant_id, 1) = %s
+                          AND ((source_id = %s AND source_thread_id = %s)
+                            OR (target_id = %s AND target_thread_id = %s))
+                        """,
+                        (int(tenant_id), channel_id, thread_id, channel_id, thread_id),
+                    )
+
+                if channel_type in (None, "source"):
+                    if thread_id is None:
+                        cur.execute(
+                            """
+                            DELETE FROM posts
+                            WHERE source_channel = %s
+                              AND source_thread_id IS NULL
+                              AND NOT EXISTS (
+                                SELECT 1
+                                FROM channels c
+                                WHERE c.channel_type = 'source'
+                                  AND c.channel_id = posts.source_channel
+                                  AND c.thread_id IS NULL
+                                  AND c.is_active = TRUE
+                              )
+                            """,
+                            (channel_id,),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            DELETE FROM posts
+                            WHERE source_channel = %s
+                              AND source_thread_id = %s
+                              AND NOT EXISTS (
+                                SELECT 1
+                                FROM channels c
+                                WHERE c.channel_type = 'source'
+                                  AND c.channel_id = posts.source_channel
+                                  AND c.thread_id = posts.source_thread_id
+                                  AND c.is_active = TRUE
+                              )
+                            """,
+                            (channel_id, thread_id),
+                        )
+
+                cur.execute(
+                    """
+                    DELETE FROM deliveries d
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM routing r
+                        WHERE r.id = d.rule_id
+                    )
+                    """
+                )
+
+            conn.commit()
+            return True
 
     def get_processing_album_for_rule(
         self,

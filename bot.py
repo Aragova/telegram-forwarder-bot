@@ -125,6 +125,10 @@ MENU_NAVIGATION_TEXTS = {
     "⚙️ Система",
     "💎 Тарифы",
     "👤 Мой аккаунт",
+    "📡 Источники",
+    "🎯 Получатели",
+    "⚙️ Мои правила",
+    "📊 Статус",
     "🌐 Язык",
     "📈 Использование",
     "🧾 Счета",
@@ -134,9 +138,15 @@ MENU_NAVIGATION_TEXTS = {
     "📜 Список",
     "📜 Список правил",
     "📜 Список каналов",
+    "📜 Мои источники",
+    "📜 Мои получатели",
     "➕ Добавить канал",
+    "➕ Добавить источник",
+    "➕ Добавить получатель",
     "➖ Канал",
     "➖ Удалить канал",
+    "➖ Удалить источник",
+    "➖ Удалить получатель",
     "➕ Добавить правило",
     "⚠️ Проблемные доставки",
     "📊 Журнал системы",
@@ -633,11 +643,50 @@ def _is_admin_user(user_id: int | None) -> bool:
         return False
     return int(user_id) == int(settings.admin_id)
 
+def is_admin_user(user_id: int | None) -> bool:
+    return _is_admin_user(user_id)
+
+
+def get_current_tenant_for_user(user_id: int) -> int:
+    tenant = tenant_service.ensure_tenant_exists(int(user_id))
+    return int(tenant.get("id") or 1)
+
+
+def ensure_user_tenant(user_id: int) -> int:
+    return get_current_tenant_for_user(user_id)
+
+
+def is_rule_owned_by_user(rule_id: int, user_id: int) -> bool:
+    if is_admin_user(user_id):
+        return True
+    if not hasattr(db, "get_rule_tenant_id"):
+        return False
+    return int(db.get_rule_tenant_id(int(rule_id)) or 1) == ensure_user_tenant(int(user_id))
+
+
+def is_channel_owned_by_user(
+    channel_id: str,
+    thread_id: int | None,
+    channel_type: str,
+    user_id: int,
+) -> bool:
+    if is_admin_user(user_id):
+        return True
+    tenant_id = ensure_user_tenant(int(user_id))
+    if not hasattr(db, "get_channels_for_tenant"):
+        return False
+    rows = db.get_channels_for_tenant(tenant_id, channel_type)
+    return any(
+        str(row["channel_id"]) == str(channel_id)
+        and ((row["thread_id"] is None and thread_id is None) or int(row["thread_id"]) == int(thread_id or 0))
+        for row in rows
+    )
+
 
 def _public_user_menu_text() -> str:
     return (
         "👋 Добро пожаловать в ViMi\n\n"
-        "ViMi помогает автоматизировать Telegram-каналы: публикации, видео, очереди, тарифы, счета и оплату — внутри Telegram.\n\n"
+        "ViMi помогает автоматизировать Telegram-каналы: источники, получатели, правила публикации, очередь и статус — внутри Telegram.\n\n"
         "Выберите действие:"
     )
 
@@ -645,10 +694,13 @@ def _public_user_menu_text() -> str:
 def _public_user_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="📡 Источники", callback_data="user_sources")],
+            [InlineKeyboardButton(text="🎯 Получатели", callback_data="user_targets")],
+            [InlineKeyboardButton(text="⚙️ Мои правила", callback_data="user_rules")],
+            [InlineKeyboardButton(text="📊 Статус", callback_data="user_status")],
             [InlineKeyboardButton(text="👤 Мой аккаунт", callback_data="user_account")],
             [InlineKeyboardButton(text="💎 Тарифы", callback_data="user_plans")],
             [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
-            [InlineKeyboardButton(text="💳 Оплата", callback_data="user_payments")],
             [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
         ]
     )
@@ -699,9 +751,30 @@ def _public_account_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
             [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
-            [InlineKeyboardButton(text="💳 Оплата", callback_data="user_payments")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
         ]
+    )
+
+
+def _user_sources_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📜 Мои источники")],
+            [KeyboardButton(text="➕ Добавить источник"), KeyboardButton(text="➖ Удалить источник")],
+            [KeyboardButton(text="⬅️ Назад в меню")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _user_targets_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📜 Мои получатели")],
+            [KeyboardButton(text="➕ Добавить получатель"), KeyboardButton(text="➖ Удалить получатель")],
+            [KeyboardButton(text="⬅️ Назад в меню")],
+        ],
+        resize_keyboard=True,
     )
 
 
@@ -808,6 +881,51 @@ def interval_to_text(seconds: int) -> str:
     if seconds % 3600 == 0:
         return f"{seconds // 3600}ч"
     return f"{seconds}s"
+
+
+def build_user_rules_keyboard(rules, page: int = 0) -> InlineKeyboardMarkup:
+    total = len(rules)
+    if total == 0:
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")]])
+    max_page = (total - 1) // RULES_PAGE_SIZE
+    page = max(0, min(page, max_page))
+    start = page * RULES_PAGE_SIZE
+    current = rules[start:start + RULES_PAGE_SIZE]
+    rows: list[list[InlineKeyboardButton]] = []
+    for row in current:
+        rid = int(getattr(row, "id", 0))
+        label = compact_rule_text(row)
+        state = "▶️" if bool(getattr(row, "is_active", False)) else "⏸"
+        rows.append([InlineKeyboardButton(text=f"{state} #{rid} {label}", callback_data=f"user_rule_open:{rid}")])
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"user_rules_page:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{max_page + 1}", callback_data="user_rules_noop"))
+    if page < max_page:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"user_rules_page:{page + 1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(text="➕ Добавить правило", callback_data="user_rules_add")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_user_rule_card(rule) -> tuple[str, InlineKeyboardMarkup]:
+    rid = int(getattr(rule, "id", 0))
+    text = (
+        f"⚙️ Правило #{rid}\n\n"
+        f"Источник: {getattr(rule, 'source_title', None) or getattr(rule, 'source_id', '')}\n"
+        f"Получатель: {getattr(rule, 'target_title', None) or getattr(rule, 'target_id', '')}\n"
+        f"Интервал: {interval_to_text(int(getattr(rule, 'interval', 0) or 0))}\n"
+        f"Статус: {'активно' if bool(getattr(rule, 'is_active', False)) else 'остановлено'}"
+    )
+    toggle = "⏸ Остановить" if bool(getattr(rule, "is_active", False)) else "▶️ Запустить"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=toggle, callback_data=f"user_rule_toggle:{rid}")],
+        [InlineKeyboardButton(text="⏱ Интервал", callback_data=f"user_rule_interval:{rid}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"user_rule_delete:{rid}")],
+        [InlineKeyboardButton(text="⬅️ К списку", callback_data="user_rules")],
+    ])
+    return text, kb
 
 
 def rule_label(row) -> str:
@@ -1887,7 +2005,10 @@ async def handle_invoices_button(message: Message):
 @dp.message(lambda m: m.text in ("🔙 Главное меню", "⬅️ Назад в меню"))
 async def handle_main_menu(message: Message):
     reset_user_state(message.from_user.id if message.from_user else None)
-    await message.reply("📋 Главное меню", reply_markup=get_main_menu())
+    if _is_admin_user(message.from_user.id if message.from_user else None):
+        await message.reply("📋 Главное меню", reply_markup=get_main_menu())
+        return
+    await _show_public_user_menu_message(message)
 
 @dp.message(lambda m: m.text == "❌ Отмена")
 async def handle_cancel(message: Message):
@@ -1999,7 +2120,7 @@ async def handle_user_invoices_text(message: Message):
     if _is_admin_user(message.from_user.id if message.from_user else None):
         await cmd_invoice(message)
         return
-    await _show_public_user_menu_message(message)
+    await message.answer("Раздел счетов будет подключён следующим этапом.", reply_markup=_public_user_back_keyboard())
 
 
 @dp.message(lambda m: m.text == "💳 Оплата")
@@ -2029,6 +2150,83 @@ async def handle_user_main_callback(callback: CallbackQuery):
         text=_public_user_menu_text(),
         reply_markup=_public_user_menu_keyboard(),
     )
+
+@dp.callback_query(lambda c: c.data == "user_sources")
+async def handle_user_sources_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    logger.info("пользователь открыл список источников user_id=%s tenant_id=%s", user_id, tenant_id)
+    await answer_callback_safe_once(callback)
+    await callback.message.answer("📡 Источники\n\nВыберите действие:", reply_markup=_user_sources_keyboard())
+
+
+@dp.callback_query(lambda c: c.data == "user_targets")
+async def handle_user_targets_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    logger.info("пользователь открыл список получателей user_id=%s tenant_id=%s", user_id, tenant_id)
+    await answer_callback_safe_once(callback)
+    await callback.message.answer("🎯 Получатели\n\nВыберите действие:", reply_markup=_user_targets_keyboard())
+
+
+@dp.callback_query(lambda c: c.data == "user_rules")
+async def handle_user_rules_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    logger.info("пользователь открыл свои правила user_id=%s tenant_id=%s", user_id, tenant_id)
+    rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(message=callback.message, text="📜 Список правил:", reply_markup=build_user_rules_keyboard(rules, page=0))
+
+
+@dp.callback_query(lambda c: c.data == "user_status")
+async def handle_user_status_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    sub = await run_db(subscription_service.get_active_subscription, tenant_id) or {}
+    rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
+    active_rules = sum(1 for row in rules if bool(getattr(row, "is_active", False)))
+    rule_limit = int(sub.get("max_rules") or 0)
+    queue_total = 0
+    errors_total = 0
+    next_publication = "—"
+    for row in rules:
+        snapshot = await run_db(db.get_rule_card_snapshot, int(getattr(row, "id", 0)))
+        if not snapshot:
+            continue
+        queue_total += int(snapshot.get("pending_count") or 0)
+        errors_total += int(snapshot.get("faulty_count") or 0)
+        next_run = snapshot.get("next_run_at")
+        if next_run and next_publication == "—":
+            next_publication = str(next_run)[11:16]
+    text = (
+        "📊 Статус\n\n"
+        f"Правил: {len(rules)} / {rule_limit}\n"
+        f"Активных правил: {active_rules}\n"
+        f"Публикаций в очереди: {queue_total}\n"
+        f"Ошибок: {errors_total}\n"
+        f"Следующая публикация: {next_publication}\n\n"
+        f"Тариф: {str(sub.get('plan_name') or 'FREE').upper()}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚙️ Мои правила", callback_data="user_rules")],
+        [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
+    ])
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
 
 @dp.callback_query(lambda c: c.data == "user_account")
@@ -2615,24 +2813,30 @@ async def handle_system_menu(message: Message):
 @dp.message(lambda m: m.text == "📜 Список правил")
 async def handle_list_rules(message: Message):
     reset_user_state(message.from_user.id if message.from_user else None)
-    if not await is_admin(message):
-        return
-
-    rules = await run_db(db.get_all_rules)
+    user_id = message.from_user.id if message.from_user else settings.admin_id
+    is_admin_mode = is_admin_user(user_id)
+    if is_admin_mode:
+        rules = await run_db(db.get_all_rules)
+    else:
+        tenant_id = await run_db(ensure_user_tenant, user_id)
+        rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
 
     if not rules:
         await message.reply("Правил пока нет", reply_markup=get_rules_menu())
         return
 
-    await message.reply(
-        "📜 Список правил:",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    if is_admin_mode:
+        await message.reply(
+            "📜 Список правил:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await message.answer(
+            "📜 Список правил:",
+            reply_markup=rules_list_keyboard(rules, page=0),
+        )
+        return
 
-    await message.answer(
-        "📜 Список правил:",
-        reply_markup=rules_list_keyboard(rules, page=0),
-    )
+    await message.answer("📜 Список правил:", reply_markup=build_user_rules_keyboard(rules, page=0))
 
 @dp.callback_query(lambda c: c.data == "rules_back")
 async def handle_rules_back(callback: CallbackQuery):
@@ -2660,6 +2864,106 @@ async def handle_rules_back(callback: CallbackQuery):
         text="🔄 Раздел: Правила",
         reply_markup=get_rules_menu(),
     )
+
+
+@dp.callback_query(lambda c: c.data == "user_rules_noop")
+async def handle_user_rules_noop(callback: CallbackQuery):
+    await answer_callback_safe_once(callback)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_rules_page:"))
+async def handle_user_rules_page(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    page = int((callback.data or "user_rules_page:0").split(":", 1)[1])
+    tenant_id = await run_db(ensure_user_tenant, callback.from_user.id if callback.from_user else 0)
+    rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
+    await answer_callback_safe_once(callback)
+    await edit_message_reply_markup_safe(message=callback.message, reply_markup=build_user_rules_keyboard(rules, page=page))
+
+
+@dp.callback_query(lambda c: c.data == "user_rules_add")
+async def handle_user_rules_add(callback: CallbackQuery):
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    source_rows = await run_db(db.get_channels_for_tenant, tenant_id, "source") if hasattr(db, "get_channels_for_tenant") else []
+    sources = [ChannelChoice(r["channel_id"], r["thread_id"], r["title"] or r["channel_id"]) for r in source_rows]
+    if not sources:
+        await answer_callback_safe(callback, "Сначала добавьте источник", show_alert=True)
+        return
+    keyboard = [[KeyboardButton(text=f"📤 {i}. {s.title}{f' (тема {s.thread_id})' if s.thread_id else ''}")] for i, s in enumerate(sources, 1)]
+    keyboard.append([KeyboardButton(text="❌ Отмена")])
+    user_states[user_id] = {"action": "pick_rule_source", "sources": sources}
+    await answer_callback_safe_once(callback)
+    await callback.message.answer("Выберите источник", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True))
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_open:"))
+async def handle_user_rule_open(callback: CallbackQuery):
+    user_id = callback.from_user.id if callback.from_user else 0
+    rule_id = int((callback.data or "").split(":", 1)[1])
+    if not await run_db(is_rule_owned_by_user, rule_id, user_id):
+        logger.warning("пользователь попытался открыть чужой объект user_id=%s object=rule:%s", user_id, rule_id)
+        await answer_callback_safe(callback, "⛔ Нет доступа к этому объекту", show_alert=True)
+        return
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return
+    text, kb = build_user_rule_card(rule)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_toggle:"))
+async def handle_user_rule_toggle(callback: CallbackQuery):
+    user_id = callback.from_user.id if callback.from_user else 0
+    rule_id = int((callback.data or "").split(":", 1)[1])
+    if not await run_db(is_rule_owned_by_user, rule_id, user_id):
+        logger.warning("пользователь попытался открыть чужой объект user_id=%s object=rule:%s", user_id, rule_id)
+        await answer_callback_safe(callback, "⛔ Нет доступа к этому объекту", show_alert=True)
+        return
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return
+    if bool(getattr(rule, "is_active", False)):
+        await run_db(scheduler_service.deactivate_rule, rule_id)
+    else:
+        await run_db(scheduler_service.activate_with_backfill, rule_id)
+    updated = await run_db(db.get_rule, rule_id)
+    text, kb = build_user_rule_card(updated)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_delete:"))
+async def handle_user_rule_delete(callback: CallbackQuery):
+    user_id = callback.from_user.id if callback.from_user else 0
+    rule_id = int((callback.data or "").split(":", 1)[1])
+    if not await run_db(is_rule_owned_by_user, rule_id, user_id):
+        logger.warning("пользователь попытался открыть чужой объект user_id=%s object=rule:%s", user_id, rule_id)
+        await answer_callback_safe(callback, "⛔ Нет доступа к этому объекту", show_alert=True)
+        return
+    await run_db(db.remove_rule, rule_id)
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
+    await answer_callback_safe_once(callback, "Удалено")
+    await edit_message_text_safe(message=callback.message, text="📜 Список правил:", reply_markup=build_user_rules_keyboard(rules, page=0))
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_interval:"))
+async def handle_user_rule_interval(callback: CallbackQuery):
+    user_id = callback.from_user.id if callback.from_user else 0
+    rule_id = int((callback.data or "").split(":", 1)[1])
+    if not await run_db(is_rule_owned_by_user, rule_id, user_id):
+        logger.warning("пользователь попытался открыть чужой объект user_id=%s object=rule:%s", user_id, rule_id)
+        await answer_callback_safe(callback, "⛔ Нет доступа к этому объекту", show_alert=True)
+        return
+    user_states[user_id] = {"action": "user_set_rule_interval", "rule_id": rule_id}
+    await answer_callback_safe_once(callback)
+    await callback.message.answer("Отправьте новый интервал в секундах", reply_markup=get_cancel_keyboard())
 
 @dp.callback_query(lambda c: c.data == "rules_page_info")
 async def handle_rules_page_info(callback: CallbackQuery):
@@ -6906,7 +7210,12 @@ async def handle_stateful_private_inputs(message: Message):
             if exists:
                 await message.answer("Такая тема уже добавлена", reply_markup=get_main_menu())
             else:
-                await run_db(db.add_channel, chat_id, thread_id, channel_type, title, settings.admin_id)
+                actor_id = message.from_user.id if message.from_user else settings.admin_id
+                if is_admin_user(actor_id):
+                    await run_db(db.add_channel, chat_id, thread_id, channel_type, title, actor_id)
+                else:
+                    tenant_id = await run_db(ensure_user_tenant, actor_id)
+                    await run_db(db.add_channel_for_tenant, tenant_id, chat_id, thread_id, channel_type, title, actor_id)
                 await message.answer(
                     f"✅ Добавлена запись: {title} / тема {thread_id}",
                     reply_markup=get_main_menu(),
@@ -6950,6 +7259,9 @@ async def handle_stateful_private_inputs(message: Message):
 
         if rule_id:
             await ensure_rule_workers()
+            if not is_admin_user(message.from_user.id if message.from_user else None):
+                tenant_id = await run_db(ensure_user_tenant, message.from_user.id if message.from_user else 0)
+                logger.info("пользователь создал правило rule_id=%s tenant_id=%s", rule_id, tenant_id)
             await message.answer(
                 f"✅ Правило создано #{rule_id}. Первый пост выйдет сразу, дальше — каждые {interval_to_text(interval)}",
                 reply_markup=get_main_menu(),
@@ -6963,13 +7275,18 @@ async def handle_stateful_private_inputs(message: Message):
                 sub = await run_db(subscription_service.get_active_subscription, tenant_id) or {}
                 created_rules = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
                 await message.answer(
-                    product_ui.rule_limit_error(
-                        lang=lang,
-                        plan_name=str(sub.get("plan_name") or "FREE"),
-                        allowed_rules=int(sub.get("max_rules") or 0),
-                        created_rules=int(created_rules or 0),
+                    (
+                        "🚫 Лимит тарифа достигнут\n\n"
+                        f"На вашем тарифе доступно: {int(sub.get('max_rules') or 0)} правил.\n"
+                        f"Сейчас создано: {int(created_rules or 0)}.\n\n"
+                        "Чтобы добавить больше правил, смените тариф."
                     ),
-                    reply_markup=product_ui.limit_error_keyboard(lang),
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
+                            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
+                        ]
+                    ),
                 )
                 reset_user_state(user_id)
                 return
@@ -6981,8 +7298,38 @@ async def handle_stateful_private_inputs(message: Message):
         reset_user_state(user_id)
         return
 
-@dp.message(lambda m: m.text in ("➕ Канал", "➕ Добавить канал"))
+    if action == "user_set_rule_interval":
+        try:
+            interval = int(text)
+        except Exception:
+            await message.answer("❌ Введите число секунд", reply_markup=get_cancel_keyboard())
+            return
+        if interval < 1:
+            await message.answer("❌ Интервал должен быть не меньше 1 секунды", reply_markup=get_cancel_keyboard())
+            return
+        rule_id = int(state.get("rule_id") or 0)
+        if not await run_db(is_rule_owned_by_user, rule_id, message.from_user.id if message.from_user else 0):
+            await message.answer("⛔ Нет доступа к этому объекту", reply_markup=get_main_menu())
+            reset_user_state(user_id)
+            return
+        updated = await run_db(_change_interval_sync, rule_id, "change_interval", interval, message.from_user.id if message.from_user else settings.admin_id)
+        if updated.get("ok"):
+            await message.answer("✅ Интервал обновлён", reply_markup=get_main_menu())
+        else:
+            await message.answer("❌ Не удалось обновить интервал", reply_markup=get_main_menu())
+        reset_user_state(user_id)
+        return
+
+@dp.message(lambda m: m.text in ("➕ Канал", "➕ Добавить канал", "➕ Добавить источник", "➕ Добавить получатель"))
 async def handle_add_channel(message: Message):
+    if message.text == "➕ Добавить источник":
+        user_states[message.from_user.id] = {"action": "choose_source_kind"}
+        await message.reply("Выберите: канал или группа с темой", reply_markup=get_entity_kind_keyboard())
+        return
+    if message.text == "➕ Добавить получатель":
+        user_states[message.from_user.id] = {"action": "choose_target_kind"}
+        await message.reply("Выберите: канал или группа с темой", reply_markup=get_entity_kind_keyboard())
+        return
     if not await is_admin(message):
         return
     await message.reply("Выберите тип записи", reply_markup=get_channel_type_keyboard())
@@ -6990,7 +7337,7 @@ async def handle_add_channel(message: Message):
 
 @dp.message(lambda m: m.text == "📤 Источник")
 async def handle_source_type(message: Message):
-    if not await is_admin(message):
+    if not is_admin_user(message.from_user.id if message.from_user else None):
         return
     user_states[message.from_user.id] = {"action": "choose_source_kind"}
     await message.reply("Выберите: канал или группа с темой", reply_markup=get_entity_kind_keyboard())
@@ -6998,7 +7345,7 @@ async def handle_source_type(message: Message):
 
 @dp.message(lambda m: m.text == "📥 Получатель")
 async def handle_target_type(message: Message):
-    if not await is_admin(message):
+    if not is_admin_user(message.from_user.id if message.from_user else None):
         return
     user_states[message.from_user.id] = {"action": "choose_target_kind"}
     await message.reply("Выберите: канал или группа с темой", reply_markup=get_entity_kind_keyboard())
@@ -7006,8 +7353,6 @@ async def handle_target_type(message: Message):
 
 @dp.message(lambda m: m.text in ("📺 Канал", "👥 Группа с темой"))
 async def handle_entity_kind(message: Message):
-    if not await is_admin(message):
-        return
     state = user_states.get(message.from_user.id)
     if not state:
         return
@@ -7032,9 +7377,6 @@ async def resolve_chat_title(chat_id: str) -> str:
 
 @dp.message(lambda m: m.text and m.text.startswith("-100"))
 async def handle_chat_id_inputs(message: Message):
-    if not await is_admin(message):
-        return
-
     state = user_states.get(message.from_user.id)
     if not state:
         return
@@ -7059,14 +7401,12 @@ async def handle_chat_id_inputs(message: Message):
                     reply_markup=get_main_menu(),
                 )
             else:
-                created = await run_db(
-                    db.add_channel,
-                    chat_id,
-                    None,
-                    channel_type,
-                    title,
-                    settings.admin_id,
-                )
+                actor_id = message.from_user.id if message.from_user else settings.admin_id
+                if is_admin_user(actor_id):
+                    created = await run_db(db.add_channel, chat_id, None, channel_type, title, actor_id)
+                else:
+                    tenant_id = await run_db(ensure_user_tenant, actor_id)
+                    created = await run_db(db.add_channel_for_tenant, tenant_id, chat_id, None, channel_type, title, actor_id)
 
                 if not created:
                     await message.reply(
@@ -7257,12 +7597,22 @@ async def handle_intro_file(message: Message):
     )
 )
 
-@dp.message(lambda m: m.text in ("📜 Список", "📜 Список каналов"))
+@dp.message(lambda m: m.text in ("📜 Список", "📜 Список каналов", "📜 Мои источники", "📜 Мои получатели"))
 async def handle_list_channels(message: Message):
     reset_user_state(message.from_user.id if message.from_user else None)
-    if not await is_admin(message):
-        return
-    rows = await run_db(db.get_channels)
+    user_id = message.from_user.id if message.from_user else settings.admin_id
+    is_admin_mode = is_admin_user(user_id)
+    if is_admin_mode:
+        rows = await run_db(db.get_channels)
+    else:
+        tenant_id = await run_db(ensure_user_tenant, user_id)
+        channel_type = None
+        if message.text == "📜 Мои источники":
+            channel_type = "source"
+        if message.text == "📜 Мои получатели":
+            channel_type = "target"
+        rows = await run_db(db.get_channels_for_tenant, tenant_id, channel_type) if hasattr(db, "get_channels_for_tenant") else []
+        logger.info("пользователь открыл список каналов user_id=%s tenant_id=%s type=%s", user_id, tenant_id, channel_type or "all")
     if not rows:
         await message.reply("Нет каналов", reply_markup=get_main_menu())
         return
@@ -7274,12 +7624,16 @@ async def handle_list_channels(message: Message):
     await message.reply(text[:4000], parse_mode="Markdown", reply_markup=get_main_menu())
 
 
-@dp.message(lambda m: m.text in ("➖ Канал", "➖ Удалить канал"))
+@dp.message(lambda m: m.text in ("➖ Канал", "➖ Удалить канал", "➖ Удалить источник", "➖ Удалить получатель"))
 async def handle_remove_channel(message: Message):
-    if not await is_admin(message):
-        return
-
-    rows = await run_db(db.get_channels)
+    user_id = message.from_user.id if message.from_user else settings.admin_id
+    is_admin_mode = is_admin_user(user_id)
+    if is_admin_mode:
+        rows = await run_db(db.get_channels)
+    else:
+        tenant_id = await run_db(ensure_user_tenant, user_id)
+        channel_type = "source" if message.text == "➖ Удалить источник" else ("target" if message.text == "➖ Удалить получатель" else None)
+        rows = await run_db(db.get_channels_for_tenant, tenant_id, channel_type) if hasattr(db, "get_channels_for_tenant") else []
     if not rows:
         await message.reply("Нет каналов", reply_markup=get_main_menu())
         return
@@ -7299,6 +7653,7 @@ async def handle_remove_channel(message: Message):
     user_states[message.from_user.id] = {
         "action": "remove_channel",
         "mapping": mapping,
+        "tenant_id": None if is_admin_mode else tenant_id,
     }
 
     await message.reply(
@@ -7309,9 +7664,7 @@ async def handle_remove_channel(message: Message):
 
 @dp.message(lambda m: m.text and m.text.startswith("Удалить "))
 async def handle_remove_selected(message: Message):
-    if not await is_admin(message):
-        return
-
+    user_id = message.from_user.id if message.from_user else settings.admin_id
     state = user_states.get(message.from_user.id)
     if not state or state.get("action") != "remove_channel":
         return
@@ -7319,7 +7672,11 @@ async def handle_remove_selected(message: Message):
     try:
         idx = int(message.text.split()[-1]) - 1
         channel_id, thread_id, channel_type = state["mapping"][idx]
-        await run_db(db.remove_channel, channel_id, thread_id, channel_type)
+        tenant_id = state.get("tenant_id")
+        if tenant_id is None:
+            await run_db(db.remove_channel, channel_id, thread_id, channel_type)
+        else:
+            await run_db(db.remove_channel_for_tenant, tenant_id, channel_id, thread_id, channel_type)
         await ensure_rule_workers()
         await message.reply("✅ Канал удалён", reply_markup=get_main_menu())
     except Exception as exc:
@@ -7330,9 +7687,12 @@ async def handle_remove_selected(message: Message):
 
 @dp.message(lambda m: m.text == "➕ Добавить правило")
 async def handle_add_rule(message: Message):
-    if not await is_admin(message):
-        return
-    source_rows = await run_db(db.get_channels, "source")
+    user_id = message.from_user.id if message.from_user else settings.admin_id
+    if is_admin_user(user_id):
+        source_rows = await run_db(db.get_channels, "source")
+    else:
+        tenant_id = await run_db(ensure_user_tenant, user_id)
+        source_rows = await run_db(db.get_channels_for_tenant, tenant_id, "source") if hasattr(db, "get_channels_for_tenant") else []
     sources = [ChannelChoice(r["channel_id"], r["thread_id"], r["title"] or r["channel_id"]) for r in source_rows]
     if not sources:
         await message.reply("Нет источников", reply_markup=get_main_menu())
@@ -7345,14 +7705,17 @@ async def handle_add_rule(message: Message):
 
 @dp.message(lambda m: m.text and m.text.startswith("📤 "))
 async def handle_pick_rule_source(message: Message):
-    if not await is_admin(message):
-        return
     state = user_states.get(message.from_user.id)
     if not state or state.get("action") != "pick_rule_source":
         return
     idx = int(message.text.split(".")[0].split()[1]) - 1
     choice = state["sources"][idx]
-    target_rows = await run_db(db.get_channels, "target")
+    user_id = message.from_user.id if message.from_user else settings.admin_id
+    if is_admin_user(user_id):
+        target_rows = await run_db(db.get_channels, "target")
+    else:
+        tenant_id = await run_db(ensure_user_tenant, user_id)
+        target_rows = await run_db(db.get_channels_for_tenant, tenant_id, "target") if hasattr(db, "get_channels_for_tenant") else []
     targets = [ChannelChoice(r["channel_id"], r["thread_id"], r["title"] or r["channel_id"]) for r in target_rows]
     if not targets:
         await message.reply("Нет получателей", reply_markup=get_main_menu())
@@ -7367,8 +7730,6 @@ async def handle_pick_rule_source(message: Message):
 
 @dp.message(lambda m: m.text and m.text.startswith("📥 "))
 async def handle_pick_rule_target(message: Message):
-    if not await is_admin(message):
-        return
     state = user_states.get(message.from_user.id)
     if not state or state.get("action") != "pick_rule_target":
         return
