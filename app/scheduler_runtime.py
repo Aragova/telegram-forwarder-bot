@@ -64,7 +64,11 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
                 )
 
         checked_rules += 1
-        due = await asyncio.to_thread(repo.take_due_delivery, int(rule.id), due_iso)
+        has_get_due_delivery = hasattr(repo, "get_due_delivery")
+        if has_get_due_delivery:
+            due = await asyncio.to_thread(repo.get_due_delivery, int(rule.id), due_iso)
+        else:
+            due = await asyncio.to_thread(repo.take_due_delivery, int(rule.id), due_iso)
         if not due:
             continue
         tenant_id = int(due.get("tenant_id") or getattr(repo, "get_rule_tenant_id", lambda _x: 1)(int(rule.id)) or 1)
@@ -75,7 +79,6 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
             continue
 
         delivery_id = int(due["delivery_id"])
-        media_group_id = due.get("media_group_id")
 
         queue_name = "heavy" if rule_mode == "video" else "light"
         pending_by_tenant = repo.get_tenant_job_counts(queue=queue_name) if hasattr(repo, "get_tenant_job_counts") else {}
@@ -96,50 +99,79 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
             logger.warning("Scheduler временно ограничил tenant #%s: превышена нагрузка", tenant_id)
             continue
 
-        if rule_mode == "video":
-            dedup_key = build_dedup_key_for_video(delivery_id)
-            if await asyncio.to_thread(repo.get_active_job_by_dedup_key, dedup_key):
-                duplicates += 1
-                logger.info("Scheduler пропустил дубль задачи video_delivery для delivery #%s", delivery_id)
+        job_id: int | None = None
+        if hasattr(repo, "take_due_delivery_and_create_job"):
+            try:
+                atomic_result = await asyncio.to_thread(repo.take_due_delivery_and_create_job, int(rule.id), due_iso)
+            except Exception as exc:
+                logger.warning("Ошибка атомарного enqueue delivery_id=%s: %s", delivery_id, exc)
                 continue
-            job_id = await asyncio.to_thread(enqueue_video_delivery, repo, delivery_id)
-
-        elif media_group_id:
-            album_rows = await asyncio.to_thread(
-                repo.get_album_pending_for_rule,
-                int(rule.id),
-                str(due["source_channel"]),
-                due["source_thread_id"],
-                str(media_group_id),
-            )
-            delivery_ids = [int(row["delivery_id"]) for row in (album_rows or [])] or [delivery_id]
-            dedup_key = build_dedup_key_for_album(int(rule.id), str(media_group_id), delivery_ids)
-            if await asyncio.to_thread(repo.get_active_job_by_dedup_key, dedup_key):
-                duplicates += 1
-                logger.info(
-                    "Scheduler пропустил дубль задачи repost_album для rule #%s media_group_id=%s",
-                    int(rule.id),
-                    media_group_id,
-                )
+            if not atomic_result:
                 continue
-            job_id = await asyncio.to_thread(enqueue_repost_album, repo, delivery_ids, str(media_group_id))
-
+            result_status = str(atomic_result.get("status") or "").strip().lower()
+            if result_status == "duplicate":
+                duplicates += 1
+                duplicate_delivery_id = int(atomic_result.get("delivery_id") or delivery_id)
+                logger.debug("Scheduler пропустил delivery %s (дубликат задачи)", duplicate_delivery_id)
+                continue
+            if result_status != "created":
+                logger.warning("Ошибка атомарного enqueue delivery_id=%s: неизвестный статус %s", delivery_id, result_status or "none")
+                continue
+            job_id = atomic_result.get("job_id")
+            if job_id is None:
+                logger.warning("Ошибка атомарного enqueue delivery_id=%s: job_id не получен", delivery_id)
+                continue
+            delivery_id = int(atomic_result.get("delivery_id") or delivery_id)
+            tenant_id = int(atomic_result.get("tenant_id") or tenant_id)
         else:
-            dedup_key = build_dedup_key_for_single(delivery_id)
-            if await asyncio.to_thread(repo.get_active_job_by_dedup_key, dedup_key):
-                duplicates += 1
-                logger.info("Scheduler пропустил дубль задачи repost_single для delivery #%s", delivery_id)
+            if has_get_due_delivery:
+                due_taken = await asyncio.to_thread(repo.take_due_delivery, int(rule.id), due_iso)
+            else:
+                due_taken = due
+            if not due_taken:
                 continue
-            job_id = await asyncio.to_thread(enqueue_repost_single, repo, delivery_id)
-
-        if job_id is None:
-            duplicates += 1
-            logger.info("Scheduler пропустил дубль задачи для delivery #%s", delivery_id)
-            continue
+            media_group_id = due_taken.get("media_group_id")
+            if rule_mode == "video":
+                dedup_key = build_dedup_key_for_video(delivery_id)
+                if await asyncio.to_thread(repo.get_active_job_by_dedup_key, dedup_key):
+                    duplicates += 1
+                    logger.info("Scheduler пропустил дубль задачи video_delivery для delivery #%s", delivery_id)
+                    continue
+                job_id = await asyncio.to_thread(enqueue_video_delivery, repo, delivery_id)
+            elif media_group_id:
+                album_rows = await asyncio.to_thread(
+                    repo.get_album_pending_for_rule,
+                    int(rule.id),
+                    str(due_taken["source_channel"]),
+                    due_taken["source_thread_id"],
+                    str(media_group_id),
+                )
+                delivery_ids = [int(row["delivery_id"]) for row in (album_rows or [])] or [delivery_id]
+                dedup_key = build_dedup_key_for_album(int(rule.id), str(media_group_id), delivery_ids)
+                if await asyncio.to_thread(repo.get_active_job_by_dedup_key, dedup_key):
+                    duplicates += 1
+                    logger.info(
+                        "Scheduler пропустил дубль задачи repost_album для rule #%s media_group_id=%s",
+                        int(rule.id),
+                        media_group_id,
+                    )
+                    continue
+                job_id = await asyncio.to_thread(enqueue_repost_album, repo, delivery_ids, str(media_group_id))
+            else:
+                dedup_key = build_dedup_key_for_single(delivery_id)
+                if await asyncio.to_thread(repo.get_active_job_by_dedup_key, dedup_key):
+                    duplicates += 1
+                    logger.info("Scheduler пропустил дубль задачи repost_single для delivery #%s", delivery_id)
+                    continue
+                job_id = await asyncio.to_thread(enqueue_repost_single, repo, delivery_id)
+            if job_id is None:
+                duplicates += 1
+                logger.info("Scheduler пропустил дубль задачи для delivery #%s", delivery_id)
+                continue
 
         created += 1
         await asyncio.to_thread(usage_service.increment_jobs, tenant_id, 1)
-        logger.info("Scheduler создал задачу #%s для delivery #%s", int(job_id), delivery_id)
+        logger.info("Scheduler атомарно создал задачу job_id=%s для delivery_id=%s", int(job_id), delivery_id)
 
     return {"created": created, "duplicates": duplicates, "checked_rules": checked_rules}
 
