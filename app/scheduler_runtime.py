@@ -75,7 +75,29 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
 
         can_enqueue, enqueue_reason = limit_service.can_enqueue_job(tenant_id)
         if not can_enqueue:
-            logger.warning("Scheduler пропустил enqueue | rule_id=%s | tenant_id=%s | причина=%s", int(rule.id), tenant_id, enqueue_reason)
+            logger.warning(
+                "Scheduler пропустил публикацию: лимит тарифа tenant_id=%s reason=%s",
+                tenant_id,
+                enqueue_reason or "unknown",
+            )
+            if hasattr(repo, "create_billing_event"):
+                sub = subscription_service.get_active_subscription(int(tenant_id)) or {}
+                usage_today = usage_service.get_today_usage(int(tenant_id)) or {}
+                repo.create_billing_event(
+                    int(tenant_id),
+                    "subscription_blocked_action" if str(enqueue_reason or "").strip().lower() == "подписка неактивна" else "limit_job_blocked",
+                    event_source="scheduler_runtime",
+                    metadata={
+                        "tenant_id": int(tenant_id),
+                        "plan_name": str(sub.get("plan_name") or "FREE"),
+                        "action": "enqueue_publication",
+                        "reason": str(enqueue_reason or "limit"),
+                        "usage_snapshot": {
+                            "jobs_count": int(usage_today.get("jobs_count") or 0),
+                            "video_count": int(usage_today.get("video_count") or 0),
+                        },
+                    },
+                )
             continue
 
         delivery_id = int(due["delivery_id"])

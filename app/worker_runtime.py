@@ -271,13 +271,50 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     can_enqueue, enqueue_reason = limit_service.can_enqueue_job(tenant_id)
     if not can_enqueue:
         logger.warning("Worker блокирует выполнение job #%s tenant_id=%s: %s", job_id, tenant_id, enqueue_reason)
+        if hasattr(repo, "create_billing_event"):
+            sub = subscription_service.get_active_subscription(int(tenant_id)) or {}
+            usage_today = usage_service.get_today_usage(int(tenant_id)) or {}
+            event_type = "subscription_blocked_action" if str(enqueue_reason or "").strip().lower() == "подписка неактивна" else "limit_job_blocked"
+            repo.create_billing_event(
+                int(tenant_id),
+                event_type,
+                event_source="worker_runtime",
+                metadata={
+                    "tenant_id": int(tenant_id),
+                    "plan_name": str(sub.get("plan_name") or "FREE"),
+                    "action": "worker_job_execution",
+                    "reason": str(enqueue_reason or "limit"),
+                    "usage_snapshot": {
+                        "jobs_count": int(usage_today.get("jobs_count") or 0),
+                        "video_count": int(usage_today.get("video_count") or 0),
+                    },
+                },
+            )
         await asyncio.to_thread(repo.fail_job, job_id, enqueue_reason or "Подписка неактивна")
         return True
 
     if str(job_type).startswith("video_"):
         can_video, video_reason = limit_service.can_process_video(tenant_id)
         if not can_video:
-            logger.warning("Лимит видео задач превышен | tenant_id=%s | job_id=%s", tenant_id, job_id)
+            logger.warning("Видео не обработано: лимит тарифа tenant_id=%s reason=%s", tenant_id, video_reason or "unknown")
+            if hasattr(repo, "create_billing_event"):
+                sub = subscription_service.get_active_subscription(int(tenant_id)) or {}
+                usage_today = usage_service.get_today_usage(int(tenant_id)) or {}
+                repo.create_billing_event(
+                    int(tenant_id),
+                    "limit_video_blocked",
+                    event_source="worker_runtime",
+                    metadata={
+                        "tenant_id": int(tenant_id),
+                        "plan_name": str(sub.get("plan_name") or "FREE"),
+                        "action": "video_processing",
+                        "reason": str(video_reason or "limit"),
+                        "usage_snapshot": {
+                            "jobs_count": int(usage_today.get("jobs_count") or 0),
+                            "video_count": int(usage_today.get("video_count") or 0),
+                        },
+                    },
+                )
             friendly = (
                 "🎬 Лимит видео на сегодня исчерпан. "
                 "Новые видео будут доступны после обновления дневного лимита "
@@ -395,7 +432,9 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
 
         if ok:
             await asyncio.to_thread(repo.complete_job, job_id)
-            if str(job_type).startswith("video_"):
+            # Учитываем видео usage один раз на завершение конечной стадии доставки.
+            # Это защищает от накрутки на download/process/retry этапах.
+            if str(job_type) in {"video_send", "video_delivery"}:
                 await asyncio.to_thread(usage_service.increment_video, tenant_id, 1)
             logger.info("JOB DONE | %s завершил задачу #%s", worker_id, job_id)
             await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)

@@ -76,7 +76,69 @@ def build_user_account_text(
     )
 
 
-def build_user_account_keyboard() -> InlineKeyboardMarkup:
+def build_user_usage_text(
+    subscription: dict[str, Any] | None,
+    usage_today: dict[str, Any] | None,
+    rules_count: int,
+) -> str:
+    sub = subscription or {}
+    usage = usage_today or {}
+    plan_name = str(sub.get("plan_name") or "FREE").upper()
+    status = str(sub.get("status") or "active")
+    max_rules = int(sub.get("max_rules") or 0)
+    max_video = int(sub.get("max_video_per_day") or 0)
+    max_jobs = int(sub.get("max_jobs_per_day") or 0)
+    video_today = int(usage.get("video_count") or 0)
+    jobs_today = int(usage.get("jobs_count") or 0)
+    return (
+        "📊 Использование\n\n"
+        f"Тариф: {plan_name}\n"
+        f"Статус: {status}\n\n"
+        "Лимиты:\n"
+        f"📌 Правила: {int(rules_count)} / {max_rules}\n"
+        f"🎬 Видео сегодня: {video_today} / {max_video}\n"
+        f"📦 Задачи сегодня: {jobs_today} / {max_jobs}"
+    )
+
+
+def build_user_limit_block_text(
+    subscription: dict[str, Any] | None,
+    usage_today: dict[str, Any] | None,
+    rules_count: int,
+) -> str:
+    return (
+        "🚫 Лимит тарифа достигнут\n\n"
+        + build_user_usage_text(subscription, usage_today, rules_count)
+        + "\n\nЧтобы добавить больше правил, смените тариф."
+    )
+
+
+def build_user_limit_exceeded_text(
+    reason: str | None,
+    subscription: dict[str, Any] | None,
+    usage_today: dict[str, Any] | None,
+    rules_count: int,
+) -> str:
+    return (
+        "🚫 Лимит тарифа достигнут\n\n"
+        f"Причина: {str(reason or 'Лимит тарифа достигнут')}\n\n"
+        + build_user_usage_text(subscription, usage_today, rules_count)
+        + "\n\nЧтобы продолжить работу, смените тариф."
+    )
+
+
+def build_user_subscription_blocked_text(subscription: dict[str, Any] | None) -> str:
+    plan_name = str((subscription or {}).get("plan_name") or "FREE").upper()
+    status = str((subscription or {}).get("status") or "expired")
+    return (
+        "🔒 Подписка неактивна\n\n"
+        "Чтобы продолжить пользоваться автоматизацией, выберите тариф и оплатите счёт.\n\n"
+        f"Тариф: {plan_name}\n"
+        f"Статус: {status}"
+    )
+
+
+def build_user_usage_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
@@ -84,6 +146,10 @@ def build_user_account_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
         ]
     )
+
+
+def build_user_account_keyboard() -> InlineKeyboardMarkup:
+    return build_user_usage_keyboard()
 
 
 def build_user_plans_text(plans: list[dict[str, Any]]) -> str:

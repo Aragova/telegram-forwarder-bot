@@ -25,6 +25,8 @@ class LimitService:
         limits = self._get_plan_limits(tenant_id)
         if self._is_unlimited_plan(limits):
             return True, None
+        if not self._subscription_service.is_subscription_active(int(tenant_id)):
+            return False, "Подписка неактивна"
         max_rules = int(limits.get("max_rules") or 0)
         if max_rules <= 0:
             return True, None
