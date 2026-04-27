@@ -663,6 +663,18 @@ def is_rule_owned_by_user(rule_id: int, user_id: int) -> bool:
     return access_control.is_rule_owned_by_user(rule_id, user_id, db, tenant_service)
 
 
+async def ensure_rule_callback_access(callback: CallbackQuery, rule_id: int) -> bool:
+    user_id = callback.from_user.id if callback.from_user else 0
+    if _is_admin_user(user_id):
+        return True
+    owned = await run_db(is_rule_owned_by_user, rule_id, user_id)
+    if owned:
+        return True
+    logger.warning("попытка доступа к чужому правилу user_id=%s rule_id=%s", user_id, rule_id)
+    await answer_callback_safe(callback, "⛔ Нет доступа к этому правилу", show_alert=True)
+    return False
+
+
 def is_channel_owned_by_user(
     channel_id: str,
     thread_id: int | None,
@@ -896,7 +908,12 @@ def interval_to_text(seconds: int) -> str:
 def build_user_rules_keyboard(rules, page: int = 0) -> InlineKeyboardMarkup:
     total = len(rules)
     if total == 0:
-        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")]])
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Добавить правило", callback_data="user_rules_add")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
+            ]
+        )
     max_page = (total - 1) // RULES_PAGE_SIZE
     page = max(0, min(page, max_page))
     start = page * RULES_PAGE_SIZE
@@ -919,23 +936,88 @@ def build_user_rules_keyboard(rules, page: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_user_rule_card(rule) -> tuple[str, InlineKeyboardMarkup]:
-    rid = int(getattr(rule, "id", 0))
-    text = (
-        f"⚙️ Правило #{rid}\n\n"
-        f"Источник: {getattr(rule, 'source_title', None) or getattr(rule, 'source_id', '')}\n"
-        f"Получатель: {getattr(rule, 'target_title', None) or getattr(rule, 'target_id', '')}\n"
-        f"Интервал: {interval_to_text(int(getattr(rule, 'interval', 0) or 0))}\n"
-        f"Статус: {'активно' if bool(getattr(rule, 'is_active', False)) else 'остановлено'}"
+def _filter_user_rule_card_keyboard(keyboard: InlineKeyboardMarkup, rule_id: int) -> InlineKeyboardMarkup:
+    allowed_prefixes = (
+        "rule_refresh:",
+        "enable_rule:",
+        "disable_rule:",
+        "change_interval:",
+        "change_fixed_times:",
+        "set_interval_mode:",
+        "change_next_run:",
+        "toggle_rule_mode:",
+        "video_intro_menu:",
+        "video_caption_menu:",
+        "caption_mode_menu:",
+        "trigger_now:",
+        "delete_rule:",
+        "rule_extra_menu:",
     )
-    toggle = "⏸ Остановить" if bool(getattr(rule, "is_active", False)) else "▶️ Запустить"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=toggle, callback_data=f"user_rule_toggle:{rid}")],
-        [InlineKeyboardButton(text="⏱ Интервал", callback_data=f"user_rule_interval:{rid}")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"user_rule_delete:{rid}")],
-        [InlineKeyboardButton(text="⬅️ К списку", callback_data="user_rules")],
-    ])
-    return text, kb
+    allowed_exact = {"rule_to_list"}
+    filtered_rows: list[list[InlineKeyboardButton]] = []
+    for row in keyboard.inline_keyboard:
+        filtered_row: list[InlineKeyboardButton] = []
+        for button in row:
+            callback_data = button.callback_data or ""
+            if callback_data in allowed_exact or callback_data.startswith(allowed_prefixes):
+                filtered_row.append(button)
+        if filtered_row:
+            filtered_rows.append(filtered_row)
+
+    # user navigation должен вести только в user-flow
+    filtered_rows.append([InlineKeyboardButton(text="⬅️ К моим правилам", callback_data="user_rules")])
+    return InlineKeyboardMarkup(inline_keyboard=filtered_rows)
+
+
+def build_user_rule_extra_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+    base = build_rule_extra_keyboard(rule_id)
+    allowed_prefixes = (
+        "toggle_rule_mode:",
+        "caption_mode_menu:",
+        "trigger_now:",
+        "delete_rule:",
+        "rule_card:",
+    )
+    filtered_rows: list[list[InlineKeyboardButton]] = []
+    for row in base.inline_keyboard:
+        filtered_row: list[InlineKeyboardButton] = []
+        for button in row:
+            callback_data = button.callback_data or ""
+            if callback_data.startswith(allowed_prefixes):
+                filtered_row.append(button)
+        if filtered_row:
+            filtered_rows.append(filtered_row)
+    filtered_rows.append([InlineKeyboardButton(text="⬅️ К моим правилам", callback_data="user_rules")])
+    return InlineKeyboardMarkup(inline_keyboard=filtered_rows)
+
+
+async def build_user_rule_card_payload(rule_id: int) -> tuple[str | None, InlineKeyboardMarkup | None]:
+    text, keyboard, _cache_status = await build_rule_card_payload_cached(rule_id)
+    if not text or not keyboard:
+        return None, None
+    return text, _filter_user_rule_card_keyboard(keyboard, rule_id)
+
+
+async def refresh_rule_card_for_actor(
+    callback: CallbackQuery,
+    rule_id: int,
+    *,
+    prefix_text: str | None = None,
+) -> str:
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        return await refresh_rule_card_message(callback, rule_id, prefix_text=prefix_text)
+    text, keyboard = await build_user_rule_card_payload(rule_id)
+    if not text or not keyboard:
+        return "failed"
+    if prefix_text:
+        text = f"{prefix_text}\n\n{text}"
+    edited = await edit_message_text_safe(
+        message=callback.message,
+        text=text,
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+    return "updated" if edited else "not_modified"
 
 
 def rule_label(row) -> str:
@@ -2323,10 +2405,20 @@ async def handle_user_rules_callback(callback: CallbackQuery):
         return
     user_id = callback.from_user.id if callback.from_user else 0
     tenant_id = await run_db(ensure_user_tenant, user_id)
-    logger.info("пользователь открыл свои правила user_id=%s tenant_id=%s", user_id, tenant_id)
+    logger.info("пользователь открыл список правил user_id=%s tenant_id=%s", user_id, tenant_id)
     rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
     await answer_callback_safe_once(callback)
-    await edit_message_text_safe(message=callback.message, text="📜 Список правил:", reply_markup=build_user_rules_keyboard(rules, page=0))
+    text = (
+        "⚙️ Мои правила\n\n"
+        "У вас пока нет правил.\n\n"
+        "Создайте первое правило:\n"
+        "1. выберите источник;\n"
+        "2. выберите получателя;\n"
+        "3. задайте интервал публикации."
+        if not rules
+        else "⚙️ Мои правила"
+    )
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=build_user_rules_keyboard(rules, page=0))
 
 
 @dp.callback_query(lambda c: c.data == "user_status")
@@ -3618,7 +3710,18 @@ async def handle_list_rules(message: Message):
         )
         return
 
-    await message.answer("📜 Список правил:", reply_markup=build_user_rules_keyboard(rules, page=0))
+    if not rules:
+        await message.answer(
+            "⚙️ Мои правила\n\n"
+            "У вас пока нет правил.\n\n"
+            "Создайте первое правило:\n"
+            "1. выберите источник;\n"
+            "2. выберите получателя;\n"
+            "3. задайте интервал публикации.",
+            reply_markup=build_user_rules_keyboard(rules, page=0),
+        )
+        return
+    await message.answer("⚙️ Мои правила", reply_markup=build_user_rules_keyboard(rules, page=0))
 
 @dp.callback_query(lambda c: c.data == "rules_back")
 async def handle_rules_back(callback: CallbackQuery):
@@ -3662,13 +3765,31 @@ async def handle_user_rules_page(callback: CallbackQuery):
     tenant_id = await run_db(ensure_user_tenant, callback.from_user.id if callback.from_user else 0)
     rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
     await answer_callback_safe_once(callback)
+    if not rules:
+        await edit_message_text_safe(
+            message=callback.message,
+            text=(
+                "⚙️ Мои правила\n\n"
+                "У вас пока нет правил.\n\n"
+                "Создайте первое правило:\n"
+                "1. выберите источник;\n"
+                "2. выберите получателя;\n"
+                "3. задайте интервал публикации."
+            ),
+            reply_markup=build_user_rules_keyboard(rules, page=0),
+        )
+        return
     await edit_message_reply_markup_safe(message=callback.message, reply_markup=build_user_rules_keyboard(rules, page=page))
 
 
 @dp.callback_query(lambda c: c.data == "user_rules_add")
 async def handle_user_rules_add(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
     user_id = callback.from_user.id if callback.from_user else 0
     tenant_id = await run_db(ensure_user_tenant, user_id)
+    logger.info("пользователь начал создание правила user_id=%s tenant_id=%s", user_id, tenant_id)
     subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", "ru")
     usage_today = await run_db(usage_service.get_today_usage, tenant_id)
     rules_count = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
@@ -3716,7 +3837,18 @@ async def handle_user_rules_add(callback: CallbackQuery):
     source_rows = await run_db(db.get_channels_for_tenant, tenant_id, "source") if hasattr(db, "get_channels_for_tenant") else []
     sources = [ChannelChoice(r["channel_id"], r["thread_id"], r["title"] or r["channel_id"]) for r in source_rows]
     if not sources:
-        await answer_callback_safe(callback, "Сначала добавьте источник", show_alert=True)
+        await answer_callback_safe_once(callback)
+        await edit_message_text_safe(
+            message=callback.message,
+            text="Для создания правила сначала добавьте источник и получатель.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📡 Добавить источник", callback_data="user_sources_add")],
+                    [InlineKeyboardButton(text="🎯 Добавить получатель", callback_data="user_targets_add")],
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_rules")],
+                ]
+            ),
+        )
         return
     keyboard = [[KeyboardButton(text=f"📤 {i}. {s.title}{f' (тема {s.thread_id})' if s.thread_id else ''}")] for i, s in enumerate(sources, 1)]
     keyboard.append([KeyboardButton(text="❌ Отмена")])
@@ -3729,67 +3861,15 @@ async def handle_user_rules_add(callback: CallbackQuery):
 async def handle_user_rule_open(callback: CallbackQuery):
     user_id = callback.from_user.id if callback.from_user else 0
     rule_id = int((callback.data or "").split(":", 1)[1])
-    if not await run_db(is_rule_owned_by_user, rule_id, user_id):
-        logger.warning("пользователь попытался открыть чужой объект user_id=%s object=rule:%s", user_id, rule_id)
-        await answer_callback_safe(callback, "⛔ Нет доступа к этому объекту", show_alert=True)
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
+    logger.info("пользователь открыл карточку rule_id=%s", rule_id)
+    text, kb = await build_user_rule_card_payload(rule_id)
+    if not text or not kb:
         await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
         return
-    text, kb = build_user_rule_card(rule)
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_toggle:"))
-async def handle_user_rule_toggle(callback: CallbackQuery):
-    user_id = callback.from_user.id if callback.from_user else 0
-    rule_id = int((callback.data or "").split(":", 1)[1])
-    if not await run_db(is_rule_owned_by_user, rule_id, user_id):
-        logger.warning("пользователь попытался открыть чужой объект user_id=%s object=rule:%s", user_id, rule_id)
-        await answer_callback_safe(callback, "⛔ Нет доступа к этому объекту", show_alert=True)
-        return
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-    if bool(getattr(rule, "is_active", False)):
-        await run_db(scheduler_service.deactivate_rule, rule_id)
-    else:
-        await run_db(scheduler_service.activate_with_backfill, rule_id)
-    updated = await run_db(db.get_rule, rule_id)
-    text, kb = build_user_rule_card(updated)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_delete:"))
-async def handle_user_rule_delete(callback: CallbackQuery):
-    user_id = callback.from_user.id if callback.from_user else 0
-    rule_id = int((callback.data or "").split(":", 1)[1])
-    if not await run_db(is_rule_owned_by_user, rule_id, user_id):
-        logger.warning("пользователь попытался открыть чужой объект user_id=%s object=rule:%s", user_id, rule_id)
-        await answer_callback_safe(callback, "⛔ Нет доступа к этому объекту", show_alert=True)
-        return
-    await run_db(db.remove_rule, rule_id)
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
-    await answer_callback_safe_once(callback, "Удалено")
-    await edit_message_text_safe(message=callback.message, text="📜 Список правил:", reply_markup=build_user_rules_keyboard(rules, page=0))
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_interval:"))
-async def handle_user_rule_interval(callback: CallbackQuery):
-    user_id = callback.from_user.id if callback.from_user else 0
-    rule_id = int((callback.data or "").split(":", 1)[1])
-    if not await run_db(is_rule_owned_by_user, rule_id, user_id):
-        logger.warning("пользователь попытался открыть чужой объект user_id=%s object=rule:%s", user_id, rule_id)
-        await answer_callback_safe(callback, "⛔ Нет доступа к этому объекту", show_alert=True)
-        return
-    user_states[user_id] = {"action": "user_set_rule_interval", "rule_id": rule_id}
-    await answer_callback_safe_once(callback)
-    await callback.message.answer("Отправьте новый интервал в секундах", reply_markup=get_cancel_keyboard())
 
 @dp.callback_query(lambda c: c.data == "rules_page_info")
 async def handle_rules_page_info(callback: CallbackQuery):
@@ -6048,13 +6128,12 @@ def build_intro_list_keyboard(
 
 @dp.callback_query(lambda c: c.data.startswith("video_intro_menu:"))
 async def handle_video_intro_menu(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     intros = await run_db(db.get_intros)
@@ -6085,15 +6164,14 @@ async def handle_video_intro_menu(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "rule_back_from_intro")
 async def handle_intro_back(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     state = user_states.get(callback.from_user.id)
     if not state:
         await answer_callback_safe(callback, "Ошибка состояния", show_alert=True)
         return
 
     rule_id = state.get("rule_id")
+    if not await ensure_rule_callback_access(callback, int(rule_id or 0)):
+        return
 
     row = await get_rule_stats_row_async(rule_id)
     if not row:
@@ -6105,11 +6183,23 @@ async def handle_intro_back(callback: CallbackQuery):
             message=callback.message,
             text=build_rule_card_text(row),
             parse_mode="HTML",
-            reply_markup=build_rule_card_keyboard(
-                rule_id,
-                bool(row["is_active"]),
-                row["schedule_mode"] or "interval",
-                row["mode"] or "repost",
+            reply_markup=(
+                build_rule_card_keyboard(
+                    rule_id,
+                    bool(row["is_active"]),
+                    row["schedule_mode"] or "interval",
+                    row["mode"] or "repost",
+                )
+                if _is_admin_user(callback.from_user.id if callback.from_user else None)
+                else _filter_user_rule_card_keyboard(
+                    build_rule_card_keyboard(
+                        rule_id,
+                        bool(row["is_active"]),
+                        row["schedule_mode"] or "interval",
+                        row["mode"] or "repost",
+                    ),
+                    rule_id,
+                )
             ),
         )
     except Exception as exc:
@@ -6120,13 +6210,12 @@ async def handle_intro_back(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("caption_mode_menu:"))
 async def handle_caption_mode_menu(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     rule = await run_db(db.get_rule, rule_id)
@@ -6290,13 +6379,12 @@ async def handle_intro_delete(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("video_caption_menu:"))
 async def handle_video_caption_menu(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     rule = await run_db(db.get_rule, rule_id)
@@ -6331,13 +6419,12 @@ async def handle_video_caption_menu(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("video_caption_edit:"))
 async def handle_video_caption_edit(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     edited = await edit_message_text_safe(
@@ -6369,13 +6456,12 @@ async def handle_video_caption_edit(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("video_caption_clear:"))
 async def handle_video_caption_clear(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     before_rule = await run_db(db.get_rule, rule_id)
@@ -6407,13 +6493,12 @@ async def handle_video_caption_clear(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("video_intro_horizontal:"))
 async def handle_video_intro_horizontal(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     intros = await run_db(db.get_intros)
@@ -6460,13 +6545,12 @@ async def handle_video_intro_horizontal(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("video_intro_vertical:"))
 async def handle_video_intro_vertical(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     intros = await run_db(db.get_intros)
@@ -6513,14 +6597,13 @@ async def handle_video_intro_vertical(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("apply_intro:"))
 async def handle_apply_intro(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         _, mode, rule_id_raw, intro_id_raw = callback.data.split(":")
         rule_id = int(rule_id_raw)
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     try:
@@ -6540,11 +6623,23 @@ async def handle_apply_intro(callback: CallbackQuery):
         await edit_message_text_safe(
             message=callback.message,
             text=build_rule_card_text(row),
-            reply_markup=build_rule_card_keyboard(
-                rule_id,
-                bool(row["is_active"]),
-                row["schedule_mode"] or "interval",
-                row["mode"] or "repost",
+            reply_markup=(
+                build_rule_card_keyboard(
+                    rule_id,
+                    bool(row["is_active"]),
+                    row["schedule_mode"] or "interval",
+                    row["mode"] or "repost",
+                )
+                if _is_admin_user(callback.from_user.id if callback.from_user else None)
+                else _filter_user_rule_card_keyboard(
+                    build_rule_card_keyboard(
+                        rule_id,
+                        bool(row["is_active"]),
+                        row["schedule_mode"] or "interval",
+                        row["mode"] or "repost",
+                    ),
+                    rule_id,
+                )
             ),
             parse_mode="HTML",
         )
@@ -6556,13 +6651,12 @@ async def handle_apply_intro(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("rule_card:"))
 async def handle_rule_card(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     # отвечаем мгновенно
@@ -6578,7 +6672,7 @@ async def handle_rule_card(callback: CallbackQuery):
 
     rule_card_open_inflight.add(rule_id)
     try:
-        result = await refresh_rule_card_message(callback, rule_id)
+        result = await refresh_rule_card_for_actor(callback, rule_id)
 
         if result in {"updated", "not_modified", "resent"}:
             return
@@ -6607,13 +6701,12 @@ async def handle_rule_to_main_menu(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("rule_extra_menu:"))
 async def handle_rule_extra_menu(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     await answer_callback_safe_once(callback)
@@ -6622,7 +6715,11 @@ async def handle_rule_extra_menu(callback: CallbackQuery):
         await edit_message_text_safe(
             message=callback.message,
             text=f"⚙️ Дополнительные функции правила #{rule_id}",
-            reply_markup=await run_db(build_rule_extra_keyboard, rule_id),
+            reply_markup=(
+                await run_db(build_rule_extra_keyboard, rule_id)
+                if _is_admin_user(callback.from_user.id if callback.from_user else None)
+                else await run_db(build_user_rule_extra_keyboard, rule_id)
+            ),
         )
     except Exception as exc:
         if "message is not modified" in str(exc).lower():
@@ -6631,13 +6728,12 @@ async def handle_rule_extra_menu(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("video_caption_mode_menu:"))
 async def handle_video_caption_mode_menu(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     rule = await run_db(db.get_rule, rule_id)
@@ -6830,13 +6926,12 @@ async def _apply_video_caption_delivery_mode(
 
 @dp.callback_query(lambda c: c.data.startswith("set_caption_mode_copy_first:"))
 async def handle_set_caption_mode_copy_first_repost(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     await _apply_caption_delivery_mode(callback, rule_id, "copy_first")
@@ -6844,13 +6939,12 @@ async def handle_set_caption_mode_copy_first_repost(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("set_caption_mode_builder_first:"))
 async def handle_set_caption_mode_builder_first_repost(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     await _apply_caption_delivery_mode(callback, rule_id, "builder_first")
@@ -6858,26 +6952,24 @@ async def handle_set_caption_mode_builder_first_repost(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("set_caption_mode_auto:"))
 async def handle_set_caption_mode_auto_repost(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     await _apply_caption_delivery_mode(callback, rule_id, "auto")
 
 @dp.callback_query(lambda c: c.data.startswith("set_video_caption_mode_copy_first:"))
 async def handle_set_caption_mode_copy_first(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     await _apply_video_caption_delivery_mode(callback, rule_id, "copy_first")
@@ -6885,13 +6977,12 @@ async def handle_set_caption_mode_copy_first(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("set_video_caption_mode_builder_first:"))
 async def handle_set_caption_mode_builder_first(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     await _apply_video_caption_delivery_mode(callback, rule_id, "builder_first")
@@ -6899,26 +6990,24 @@ async def handle_set_caption_mode_builder_first(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("set_video_caption_mode_auto:"))
 async def handle_set_caption_mode_auto(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     await _apply_video_caption_delivery_mode(callback, rule_id, "auto")
 
 @dp.callback_query(lambda c: c.data.startswith("rule_refresh:"))
 async def handle_rule_refresh(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     # отвечаем сразу, пока callback живой
@@ -6936,7 +7025,7 @@ async def handle_rule_refresh(callback: CallbackQuery):
 
     rule_refresh_inflight.add(rule_id)
     try:
-        result = await refresh_rule_card_message(callback, rule_id)
+        result = await refresh_rule_card_for_actor(callback, rule_id)
 
         if result in {"updated", "not_modified", "resent"}:
             return
@@ -6977,14 +7066,13 @@ async def handle_rule_to_list(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("start_from_number:"))
 async def handle_start_from_number(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         _, rule_id_raw = parse_callback_parts(callback.data, "start_from_number", 2)
         rule_id = int(rule_id_raw)
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     user_states[callback.from_user.id] = {
@@ -7009,13 +7097,12 @@ async def handle_start_from_number(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("rollback:"))
 async def rollback_handler(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     result = await run_db(
@@ -7055,7 +7142,7 @@ async def rollback_handler(callback: CallbackQuery):
     await answer_callback_safe_once(callback, "Откат выполнен")
 
     invalidate_rule_card_cache(rule_id)
-    await refresh_rule_card_message(
+    await refresh_rule_card_for_actor(
         callback,
         rule_id,
         prefix_text=prefix_text,
@@ -7277,12 +7364,14 @@ async def handle_rescan_rule_keep(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("change_interval:"))
 async def handle_change_interval_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
-
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
     await answer_callback_safe_once(callback)
-
-    rule_id = int(callback.data.split(":")[1])
 
     prompt = await callback.message.answer(
         f"Введите новый интервал (в секундах) для правила #{rule_id}.",
@@ -7300,13 +7389,12 @@ async def handle_change_interval_callback(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("change_next_run:"))
 async def handle_change_next_run_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     prompt = await callback.message.answer(
@@ -7329,12 +7417,14 @@ async def handle_change_next_run_callback(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("change_fixed_times:"))
 async def handle_change_fixed_times_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
-
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
     await answer_callback_safe_once(callback)
-
-    rule_id = int(callback.data.split(":")[1])
 
     prompt = await callback.message.answer(
         f"Введите фиксированные времена для правила #{rule_id}.\n\n"
@@ -7355,12 +7445,14 @@ async def handle_change_fixed_times_callback(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("set_interval_mode:"))
 async def handle_set_interval_mode_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
-
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
     await answer_callback_safe_once(callback)
-
-    rule_id = int(callback.data.split(":")[1])
 
     prompt = await callback.message.answer(
         f"Введите новый интервал в секундах для правила #{rule_id}.\n\n"
@@ -7379,13 +7471,12 @@ async def handle_set_interval_mode_callback(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("trigger_now:"))
 async def handle_trigger_now_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     result = await run_db(
@@ -7400,7 +7491,7 @@ async def handle_trigger_now_callback(callback: CallbackQuery):
 
         await ensure_rule_workers()
         invalidate_rule_card_cache(rule_id)
-        await refresh_rule_card_message(
+        await refresh_rule_card_for_actor(
             callback,
             rule_id,
             prefix_text="⚡ Следующий пост поставлен на немедленную отправку.",
@@ -7418,12 +7509,14 @@ async def handle_trigger_now_callback(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("disable_rule:"))
 async def handle_disable_rule_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
-
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
     await answer_callback_safe_once(callback)
-
-    rule_id = int(callback.data.split(":")[1])
 
     result = await run_db(
         _disable_rule_sync,
@@ -7435,7 +7528,7 @@ async def handle_disable_rule_callback(callback: CallbackQuery):
     if ok:
         await ensure_rule_workers()
         invalidate_rule_card_cache(rule_id)
-        await refresh_rule_card_message(
+        await refresh_rule_card_for_actor(
             callback,
             rule_id,
             prefix_text=(
@@ -7452,13 +7545,12 @@ async def handle_disable_rule_callback(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("toggle_rule_mode:"))
 async def handle_toggle_rule_mode(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     result = await run_db(
@@ -7485,7 +7577,7 @@ async def handle_toggle_rule_mode(callback: CallbackQuery):
     )
 
     invalidate_rule_card_cache(rule_id)
-    await refresh_rule_card_message(
+    await refresh_rule_card_for_actor(
         callback,
         rule_id,
         prefix_text=(
@@ -7497,13 +7589,12 @@ async def handle_toggle_rule_mode(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("enable_rule:"))
 async def handle_enable_rule_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     result = await run_db(
@@ -7519,7 +7610,7 @@ async def handle_enable_rule_callback(callback: CallbackQuery):
         await ensure_rule_workers()
 
         invalidate_rule_card_cache(rule_id)
-        await refresh_rule_card_message(
+        await refresh_rule_card_for_actor(
             callback,
             rule_id,
             prefix_text="✅ Правило включено.",
@@ -7533,13 +7624,12 @@ async def handle_enable_rule_callback(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("delete_rule:"))
 async def handle_delete_rule_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     ok = await run_db(
@@ -7551,10 +7641,30 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
     if ok:
         await answer_callback_safe_once(callback, "✅ Правило удалено")
         await ensure_rule_workers()
-        await edit_message_text_safe(
-            message=callback.message,
-            text="✅ Правило удалено",
-        )
+        if _is_admin_user(callback.from_user.id if callback.from_user else None):
+            await edit_message_text_safe(
+                message=callback.message,
+                text="✅ Правило удалено",
+            )
+        else:
+            user_id = callback.from_user.id if callback.from_user else 0
+            tenant_id = await run_db(ensure_user_tenant, user_id)
+            logger.info("пользователь удалил правило rule_id=%s", rule_id)
+            rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
+            await edit_message_text_safe(
+                message=callback.message,
+                text=(
+                    "⚙️ Мои правила\n\n"
+                    "У вас пока нет правил.\n\n"
+                    "Создайте первое правило:\n"
+                    "1. выберите источник;\n"
+                    "2. выберите получателя;\n"
+                    "3. задайте интервал публикации."
+                    if not rules
+                    else "⚙️ Мои правила"
+                ),
+                reply_markup=build_user_rules_keyboard(rules, page=0),
+            )
     else:
         await answer_callback_safe_once(callback, "❌ Не удалось удалить правило", show_alert=True)
         await edit_message_text_safe(
@@ -8088,10 +8198,26 @@ async def handle_stateful_private_inputs(message: Message):
             if not is_admin_user(message.from_user.id if message.from_user else None):
                 tenant_id = await run_db(ensure_user_tenant, message.from_user.id if message.from_user else 0)
                 logger.info("пользователь создал правило rule_id=%s tenant_id=%s", rule_id, tenant_id)
-            await message.answer(
-                f"✅ Правило создано #{rule_id}. Первый пост выйдет сразу, дальше — каждые {interval_to_text(interval)}",
-                reply_markup=get_main_menu(),
-            )
+                text, keyboard = await build_user_rule_card_payload(int(rule_id))
+                if text and keyboard:
+                    await message.answer(
+                        f"✅ Правило создано #{rule_id}. Первый пост выйдет сразу, дальше — каждые {interval_to_text(interval)}"
+                    )
+                    await message.answer(
+                        text,
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                    )
+                else:
+                    await message.answer(
+                        f"✅ Правило создано #{rule_id}. Первый пост выйдет сразу, дальше — каждые {interval_to_text(interval)}",
+                        reply_markup=get_main_menu(),
+                    )
+            else:
+                await message.answer(
+                    f"✅ Правило создано #{rule_id}. Первый пост выйдет сразу, дальше — каждые {interval_to_text(interval)}",
+                    reply_markup=get_main_menu(),
+                )
         else:
             tenant = await run_db(tenant_service.ensure_tenant_exists, message.from_user.id if message.from_user else settings.admin_id)
             tenant_id = int(tenant.get("id") or 1)
