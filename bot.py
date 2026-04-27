@@ -112,6 +112,11 @@ PREVIEW_CACHE_TTL_SECONDS = 300
 USER_TZ = timezone(timedelta(hours=3))
 RULES_PAGE_SIZE = 8
 TG_TEXT_SOFT_LIMIT = 3900
+DEFAULT_TELEGRAM_COMMANDS = [
+    BotCommand(command="start", description="Старт"),
+    BotCommand(command="menu", description="Главное меню"),
+    BotCommand(command="help", description="Помощь"),
+]
 
 MENU_NAVIGATION_TEXTS = {
     "📋 Меню",
@@ -8340,11 +8345,7 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
         logger.warning("Webhook skip (network issue): %s", e)
     try:
         await bot.set_my_commands(
-            [
-                BotCommand(command="start", description="Старт"),
-                BotCommand(command="menu", description="Главное меню"),
-                BotCommand(command="help", description="Помощь"),
-            ],
+            DEFAULT_TELEGRAM_COMMANDS,
             scope=BotCommandScopeDefault(),
         )
     except Exception as exc:
