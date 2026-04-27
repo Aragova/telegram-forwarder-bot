@@ -2481,31 +2481,119 @@ async def handle_user_invoice_callback(callback: CallbackQuery):
 @dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice_pay:"))
 async def handle_user_invoice_pay_callback(callback: CallbackQuery):
     user_id = callback.from_user.id if callback.from_user else 0
+    if _is_admin_user(user_id):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
     invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
     invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
     if not invoice:
         await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
         return
-    is_admin = _is_admin_user(user_id)
-    if not is_admin:
-        tenant_id = await run_db(ensure_user_tenant, user_id)
-        if int(invoice.get("tenant_id") or 0) != int(tenant_id):
-            logger.warning("попытка открыть чужой счёт user_id=%s invoice_id=%s", user_id, invoice_id)
-            await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
-            return
+    tenant_id = int(invoice.get("tenant_id") or 0)
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    if int(invoice.get("tenant_id") or 0) != int(tenant_id):
+        logger.warning("попытка оплаты чужого invoice user_id=%s invoice_id=%s", user_id, invoice_id)
+        await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+        return
+    logger.info(
+        "пользователь открыл способы оплаты invoice_id=%s user_id=%s tenant_id=%s",
+        invoice_id,
+        user_id,
+        tenant_id,
+    )
+    methods = await run_db(payment_service.get_available_payment_methods, int(tenant_id), int(invoice_id))
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(
         message=callback.message,
-        text=(
-            f"💳 Оплата счёта #{invoice_id}\n\n"
-            "Выбор способа оплаты будет подключён следующим этапом."
-        ),
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{invoice_id}")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_invoices")],
-            ]
-        ),
+        text=user_ui.build_user_payment_methods_text(invoice, methods),
+        reply_markup=user_ui.build_user_payment_methods_keyboard(invoice_id, methods),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_pay_provider:"))
+async def handle_user_pay_provider_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id if callback.from_user else 0
+    if _is_admin_user(user_id):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    raw = (callback.data or "").split(":", 2)
+    if len(raw) < 3:
+        await answer_callback_safe(callback, "Некорректный запрос", show_alert=True)
+        return
+    invoice_id = int(raw[1] or 0)
+    provider = str(raw[2] or "").strip()
+    logger.info("пользователь выбрал provider=%s invoice_id=%s", provider, invoice_id)
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
+    if not invoice:
+        await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
+        return
+    if int(invoice.get("tenant_id") or 0) != int(tenant_id):
+        logger.warning("попытка оплаты чужого invoice user_id=%s invoice_id=%s", user_id, invoice_id)
+        await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+        return
+    if str(invoice.get("status") or "") == "paid":
+        await answer_callback_safe(callback, "✅ Этот счёт уже оплачен", show_alert=True)
+        return
+    methods = await run_db(payment_service.get_available_payment_methods, int(tenant_id), int(invoice_id))
+    available_providers = {str(item.get("provider") or "") for item in methods}
+    if provider not in available_providers:
+        logger.warning("provider недоступен provider=%s invoice_id=%s", provider, invoice_id)
+        await answer_callback_safe(callback, "❌ Этот способ оплаты сейчас недоступен", show_alert=True)
+        return
+    active_intent = None
+    if hasattr(db, "get_active_payment_intent_for_invoice_provider"):
+        active_intent = await run_db(db.get_active_payment_intent_for_invoice_provider, int(invoice_id), provider)
+    if not active_intent and hasattr(db, "list_payment_intents_for_tenant"):
+        intents = await run_db(db.list_payment_intents_for_tenant, int(tenant_id), 50)
+        for intent in intents:
+            if int(intent.get("invoice_id") or 0) != int(invoice_id):
+                continue
+            if str(intent.get("provider") or "") != provider:
+                continue
+            if str(intent.get("status") or "") not in {"created", "pending", "waiting_confirmation"}:
+                continue
+            active_intent = intent
+            break
+    payment_result: dict[str, Any]
+    if active_intent:
+        logger.info(
+            "найден существующий активный payment_intent id=%s provider=%s invoice_id=%s",
+            int(active_intent.get("id") or 0),
+            provider,
+            invoice_id,
+        )
+        payload = active_intent.get("provider_payload_json") if isinstance(active_intent.get("provider_payload_json"), dict) else {}
+        payment_result = {
+            "ok": True,
+            "payment_intent_id": int(active_intent.get("id") or 0),
+            "provider": provider,
+            "status": str(active_intent.get("status") or "created"),
+            "checkout_url": active_intent.get("external_checkout_url"),
+            "message_ru": payload.get("user_message_ru"),
+            "payload": payload.get("payload") if isinstance(payload.get("payload"), dict) else payload,
+        }
+    else:
+        payment_result = await run_db(payment_service.create_payment_for_invoice, int(invoice_id), provider)
+        if payment_result.get("ok"):
+            logger.info(
+                "создан payment_intent id=%s provider=%s invoice_id=%s",
+                int(payment_result.get("payment_intent_id") or 0),
+                provider,
+                invoice_id,
+            )
+    await answer_callback_safe_once(callback)
+    if not payment_result.get("ok"):
+        await edit_message_text_safe(
+            message=callback.message,
+            text="❌ Не удалось создать оплату. Попробуйте ещё раз позже.",
+            reply_markup=user_ui.build_user_payment_methods_keyboard(invoice_id, methods),
+        )
+        return
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_payment_result_text(invoice, payment_result),
+        reply_markup=user_ui.build_user_payment_result_keyboard(invoice_id, payment_result),
     )
 
 
@@ -2631,6 +2719,11 @@ async def handle_invoice_provider_callback(callback: CallbackQuery):
     if str(result.get("status")) == "waiting_confirmation":
         kb = product_ui.payment_manual_confirm_keyboard(lang, int(result.get("payment_intent_id") or 0))
     await edit_message_text_safe(message=callback.message, text=message_text, reply_markup=kb)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_manual_paid_stub:"))
+async def handle_user_manual_paid_stub_callback(callback: CallbackQuery):
+    await answer_callback_safe(callback, "Подтверждение ручной оплаты будет подключено следующим этапом.", show_alert=True)
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("payment:manual_sent:"))

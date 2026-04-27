@@ -5611,6 +5611,9 @@ class PostgresRepository(RepositoryProtocol):
     def get_payment_intent_by_invoice(self, invoice_id: int) -> dict[str, Any] | None:
         return self.payment_repo.get_payment_intent_by_invoice(invoice_id=invoice_id)
 
+    def get_active_payment_intent_for_invoice_provider(self, invoice_id: int, provider: str) -> dict[str, Any] | None:
+        return self.payment_repo.get_active_payment_intent_for_invoice_provider(invoice_id=invoice_id, provider=provider)
+
     def get_payment_intent_by_external_id(self, external_payment_id: str) -> dict[str, Any] | None:
         return self.payment_repo.get_payment_intent_by_external_id(external_payment_id=external_payment_id)
 
