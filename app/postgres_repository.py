@@ -23,6 +23,18 @@ from app.billing_repository import BillingRepository
 from app.payment_repository import PaymentRepository
 from app.usage_repository import UsageRepository
 from app.tenant_fairness_service import TenantFairnessService
+from app.job_service import (
+    JOB_PRIORITY_BY_TYPE,
+    JOB_QUEUE_BY_TYPE,
+    JOB_TYPE_REPOST_ALBUM,
+    JOB_TYPE_REPOST_SINGLE,
+    JOB_TYPE_VIDEO_DOWNLOAD,
+    VIDEO_ARTIFACT_VERSION,
+    VIDEO_PIPELINE_VERSION,
+    build_dedup_key_for_album,
+    build_dedup_key_for_single,
+    build_dedup_key_for_video,
+)
 
 logger = logging.getLogger("forwarder.postgres")
 
@@ -2954,6 +2966,261 @@ class PostgresRepository(RepositoryProtocol):
                         (rule_id, str(source_channel), source_thread_id, media_group_id),
                     )
                 return cur.fetchall()
+
+    def take_due_delivery_and_create_job(self, rule_id: int, due_iso: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT mode, schedule_mode, interval
+                    FROM routing
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (rule_id,),
+                )
+                rule_row = cur.fetchone()
+                if not rule_row:
+                    conn.commit()
+                    return None
+
+                rule_mode = (rule_row["mode"] or "repost").strip().lower()
+                schedule_mode = (rule_row["schedule_mode"] or "interval").strip().lower()
+                interval = int(rule_row["interval"] or 0)
+
+                cur.execute(
+                    """
+                    SELECT
+                        d.id AS delivery_id,
+                        d.rule_id,
+                        p.id AS post_id,
+                        p.message_id,
+                        p.source_channel,
+                        p.source_thread_id,
+                        p.content_json,
+                        p.media_group_id,
+                        r.target_id,
+                        r.target_thread_id,
+                        COALESCE(r.tenant_id, d.tenant_id, 1) AS tenant_id
+                    FROM deliveries d
+                    JOIN routing r ON r.id = d.rule_id
+                    JOIN posts p ON p.id = d.post_id
+                    WHERE d.rule_id = %s
+                      AND d.status = 'pending'
+                      AND r.is_active = TRUE
+                      AND (r.next_run_at IS NULL OR r.next_run_at <= %s)
+                      AND (
+                            %s != 'video'
+                            OR COALESCE((p.content_json::jsonb ->> 'media_kind'), '') = 'video'
+                      )
+                      AND NOT EXISTS (
+                            SELECT 1
+                            FROM deliveries d_rule
+                            WHERE d_rule.rule_id = d.rule_id
+                              AND d_rule.status = 'processing'
+                      )
+                      AND NOT EXISTS (
+                            SELECT 1
+                            FROM deliveries d_sent
+                            JOIN posts p_sent ON p_sent.id = d_sent.post_id
+                            WHERE d_sent.rule_id = d.rule_id
+                              AND d_sent.status = 'sent'
+                              AND p.media_group_id IS NOT NULL
+                              AND p_sent.source_channel = p.source_channel
+                              AND (
+                                    (p_sent.source_thread_id IS NULL AND p.source_thread_id IS NULL)
+                                    OR p_sent.source_thread_id = p.source_thread_id
+                                  )
+                              AND p_sent.media_group_id = p.media_group_id
+                              AND %s = 'repost'
+                      )
+                      AND NOT EXISTS (
+                            SELECT 1
+                            FROM deliveries d_target
+                            JOIN routing r_target ON r_target.id = d_target.rule_id
+                            WHERE d_target.status = 'processing'
+                              AND r_target.target_id = r.target_id
+                              AND (
+                                    (r_target.target_thread_id IS NULL AND r.target_thread_id IS NULL)
+                                    OR r_target.target_thread_id = r.target_thread_id
+                                  )
+                      )
+                    ORDER BY p.id ASC
+                    FOR UPDATE OF d SKIP LOCKED
+                    LIMIT 1
+                    """,
+                    (rule_id, due_iso, rule_mode, rule_mode),
+                )
+                due_row = cur.fetchone()
+                if not due_row:
+                    conn.commit()
+                    return None
+
+                delivery_id = int(due_row["delivery_id"])
+                tenant_id = int(due_row["tenant_id"] or 1)
+                media_group_id = due_row.get("media_group_id")
+
+                payload: dict[str, Any] = {
+                    "rule_id": int(due_row["rule_id"]),
+                    "delivery_id": delivery_id,
+                    "tenant_id": tenant_id,
+                    "message_id": int(due_row["message_id"]),
+                    "source_channel": str(due_row["source_channel"]),
+                    "source_thread_id": due_row["source_thread_id"],
+                    "target_id": str(due_row["target_id"]),
+                    "target_thread_id": due_row["target_thread_id"],
+                    "mode": rule_mode,
+                    "interval": interval,
+                    "schedule_mode": schedule_mode,
+                    "media_group_id": media_group_id,
+                }
+
+                job_type = JOB_TYPE_REPOST_SINGLE
+                dedup_key = build_dedup_key_for_single(delivery_id)
+                delivery_ids_to_take = [delivery_id]
+
+                if rule_mode == "video":
+                    job_type = JOB_TYPE_VIDEO_DOWNLOAD
+                    dedup_key = build_dedup_key_for_video(delivery_id)
+                    payload["job_type"] = JOB_TYPE_VIDEO_DOWNLOAD
+                    payload["attempt_stage"] = "download"
+                    payload["source_video_path"] = None
+                    payload["processed_video_path"] = None
+                    payload["thumbnail_path"] = None
+                    payload["cleanup_paths"] = []
+                    payload["video_file_path"] = None
+                    payload["processed_file_path"] = None
+                    payload["artifact_version"] = VIDEO_ARTIFACT_VERSION
+                    payload["pipeline_version"] = VIDEO_PIPELINE_VERSION
+                elif media_group_id:
+                    if due_row["source_thread_id"] is None:
+                        cur.execute(
+                            """
+                            SELECT d.id AS delivery_id
+                            FROM deliveries d
+                            JOIN posts p ON p.id = d.post_id
+                            WHERE d.rule_id = %s
+                              AND d.status = 'pending'
+                              AND p.source_channel = %s
+                              AND p.source_thread_id IS NULL
+                              AND p.media_group_id = %s
+                            ORDER BY p.message_id ASC
+                            FOR UPDATE OF d SKIP LOCKED
+                            """,
+                            (rule_id, str(due_row["source_channel"]), str(media_group_id)),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT d.id AS delivery_id
+                            FROM deliveries d
+                            JOIN posts p ON p.id = d.post_id
+                            WHERE d.rule_id = %s
+                              AND d.status = 'pending'
+                              AND p.source_channel = %s
+                              AND p.source_thread_id = %s
+                              AND p.media_group_id = %s
+                            ORDER BY p.message_id ASC
+                            FOR UPDATE OF d SKIP LOCKED
+                            """,
+                            (rule_id, str(due_row["source_channel"]), due_row["source_thread_id"], str(media_group_id)),
+                        )
+
+                    album_rows = cur.fetchall() or []
+                    delivery_ids_to_take = [int(item["delivery_id"]) for item in album_rows]
+                    if not delivery_ids_to_take or delivery_id not in delivery_ids_to_take:
+                        conn.commit()
+                        return None
+
+                    job_type = JOB_TYPE_REPOST_ALBUM
+                    dedup_key = build_dedup_key_for_album(int(due_row["rule_id"]), str(media_group_id), delivery_ids_to_take)
+                    payload["job_type"] = JOB_TYPE_REPOST_ALBUM
+                    payload["delivery_ids"] = delivery_ids_to_take
+                    payload["media_group_id"] = media_group_id
+                else:
+                    payload["job_type"] = JOB_TYPE_REPOST_SINGLE
+
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM jobs
+                    WHERE dedup_key = %s
+                      AND status IN ('pending', 'leased', 'processing', 'retry')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (dedup_key,),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    conn.commit()
+                    return {
+                        "status": "duplicate",
+                        "delivery_id": delivery_id,
+                        "tenant_id": tenant_id,
+                        "dedup_key": dedup_key,
+                    }
+
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO jobs(job_type, payload_json, dedup_key, status, priority, queue, run_at, created_at, updated_at)
+                        VALUES(%s, %s::jsonb, %s, 'pending', %s, %s, NOW(), NOW(), NOW())
+                        RETURNING id
+                        """,
+                        (
+                            job_type,
+                            _json_dumps(payload) or "{}",
+                            dedup_key,
+                            int(JOB_PRIORITY_BY_TYPE.get(job_type, 100)),
+                            str(JOB_QUEUE_BY_TYPE.get(job_type, "default")),
+                        ),
+                    )
+                    job_row = cur.fetchone()
+                except Exception as exc:
+                    if "duplicate key value violates unique constraint" not in str(exc).lower():
+                        raise
+                    conn.rollback()
+                    return {
+                        "status": "duplicate",
+                        "delivery_id": delivery_id,
+                        "tenant_id": tenant_id,
+                        "dedup_key": dedup_key,
+                    }
+
+                cur.executemany(
+                    """
+                    UPDATE deliveries
+                    SET status = 'processing'
+                    WHERE id = %s
+                      AND status = 'pending'
+                    """,
+                    [(item_id,) for item_id in delivery_ids_to_take],
+                )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM deliveries
+                    WHERE id = ANY(%s)
+                      AND status = 'processing'
+                    """,
+                    (delivery_ids_to_take,),
+                )
+                taken_count_row = cur.fetchone()
+                taken_count = int(taken_count_row["cnt"] or 0) if taken_count_row else 0
+                if taken_count != len(delivery_ids_to_take):
+                    conn.rollback()
+                    return None
+
+            conn.commit()
+            return {
+                "status": "created",
+                "job_id": int(job_row["id"]) if job_row else None,
+                "delivery_id": delivery_id,
+                "tenant_id": tenant_id,
+                "dedup_key": dedup_key,
+                "job_type": job_type,
+            }
 
     # =========================================================
     # DELIVERY STATUS
