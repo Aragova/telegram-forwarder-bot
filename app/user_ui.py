@@ -16,6 +16,8 @@ PAYMENT_PROVIDER_TITLES_RU: dict[str, str] = {
     "lava_top": "Lava.top",
 }
 
+MANUAL_PAYMENT_PROVIDERS = {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual"}
+
 
 def build_user_main_text() -> str:
     return (
@@ -168,6 +170,7 @@ def build_user_invoice_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💳 Перейти к оплате", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
             [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_plans")],
         ]
@@ -280,8 +283,9 @@ def build_user_payment_result_keyboard(invoice_id: int, payment_result: dict[str
     provider = str(payment_result.get("provider") or "")
     if checkout_url:
         rows.append([InlineKeyboardButton(text="Открыть оплату", url=checkout_url)])
-    if provider in {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual"}:
-        rows.append([InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_manual_paid:{int(invoice_id)}")])
+    if provider in MANUAL_PAYMENT_PROVIDERS:
+        rows.append([InlineKeyboardButton(text="📎 Прикрепить чек оплаты", callback_data=f"user_upload_receipt:{int(invoice_id)}")])
+    rows.append([InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")])
     rows.extend(
         [
             [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
@@ -289,3 +293,85 @@ def build_user_payment_result_keyboard(invoice_id: int, payment_result: dict[str
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_user_manual_receipt_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📎 Прикрепить чек оплаты", callback_data=f"user_upload_receipt:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
+        ]
+    )
+
+
+def build_user_payment_status_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 К оплате", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_invoices")],
+        ]
+    )
+
+
+def build_user_manual_receipt_request_text(invoice: dict[str, Any], payment_intent: dict[str, Any]) -> str:
+    invoice_id = int(invoice.get("id") or 0)
+    intent_id = int(payment_intent.get("id") or 0)
+    provider_title = payment_provider_title(str(payment_intent.get("provider") or ""))
+    return (
+        "📎 Подтверждение ручной оплаты\n\n"
+        f"Счёт: #{invoice_id}\n"
+        f"Payment intent: #{intent_id}\n"
+        f"Способ: {provider_title}\n\n"
+        "Прикрепите чек оплаты файлом или фотографией.\n"
+        "Поддерживаются: фото, PDF, JPG, PNG, WEBP.\n"
+        "После загрузки чека появится кнопка ✅ Я оплатил."
+    )
+
+
+def build_user_manual_receipt_uploaded_text(invoice: dict[str, Any], payment_intent: dict[str, Any]) -> str:
+    invoice_id = int(invoice.get("id") or 0)
+    intent_id = int(payment_intent.get("id") or 0)
+    return (
+        "✅ Чек прикреплён\n\n"
+        f"Счёт: #{invoice_id}\n"
+        f"Payment intent: #{intent_id}\n\n"
+        "Теперь нажмите «✅ Я оплатил», чтобы отправить заявку администратору."
+    )
+
+
+def build_user_payment_status_text(invoice: dict[str, Any], payment_intent: dict[str, Any] | None) -> str:
+    invoice_id = int(invoice.get("id") or 0)
+    invoice_status = str(invoice.get("status") or "draft")
+    if not payment_intent:
+        return (
+            "📊 Статус оплаты\n\n"
+            f"Счёт: #{invoice_id}\n"
+            f"Статус счёта: {invoice_status}\n\n"
+            "Оплата ещё не создавалась."
+        )
+    intent_id = int(payment_intent.get("id") or 0)
+    provider_title = payment_provider_title(str(payment_intent.get("provider") or ""))
+    payment_status = str(payment_intent.get("status") or "created")
+    payload = payment_intent.get("confirmation_payload_json") if isinstance(payment_intent.get("confirmation_payload_json"), dict) else {}
+    user_payload_status = str(payload.get("status") or "")
+    description = "💳 Оплата создана"
+    if payment_status == "waiting_confirmation":
+        description = "⏳ Оплата ожидает проверки"
+    if user_payload_status == "submitted_by_user":
+        description = "📨 Чек отправлен администратору"
+    if payment_status == "paid":
+        description = "✅ Оплата подтверждена"
+    if payment_status == "failed":
+        description = "❌ Оплата отклонена"
+    return (
+        "📊 Статус оплаты\n\n"
+        f"Счёт: #{invoice_id}\n"
+        f"Payment intent: #{intent_id}\n"
+        f"Способ: {provider_title}\n"
+        f"Статус счёта: {invoice_status}\n"
+        f"Статус оплаты: {payment_status}\n\n"
+        f"{description}"
+    )
