@@ -280,11 +280,8 @@ def build_user_payment_result_text(invoice: dict[str, Any], payment_result: dict
 def build_user_payment_result_keyboard(invoice_id: int, payment_result: dict[str, Any]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     checkout_url = str(payment_result.get("checkout_url") or "").strip()
-    provider = str(payment_result.get("provider") or "")
     if checkout_url:
         rows.append([InlineKeyboardButton(text="Открыть оплату", url=checkout_url)])
-    if provider in MANUAL_PAYMENT_PROVIDERS:
-        rows.append([InlineKeyboardButton(text="📎 Прикрепить чек оплаты", callback_data=f"user_upload_receipt:{int(invoice_id)}")])
     rows.append([InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")])
     rows.extend(
         [
@@ -298,7 +295,7 @@ def build_user_payment_result_keyboard(invoice_id: int, payment_result: dict[str
 def build_user_manual_receipt_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📎 Прикрепить чек оплаты", callback_data=f"user_upload_receipt:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_manual_paid:{int(invoice_id)}")],
             [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
             [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
@@ -321,13 +318,13 @@ def build_user_manual_receipt_request_text(invoice: dict[str, Any], payment_inte
     intent_id = int(payment_intent.get("id") or 0)
     provider_title = payment_provider_title(str(payment_intent.get("provider") or ""))
     return (
-        "📎 Подтверждение ручной оплаты\n\n"
-        f"Счёт: #{invoice_id}\n"
-        f"Payment intent: #{intent_id}\n"
-        f"Способ: {provider_title}\n\n"
-        "Прикрепите чек оплаты файлом или фотографией.\n"
-        "Поддерживаются: фото, PDF, JPG, PNG, WEBP.\n"
-        "После загрузки чека появится кнопка ✅ Я оплатил."
+        "💎 <b>Премиум-подтверждение оплаты</b>\n\n"
+        f"🧾 <b>Счёт:</b> #{invoice_id}\n"
+        f"🔖 <b>Payment intent:</b> #{intent_id}\n"
+        f"💳 <b>Способ оплаты:</b> {provider_title}\n\n"
+        "📤 <b>Загрузите чек</b> файлом или фотографией прямо в этот чат.\n"
+        "🖼️ <b>Поддерживаются форматы:</b> фото, PDF, JPG, PNG, WEBP.\n\n"
+        "✅ После загрузки нажмите кнопку <b>«Я оплатил»</b> — и мы сразу отправим заявку администратору."
     )
 
 
