@@ -29,8 +29,9 @@ def test_owner_plan_not_visible():
 def test_cta_ru_en_and_telegram_bot_present():
     index_text = read(LANDING / "index.html")
     app_text = read(LANDING / "app.js")
-    assert "cta-open-bot" in index_text
+
     assert "header-open-bot" in index_text
+    assert "https://t.me/topposter69_bot" in index_text
     assert "botUrl" in app_text
     assert "Telegram" in app_text
     assert 'data-lang="ru"' in index_text
@@ -70,10 +71,17 @@ def test_assets_robot_logo_favicon_exist():
 def test_legal_links_and_faq_exist():
     index_text = read(LANDING / "index.html")
     app_text = read(LANDING / "app.js")
-    for link_id in ("link-terms", "link-privacy", "link-refund", "link-contacts", "link-help"):
+
+    for link_id in (
+        "footer-link-terms",
+        "footer-link-privacy",
+        "footer-link-refund",
+        "footer-link-contacts",
+    ):
         assert link_id in index_text
-    assert "faqList" in index_text
-    assert "faq" in app_text.lower()
+
+    assert "ru/instructions.html" in index_text or "#how" in index_text
+    assert "nav_instructions" in app_text
 
 
 def test_ru_en_legal_and_instruction_pages_exist():
