@@ -32,6 +32,7 @@ def test_cta_ru_en_and_telegram_bot_present():
 
     assert "header-open-bot" in index_text
     assert "https://t.me/topposter69_bot" in index_text
+    assert "https://t.me/topposter69_bot" in index_text
     assert "botUrl" in app_text
     assert "Telegram" in app_text
     assert 'data-lang="ru"' in index_text
