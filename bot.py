@@ -128,6 +128,9 @@ MENU_NAVIGATION_TEXTS = {
     "🌐 Язык",
     "📈 Использование",
     "🧾 Счета",
+    "🧾 Мои счета",
+    "💳 Оплата",
+    "🆘 Поддержка",
     "📜 Список",
     "📜 Список правил",
     "📜 Список каналов",
@@ -623,6 +626,111 @@ def _resolve_language(user_id: int | None) -> str:
     if user_id is None:
         return "ru"
     return get_user_language(int(user_id), db)
+
+
+def _is_admin_user(user_id: int | None) -> bool:
+    if user_id is None:
+        return False
+    return int(user_id) == int(settings.admin_id)
+
+
+def _public_user_menu_text() -> str:
+    return (
+        "👋 Добро пожаловать в ViMi\n\n"
+        "ViMi помогает автоматизировать Telegram-каналы: публикации, видео, очереди, тарифы, счета и оплату — внутри Telegram.\n\n"
+        "Выберите действие:"
+    )
+
+
+def _public_user_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👤 Мой аккаунт", callback_data="user_account")],
+            [InlineKeyboardButton(text="💎 Тарифы", callback_data="user_plans")],
+            [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
+            [InlineKeyboardButton(text="💳 Оплата", callback_data="user_payments")],
+            [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
+        ]
+    )
+
+
+def _public_user_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")]]
+    )
+
+
+async def _show_public_user_menu_message(message: Message) -> None:
+    await message.reply(_public_user_menu_text(), reply_markup=_public_user_menu_keyboard())
+
+
+def _build_public_account_text(
+    *,
+    user_id: int,
+    tenant_id: int,
+    subscription: dict[str, Any] | None,
+    usage_today: dict[str, Any] | None,
+    rules_count: int,
+) -> str:
+    sub = subscription or {}
+    usage = usage_today or {}
+    plan_name = str(sub.get("plan_name") or "FREE").upper()
+    status = str(sub.get("status") or "active")
+    max_rules = int(sub.get("max_rules") or 0)
+    max_video = int(sub.get("max_video_per_day") or 0)
+    max_jobs = int(sub.get("max_jobs_per_day") or 0)
+    video_today = int(usage.get("video_count") or 0)
+    jobs_today = int(usage.get("jobs_count") or 0)
+    return (
+        "👤 Мой аккаунт\n\n"
+        f"Telegram ID: {int(user_id)}\n"
+        f"Аккаунт: #{int(tenant_id)}\n\n"
+        f"Тариф: {plan_name}\n"
+        f"Статус: {status}\n\n"
+        "Лимиты:\n"
+        f"📌 Правила: {int(rules_count)} / {max_rules}\n"
+        f"🎬 Видео сегодня: {video_today} / {max_video}\n"
+        f"📦 Задачи сегодня: {jobs_today} / {max_jobs}"
+    )
+
+
+def _public_account_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
+            [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
+            [InlineKeyboardButton(text="💳 Оплата", callback_data="user_payments")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
+        ]
+    )
+
+
+def _build_public_plans_text() -> str:
+    plans = [item for item in _default_plan_catalog("ru") if str(item.get("name")).upper() != "OWNER"]
+    lines = ["💎 Тарифы\n"]
+    for plan in plans:
+        lines.extend(
+            [
+                f"{plan['name']}",
+                f"{plan['description']}",
+                f"📌 Правила: {int(plan.get('max_rules') or 0)}",
+                f"🎬 Видео/день: {int(plan.get('max_video_per_day') or 0)}",
+                f"📦 Задачи/день: {int(plan.get('max_jobs_per_day') or 0)}",
+                f"💰 Цена: ${float(plan.get('price') or 0):.0f}/мес",
+                "",
+            ]
+        )
+    return "\n".join(lines).strip()
+
+
+def _public_plans_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="BASIC — выбрать", callback_data="user_select_plan:BASIC")],
+            [InlineKeyboardButton(text="PRO — выбрать", callback_data="user_select_plan:PRO")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
+        ]
+    )
 
 
 def _default_plan_catalog(lang: str) -> list[dict[str, Any]]:
@@ -1519,14 +1627,25 @@ async def stop_all_workers() -> None:
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id if message.from_user else settings.admin_id
-    lang = _resolve_language(user_id)
+    if _is_admin_user(user_id):
+        lang = _resolve_language(user_id)
+        tenant_before = await run_db(tenant_service.get_tenant_by_admin, user_id)
+        await run_db(tenant_service.ensure_tenant_exists, user_id)
+        is_new = tenant_before is None
+        await message.reply(
+            product_ui.start_screen(lang, is_new),
+            reply_markup=product_ui.start_keyboard(lang),
+        )
+        return
+
     tenant_before = await run_db(tenant_service.get_tenant_by_admin, user_id)
-    await run_db(tenant_service.ensure_tenant_exists, user_id)
-    is_new = tenant_before is None
-    await message.reply(
-        product_ui.start_screen(lang, is_new),
-        reply_markup=product_ui.start_keyboard(lang),
-    )
+    tenant = await run_db(tenant_service.ensure_tenant_exists, user_id)
+    tenant_id = int(tenant.get("id") or 0)
+    if tenant_before is None:
+        logger.info("Создан tenant для user_id=%s tenant_id=%s", user_id, tenant_id)
+    else:
+        logger.info("Получен tenant для user_id=%s tenant_id=%s", user_id, tenant_id)
+    await _show_public_user_menu_message(message)
 
 
 @dp.message(Command("menu"))
@@ -1726,20 +1845,28 @@ async def cmd_invoice(message: Message):
 @dp.message(lambda m: m.text == "📋 Меню")
 async def handle_start(message: Message):
     reset_user_state(message.from_user.id if message.from_user else None)
-
-    await message.reply(
-        "📋 Главное меню",
-        reply_markup=get_main_menu(),
-    )
+    if _is_admin_user(message.from_user.id if message.from_user else None):
+        await message.reply(
+            "📋 Главное меню",
+            reply_markup=get_main_menu(),
+        )
+        return
+    await _show_public_user_menu_message(message)
 
 
 @dp.message(lambda m: m.text == "👤 Мой аккаунт")
 async def handle_account_button(message: Message):
+    if not _is_admin_user(message.from_user.id if message.from_user else None):
+        await _show_public_user_menu_message(message)
+        return
     await cmd_account(message)
 
 
 @dp.message(lambda m: m.text == "💎 Тарифы")
 async def handle_plans_button(message: Message):
+    if not _is_admin_user(message.from_user.id if message.from_user else None):
+        await _show_public_user_menu_message(message)
+        return
     await cmd_plans(message)
 
 
@@ -1865,6 +1992,142 @@ async def handle_product_callback(callback: CallbackQuery):
         kb = product_ui.language_keyboard()
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+
+@dp.message(lambda m: m.text == "🧾 Мои счета")
+async def handle_user_invoices_text(message: Message):
+    if _is_admin_user(message.from_user.id if message.from_user else None):
+        await cmd_invoice(message)
+        return
+    await _show_public_user_menu_message(message)
+
+
+@dp.message(lambda m: m.text == "💳 Оплата")
+async def handle_user_payments_text(message: Message):
+    if _is_admin_user(message.from_user.id if message.from_user else None):
+        await message.answer("Раздел оплаты доступен через админские команды.")
+        return
+    await _show_public_user_menu_message(message)
+
+
+@dp.message(lambda m: m.text == "🆘 Поддержка")
+async def handle_user_support_text(message: Message):
+    if _is_admin_user(message.from_user.id if message.from_user else None):
+        await message.answer("Поддержка: используйте внутренние админские инструменты.")
+        return
+    await _show_public_user_menu_message(message)
+
+
+@dp.callback_query(lambda c: c.data == "user_main")
+async def handle_user_main_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=_public_user_menu_text(),
+        reply_markup=_public_user_menu_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_account")
+async def handle_user_account_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant = await run_db(tenant_service.ensure_tenant_exists, user_id)
+    tenant_id = int(tenant.get("id") or 1)
+    subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", "ru")
+    usage_today = await run_db(usage_service.get_today_usage, tenant_id)
+    rules_count = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
+    logger.info("Пользователь открыл user_account user_id=%s tenant_id=%s", user_id, tenant_id)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=_build_public_account_text(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            subscription=subscription,
+            usage_today=usage_today,
+            rules_count=int(rules_count or 0),
+        ),
+        reply_markup=_public_account_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_plans")
+async def handle_user_plans_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    logger.info("Пользователь открыл user_plans user_id=%s", callback.from_user.id if callback.from_user else 0)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=_build_public_plans_text(),
+        reply_markup=_public_plans_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_select_plan:"))
+async def handle_user_select_plan_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text="Создание счёта будет добавлено следующим этапом.",
+        reply_markup=_public_user_back_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_invoices")
+async def handle_user_invoices_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text="Раздел счетов будет подключён следующим этапом.",
+        reply_markup=_public_user_back_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_payments")
+async def handle_user_payments_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text="Оплата будет подключена следующим этапом.",
+        reply_markup=_public_user_back_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_support")
+async def handle_user_support_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    support_placeholder = getattr(settings, "support", "") or getattr(settings, "support_contact", "")
+    text = (
+        "🆘 Поддержка\n\n"
+        "Если нужна помощь с тарифом, оплатой или настройкой — напишите администратору."
+    )
+    if support_placeholder:
+        text += f"\n\nКонтакт: {support_placeholder}"
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=text,
+        reply_markup=_public_user_back_keyboard(),
+    )
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("plan_select:"))
