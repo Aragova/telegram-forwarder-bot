@@ -282,6 +282,10 @@ def build_user_payment_result_keyboard(invoice_id: int, payment_result: dict[str
     checkout_url = str(payment_result.get("checkout_url") or "").strip()
     if checkout_url:
         rows.append([InlineKeyboardButton(text="Открыть оплату", url=checkout_url)])
+    provider = str(payment_result.get("provider") or "")
+    payment_status = str(payment_result.get("status") or "")
+    if provider in MANUAL_PAYMENT_PROVIDERS and payment_status in {"created", "pending", "waiting_confirmation"}:
+        rows.append([InlineKeyboardButton(text="📤 Прикрепить чек", callback_data=f"user_upload_receipt:{int(invoice_id)}")])
     rows.append([InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")])
     rows.extend(
         [
@@ -303,14 +307,21 @@ def build_user_manual_receipt_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def build_user_payment_status_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def build_user_payment_status_keyboard(invoice_id: int, payment_intent: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if payment_intent:
+        provider = str(payment_intent.get("provider") or "")
+        payment_status = str(payment_intent.get("status") or "")
+        if provider in MANUAL_PAYMENT_PROVIDERS and payment_status in {"created", "pending", "waiting_confirmation"}:
+            rows.append([InlineKeyboardButton(text="📤 Прикрепить чек", callback_data=f"user_upload_receipt:{int(invoice_id)}")])
+    rows.extend(
+        [
             [InlineKeyboardButton(text="💳 К оплате", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
             [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_invoices")],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_user_manual_receipt_request_text(invoice: dict[str, Any], payment_intent: dict[str, Any]) -> str:

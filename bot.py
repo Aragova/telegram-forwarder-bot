@@ -2839,7 +2839,7 @@ async def handle_user_payment_status_callback(callback: CallbackQuery):
     await edit_message_text_safe(
         message=callback.message,
         text=user_ui.build_user_payment_status_text(invoice, payment_intent),
-        reply_markup=user_ui.build_user_payment_status_keyboard(invoice_id),
+        reply_markup=user_ui.build_user_payment_status_keyboard(invoice_id, payment_intent),
     )
 
 
