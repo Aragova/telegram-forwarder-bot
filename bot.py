@@ -2590,6 +2590,24 @@ async def handle_user_pay_provider_callback(callback: CallbackQuery):
             reply_markup=user_ui.build_user_payment_methods_keyboard(invoice_id, methods),
         )
         return
+    if provider in MANUAL_PAYMENT_PROVIDERS:
+        payment_intent_id = int(payment_result.get("payment_intent_id") or 0)
+        user_states[user_id] = {
+            "action": "awaiting_payment_receipt",
+            "invoice_id": int(invoice_id),
+            "payment_intent_id": payment_intent_id,
+        }
+        logger.info("пользователь начал загрузку чека invoice_id=%s intent_id=%s", invoice_id, payment_intent_id)
+        await edit_message_text_safe(
+            message=callback.message,
+            text=user_ui.build_user_manual_receipt_request_text(
+                invoice,
+                {"id": payment_intent_id, "provider": provider},
+            ),
+            reply_markup=user_ui.build_user_manual_receipt_keyboard(invoice_id),
+            parse_mode="HTML",
+        )
+        return
     await edit_message_text_safe(
         message=callback.message,
         text=user_ui.build_user_payment_result_text(invoice, payment_result),
@@ -2723,6 +2741,8 @@ async def handle_invoice_provider_callback(callback: CallbackQuery):
 
 MANUAL_PAYMENT_PROVIDERS = {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual"}
 MANUAL_PAYMENT_ACTIVE_STATUSES = {"created", "pending", "waiting_confirmation"}
+RECEIPT_ALLOWED_MIME_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+RECEIPT_ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".webp"}
 
 
 async def find_active_manual_payment_intent_for_invoice(invoice_id: int) -> dict[str, Any] | None:
@@ -2738,6 +2758,37 @@ async def find_active_manual_payment_intent_for_invoice(invoice_id: int) -> dict
     return intent
 
 
+def _receipt_extension(file_name: str) -> str:
+    normalized = str(file_name or "").strip().lower()
+    if "." not in normalized:
+        return ""
+    return "." + normalized.rsplit(".", 1)[1]
+
+
+def _is_supported_receipt_document(document: Any) -> bool:
+    mime_type = str(getattr(document, "mime_type", "") or "").lower()
+    file_name = str(getattr(document, "file_name", "") or "")
+    extension = _receipt_extension(file_name)
+    if mime_type in RECEIPT_ALLOWED_MIME_TYPES:
+        return True
+    if extension in RECEIPT_ALLOWED_EXTENSIONS:
+        return True
+    return False
+
+
+async def _find_latest_payment_intent_for_invoice(invoice_id: int, tenant_id: int) -> dict[str, Any] | None:
+    if hasattr(db, "get_payment_intent_by_invoice"):
+        intent = await run_db(db.get_payment_intent_by_invoice, int(invoice_id))
+        if intent:
+            return intent
+    if hasattr(db, "list_payment_intents_for_tenant"):
+        intents = await run_db(db.list_payment_intents_for_tenant, int(tenant_id), 50)
+        for intent in intents:
+            if int(intent.get("invoice_id") or 0) == int(invoice_id):
+                return intent
+    return None
+
+
 def _admin_manual_payment_keyboard(payment_intent_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -2746,6 +2797,67 @@ def _admin_manual_payment_keyboard(payment_intent_id: int) -> InlineKeyboardMark
                 InlineKeyboardButton(text="❌ Отклонить", callback_data=f"admin_reject_manual_payment:{int(payment_intent_id)}"),
             ]
         ]
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_upload_receipt:"))
+async def handle_user_upload_receipt_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id if callback.from_user else 0
+    if _is_admin_user(user_id):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
+    if not invoice:
+        await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
+        return
+    if int(invoice.get("tenant_id") or 0) != int(tenant_id):
+        logger.warning("попытка загрузить чек по чужому счёту user_id=%s invoice_id=%s", user_id, invoice_id)
+        await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+        return
+    intent = await find_active_manual_payment_intent_for_invoice(int(invoice_id))
+    if not intent:
+        await answer_callback_safe(callback, "❌ Активная ручная оплата не найдена", show_alert=True)
+        return
+    payment_intent_id = int(intent.get("id") or 0)
+    user_states[user_id] = {
+        "action": "awaiting_payment_receipt",
+        "invoice_id": int(invoice_id),
+        "payment_intent_id": payment_intent_id,
+    }
+    logger.info("пользователь начал загрузку чека invoice_id=%s intent_id=%s", invoice_id, payment_intent_id)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_manual_receipt_request_text(invoice, intent),
+        reply_markup=user_ui.build_user_manual_receipt_keyboard(invoice_id),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_payment_status:"))
+async def handle_user_payment_status_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id if callback.from_user else 0
+    if _is_admin_user(user_id):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
+    if not invoice:
+        await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
+        return
+    if int(invoice.get("tenant_id") or 0) != int(tenant_id):
+        logger.warning("попытка просмотра статуса чужой оплаты user_id=%s invoice_id=%s", user_id, invoice_id)
+        await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+        return
+    payment_intent = await _find_latest_payment_intent_for_invoice(invoice_id, tenant_id)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_payment_status_text(invoice, payment_intent),
+        reply_markup=user_ui.build_user_payment_status_keyboard(invoice_id),
     )
 
 
@@ -2778,29 +2890,48 @@ async def handle_user_manual_paid_callback(callback: CallbackQuery):
         )
         return
     payment_intent_id = int(intent.get("id") or 0)
-    payload = {
-        "user_id": int(user_id),
-        "tenant_id": int(tenant_id),
-        "invoice_id": int(invoice_id),
-        "payment_intent_id": payment_intent_id,
-        "provider": str(intent.get("provider") or ""),
-        "amount": float(intent.get("amount") or 0),
-        "currency": str(intent.get("currency") or "USD").upper(),
-        "submitted_at": utc_now_iso(),
-        "status": "submitted_by_user",
-    }
+    payload = dict(intent.get("confirmation_payload_json") or {})
+    if not bool(payload.get("receipt_uploaded")):
+        logger.info("пользователь попытался отправить заявку без чека invoice_id=%s intent_id=%s", invoice_id, payment_intent_id)
+        user_states[user_id] = {
+            "action": "awaiting_payment_receipt",
+            "invoice_id": int(invoice_id),
+            "payment_intent_id": payment_intent_id,
+        }
+        await answer_callback_safe(callback, "❌ Сначала прикрепите чек оплаты", show_alert=True)
+        await edit_message_text_safe(
+            message=callback.message,
+            text=user_ui.build_user_manual_receipt_request_text(invoice, intent),
+            reply_markup=user_ui.build_user_manual_receipt_keyboard(invoice_id),
+            parse_mode="HTML",
+        )
+        return
+    payload.update(
+        {
+            "user_id": int(user_id),
+            "tenant_id": int(tenant_id),
+            "invoice_id": int(invoice_id),
+            "payment_intent_id": payment_intent_id,
+            "provider": str(intent.get("provider") or ""),
+            "amount": float(intent.get("amount") or 0),
+            "currency": str(intent.get("currency") or "USD").upper(),
+            "submitted_at": utc_now_iso(),
+            "status": "submitted_by_user",
+        }
+    )
     await run_db(payment_service.save_manual_confirmation_payload, payment_intent_id, payload)
     logger.info("пользователь отправил заявку ручной оплаты user_id=%s invoice_id=%s intent_id=%s", user_id, invoice_id, payment_intent_id)
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(
         message=callback.message,
         text=(
-            "✅ Заявка на оплату отправлена\n\n"
+            "📨 Чек отправлен администратору\n\n"
             "Администратор проверит платёж и подтвердит тариф.\n"
             "Обычно это занимает некоторое время."
         ),
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
+                [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
                 [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
             ]
@@ -2819,14 +2950,108 @@ async def handle_user_manual_paid_callback(callback: CallbackQuery):
                     f"Payment intent: #{payment_intent_id}\n"
                     f"Способ: {provider_title}\n"
                     f"Сумма: {payload['amount']} {payload['currency']}\n"
-                    f"Статус: {str(intent.get('status') or 'waiting_confirmation')}\n\n"
-                    "Проверьте поступление платежа и выберите действие."
+                    "Статус: submitted_by_user"
                 ),
-                reply_markup=_admin_manual_payment_keyboard(payment_intent_id),
             )
-            logger.info("администратору отправлено уведомление intent_id=%s", payment_intent_id)
+            if str(payload.get("receipt_kind") or "") == "photo":
+                await bot.send_photo(
+                    settings.admin_id,
+                    str(payload.get("receipt_file_id") or ""),
+                    caption=f"Чек по заявке #{payment_intent_id}",
+                    reply_markup=_admin_manual_payment_keyboard(payment_intent_id),
+                )
+            else:
+                await bot.send_document(
+                    settings.admin_id,
+                    str(payload.get("receipt_file_id") or ""),
+                    caption=f"Чек по заявке #{payment_intent_id}",
+                    reply_markup=_admin_manual_payment_keyboard(payment_intent_id),
+                )
+            logger.info("заявка с чеком отправлена админу intent_id=%s", payment_intent_id)
         except Exception as exc:
             logger.warning("не удалось отправить уведомление администратору intent_id=%s: %s", payment_intent_id, exc)
+
+
+@dp.message(lambda m: m.chat.type == "private" and m.from_user is not None and user_states.get(m.from_user.id, {}).get("action") == "awaiting_payment_receipt")
+async def handle_user_payment_receipt_message(message: Message):
+    user_id = message.from_user.id if message.from_user else 0
+    if _is_admin_user(user_id):
+        user_states.pop(user_id, None)
+        return
+    state = user_states.get(user_id) or {}
+    invoice_id = int(state.get("invoice_id") or 0)
+    payment_intent_id = int(state.get("payment_intent_id") or 0)
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
+    intent = await run_db(db.get_payment_intent, payment_intent_id) if hasattr(db, "get_payment_intent") else None
+    if not invoice or not intent:
+        user_states.pop(user_id, None)
+        await message.answer("❌ Счёт или оплата не найдены. Откройте счёт и начните заново.")
+        return
+    if int(invoice.get("tenant_id") or 0) != int(tenant_id) or int(intent.get("invoice_id") or 0) != int(invoice_id):
+        logger.warning("попытка загрузки чека в чужую оплату user_id=%s invoice_id=%s intent_id=%s", user_id, invoice_id, payment_intent_id)
+        user_states.pop(user_id, None)
+        await message.answer("⛔ Нет доступа к этому счёту.")
+        return
+    receipt_kind = ""
+    receipt_file_id = ""
+    receipt_file_unique_id = ""
+    receipt_file_name = ""
+    receipt_mime_type = ""
+    if message.photo:
+        photo = message.photo[-1]
+        receipt_kind = "photo"
+        receipt_file_id = str(photo.file_id or "")
+        receipt_file_unique_id = str(photo.file_unique_id or "")
+        receipt_mime_type = "image/jpeg"
+    elif message.document:
+        if not _is_supported_receipt_document(message.document):
+            await message.answer("❌ Неподдерживаемый формат чека\n\nПрикрепите PDF, JPG, PNG или WEBP.")
+            return
+        document = message.document
+        receipt_kind = "document"
+        receipt_file_id = str(document.file_id or "")
+        receipt_file_unique_id = str(document.file_unique_id or "")
+        receipt_file_name = str(document.file_name or "")
+        receipt_mime_type = str(document.mime_type or "")
+    else:
+        await message.answer(
+            "❌ Чек не найден\n\n"
+            "Прикрепите чек оплаты файлом или фотографией.\n"
+            "Поддерживаются: PDF, JPG, PNG, WEBP."
+        )
+        return
+    payload = dict(intent.get("confirmation_payload_json") or {})
+    payload.update(
+        {
+            "receipt_uploaded": True,
+            "receipt_kind": receipt_kind,
+            "receipt_file_id": receipt_file_id,
+            "receipt_file_unique_id": receipt_file_unique_id,
+            "receipt_file_name": receipt_file_name,
+            "receipt_mime_type": receipt_mime_type,
+            "receipt_uploaded_at": utc_now_iso(),
+            "user_id": int(user_id),
+            "tenant_id": int(tenant_id),
+            "invoice_id": int(invoice_id),
+            "payment_intent_id": int(payment_intent_id),
+        }
+    )
+    await run_db(payment_service.save_manual_confirmation_payload, payment_intent_id, payload)
+    user_states.pop(user_id, None)
+    logger.info("пользователь прикрепил чек invoice_id=%s intent_id=%s file_id=%s", invoice_id, payment_intent_id, receipt_file_id)
+    await message.answer(
+        user_ui.build_user_manual_receipt_uploaded_text(invoice, intent),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_manual_paid:{int(invoice_id)}")],
+                [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
+                [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
+            ]
+        ),
+        parse_mode="HTML",
+    )
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("admin_confirm_manual_payment:"))
@@ -2845,12 +3070,17 @@ async def handle_admin_confirm_manual_payment_callback(callback: CallbackQuery):
     if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
         await answer_callback_safe(callback, "❌ Это не ручная оплата", show_alert=True)
         return
+    payload = dict(intent.get("confirmation_payload_json") or {})
+    if not bool(payload.get("receipt_uploaded")):
+        logger.warning("админ попытался подтвердить оплату без чека intent_id=%s", payment_intent_id)
+        await answer_callback_safe(callback, "❌ Нельзя подтвердить оплату без чека", show_alert=True)
+        return
     ok = await run_db(payment_service.confirm_manual_payment, payment_intent_id, admin_id, "manual_payment_confirmed_by_admin")
     await answer_callback_safe_once(callback)
     if not ok:
         await answer_callback_safe(callback, "❌ Не удалось подтвердить оплату", show_alert=True)
         return
-    logger.info("админ подтвердил ручную оплату intent_id=%s", payment_intent_id)
+    logger.info("админ подтвердил оплату с чеком intent_id=%s", payment_intent_id)
     await edit_message_text_safe(message=callback.message, text=f"✅ Оплата #{payment_intent_id} подтверждена.", reply_markup=None)
     confirmation_payload = intent.get("confirmation_payload_json") if isinstance(intent.get("confirmation_payload_json"), dict) else {}
     user_id = int(confirmation_payload.get("user_id") or 0)
@@ -2893,7 +3123,7 @@ async def handle_admin_reject_manual_payment_callback(callback: CallbackQuery):
     if not ok:
         await answer_callback_safe(callback, "❌ Не удалось отклонить оплату", show_alert=True)
         return
-    logger.info("админ отклонил ручную оплату intent_id=%s", payment_intent_id)
+    logger.info("админ отклонил оплату intent_id=%s", payment_intent_id)
     await edit_message_text_safe(message=callback.message, text=f"❌ Оплата #{payment_intent_id} отклонена.", reply_markup=None)
     user_id = int(payload.get("user_id") or 0)
     if user_id and bot:
