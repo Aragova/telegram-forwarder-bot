@@ -5559,6 +5559,9 @@ class PostgresRepository(RepositoryProtocol):
     def get_last_invoice(self, tenant_id: int) -> dict[str, Any] | None:
         return self.billing_repo.get_last_invoice(tenant_id=tenant_id)
 
+    def list_invoices_for_tenant(self, tenant_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        return self.billing_repo.list_invoices_for_tenant(tenant_id=tenant_id, limit=limit)
+
     def count_open_invoices(self, tenant_id: int) -> int:
         return self.billing_repo.count_open_invoices(tenant_id=tenant_id)
 

@@ -201,6 +201,22 @@ class BillingRepository(RepositorySplitBase):
                 row = cur.fetchone()
         return dict(row) if row else None
 
+    def list_invoices_for_tenant(self, tenant_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM invoices
+                    WHERE tenant_id = %s
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (int(tenant_id), int(limit)),
+                )
+                rows = cur.fetchall() or []
+        return [dict(row) for row in rows]
+
     def count_open_invoices(self, tenant_id: int) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
