@@ -2759,16 +2759,25 @@ def _is_supported_receipt_document(document: Any) -> bool:
 
 
 async def _find_latest_payment_intent_for_invoice(invoice_id: int, tenant_id: int) -> dict[str, Any] | None:
+    latest_intent: dict[str, Any] | None = None
+    latest_receipt_intent: dict[str, Any] | None = None
     if hasattr(db, "get_payment_intent_by_invoice"):
-        intent = await run_db(db.get_payment_intent_by_invoice, int(invoice_id))
-        if intent:
-            return intent
+        latest_intent = await run_db(db.get_payment_intent_by_invoice, int(invoice_id))
     if hasattr(db, "list_payment_intents_for_tenant"):
         intents = await run_db(db.list_payment_intents_for_tenant, int(tenant_id), 50)
         for intent in intents:
-            if int(intent.get("invoice_id") or 0) == int(invoice_id):
-                return intent
-    return None
+            if int(intent.get("invoice_id") or 0) != int(invoice_id):
+                continue
+            if latest_intent is None:
+                latest_intent = intent
+            if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
+                continue
+            payload = intent.get("confirmation_payload_json") if isinstance(intent.get("confirmation_payload_json"), dict) else {}
+            if not bool(payload.get("receipt_uploaded")):
+                continue
+            latest_receipt_intent = intent
+            break
+    return latest_receipt_intent or latest_intent
 
 
 def _admin_manual_payment_keyboard(payment_intent_id: int) -> InlineKeyboardMarkup:
@@ -2969,6 +2978,17 @@ async def handle_user_payment_receipt_message(message: Message):
         logger.warning("попытка загрузки чека в чужую оплату user_id=%s invoice_id=%s intent_id=%s", user_id, invoice_id, payment_intent_id)
         user_states.pop(user_id, None)
         await message.answer("⛔ Нет доступа к этому счёту.")
+        return
+    if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
+        user_states.pop(user_id, None)
+        await message.answer("❌ Этот способ оплаты не поддерживает ручную загрузку чека.")
+        return
+    if str(intent.get("status") or "") not in MANUAL_PAYMENT_ACTIVE_STATUSES:
+        user_states.pop(user_id, None)
+        await message.answer(
+            "❌ Эта заявка на оплату уже закрыта.\n\n"
+            "Откройте счёт и создайте новую попытку оплаты, затем прикрепите чек."
+        )
         return
     receipt_kind = ""
     receipt_file_id = ""
