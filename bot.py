@@ -4837,7 +4837,9 @@ def build_system_journal_inline_keyboard(page: int, total_pages: int) -> InlineK
     if nav_row:
         rows.append(nav_row)
 
-    rows.append([InlineKeyboardButton(text="🔄 Обновить", style="primary", callback_data=f"syslog_refresh:{page}")])
+
+    rows.append([InlineKeyboardButton(text="🔵 Обновить", style="primary", callback_data=f"syslog_refresh:{page}")])
+
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="syslog_back")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
