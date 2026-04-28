@@ -38,43 +38,18 @@ def build_user_rules_keyboard(rules, page: int = 0, *, rules_page_size: int = 8,
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _filter_user_rule_card_keyboard(keyboard: InlineKeyboardMarkup, rule_id: int) -> InlineKeyboardMarkup:
-    allowed_prefixes = (
-        "rule_refresh:",
-        "enable_rule:",
-        "disable_rule:",
-        "change_interval:",
-        "change_fixed_times:",
-        "set_interval_mode:",
-        "change_next_run:",
-        "toggle_rule_mode:",
-        "video_intro_menu:",
-        "video_caption_menu:",
-        "caption_mode_menu:",
-        "trigger_now:",
-        "delete_rule:",
-        "rule_extra_menu:",
-    )
-    allowed_exact = {"rule_to_list"}
-    filtered_rows: list[list[InlineKeyboardButton]] = []
-    for row in keyboard.inline_keyboard:
-        filtered_row: list[InlineKeyboardButton] = []
-        for button in row:
-            callback_data = button.callback_data or ""
-            if callback_data in allowed_exact or callback_data.startswith(allowed_prefixes):
-                filtered_row.append(button)
-        if filtered_row:
-            filtered_rows.append(filtered_row)
-
-    filtered_rows.append([InlineKeyboardButton(text="⬅️ К моим правилам", callback_data="user_rules")])
-    return InlineKeyboardMarkup(inline_keyboard=filtered_rows)
-
-
 async def build_user_rule_card_payload(ctx: UserHandlersContext, rule_id: int) -> tuple[str | None, InlineKeyboardMarkup | None]:
-    text, keyboard, _cache_status = await ctx.build_rule_card_payload_cached(rule_id)
-    if not text or not keyboard:
+    snapshot = await ctx.run_db(ctx.db.get_rule_card_snapshot, int(rule_id)) if hasattr(ctx.db, "get_rule_card_snapshot") else None
+    if not snapshot:
         return None, None
-    return text, _filter_user_rule_card_keyboard(keyboard, rule_id)
+    text = user_ui.build_user_rule_card_text(snapshot)
+    keyboard = user_ui.build_user_rule_card_keyboard(
+        rule_id=int(rule_id),
+        is_active=bool(snapshot.get("is_active")),
+        schedule_mode=str(snapshot.get("schedule_mode") or "interval"),
+        mode=str(snapshot.get("mode") or "repost"),
+    )
+    return text, keyboard
 
 
 async def ensure_rule_callback_access(ctx: UserHandlersContext, callback: CallbackQuery, rule_id: int) -> bool:
@@ -231,3 +206,62 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             return
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_refresh:"))
+    async def handle_user_rule_refresh(callback: CallbackQuery):
+        rule_id = int((callback.data or "").split(":", 1)[1])
+        if not await ensure_rule_callback_access(ctx, callback, rule_id):
+            return
+        text, kb = await build_user_rule_card_payload(ctx, rule_id)
+        if not text or not kb:
+            await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+            return
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_extra:"))
+    async def handle_user_rule_extra(callback: CallbackQuery):
+        rule_id = int((callback.data or "").split(":", 1)[1])
+        if not await ensure_rule_callback_access(ctx, callback, rule_id):
+            return
+        snapshot = await ctx.run_db(ctx.db.get_rule_card_snapshot, int(rule_id)) if hasattr(ctx.db, "get_rule_card_snapshot") else None
+        if not snapshot:
+            await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+            return
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=user_ui.build_user_rule_extra_text(
+                rule_id=rule_id,
+                target_title=str(snapshot.get("target_title") or snapshot.get("target_id") or "—"),
+            ),
+            reply_markup=user_ui.build_user_rule_extra_keyboard(rule_id=rule_id, mode=str(snapshot.get("mode") or "repost")),
+        )
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_logs:"))
+    async def handle_user_rule_logs(callback: CallbackQuery):
+        rule_id = int((callback.data or "").split(":", 1)[1])
+        if not await ensure_rule_callback_access(ctx, callback, rule_id):
+            return
+        rows = await ctx.run_db(ctx.db.get_audit_for_rule, int(rule_id), 50) if hasattr(ctx.db, "get_audit_for_rule") else []
+        rows = list(rows or [])
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=user_ui.build_user_rule_logs_text(rule_id=rule_id, log_rows=rows),
+            reply_markup=user_ui.build_user_rule_logs_keyboard(rule_id=rule_id, has_logs=bool(rows)),
+        )
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_logs_refresh:"))
+    async def handle_user_rule_logs_refresh(callback: CallbackQuery):
+        rule_id = int((callback.data or "").split(":", 1)[1])
+        if not await ensure_rule_callback_access(ctx, callback, rule_id):
+            return
+        rows = await ctx.run_db(ctx.db.get_audit_for_rule, int(rule_id), 50) if hasattr(ctx.db, "get_audit_for_rule") else []
+        rows = list(rows or [])
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=user_ui.build_user_rule_logs_text(rule_id=rule_id, log_rows=rows),
+            reply_markup=user_ui.build_user_rule_logs_keyboard(rule_id=rule_id, has_logs=bool(rows)),
+        )

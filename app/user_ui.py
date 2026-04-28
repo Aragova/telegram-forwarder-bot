@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,6 +18,7 @@ PAYMENT_PROVIDER_TITLES_RU: dict[str, str] = {
 }
 
 MANUAL_PAYMENT_PROVIDERS = {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual"}
+USER_TZ = timezone(timedelta(hours=3))
 
 
 def build_button(
@@ -639,3 +641,166 @@ def build_user_payment_status_text(invoice: dict[str, Any], payment_intent: dict
         f"Статус оплаты: {payment_status}\n\n"
         f"{description}"
     )
+
+
+def user_rule_status_label(is_active: bool, processing_count: int) -> str:
+    if not bool(is_active):
+        return "⏸ Выключено"
+    if int(processing_count or 0) > 0:
+        return "🟡 Обрабатывает"
+    return "🟢 Работает"
+
+
+def user_rule_mode_label(mode: str | None) -> str:
+    return "Видеоредактор" if str(mode or "repost").strip().lower() == "video" else "Репост"
+
+
+def user_rule_caption_mode_label(mode: str | None) -> str:
+    normalized = str(mode or "auto").strip().lower()
+    if normalized == "copy_first":
+        return "Обычный"
+    if normalized == "builder_first":
+        return "Премиум"
+    return "Авто"
+
+
+def _format_user_rule_wait(next_run_at: str | None) -> str:
+    if not next_run_at:
+        return "—"
+    try:
+        dt_utc = datetime.fromisoformat(str(next_run_at))
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        return dt_utc.astimezone(USER_TZ).strftime("%H:%M")
+    except Exception:
+        return "—"
+
+
+def _format_user_rule_position(current_position: Any, total: int) -> str:
+    if current_position is None or int(total or 0) <= 0:
+        return "—"
+    return f"{int(current_position)} / {int(total)}"
+
+
+def build_user_rule_card_text(snapshot: dict[str, Any]) -> str:
+    rule_id = int(snapshot.get("id") or 0)
+    mode_raw = str(snapshot.get("mode") or "repost").strip().lower()
+    mode = user_rule_mode_label(mode_raw)
+    target = str(snapshot.get("target_title") or snapshot.get("target_id") or "—")
+    status = user_rule_status_label(bool(snapshot.get("is_active")), int(snapshot.get("logical_processing") or snapshot.get("processing") or 0))
+    wait_to = _format_user_rule_wait(snapshot.get("next_run_at"))
+    pending_count = int(snapshot.get("logical_pending") or 0)
+    processing_count = int(snapshot.get("logical_processing") or snapshot.get("processing") or 0)
+    sent_count = int(snapshot.get("logical_completed") or 0)
+    faulty_count = int(snapshot.get("logical_faulty") or snapshot.get("faulty") or 0)
+    total = int(snapshot.get("logical_total") or 0)
+    position = _format_user_rule_position(snapshot.get("logical_current_position"), total)
+
+    lines = [
+        f"⚙️ Правило #{rule_id}",
+        f"👉 {target}",
+        "",
+        f"{status} · {mode}",
+        "",
+        "──────────────",
+        "",
+        f"🕒 Ждёт до {wait_to}",
+        "",
+        f"📦 В очереди: {pending_count}",
+        f"⏳ В обработке: {processing_count}",
+        f"✅ Отправлено: {sent_count}",
+        f"⚠️ Ошибки: {faulty_count}",
+        f"📍 Позиция: {position}",
+    ]
+    if mode_raw == "repost":
+        caption_mode = user_rule_caption_mode_label(snapshot.get("caption_delivery_mode"))
+        lines.extend(["", "──────────────", "", f"✍️ Подпись: {caption_mode}"])
+    return "\n".join(lines)
+
+
+def build_user_rule_card_keyboard(*, rule_id: int, is_active: bool, schedule_mode: str, mode: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    is_fixed = str(schedule_mode or "interval").strip().lower() == "fixed"
+    is_video = str(mode or "repost").strip().lower() == "video"
+    rows.append(
+        [build_button(text=("🔁 Сделать плавающим" if is_fixed else "🔁 Сделать фиксированным"), callback_data=(f"set_interval_mode:{rule_id}" if is_fixed else f"change_fixed_times:{rule_id}"))]
+    )
+    rows.append(
+        [
+            build_button(text=("🕓 Фикс. время" if is_fixed else "⏱ Интервал"), callback_data=(f"change_fixed_times:{rule_id}" if is_fixed else f"change_interval:{rule_id}")),
+            build_button(text="🕓 Время", callback_data=f"change_next_run:{rule_id}"),
+        ]
+    )
+    if is_video:
+        rows.append(
+            [
+                build_button(text="🎬 Заставки", callback_data=f"video_intro_menu:{rule_id}"),
+                build_button(text="✍️ Подпись", callback_data=f"video_caption_menu:{rule_id}"),
+            ]
+        )
+    rows.append([build_button(text="⚙️ Дополнительные функции", callback_data=f"user_rule_extra:{rule_id}", style="primary")])
+    rows.append(
+        [
+            build_button(text="🔄 Обновить", callback_data=f"user_rule_refresh:{rule_id}", style="primary"),
+            build_button(text=("⏸ Выключить" if is_active else "▶️ Включить"), callback_data=(f"disable_rule:{rule_id}" if is_active else f"enable_rule:{rule_id}"), style=("danger" if is_active else "success")),
+        ]
+    )
+    rows.append([build_button(text="⬅️ К правилам", callback_data="user_rules"), build_button(text="🏠 Главное меню", callback_data="user_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_user_rule_extra_text(*, rule_id: int, target_title: str) -> str:
+    return (
+        "⚙️ Дополнительные функции\n\n"
+        f"Правило #{int(rule_id)}\n"
+        f"👉 {target_title}\n\n"
+        "Расширенные действия для этого правила."
+    )
+
+
+def build_user_rule_extra_keyboard(*, rule_id: int, mode: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    is_video = str(mode or "repost").strip().lower() == "video"
+    rows.append([build_button(text=("🔁 Сменить режим: Репост" if is_video else "🔁 Сменить режим: Видеоредактор"), callback_data=f"toggle_rule_mode:{rule_id}")])
+    if not is_video:
+        rows.append([build_button(text="✍️ Режим подписи", callback_data=f"caption_mode_menu:{rule_id}")])
+    rows.extend(
+        [
+            [build_button(text="⚡ Отправить сейчас", callback_data=f"trigger_now:{rule_id}")],
+            [build_button(text="🔢 Начать с номера", callback_data=f"start_from_number:{rule_id}")],
+            [build_button(text="🔄 Пересканировать", callback_data=f"rescan_rule_menu:{rule_id}")],
+            [build_button(text="⏪ Откатить", callback_data=f"rollback:{rule_id}")],
+            [build_button(text="📜 Логи правила", callback_data=f"user_rule_logs:{rule_id}")],
+            [build_button(text="🗑 Удалить правило", callback_data=f"delete_rule:{rule_id}", style="danger")],
+            [build_button(text="⬅️ Назад к правилу", callback_data=f"user_rule_open:{rule_id}")],
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_user_rule_logs_text(*, rule_id: int, log_rows: list[dict[str, Any]]) -> str:
+    if not log_rows:
+        return f"📜 Логи правила #{int(rule_id)}\n\nЛогов по этому правилу пока нет."
+
+    lines = [f"📜 Логи правила #{int(rule_id)}", "", "Последние события:", ""]
+    for idx, row in enumerate(log_rows[:10], start=1):
+        created_raw = row.get("created_at")
+        event_type = str(row.get("event_type") or "событие")
+        ts = "—"
+        try:
+            dt = datetime.fromisoformat(str(created_raw))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            ts = dt.astimezone(USER_TZ).strftime("%H:%M")
+        except Exception:
+            pass
+        lines.append(f"{idx}. {ts} — {event_type.replace('_', ' ')}")
+    return "\n".join(lines)
+
+
+def build_user_rule_logs_keyboard(*, rule_id: int, has_logs: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_logs:
+        rows.append([build_button(text="🔄 Обновить", callback_data=f"user_rule_logs_refresh:{rule_id}")])
+    rows.append([build_button(text="⬅️ Назад к правилу", callback_data=f"user_rule_open:{rule_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
