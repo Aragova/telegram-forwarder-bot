@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from pathlib import Path
 
 from app import user_ui
 from app.user_handlers import rules as user_rules
@@ -190,3 +191,20 @@ def test_navigation_callbacks_exist():
     assert "user_rules" in card_callbacks
     assert "user_main" in card_callbacks
     assert any(cb.startswith("user_rule_logs_refresh:") for cb in logs_callbacks)
+
+    
+def test_rule_callbacks_with_rule_id_are_not_admin_only_for_user_flows():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    for marker in [
+        'c.data.startswith("rescan_rule_menu:")',
+        'c.data.startswith("rescan_rule_fresh:")',
+        'c.data.startswith("rescan_rule_keep:")',
+        'c.data.startswith("startpos_prev:")',
+        'c.data.startswith("startpos_next:")',
+        'c.data.startswith("startpos_apply:")',
+        'c.data.startswith("startpos_cancel:")',
+    ]:
+        idx = source.find(marker)
+        assert idx >= 0
+        block = source[idx: idx + 800]
+        assert "ensure_rule_callback_access(callback, rule_id)" in block

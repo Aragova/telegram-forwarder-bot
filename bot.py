@@ -6343,13 +6343,12 @@ async def handle_rule_logs_refresh(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("rescan_rule_menu:"))
 async def handle_rescan_rule_menu(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     rule = await run_db(db.get_rule, rule_id)
@@ -6381,13 +6380,12 @@ async def handle_rescan_rule_menu(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("rescan_rule_fresh:"))
 async def handle_rescan_rule_fresh(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     await answer_callback_safe_once(callback)
@@ -6423,13 +6421,12 @@ async def handle_rescan_rule_fresh(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("rescan_rule_keep:"))
 async def handle_rescan_rule_keep(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     await answer_callback_safe_once(callback)
@@ -7540,15 +7537,14 @@ async def handle_pick_rule_target(message: Message):
 
 @dp.callback_query(lambda c: c.data.startswith("startpos_prev:"))
 async def handle_startpos_prev(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         _, rule_id_raw, position_raw = parse_callback_parts(callback.data, "startpos_prev", 3)
         rule_id = int(rule_id_raw)
         position = int(position_raw)
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     rule = await run_db(db.get_rule, rule_id)
@@ -7612,15 +7608,14 @@ async def handle_startpos_prev(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("startpos_next:"))
 async def handle_startpos_next(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         _, rule_id_raw, position_raw = parse_callback_parts(callback.data, "startpos_next", 3)
         rule_id = int(rule_id_raw)
         position = int(position_raw)
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     rule = await run_db(db.get_rule, rule_id)
@@ -7684,15 +7679,14 @@ async def handle_startpos_next(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("startpos_apply:"))
 async def handle_startpos_apply(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         _, rule_id_raw, position_raw = parse_callback_parts(callback.data, "startpos_apply", 3)
         rule_id = int(rule_id_raw)
         position = int(position_raw)
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     selected = await run_db(db.set_rule_start_from_position, rule_id, position)
@@ -7712,27 +7706,7 @@ async def handle_startpos_apply(callback: CallbackQuery):
     user_states.pop(callback.from_user.id, None)
     invalidate_rule_card_cache(rule_id)
 
-    row = await get_rule_stats_row_async(rule_id)
-    if not row:
-        await answer_callback_safe_once(callback, f"Старт с {selected['position']}")
-        await edit_message_text_safe(
-            message=callback.message,
-            text="Точка старта изменена",
-        )
-        return
-
-    await edit_message_text_safe(
-        message=callback.message,
-        text=build_rule_card_text(row),
-        parse_mode="HTML",
-        reply_markup=build_rule_card_keyboard(
-            rule_id,
-            bool(row["is_active"]),
-            row["schedule_mode"] or "interval",
-            row["mode"] or "repost",
-        ),
-    )
-
+    await refresh_rule_card_for_actor(callback, rule_id)
     await answer_callback_safe_once(
         callback,
         f"Старт с {selected['position']}",
@@ -7741,15 +7715,14 @@ async def handle_startpos_apply(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("startpos_cancel:"))
 async def handle_startpos_cancel(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
     try:
         _, rule_id_raw = parse_callback_parts(callback.data, "startpos_cancel", 2)
         rule_id = int(rule_id_raw)
         invalidate_preview_cache(rule_id)
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
         return
 
     old_state = user_states.get(callback.from_user.id, {})
@@ -7759,29 +7732,8 @@ async def handle_startpos_cancel(callback: CallbackQuery):
         old_state.get("preview_message_ids"),
     )
 
-    row = await get_rule_stats_row_async(rule_id)
     user_states.pop(callback.from_user.id, None)
-
-    if not row:
-        await answer_callback_safe_once(callback, "Отменено")
-        await edit_message_text_safe(
-            message=callback.message,
-            text="Отменено",
-        )
-        return
-
-    await edit_message_text_safe(
-        message=callback.message,
-        text=build_rule_card_text(row),
-        parse_mode="HTML",
-        reply_markup=build_rule_card_keyboard(
-            rule_id,
-            bool(row["is_active"]),
-            row["schedule_mode"] or "interval",
-            row["mode"] or "repost",
-        ),
-    )
-
+    await refresh_rule_card_for_actor(callback, rule_id)
     await answer_callback_safe_once(callback, "Отменено")
 
 @dp.callback_query(lambda c: c.data.startswith("faulty_page:"))
