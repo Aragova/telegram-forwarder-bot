@@ -76,6 +76,12 @@ from app.saas_bootstrap import ensure_owner_and_default_tenant_bootstrap
 from app.i18n import get_user_language, set_user_language, t as tr
 from app import product_ui
 from app import access_control, user_ui
+from app.user_handlers import (
+    UserHandlersContext,
+    register_user_payment_handlers,
+    register_user_recovery_handlers,
+    register_user_rule_handlers,
+)
 
 logger = setup_logging(settings.log_level)
 
@@ -106,6 +112,7 @@ dashboard_tasks: dict[int, asyncio.Task] = {}
 ui_policy: UIErrorPolicy | None = None
 last_notifications: dict[str, datetime] = {}
 rule_ui_tasks: dict[str, asyncio.Task] = {}
+user_handlers_ctx: UserHandlersContext | None = None
 
 preview_queue_cache: dict[int, dict[str, Any]] = {}
 preview_busy_users: set[int] = set()
@@ -875,6 +882,65 @@ def _get_plan_info(plan_name: str, lang: str) -> dict[str, Any]:
         if item["name"] == normalized:
             return item
     return _default_plan_catalog(lang)[0]
+
+
+MANUAL_PAYMENT_PROVIDERS = {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual"}
+MANUAL_PAYMENT_ACTIVE_STATUSES = {"created", "pending", "waiting_confirmation"}
+RECEIPT_ALLOWED_MIME_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+RECEIPT_ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".webp"}
+
+
+async def find_active_manual_payment_intent_for_invoice(invoice_id: int) -> dict[str, Any] | None:
+    if hasattr(db, "get_active_manual_payment_intent_for_invoice"):
+        return await run_db(db.get_active_manual_payment_intent_for_invoice, int(invoice_id))
+    intent = await run_db(db.get_payment_intent_by_invoice, int(invoice_id)) if hasattr(db, "get_payment_intent_by_invoice") else None
+    if not intent:
+        return None
+    if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
+        return None
+    if str(intent.get("status") or "") not in MANUAL_PAYMENT_ACTIVE_STATUSES:
+        return None
+    return intent
+
+
+def _receipt_extension(file_name: str) -> str:
+    normalized = str(file_name or "").strip().lower()
+    if "." not in normalized:
+        return ""
+    return "." + normalized.rsplit(".", 1)[1]
+
+
+def _is_supported_receipt_document(document: Any) -> bool:
+    mime_type = str(getattr(document, "mime_type", "") or "").lower()
+    file_name = str(getattr(document, "file_name", "") or "")
+    extension = _receipt_extension(file_name)
+    if mime_type in RECEIPT_ALLOWED_MIME_TYPES:
+        return True
+    if extension in RECEIPT_ALLOWED_EXTENSIONS:
+        return True
+    return False
+
+
+async def _find_latest_payment_intent_for_invoice(invoice_id: int, tenant_id: int) -> dict[str, Any] | None:
+    latest_intent: dict[str, Any] | None = None
+    latest_receipt_intent: dict[str, Any] | None = None
+    if hasattr(db, "get_payment_intent_by_invoice"):
+        latest_intent = await run_db(db.get_payment_intent_by_invoice, int(invoice_id))
+    if hasattr(db, "list_payment_intents_for_tenant"):
+        intents = await run_db(db.list_payment_intents_for_tenant, int(tenant_id), 50)
+        for intent in intents:
+            if int(intent.get("invoice_id") or 0) != int(invoice_id):
+                continue
+            if latest_intent is None:
+                latest_intent = intent
+            if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
+                continue
+            payload = intent.get("confirmation_payload_json") if isinstance(intent.get("confirmation_payload_json"), dict) else {}
+            if not bool(payload.get("receipt_uploaded")):
+                continue
+            latest_receipt_intent = intent
+            break
+    return latest_receipt_intent or latest_intent
 
 
 def _build_invoice_for_plan_sync(tenant_id: int, plan_name: str) -> dict[str, Any] | None:
@@ -2417,32 +2483,6 @@ async def handle_user_channel_remove_callback(callback: CallbackQuery):
     )
 
 
-@dp.callback_query(lambda c: c.data == "user_rules")
-async def handle_user_rules_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    logger.info("пользователь открыл список правил user_id=%s tenant_id=%s", user_id, tenant_id)
-    rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
-    recovery_summary = await run_db(recovery_service.build_recovery_summary, tenant_id)
-    await answer_callback_safe_once(callback)
-    text = (
-        "⚙️ Мои правила\n\n"
-        "У вас пока нет правил.\n\n"
-        "Создайте первое правило:\n"
-        "1. выберите источник;\n"
-        "2. выберите получателя;\n"
-        "3. задайте интервал публикации."
-        if not rules
-        else "⚙️ Мои правила"
-    )
-    kb = build_user_rules_keyboard(rules, page=0)
-    kb = _with_recovery_button(kb, enabled=_recovery_has_items(recovery_summary))
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
-
 @dp.callback_query(lambda c: c.data == "user_status")
 async def handle_user_status_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
@@ -2555,90 +2595,6 @@ async def handle_user_account_callback(callback: CallbackQuery):
     )
 
 
-@dp.callback_query(lambda c: c.data == "user_recovery")
-async def handle_user_recovery_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    logger.info("пользователь открыл recovery tenant_id=%s user_id=%s", tenant_id, user_id)
-    summary = await run_db(recovery_service.build_recovery_summary, tenant_id)
-    can_recover, reason = await run_db(recovery_service.can_recover, tenant_id)
-    text = user_ui.build_user_recovery_summary_text(summary)
-    if not can_recover and reason:
-        text += f"\n\n⛔ {reason}"
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=text,
-        reply_markup=user_ui.build_user_recovery_keyboard(can_recover=bool(can_recover)),
-    )
-
-
-@dp.callback_query(lambda c: c.data == "user_recovery_run")
-async def handle_user_recovery_run_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    can_recover, reason = await run_db(recovery_service.can_recover, tenant_id)
-    if not can_recover:
-        logger.info("recovery запрещён из-за неактивной подписки tenant_id=%s", tenant_id)
-        await answer_callback_safe(callback, reason or "Подписка ещё не активна", show_alert=True)
-        return
-    result = await run_db(recovery_service.recover_after_payment, tenant_id, user_id)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=user_ui.build_user_recovery_result_text(result),
-        reply_markup=user_ui.build_user_recovery_keyboard(can_recover=True),
-    )
-
-
-@dp.callback_query(lambda c: c.data == "user_recovery")
-async def handle_user_recovery_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    logger.info("пользователь открыл recovery tenant_id=%s user_id=%s", tenant_id, user_id)
-    summary = await run_db(recovery_service.build_recovery_summary, tenant_id)
-    can_recover, reason = await run_db(recovery_service.can_recover, tenant_id)
-    text = user_ui.build_user_recovery_summary_text(summary)
-    if not can_recover and reason:
-        text += f"\n\n⛔ {reason}"
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=text,
-        reply_markup=user_ui.build_user_recovery_keyboard(can_recover=bool(can_recover)),
-    )
-
-
-@dp.callback_query(lambda c: c.data == "user_recovery_run")
-async def handle_user_recovery_run_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    can_recover, reason = await run_db(recovery_service.can_recover, tenant_id)
-    if not can_recover:
-        logger.info("recovery запрещён из-за неактивной подписки tenant_id=%s", tenant_id)
-        await answer_callback_safe(callback, reason or "Подписка ещё не активна", show_alert=True)
-        return
-    result = await run_db(recovery_service.recover_after_payment, tenant_id, user_id)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=user_ui.build_user_recovery_result_text(result),
-        reply_markup=user_ui.build_user_recovery_keyboard(can_recover=True),
-    )
-
-
 @dp.callback_query(lambda c: c.data == "user_plans")
 async def handle_user_plans_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
@@ -2651,800 +2607,6 @@ async def handle_user_plans_callback(callback: CallbackQuery):
         text=_build_public_plans_text(),
         reply_markup=_public_plans_keyboard(),
     )
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_select_plan:"))
-async def handle_user_select_plan_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    plan_name = str((callback.data or "").split(":", 1)[1] if ":" in (callback.data or "") else "").upper()
-    logger.info("пользователь выбрал тариф plan_name=%s user_id=%s tenant_id=%s", plan_name, user_id, tenant_id)
-    if plan_name == "OWNER":
-        await answer_callback_safe(callback, "Тариф OWNER недоступен", show_alert=True)
-        return
-    if plan_name == "FREE":
-        await answer_callback_safe_once(callback)
-        await edit_message_text_safe(
-            message=callback.message,
-            text="Тариф FREE не требует создания счёта.",
-            reply_markup=_public_plans_keyboard(),
-        )
-        return
-    if plan_name not in {"BASIC", "PRO"}:
-        await answer_callback_safe(callback, "Разрешены только тарифы BASIC и PRO", show_alert=True)
-        return
-
-    invoices = await run_db(_get_user_invoices_payload, tenant_id, 10)
-    for invoice in invoices:
-        status = str(invoice.get("status") or "")
-        if status not in {"open", "draft"}:
-            continue
-        if _invoice_plan_name(invoice, invoice.get("items") or []) == plan_name:
-            await answer_callback_safe_once(callback)
-            await edit_message_text_safe(
-                message=callback.message,
-                text=user_ui.build_user_invoice_text(invoice, invoice.get("items") or []),
-                reply_markup=_public_invoice_keyboard(int(invoice.get("id") or 0)),
-            )
-            return
-
-    sub = await run_db(subscription_service.get_active_subscription, tenant_id)
-    if not sub:
-        await answer_callback_safe(callback, "Не удалось найти активную подписку", show_alert=True)
-        return
-    sub = await run_db(billing_service.ensure_billing_period, sub)
-    plan = _get_plan_info(plan_name, "ru")
-    invoice_id = await run_db(
-        invoice_service.create_draft_invoice,
-        int(tenant_id),
-        int(sub.get("id") or 0),
-        str(sub.get("current_period_start")),
-        str(sub.get("current_period_end")),
-        currency="USD",
-    )
-    if not invoice_id:
-        await answer_callback_safe(callback, "Не удалось создать счёт", show_alert=True)
-        return
-    await run_db(
-        invoice_service.add_invoice_item,
-        int(invoice_id),
-        item_type="base_plan",
-        description=plan_name,
-        quantity=1,
-        unit_price=float(plan.get("price") or 0),
-        metadata={"plan_name": plan_name},
-    )
-    await run_db(invoice_service.finalize_invoice, int(invoice_id))
-    invoice = await run_db(db.get_invoice, int(invoice_id)) if hasattr(db, "get_invoice") else {"id": int(invoice_id), "status": "open", "total": float(plan.get("price") or 0), "currency": "USD"}
-    items = await run_db(db.list_invoice_items, int(invoice_id)) if hasattr(db, "list_invoice_items") else []
-    logger.info("создан счёт invoice_id=%s tenant_id=%s plan=%s", invoice_id, tenant_id, plan_name)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=user_ui.build_user_invoice_text(invoice, items),
-        reply_markup=_public_invoice_keyboard(int(invoice_id)),
-    )
-
-
-@dp.callback_query(lambda c: c.data == "user_invoices")
-async def handle_user_invoices_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    invoices = await run_db(_get_user_invoices_payload, tenant_id, 10)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=user_ui.build_user_invoices_text(invoices),
-        reply_markup=user_ui.build_user_invoices_keyboard(invoices),
-    )
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice:"))
-async def handle_user_invoice_callback(callback: CallbackQuery):
-    user_id = callback.from_user.id if callback.from_user else 0
-    invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
-    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
-    if not invoice:
-        await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
-        return
-    is_admin = _is_admin_user(user_id)
-    if not is_admin:
-        tenant_id = await run_db(ensure_user_tenant, user_id)
-        if int(invoice.get("tenant_id") or 0) != int(tenant_id):
-            logger.warning("попытка открыть чужой счёт user_id=%s invoice_id=%s", user_id, invoice_id)
-            await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
-            return
-    items = await run_db(db.list_invoice_items, invoice_id) if hasattr(db, "list_invoice_items") else []
-    logger.info("пользователь открыл счёт invoice_id=%s", invoice_id)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=user_ui.build_user_invoice_text(invoice, items),
-        reply_markup=_public_invoice_keyboard(invoice_id),
-    )
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice_pay:"))
-async def handle_user_invoice_pay_callback(callback: CallbackQuery):
-    user_id = callback.from_user.id if callback.from_user else 0
-    if _is_admin_user(user_id):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
-    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
-    if not invoice:
-        await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
-        return
-    tenant_id = int(invoice.get("tenant_id") or 0)
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    if int(invoice.get("tenant_id") or 0) != int(tenant_id):
-        logger.warning("попытка оплаты чужого invoice user_id=%s invoice_id=%s", user_id, invoice_id)
-        await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
-        return
-    logger.info(
-        "пользователь открыл способы оплаты invoice_id=%s user_id=%s tenant_id=%s",
-        invoice_id,
-        user_id,
-        tenant_id,
-    )
-    methods = await run_db(payment_service.get_available_payment_methods, int(tenant_id), int(invoice_id))
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=user_ui.build_user_payment_methods_text(invoice, methods),
-        reply_markup=user_ui.build_user_payment_methods_keyboard(invoice_id, methods),
-    )
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_pay_provider:"))
-async def handle_user_pay_provider_callback(callback: CallbackQuery):
-    user_id = callback.from_user.id if callback.from_user else 0
-    if _is_admin_user(user_id):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    raw = (callback.data or "").split(":", 2)
-    if len(raw) < 3:
-        await answer_callback_safe(callback, "Некорректный запрос", show_alert=True)
-        return
-    invoice_id = int(raw[1] or 0)
-    provider = str(raw[2] or "").strip()
-    logger.info("пользователь выбрал provider=%s invoice_id=%s", provider, invoice_id)
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
-    if not invoice:
-        await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
-        return
-    if int(invoice.get("tenant_id") or 0) != int(tenant_id):
-        logger.warning("попытка оплаты чужого invoice user_id=%s invoice_id=%s", user_id, invoice_id)
-        await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
-        return
-    if str(invoice.get("status") or "") == "paid":
-        await answer_callback_safe(callback, "✅ Этот счёт уже оплачен", show_alert=True)
-        return
-    methods = await run_db(payment_service.get_available_payment_methods, int(tenant_id), int(invoice_id))
-    available_providers = {str(item.get("provider") or "") for item in methods}
-    if provider not in available_providers:
-        logger.warning("provider недоступен provider=%s invoice_id=%s", provider, invoice_id)
-        await answer_callback_safe(callback, "❌ Этот способ оплаты сейчас недоступен", show_alert=True)
-        return
-    active_intent = None
-    if hasattr(db, "get_active_payment_intent_for_invoice_provider"):
-        active_intent = await run_db(db.get_active_payment_intent_for_invoice_provider, int(invoice_id), provider)
-    if not active_intent and hasattr(db, "list_payment_intents_for_tenant"):
-        intents = await run_db(db.list_payment_intents_for_tenant, int(tenant_id), 50)
-        for intent in intents:
-            if int(intent.get("invoice_id") or 0) != int(invoice_id):
-                continue
-            if str(intent.get("provider") or "") != provider:
-                continue
-            if str(intent.get("status") or "") not in {"created", "pending", "waiting_confirmation"}:
-                continue
-            active_intent = intent
-            break
-    payment_result: dict[str, Any]
-    if active_intent:
-        logger.info(
-            "найден существующий активный payment_intent id=%s provider=%s invoice_id=%s",
-            int(active_intent.get("id") or 0),
-            provider,
-            invoice_id,
-        )
-        payload = active_intent.get("provider_payload_json") if isinstance(active_intent.get("provider_payload_json"), dict) else {}
-        payment_result = {
-            "ok": True,
-            "payment_intent_id": int(active_intent.get("id") or 0),
-            "provider": provider,
-            "status": str(active_intent.get("status") or "created"),
-            "checkout_url": active_intent.get("external_checkout_url"),
-            "message_ru": payload.get("user_message_ru"),
-            "payload": payload.get("payload") if isinstance(payload.get("payload"), dict) else payload,
-        }
-    else:
-        payment_result = await run_db(payment_service.create_payment_for_invoice, int(invoice_id), provider)
-        if payment_result.get("ok"):
-            logger.info(
-                "создан payment_intent id=%s provider=%s invoice_id=%s",
-                int(payment_result.get("payment_intent_id") or 0),
-                provider,
-                invoice_id,
-            )
-    await answer_callback_safe_once(callback)
-    if not payment_result.get("ok"):
-        await edit_message_text_safe(
-            message=callback.message,
-            text="❌ Не удалось создать оплату. Попробуйте ещё раз позже.",
-            reply_markup=user_ui.build_user_payment_methods_keyboard(invoice_id, methods),
-        )
-        return
-    await edit_message_text_safe(
-        message=callback.message,
-        text=user_ui.build_user_payment_result_text(invoice, payment_result),
-        reply_markup=user_ui.build_user_payment_result_keyboard(invoice_id, payment_result),
-    )
-
-
-@dp.callback_query(lambda c: c.data == "user_payments")
-async def handle_user_payments_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text="Оплата будет подключена следующим этапом.",
-        reply_markup=_public_user_back_keyboard(),
-    )
-
-
-@dp.callback_query(lambda c: c.data == "user_support")
-async def handle_user_support_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    support_placeholder = getattr(settings, "support", "") or getattr(settings, "support_contact", "")
-    text = (
-        "🆘 Поддержка\n\n"
-        "Если нужна помощь с тарифом, оплатой или настройкой — напишите администратору."
-    )
-    if support_placeholder:
-        text += f"\n\nКонтакт: {support_placeholder}"
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=text,
-        reply_markup=_public_user_back_keyboard(),
-    )
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("plan_select:"))
-async def handle_plan_select_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    lang = _resolve_language(callback.from_user.id if callback.from_user else None)
-    plan_name = (callback.data or "").split(":", 1)[1].upper()
-    plan = _get_plan_info(plan_name, lang)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=product_ui.upgrade_confirm_screen(lang, plan),
-        reply_markup=product_ui.upgrade_confirm_keyboard(lang, plan_name),
-    )
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("plan_confirm:"))
-async def handle_plan_confirm_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    admin_id = callback.from_user.id if callback.from_user else settings.admin_id
-    lang = _resolve_language(admin_id)
-    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
-    result = await run_db(_build_invoice_for_plan_sync, int(tenant.get("id") or 1), (callback.data or "").split(":", 1)[1].upper())
-    await answer_callback_safe_once(callback)
-    if not result or not result.get("invoice"):
-        await edit_message_text_safe(message=callback.message, text=("❌ Не удалось создать счёт." if lang == "ru" else "❌ Failed to create invoice."))
-        return
-    await edit_message_text_safe(
-        message=callback.message,
-        text=product_ui.invoice_screen(lang=lang, invoice=result["invoice"], items=result.get("items") or []),
-        reply_markup=product_ui.invoice_keyboard(lang),
-    )
-
-
-@dp.callback_query(lambda c: c.data == "invoice:pay")
-async def handle_invoice_pay_stub(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    lang = _resolve_language(callback.from_user.id if callback.from_user else None)
-    await answer_callback_safe_once(callback)
-    admin_id = callback.from_user.id if callback.from_user else settings.admin_id
-    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
-    tenant_id = int(tenant.get("id") or 1)
-    summary = await run_db(billing_service.get_last_invoice_summary, tenant_id)
-    invoice = (summary or {}).get("invoice") or {}
-    providers = await run_db(
-        lambda: [m["provider"] for m in payment_service.get_available_payment_methods(tenant_id, int(invoice.get("id") or 0))]
-    )
-    if not providers:
-        await edit_message_text_safe(
-            message=callback.message,
-            text=product_ui.payment_stub_screen(lang),
-            reply_markup=product_ui.invoice_keyboard(lang),
-        )
-        return
-    await edit_message_text_safe(
-        message=callback.message,
-        text=product_ui.payment_methods_screen(lang),
-        reply_markup=product_ui.payment_methods_keyboard(lang, providers),
-    )
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("invoice:provider:"))
-async def handle_invoice_provider_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    admin_id = callback.from_user.id if callback.from_user else settings.admin_id
-    lang = _resolve_language(admin_id)
-    provider = (callback.data or "").split(":", 2)[2]
-    tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
-    tenant_id = int(tenant.get("id") or 1)
-    summary = await run_db(billing_service.get_last_invoice_summary, tenant_id)
-    invoice = (summary or {}).get("invoice") or {}
-    result = await run_db(payment_service.create_payment_for_invoice, int(invoice.get("id") or 0), provider)
-    await answer_callback_safe_once(callback)
-    if not result.get("ok"):
-        await edit_message_text_safe(
-            message=callback.message,
-            text=("❌ Не удалось создать оплату." if lang == "ru" else "❌ Failed to create payment."),
-            reply_markup=product_ui.invoice_keyboard(lang),
-        )
-        return
-    message_text = (result.get("message_ru") if lang == "ru" else result.get("message_en")) or "OK"
-    if result.get("checkout_url"):
-        message_text += "\n\n" + str(result["checkout_url"])
-    kb = product_ui.invoice_keyboard(lang)
-    if str(result.get("status")) == "waiting_confirmation":
-        kb = product_ui.payment_manual_confirm_keyboard(lang, int(result.get("payment_intent_id") or 0))
-    await edit_message_text_safe(message=callback.message, text=message_text, reply_markup=kb)
-
-
-MANUAL_PAYMENT_PROVIDERS = {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual"}
-MANUAL_PAYMENT_ACTIVE_STATUSES = {"created", "pending", "waiting_confirmation"}
-RECEIPT_ALLOWED_MIME_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
-RECEIPT_ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".webp"}
-
-
-async def find_active_manual_payment_intent_for_invoice(invoice_id: int) -> dict[str, Any] | None:
-    if hasattr(db, "get_active_manual_payment_intent_for_invoice"):
-        return await run_db(db.get_active_manual_payment_intent_for_invoice, int(invoice_id))
-    intent = await run_db(db.get_payment_intent_by_invoice, int(invoice_id)) if hasattr(db, "get_payment_intent_by_invoice") else None
-    if not intent:
-        return None
-    if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
-        return None
-    if str(intent.get("status") or "") not in MANUAL_PAYMENT_ACTIVE_STATUSES:
-        return None
-    return intent
-
-
-def _receipt_extension(file_name: str) -> str:
-    normalized = str(file_name or "").strip().lower()
-    if "." not in normalized:
-        return ""
-    return "." + normalized.rsplit(".", 1)[1]
-
-
-def _is_supported_receipt_document(document: Any) -> bool:
-    mime_type = str(getattr(document, "mime_type", "") or "").lower()
-    file_name = str(getattr(document, "file_name", "") or "")
-    extension = _receipt_extension(file_name)
-    if mime_type in RECEIPT_ALLOWED_MIME_TYPES:
-        return True
-    if extension in RECEIPT_ALLOWED_EXTENSIONS:
-        return True
-    return False
-
-
-async def _find_latest_payment_intent_for_invoice(invoice_id: int, tenant_id: int) -> dict[str, Any] | None:
-    latest_intent: dict[str, Any] | None = None
-    latest_receipt_intent: dict[str, Any] | None = None
-    if hasattr(db, "get_payment_intent_by_invoice"):
-        latest_intent = await run_db(db.get_payment_intent_by_invoice, int(invoice_id))
-    if hasattr(db, "list_payment_intents_for_tenant"):
-        intents = await run_db(db.list_payment_intents_for_tenant, int(tenant_id), 50)
-        for intent in intents:
-            if int(intent.get("invoice_id") or 0) != int(invoice_id):
-                continue
-            if latest_intent is None:
-                latest_intent = intent
-            if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
-                continue
-            payload = intent.get("confirmation_payload_json") if isinstance(intent.get("confirmation_payload_json"), dict) else {}
-            if not bool(payload.get("receipt_uploaded")):
-                continue
-            latest_receipt_intent = intent
-            break
-    return latest_receipt_intent or latest_intent
-
-
-def _admin_manual_payment_keyboard(payment_intent_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin_confirm_manual_payment:{int(payment_intent_id)}"),
-                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"admin_reject_manual_payment:{int(payment_intent_id)}"),
-            ]
-        ]
-    )
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_upload_receipt:"))
-async def handle_user_upload_receipt_callback(callback: CallbackQuery):
-    user_id = callback.from_user.id if callback.from_user else 0
-    if _is_admin_user(user_id):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
-    if not invoice:
-        await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
-        return
-    if int(invoice.get("tenant_id") or 0) != int(tenant_id):
-        logger.warning("попытка загрузить чек по чужому счёту user_id=%s invoice_id=%s", user_id, invoice_id)
-        await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
-        return
-    intent = await find_active_manual_payment_intent_for_invoice(int(invoice_id))
-    if not intent:
-        await answer_callback_safe(callback, "❌ Активная ручная оплата не найдена", show_alert=True)
-        return
-    payment_intent_id = int(intent.get("id") or 0)
-    user_states[user_id] = {
-        "action": "awaiting_payment_receipt",
-        "invoice_id": int(invoice_id),
-        "payment_intent_id": payment_intent_id,
-    }
-    logger.info("пользователь начал загрузку чека invoice_id=%s intent_id=%s", invoice_id, payment_intent_id)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=user_ui.build_user_manual_receipt_request_text(invoice, intent),
-        reply_markup=user_ui.build_user_manual_receipt_keyboard(invoice_id),
-        parse_mode="HTML",
-    )
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_payment_status:"))
-async def handle_user_payment_status_callback(callback: CallbackQuery):
-    user_id = callback.from_user.id if callback.from_user else 0
-    if _is_admin_user(user_id):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
-    if not invoice:
-        await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
-        return
-    if int(invoice.get("tenant_id") or 0) != int(tenant_id):
-        logger.warning("попытка просмотра статуса чужой оплаты user_id=%s invoice_id=%s", user_id, invoice_id)
-        await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
-        return
-    payment_intent = await _find_latest_payment_intent_for_invoice(invoice_id, tenant_id)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=user_ui.build_user_payment_status_text(invoice, payment_intent),
-        reply_markup=user_ui.build_user_payment_status_keyboard(invoice_id, payment_intent),
-    )
-
-
-@dp.callback_query(lambda c: c.data and (c.data.startswith("user_manual_paid:") or c.data.startswith("user_manual_paid_stub:")))
-async def handle_user_manual_paid_callback(callback: CallbackQuery):
-    user_id = callback.from_user.id if callback.from_user else 0
-    if _is_admin_user(user_id):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    raw = (callback.data or "").split(":", 1)
-    invoice_id = int(raw[1] or 0) if len(raw) > 1 else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
-    if not invoice:
-        await answer_callback_safe(callback, "Счёт не найден", show_alert=True)
-        return
-    if int(invoice.get("tenant_id") or 0) != int(tenant_id):
-        logger.warning("попытка чужой заявки user_id=%s invoice_id=%s", user_id, invoice_id)
-        await answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
-        return
-    if str(invoice.get("status") or "") == "paid":
-        await answer_callback_safe(callback, "✅ Этот счёт уже оплачен.", show_alert=True)
-        return
-    intent = await find_active_manual_payment_intent_for_invoice(int(invoice_id))
-    if not intent:
-        await answer_callback_safe(
-            callback,
-            "❌ Не найдена активная ручная оплата по этому счёту.\nВернитесь к счёту и выберите способ оплаты.",
-            show_alert=True,
-        )
-        return
-    payment_intent_id = int(intent.get("id") or 0)
-    payload = dict(intent.get("confirmation_payload_json") or {})
-    if not bool(payload.get("receipt_uploaded")):
-        logger.info("пользователь попытался отправить заявку без чека invoice_id=%s intent_id=%s", invoice_id, payment_intent_id)
-        await answer_callback_safe(callback, "❌ Сначала прикрепите чек оплаты", show_alert=True)
-        await edit_message_text_safe(
-            message=callback.message,
-            text=user_ui.build_user_manual_receipt_request_text(invoice, intent),
-            reply_markup=user_ui.build_user_manual_receipt_keyboard(invoice_id),
-            parse_mode="HTML",
-        )
-        return
-    payload.update(
-        {
-            "user_id": int(user_id),
-            "tenant_id": int(tenant_id),
-            "invoice_id": int(invoice_id),
-            "payment_intent_id": payment_intent_id,
-            "provider": str(intent.get("provider") or ""),
-            "amount": float(intent.get("amount") or 0),
-            "currency": str(intent.get("currency") or "USD").upper(),
-            "submitted_at": utc_now_iso(),
-            "status": "submitted_by_user",
-        }
-    )
-    await run_db(payment_service.save_manual_confirmation_payload, payment_intent_id, payload)
-    logger.info("пользователь отправил заявку ручной оплаты user_id=%s invoice_id=%s intent_id=%s", user_id, invoice_id, payment_intent_id)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            "📨 Чек отправлен администратору\n\n"
-            "Администратор проверит платёж и подтвердит тариф.\n"
-            "Обычно это занимает некоторое время."
-        ),
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
-                [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
-            ]
-        ),
-    )
-    if bot:
-        provider_title = user_ui.payment_provider_title(str(intent.get("provider") or ""))
-        try:
-            await bot.send_message(
-                settings.admin_id,
-                (
-                    "💳 Новая ручная оплата\n\n"
-                    f"Пользователь: {user_id}\n"
-                    f"Аккаунт: #{tenant_id}\n"
-                    f"Счёт: #{invoice_id}\n"
-                    f"Payment intent: #{payment_intent_id}\n"
-                    f"Способ: {provider_title}\n"
-                    f"Сумма: {payload['amount']} {payload['currency']}\n"
-                    "Статус: submitted_by_user"
-                ),
-            )
-            if str(payload.get("receipt_kind") or "") == "photo":
-                await bot.send_photo(
-                    settings.admin_id,
-                    str(payload.get("receipt_file_id") or ""),
-                    caption=f"Чек по заявке #{payment_intent_id}",
-                    reply_markup=_admin_manual_payment_keyboard(payment_intent_id),
-                )
-            else:
-                await bot.send_document(
-                    settings.admin_id,
-                    str(payload.get("receipt_file_id") or ""),
-                    caption=f"Чек по заявке #{payment_intent_id}",
-                    reply_markup=_admin_manual_payment_keyboard(payment_intent_id),
-                )
-            logger.info("заявка с чеком отправлена админу intent_id=%s", payment_intent_id)
-        except Exception as exc:
-            logger.warning("не удалось отправить уведомление администратору intent_id=%s: %s", payment_intent_id, exc)
-
-
-@dp.message(lambda m: m.chat.type == "private" and m.from_user is not None and user_states.get(m.from_user.id, {}).get("action") == "awaiting_payment_receipt")
-async def handle_user_payment_receipt_message(message: Message):
-    user_id = message.from_user.id if message.from_user else 0
-    if _is_admin_user(user_id):
-        user_states.pop(user_id, None)
-        return
-    state = user_states.get(user_id) or {}
-    invoice_id = int(state.get("invoice_id") or 0)
-    payment_intent_id = int(state.get("payment_intent_id") or 0)
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    invoice = await run_db(db.get_invoice, invoice_id) if hasattr(db, "get_invoice") else None
-    intent = await run_db(db.get_payment_intent, payment_intent_id) if hasattr(db, "get_payment_intent") else None
-    if not invoice or not intent:
-        user_states.pop(user_id, None)
-        await message.answer("❌ Счёт или оплата не найдены. Откройте счёт и начните заново.")
-        return
-    if int(invoice.get("tenant_id") or 0) != int(tenant_id) or int(intent.get("invoice_id") or 0) != int(invoice_id):
-        logger.warning("попытка загрузки чека в чужую оплату user_id=%s invoice_id=%s intent_id=%s", user_id, invoice_id, payment_intent_id)
-        user_states.pop(user_id, None)
-        await message.answer("⛔ Нет доступа к этому счёту.")
-        return
-    if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
-        user_states.pop(user_id, None)
-        await message.answer("❌ Этот способ оплаты не поддерживает ручную загрузку чека.")
-        return
-    if str(intent.get("status") or "") not in MANUAL_PAYMENT_ACTIVE_STATUSES:
-        user_states.pop(user_id, None)
-        await message.answer(
-            "❌ Эта заявка на оплату уже закрыта.\n\n"
-            "Откройте счёт и создайте новую попытку оплаты, затем прикрепите чек."
-        )
-        return
-    receipt_kind = ""
-    receipt_file_id = ""
-    receipt_file_unique_id = ""
-    receipt_file_name = ""
-    receipt_mime_type = ""
-    if message.photo:
-        photo = message.photo[-1]
-        receipt_kind = "photo"
-        receipt_file_id = str(photo.file_id or "")
-        receipt_file_unique_id = str(photo.file_unique_id or "")
-        receipt_mime_type = "image/jpeg"
-    elif message.document:
-        if not _is_supported_receipt_document(message.document):
-            await message.answer("❌ Неподдерживаемый формат чека\n\nПрикрепите PDF, JPG, PNG или WEBP.")
-            return
-        document = message.document
-        receipt_kind = "document"
-        receipt_file_id = str(document.file_id or "")
-        receipt_file_unique_id = str(document.file_unique_id or "")
-        receipt_file_name = str(document.file_name or "")
-        receipt_mime_type = str(document.mime_type or "")
-    else:
-        await message.answer(
-            "❌ Чек не найден\n\n"
-            "Прикрепите чек оплаты файлом или фотографией.\n"
-            "Поддерживаются: PDF, JPG, PNG, WEBP."
-        )
-        return
-    payload = dict(intent.get("confirmation_payload_json") or {})
-    payload.update(
-        {
-            "receipt_uploaded": True,
-            "receipt_kind": receipt_kind,
-            "receipt_file_id": receipt_file_id,
-            "receipt_file_unique_id": receipt_file_unique_id,
-            "receipt_file_name": receipt_file_name,
-            "receipt_mime_type": receipt_mime_type,
-            "receipt_uploaded_at": utc_now_iso(),
-            "user_id": int(user_id),
-            "tenant_id": int(tenant_id),
-            "invoice_id": int(invoice_id),
-            "payment_intent_id": int(payment_intent_id),
-        }
-    )
-    await run_db(payment_service.save_manual_confirmation_payload, payment_intent_id, payload)
-    user_states.pop(user_id, None)
-    logger.info("пользователь прикрепил чек invoice_id=%s intent_id=%s file_id=%s", invoice_id, payment_intent_id, receipt_file_id)
-    await message.answer(
-        user_ui.build_user_manual_receipt_uploaded_text(invoice, intent),
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_manual_paid:{int(invoice_id)}")],
-                [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
-                [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
-            ]
-        ),
-    )
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("admin_confirm_manual_payment:"))
-async def handle_admin_confirm_manual_payment_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    admin_id = callback.from_user.id if callback.from_user else settings.admin_id
-    payment_intent_id = int((callback.data or "0").split(":", 1)[1] or 0)
-    intent = await run_db(db.get_payment_intent, payment_intent_id) if hasattr(db, "get_payment_intent") else None
-    if not intent:
-        await answer_callback_safe(callback, "❌ Платёж не найден", show_alert=True)
-        return
-    if str(intent.get("status") or "") == "paid":
-        await answer_callback_safe(callback, "✅ Уже оплачено", show_alert=True)
-        return
-    if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
-        await answer_callback_safe(callback, "❌ Это не ручная оплата", show_alert=True)
-        return
-    payload = dict(intent.get("confirmation_payload_json") or {})
-    if not bool(payload.get("receipt_uploaded")):
-        logger.warning("админ попытался подтвердить оплату без чека intent_id=%s", payment_intent_id)
-        await answer_callback_safe(callback, "❌ Нельзя подтвердить оплату без чека", show_alert=True)
-        return
-    ok = await run_db(payment_service.confirm_manual_payment, payment_intent_id, admin_id, "manual_payment_confirmed_by_admin")
-    await answer_callback_safe_once(callback)
-    if not ok:
-        await answer_callback_safe(callback, "❌ Не удалось подтвердить оплату", show_alert=True)
-        return
-    logger.info("админ подтвердил оплату с чеком intent_id=%s", payment_intent_id)
-    await edit_message_text_safe(message=callback.message, text=f"✅ Оплата #{payment_intent_id} подтверждена.", reply_markup=None)
-    confirmation_payload = intent.get("confirmation_payload_json") if isinstance(intent.get("confirmation_payload_json"), dict) else {}
-    user_id = int(confirmation_payload.get("user_id") or 0)
-    if user_id and bot:
-        try:
-            await bot.send_message(
-                user_id,
-                (
-                    "✅ Оплата подтверждена\n\n"
-                    "Ваш тариф активирован.\n"
-                    "Если публикации или видео были остановлены из-за лимитов, восстановите работу одним нажатием."
-                ),
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text="🔄 Восстановить работу", callback_data="user_recovery")],
-                    ]
-                ),
-            )
-        except Exception as exc:
-            logger.warning("не удалось уведомить пользователя user_id=%s intent_id=%s: %s", user_id, payment_intent_id, exc)
-    elif not user_id:
-        logger.warning("не удалось уведомить пользователя user_id=%s intent_id=%s", user_id, payment_intent_id)
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("admin_reject_manual_payment:"))
-async def handle_admin_reject_manual_payment_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    admin_id = callback.from_user.id if callback.from_user else settings.admin_id
-    payment_intent_id = int((callback.data or "0").split(":", 1)[1] or 0)
-    intent = await run_db(db.get_payment_intent, payment_intent_id) if hasattr(db, "get_payment_intent") else None
-    if not intent:
-        await answer_callback_safe(callback, "❌ Платёж не найден", show_alert=True)
-        return
-    if str(intent.get("status") or "") == "paid":
-        await answer_callback_safe(callback, "❌ Оплата уже подтверждена, отклонение недоступно", show_alert=True)
-        return
-    if str(intent.get("provider") or "") not in MANUAL_PAYMENT_PROVIDERS:
-        await answer_callback_safe(callback, "❌ Это не ручная оплата", show_alert=True)
-        return
-    payload = dict(intent.get("confirmation_payload_json") or {})
-    payload.update(
-        {
-            "status": "rejected_by_admin",
-            "rejected_by": int(admin_id),
-            "rejected_at": utc_now_iso(),
-            "reason": "manual_payment_rejected_by_admin",
-        }
-    )
-    ok = await run_db(db.mark_payment_failed, payment_intent_id, "manual_payment_rejected_by_admin", payload=payload)
-    await answer_callback_safe_once(callback)
-    if not ok:
-        await answer_callback_safe(callback, "❌ Не удалось отклонить оплату", show_alert=True)
-        return
-    logger.info("админ отклонил оплату intent_id=%s", payment_intent_id)
-    await edit_message_text_safe(message=callback.message, text=f"❌ Оплата #{payment_intent_id} отклонена.", reply_markup=None)
-    user_id = int(payload.get("user_id") or 0)
-    if user_id and bot:
-        try:
-            await bot.send_message(
-                user_id,
-                (
-                    "❌ Оплата не подтверждена\n"
-                    "Платёж не найден или данные не совпали.\n"
-                    "Если вы уверены, что оплатили, свяжитесь с поддержкой."
-                ),
-            )
-        except Exception as exc:
-            logger.warning("не удалось уведомить пользователя user_id=%s intent_id=%s: %s", user_id, payment_intent_id, exc)
-    elif not user_id:
-        logger.warning("не удалось уведомить пользователя user_id=%s intent_id=%s", user_id, payment_intent_id)
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("payment:manual_sent:"))
-async def handle_manual_payment_sent(callback: CallbackQuery):
-    await answer_callback_safe(callback, "Используйте кнопку «✅ Я оплатил» в пользовательском меню счёта.", show_alert=True)
 
 
 @dp.pre_checkout_query()
@@ -3876,126 +3038,6 @@ async def handle_rules_back(callback: CallbackQuery):
         reply_markup=get_rules_menu(),
     )
 
-
-@dp.callback_query(lambda c: c.data == "user_rules_noop")
-async def handle_user_rules_noop(callback: CallbackQuery):
-    await answer_callback_safe_once(callback)
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_rules_page:"))
-async def handle_user_rules_page(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    page = int((callback.data or "user_rules_page:0").split(":", 1)[1])
-    tenant_id = await run_db(ensure_user_tenant, callback.from_user.id if callback.from_user else 0)
-    rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
-    await answer_callback_safe_once(callback)
-    if not rules:
-        await edit_message_text_safe(
-            message=callback.message,
-            text=(
-                "⚙️ Мои правила\n\n"
-                "У вас пока нет правил.\n\n"
-                "Создайте первое правило:\n"
-                "1. выберите источник;\n"
-                "2. выберите получателя;\n"
-                "3. задайте интервал публикации."
-            ),
-            reply_markup=build_user_rules_keyboard(rules, page=0),
-        )
-        return
-    await edit_message_reply_markup_safe(message=callback.message, reply_markup=build_user_rules_keyboard(rules, page=page))
-
-
-@dp.callback_query(lambda c: c.data == "user_rules_add")
-async def handle_user_rules_add(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    logger.info("пользователь начал создание правила user_id=%s tenant_id=%s", user_id, tenant_id)
-    subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", "ru")
-    usage_today = await run_db(usage_service.get_today_usage, tenant_id)
-    rules_count = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
-    can_create, reason = await run_db(limit_service.can_create_rule, tenant_id)
-    if not can_create:
-        if str(reason or "").strip().lower() == "подписка неактивна":
-            await run_db(
-                _write_billing_event,
-                tenant_id,
-                "subscription_blocked_action",
-                action="create_rule",
-                reason=reason,
-                plan_name=str(subscription.get("plan_name") or "FREE"),
-                usage_today=usage_today,
-            )
-            await answer_callback_safe_once(callback)
-            await edit_message_text_safe(
-                message=callback.message,
-                text=user_ui.build_user_subscription_blocked_text(subscription),
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text="💎 Тарифы", callback_data="user_plans")],
-                        [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
-                        [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
-                    ]
-                ),
-            )
-            return
-        await run_db(
-            _write_billing_event,
-            tenant_id,
-            "limit_rule_blocked",
-            action="create_rule",
-            reason=reason,
-            plan_name=str(subscription.get("plan_name") or "FREE"),
-            usage_today=usage_today,
-        )
-        await answer_callback_safe_once(callback)
-        await edit_message_text_safe(
-            message=callback.message,
-            text=user_ui.build_user_limit_exceeded_text(reason, subscription, usage_today, int(rules_count or 0)),
-            reply_markup=_public_usage_keyboard(),
-        )
-        return
-    source_rows = await run_db(db.get_channels_for_tenant, tenant_id, "source") if hasattr(db, "get_channels_for_tenant") else []
-    sources = [ChannelChoice(r["channel_id"], r["thread_id"], r["title"] or r["channel_id"]) for r in source_rows]
-    if not sources:
-        await answer_callback_safe_once(callback)
-        await edit_message_text_safe(
-            message=callback.message,
-            text="Для создания правила сначала добавьте источник и получатель.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="📡 Добавить источник", callback_data="user_sources_add")],
-                    [InlineKeyboardButton(text="🎯 Добавить получатель", callback_data="user_targets_add")],
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_rules")],
-                ]
-            ),
-        )
-        return
-    keyboard = [[KeyboardButton(text=f"📤 {i}. {s.title}{f' (тема {s.thread_id})' if s.thread_id else ''}")] for i, s in enumerate(sources, 1)]
-    keyboard.append([KeyboardButton(text="❌ Отмена")])
-    user_states[user_id] = {"action": "pick_rule_source", "sources": sources}
-    await answer_callback_safe_once(callback)
-    await callback.message.answer("Выберите источник", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True))
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_open:"))
-async def handle_user_rule_open(callback: CallbackQuery):
-    user_id = callback.from_user.id if callback.from_user else 0
-    rule_id = int((callback.data or "").split(":", 1)[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    logger.info("пользователь открыл карточку rule_id=%s", rule_id)
-    text, kb = await build_user_rule_card_payload(rule_id)
-    if not text or not kb:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data == "rules_page_info")
 async def handle_rules_page_info(callback: CallbackQuery):
@@ -5235,6 +4277,31 @@ async def send_message_safe(
         message_thread_id=message_thread_id,
     )
     return result.result
+
+
+async def edit_message_reply_markup_safe(*, message: Message, reply_markup=None) -> bool:
+    global ui_policy, bot
+
+    if ui_policy is None:
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=reply_markup,
+            )
+            return True
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return True
+            logger.exception("edit_message_reply_markup_safe fallback failed: %s", exc)
+            return False
+
+    result = await ui_policy.edit_message_reply_markup(
+        chat_id=message.chat.id,
+        message_id=message.message_id,
+        reply_markup=reply_markup,
+    )
+    return bool(result.ok)
 
 
 async def delete_message_safe(
@@ -9354,12 +8421,14 @@ async def _init_db_runtime() -> None:
 
 
 async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
-    global bot, telethon_client, reaction_clients, sender_service, ui_policy, runtime_context
+    global bot, telethon_client, reaction_clients, sender_service, ui_policy, runtime_context, user_handlers_ctx
 
     bot = Bot(
         token=settings.bot_token,
         base_url=f"{settings.bot_api_base}/bot",
     )
+    if user_handlers_ctx is not None:
+        user_handlers_ctx.bot = bot
 
     if create_ui_policy:
         ui_policy = UIErrorPolicy(bot)
@@ -9574,6 +8643,60 @@ async def stop_job_workers_runtime() -> None:
     logger.info("JOB WORKERS | остановлены")
 
 
+def _register_user_saas_handlers() -> None:
+    global user_handlers_ctx
+    ctx = UserHandlersContext(
+        bot=bot,
+        db=db,
+        tenant_service=tenant_service,
+        subscription_service=subscription_service,
+        usage_service=usage_service,
+        limit_service=limit_service,
+        invoice_service=invoice_service,
+        billing_service=billing_service,
+        payment_service=payment_service,
+        recovery_service=recovery_service,
+        user_states=user_states,
+        run_db=run_db,
+        answer_callback_safe=answer_callback_safe,
+        send_message_safe=send_message_safe,
+        is_admin_user=is_admin_user,
+        ensure_user_tenant=ensure_user_tenant,
+        is_rule_owned_by_user=is_rule_owned_by_user,
+        logger=logger,
+        answer_callback_safe_once=answer_callback_safe_once,
+        edit_message_text_safe=edit_message_text_safe,
+        edit_message_reply_markup_safe=edit_message_reply_markup_safe,
+        with_recovery_button=_with_recovery_button,
+        recovery_has_items=_recovery_has_items,
+        rules_page_size=RULES_PAGE_SIZE,
+        get_user_invoices_payload=_get_user_invoices_payload,
+        invoice_plan_name=_invoice_plan_name,
+        public_invoice_keyboard=_public_invoice_keyboard,
+        public_plans_keyboard=_public_plans_keyboard,
+        public_usage_keyboard=_public_usage_keyboard,
+        get_plan_info=_get_plan_info,
+        is_subscription_blocked_status=_is_subscription_blocked_status,
+        write_billing_event=_write_billing_event,
+        find_active_manual_payment_intent_for_invoice=find_active_manual_payment_intent_for_invoice,
+        find_latest_payment_intent_for_invoice=_find_latest_payment_intent_for_invoice,
+        is_supported_receipt_document=_is_supported_receipt_document,
+        is_admin_callback=is_admin_callback,
+        utc_now_iso=utc_now_iso,
+        settings=settings,
+        channel_choice_cls=ChannelChoice,
+        build_rule_card_payload_cached=build_rule_card_payload_cached,
+        build_rule_extra_keyboard=build_rule_extra_keyboard,
+        compact_rule_text=compact_rule_text,
+        manual_payment_providers=MANUAL_PAYMENT_PROVIDERS,
+        manual_payment_active_statuses=MANUAL_PAYMENT_ACTIVE_STATUSES,
+    )
+    register_user_rule_handlers(dp, ctx)
+    register_user_payment_handlers(dp, ctx)
+    register_user_recovery_handlers(dp, ctx)
+    user_handlers_ctx = ctx
+
+
 async def main(role: str = "all"):
     normalized_role = normalize_runtime_role(role)
     logger.info("STARTUP | Инициализация роли %s", normalized_role)
@@ -9628,6 +8751,9 @@ def _parse_args() -> argparse.Namespace:
         help="Вывести результат в JSON (используется для operational-скриптов)",
     )
     return parser.parse_args()
+
+
+_register_user_saas_handlers()
 
 
 if __name__ == "__main__":
