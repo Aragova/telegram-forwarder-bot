@@ -2330,6 +2330,105 @@ async def handle_user_main_callback(callback: CallbackQuery):
         reply_markup=_public_user_menu_keyboard(),
     )
 
+
+@dp.callback_query(lambda c: c.data == "user_channels")
+async def handle_user_channels_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    source_rows = await run_db(db.get_channels_for_tenant, tenant_id, "source") if hasattr(db, "get_channels_for_tenant") else []
+    target_rows = await run_db(db.get_channels_for_tenant, tenant_id, "target") if hasattr(db, "get_channels_for_tenant") else []
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_channels_text(sources_count=len(source_rows), targets_count=len(target_rows)),
+        reply_markup=user_ui.build_user_channels_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_language")
+async def handle_user_language_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_language_text(),
+        reply_markup=user_ui.build_user_language_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_set_lang:"))
+async def handle_user_set_language_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    code = (callback.data or "").split(":", 1)[1]
+    if callback.from_user:
+        set_user_language(callback.from_user.id, code, db)
+    await answer_callback_safe_once(callback, "Язык сохранён")
+    await edit_message_text_safe(
+        message=callback.message,
+        text="Язык сохранён. Полный перевод интерфейса будет расширяться.",
+        reply_markup=_public_user_menu_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_timezone")
+async def handle_user_timezone_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_timezone_text(),
+        reply_markup=user_ui.build_user_timezone_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_timezone:set:"))
+async def handle_user_timezone_set_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    tz_name = (callback.data or "").split(":", 2)[2]
+    await answer_callback_safe_once(callback, "TimeZone сохранён")
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_timezone_text(current_tz=tz_name, utc_label="UTC"),
+        reply_markup=user_ui.build_user_timezone_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_support")
+async def handle_user_support_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_support_text(),
+        reply_markup=user_ui.build_user_support_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_help")
+async def handle_user_help_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_help_text(),
+        reply_markup=user_ui.build_user_help_keyboard(),
+    )
+
 @dp.callback_query(lambda c: c.data == "user_sources")
 async def handle_user_sources_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
@@ -2524,24 +2623,21 @@ async def handle_user_status_callback(callback: CallbackQuery):
         state_line = "🚫 Лимит достигнут"
 
     text = (
-        "📊 Статус\n\n"
-        f"Состояние: {state_line}\n"
-        f"Тариф: {str(sub.get('plan_name') or 'FREE').upper()}\n"
-        f"Статус подписки: {status}\n\n"
-        "Использование:\n"
-        f"📌 Правила: {len(rules)} / {rule_limit}\n"
-        f"🎬 Видео сегодня: {video_today} / {max_video}\n"
-        f"📦 Публикации сегодня: {jobs_today} / {max_jobs}\n\n"
-        f"Правил: {len(rules)} / {rule_limit}\n"
-        f"Активных правил: {active_rules}\n"
-        f"Публикаций в очереди: {queue_total}\n"
-        f"Ошибок: {errors_total}\n"
+        "📊 Живой статус\n\n"
+        f"{state_line.replace('Доступ активен', 'Автоматизация работает')}\n\n"
+        "──────────────\n\n"
+        f"📦 В очереди: {queue_total}\n"
+        f"⏳ В обработке: {active_rules}\n"
+        f"✅ Отправлено сегодня: {jobs_today}\n"
+        f"⚠️ Ошибки: {errors_total}\n\n"
+        "──────────────\n\n"
+        f"🕒 Обновлено: {datetime.now(USER_TZ).strftime('%H:%M')} (UTC+3)\n"
         f"Следующая публикация: {next_publication}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚙️ Мои правила", callback_data="user_rules")],
-        [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="user_status")],
+        [InlineKeyboardButton(text="⚙️ Мои правила", callback_data="user_rules"), InlineKeyboardButton(text="📡 Мои каналы", callback_data="user_channels")],
+        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
     ])
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
