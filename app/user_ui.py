@@ -585,6 +585,7 @@ def build_user_invoice_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="💳 Перейти к оплате", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
             [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"user_invoice_check_payment:{int(invoice_id)}")],
             [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_plans")],
         ]
@@ -717,6 +718,7 @@ def build_user_manual_receipt_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_manual_paid:{int(invoice_id)}")],
             [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"user_invoice_check_payment:{int(invoice_id)}")],
             [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
         ]
@@ -1000,7 +1002,7 @@ def build_lava_invoice_created_text(*, invoice_id: int, tariff_title: str, amoun
         f"Тариф: {tariff_title}\n"
         f"Сумма: {amount_text}\n"
         "Статус: ожидает оплату\n\n"
-        "После оплаты вернитесь в бот. Автоматическое зачисление будет подключено на следующем этапе."
+        "После оплаты нажмите «🔄 Проверить оплату», если уведомление ещё не пришло."
     )
 
 
@@ -1008,6 +1010,7 @@ def build_lava_invoice_keyboard(*, invoice_id: int, payment_url: str) -> InlineK
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💳 Перейти к оплате", url=payment_url)],
+            [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"user_invoice_check_payment:{int(invoice_id)}")],
             [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
             [InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
         ]

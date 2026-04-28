@@ -18,8 +18,9 @@ def test_lava_invoice_keyboard_uses_url_button():
     keyboard = user_ui.build_lava_invoice_keyboard(invoice_id=12, payment_url="https://gate.lava.top/pay/abc")
     first_button = keyboard.inline_keyboard[0][0]
     assert first_button.url == "https://gate.lava.top/pay/abc"
-    assert keyboard.inline_keyboard[1][0].callback_data == "user_invoice:12"
-    assert keyboard.inline_keyboard[2][0].callback_data == "user_invoice_pay:12"
+    assert keyboard.inline_keyboard[1][0].callback_data == "user_invoice_check_payment:12"
+    assert keyboard.inline_keyboard[2][0].callback_data == "user_invoice:12"
+    assert keyboard.inline_keyboard[3][0].callback_data == "user_invoice_pay:12"
 
 
 def test_tariff_screen_has_no_lava_button():
@@ -60,3 +61,14 @@ def test_admin_menu_not_touched_and_critical_files_untouched():
     assert Path("app/scheduler_runtime.py").exists()
     assert Path("app/worker_runtime.py").exists()
     assert Path("app/sender.py").exists()
+
+
+def test_invoice_screen_has_check_payment_button():
+    keyboard = user_ui.build_user_invoice_keyboard(12)
+    callbacks = _callbacks(keyboard)
+    assert "user_invoice_check_payment:12" in callbacks
+
+
+def test_check_payment_callback_exists_in_handlers_source():
+    source = Path("app/user_handlers/payments.py").read_text(encoding="utf-8")
+    assert "user_invoice_check_payment:" in source
