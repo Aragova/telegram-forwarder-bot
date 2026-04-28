@@ -368,6 +368,7 @@ def build_user_plans_keyboard(current_plan_name: str | None = None) -> InlineKey
         inline_keyboard=[
             [build_button(text=basic_text, callback_data="user_select_plan:BASIC", style="primary")],
             [build_button(text=pro_text, callback_data="user_select_plan:PRO", style="success")],
+            [build_button(text="💳 Оплатить BASIC — $9", callback_data="user_subscription", style="primary")],
             [build_button(text="⬅️ Назад", callback_data="user_account")],
         ]
     )
@@ -967,3 +968,45 @@ def build_user_rule_logs_keyboard(*, rule_id: int, has_logs: bool) -> InlineKeyb
         rows.append([build_button(text="🔄 Обновить", callback_data=f"user_rule_logs_refresh:{rule_id}")])
     rows.append([build_button(text="⬅️ Назад к правилу", callback_data=f"user_rule_open:{rule_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_lava_subscription_text() -> str:
+    return (
+        "💎 Подписка ViMi\n\n"
+        "Текущий этап: подключение оплаты через Lava.top.\n\n"
+        "Тариф BASIC:\n"
+        "• $9\n"
+        "• Автоматизация Telegram-канала\n"
+        "• Подключение оплаты через безопасную страницу Lava.top"
+    )
+
+
+def build_lava_subscription_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить BASIC — $9", callback_data="user_pay_lava_basic")],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
+        ]
+    )
+
+
+def build_lava_invoice_created_text(*, amount: float, currency: str) -> str:
+    symbol = "$" if str(currency).upper() == "USD" else ""
+    amount_text = f"{symbol}{amount:.0f}" if symbol else f"{amount:.0f} {str(currency).upper()}"
+    return (
+        "✅ Счёт создан\n\n"
+        "Тариф: BASIC\n"
+        f"Сумма: {amount_text}\n"
+        "Статус: ожидает оплату\n\n"
+        "Нажмите кнопку ниже, чтобы перейти к оплате."
+    )
+
+
+def build_lava_invoice_keyboard(*, payment_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить в Lava.top", url=payment_url)],
+            [InlineKeyboardButton(text="🔄 Создать новую ссылку", callback_data="user_pay_lava_basic")],
+            [InlineKeyboardButton(text="⬅️ Назад к тарифам", callback_data="user_subscription")],
+        ]
+    )

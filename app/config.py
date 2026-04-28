@@ -105,6 +105,7 @@ class Settings:
     lava_top_api_key: str = os.getenv("LAVA_TOP_API_KEY", "")
     lava_top_api_base: str = os.getenv("LAVA_TOP_API_BASE", "https://gate.lava.top").rstrip("/")
     lava_top_webhook_secret: str = os.getenv("LAVA_TOP_WEBHOOK_SECRET", "")
+    lava_top_basic_offer_id: str = os.getenv("LAVA_TOP_BASIC_OFFER_ID", "").strip()
 
     public_base_url: str = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
