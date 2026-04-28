@@ -141,6 +141,7 @@ def build_user_subscription_blocked_text(subscription: dict[str, Any] | None) ->
 def build_user_usage_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Восстановить работу", callback_data="user_recovery")],
             [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
             [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
@@ -150,6 +151,57 @@ def build_user_usage_keyboard() -> InlineKeyboardMarkup:
 
 def build_user_account_keyboard() -> InlineKeyboardMarkup:
     return build_user_usage_keyboard()
+
+
+def build_user_recovery_summary_text(summary: dict[str, Any]) -> str:
+    active_rules_count = int(summary.get("active_rules_count") or 0)
+    pending_deliveries_count = int(summary.get("pending_deliveries_count") or 0)
+    failed_limit_video_jobs_count = int(summary.get("failed_limit_video_jobs_count") or 0)
+    blocked_events_count = len(summary.get("last_blocked_events") or [])
+    failed_limit_jobs_count = int(summary.get("failed_limit_jobs_count") or 0)
+    if pending_deliveries_count <= 0 and failed_limit_video_jobs_count <= 0 and failed_limit_jobs_count <= 0:
+        return (
+            "✅ Всё в порядке\n\n"
+            "Заблокированных задач не найдено.\n"
+            "Ваши активные правила продолжат работу по расписанию."
+        )
+    return (
+        "🔄 Восстановление работы\n\n"
+        "После оплаты можно вернуть в работу публикации и видео, которые были остановлены из-за лимитов или неактивной подписки.\n\n"
+        "Найдено:\n"
+        f"📌 Активных правил: {active_rules_count}\n"
+        f"📦 Ожидающих публикаций: {pending_deliveries_count}\n"
+        f"🎬 Видео-задач после лимита: {failed_limit_video_jobs_count}\n"
+        f"⚠️ Событий блокировки: {blocked_events_count}"
+    )
+
+
+def build_user_recovery_result_text(result: dict[str, Any]) -> str:
+    if not bool(result.get("ok")):
+        return f"⛔ Восстановление недоступно\n\n{str(result.get('reason') or 'Подписка ещё не активна')}"
+    if bool(result.get("already_recovered")) and int(result.get("restored_jobs") or 0) == 0:
+        return "✅ Всё уже восстановлено"
+    return (
+        "✅ Доступ восстановлен\n\n"
+        f"📌 Правил проверено: {int(result.get('checked_rules') or 0)}\n"
+        f"📦 Восстановлено задач: {int(result.get('restored_jobs') or 0)}\n"
+        f"⏳ Ожидающих публикаций: {int(result.get('pending_deliveries') or 0)}\n"
+        f"⚠️ Событий лимита найдено: {int(result.get('limit_events_found') or 0)}"
+    )
+
+
+def build_user_recovery_keyboard(can_recover: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if can_recover:
+        rows.append([InlineKeyboardButton(text="🔄 Восстановить работу", callback_data="user_recovery_run")])
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="⚙️ Мои правила", callback_data="user_rules")],
+            [InlineKeyboardButton(text="📊 Статус", callback_data="user_status")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_user_plans_text(plans: list[dict[str, Any]]) -> str:
@@ -375,11 +427,14 @@ def build_user_manual_receipt_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
 
 def build_user_payment_status_keyboard(invoice_id: int, payment_intent: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    payment_status = ""
     if payment_intent:
         provider = str(payment_intent.get("provider") or "")
         payment_status = str(payment_intent.get("status") or "")
         if provider in MANUAL_PAYMENT_PROVIDERS and payment_status in {"created", "pending", "waiting_confirmation"}:
             rows.append([InlineKeyboardButton(text="📤 Прикрепить чек", callback_data=f"user_upload_receipt:{int(invoice_id)}")])
+    if payment_status == "paid":
+        rows.append([InlineKeyboardButton(text="🔄 Восстановить работу", callback_data="user_recovery")])
     rows.extend(
         [
             [InlineKeyboardButton(text="💳 К оплате", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
