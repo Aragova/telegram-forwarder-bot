@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import argparse
 import json
+import re
 import time
 from html import escape
 from dataclasses import dataclass
@@ -121,6 +122,7 @@ ui_policy: UIErrorPolicy | None = None
 last_notifications: dict[str, datetime] = {}
 rule_ui_tasks: dict[str, asyncio.Task] = {}
 user_handlers_ctx: UserHandlersContext | None = None
+admin_handlers_ctx: AdminHandlersContext | None = None
 
 preview_queue_cache: dict[int, dict[str, Any]] = {}
 preview_busy_users: set[int] = set()
@@ -7381,15 +7383,6 @@ async def handle_intro_file(message: Message):
         "rule_id": state.get("rule_id"),
     }
 
-@dp.message(
-    lambda m: (
-        m.text is not None
-        and not is_menu_navigation_text(m.text)
-        and not (m.text or "").startswith("Удалить ")
-        and not (m.text or "").isdigit()
-    )
-)
-
 @dp.message(lambda m: m.text == "➕ Добавить правило")
 async def handle_add_rule(message: Message):
     user_id = message.from_user.id if message.from_user else settings.admin_id
@@ -7408,7 +7401,7 @@ async def handle_add_rule(message: Message):
     await message.reply("Выберите источник", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True))
 
 
-@dp.message(lambda m: m.text and m.text.startswith("📤 "))
+@dp.message(lambda m: bool(re.match(r"^📤\s+\d+\.", (m.text or "").strip())))
 async def handle_pick_rule_source(message: Message):
     state = user_states.get(message.from_user.id)
     if not state or state.get("action") != "pick_rule_source":
@@ -7433,7 +7426,7 @@ async def handle_pick_rule_source(message: Message):
     state["targets"] = targets
     await message.reply("Выберите получателя", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True))
 
-@dp.message(lambda m: m.text and m.text.startswith("📥 "))
+@dp.message(lambda m: bool(re.match(r"^📥\s+\d+\.", (m.text or "").strip())))
 async def handle_pick_rule_target(message: Message):
     state = user_states.get(message.from_user.id)
     if not state or state.get("action") != "pick_rule_target":
@@ -7895,7 +7888,7 @@ async def _init_db_runtime() -> None:
 
 
 async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
-    global bot, telethon_client, reaction_clients, sender_service, ui_policy, runtime_context, user_handlers_ctx
+    global bot, telethon_client, reaction_clients, sender_service, ui_policy, runtime_context, user_handlers_ctx, admin_handlers_ctx
 
     bot = Bot(
         token=settings.bot_token,
@@ -7923,6 +7916,9 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
 
     telethon_client = await create_telethon_client()
     reaction_clients = await create_reaction_clients()
+    if admin_handlers_ctx is not None:
+        admin_handlers_ctx.bot = bot
+        admin_handlers_ctx.telethon_client = telethon_client
 
     sender_service = SenderService(
         bot=bot,
@@ -8172,6 +8168,7 @@ def _register_user_saas_handlers() -> None:
 
 
 def _register_admin_handlers() -> None:
+    global admin_handlers_ctx
     ctx = AdminHandlersContext(
         bot=bot,
         db=db,
@@ -8224,6 +8221,7 @@ def _register_admin_handlers() -> None:
     register_admin_queue_handlers(dp, ctx)
     register_admin_diagnostics_handlers(dp, ctx)
     register_admin_system_handlers(dp, ctx)
+    admin_handlers_ctx = ctx
 
 
 async def main(role: str = "all"):
