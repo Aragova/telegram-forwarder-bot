@@ -18,7 +18,7 @@ def register_admin_menu_handlers(dp: Dispatcher, ctx: AdminHandlersContext) -> N
         if ctx.is_admin_user(message.from_user.id if message.from_user else None):
             await message.reply("📋 Главное меню", reply_markup=ctx.get_main_menu())
             return
-        await message.answer("✅ Пользовательский режим включён", reply_markup=ReplyKeyboardRemove())
+        await message.answer(" ", reply_markup=ReplyKeyboardRemove())
         await ctx.show_public_user_menu_message(message)
 
     @dp.message(lambda m: m.text in ("🔙 Главное меню", "⬅️ Назад в меню"))
@@ -27,7 +27,7 @@ def register_admin_menu_handlers(dp: Dispatcher, ctx: AdminHandlersContext) -> N
         if ctx.is_admin_user(message.from_user.id if message.from_user else None):
             await message.reply("📋 Главное меню", reply_markup=ctx.get_main_menu())
             return
-        await message.answer("✅ Пользовательский режим включён", reply_markup=ReplyKeyboardRemove())
+        await message.answer(" ", reply_markup=ReplyKeyboardRemove())
         await ctx.show_public_user_menu_message(message)
 
     @dp.message(lambda m: m.text == "🔄 Правила")
