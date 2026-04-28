@@ -193,11 +193,18 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
                 [InlineKeyboardButton(text=f"📤 {i}. {s.title}{f' (тема {s.thread_id})' if s.thread_id else ''}", callback_data=f"user_rule_pick_source:{i - 1}")]
                 for i, s in enumerate(sources, 1)
             ]
-            + [[InlineKeyboardButton(text="❌ Отмена", callback_data="user_main")]]
+            + [
+                [InlineKeyboardButton(text="➕ Добавить источник", callback_data="user_sources_add")],
+                [InlineKeyboardButton(text="⬅️ Назад в Мои правила", callback_data="user_rules")],
+            ]
         )
         ctx.user_states[user_id] = {"action": "pick_rule_source", "sources": sources}
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(message=callback.message, text="Выберите источник", reply_markup=keyboard)
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text="📤 Выберите источник\n\nИсточник — канал или тема группы, откуда ViMi возьмёт публикации.",
+            reply_markup=keyboard,
+        )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_open:"))
     async def handle_user_rule_open(callback: CallbackQuery):
