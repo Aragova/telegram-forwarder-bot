@@ -41,12 +41,72 @@ def build_button(
     return InlineKeyboardButton(**payload)
 
 
-def build_user_main_text() -> str:
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _format_subscription_date(value: Any) -> str | None:
+    dt = _parse_iso_datetime(value)
+    if not dt:
+        return None
+    return dt.astimezone(USER_TZ).strftime("%d.%m.%Y")
+
+
+def _subscription_status_line(subscription: dict[str, Any] | None) -> tuple[str, str]:
+    sub = subscription or {}
+    status = str(sub.get("status") or "active").strip().lower()
+    if status == "grace":
+        grace_until = _format_subscription_date(sub.get("grace_ends_at"))
+        return ("⚠️ Статус: льготный период", f"📅 Доступ до: {grace_until or '—'}")
+    if status in {"expired", "canceled"}:
+        until = _format_subscription_date(sub.get("expires_at"))
+        return ("🔴 Статус: неактивен", f"📅 Действовал до: {until or '—'}")
+    until = _format_subscription_date(sub.get("expires_at"))
+    plan_name = str(sub.get("plan_name") or "FREE").upper()
+    if until:
+        return ("🟢 Статус: активен", f"📅 Действует до: {until}")
+    if plan_name in {"FREE", "OWNER", "LEGACY"}:
+        return ("🟢 Статус: активен", "📅 Действует до: без ограничения")
+    return ("🟢 Статус: активен", "📅 Действует до: —")
+
+
+def build_user_main_text(
+    *,
+    subscription: dict[str, Any] | None,
+    usage_today: dict[str, Any] | None,
+    rules_count: int,
+    timezone_label: str | None = None,
+) -> str:
+    sub = subscription or {}
+    usage = usage_today or {}
+    plan_name = str(sub.get("plan_name") or "FREE").upper()
+    max_rules = int(sub.get("max_rules") or 0)
+    max_video = int(sub.get("max_video_per_day") or 0)
+    max_jobs = int(sub.get("max_jobs_per_day") or 0)
+    video_today = int(usage.get("video_count") or 0)
+    jobs_today = int(usage.get("jobs_count") or 0)
+    status_line, date_line = _subscription_status_line(sub)
+    tz_line = timezone_label or "Europe/Moscow · UTC+3"
     return (
         "✨ ViMi — автоматизация Telegram-каналов\n\n"
-        "Ваш центр управления публикациями, видео, правилами и расписанием.\n\n"
-        "Тариф: FREE\n"
-        "Статус: 🟢 активен\n\n"
+        "Ваш центр управления публикациями, видео и правилами.\n\n"
+        "──────────────\n\n"
+        f"💎 Тариф: {plan_name}\n"
+        f"{status_line}\n"
+        f"{date_line}\n"
+        f"🌍 TimeZone: {tz_line}\n\n"
+        "──────────────\n\n"
+        f"📌 Правила: {int(rules_count)} / {max_rules if max_rules > 0 else '∞'}\n"
+        f"🎬 Видео сегодня: {video_today} / {max_video if max_video > 0 else '∞'}\n"
+        f"📤 Публикации сегодня: {jobs_today} / {max_jobs if max_jobs > 0 else '∞'}\n\n"
         "Выберите раздел:"
     )
 
@@ -89,21 +149,28 @@ def build_user_account_text(
     sub = subscription or {}
     usage = usage_today or {}
     plan_name = str(sub.get("plan_name") or "FREE").upper()
-    status = str(sub.get("status") or "active")
+    status_line, date_line = _subscription_status_line(sub)
     max_rules = int(sub.get("max_rules") or 0)
     max_video = int(sub.get("max_video_per_day") or 0)
     max_jobs = int(sub.get("max_jobs_per_day") or 0)
     video_today = int(usage.get("video_count") or 0)
     jobs_today = int(usage.get("jobs_count") or 0)
-    status_label = "Активен" if status in {"active", "trial", "grace"} else "Неактивен"
+    plan_copy = "BASIC подходит для стабильной автопубликации и регулярной работы с несколькими каналами."
+    if plan_name == "PRO":
+        plan_copy = "PRO подходит для больших каналов, видео-потоков и активной автоматизации."
     return (
         "👤 Мой аккаунт\n\n"
-        f"💎 Тариф: {plan_name}\n"
-        f"📊 Статус: {status_label}\n\n"
         "──────────────\n\n"
-        f"📦 Правил: {int(rules_count)} / {max_rules if max_rules > 0 else '∞'}\n"
-        f"🎬 Видео: {video_today} / {max_video if max_video > 0 else '∞'}\n"
-        f"📤 Публикации: {jobs_today} / {max_jobs if max_jobs > 0 else '∞'}"
+        f"💎 Тариф: {plan_name}\n"
+        f"{status_line}\n"
+        f"{date_line}\n\n"
+        "──────────────\n\n"
+        "Ваши лимиты:\n\n"
+        f"📌 Правила: {int(rules_count)} / {max_rules if max_rules > 0 else '∞'}\n"
+        f"🎬 Видео сегодня: {video_today} / {max_video if max_video > 0 else '∞'}\n"
+        f"📤 Публикации сегодня: {jobs_today} / {max_jobs if max_jobs > 0 else '∞'}\n\n"
+        "──────────────\n\n"
+        f"{plan_copy}"
     )
 
 
@@ -236,8 +303,15 @@ def build_user_recovery_keyboard(can_recover: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_user_plans_text(plans: list[dict[str, Any]]) -> str:
-    lines = ["💎 Тарифы ViMi", "", "Ваш текущий тариф: FREE", "", "──────────────", ""]
+def build_user_plans_text(
+    plans: list[dict[str, Any]],
+    *,
+    current_subscription: dict[str, Any] | None = None,
+) -> str:
+    current = current_subscription or {}
+    current_plan = str(current.get("plan_name") or "FREE").upper()
+    _status_line, date_line = _subscription_status_line(current)
+    lines = ["💎 Тарифы ViMi", "", f"Ваш текущий тариф: {current_plan}", date_line, "", "──────────────", ""]
     for plan in plans:
         plan_name = str(plan.get("name") or "").upper()
         if plan_name == "OWNER":
@@ -246,35 +320,95 @@ def build_user_plans_text(plans: list[dict[str, Any]]) -> str:
             lines.extend(
                 [
                     "FREE",
-                    "• до 3 правил",
-                    "• до 5 видео в день",
-                    "• до 100 публикаций в день",
+                    "🧪 Для теста и первого знакомства",
+                    "",
+                    f"📌 Правила: до {int(plan.get('max_rules') or 0)}",
+                    f"🎬 Видео: до {int(plan.get('max_video_per_day') or 0)} в день",
+                    f"📤 Публикации: до {int(plan.get('max_jobs_per_day') or 0)} в день",
+                    "",
+                    "──────────────",
                     "",
                 ]
             )
             continue
         price = float(plan.get("price") or 0)
         title = f"{plan_name} — {price:.0f} USD / месяц"
-        use_case = "• подходит для стабильной автопубликации" if plan_name == "BASIC" else "• подходит для больших каналов и видео-потоков"
+        subtitle = "🚀 Для стабильной автопубликации" if plan_name == "BASIC" else "💎 Для больших каналов и видео-потоков"
+        use_case = (
+            "Подойдёт, если вы ведёте несколько каналов и хотите регулярную публикацию без ручной рутины."
+            if plan_name == "BASIC"
+            else "Подойдёт для активных проектов, сеток каналов и видеоконтента."
+        )
+        current_marker = "✅ Ваш текущий тариф" if current_plan == plan_name else ""
         lines.extend(
             [
                 title,
-                f"📌 Правила: {int(plan.get('max_rules') or 0)}",
-                f"🎬 Видео/день: {int(plan.get('max_video_per_day') or 0)}",
-                f"📦 Публикации/день: {int(plan.get('max_jobs_per_day') or 0)}",
+                subtitle,
+                "",
+                f"📌 Правила: до {int(plan.get('max_rules') or 0)}",
+                f"🎬 Видео: до {int(plan.get('max_video_per_day') or 0)} в день",
+                f"📤 Публикации: до {int(plan.get('max_jobs_per_day') or 0)} в день",
+                "",
                 use_case,
+                current_marker,
+                "",
+                "──────────────",
                 "",
             ]
         )
     return "\n".join(lines).strip()
 
 
-def build_user_plans_keyboard() -> InlineKeyboardMarkup:
+def build_user_plans_keyboard(current_plan_name: str | None = None) -> InlineKeyboardMarkup:
+    current = str(current_plan_name or "").upper()
+    basic_text = "✅ BASIC подключён" if current == "BASIC" else "🚀 Выбрать BASIC"
+    pro_text = "✅ PRO подключён" if current == "PRO" else "💎 Выбрать PRO"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [build_button(text="Выбрать BASIC", callback_data="user_select_plan:BASIC", style="primary")],
-            [build_button(text="Выбрать PRO", callback_data="user_select_plan:PRO", style="primary")],
+            [build_button(text=basic_text, callback_data="user_select_plan:BASIC", style="primary")],
+            [build_button(text=pro_text, callback_data="user_select_plan:PRO", style="success")],
             [build_button(text="⬅️ Назад", callback_data="user_account")],
+        ]
+    )
+
+
+def build_user_plan_confirmation_text(plan: dict[str, Any]) -> str:
+    plan_name = str(plan.get("name") or "").upper()
+    if plan_name == "PRO":
+        return (
+            "💎 PRO\n\n"
+            "Для больших каналов, видео-потоков и активной автоматизации.\n\n"
+            "──────────────\n\n"
+            "Что входит:\n\n"
+            "📌 До 50 правил\n"
+            "🎬 До 100 видео в день\n"
+            "📤 До 5000 публикаций в день\n\n"
+            "──────────────\n\n"
+            "Стоимость:\n"
+            "💳 29 USD / месяц\n\n"
+            "После подтверждения будет создан счёт на оплату."
+        )
+    return (
+        "🚀 BASIC\n\n"
+        "Для стабильной автопубликации и регулярной работы с Telegram-каналами.\n\n"
+        "──────────────\n\n"
+        "Что входит:\n\n"
+        "📌 До 15 правил\n"
+        "🎬 До 30 видео в день\n"
+        "📤 До 1000 публикаций в день\n\n"
+        "──────────────\n\n"
+        "Стоимость:\n"
+        "💳 9 USD / месяц\n\n"
+        "После подтверждения будет создан счёт на оплату."
+    )
+
+
+def build_user_plan_confirmation_keyboard(plan_name: str) -> InlineKeyboardMarkup:
+    normalized = str(plan_name or "").upper()
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [build_button(text=f"🧾 Создать счёт {normalized}", callback_data=f"user_confirm_plan:{normalized}", style=("success" if normalized == "PRO" else "primary"))],
+            [build_button(text="⬅️ Назад к тарифам", callback_data="user_plans")],
         ]
     )
 
@@ -378,6 +512,27 @@ def build_user_support_keyboard() -> InlineKeyboardMarkup:
 
 def build_user_help_text() -> str:
     return "📘 Инструкция ViMi\n\nВыберите раздел:"
+
+
+def build_user_help_section_text(section: str) -> str:
+    mapping = {
+        "channels": "📡 Каналы\n\nДобавьте источники и получатели, чтобы ViMi мог автоматически пересылать публикации между вашими Telegram-каналами.",
+        "rules": "⚙️ Правила\n\nПравило связывает источник и получателя, задаёт интервал и параметры отправки. Одно правило = один стабильный поток публикаций.",
+        "modes": "🔁 Режимы\n\nРежим repost пересылает посты как есть. Режим video включает обработку видео и дополнительные параметры медиаконтента.",
+        "schedule": "🕒 Расписание\n\nИспользуйте плавающий интервал или фиксированное время публикаций, чтобы выдерживать предсказуемый ритм контента.",
+        "video": "🎬 Видеоредактор\n\nВ видеорежиме доступны интро, подписи и расширенная подготовка роликов перед публикацией.",
+        "payment": "💳 Оплата\n\nВыберите тариф BASIC или PRO, создайте счёт и оплатите удобным способом. После подтверждения тариф активируется автоматически.",
+    }
+    return mapping.get(section, "📘 Раздел не найден")
+
+
+def build_user_help_section_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [build_button(text="⬅️ К инструкции", callback_data="user_help")],
+            [build_button(text="🏠 Главное меню", callback_data="user_main")],
+        ]
+    )
 
 
 def build_user_help_keyboard() -> InlineKeyboardMarkup:

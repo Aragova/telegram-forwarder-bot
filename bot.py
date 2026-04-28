@@ -710,8 +710,28 @@ def is_channel_owned_by_user(
     )
 
 
-def _public_user_menu_text() -> str:
-    return user_ui.build_user_main_text()
+async def build_user_main_payload(user_id: int) -> dict[str, Any]:
+    tenant = await run_db(tenant_service.ensure_tenant_exists, int(user_id))
+    tenant_id = int(tenant.get("id") or 1)
+    subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", "ru")
+    usage_today = await run_db(usage_service.get_today_usage, tenant_id)
+    rules_count = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
+    return {
+        "tenant_id": tenant_id,
+        "subscription": subscription,
+        "usage_today": usage_today,
+        "rules_count": int(rules_count or 0),
+        "timezone_label": "Europe/Moscow · UTC+3",
+    }
+
+
+def _public_user_menu_text(payload: dict[str, Any]) -> str:
+    return user_ui.build_user_main_text(
+        subscription=payload.get("subscription"),
+        usage_today=payload.get("usage_today"),
+        rules_count=int(payload.get("rules_count") or 0),
+        timezone_label=str(payload.get("timezone_label") or "Europe/Moscow · UTC+3"),
+    )
 
 
 def _public_user_menu_keyboard() -> InlineKeyboardMarkup:
@@ -723,7 +743,11 @@ def _public_user_back_keyboard() -> InlineKeyboardMarkup:
 
 
 async def _show_public_user_menu_message(message: Message) -> None:
-    await message.reply(_public_user_menu_text(), reply_markup=_public_user_menu_keyboard())
+    user_id = message.from_user.id if message.from_user else 0
+    payload = await build_user_main_payload(user_id)
+    sent = await message.reply(_public_user_menu_text(payload), reply_markup=ReplyKeyboardRemove())
+    if sent:
+        await edit_message_reply_markup_safe(message=sent, reply_markup=_public_user_menu_keyboard())
 
 
 def _build_public_account_text(
@@ -814,13 +838,13 @@ def _user_targets_keyboard() -> InlineKeyboardMarkup:
     return user_ui.build_user_targets_keyboard()
 
 
-def _build_public_plans_text() -> str:
+def _build_public_plans_text(current_subscription: dict[str, Any] | None = None) -> str:
     plans = [item for item in _default_plan_catalog("ru") if str(item.get("name")).upper() != "OWNER"]
-    return user_ui.build_user_plans_text(plans)
+    return user_ui.build_user_plans_text(plans, current_subscription=current_subscription)
 
 
-def _public_plans_keyboard() -> InlineKeyboardMarkup:
-    return user_ui.build_user_plans_keyboard()
+def _public_plans_keyboard(current_plan_name: str | None = None) -> InlineKeyboardMarkup:
+    return user_ui.build_user_plans_keyboard(current_plan_name)
 
 
 def _public_invoice_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
@@ -1972,7 +1996,6 @@ async def cmd_start(message: Message):
         logger.info("Создан tenant для user_id=%s tenant_id=%s", user_id, tenant_id)
     else:
         logger.info("Получен tenant для user_id=%s tenant_id=%s", user_id, tenant_id)
-    await message.answer("✅ Пользовательский режим включён", reply_markup=ReplyKeyboardRemove())
     await _show_public_user_menu_message(message)
 
 
@@ -2344,9 +2367,10 @@ async def handle_user_main_callback(callback: CallbackQuery):
         await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
         return
     await answer_callback_safe_once(callback)
+    payload = await build_user_main_payload(callback.from_user.id if callback.from_user else 0)
     await edit_message_text_safe(
         message=callback.message,
-        text=_public_user_menu_text(),
+        text=_public_user_menu_text(payload),
         reply_markup=_public_user_menu_keyboard(),
     )
 
@@ -2424,6 +2448,23 @@ async def handle_user_timezone_set_callback(callback: CallbackQuery):
     )
 
 
+@dp.callback_query(lambda c: c.data == "user_timezone_manual")
+async def handle_user_timezone_manual_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=(
+            "🌍 TimeZone\n\n"
+            "Ручной ввод часового пояса будет добавлен отдельно. "
+            "Сейчас выберите один из готовых вариантов."
+        ),
+        reply_markup=user_ui.build_user_timezone_keyboard(),
+    )
+
+
 @dp.callback_query(lambda c: c.data == "user_support")
 async def handle_user_support_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
@@ -2447,6 +2488,20 @@ async def handle_user_help_callback(callback: CallbackQuery):
         message=callback.message,
         text=user_ui.build_user_help_text(),
         reply_markup=user_ui.build_user_help_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_help:"))
+async def handle_user_help_section_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    section = (callback.data or "").split(":", 1)[1]
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_help_section_text(section),
+        reply_markup=user_ui.build_user_help_section_keyboard(),
     )
 
 @dp.callback_query(lambda c: c.data == "user_sources")
@@ -2707,12 +2762,15 @@ async def handle_user_plans_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
         await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
         return
-    logger.info("Пользователь открыл user_plans user_id=%s", callback.from_user.id if callback.from_user else 0)
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", "ru")
+    logger.info("Пользователь открыл user_plans user_id=%s", user_id)
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(
         message=callback.message,
-        text=_build_public_plans_text(),
-        reply_markup=_public_plans_keyboard(),
+        text=_build_public_plans_text(subscription),
+        reply_markup=_public_plans_keyboard(str(subscription.get("plan_name") or "FREE")),
     )
 
 

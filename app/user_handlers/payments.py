@@ -59,6 +59,36 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         if plan_name not in {"BASIC", "PRO"}:
             await ctx.answer_callback_safe(callback, "Разрешены только тарифы BASIC и PRO", show_alert=True)
             return
+        current_sub = await ctx.run_db(ctx.subscription_service.get_active_subscription, tenant_id) or {}
+        current_plan = str(current_sub.get("plan_name") or "FREE").upper()
+        if current_plan == plan_name:
+            await ctx.answer_callback_safe_once(callback, "Этот тариф уже подключён")
+            await ctx.edit_message_text_safe(
+                message=callback.message,
+                text="✅ Этот тариф уже активен.\n\nВыберите другой план или вернитесь назад.",
+                reply_markup=ctx.public_plans_keyboard(current_plan),
+            )
+            return
+        plan = ctx.get_plan_info(plan_name, "ru")
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=user_ui.build_user_plan_confirmation_text(plan),
+            reply_markup=user_ui.build_user_plan_confirmation_keyboard(plan_name),
+        )
+        return
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_confirm_plan:"))
+    async def handle_user_confirm_plan_callback(callback: CallbackQuery):
+        if ctx.is_admin_user(callback.from_user.id if callback.from_user else None):
+            await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+            return
+        user_id = callback.from_user.id if callback.from_user else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        plan_name = str((callback.data or "").split(":", 1)[1] if ":" in (callback.data or "") else "").upper()
+        if plan_name not in {"BASIC", "PRO"}:
+            await ctx.answer_callback_safe(callback, "Разрешены только тарифы BASIC и PRO", show_alert=True)
+            return
 
         invoices = await ctx.run_db(ctx.get_user_invoices_payload, tenant_id, 10)
         for invoice in invoices:

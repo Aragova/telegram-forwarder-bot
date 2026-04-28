@@ -1,4 +1,5 @@
 from app import user_ui
+from pathlib import Path
 
 
 def _flatten_texts(markup):
@@ -68,3 +69,76 @@ def test_single_button_rows_are_single_for_back_actions():
     assert len(kb.inline_keyboard[-1]) == 1
     tz = user_ui.build_user_timezone_keyboard()
     assert len(tz.inline_keyboard[-1]) == 1
+
+
+def test_main_text_uses_subscription_plan_and_not_hardcoded_free():
+    text = user_ui.build_user_main_text(
+        subscription={"plan_name": "BASIC", "status": "active", "max_rules": 15, "max_video_per_day": 30, "max_jobs_per_day": 1000, "expires_at": "2026-05-26T00:00:00+00:00"},
+        usage_today={"video_count": 4, "jobs_count": 120},
+        rules_count=3,
+        timezone_label="Europe/Moscow · UTC+3",
+    )
+    assert "💎 Тариф: BASIC" in text
+    assert "Тариф: FREE" not in text
+
+
+def test_main_text_shows_expiry_date():
+    text = user_ui.build_user_main_text(
+        subscription={"plan_name": "PRO", "status": "active", "max_rules": 50, "max_video_per_day": 100, "max_jobs_per_day": 5000, "expires_at": "2026-05-26T12:00:00+00:00"},
+        usage_today={"video_count": 0, "jobs_count": 0},
+        rules_count=0,
+    )
+    assert "📅 Действует до: 26.05.2026" in text
+
+
+def test_account_text_shows_expiry_date():
+    text = user_ui.build_user_account_text(
+        user_id=1,
+        tenant_id=1,
+        subscription={"plan_name": "BASIC", "status": "active", "max_rules": 15, "max_video_per_day": 30, "max_jobs_per_day": 1000, "expires_at": "2026-05-26T00:00:00+00:00"},
+        usage_today={"video_count": 1, "jobs_count": 2},
+        rules_count=1,
+    )
+    assert "📅 Действует до: 26.05.2026" in text
+
+
+def test_plans_text_shows_current_plan():
+    plans = [
+        {"name": "FREE", "max_rules": 3, "max_video_per_day": 5, "max_jobs_per_day": 100, "price": 0},
+        {"name": "BASIC", "max_rules": 15, "max_video_per_day": 30, "max_jobs_per_day": 1000, "price": 9},
+        {"name": "PRO", "max_rules": 50, "max_video_per_day": 100, "max_jobs_per_day": 5000, "price": 29},
+    ]
+    text = user_ui.build_user_plans_text(plans, current_subscription={"plan_name": "BASIC", "status": "active"})
+    assert "Ваш текущий тариф: BASIC" in text
+    assert "Ваш текущий тариф: FREE" not in text
+
+
+def test_plans_buttons_have_premium_icons_and_styles():
+    kb = user_ui.build_user_plans_keyboard()
+    assert kb.inline_keyboard[0][0].text.startswith("🚀")
+    assert kb.inline_keyboard[1][0].text.startswith("💎")
+
+
+def test_plans_buttons_style_fallback_still_keeps_text(monkeypatch):
+    real_button = user_ui.InlineKeyboardButton
+
+    def fake_button(**kwargs):
+        if "style" in kwargs:
+            raise TypeError("style not supported")
+        return real_button(**kwargs)
+
+    monkeypatch.setattr(user_ui, "InlineKeyboardButton", fake_button)
+    kb = user_ui.build_user_plans_keyboard()
+    assert "🚀 Выбрать BASIC" == kb.inline_keyboard[0][0].text
+    assert "💎 Выбрать PRO" == kb.inline_keyboard[1][0].text
+
+
+def test_user_help_sections_have_real_text():
+    assert "Каналы" in user_ui.build_user_help_section_text("channels")
+    assert "Правило" in user_ui.build_user_help_section_text("rules")
+    assert "Оплата" in user_ui.build_user_help_section_text("payment")
+
+
+def test_no_user_mode_enabled_phrase_in_user_texts():
+    source = Path("app/user_ui.py").read_text(encoding="utf-8")
+    assert "Пользовательский режим включён" not in source
