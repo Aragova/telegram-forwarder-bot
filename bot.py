@@ -71,6 +71,7 @@ from app.limit_service import LimitService
 from app.invoice_service import InvoiceService
 from app.billing_service import BillingService
 from app.payment_service import PaymentService
+from app.recovery_service import RecoveryService
 from app.saas_bootstrap import ensure_owner_and_default_tenant_bootstrap
 from app.i18n import get_user_language, set_user_language, t as tr
 from app import product_ui
@@ -89,6 +90,7 @@ limit_service = LimitService(db, subscription_service, usage_service)
 invoice_service = InvoiceService(db)
 billing_service = BillingService(db)
 payment_service = PaymentService(db)
+recovery_service = RecoveryService(db, subscription_service)
 telethon_client = None
 reaction_clients = []
 sender_service = None
@@ -741,6 +743,16 @@ def _public_usage_keyboard() -> InlineKeyboardMarkup:
     return user_ui.build_user_usage_keyboard()
 
 
+def _recovery_has_items(summary: dict[str, Any] | None) -> bool:
+    payload = summary or {}
+    return bool(
+        int(payload.get("pending_deliveries_count") or 0) > 0
+        or int(payload.get("failed_limit_jobs_count") or 0) > 0
+        or int(payload.get("failed_limit_video_jobs_count") or 0) > 0
+        or len(payload.get("last_blocked_events") or []) > 0
+    )
+
+
 def _is_subscription_blocked_status(status: str | None) -> bool:
     return str(status or "").strip().lower() in {"expired", "canceled"}
 
@@ -933,6 +945,13 @@ def build_user_rules_keyboard(rules, page: int = 0) -> InlineKeyboardMarkup:
     rows.append(nav)
     rows.append([InlineKeyboardButton(text="➕ Добавить правило", callback_data="user_rules_add")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _with_recovery_button(keyboard: InlineKeyboardMarkup, *, enabled: bool) -> InlineKeyboardMarkup:
+    rows = [list(row) for row in keyboard.inline_keyboard]
+    if enabled:
+        rows.insert(0, [InlineKeyboardButton(text="🔄 Восстановить работу", callback_data="user_recovery")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2407,6 +2426,7 @@ async def handle_user_rules_callback(callback: CallbackQuery):
     tenant_id = await run_db(ensure_user_tenant, user_id)
     logger.info("пользователь открыл список правил user_id=%s tenant_id=%s", user_id, tenant_id)
     rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
+    recovery_summary = await run_db(recovery_service.build_recovery_summary, tenant_id)
     await answer_callback_safe_once(callback)
     text = (
         "⚙️ Мои правила\n\n"
@@ -2418,7 +2438,9 @@ async def handle_user_rules_callback(callback: CallbackQuery):
         if not rules
         else "⚙️ Мои правила"
     )
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=build_user_rules_keyboard(rules, page=0))
+    kb = build_user_rules_keyboard(rules, page=0)
+    kb = _with_recovery_button(kb, enabled=_recovery_has_items(recovery_summary))
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
 
 @dp.callback_query(lambda c: c.data == "user_status")
@@ -2431,6 +2453,7 @@ async def handle_user_status_callback(callback: CallbackQuery):
     sub = await run_db(subscription_service.get_active_subscription, tenant_id) or {}
     status = str(sub.get("status") or "active")
     usage_today = await run_db(usage_service.get_today_usage, tenant_id)
+    recovery_summary = await run_db(recovery_service.build_recovery_summary, tenant_id)
     rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
     active_rules = sum(1 for row in rules if bool(getattr(row, "is_active", False)))
     rule_limit = int(sub.get("max_rules") or 0)
@@ -2478,10 +2501,13 @@ async def handle_user_status_callback(callback: CallbackQuery):
         f"Следующая публикация: {next_publication}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Восстановить работу", callback_data="user_recovery")],
         [InlineKeyboardButton(text="⚙️ Мои правила", callback_data="user_rules")],
         [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
     ])
+    if not _recovery_has_items(recovery_summary):
+        kb = InlineKeyboardMarkup(inline_keyboard=kb.inline_keyboard[1:])
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
@@ -2496,6 +2522,7 @@ async def handle_user_account_callback(callback: CallbackQuery):
     tenant_id = int(tenant.get("id") or 1)
     subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", "ru")
     usage_today = await run_db(usage_service.get_today_usage, tenant_id)
+    recovery_summary = await run_db(recovery_service.build_recovery_summary, tenant_id)
     rules_count = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
     status = str((subscription or {}).get("status") or "active")
     logger.info("Пользователь открыл user_account user_id=%s tenant_id=%s", user_id, tenant_id)
@@ -2521,7 +2548,52 @@ async def handle_user_account_callback(callback: CallbackQuery):
     await edit_message_text_safe(
         message=callback.message,
         text=text,
-        reply_markup=_public_usage_keyboard(),
+        reply_markup=_with_recovery_button(
+            _public_usage_keyboard(),
+            enabled=_recovery_has_items(recovery_summary) or status in {"active", "trial", "grace"},
+        ),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_recovery")
+async def handle_user_recovery_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    logger.info("пользователь открыл recovery tenant_id=%s user_id=%s", tenant_id, user_id)
+    summary = await run_db(recovery_service.build_recovery_summary, tenant_id)
+    can_recover, reason = await run_db(recovery_service.can_recover, tenant_id)
+    text = user_ui.build_user_recovery_summary_text(summary)
+    if not can_recover and reason:
+        text += f"\n\n⛔ {reason}"
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=text,
+        reply_markup=user_ui.build_user_recovery_keyboard(can_recover=bool(can_recover)),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_recovery_run")
+async def handle_user_recovery_run_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    can_recover, reason = await run_db(recovery_service.can_recover, tenant_id)
+    if not can_recover:
+        logger.info("recovery запрещён из-за неактивной подписки tenant_id=%s", tenant_id)
+        await answer_callback_safe(callback, reason or "Подписка ещё не активна", show_alert=True)
+        return
+    result = await run_db(recovery_service.recover_after_payment, tenant_id, user_id)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_recovery_result_text(result),
+        reply_markup=user_ui.build_user_recovery_keyboard(can_recover=True),
     )
 
 
@@ -3260,7 +3332,19 @@ async def handle_admin_confirm_manual_payment_callback(callback: CallbackQuery):
     user_id = int(confirmation_payload.get("user_id") or 0)
     if user_id and bot:
         try:
-            await bot.send_message(user_id, "✅ Оплата подтверждена\nВаш тариф активирован.")
+            await bot.send_message(
+                user_id,
+                (
+                    "✅ Оплата подтверждена\n\n"
+                    "Ваш тариф активирован.\n"
+                    "Если публикации или видео были остановлены из-за лимитов, восстановите работу одним нажатием."
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="🔄 Восстановить работу", callback_data="user_recovery")],
+                    ]
+                ),
+            )
         except Exception as exc:
             logger.warning("не удалось уведомить пользователя user_id=%s intent_id=%s: %s", user_id, payment_intent_id, exc)
     elif not user_id:
