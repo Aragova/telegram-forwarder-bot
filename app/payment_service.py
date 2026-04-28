@@ -84,6 +84,26 @@ class PaymentService:
             methods = [m for m in methods if m["provider"] in allowed]
         return methods
 
+    def list_available_methods(self, invoice: dict[str, Any]) -> list[dict[str, Any]]:
+        """Совместимость с существующими handler'ами оплаты."""
+        if not invoice:
+            return []
+        tenant_id = int(invoice.get("tenant_id") or 0)
+        invoice_id = int(invoice.get("id") or 0)
+        if tenant_id <= 0 or invoice_id <= 0:
+            return []
+        return self.get_available_payment_methods(tenant_id, invoice_id)
+
+    def start_payment(self, invoice: dict[str, Any], provider: str, user_id: int | None = None) -> dict[str, Any]:
+        """Совместимость с существующими handler'ами оплаты."""
+        _ = user_id
+        if not invoice:
+            return {"ok": False, "error": "invoice_not_found"}
+        invoice_id = int(invoice.get("id") or 0)
+        if invoice_id <= 0:
+            return {"ok": False, "error": "invoice_not_found"}
+        return self.create_payment_for_invoice(invoice_id, provider)
+
     def handle_provider_webhook(self, provider: str, headers: dict[str, Any], body: str) -> dict[str, Any]:
         adapter = self._providers.get(str(provider))
         if not adapter:
