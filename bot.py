@@ -7687,9 +7687,6 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
     )
 )
 async def handle_stateful_private_inputs(message: Message):
-    if not await is_admin(message):
-        return
-
     user_id = message.from_user.id if message.from_user else None
     state = user_states.get(user_id) if user_id is not None else None
     if not state:
