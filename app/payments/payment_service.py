@@ -1,8 +1,36 @@
 from __future__ import annotations
 
-import time
 import uuid
 from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class LavaClientOrderRef:
+    internal_invoice_id: int
+    user_id: int
+    tariff_code: str
+    raw: str
+
+
+def parse_lava_client_order_id(value: str) -> LavaClientOrderRef:
+    raw = str(value or "").strip()
+    parts = raw.split(":")
+    if len(parts) != 8:
+        raise ValueError("Некорректный формат clientOrderId")
+    if parts[0] != "vimi" or parts[1] != "invoice" or parts[3] != "user" or parts[5] != "tariff":
+        raise ValueError("Некорректный формат clientOrderId")
+    invoice_id = int(parts[2])
+    user_id = int(parts[4])
+    tariff_code = str(parts[6] or "").strip().lower()
+    nonce = str(parts[7] or "").strip()
+    if invoice_id < 0 or user_id <= 0 or not tariff_code or not nonce:
+        raise ValueError("Некорректный формат clientOrderId")
+    return LavaClientOrderRef(
+        internal_invoice_id=invoice_id,
+        user_id=user_id,
+        tariff_code=tariff_code,
+        raw=raw,
+    )
 
 from app.config import settings
 from app.payments.lava_top_client import LavaTopClient, LavaTopInvoiceResult
@@ -59,9 +87,7 @@ class PaymentService:
         tariff = get_tariff(tariff_code)
         user_email = (email or "").strip() or f"user_{int(user_id)}@usevimi.local"
         client_order_id = (
-            f"vimi:invoice:{int(invoice_id)}:user:{int(user_id)}:{tariff.code}:{uuid.uuid4().hex[:8]}"
-            if int(invoice_id) > 0
-            else f"vimi:{int(user_id)}:{tariff.code}:{int(time.time())}:{uuid.uuid4().hex[:8]}"
+            f"vimi:invoice:{int(invoice_id)}:user:{int(user_id)}:tariff:{tariff.code}:{uuid.uuid4().hex}"
         )
 
         result: LavaTopInvoiceResult = await self._lava_client.create_invoice(

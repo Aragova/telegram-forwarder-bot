@@ -266,6 +266,55 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             reply_markup=ctx.public_invoice_keyboard(invoice_id),
         )
 
+
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice_check_payment:"))
+    async def handle_user_invoice_check_payment_callback(callback: CallbackQuery):
+        user_id = callback.from_user.id if callback.from_user else 0
+        if ctx.is_admin_user(user_id):
+            await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+            return
+        raw = (callback.data or "").split(":", 1)
+        invoice_id = int(raw[1] or 0) if len(raw) > 1 else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
+        items = await ctx.run_db(ctx.db.list_invoice_items, invoice_id) if hasattr(ctx.db, "list_invoice_items") else []
+        if not invoice:
+            await ctx.answer_callback_safe(callback, "Счёт не найден", show_alert=True)
+            return
+        if int(invoice.get("tenant_id") or 0) != int(tenant_id):
+            await ctx.answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+            return
+
+        status = str(invoice.get("status") or "").lower()
+        await ctx.answer_callback_safe_once(callback)
+        if status == "paid":
+            sub = await ctx.run_db(ctx.subscription_service.get_active_subscription, tenant_id) or {}
+            plan_name = str(sub.get("plan_name") or "BASIC").upper()
+            await ctx.edit_message_text_safe(
+                message=callback.message,
+                text=("✅ Оплата получена\n\n" f"Тариф {plan_name} активирован."),
+                reply_markup=user_ui.build_user_invoice_keyboard(invoice_id),
+            )
+            return
+        if status in {"open", "draft", "pending"}:
+            await ctx.edit_message_text_safe(
+                message=callback.message,
+                text=(
+                    user_ui.build_user_invoice_text(invoice, items)
+                    + "\n\nПлатёж ещё не подтверждён Lava.top. Попробуйте проверить чуть позже."
+                ),
+                reply_markup=user_ui.build_user_invoice_keyboard(invoice_id),
+            )
+            return
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=(
+                user_ui.build_user_invoice_text(invoice, items)
+                + "\n\nПлатёж не прошёл или счёт закрыт. Создайте новый счёт и попробуйте снова."
+            ),
+            reply_markup=user_ui.build_user_invoice_keyboard(invoice_id),
+        )
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice_pay:"))
     async def handle_user_invoice_pay_callback(callback: CallbackQuery):
         user_id = callback.from_user.id if callback.from_user else 0

@@ -4,7 +4,7 @@ import asyncio
 
 from app.config import settings
 from app.payments.lava_top_client import LavaTopInvoiceResult
-from app.payments.payment_service import PaymentService
+from app.payments.payment_service import PaymentService, parse_lava_client_order_id
 
 
 class _FakeLavaClient:
@@ -51,7 +51,7 @@ def test_basic_offer_id_and_technical_email_and_client_order_id_shape():
     payload = fake_client.calls[0]
     assert payload["offer_id"] == "offer-basic-123"
     assert payload["email"] == "user_77@usevimi.local"
-    assert "vimi:77:basic:" in payload["client_order_id"]
+    assert "vimi:invoice:0:user:77:tariff:basic:" in payload["client_order_id"]
     assert view.provider == "lava_top"
     assert view.tariff_code == "basic"
 
@@ -96,7 +96,7 @@ def test_create_lava_invoice_for_user_invoice_uses_invoice_context():
     )
 
     payload = fake_client.calls[0]
-    assert "vimi:invoice:88:user:501:basic:" in payload["client_order_id"]
+    assert "vimi:invoice:88:user:501:tariff:basic:" in payload["client_order_id"]
     assert payload["currency"] == "EUR"
     assert payload["offer_id"] == "offer-basic-999"
     assert view.amount == 9.0
@@ -104,3 +104,19 @@ def test_create_lava_invoice_for_user_invoice_uses_invoice_context():
 
     settings.lava_top_enabled = old_enabled
     settings.lava_top_basic_offer_id = old_offer
+
+
+def test_parse_lava_client_order_id_ok():
+    parsed = parse_lava_client_order_id("vimi:invoice:11:user:42:tariff:basic:abc123")
+    assert parsed.internal_invoice_id == 11
+    assert parsed.user_id == 42
+    assert parsed.tariff_code == "basic"
+
+
+def test_parse_lava_client_order_id_invalid():
+    try:
+        parse_lava_client_order_id("broken")
+    except ValueError:
+        assert True
+    else:
+        assert False, "must fail"
