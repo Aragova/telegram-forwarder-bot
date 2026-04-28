@@ -71,6 +71,7 @@ from app.limit_service import LimitService
 from app.invoice_service import InvoiceService
 from app.billing_service import BillingService
 from app.payment_service import PaymentService
+from app.recovery_service import RecoveryService
 from app.saas_bootstrap import ensure_owner_and_default_tenant_bootstrap
 from app.i18n import get_user_language, set_user_language, t as tr
 from app import product_ui
@@ -89,6 +90,7 @@ limit_service = LimitService(db, subscription_service, usage_service)
 invoice_service = InvoiceService(db)
 billing_service = BillingService(db)
 payment_service = PaymentService(db)
+recovery_service = RecoveryService(db, subscription_service)
 telethon_client = None
 reaction_clients = []
 sender_service = None
@@ -774,6 +776,34 @@ def _write_billing_event(
         str(event_type),
         event_source="ui_enforcement",
         metadata=metadata,
+    )
+
+
+def _is_recovery_cta_already_shown(tenant_id: int, payment_intent_id: int) -> bool:
+    if not hasattr(db, "get_billing_events"):
+        return False
+    events = db.get_billing_events(int(tenant_id), limit=100)
+    for event in events or []:
+        if str(event.get("event_type") or "") != "post_payment_recovery_cta_shown":
+            continue
+        meta = event.get("metadata_json") if isinstance(event.get("metadata_json"), dict) else {}
+        if int(meta.get("payment_intent_id") or 0) == int(payment_intent_id):
+            return True
+    return False
+
+
+def _mark_recovery_cta_shown(tenant_id: int, payment_intent_id: int, user_id: int) -> None:
+    if not hasattr(db, "create_billing_event"):
+        return
+    db.create_billing_event(
+        int(tenant_id),
+        "post_payment_recovery_cta_shown",
+        event_source="payment_recovery_ui",
+        metadata={
+            "tenant_id": int(tenant_id),
+            "payment_intent_id": int(payment_intent_id),
+            "user_id": int(user_id),
+        },
     )
 
 
@@ -2525,6 +2555,48 @@ async def handle_user_account_callback(callback: CallbackQuery):
     )
 
 
+@dp.callback_query(lambda c: c.data == "user_recovery")
+async def handle_user_recovery_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    logger.info("пользователь открыл recovery tenant_id=%s user_id=%s", tenant_id, user_id)
+    summary = await run_db(recovery_service.build_recovery_summary, tenant_id)
+    can_recover, reason = await run_db(recovery_service.can_recover, tenant_id)
+    text = user_ui.build_user_recovery_summary_text(summary)
+    if not can_recover and reason:
+        text += f"\n\n⛔ {reason}"
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=text,
+        reply_markup=user_ui.build_user_recovery_keyboard(can_recover=bool(can_recover)),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_recovery_run")
+async def handle_user_recovery_run_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    can_recover, reason = await run_db(recovery_service.can_recover, tenant_id)
+    if not can_recover:
+        logger.info("recovery запрещён из-за неактивной подписки tenant_id=%s", tenant_id)
+        await answer_callback_safe(callback, reason or "Подписка ещё не активна", show_alert=True)
+        return
+    result = await run_db(recovery_service.recover_after_payment, tenant_id, user_id)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_recovery_result_text(result),
+        reply_markup=user_ui.build_user_recovery_keyboard(can_recover=True),
+    )
+
+
 @dp.callback_query(lambda c: c.data == "user_plans")
 async def handle_user_plans_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
@@ -3258,9 +3330,28 @@ async def handle_admin_confirm_manual_payment_callback(callback: CallbackQuery):
     await edit_message_text_safe(message=callback.message, text=f"✅ Оплата #{payment_intent_id} подтверждена.", reply_markup=None)
     confirmation_payload = intent.get("confirmation_payload_json") if isinstance(intent.get("confirmation_payload_json"), dict) else {}
     user_id = int(confirmation_payload.get("user_id") or 0)
+    tenant_id = int(intent.get("tenant_id") or 0)
     if user_id and bot:
+        cta_already_shown = await run_db(_is_recovery_cta_already_shown, tenant_id, payment_intent_id) if tenant_id > 0 else False
+        if cta_already_shown:
+            logger.info("recovery CTA уже был показан tenant_id=%s intent_id=%s user_id=%s", tenant_id, payment_intent_id, user_id)
+            return
         try:
-            await bot.send_message(user_id, "✅ Оплата подтверждена\nВаш тариф активирован.")
+            await bot.send_message(
+                user_id,
+                (
+                    "✅ Оплата подтверждена\n\n"
+                    "Ваш тариф активирован.\n"
+                    "Если публикации или видео были остановлены из-за лимитов, восстановите работу одним нажатием."
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="🔄 Восстановить работу", callback_data="user_recovery")],
+                    ]
+                ),
+            )
+            if tenant_id > 0:
+                await run_db(_mark_recovery_cta_shown, tenant_id, payment_intent_id, user_id)
         except Exception as exc:
             logger.warning("не удалось уведомить пользователя user_id=%s intent_id=%s: %s", user_id, payment_intent_id, exc)
     elif not user_id:

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from app.repository_split_base import RepositorySplitBase
+
+logger = logging.getLogger("forwarder.repository")
 
 
 class UsageRepository(RepositorySplitBase):
@@ -245,3 +248,159 @@ class UsageRepository(RepositorySplitBase):
             "tenants_with_billing_issues": billing_issues,
             "tenants_with_overage_candidates": overage_candidates,
         }
+
+    def get_recoverable_summary_for_tenant(self, tenant_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM routing
+                    WHERE COALESCE(tenant_id, 1) = %s
+                      AND is_active = TRUE
+                    """,
+                    (int(tenant_id),),
+                )
+                active_rules_count = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM deliveries d
+                    JOIN routing r ON r.id = d.rule_id
+                    WHERE COALESCE(r.tenant_id, 1) = %s
+                      AND d.status = 'pending'
+                    """,
+                    (int(tenant_id),),
+                )
+                pending_deliveries_count = int((cur.fetchone() or {}).get("cnt") or 0)
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(CASE WHEN j.job_type LIKE 'video_%%' THEN 1 ELSE 0 END), 0) AS video_cnt,
+                        COALESCE(SUM(CASE WHEN j.job_type NOT LIKE 'video_%%' THEN 1 ELSE 0 END), 0) AS non_video_cnt
+                    FROM jobs j
+                    WHERE COALESCE(NULLIF(j.payload_json->>'tenant_id', '')::BIGINT, 1) = %s
+                      AND j.status = 'failed'
+                      AND (
+                          COALESCE(j.error_text, '') ILIKE '%%лимит%%'
+                          OR COALESCE(j.error_text, '') ILIKE '%%подписка неактивна%%'
+                          OR COALESCE(j.error_text, '') ILIKE '%%subscription%%'
+                          OR COALESCE(j.error_text, '') ILIKE '%%limit%%'
+                      )
+                      AND COALESCE(j.error_text, '') NOT ILIKE '%%ffmpeg%%'
+                      AND COALESCE(j.error_text, '') NOT ILIKE '%%telegram%%'
+                      AND COALESCE(j.error_text, '') NOT ILIKE '%%invalid source%%'
+                      AND COALESCE(j.error_text, '') NOT ILIKE '%%access%%'
+                    """,
+                    (int(tenant_id),),
+                )
+                row = cur.fetchone() or {}
+                failed_limit_video_jobs_count = int(row.get("video_cnt") or 0)
+                failed_limit_jobs_count = int(row.get("non_video_cnt") or 0)
+                cur.execute(
+                    """
+                    SELECT id, event_type, created_at, metadata_json
+                    FROM billing_events
+                    WHERE tenant_id = %s
+                      AND event_type IN ('limit_rule_blocked', 'limit_job_blocked', 'limit_video_blocked', 'subscription_blocked_action')
+                    ORDER BY id DESC
+                    LIMIT 10
+                    """,
+                    (int(tenant_id),),
+                )
+                limit_rows = cur.fetchall() or []
+        return {
+            "active_rules_count": active_rules_count,
+            "pending_deliveries_count": pending_deliveries_count,
+            "failed_limit_jobs_count": failed_limit_jobs_count,
+            "failed_limit_video_jobs_count": failed_limit_video_jobs_count,
+            "last_blocked_events": [dict(row) for row in limit_rows],
+        }
+
+    def recover_blocked_jobs_for_tenant(self, tenant_id: int) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT j.id, COALESCE(j.error_text, '') AS error_text
+                    FROM jobs j
+                    WHERE COALESCE(NULLIF(j.payload_json->>'tenant_id', '')::BIGINT, 1) = %s
+                      AND j.status = 'failed'
+                    """,
+                    (int(tenant_id),),
+                )
+                rows = cur.fetchall() or []
+                recover_ids: list[int] = []
+                for row in rows:
+                    job_id = int(row["id"])
+                    error_text = str(row.get("error_text") or "")
+                    lowered = error_text.lower()
+                    has_limit_marker = (
+                        "лимит" in lowered
+                        or "подписка неактивна" in lowered
+                        or "subscription" in lowered
+                        or "limit" in lowered
+                    )
+                    has_excluded_marker = (
+                        "ffmpeg" in lowered
+                        or "telegram" in lowered
+                        or "invalid source" in lowered
+                        or "access" in lowered
+                    )
+                    if has_limit_marker and not has_excluded_marker:
+                        recover_ids.append(job_id)
+                    else:
+                        logger.info("skipped non-limit failed job job_id=%s reason=%s", job_id, (error_text or "нет текста ошибки")[:160])
+                if recover_ids:
+                    cur.execute(
+                        """
+                        UPDATE jobs
+                        SET status = 'retry',
+                            run_at = NOW(),
+                            locked_by = NULL,
+                            lease_until = NULL,
+                            updated_at = NOW(),
+                            error_text = NULL
+                        WHERE id = ANY(%s)
+                        """,
+                        (recover_ids,),
+                    )
+                    recovered = int(cur.rowcount or 0)
+                else:
+                    recovered = 0
+            conn.commit()
+        return recovered
+
+    def recover_pending_deliveries_for_tenant(self, tenant_id: int) -> int:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET next_run_at = %s
+                    WHERE COALESCE(tenant_id, 1) = %s
+                      AND is_active = TRUE
+                    """,
+                    (now_iso, int(tenant_id)),
+                )
+                updated_rules = int(cur.rowcount or 0)
+            conn.commit()
+        return updated_rules
+
+    def get_recent_limit_events_for_tenant(self, tenant_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, event_type, event_source, metadata_json, created_at
+                    FROM billing_events
+                    WHERE tenant_id = %s
+                      AND event_type IN ('limit_rule_blocked', 'limit_job_blocked', 'limit_video_blocked', 'subscription_blocked_action')
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (int(tenant_id), int(limit)),
+                )
+                rows = cur.fetchall() or []
+        return [dict(row) for row in rows]
