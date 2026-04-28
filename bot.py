@@ -2597,6 +2597,48 @@ async def handle_user_recovery_run_callback(callback: CallbackQuery):
     )
 
 
+@dp.callback_query(lambda c: c.data == "user_recovery")
+async def handle_user_recovery_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    logger.info("пользователь открыл recovery tenant_id=%s user_id=%s", tenant_id, user_id)
+    summary = await run_db(recovery_service.build_recovery_summary, tenant_id)
+    can_recover, reason = await run_db(recovery_service.can_recover, tenant_id)
+    text = user_ui.build_user_recovery_summary_text(summary)
+    if not can_recover and reason:
+        text += f"\n\n⛔ {reason}"
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=text,
+        reply_markup=user_ui.build_user_recovery_keyboard(can_recover=bool(can_recover)),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_recovery_run")
+async def handle_user_recovery_run_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    can_recover, reason = await run_db(recovery_service.can_recover, tenant_id)
+    if not can_recover:
+        logger.info("recovery запрещён из-за неактивной подписки tenant_id=%s", tenant_id)
+        await answer_callback_safe(callback, reason or "Подписка ещё не активна", show_alert=True)
+        return
+    result = await run_db(recovery_service.recover_after_payment, tenant_id, user_id)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=user_ui.build_user_recovery_result_text(result),
+        reply_markup=user_ui.build_user_recovery_keyboard(can_recover=True),
+    )
+
+
 @dp.callback_query(lambda c: c.data == "user_plans")
 async def handle_user_plans_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
