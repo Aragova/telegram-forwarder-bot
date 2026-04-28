@@ -7844,11 +7844,8 @@ async def handle_faulty_back(callback: CallbackQuery):
         reply_markup=get_diagnostics_menu(),
     )
 
-@dp.message()
+@dp.message(lambda m: m.chat.type != "private")
 async def handle_new_message(message: Message):
-    if message.chat.type == "private":
-        return
-
     try:
         source_rows = await run_db(db.get_channels, "source")
 
