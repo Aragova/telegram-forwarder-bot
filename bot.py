@@ -194,6 +194,27 @@ MENU_NAVIGATION_PREFIXES = (
 )
 
 
+def normalize_reply_text(text: str | None) -> str:
+    return (text or "").replace("\ufe0f", "").strip()
+
+
+ADMIN_REPLY_KEYBOARD_ALIASES = {
+    "📈 Живой статус": "📈 Живой статус",
+    "🔄 Правила": "🔄 Правила",
+    "📡 Каналы": "📡 Каналы",
+    "📦 Очередь": "📦 Очередь",
+    "⚠ Диагностика": "⚠️ Диагностика",
+    "⚙ Система": "⚙️ Система",
+    "▶ Запустить пересылку": "▶️ Запустить пересылку",
+    "▶ Запуск": "▶️ Запустить пересылку",
+    "⏸ Остановить пересылку": "⏸ Остановить пересылку",
+    "⏸ Стоп": "⏸ Остановить пересылку",
+    "⬅ Назад в меню": "⬅️ Назад в меню",
+    "📋 Меню": "📋 Меню",
+    "🔙 Главное меню": "🔙 Главное меню",
+}
+
+
 def is_menu_navigation_text(text: str | None) -> bool:
     value = (text or "").strip()
     if not value:
@@ -3042,6 +3063,68 @@ async def handle_live_status(message: Message):
 
     task = asyncio.create_task(dashboard_worker(message.from_user.id, msg))
     dashboard_tasks[message.from_user.id] = task
+
+
+@dp.message(
+    lambda m: (
+        m.chat.type == "private"
+        and m.from_user is not None
+        and _is_admin_user(m.from_user.id)
+        and normalize_reply_text(m.text) in ADMIN_REPLY_KEYBOARD_ALIASES
+    )
+)
+async def handle_admin_reply_keyboard_router(message: Message):
+    normalized = normalize_reply_text(message.text)
+    canonical = ADMIN_REPLY_KEYBOARD_ALIASES.get(normalized)
+    logger.info(
+        "ADMIN_REPLY_KEYBOARD | text=%r normalized=%r admin_id=%s",
+        message.text,
+        normalized,
+        message.from_user.id if message.from_user else None,
+    )
+    reset_user_state(message.from_user.id if message.from_user else None)
+
+    if canonical == "📈 Живой статус":
+        await handle_live_status(message)
+        return
+    if canonical == "🔄 Правила":
+        await message.reply("🔄 Раздел: Правила", reply_markup=get_rules_menu())
+        return
+    if canonical == "📡 Каналы":
+        await message.reply("📡 Раздел: Каналы", reply_markup=get_channels_menu())
+        return
+    if canonical == "📦 Очередь":
+        await message.reply("📦 Раздел: Очередь", reply_markup=get_queue_menu())
+        return
+    if canonical == "⚠️ Диагностика":
+        await message.reply("⚠️ Раздел: Диагностика", reply_markup=get_diagnostics_menu())
+        return
+    if canonical == "⚙️ Система":
+        await message.reply("⚙️ Раздел: Система", reply_markup=get_system_menu())
+        return
+    if canonical in {"📋 Меню", "🔙 Главное меню", "⬅️ Назад в меню"}:
+        await message.reply("📋 Главное меню", reply_markup=get_main_menu())
+        return
+    if canonical == "▶️ Запустить пересылку":
+        if posting_active:
+            await message.reply("ℹ️ Пересылка уже запущена.")
+            return
+        await start_forwarding()
+        await message.reply("▶️ Пересылка запущена.", reply_markup=get_main_menu())
+        return
+    if canonical == "⏸ Остановить пересылку":
+        if not posting_active:
+            await message.reply("ℹ️ Пересылка уже остановлена.")
+            return
+        await stop_forwarding()
+        await message.reply("⏸ Пересылка остановлена.", reply_markup=get_main_menu())
+        return
+
+    logger.info(
+        "ADMIN_REPLY_KEYBOARD_SKIP | text=%r normalized=%r",
+        message.text,
+        normalized,
+    )
 
 @dp.callback_query(lambda c: c.data == "dashboard_refresh")
 async def handle_dashboard_refresh(callback: CallbackQuery):

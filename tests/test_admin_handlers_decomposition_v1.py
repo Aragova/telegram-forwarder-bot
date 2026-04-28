@@ -13,6 +13,20 @@ EXPECTED_ADMIN_TEXTS = [
     "⚙️ Система",
 ]
 
+EXPECTED_ADMIN_REPLY_KEYBOARD_TEXTS = [
+    "📈 Живой статус",
+    "🔄 Правила",
+    "📡 Каналы",
+    "📦 Очередь",
+    "⚠️ Диагностика",
+    "⚙️ Система",
+    "▶️ Запустить пересылку",
+    "⏸ Остановить пересылку",
+    "⬅️ Назад в меню",
+    "📋 Меню",
+    "🔙 Главное меню",
+]
+
 EXPECTED_USER_CALLBACK_PREFIXES = [
     "user_rules",
     "user_rules_page:",
@@ -64,3 +78,22 @@ def test_user_callback_prefixes_unchanged() -> None:
     )
     for callback_data in EXPECTED_USER_CALLBACK_PREFIXES:
         assert callback_data in source, f"callback_data not found: {callback_data}"
+
+
+def test_admin_reply_keyboard_router_declared_before_generic_private_state_handler() -> None:
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert source.index("async def handle_admin_reply_keyboard_router") < source.index("async def handle_stateful_private_inputs")
+
+
+def test_admin_reply_keyboard_router_keeps_all_bottom_buttons() -> None:
+    source = Path("bot.py").read_text(encoding="utf-8")
+    for text in EXPECTED_ADMIN_REPLY_KEYBOARD_TEXTS:
+        assert text in source, f"missing admin reply keyboard text: {text}"
+
+
+def test_admin_reply_keyboard_router_contains_operational_actions() -> None:
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "await start_forwarding()" in source
+    assert "await stop_forwarding()" in source
+    assert "reply_markup=get_system_menu()" in source
+    assert "reply_markup=get_main_menu()" in source
