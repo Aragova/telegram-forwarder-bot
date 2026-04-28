@@ -19,25 +19,55 @@ PAYMENT_PROVIDER_TITLES_RU: dict[str, str] = {
 MANUAL_PAYMENT_PROVIDERS = {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual"}
 
 
+def build_button(
+    text: str,
+    *,
+    callback_data: str | None = None,
+    url: str | None = None,
+    style: str | None = None,
+) -> InlineKeyboardButton:
+    payload: dict[str, Any] = {"text": text}
+    if callback_data:
+        payload["callback_data"] = callback_data
+    if url:
+        payload["url"] = url
+    if style:
+        try:
+            return InlineKeyboardButton(**payload, style=style)
+        except Exception:
+            pass
+    return InlineKeyboardButton(**payload)
+
+
 def build_user_main_text() -> str:
     return (
-        "👋 Добро пожаловать в ViMi\n\n"
-        "ViMi помогает автоматизировать Telegram-каналы: источники, получатели, правила публикации, очередь и статус — внутри Telegram.\n\n"
-        "Выберите действие:"
+        "✨ ViMi — автоматизация Telegram-каналов\n\n"
+        "Ваш центр управления публикациями, видео, правилами и расписанием.\n\n"
+        "Тариф: FREE\n"
+        "Статус: 🟢 активен\n\n"
+        "Выберите раздел:"
     )
 
 
 def build_user_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📡 Источники", callback_data="user_sources")],
-            [InlineKeyboardButton(text="🎯 Получатели", callback_data="user_targets")],
-            [InlineKeyboardButton(text="⚙️ Мои правила", callback_data="user_rules")],
-            [InlineKeyboardButton(text="📊 Статус", callback_data="user_status")],
-            [InlineKeyboardButton(text="👤 Мой аккаунт", callback_data="user_account")],
-            [InlineKeyboardButton(text="💎 Тарифы", callback_data="user_plans")],
-            [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
-            [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
+            [
+                build_button(text="👤 Мой аккаунт", callback_data="user_account"),
+                build_button(text="⚙️ Мои правила", callback_data="user_rules"),
+            ],
+            [
+                build_button(text="📡 Мои каналы", callback_data="user_channels"),
+                build_button(text="🌐 Language", callback_data="user_language", style="danger"),
+            ],
+            [
+                build_button(text="📊 Живой статус", callback_data="user_status"),
+                build_button(text="🌍 TimeZone", callback_data="user_timezone"),
+            ],
+            [
+                build_button(text="🆘 Поддержка", callback_data="user_support", style="primary"),
+                build_button(text="📘 Инструкция", callback_data="user_help"),
+            ],
         ]
     )
 
@@ -63,16 +93,15 @@ def build_user_account_text(
     max_jobs = int(sub.get("max_jobs_per_day") or 0)
     video_today = int(usage.get("video_count") or 0)
     jobs_today = int(usage.get("jobs_count") or 0)
+    status_label = "Активен" if status in {"active", "trial", "grace"} else "Неактивен"
     return (
         "👤 Мой аккаунт\n\n"
-        f"Telegram ID: {int(user_id)}\n"
-        f"Аккаунт: #{int(tenant_id)}\n\n"
-        f"Тариф: {plan_name}\n"
-        f"Статус: {status}\n\n"
-        "Лимиты:\n"
-        f"📌 Правила: {int(rules_count)} / {max_rules}\n"
-        f"🎬 Видео сегодня: {video_today} / {max_video}\n"
-        f"📦 Задачи сегодня: {jobs_today} / {max_jobs}"
+        f"💎 Тариф: {plan_name}\n"
+        f"📊 Статус: {status_label}\n\n"
+        "──────────────\n\n"
+        f"📦 Правил: {int(rules_count)} / {max_rules if max_rules > 0 else '∞'}\n"
+        f"🎬 Видео: {video_today} / {max_video if max_video > 0 else '∞'}\n"
+        f"📤 Публикации: {jobs_today} / {max_jobs if max_jobs > 0 else '∞'}"
     )
 
 
@@ -141,9 +170,11 @@ def build_user_subscription_blocked_text(subscription: dict[str, Any] | None) ->
 def build_user_usage_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
-            [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
+            [
+                build_button(text="💎 Сменить тариф", callback_data="user_plans", style="primary"),
+                build_button(text="🧾 Мои счета", callback_data="user_invoices"),
+            ],
+            [build_button(text="⬅️ Главное меню", callback_data="user_main")],
         ]
     )
 
@@ -204,16 +235,32 @@ def build_user_recovery_keyboard(can_recover: bool) -> InlineKeyboardMarkup:
 
 
 def build_user_plans_text(plans: list[dict[str, Any]]) -> str:
-    lines = ["💎 Тарифы\n"]
+    lines = ["💎 Тарифы ViMi", "", "Ваш текущий тариф: FREE", "", "──────────────", ""]
     for plan in plans:
+        plan_name = str(plan.get("name") or "").upper()
+        if plan_name == "OWNER":
+            continue
+        if plan_name == "FREE":
+            lines.extend(
+                [
+                    "FREE",
+                    "• до 3 правил",
+                    "• до 5 видео в день",
+                    "• до 100 публикаций в день",
+                    "",
+                ]
+            )
+            continue
+        price = float(plan.get("price") or 0)
+        title = f"{plan_name} — {price:.0f} USD / месяц"
+        use_case = "• подходит для стабильной автопубликации" if plan_name == "BASIC" else "• подходит для больших каналов и видео-потоков"
         lines.extend(
             [
-                f"{plan['name']}",
-                f"{plan['description']}",
+                title,
                 f"📌 Правила: {int(plan.get('max_rules') or 0)}",
                 f"🎬 Видео/день: {int(plan.get('max_video_per_day') or 0)}",
-                f"📦 Задачи/день: {int(plan.get('max_jobs_per_day') or 0)}",
-                f"💰 Цена: ${float(plan.get('price') or 0):.0f}/мес",
+                f"📦 Публикации/день: {int(plan.get('max_jobs_per_day') or 0)}",
+                use_case,
                 "",
             ]
         )
@@ -223,9 +270,30 @@ def build_user_plans_text(plans: list[dict[str, Any]]) -> str:
 def build_user_plans_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="BASIC — выбрать", callback_data="user_select_plan:BASIC")],
-            [InlineKeyboardButton(text="PRO — выбрать", callback_data="user_select_plan:PRO")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
+            [build_button(text="Выбрать BASIC", callback_data="user_select_plan:BASIC", style="primary")],
+            [build_button(text="Выбрать PRO", callback_data="user_select_plan:PRO", style="primary")],
+            [build_button(text="⬅️ Назад", callback_data="user_account")],
+        ]
+    )
+
+
+def build_user_channels_text(*, sources_count: int = 0, targets_count: int = 0) -> str:
+    return (
+        "📡 Мои каналы\n\n"
+        "Здесь находятся ваши источники и получатели.\n\n"
+        "Источник — откуда ViMi берёт публикации.\n"
+        "Получатель — куда ViMi отправляет публикации.\n\n"
+        f"Источники: {int(sources_count)}\n"
+        f"Получатели: {int(targets_count)}"
+    )
+
+
+def build_user_channels_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [build_button(text="📤 Источники", callback_data="user_sources"), build_button(text="📥 Получатели", callback_data="user_targets")],
+            [build_button(text="➕ Добавить канал", callback_data="user_sources_add", style="primary"), build_button(text="➖ Удалить канал", callback_data="user_sources_remove")],
+            [build_button(text="⬅️ Главное меню", callback_data="user_main")],
         ]
     )
 
@@ -236,7 +304,7 @@ def build_user_sources_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📜 Мои источники", callback_data="user_sources_list")],
             [InlineKeyboardButton(text="➕ Добавить источник", callback_data="user_sources_add")],
             [InlineKeyboardButton(text="➖ Удалить источник", callback_data="user_sources_remove")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
+            [build_button(text="⬅️ Главное меню", callback_data="user_main")],
         ]
     )
 
@@ -247,9 +315,79 @@ def build_user_targets_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📜 Мои получатели", callback_data="user_targets_list")],
             [InlineKeyboardButton(text="➕ Добавить получатель", callback_data="user_targets_add")],
             [InlineKeyboardButton(text="➖ Удалить получатель", callback_data="user_targets_remove")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
+            [build_button(text="⬅️ Главное меню", callback_data="user_main")],
         ]
     )
+
+
+def build_user_timezone_text(current_tz: str = "Europe/Moscow", utc_label: str = "UTC+3") -> str:
+    return (
+        "🌍 TimeZone\n\n"
+        f"Текущий часовой пояс:\n{current_tz} · {utc_label}\n\n"
+        "Он используется для:\n"
+        "• строки “Ждёт до”;\n"
+        "• фиксированного времени публикаций;\n"
+        "• живого статуса;\n"
+        "• логов и истории."
+    )
+
+
+def build_user_timezone_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [build_button(text="UTC+3 Москва", callback_data="user_timezone:set:Europe/Moscow")],
+        [build_button(text="UTC+2 Европа", callback_data="user_timezone:set:Europe/Kaliningrad")],
+        [build_button(text="UTC+1 Центральная Европа", callback_data="user_timezone:set:Europe/Berlin")],
+        [build_button(text="UTC+0 Лондон", callback_data="user_timezone:set:Europe/London")],
+        [build_button(text="✏️ Ввести вручную", callback_data="user_timezone_manual")],
+        [build_button(text="⬅️ Главное меню", callback_data="user_main")],
+    ])
+
+
+def build_user_language_text() -> str:
+    return "🌐 Interface language\n\nChoose your language:"
+
+
+def build_user_language_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [build_button(text="🇷🇺 Русский", callback_data="user_set_lang:ru"), build_button(text="🇺🇸 English", callback_data="user_set_lang:en")],
+        [build_button(text="🇪🇸 Español", callback_data="user_set_lang:es"), build_button(text="🇩🇪 Deutsch", callback_data="user_set_lang:de")],
+        [build_button(text="⬅️ Main menu", callback_data="user_main")],
+    ])
+
+
+def build_user_support_text() -> str:
+    return (
+        "🆘 Поддержка ViMi\n\n"
+        "Мы поможем с настройкой каналов, правилами, оплатой и ошибками публикации.\n\n"
+        "Перед обращением подготовьте:\n"
+        "• номер правила, если вопрос по публикации;\n"
+        "• номер счёта, если вопрос по оплате;\n"
+        "• скрин ошибки, если она есть.\n\n"
+        "Нажмите кнопку ниже, чтобы открыть поддержку."
+    )
+
+
+def build_user_support_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [build_button(text="💬 Открыть поддержку", url="https://t.me/vimi_support_bot", style="primary")],
+        [build_button(text="⬅️ Главное меню", callback_data="user_main")],
+    ])
+
+
+def build_user_help_text() -> str:
+    return "📘 Инструкция ViMi\n\nВыберите раздел:"
+
+
+def build_user_help_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [build_button(text="📡 Каналы", callback_data="user_help:channels")],
+        [build_button(text="⚙️ Правила", callback_data="user_help:rules")],
+        [build_button(text="🔁 Режимы", callback_data="user_help:modes")],
+        [build_button(text="🕒 Расписание", callback_data="user_help:schedule")],
+        [build_button(text="🎬 Видеоредактор", callback_data="user_help:video")],
+        [build_button(text="💳 Оплата", callback_data="user_help:payment")],
+        [build_button(text="⬅️ Главное меню", callback_data="user_main")],
+    ])
 
 
 def build_user_invoice_text(invoice: dict[str, Any], items: list[dict[str, Any]]) -> str:
