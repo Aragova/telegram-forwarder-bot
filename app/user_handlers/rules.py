@@ -99,7 +99,6 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         ctx.logger.info("пользователь открыл список правил user_id=%s tenant_id=%s", user_id, tenant_id)
         rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id) if hasattr(ctx.db, "get_rules_for_tenant") else []
-        recovery_summary = await ctx.run_db(ctx.recovery_service.build_recovery_summary, tenant_id)
         await ctx.answer_callback_safe_once(callback)
         text = (
             "⚙️ Мои правила\n\n"
@@ -112,7 +111,6 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             else "⚙️ Мои правила"
         )
         kb = build_user_rules_keyboard(rules, page=0, rules_page_size=ctx.rules_page_size, compact_rule_text=ctx.compact_rule_text)
-        kb = ctx.with_recovery_button(kb, enabled=ctx.recovery_has_items(recovery_summary))
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
     @dp.callback_query(lambda c: c.data == "user_rules_noop")
