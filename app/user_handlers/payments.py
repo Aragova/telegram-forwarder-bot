@@ -9,6 +9,9 @@ from app import user_ui
 from .context import UserHandlersContext
 
 
+RECOVERY_CTA_EVENT_TYPE = "recovery_cta_shown_after_payment"
+
+
 def _admin_manual_payment_keyboard(payment_intent_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -18,6 +21,18 @@ def _admin_manual_payment_keyboard(payment_intent_id: int) -> InlineKeyboardMark
             ]
         ]
     )
+
+
+def _is_recovery_cta_already_shown(events: list[dict[str, Any]], payment_intent_id: int) -> bool:
+    for event in events:
+        if str(event.get("event_type") or "") != RECOVERY_CTA_EVENT_TYPE:
+            continue
+        metadata = event.get("metadata_json") if isinstance(event.get("metadata_json"), dict) else {}
+        if int(metadata.get("payment_intent_id") or 0) != int(payment_intent_id):
+            continue
+        if bool(metadata.get("already_shown")):
+            return True
+    return False
 
 
 def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> None:
@@ -470,6 +485,12 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         await ctx.edit_message_text_safe(message=callback.message, text=f"✅ Оплата #{payment_intent_id} подтверждена.", reply_markup=None)
         confirmation_payload = intent.get("confirmation_payload_json") if isinstance(intent.get("confirmation_payload_json"), dict) else {}
         user_id = int(confirmation_payload.get("user_id") or 0)
+        tenant_id = int(intent.get("tenant_id") or 0)
+        if tenant_id:
+            recent_events = await ctx.run_db(ctx.billing_service.get_recent_billing_events, tenant_id, 50)
+            if _is_recovery_cta_already_shown(recent_events, payment_intent_id):
+                ctx.logger.info("recovery CTA уже был показан ранее intent_id=%s tenant_id=%s", payment_intent_id, tenant_id)
+                return
         if user_id and ctx.bot:
             try:
                 await ctx.bot.send_message(
@@ -481,6 +502,19 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
                     ),
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Восстановить работу", callback_data="user_recovery")]]),
                 )
+                if hasattr(ctx.db, "create_billing_event"):
+                    await ctx.run_db(
+                        ctx.db.create_billing_event,
+                        int(tenant_id),
+                        RECOVERY_CTA_EVENT_TYPE,
+                        event_source="user_payments",
+                        metadata={
+                            "payment_intent_id": int(payment_intent_id),
+                            "invoice_id": int(intent.get("invoice_id") or 0),
+                            "user_id": int(user_id),
+                            "already_shown": True,
+                        },
+                    )
             except Exception as exc:
                 ctx.logger.warning("не удалось уведомить пользователя user_id=%s intent_id=%s: %s", user_id, payment_intent_id, exc)
         elif not user_id:
