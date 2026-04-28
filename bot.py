@@ -7382,15 +7382,6 @@ async def handle_intro_file(message: Message):
         "rule_id": state.get("rule_id"),
     }
 
-@dp.message(
-    lambda m: (
-        m.text is not None
-        and not is_menu_navigation_text(m.text)
-        and not (m.text or "").startswith("Удалить ")
-        and not (m.text or "").isdigit()
-    )
-)
-
 @dp.message(lambda m: m.text == "➕ Добавить правило")
 async def handle_add_rule(message: Message):
     user_id = message.from_user.id if message.from_user else settings.admin_id
