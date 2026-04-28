@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app import user_ui
+from app.payments import LavaTopAPIError, PaymentService as LavaPaymentService
 from .context import UserHandlersContext
 
 
 RECOVERY_CTA_EVENT_TYPE = "recovery_cta_shown_after_payment"
+LAVA_PAYMENT_LOGGER = logging.getLogger("forwarder.payments.lava")
 
 
 def _admin_manual_payment_keyboard(payment_intent_id: int) -> InlineKeyboardMarkup:
@@ -36,6 +39,83 @@ def _is_recovery_cta_already_shown(events: list[dict[str, Any]], payment_intent_
 
 
 def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> None:
+
+    @dp.callback_query(lambda c: c.data == "user_subscription")
+    async def handle_user_subscription_callback(callback: CallbackQuery):
+        if ctx.is_admin_user(callback.from_user.id if callback.from_user else None):
+            await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+            return
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=user_ui.build_lava_subscription_text(),
+            reply_markup=user_ui.build_lava_subscription_keyboard(),
+        )
+
+    @dp.callback_query(lambda c: c.data == "user_tariff_basic")
+    async def handle_user_tariff_basic_callback(callback: CallbackQuery):
+        if ctx.is_admin_user(callback.from_user.id if callback.from_user else None):
+            await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+            return
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=user_ui.build_lava_subscription_text(),
+            reply_markup=user_ui.build_lava_subscription_keyboard(),
+        )
+
+    @dp.callback_query(lambda c: c.data == "user_pay_lava_basic")
+    async def handle_user_pay_lava_basic_callback(callback: CallbackQuery):
+        user_id = callback.from_user.id if callback.from_user else 0
+        if ctx.is_admin_user(user_id):
+            await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+            return
+        await ctx.answer_callback_safe_once(callback, "⏳ Создаю ссылку на оплату…")
+
+        lava_service = LavaPaymentService()
+        username = callback.from_user.username if callback.from_user else None
+        LAVA_PAYMENT_LOGGER.info(
+            "Старт создания invoice Lava.top user_id=%s tariff_code=basic provider=lava_top",
+            user_id,
+        )
+        try:
+            invoice_view = await lava_service.create_lava_basic_invoice(
+                user_id=user_id,
+                username=username,
+            )
+            if not invoice_view.payment_url:
+                raise LavaTopAPIError("Lava.top вернул пустую ссылку оплаты")
+        except Exception as exc:
+            status_code = exc.status_code if isinstance(exc, LavaTopAPIError) else None
+            LAVA_PAYMENT_LOGGER.exception(
+                "Ошибка создания invoice Lava.top user_id=%s tariff_code=basic status_code=%s",
+                user_id,
+                status_code,
+            )
+            await ctx.edit_message_text_safe(
+                message=callback.message,
+                text=(
+                    "Не удалось создать ссылку оплаты. "
+                    "Попробуйте позже или напишите в поддержку."
+                ),
+                reply_markup=user_ui.build_lava_subscription_keyboard(),
+            )
+            return
+
+        LAVA_PAYMENT_LOGGER.info(
+            "Invoice Lava.top создан user_id=%s tariff_code=basic invoice_id=%s amount=%s currency=%s payment_url=%s",
+            user_id,
+            invoice_view.invoice_id,
+            invoice_view.amount,
+            invoice_view.currency,
+            bool(invoice_view.payment_url),
+        )
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=user_ui.build_lava_invoice_created_text(amount=invoice_view.amount, currency=invoice_view.currency),
+            reply_markup=user_ui.build_lava_invoice_keyboard(payment_url=invoice_view.payment_url),
+        )
+
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_select_plan:"))
     async def handle_user_select_plan_callback(callback: CallbackQuery):
         if ctx.is_admin_user(callback.from_user.id if callback.from_user else None):
