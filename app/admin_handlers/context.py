@@ -52,3 +52,4 @@ class AdminHandlersContext:
     show_public_user_menu_message: Callable[..., Any] | None = None
     start_forwarding: Callable[..., Any] | None = None
     stop_forwarding: Callable[..., Any] | None = None
+    is_posting_active: Callable[[], bool] | None = None

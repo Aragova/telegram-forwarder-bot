@@ -8853,6 +8853,7 @@ def _register_admin_handlers() -> None:
         show_public_user_menu_message=_show_public_user_menu_message,
         start_forwarding=start_forwarding,
         stop_forwarding=stop_forwarding,
+        is_posting_active=lambda: posting_active,
     )
     register_admin_menu_handlers(dp, ctx)
     register_admin_channel_handlers(dp, ctx)
