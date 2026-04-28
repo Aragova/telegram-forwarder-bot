@@ -82,6 +82,14 @@ from app.user_handlers import (
     register_user_recovery_handlers,
     register_user_rule_handlers,
 )
+from app.admin_handlers import (
+    AdminHandlersContext,
+    register_admin_menu_handlers,
+    register_admin_channel_handlers,
+    register_admin_queue_handlers,
+    register_admin_diagnostics_handlers,
+    register_admin_system_handlers,
+)
 
 logger = setup_logging(settings.log_level)
 
@@ -1919,6 +1927,18 @@ async def stop_all_workers() -> None:
     # Историческое имя функции: останавливаем текущий runtime job workers.
     await stop_job_workers_runtime()
 
+
+async def start_forwarding() -> None:
+    global posting_active
+    posting_active = True
+    await ensure_rule_workers()
+
+
+async def stop_forwarding() -> None:
+    global posting_active
+    posting_active = False
+    await stop_all_workers()
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id if message.from_user else settings.admin_id
@@ -1936,11 +1956,6 @@ async def cmd_start(message: Message):
         logger.info("Получен tenant для user_id=%s tenant_id=%s", user_id, tenant_id)
     await message.answer("✅ Пользовательский режим включён", reply_markup=ReplyKeyboardRemove())
     await _show_public_user_menu_message(message)
-
-
-@dp.message(Command("menu"))
-async def cmd_menu(message: Message):
-    await handle_start(message)
 
 
 @dp.message(Command("language"))
@@ -2132,19 +2147,6 @@ async def cmd_invoice(message: Message):
     items = summary.get("items") or []
     await message.answer(product_ui.invoice_screen(lang=lang, invoice=invoice, items=items), reply_markup=product_ui.invoice_keyboard(lang))
 
-@dp.message(lambda m: m.text == "📋 Меню")
-async def handle_start(message: Message):
-    reset_user_state(message.from_user.id if message.from_user else None)
-    if _is_admin_user(message.from_user.id if message.from_user else None):
-        await message.reply(
-            "📋 Главное меню",
-            reply_markup=get_main_menu(),
-        )
-        return
-    await message.answer("✅ Пользовательский режим включён", reply_markup=ReplyKeyboardRemove())
-    await _show_public_user_menu_message(message)
-
-
 @dp.message(lambda m: m.text == "👤 Мой аккаунт")
 async def handle_account_button(message: Message):
     if not _is_admin_user(message.from_user.id if message.from_user else None):
@@ -2174,15 +2176,6 @@ async def handle_usage_button(message: Message):
 @dp.message(lambda m: m.text == "🧾 Счета")
 async def handle_invoices_button(message: Message):
     await cmd_invoice(message)
-
-@dp.message(lambda m: m.text in ("🔙 Главное меню", "⬅️ Назад в меню"))
-async def handle_main_menu(message: Message):
-    reset_user_state(message.from_user.id if message.from_user else None)
-    if _is_admin_user(message.from_user.id if message.from_user else None):
-        await message.reply("📋 Главное меню", reply_markup=get_main_menu())
-        return
-    await message.answer("✅ Пользовательский режим включён", reply_markup=ReplyKeyboardRemove())
-    await _show_public_user_menu_message(message)
 
 @dp.message(lambda m: m.text == "❌ Отмена")
 async def handle_cancel(message: Message):
@@ -2782,187 +2775,6 @@ async def handle_dashboard_back(callback: CallbackQuery):
             logger.exception("Ошибка dashboard_back edit_text: %s", exc)
 
     await callback.message.answer("📋 Главное меню", reply_markup=get_main_menu())
-
-@dp.message(lambda m: m.text in ("📋 Очередь", "📋 Общая очередь"))
-async def handle_queue(message: Message):
-    if not await is_admin(message):
-        return
-    stats = await run_db(db.get_queue_stats)
-    await message.reply(
-        f"📋 Очередь\n\n⏳ Pending: {stats['pending']}\n✅ Sent: {stats['sent']}\n⚠️ Faulty: {stats['faulty']}",
-        reply_markup=get_main_menu(),
-    )
-@dp.message(lambda m: m.text in ("▶️ Запуск", "▶️ Запустить пересылку"))
-async def handle_global_start(message: Message):
-    global posting_active
-    if not await is_admin(message):
-        return
-    posting_active = True
-    await ensure_rule_workers()
-    await message.reply("✅ Пересылка запущена", reply_markup=get_main_menu())
-
-
-@dp.message(lambda m: m.text in ("⏸ Стоп", "⏸ Остановить пересылку"))
-async def handle_global_stop(message: Message):
-    global posting_active
-    if not await is_admin(message):
-        return
-    posting_active = False
-    await stop_all_workers()
-    await message.reply("⏸ Пересылка остановлена", reply_markup=get_main_menu())
-
-
-@dp.message(lambda m: m.text == "🔄 Правила")
-async def handle_rules_menu_open(message: Message):
-    reset_user_state(message.from_user.id if message.from_user else None)
-    if not await is_admin(message):
-        return
-    await message.reply("🔄 Раздел: Правила", reply_markup=get_rules_menu())
-
-@dp.message(lambda m: m.text == "📡 Каналы")
-async def handle_channels_menu(message: Message):
-    reset_user_state(message.from_user.id if message.from_user else None)
-    if not await is_admin(message):
-        return
-    await message.reply("📡 Раздел: Каналы", reply_markup=get_channels_menu())
-
-@dp.message(lambda m: m.text == "📦 Очередь")
-async def handle_queue_menu(message: Message):
-    reset_user_state(message.from_user.id if message.from_user else None)
-    if not await is_admin(message):
-        return
-    await message.reply("📦 Раздел: Очередь", reply_markup=get_queue_menu())
-
-@dp.message(lambda m: m.text == "⚠️ Диагностика")
-async def handle_diagnostics_menu(message: Message):
-    reset_user_state(message.from_user.id if message.from_user else None)
-    if not await is_admin(message):
-        return
-    await message.reply("⚠️ Раздел: Диагностика", reply_markup=get_diagnostics_menu())
-
-@dp.message(lambda m: (m.text or "").strip() == "⚠️ Проблемные доставки")
-async def handle_faulty(message: Message):
-    reset_user_state(message.from_user.id if message.from_user else None)
-    logger.warning("DEBUG: handle_faulty ENTER text=%r", message.text)
-
-    if not await is_admin(message):
-        logger.warning("DEBUG: handle_faulty rejected by is_admin text=%r", message.text)
-        return
-
-    pages = await run_db(build_faulty_pages, 200)
-    page = 0
-    total_pages = len(pages)
-
-    logger.warning("DEBUG: faulty pages count=%s first_page=%r", total_pages, pages[0] if pages else None)
-
-    current = pages[page]
-
-    await message.reply(
-        current["text"],
-        parse_mode="HTML",
-        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]),
-    )
-
-    logger.warning("DEBUG: handle_faulty DONE")
-
-@dp.message(lambda m: m.text == "📊 Журнал системы")
-async def handle_system_journal(message: Message):
-    reset_user_state(message.from_user.id if message.from_user else None)
-    if not await is_admin(message):
-        return
-
-    pages = await run_db(build_system_journal_pages, 300)
-    page = 0
-    total_pages = len(pages)
-
-    await message.reply(
-        pages[page],
-        parse_mode="HTML",
-        reply_markup=build_system_journal_inline_keyboard(page, total_pages),
-    )
-
-@dp.callback_query(lambda c: c.data == "syslog_page_info")
-async def handle_syslog_page_info(callback: CallbackQuery):
-    await answer_callback_safe_once(callback)
-
-@dp.callback_query(lambda c: c.data.startswith("syslog_page:"))
-async def handle_syslog_page(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
-    try:
-        _, page_raw = parse_callback_parts(callback.data, "syslog_page", 2)
-        page = int(page_raw)
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-
-    await answer_callback_safe_once(callback)
-
-    pages = await run_db(build_system_journal_pages, 300)
-    total_pages = len(pages)
-    page = clamp_page(page, total_pages)
-
-    try:
-        await edit_message_text_safe(
-            message=callback.message,
-            text=pages[page],
-            parse_mode="HTML",
-            reply_markup=build_system_journal_inline_keyboard(page, total_pages),
-        )
-    except Exception as exc:
-        if "message is not modified" not in str(exc).lower():
-            logger.exception("Ошибка handle_syslog_page: %s", exc)
-
-@dp.callback_query(lambda c: c.data.startswith("syslog_refresh:"))
-async def handle_syslog_refresh(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
-    try:
-        _, page_raw = parse_callback_parts(callback.data, "syslog_refresh", 2)
-        page = int(page_raw)
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-
-    await answer_callback_safe_once(callback)
-
-    pages = await run_db(build_system_journal_pages, 300)
-    total_pages = len(pages)
-    page = clamp_page(page, total_pages)
-
-    await edit_message_text_safe(
-        message=callback.message,
-        text=pages[page],
-        parse_mode="HTML",
-        reply_markup=build_system_journal_inline_keyboard(page, total_pages),
-    )
-
-@dp.callback_query(lambda c: c.data == "syslog_back")
-async def handle_syslog_back(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
-    await answer_callback_safe_once(callback)
-
-    await edit_message_text_safe(
-        message=callback.message,
-        text="⚠️ Раздел: Диагностика",
-    )
-
-    await send_message_safe(
-        chat_id=callback.message.chat.id,
-        text="⚠️ Раздел: Диагностика",
-        reply_markup=get_diagnostics_menu(),
-    )
-
-@dp.message(lambda m: m.text == "⚙️ Система")
-async def handle_system_menu(message: Message):
-    reset_user_state(message.from_user.id if message.from_user else None)
-    if not await is_admin(message):
-        return
-    await message.reply("⚙️ Раздел: Система", reply_markup=get_system_menu())
 
 @dp.message(lambda m: m.text == "📜 Список правил")
 async def handle_list_rules(message: Message):
@@ -7458,165 +7270,6 @@ async def handle_stateful_private_inputs(message: Message):
         reset_user_state(user_id)
         return
 
-@dp.message(lambda m: m.text in ("➕ Канал", "➕ Добавить канал", "➕ Добавить источник", "➕ Добавить получатель"))
-async def handle_add_channel(message: Message):
-    if message.text == "➕ Добавить источник":
-        user_states[message.from_user.id] = {"action": "choose_source_kind"}
-        await message.reply("Выберите: канал или группа с темой", reply_markup=get_entity_kind_keyboard())
-        return
-    if message.text == "➕ Добавить получатель":
-        user_states[message.from_user.id] = {"action": "choose_target_kind"}
-        await message.reply("Выберите: канал или группа с темой", reply_markup=get_entity_kind_keyboard())
-        return
-    if not await is_admin(message):
-        return
-    await message.reply("Выберите тип записи", reply_markup=get_channel_type_keyboard())
-
-
-@dp.message(lambda m: m.text == "📤 Источник")
-async def handle_source_type(message: Message):
-    if not is_admin_user(message.from_user.id if message.from_user else None):
-        return
-    user_states[message.from_user.id] = {"action": "choose_source_kind"}
-    await message.reply("Выберите: канал или группа с темой", reply_markup=get_entity_kind_keyboard())
-
-
-@dp.message(lambda m: m.text == "📥 Получатель")
-async def handle_target_type(message: Message):
-    if not is_admin_user(message.from_user.id if message.from_user else None):
-        return
-    user_states[message.from_user.id] = {"action": "choose_target_kind"}
-    await message.reply("Выберите: канал или группа с темой", reply_markup=get_entity_kind_keyboard())
-
-
-@dp.message(lambda m: m.text in ("📺 Канал", "👥 Группа с темой"))
-async def handle_entity_kind(message: Message):
-    state = user_states.get(message.from_user.id)
-    if not state:
-        return
-    if state["action"] == "choose_source_kind":
-        state["action"] = "add_source_channel" if message.text == "📺 Канал" else "add_source_group"
-        await message.reply(
-            "Отправьте ID канала" if message.text == "📺 Канал" else "Отправьте ID группы",
-            reply_markup=get_cancel_keyboard(),
-        )
-    elif state["action"] == "choose_target_kind":
-        state["action"] = "add_target_channel" if message.text == "📺 Канал" else "add_target_group"
-        await message.reply(
-            "Отправьте ID канала" if message.text == "📺 Канал" else "Отправьте ID группы",
-            reply_markup=get_cancel_keyboard(),
-        )
-
-
-async def resolve_chat_title(chat_id: str) -> str:
-    chat = await bot.get_chat(chat_id)
-    return chat.title or str(chat_id)
-
-
-@dp.message(lambda m: m.text and m.text.startswith("-100"))
-async def handle_chat_id_inputs(message: Message):
-    state = user_states.get(message.from_user.id)
-    if not state:
-        return
-
-    chat_id = (message.text or "").strip()
-    action = state.get("action")
-
-    # =========================================================
-    # 1. Добавление обычного канала / получателя
-    # =========================================================
-    if action in {"add_source_channel", "add_target_channel"}:
-        channel_type = "source" if action == "add_source_channel" else "target"
-
-        try:
-            title = await resolve_chat_title(chat_id)
-
-            exists = await run_db(db.channel_exists, chat_id, None, channel_type)
-
-            if exists:
-                await message.reply(
-                    "Такая запись уже есть",
-                    reply_markup=get_main_menu(),
-                )
-            else:
-                actor_id = message.from_user.id if message.from_user else settings.admin_id
-                if is_admin_user(actor_id):
-                    created = await run_db(db.add_channel, chat_id, None, channel_type, title, actor_id)
-                else:
-                    tenant_id = await run_db(ensure_user_tenant, actor_id)
-                    created = await run_db(db.add_channel_for_tenant, tenant_id, chat_id, None, channel_type, title, actor_id)
-
-                if not created:
-                    await message.reply(
-                        "⚠️ Не удалось добавить запись в базу",
-                        reply_markup=get_main_menu(),
-                    )
-                else:
-                    await message.reply(
-                        f"✅ Добавлен {'источник' if channel_type == 'source' else 'получатель'}: {title}",
-                        reply_markup=get_main_menu(),
-                    )
-
-                    if channel_type == "source":
-                        asyncio.create_task(
-                            parse_channel_history(
-                                telethon_client,
-                                db,
-                                chat_id,
-                                clean_start=False,
-                            )
-                        )
-
-        except Exception as exc:
-            logger.exception(
-                "Ошибка добавления канала | action=%s | chat_id=%s | error=%s",
-                action,
-                chat_id,
-                exc,
-            )
-            await message.reply(
-                f"❌ Ошибка доступа к каналу/чату: {exc}",
-                reply_markup=get_main_menu(),
-            )
-        finally:
-            reset_user_state(message.from_user.id)
-        return
-
-    # =========================================================
-    # 2. Добавление группы с темой / получателя с темой
-    # =========================================================
-    if action in {"add_source_group", "add_target_group"}:
-        try:
-            title = await resolve_chat_title(chat_id)
-
-            state["chat_id"] = chat_id
-            state["title"] = title
-            state["action"] = (
-                "add_source_group_thread"
-                if action == "add_source_group"
-                else "add_target_group_thread"
-            )
-
-            await message.reply(
-                "Теперь отправьте ID темы",
-                reply_markup=get_cancel_keyboard(),
-            )
-
-        except Exception as exc:
-            logger.exception(
-                "Ошибка доступа к группе перед вводом thread_id | action=%s | chat_id=%s | error=%s",
-                action,
-                chat_id,
-                exc,
-            )
-            await message.reply(
-                f"❌ Не удалось получить доступ к группе: {exc}",
-                reply_markup=get_main_menu(),
-            )
-            reset_user_state(message.from_user.id)
-
-        return
-
 @dp.message(lambda m: m.photo or m.video or m.document)
 async def handle_intro_file(message: Message):
     state = user_states.get(message.from_user.id)
@@ -7735,94 +7388,6 @@ async def handle_intro_file(message: Message):
     )
 )
 
-@dp.message(lambda m: m.text in ("📜 Список", "📜 Список каналов", "📜 Мои источники", "📜 Мои получатели"))
-async def handle_list_channels(message: Message):
-    reset_user_state(message.from_user.id if message.from_user else None)
-    user_id = message.from_user.id if message.from_user else settings.admin_id
-    is_admin_mode = is_admin_user(user_id)
-    if is_admin_mode:
-        rows = await run_db(db.get_channels)
-    else:
-        tenant_id = await run_db(ensure_user_tenant, user_id)
-        channel_type = None
-        if message.text == "📜 Мои источники":
-            channel_type = "source"
-        if message.text == "📜 Мои получатели":
-            channel_type = "target"
-        rows = await run_db(db.get_channels_for_tenant, tenant_id, channel_type) if hasattr(db, "get_channels_for_tenant") else []
-        logger.info("пользователь открыл список каналов user_id=%s tenant_id=%s type=%s", user_id, tenant_id, channel_type or "all")
-    if not rows:
-        await message.reply("Нет каналов", reply_markup=get_main_menu())
-        return
-    text = "📜 **СПИСОК КАНАЛОВ**\n\n"
-    for idx, row in enumerate(rows, 1):
-        title = row["title"] or row["channel_id"]
-        suffix = f" (тема {row['thread_id']})" if row["thread_id"] else ""
-        text += f"{idx}. [{row['channel_type']}] {title}{suffix}\n"
-    await message.reply(text[:4000], parse_mode="Markdown", reply_markup=get_main_menu())
-
-
-@dp.message(lambda m: m.text in ("➖ Канал", "➖ Удалить канал", "➖ Удалить источник", "➖ Удалить получатель"))
-async def handle_remove_channel(message: Message):
-    user_id = message.from_user.id if message.from_user else settings.admin_id
-    is_admin_mode = is_admin_user(user_id)
-    if is_admin_mode:
-        rows = await run_db(db.get_channels)
-    else:
-        tenant_id = await run_db(ensure_user_tenant, user_id)
-        channel_type = "source" if message.text == "➖ Удалить источник" else ("target" if message.text == "➖ Удалить получатель" else None)
-        rows = await run_db(db.get_channels_for_tenant, tenant_id, channel_type) if hasattr(db, "get_channels_for_tenant") else []
-    if not rows:
-        await message.reply("Нет каналов", reply_markup=get_main_menu())
-        return
-
-    keyboard = []
-    mapping = []
-    text = "Выберите запись для удаления\n\n"
-
-    for idx, row in enumerate(rows, 1):
-        title = row["title"] or row["channel_id"]
-        suffix = f" (тема {row['thread_id']})" if row["thread_id"] else ""
-        keyboard.append([KeyboardButton(text=f"Удалить {idx}")])
-        mapping.append((row["channel_id"], row["thread_id"], row["channel_type"]))
-        text += f"{idx}. [{row['channel_type']}] {title}{suffix}\n"
-
-    keyboard.append([KeyboardButton(text="❌ Отмена")])
-    user_states[message.from_user.id] = {
-        "action": "remove_channel",
-        "mapping": mapping,
-        "tenant_id": None if is_admin_mode else tenant_id,
-    }
-
-    await message.reply(
-        text[:4000],
-        reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True),
-    )
-
-
-@dp.message(lambda m: m.text and m.text.startswith("Удалить "))
-async def handle_remove_selected(message: Message):
-    user_id = message.from_user.id if message.from_user else settings.admin_id
-    state = user_states.get(message.from_user.id)
-    if not state or state.get("action") != "remove_channel":
-        return
-
-    try:
-        idx = int(message.text.split()[-1]) - 1
-        channel_id, thread_id, channel_type = state["mapping"][idx]
-        tenant_id = state.get("tenant_id")
-        if tenant_id is None:
-            await run_db(db.remove_channel, channel_id, thread_id, channel_type)
-        else:
-            await run_db(db.remove_channel_for_tenant, tenant_id, channel_id, thread_id, channel_type)
-        await ensure_rule_workers()
-        await message.reply("✅ Канал удалён", reply_markup=get_main_menu())
-    except Exception as exc:
-        await message.reply(f"❌ Ошибка удаления: {exc}", reply_markup=get_main_menu())
-    finally:
-        user_states.pop(message.from_user.id, None)
-
-
 @dp.message(lambda m: m.text == "➕ Добавить правило")
 async def handle_add_rule(message: Message):
     user_id = message.from_user.id if message.from_user else settings.admin_id
@@ -7877,10 +7442,6 @@ async def handle_pick_rule_target(message: Message):
     state["choice"]["target_thread_id"] = choice.thread_id
     state["action"] = "set_rule_interval"
     await message.reply("Отправьте интервал в секундах, например 3600", reply_markup=get_cancel_keyboard())
-
-@dp.callback_query(lambda c: c.data == "faulty_page_info")
-async def handle_faulty_page_info(callback: CallbackQuery):
-    await answer_callback_safe_once(callback)
 
 @dp.callback_query(lambda c: c.data.startswith("startpos_prev:"))
 async def handle_startpos_prev(callback: CallbackQuery):
@@ -8283,84 +7844,6 @@ async def handle_faulty_back(callback: CallbackQuery):
         reply_markup=get_diagnostics_menu(),
     )
 
-@dp.message(lambda m: m.text == "🔄 Сброс")
-async def handle_reset_menu(message: Message):
-    if not await is_admin(message):
-        return
-    await message.reply("Меню сброса", reply_markup=get_reset_queue_menu())
-
-@dp.message(lambda m: m.text == "🔄 Сбросить всё")
-async def handle_reset_all(message: Message):
-    if not await is_admin(message):
-        return
-
-    count, faulty = await run_db(db.reset_all_deliveries)
-
-    await message.reply(
-        f"✅ Сброшено доставок: {count}\n⚠️ Faulty раньше было: {faulty}",
-        reply_markup=get_main_menu(),
-    )
-
-@dp.message(lambda m: m.text == "📊 Сброс по источнику")
-async def handle_reset_source_pick(message: Message):
-    if not await is_admin(message):
-        return
-
-    source_rows = await run_db(db.get_channels, "source")
-    sources = [
-        ChannelChoice(r["channel_id"], r["thread_id"], r["title"] or r["channel_id"])
-        for r in source_rows
-    ]
-
-    if not sources:
-        await message.reply("Нет источников", reply_markup=get_main_menu())
-        return
-
-    user_states[message.from_user.id] = {"action": "reset_source_inline", "sources": sources}
-    await message.reply("Выберите источник для сброса:", reply_markup=sources_inline_keyboard(sources))
-
-@dp.callback_query(lambda c: c.data == "reset_back")
-async def handle_reset_back(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
-    await answer_callback_safe_once(callback)
-
-    await edit_message_text_safe(
-        message=callback.message,
-        text="Меню сброса:\n\n• 🔄 Сбросить всё\n• 📊 Сброс по источнику",
-    )
-
-@dp.callback_query(lambda c: c.data.startswith("reset_source:"))
-async def handle_reset_source_callback(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
-    state = user_states.get(callback.from_user.id)
-    if not state or state.get("action") != "reset_source_inline":
-        await answer_callback_safe(callback, "Список устарел", show_alert=True)
-        return
-
-    try:
-        idx = int(callback.data.split(":")[1])
-        choice = state["sources"][idx]
-        count = await run_db(db.reset_source_deliveries, choice.channel_id, choice.thread_id)
-
-        await answer_callback_safe_once(callback)
-
-        await edit_message_text_safe(
-            message=callback.message,
-            text=f"✅ Сброшено доставок: {count}",
-        )
-    except Exception as exc:
-        await answer_callback_safe_once(callback)
-        await edit_message_text_safe(
-            message=callback.message,
-            text=f"❌ Ошибка сброса: {exc}",
-        )
-    finally:
-        user_states.pop(callback.from_user.id, None)
-
 @dp.message()
 async def handle_new_message(message: Message):
     if message.chat.type == "private":
@@ -8689,6 +8172,61 @@ def _register_user_saas_handlers() -> None:
     user_handlers_ctx = ctx
 
 
+def _register_admin_handlers() -> None:
+    ctx = AdminHandlersContext(
+        bot=bot,
+        db=db,
+        scheduler_service=scheduler_service,
+        sender_service=sender_service,
+        runtime_context=runtime_context,
+        user_states=user_states,
+        dashboard_tasks=dashboard_tasks,
+        run_db=run_db,
+        is_admin=is_admin,
+        is_admin_callback=is_admin_callback,
+        answer_callback_safe=answer_callback_safe,
+        answer_callback_safe_once=answer_callback_safe_once,
+        send_message_safe=send_message_safe,
+        get_main_menu=get_main_menu,
+        logger=logger,
+        reset_user_state=reset_user_state,
+        ensure_rule_workers=ensure_rule_workers,
+        stop_all_workers=stop_all_workers,
+        parse_callback_parts=parse_callback_parts,
+        clamp_page=clamp_page,
+        build_faulty_pages=build_faulty_pages,
+        build_faulty_inline_keyboard=build_faulty_inline_keyboard,
+        build_system_journal_pages=build_system_journal_pages,
+        build_system_journal_inline_keyboard=build_system_journal_inline_keyboard,
+        edit_message_text_safe=edit_message_text_safe,
+        get_channels_menu=get_channels_menu,
+        get_queue_menu=get_queue_menu,
+        get_diagnostics_menu=get_diagnostics_menu,
+        get_system_menu=get_system_menu,
+        get_rules_menu=get_rules_menu,
+        get_reset_queue_menu=get_reset_queue_menu,
+        get_channel_type_keyboard=get_channel_type_keyboard,
+        get_entity_kind_keyboard=get_entity_kind_keyboard,
+        get_cancel_keyboard=get_cancel_keyboard,
+        reply_keyboard_markup_cls=ReplyKeyboardMarkup,
+        keyboard_button_cls=KeyboardButton,
+        channel_choice_cls=ChannelChoice,
+        settings=settings,
+        ensure_user_tenant=ensure_user_tenant,
+        is_admin_user=is_admin_user,
+        parse_channel_history=parse_channel_history,
+        telethon_client=telethon_client,
+        show_public_user_menu_message=_show_public_user_menu_message,
+        start_forwarding=start_forwarding,
+        stop_forwarding=stop_forwarding,
+    )
+    register_admin_menu_handlers(dp, ctx)
+    register_admin_channel_handlers(dp, ctx)
+    register_admin_queue_handlers(dp, ctx)
+    register_admin_diagnostics_handlers(dp, ctx)
+    register_admin_system_handlers(dp, ctx)
+
+
 async def main(role: str = "all"):
     normalized_role = normalize_runtime_role(role)
     logger.info("STARTUP | Инициализация роли %s", normalized_role)
@@ -8745,6 +8283,7 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+_register_admin_handlers()
 _register_user_saas_handlers()
 
 
