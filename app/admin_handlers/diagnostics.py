@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aiogram import Dispatcher
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .context import AdminHandlersContext
 
@@ -34,6 +34,34 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         page = 0
         total_pages = len(pages)
         await message.reply(pages[page], parse_mode="HTML", reply_markup=ctx.build_system_journal_inline_keyboard(page, total_pages))
+
+    @dp.message(lambda m: m.text == "🎨 Тест styled-кнопок")
+    async def handle_styled_buttons_test(message: Message):
+        ctx.reset_user_state(message.from_user.id if message.from_user else None)
+        if not await ctx.is_admin(message):
+            return
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Primary", style="primary", callback_data="styled_test_primary"),
+                    InlineKeyboardButton(text="Success", style="success", callback_data="styled_test_success"),
+                ],
+                [
+                    InlineKeyboardButton(text="Danger", style="danger", callback_data="styled_test_danger"),
+                ],
+            ]
+        )
+        await message.reply(
+            "🎨 Тест styled-кнопок (только для ADMIN_ID).\n"
+            "Если цвета не отображаются, остаёмся на emoji-style.",
+            reply_markup=markup,
+        )
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("styled_test_"))
+    async def handle_styled_buttons_test_callback(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        await ctx.answer_callback_safe_once(callback, "✅ Нажатие получено")
 
     @dp.callback_query(lambda c: c.data == "syslog_page_info")
     async def handle_syslog_page_info(callback: CallbackQuery):
