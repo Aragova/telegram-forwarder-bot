@@ -63,13 +63,14 @@ def _format_subscription_date(value: Any) -> str | None:
 def _subscription_status_line(subscription: dict[str, Any] | None) -> tuple[str, str]:
     sub = subscription or {}
     status = str(sub.get("status") or "active").strip().lower()
+    subscription_until = sub.get("expires_at") or sub.get("current_period_end")
     if status == "grace":
         grace_until = _format_subscription_date(sub.get("grace_ends_at"))
         return ("⚠️ Статус: льготный период", f"📅 Доступ до: {grace_until or '—'}")
     if status in {"expired", "canceled"}:
-        until = _format_subscription_date(sub.get("expires_at"))
+        until = _format_subscription_date(subscription_until)
         return ("🔴 Статус: неактивен", f"📅 Действовал до: {until or '—'}")
-    until = _format_subscription_date(sub.get("expires_at"))
+    until = _format_subscription_date(subscription_until)
     plan_name = str(sub.get("plan_name") or "FREE").upper()
     if until:
         return ("🟢 Статус: активен", f"📅 Действует до: {until}")

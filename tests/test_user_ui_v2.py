@@ -91,6 +91,15 @@ def test_main_text_shows_expiry_date():
     assert "📅 Действует до: 26.05.2026" in text
 
 
+def test_main_text_uses_current_period_end_when_expires_at_missing():
+    text = user_ui.build_user_main_text(
+        subscription={"plan_name": "BASIC", "status": "active", "max_rules": 15, "max_video_per_day": 30, "max_jobs_per_day": 1000, "current_period_end": "2026-05-26T12:00:00+00:00"},
+        usage_today={"video_count": 0, "jobs_count": 0},
+        rules_count=0,
+    )
+    assert "📅 Действует до: 26.05.2026" in text
+
+
 def test_account_text_shows_expiry_date():
     text = user_ui.build_user_account_text(
         user_id=1,
