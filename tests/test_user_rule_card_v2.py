@@ -191,6 +191,24 @@ def test_navigation_callbacks_exist():
     assert "user_rules" in card_callbacks
     assert "user_main" in card_callbacks
     assert any(cb.startswith("user_rule_logs_refresh:") for cb in logs_callbacks)
+    assert any(cb.startswith("user_rule_toggle:") for cb in card_callbacks)
+    assert any(cb.startswith("user_rule_switch_mode:") for cb in extra_callbacks)
+
+
+def test_user_card_callbacks_are_user_safe_namespaced():
+    callbacks = _callbacks(user_ui.build_user_rule_card_keyboard(rule_id=7, is_active=True, schedule_mode="fixed", mode="video"))
+    joined = " ".join(callbacks)
+    for expected in [
+        "user_rule_schedule_mode:7:interval",
+        "user_rule_schedule_mode:7:fixed",
+        "user_rule_time:7",
+        "user_rule_intros:7",
+        "user_rule_caption:7",
+        "user_rule_toggle:7",
+    ]:
+        assert expected in joined
+    for forbidden in ["change_interval:", "set_interval_mode:", "video_intro_menu:", "video_caption_menu:", "enable_rule:", "disable_rule:"]:
+        assert forbidden not in joined
 
     
 def test_rule_callbacks_with_rule_id_are_not_admin_only_for_user_flows():
