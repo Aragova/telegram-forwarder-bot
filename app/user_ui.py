@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from app.config import settings
 
 PAYMENT_PROVIDER_TITLES_RU: dict[str, str] = {
     "telegram_stars": "⭐ Telegram Stars",
@@ -368,7 +369,6 @@ def build_user_plans_keyboard(current_plan_name: str | None = None) -> InlineKey
         inline_keyboard=[
             [build_button(text=basic_text, callback_data="user_select_plan:BASIC", style="primary")],
             [build_button(text=pro_text, callback_data="user_select_plan:PRO", style="success")],
-            [build_button(text="💳 Оплатить BASIC — $9", callback_data="user_subscription", style="primary")],
             [build_button(text="⬅️ Назад", callback_data="user_account")],
         ]
     )
@@ -654,9 +654,11 @@ def build_user_payment_methods_keyboard(invoice_id: int, methods: list[dict[str,
     rows: list[list[InlineKeyboardButton]] = []
     for method in methods:
         provider = str(method.get("provider") or "")
-        if not provider:
+        if not provider or provider == "lava_top":
             continue
         rows.append([InlineKeyboardButton(text=payment_provider_title(provider), callback_data=f"user_pay_provider:{int(invoice_id)}:{provider}")])
+    if settings.lava_top_enabled:
+        rows.append([InlineKeyboardButton(text="💳 Оплатить через Lava.top", callback_data=f"user_invoice_pay_lava:{int(invoice_id)}")])
     rows.extend(
         [
             [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
@@ -990,23 +992,23 @@ def build_lava_subscription_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def build_lava_invoice_created_text(*, amount: float, currency: str) -> str:
-    symbol = "$" if str(currency).upper() == "USD" else ""
-    amount_text = f"{symbol}{amount:.0f}" if symbol else f"{amount:.0f} {str(currency).upper()}"
+def build_lava_invoice_created_text(*, invoice_id: int, tariff_title: str, amount: float, currency: str) -> str:
+    amount_text = f"{amount:.0f} {str(currency).upper()}"
     return (
-        "✅ Счёт создан\n\n"
-        "Тариф: BASIC\n"
+        "✅ Ссылка на оплату создана\n\n"
+        f"Счёт: #{int(invoice_id)}\n"
+        f"Тариф: {tariff_title}\n"
         f"Сумма: {amount_text}\n"
         "Статус: ожидает оплату\n\n"
-        "Нажмите кнопку ниже, чтобы перейти к оплате."
+        "После оплаты вернитесь в бот. Автоматическое зачисление будет подключено на следующем этапе."
     )
 
 
-def build_lava_invoice_keyboard(*, payment_url: str) -> InlineKeyboardMarkup:
+def build_lava_invoice_keyboard(*, invoice_id: int, payment_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Оплатить в Lava.top", url=payment_url)],
-            [InlineKeyboardButton(text="🔄 Создать новую ссылку", callback_data="user_pay_lava_basic")],
-            [InlineKeyboardButton(text="⬅️ Назад к тарифам", callback_data="user_subscription")],
+            [InlineKeyboardButton(text="💳 Перейти к оплате", url=payment_url)],
+            [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
         ]
     )

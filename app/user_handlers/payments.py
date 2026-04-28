@@ -7,6 +7,7 @@ from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app import user_ui
+from app.config import settings
 from app.payments import LavaTopAPIError, PaymentService as LavaPaymentService
 from .context import UserHandlersContext
 
@@ -112,8 +113,13 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         )
         await ctx.edit_message_text_safe(
             message=callback.message,
-            text=user_ui.build_lava_invoice_created_text(amount=invoice_view.amount, currency=invoice_view.currency),
-            reply_markup=user_ui.build_lava_invoice_keyboard(payment_url=invoice_view.payment_url),
+            text=user_ui.build_lava_invoice_created_text(
+                invoice_id=0,
+                tariff_title="BASIC",
+                amount=invoice_view.amount,
+                currency=invoice_view.currency,
+            ),
+            reply_markup=user_ui.build_lava_invoice_keyboard(invoice_id=0, payment_url=invoice_view.payment_url),
         )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_select_plan:"))
@@ -319,6 +325,90 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             message=callback.message,
             text=user_ui.build_user_payment_result_text(invoice, payment_result),
             reply_markup=user_ui.build_user_payment_result_keyboard(invoice_id, payment_result),
+        )
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice_pay_lava:"))
+    async def handle_user_invoice_pay_lava_callback(callback: CallbackQuery):
+        user_id = callback.from_user.id if callback.from_user else 0
+        if ctx.is_admin_user(user_id):
+            await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+            return
+        raw = (callback.data or "").split(":", 1)
+        invoice_id = int(raw[1] or 0) if len(raw) > 1 else 0
+        if invoice_id <= 0:
+            await ctx.answer_callback_safe(callback, "Некорректный счёт", show_alert=True)
+            return
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
+        if not invoice:
+            await ctx.answer_callback_safe(callback, "Счёт не найден", show_alert=True)
+            return
+        if int(invoice.get("tenant_id") or 0) != int(tenant_id):
+            ctx.logger.warning("попытка Lava оплаты чужого счёта user_id=%s invoice_id=%s", user_id, invoice_id)
+            await ctx.answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+            return
+        if str(invoice.get("status") or "").lower() not in {"open", "pending"}:
+            await ctx.answer_callback_safe(callback, "Этот счёт нельзя оплатить через Lava.top", show_alert=True)
+            return
+        if not settings.lava_top_enabled:
+            await ctx.answer_callback_safe(callback, "Оплата через Lava.top сейчас выключена", show_alert=True)
+            return
+        items = await ctx.run_db(ctx.db.list_invoice_items, invoice_id) if hasattr(ctx.db, "list_invoice_items") else []
+        plan_name = (ctx.invoice_plan_name(invoice, items) if callable(ctx.invoice_plan_name) else "BASIC") or "BASIC"
+        tariff_code = str(plan_name).strip().lower()
+        amount = float(invoice.get("total") or 0)
+        currency = str(invoice.get("currency") or "USD").upper()
+
+        await ctx.answer_callback_safe_once(callback, "⏳ Создаю ссылку на оплату…")
+        lava_service = LavaPaymentService()
+        username = callback.from_user.username if callback.from_user else None
+        try:
+            invoice_view = await lava_service.create_lava_invoice_for_user_invoice(
+                user_id=user_id,
+                invoice_id=invoice_id,
+                tariff_code=tariff_code,
+                amount=amount,
+                currency=currency,
+                username=username,
+            )
+            if not invoice_view.payment_url:
+                raise LavaTopAPIError("Lava.top вернул пустую ссылку оплаты")
+        except Exception as exc:
+            status_code = exc.status_code if isinstance(exc, LavaTopAPIError) else None
+            LAVA_PAYMENT_LOGGER.warning(
+                "Ошибка создания invoice Lava.top user_id=%s internal_invoice_id=%s tariff_code=%s provider=lava_top status_code=%s",
+                user_id,
+                invoice_id,
+                tariff_code,
+                status_code,
+            )
+            methods = await ctx.run_db(ctx.payment_service.list_available_methods, invoice)
+            await ctx.edit_message_text_safe(
+                message=callback.message,
+                text="Не удалось создать ссылку оплаты Lava.top. Попробуйте позже или выберите другой способ оплаты.",
+                reply_markup=user_ui.build_user_payment_methods_keyboard(invoice_id, methods),
+            )
+            return
+
+        LAVA_PAYMENT_LOGGER.info(
+            "Invoice Lava.top создан user_id=%s internal_invoice_id=%s tariff_code=%s provider=lava_top lava_invoice_id=%s amount=%s currency=%s payment_url_present=%s",
+            user_id,
+            invoice_id,
+            tariff_code,
+            invoice_view.invoice_id,
+            invoice_view.amount,
+            invoice_view.currency,
+            bool(invoice_view.payment_url),
+        )
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=user_ui.build_lava_invoice_created_text(
+                invoice_id=invoice_id,
+                tariff_title=str(plan_name).upper(),
+                amount=invoice_view.amount,
+                currency=invoice_view.currency,
+            ),
+            reply_markup=user_ui.build_lava_invoice_keyboard(invoice_id=invoice_id, payment_url=invoice_view.payment_url),
         )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_upload_receipt:"))
