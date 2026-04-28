@@ -4211,6 +4211,18 @@ class PostgresRepository(RepositoryProtocol):
                 result[job_type][status] = int(row.get("cnt") or 0)
         return result
 
+    def get_recoverable_summary_for_tenant(self, tenant_id: int) -> dict[str, Any]:
+        return self.usage_repo.get_recoverable_summary_for_tenant(tenant_id=tenant_id)
+
+    def recover_blocked_jobs_for_tenant(self, tenant_id: int) -> int:
+        return self.usage_repo.recover_blocked_jobs_for_tenant(tenant_id=tenant_id)
+
+    def recover_pending_deliveries_for_tenant(self, tenant_id: int) -> int:
+        return self.usage_repo.recover_pending_deliveries_for_tenant(tenant_id=tenant_id)
+
+    def get_recent_limit_events_for_tenant(self, tenant_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        return self.usage_repo.get_recent_limit_events_for_tenant(tenant_id=tenant_id, limit=limit)
+
     def get_job_queue_counts(self) -> dict[str, int]:
         with self.connect() as conn:
             with conn.cursor() as cur:
