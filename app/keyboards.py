@@ -40,6 +40,7 @@ def get_diagnostics_menu() -> ReplyKeyboardMarkup:
         [
             ["⚠️ Проблемные доставки"],
             ["📊 Журнал системы"],
+            ["🎨 Тест styled-кнопок"],
             ["⬅️ Назад в меню"],
         ],
         placeholder="Раздел: Диагностика",
