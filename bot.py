@@ -1032,57 +1032,69 @@ def _with_recovery_button(keyboard: InlineKeyboardMarkup, *, enabled: bool) -> I
 
 
 def _filter_user_rule_card_keyboard(keyboard: InlineKeyboardMarkup, rule_id: int) -> InlineKeyboardMarkup:
-    allowed_prefixes = (
-        "rule_refresh:",
-        "enable_rule:",
-        "disable_rule:",
-        "change_interval:",
-        "change_fixed_times:",
-        "set_interval_mode:",
-        "change_next_run:",
-        "toggle_rule_mode:",
-        "video_intro_menu:",
-        "video_caption_menu:",
-        "caption_mode_menu:",
-        "trigger_now:",
-        "delete_rule:",
-        "rule_extra_menu:",
-    )
-    allowed_exact = {"rule_to_list"}
+    callback_map = {
+        f"rule_refresh:{rule_id}": f"user_rule_refresh:{rule_id}",
+        f"enable_rule:{rule_id}": f"user_rule_toggle:{rule_id}",
+        f"disable_rule:{rule_id}": f"user_rule_toggle:{rule_id}",
+        f"change_interval:{rule_id}": f"user_rule_interval:{rule_id}",
+        f"change_fixed_times:{rule_id}": f"user_rule_fixed_times:{rule_id}",
+        f"set_interval_mode:{rule_id}": f"user_rule_schedule_mode:{rule_id}:interval",
+        f"change_next_run:{rule_id}": f"user_rule_time:{rule_id}",
+        f"toggle_rule_mode:{rule_id}": f"user_rule_switch_mode:{rule_id}:video",
+        f"video_intro_menu:{rule_id}": f"user_rule_intros:{rule_id}",
+        f"video_caption_menu:{rule_id}": f"user_rule_caption:{rule_id}",
+        f"caption_mode_menu:{rule_id}": f"user_rule_caption_mode:{rule_id}",
+        f"trigger_now:{rule_id}": f"user_rule_send_now:{rule_id}",
+        f"delete_rule:{rule_id}": f"user_rule_delete:{rule_id}",
+        f"rule_extra_menu:{rule_id}": f"user_rule_extra:{rule_id}",
+    }
     filtered_rows: list[list[InlineKeyboardButton]] = []
     for row in keyboard.inline_keyboard:
         filtered_row: list[InlineKeyboardButton] = []
         for button in row:
             callback_data = button.callback_data or ""
-            if callback_data in allowed_exact or callback_data.startswith(allowed_prefixes):
-                filtered_row.append(button)
+            mapped = callback_map.get(callback_data)
+            if mapped:
+                filtered_row.append(InlineKeyboardButton(text=button.text, callback_data=mapped))
         if filtered_row:
             filtered_rows.append(filtered_row)
 
-    # user navigation должен вести только в user-flow
-    filtered_rows.append([InlineKeyboardButton(text="⬅️ К моим правилам", callback_data="user_rules")])
+    filtered_rows.append(
+        [
+            InlineKeyboardButton(text="⬅️ К правилам", callback_data="user_rules"),
+            InlineKeyboardButton(text="🏠 Главное меню", callback_data="user_main"),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=filtered_rows)
 
 
 def build_user_rule_extra_keyboard(rule_id: int) -> InlineKeyboardMarkup:
     base = build_rule_extra_keyboard(rule_id)
-    allowed_prefixes = (
-        "toggle_rule_mode:",
-        "caption_mode_menu:",
-        "trigger_now:",
-        "delete_rule:",
-        "rule_card:",
-    )
+    callback_map = {
+        f"caption_mode_menu:{rule_id}": f"user_rule_caption_mode:{rule_id}",
+        f"trigger_now:{rule_id}": f"user_rule_send_now:{rule_id}",
+        f"start_from_number:{rule_id}": f"user_rule_start_from:{rule_id}",
+        f"rescan_rule_menu:{rule_id}": f"user_rule_rescan:{rule_id}",
+        f"rollback:{rule_id}": f"user_rule_rollback:{rule_id}",
+        f"rule_logs:{rule_id}": f"user_rule_logs:{rule_id}",
+        f"delete_rule:{rule_id}": f"user_rule_delete:{rule_id}",
+        f"rule_card:{rule_id}": f"user_rule_open:{rule_id}",
+    }
     filtered_rows: list[list[InlineKeyboardButton]] = []
     for row in base.inline_keyboard:
         filtered_row: list[InlineKeyboardButton] = []
         for button in row:
             callback_data = button.callback_data or ""
-            if callback_data.startswith(allowed_prefixes):
-                filtered_row.append(button)
+            if callback_data == f"toggle_rule_mode:{rule_id}":
+                target_mode = "repost" if "Репост" in (button.text or "") else "video"
+                mapped = f"user_rule_switch_mode:{rule_id}:{target_mode}"
+            else:
+                mapped = callback_map.get(callback_data)
+            if mapped:
+                filtered_row.append(InlineKeyboardButton(text=button.text, callback_data=mapped))
         if filtered_row:
             filtered_rows.append(filtered_row)
-    filtered_rows.append([InlineKeyboardButton(text="⬅️ К моим правилам", callback_data="user_rules")])
+    filtered_rows.append([InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"user_rule_open:{rule_id}")])
     return InlineKeyboardMarkup(inline_keyboard=filtered_rows)
 
 
@@ -2190,7 +2202,11 @@ async def handle_cancel(message: Message):
 
     if not state:
         reset_user_state(user_id)
-        await message.answer("❌ Отменено", reply_markup=get_main_menu())
+        if _is_admin_user(user_id):
+            await message.answer("❌ Отменено", reply_markup=get_main_menu())
+        else:
+            await message.answer("❌ Отменено", reply_markup=ReplyKeyboardRemove())
+            await _show_public_user_menu_message(message)
         return
 
     rule_id = state.get("rule_id")
@@ -2215,7 +2231,11 @@ async def handle_cancel(message: Message):
     reset_user_state(user_id)
 
     if not refreshed:
-        await message.answer("❌ Отменено", reply_markup=get_main_menu())
+        if _is_admin_user(user_id):
+            await message.answer("❌ Отменено", reply_markup=get_main_menu())
+        else:
+            await message.answer("❌ Отменено", reply_markup=ReplyKeyboardRemove())
+            await _show_public_user_menu_message(message)
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("lang:"))
@@ -2890,7 +2910,11 @@ async def handle_list_rules(message: Message):
         rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
 
     if not rules:
-        await message.reply("Правил пока нет", reply_markup=get_rules_menu())
+        if is_admin_mode:
+            await message.reply("Правил пока нет", reply_markup=get_rules_menu())
+        else:
+            await message.reply("Правил пока нет", reply_markup=ReplyKeyboardRemove())
+            await message.answer("⚙️ Мои правила", reply_markup=build_user_rules_keyboard([], page=0))
         return
 
     if is_admin_mode:
@@ -7530,7 +7554,17 @@ async def handle_add_rule(message: Message):
         source_rows = await run_db(db.get_channels_for_tenant, tenant_id, "source") if hasattr(db, "get_channels_for_tenant") else []
     sources = [ChannelChoice(r["channel_id"], r["thread_id"], r["title"] or r["channel_id"]) for r in source_rows]
     if not sources:
-        await message.reply("Нет источников", reply_markup=get_main_menu())
+        if is_admin_user(user_id):
+            await message.reply("Нет источников", reply_markup=get_main_menu())
+        else:
+            await message.reply("Нет источников", reply_markup=ReplyKeyboardRemove())
+            await _show_public_user_menu_message(message)
+        return
+    if not is_admin_user(user_id):
+        await message.reply(
+            "Создание правила доступно через inline-кнопку «➕ Добавить правило» в разделе «⚙️ Мои правила».",
+            reply_markup=ReplyKeyboardRemove(),
+        )
         return
     keyboard = [[KeyboardButton(text=f"📤 {i}. {s.title}{f' (тема {s.thread_id})' if s.thread_id else ''}")] for i, s in enumerate(sources, 1)]
     keyboard.append([KeyboardButton(text="❌ Отмена")])
@@ -7644,8 +7678,119 @@ async def handle_pick_rule_target(message: Message):
     if text and keyboard:
         await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
     else:
-        await message.answer(f"✅ Правило создано #{rule_id}", reply_markup=get_main_menu())
+        await message.answer(
+            f"✅ Правило создано #{rule_id}",
+            reply_markup=(get_main_menu() if is_admin_user(user_id) else ReplyKeyboardRemove()),
+        )
+        if not is_admin_user(user_id):
+            await _show_public_user_menu_message(message)
     reset_user_state(message.from_user.id)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_pick_source:"))
+async def handle_user_rule_pick_source_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    state = user_states.get(callback.from_user.id if callback.from_user else 0)
+    if not state or state.get("action") != "pick_rule_source":
+        await answer_callback_safe(callback, "Сессия выбора источника устарела", show_alert=True)
+        return
+    try:
+        idx = int((callback.data or "").split(":", 1)[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    sources = state.get("sources") or []
+    if idx < 0 or idx >= len(sources):
+        await answer_callback_safe(callback, "Источник не найден", show_alert=True)
+        return
+    choice = sources[idx]
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    target_rows = await run_db(db.get_channels_for_tenant, tenant_id, "target") if hasattr(db, "get_channels_for_tenant") else []
+    targets = [ChannelChoice(r["channel_id"], r["thread_id"], r["title"] or r["channel_id"]) for r in target_rows]
+    if not targets:
+        reset_user_state(user_id)
+        await answer_callback_safe_once(callback)
+        await edit_message_text_safe(
+            message=callback.message,
+            text="Нет получателей. Добавьте получатель и повторите создание правила.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ К правилам", callback_data="user_rules")]]),
+        )
+        return
+    state["action"] = "pick_rule_target"
+    state["choice"] = {"source_id": choice.channel_id, "source_thread_id": choice.thread_id}
+    state["targets"] = targets
+    rows = [
+        [InlineKeyboardButton(text=f"📥 {i}. {t.title}{f' (тема {t.thread_id})' if t.thread_id else ''}", callback_data=f"user_rule_pick_target:{i - 1}")]
+        for i, t in enumerate(targets, 1)
+    ]
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="user_main")])
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(message=callback.message, text="Выберите получателя", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_pick_target:"))
+async def handle_user_rule_pick_target_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    state = user_states.get(user_id)
+    if not state or state.get("action") != "pick_rule_target":
+        await answer_callback_safe(callback, "Сессия выбора получателя устарела", show_alert=True)
+        return
+    try:
+        idx = int((callback.data or "").split(":", 1)[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    targets = state.get("targets") or []
+    if idx < 0 or idx >= len(targets):
+        await answer_callback_safe(callback, "Получатель не найден", show_alert=True)
+        return
+    choice = targets[idx]
+    state["choice"]["target_id"] = choice.channel_id
+    state["choice"]["target_thread_id"] = choice.thread_id
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    await answer_callback_safe_once(callback)
+    rule_id = await run_db(_create_rule_sync, state["choice"], 3600, user_id)
+    if not rule_id:
+        reset_user_state(user_id)
+        await edit_message_text_safe(
+            message=callback.message,
+            text="⚠️ Не удалось создать правило: возможно, оно уже существует или достигнут лимит тарифа.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ К правилам", callback_data="user_rules")]]),
+        )
+        return
+    scan_warning = ""
+    try:
+        rule = await run_db(db.get_rule, int(rule_id))
+        parsed_count = 0
+        if rule and getattr(rule, "source_thread_id", None):
+            parsed_count = await parse_group_history(telethon_client, db, str(getattr(rule, "source_id", "")), int(getattr(rule, "source_thread_id")), clean_start=False)
+        elif rule:
+            parsed_count = await parse_channel_history(telethon_client, db, str(getattr(rule, "source_id", "")), clean_start=False)
+        backfilled_count = await run_db(db.backfill_rule, int(rule_id))
+        logger.info("первичное сканирование завершено rule_id=%s parsed_count=%s backfilled_count=%s", rule_id, parsed_count, backfilled_count)
+    except Exception as exc:
+        logger.warning("первичное сканирование не удалось rule_id=%s error=%s", rule_id, exc)
+        scan_warning = "⚠️ Правило создано, но источник пока не удалось просканировать.\n\nПроверьте доступ к источнику или попробуйте пересканировать позже."
+    invalidate_rule_card_cache(int(rule_id))
+    await ensure_rule_workers()
+    text, keyboard = await build_user_rule_card_payload(int(rule_id))
+    if scan_warning:
+        await callback.message.answer(scan_warning, reply_markup=ReplyKeyboardRemove())
+    if text and keyboard:
+        await edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=keyboard)
+    else:
+        await edit_message_text_safe(
+            message=callback.message,
+            text=f"✅ Правило создано #{rule_id}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ К правилам", callback_data="user_rules")]]),
+        )
+    reset_user_state(user_id)
 
 @dp.callback_query(lambda c: c.data.startswith("startpos_prev:"))
 async def handle_startpos_prev(callback: CallbackQuery):

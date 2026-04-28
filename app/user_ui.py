@@ -643,9 +643,11 @@ def build_user_payment_status_text(invoice: dict[str, Any], payment_intent: dict
     )
 
 
-def user_rule_status_label(is_active: bool, processing_count: int) -> str:
+def user_rule_status_label(is_active: bool, processing_count: int, faulty_count: int = 0) -> str:
     if not bool(is_active):
         return "⏸ Выключено"
+    if int(faulty_count or 0) > 0:
+        return "🔴 Ошибка"
     if int(processing_count or 0) > 0:
         return "🟡 Обрабатывает"
     return "🟢 Работает"
@@ -687,7 +689,11 @@ def build_user_rule_card_text(snapshot: dict[str, Any]) -> str:
     mode_raw = str(snapshot.get("mode") or "repost").strip().lower()
     mode = user_rule_mode_label(mode_raw)
     target = str(snapshot.get("target_title") or snapshot.get("target_id") or "—")
-    status = user_rule_status_label(bool(snapshot.get("is_active")), int(snapshot.get("logical_processing") or snapshot.get("processing") or 0))
+    status = user_rule_status_label(
+        bool(snapshot.get("is_active")),
+        int(snapshot.get("logical_processing") or snapshot.get("processing") or 0),
+        int(snapshot.get("logical_faulty") or snapshot.get("faulty") or 0),
+    )
     wait_to = _format_user_rule_wait(snapshot.get("next_run_at"))
     pending_count = int(snapshot.get("logical_pending") or 0)
     processing_count = int(snapshot.get("logical_processing") or snapshot.get("processing") or 0)
