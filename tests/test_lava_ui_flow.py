@@ -11,15 +11,37 @@ def _callbacks(keyboard):
 
 def test_lava_callbacks_exist_in_handlers_source():
     source = Path("app/user_handlers/payments.py").read_text(encoding="utf-8")
-    assert "user_subscription" in source
-    assert "user_tariff_basic" in source
-    assert "user_pay_lava_basic" in source
+    assert "user_invoice_pay_lava:" in source
 
 
 def test_lava_invoice_keyboard_uses_url_button():
-    keyboard = user_ui.build_lava_invoice_keyboard(payment_url="https://gate.lava.top/pay/abc")
+    keyboard = user_ui.build_lava_invoice_keyboard(invoice_id=12, payment_url="https://gate.lava.top/pay/abc")
     first_button = keyboard.inline_keyboard[0][0]
     assert first_button.url == "https://gate.lava.top/pay/abc"
+    assert keyboard.inline_keyboard[1][0].callback_data == "user_invoice:12"
+    assert keyboard.inline_keyboard[2][0].callback_data == "user_invoice_pay:12"
+
+
+def test_tariff_screen_has_no_lava_button():
+    keyboard = user_ui.build_user_plans_keyboard()
+    button_texts = [button.text for row in keyboard.inline_keyboard for button in row]
+    callbacks = _callbacks(keyboard)
+    assert "💳 Оплатить BASIC — $9" not in button_texts
+    assert "user_pay_lava_basic" not in callbacks
+
+
+def test_invoice_payment_methods_show_lava_when_enabled(monkeypatch):
+    monkeypatch.setattr(user_ui.settings, "lava_top_enabled", True)
+    keyboard = user_ui.build_user_payment_methods_keyboard(invoice_id=7, methods=[{"provider": "manual_bank_card"}])
+    callbacks = _callbacks(keyboard)
+    assert "user_invoice_pay_lava:7" in callbacks
+
+
+def test_invoice_payment_methods_hide_lava_when_disabled(monkeypatch):
+    monkeypatch.setattr(user_ui.settings, "lava_top_enabled", False)
+    keyboard = user_ui.build_user_payment_methods_keyboard(invoice_id=7, methods=[{"provider": "manual_bank_card"}])
+    callbacks = _callbacks(keyboard)
+    assert "user_invoice_pay_lava:7" not in callbacks
 
 
 def test_user_payment_flow_inline_only_no_reply_keyboard_markup():

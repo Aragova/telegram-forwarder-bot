@@ -16,6 +16,7 @@ EXPECTED_CALLBACK_DATA = [
     "user_invoices",
     "user_invoice:",
     "user_invoice_pay:",
+    "user_invoice_pay_lava:",
     "user_pay_provider:",
     "user_upload_receipt:",
     "user_manual_paid:",

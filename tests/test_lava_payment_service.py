@@ -74,3 +74,33 @@ def test_client_order_id_is_unique_and_status_new_does_not_activate_anything():
     assert all(call.get("buyer_language") == "RU" for call in fake_client.calls)
 
     settings.lava_top_enabled = old_enabled
+
+
+def test_create_lava_invoice_for_user_invoice_uses_invoice_context():
+    old_enabled = settings.lava_top_enabled
+    old_offer = settings.lava_top_basic_offer_id
+    settings.lava_top_enabled = True
+    settings.lava_top_basic_offer_id = "offer-basic-999"
+
+    fake_client = _FakeLavaClient()
+    service = PaymentService(lava_client=fake_client)
+    view = asyncio.run(
+        service.create_lava_invoice_for_user_invoice(
+            user_id=501,
+            invoice_id=88,
+            tariff_code="basic",
+            amount=9.0,
+            currency="EUR",
+            username="demo",
+        )
+    )
+
+    payload = fake_client.calls[0]
+    assert "vimi:invoice:88:user:501:basic:" in payload["client_order_id"]
+    assert payload["currency"] == "EUR"
+    assert payload["offer_id"] == "offer-basic-999"
+    assert view.amount == 9.0
+    assert view.currency == "EUR"
+
+    settings.lava_top_enabled = old_enabled
+    settings.lava_top_basic_offer_id = old_offer
