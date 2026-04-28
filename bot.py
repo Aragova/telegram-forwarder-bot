@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import argparse
 import json
+import re
 import time
 from html import escape
 from dataclasses import dataclass
@@ -7381,15 +7382,6 @@ async def handle_intro_file(message: Message):
         "rule_id": state.get("rule_id"),
     }
 
-@dp.message(
-    lambda m: (
-        m.text is not None
-        and not is_menu_navigation_text(m.text)
-        and not (m.text or "").startswith("Удалить ")
-        and not (m.text or "").isdigit()
-    )
-)
-
 @dp.message(lambda m: m.text == "➕ Добавить правило")
 async def handle_add_rule(message: Message):
     user_id = message.from_user.id if message.from_user else settings.admin_id
@@ -7408,7 +7400,7 @@ async def handle_add_rule(message: Message):
     await message.reply("Выберите источник", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True))
 
 
-@dp.message(lambda m: m.text and m.text.startswith("📤 "))
+@dp.message(lambda m: bool(re.match(r"^📤\s+\d+\.", (m.text or "").strip())))
 async def handle_pick_rule_source(message: Message):
     state = user_states.get(message.from_user.id)
     if not state or state.get("action") != "pick_rule_source":
@@ -7433,7 +7425,7 @@ async def handle_pick_rule_source(message: Message):
     state["targets"] = targets
     await message.reply("Выберите получателя", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True))
 
-@dp.message(lambda m: m.text and m.text.startswith("📥 "))
+@dp.message(lambda m: bool(re.match(r"^📥\s+\d+\.", (m.text or "").strip())))
 async def handle_pick_rule_target(message: Message):
     state = user_states.get(message.from_user.id)
     if not state or state.get("action") != "pick_rule_target":
