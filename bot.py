@@ -1994,7 +1994,7 @@ async def cmd_start(message: Message):
         logger.info("Создан tenant для user_id=%s tenant_id=%s", user_id, tenant_id)
     else:
         logger.info("Получен tenant для user_id=%s tenant_id=%s", user_id, tenant_id)
-    await message.answer(" ", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Открываю меню…", reply_markup=ReplyKeyboardRemove())
     await _show_public_user_menu_message(message)
 
 
