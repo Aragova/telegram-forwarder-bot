@@ -1349,7 +1349,11 @@ def build_dashboard_keyboard(running: bool = True) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🔄 Обновить", callback_data="dashboard_refresh"),
+                InlineKeyboardButton(
+                    text="🔄 Обновить",
+                    callback_data="dashboard_refresh",
+                    style="primary",
+                ),
                 control_button,
             ],
             [
