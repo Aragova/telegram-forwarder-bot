@@ -6837,12 +6837,12 @@ async def handle_user_rule_schedule_mode_callback(callback: CallbackQuery):
         return
 
     if mode == "interval":
-        callback.data = f"set_interval_mode:{rule_id}"
-        await handle_set_interval_mode_callback(callback)
+        redirected = callback.model_copy(update={"data": f"set_interval_mode:{rule_id}"})
+        await handle_set_interval_mode_callback(redirected)
         return
     if mode == "fixed":
-        callback.data = f"change_fixed_times:{rule_id}"
-        await handle_change_fixed_times_callback(callback)
+        redirected = callback.model_copy(update={"data": f"change_fixed_times:{rule_id}"})
+        await handle_change_fixed_times_callback(redirected)
         return
     await answer_callback_safe(callback, "Неизвестный режим расписания", show_alert=True)
 
@@ -6935,11 +6935,13 @@ async def handle_user_rule_toggle_callback(callback: CallbackQuery):
         await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
         return
 
-    callback.data = f"{'disable_rule' if bool(getattr(rule, 'is_active', False)) else 'enable_rule'}:{rule_id}"
+    redirected = callback.model_copy(
+        update={"data": f"{'disable_rule' if bool(getattr(rule, 'is_active', False)) else 'enable_rule'}:{rule_id}"}
+    )
     if bool(getattr(rule, "is_active", False)):
-        await handle_disable_rule_callback(callback)
+        await handle_disable_rule_callback(redirected)
     else:
-        await handle_enable_rule_callback(callback)
+        await handle_enable_rule_callback(redirected)
 
 @dp.callback_query(lambda c: c.data.startswith("toggle_rule_mode:") or c.data.startswith("user_rule_switch_mode:"))
 async def handle_toggle_rule_mode(callback: CallbackQuery):
