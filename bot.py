@@ -670,6 +670,30 @@ def is_admin_user(user_id: int | None) -> bool:
     return access_control.is_admin_user(user_id)
 
 
+def is_non_admin_user(user_id: int | None) -> bool:
+    return not is_admin_user(user_id)
+
+
+async def answer_user_inline_message(
+    message: Message,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    parse_mode: str | None = None,
+) -> Message:
+    user_id = message.from_user.id if message.from_user else None
+    if is_non_admin_user(user_id):
+        await message.answer(" ", reply_markup=ReplyKeyboardRemove())
+        logger.info("inline ui cleanup для user_id=%s", user_id)
+    return await message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
+
+
+def _cancel_reply_markup_for_user(user_id: int | None):
+    if is_admin_user(user_id):
+        return get_cancel_keyboard()
+    return ReplyKeyboardRemove()
+
+
 def get_current_tenant_for_user(user_id: int) -> int:
     return access_control.get_current_tenant_for_user(user_id, tenant_service)
 
@@ -834,6 +858,32 @@ def _user_sources_keyboard() -> InlineKeyboardMarkup:
 
 def _user_targets_keyboard() -> InlineKeyboardMarkup:
     return user_ui.build_user_targets_keyboard()
+
+
+def _user_channel_add_type_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Источник", callback_data="user_channel_add_type:source")],
+            [InlineKeyboardButton(text="📥 Получатель", callback_data="user_channel_add_type:target")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_channels")],
+        ]
+    )
+
+
+def _user_channel_add_entity_keyboard(channel_type: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📢 Канал", callback_data=f"user_channel_add_entity:{channel_type}:channel")],
+            [InlineKeyboardButton(text="💬 Группа с темой", callback_data=f"user_channel_add_entity:{channel_type}:forum_topic")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_channels_add")],
+        ]
+    )
+
+
+def _user_channel_add_text_input_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="user_cancel")]]
+    )
 
 
 def _build_public_plans_text(current_subscription: dict[str, Any] | None = None) -> str:
@@ -2598,8 +2648,17 @@ async def handle_user_sources_add_callback(callback: CallbackQuery):
         return
     await answer_callback_safe_once(callback)
     if callback.from_user:
-        user_states[callback.from_user.id] = {"action": "choose_source_kind"}
-    await callback.message.answer("Выберите: канал или группа с темой", reply_markup=get_entity_kind_keyboard())
+        user_states[callback.from_user.id] = {"action": "user_channel_add_type"}
+    await edit_message_text_safe(
+        message=callback.message,
+        text="➕ Добавить канал\n\nЧто вы хотите добавить?",
+        reply_markup=_user_channel_add_type_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_channels_add")
+async def handle_user_channels_add_callback(callback: CallbackQuery):
+    await handle_user_sources_add_callback(callback)
 
 
 @dp.callback_query(lambda c: c.data == "user_targets_add")
@@ -2609,8 +2668,15 @@ async def handle_user_targets_add_callback(callback: CallbackQuery):
         return
     await answer_callback_safe_once(callback)
     if callback.from_user:
-        user_states[callback.from_user.id] = {"action": "choose_target_kind"}
-    await callback.message.answer("Выберите: канал или группа с темой", reply_markup=get_entity_kind_keyboard())
+        user_states[callback.from_user.id] = {
+            "action": "user_channel_add_entity_kind",
+            "channel_type": "target",
+        }
+    await edit_message_text_safe(
+        message=callback.message,
+        text="Выберите тип:",
+        reply_markup=_user_channel_add_entity_keyboard("target"),
+    )
 
 
 @dp.callback_query(lambda c: c.data in ("user_sources_remove", "user_targets_remove"))
@@ -2633,25 +2699,20 @@ async def handle_user_channel_remove_callback(callback: CallbackQuery):
         )
         return
 
-    keyboard = []
+    rows_kb = []
     mapping = []
-    text = "Выберите запись для удаления\n\n"
-    for idx, row in enumerate(rows, 1):
+    for idx, row in enumerate(rows):
         title = row["title"] or row["channel_id"]
         suffix = f" (тема {row['thread_id']})" if row["thread_id"] else ""
-        keyboard.append([KeyboardButton(text=f"Удалить {idx}")])
-        mapping.append((row["channel_id"], row["thread_id"], row["channel_type"]))
-        text += f"{idx}. [{row['channel_type']}] {title}{suffix}\n"
-    keyboard.append([KeyboardButton(text="❌ Отмена")])
+        rows_kb.append([InlineKeyboardButton(text=f"🗑 {title}{suffix}", callback_data=f"user_channel_remove_pick:{idx}")])
+        mapping.append((row["channel_id"], row["thread_id"], row["channel_type"], title, suffix))
+    rows_kb.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="user_channels")])
     if callback.from_user:
-        user_states[callback.from_user.id] = {
-            "action": "remove_channel",
-            "mapping": mapping,
-            "tenant_id": tenant_id,
-        }
-    await callback.message.answer(
-        text[:4000],
-        reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True),
+        user_states[callback.from_user.id] = {"action": "user_channel_remove_pick", "mapping": mapping, "tenant_id": tenant_id}
+    await edit_message_text_safe(
+        message=callback.message,
+        text="🗑 Выберите канал для удаления",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows_kb),
     )
 
 
@@ -2715,6 +2776,124 @@ async def handle_user_status_callback(callback: CallbackQuery):
     ])
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_channel_add_type:"))
+async def handle_user_channel_add_type_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    channel_type = (callback.data or "").split(":", 1)[1]
+    user_id = callback.from_user.id if callback.from_user else 0
+    user_states[user_id] = {"action": "user_channel_add_entity_kind", "channel_type": channel_type}
+    await edit_message_text_safe(
+        message=callback.message,
+        text="Выберите тип:",
+        reply_markup=_user_channel_add_entity_keyboard(channel_type),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_channel_add_entity:"))
+async def handle_user_channel_add_entity_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    _, channel_type, entity_kind = parts
+    user_id = callback.from_user.id if callback.from_user else 0
+    user_states[user_id] = {
+        "action": "awaiting_user_channel_id",
+        "channel_type": channel_type,
+        "entity_kind": entity_kind,
+    }
+    await answer_user_inline_message(
+        callback.message,
+        "Отправьте ID канала или username.\n\nПример:\n@channel_name\nили\n-1001234567890",
+        reply_markup=_user_channel_add_text_input_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_channel_remove_pick:"))
+async def handle_user_channel_remove_pick_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    state = user_states.get(user_id) or {}
+    if state.get("action") != "user_channel_remove_pick":
+        await answer_callback_safe(callback, "Сессия устарела", show_alert=True)
+        return
+    try:
+        idx = int((callback.data or "").split(":", 1)[1])
+        channel_id, thread_id, channel_type, title, suffix = state.get("mapping", [])[idx]
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    state["action"] = "user_channel_remove_confirm"
+    state["remove_selection"] = (channel_id, thread_id, channel_type, title, suffix)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=f"🗑 Удалить канал?\n\n{title}{suffix}",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🗑 Да, удалить", callback_data="user_channel_remove_confirm:1")],
+                [InlineKeyboardButton(text="⬅️ Отмена", callback_data="user_channel_remove_cancel")],
+            ]
+        ),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_channel_remove_cancel")
+async def handle_user_channel_remove_cancel_callback(callback: CallbackQuery):
+    await answer_callback_safe_once(callback)
+    reset_user_state(callback.from_user.id if callback.from_user else None)
+    await edit_message_text_safe(message=callback.message, text="📡 Мои каналы", reply_markup=user_ui.build_user_channels_keyboard())
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("user_channel_remove_confirm:"))
+async def handle_user_channel_remove_confirm_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    state = user_states.get(user_id) or {}
+    if state.get("action") != "user_channel_remove_confirm":
+        await answer_callback_safe(callback, "Сессия устарела", show_alert=True)
+        return
+    channel_id, thread_id, channel_type, _, _ = state.get("remove_selection")
+    tenant_id = state.get("tenant_id")
+    await run_db(db.remove_channel_for_tenant, tenant_id, channel_id, thread_id, channel_type)
+    await ensure_rule_workers()
+    reset_user_state(user_id)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text="✅ Канал удалён",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📡 Мои каналы", callback_data="user_channels")],
+                [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
+            ]
+        ),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "user_cancel")
+async def handle_user_cancel_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Действие доступно только пользователям", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else None
+    reset_user_state(user_id)
+    await answer_callback_safe_once(callback)
+    await callback.message.answer(" ", reply_markup=ReplyKeyboardRemove())
+    await _show_public_user_menu_message(callback.message)
 
 
 @dp.callback_query(lambda c: c.data == "user_account")
@@ -6902,7 +7081,10 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
         and not (m.text or "").startswith("Удалить ")
         and not (m.text or "").startswith("📤 ")
         and not (m.text or "").startswith("📥 ")
-        and not (m.text or "").strip().startswith("-100")
+        and (
+            not (m.text or "").strip().startswith("-100")
+            or user_states.get(m.from_user.id, {}).get("action") in {"awaiting_user_channel_id", "awaiting_user_channel_thread_id"}
+        )
     )
 )
 async def handle_stateful_private_inputs(message: Message):
@@ -6913,6 +7095,85 @@ async def handle_stateful_private_inputs(message: Message):
 
     action = state.get("action")
     text = (message.text or "").strip()
+
+    if action == "awaiting_user_channel_id":
+        user_id_safe = message.from_user.id if message.from_user else 0
+        tenant_id = await run_db(ensure_user_tenant, user_id_safe)
+        channel_type = str(state.get("channel_type") or "source")
+        entity_kind = str(state.get("entity_kind") or "channel")
+        chat_id = text
+        try:
+            chat = await bot.get_chat(chat_id)
+            title = chat.title or str(chat_id)
+        except Exception as exc:
+            await answer_user_inline_message(
+                message,
+                f"❌ Не удалось получить доступ к каналу/чату: {exc}",
+                reply_markup=_user_channel_add_text_input_keyboard(),
+            )
+            return
+        if entity_kind == "forum_topic":
+            state["action"] = "awaiting_user_channel_thread_id"
+            state["chat_id"] = chat_id
+            state["title"] = title
+            await answer_user_inline_message(
+                message,
+                "Отправьте ID темы.",
+                reply_markup=_user_channel_add_text_input_keyboard(),
+            )
+            return
+        exists = await run_db(db.channel_exists, chat_id, None, channel_type)
+        if exists:
+            await answer_user_inline_message(message, "Такая запись уже есть", reply_markup=user_ui.build_user_channels_keyboard())
+            reset_user_state(user_id_safe)
+            return
+        await run_db(db.add_channel_for_tenant, tenant_id, chat_id, None, channel_type, title, user_id_safe)
+        reset_user_state(user_id_safe)
+        await answer_user_inline_message(
+            message,
+            "✅ Канал добавлен",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📡 Мои каналы", callback_data="user_channels")],
+                    [InlineKeyboardButton(text="➕ Добавить ещё", callback_data="user_sources_add")],
+                    [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
+                ]
+            ),
+        )
+        return
+
+    if action == "awaiting_user_channel_thread_id":
+        user_id_safe = message.from_user.id if message.from_user else 0
+        tenant_id = await run_db(ensure_user_tenant, user_id_safe)
+        try:
+            thread_id = int(text)
+        except Exception:
+            await answer_user_inline_message(message, "❌ ID темы должен быть числом", reply_markup=_user_channel_add_text_input_keyboard())
+            return
+        chat_id = str(state.get("chat_id") or "")
+        title = str(state.get("title") or chat_id)
+        channel_type = str(state.get("channel_type") or "source")
+        exists = await run_db(db.channel_exists, chat_id, thread_id, channel_type)
+        if exists:
+            await answer_user_inline_message(message, "Такая тема уже добавлена", reply_markup=user_ui.build_user_channels_keyboard())
+            reset_user_state(user_id_safe)
+            return
+        await run_db(db.add_channel_for_tenant, tenant_id, chat_id, thread_id, channel_type, title, user_id_safe)
+        if channel_type == "source":
+            asyncio.create_task(parse_group_history(telethon_client, db, chat_id, thread_id, clean_start=False))
+        reset_user_state(user_id_safe)
+        await answer_user_inline_message(
+            message,
+            "✅ Канал добавлен",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📡 Мои каналы", callback_data="user_channels")],
+                    [InlineKeyboardButton(text="➕ Добавить ещё", callback_data="user_sources_add")],
+                    [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
+                ]
+            ),
+        )
+        return
 
     # =========================================================
     # 1. Подпись видео
@@ -6968,7 +7229,7 @@ async def handle_stateful_private_inputs(message: Message):
             else:
                 await message.answer(
                     "❌ Не удалось сохранить подпись",
-                    reply_markup=get_cancel_keyboard(),
+                    reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
                 )
 
         reset_user_state(user_id)
@@ -7030,7 +7291,7 @@ async def handle_stateful_private_inputs(message: Message):
                     rule_id=rule_id,
                 )
             else:
-                await message.answer("❌ Не удалось обновить время", reply_markup=get_cancel_keyboard())
+                await message.answer("❌ Не удалось обновить время", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
             return
 
         await ensure_rule_workers()
@@ -7108,7 +7369,7 @@ async def handle_stateful_private_inputs(message: Message):
             else:
                 await message.answer(
                     "❌ Не удалось сохранить фиксированные времена",
-                    reply_markup=get_cancel_keyboard(),
+                    reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
                 )
             return
 
@@ -7200,7 +7461,7 @@ async def handle_stateful_private_inputs(message: Message):
             else:
                 await message.answer(
                     "❌ Не удалось сохранить интервал",
-                    reply_markup=get_cancel_keyboard(),
+                    reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
                 )
             return
 
@@ -7348,7 +7609,7 @@ async def handle_stateful_private_inputs(message: Message):
         except Exception:
             await message.answer(
                 "❌ ID темы должен быть числом",
-                reply_markup=get_cancel_keyboard(),
+                reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
             )
             return
 
@@ -7389,14 +7650,14 @@ async def handle_stateful_private_inputs(message: Message):
         except Exception:
             await message.answer(
                 "❌ Введите интервал в секундах, например 3600",
-                reply_markup=get_cancel_keyboard(),
+                reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
             )
             return
 
         if interval < 1:
             await message.answer(
                 "❌ Интервал должен быть не меньше 1 секунды",
-                reply_markup=get_cancel_keyboard(),
+                reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
             )
             return
 
@@ -7474,10 +7735,10 @@ async def handle_stateful_private_inputs(message: Message):
         try:
             interval = int(text)
         except Exception:
-            await message.answer("❌ Введите число секунд", reply_markup=get_cancel_keyboard())
+            await message.answer("❌ Введите число секунд", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
             return
         if interval < 1:
-            await message.answer("❌ Интервал должен быть не меньше 1 секунды", reply_markup=get_cancel_keyboard())
+            await message.answer("❌ Интервал должен быть не меньше 1 секунды", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
             return
         rule_id = int(state.get("rule_id") or 0)
         if not await run_db(is_rule_owned_by_user, rule_id, message.from_user.id if message.from_user else 0):
@@ -7507,7 +7768,7 @@ async def handle_intro_file(message: Message):
             "❌ Укажи название заставки в подписи к файлу.\n\n"
             "Пример:\n"
             "grom_vert",
-            reply_markup=get_cancel_keyboard(),
+            reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
         )
         return
 
@@ -7516,7 +7777,7 @@ async def handle_intro_file(message: Message):
         await message.answer(
             "❌ Некорректное название заставки.\n"
             "Разрешены буквы, цифры, пробел, _, -",
-            reply_markup=get_cancel_keyboard(),
+            reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
         )
         return
 
@@ -7537,7 +7798,7 @@ async def handle_intro_file(message: Message):
         else:
             await message.answer(
                 "❌ Поддерживаются только видео или изображения для заставки",
-                reply_markup=get_cancel_keyboard(),
+                reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
             )
             return
 
@@ -7546,7 +7807,7 @@ async def handle_intro_file(message: Message):
     if duration > 30:
         await message.answer(
             "❌ Видео-заставка не должна быть длиннее 30 секунд",
-            reply_markup=get_cancel_keyboard(),
+            reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
         )
         return
 
@@ -7563,7 +7824,7 @@ async def handle_intro_file(message: Message):
     except Exception as exc:
         await message.answer(
             f"❌ Не удалось скачать заставку: {exc}",
-            reply_markup=get_cancel_keyboard(),
+            reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
         )
         return
 
@@ -7585,7 +7846,7 @@ async def handle_intro_file(message: Message):
 
         await message.answer(
             "❌ Такая заставка уже существует",
-            reply_markup=get_cancel_keyboard(),
+            reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
         )
         return
 
@@ -7667,7 +7928,7 @@ async def handle_pick_rule_target(message: Message):
 
     if is_admin_user(user_id):
         state["action"] = "set_rule_interval"
-        await message.reply("Отправьте интервал в секундах, например 3600", reply_markup=get_cancel_keyboard())
+        await message.reply("Отправьте интервал в секундах, например 3600", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
         return
 
     tenant_id = await run_db(ensure_user_tenant, user_id)
@@ -7783,9 +8044,14 @@ async def handle_user_rule_pick_source_callback(callback: CallbackQuery):
         [InlineKeyboardButton(text=f"📥 {i}. {t.title}{f' (тема {t.thread_id})' if t.thread_id else ''}", callback_data=f"user_rule_pick_target:{i - 1}")]
         for i, t in enumerate(targets, 1)
     ]
-    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="user_main")])
+    rows.append([InlineKeyboardButton(text="➕ Добавить получатель", callback_data="user_targets_add")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад к источникам", callback_data="user_rules_add")])
     await answer_callback_safe_once(callback)
-    await edit_message_text_safe(message=callback.message, text="Выберите получателя", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await edit_message_text_safe(
+        message=callback.message,
+        text="🎯 Выберите получатель\n\nПолучатель — канал или тема группы, куда ViMi будет отправлять публикации.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_pick_target:"))
