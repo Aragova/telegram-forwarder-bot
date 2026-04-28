@@ -2493,7 +2493,6 @@ async def handle_user_status_callback(callback: CallbackQuery):
     sub = await run_db(subscription_service.get_active_subscription, tenant_id) or {}
     status = str(sub.get("status") or "active")
     usage_today = await run_db(usage_service.get_today_usage, tenant_id)
-    recovery_summary = await run_db(recovery_service.build_recovery_summary, tenant_id)
     rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
     active_rules = sum(1 for row in rules if bool(getattr(row, "is_active", False)))
     rule_limit = int(sub.get("max_rules") or 0)
@@ -2541,13 +2540,10 @@ async def handle_user_status_callback(callback: CallbackQuery):
         f"Следующая публикация: {next_publication}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Восстановить работу", callback_data="user_recovery")],
         [InlineKeyboardButton(text="⚙️ Мои правила", callback_data="user_rules")],
         [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
     ])
-    if not _recovery_has_items(recovery_summary):
-        kb = InlineKeyboardMarkup(inline_keyboard=kb.inline_keyboard[1:])
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
@@ -2562,7 +2558,6 @@ async def handle_user_account_callback(callback: CallbackQuery):
     tenant_id = int(tenant.get("id") or 1)
     subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", "ru")
     usage_today = await run_db(usage_service.get_today_usage, tenant_id)
-    recovery_summary = await run_db(recovery_service.build_recovery_summary, tenant_id)
     rules_count = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
     status = str((subscription or {}).get("status") or "active")
     logger.info("Пользователь открыл user_account user_id=%s tenant_id=%s", user_id, tenant_id)
@@ -2588,10 +2583,7 @@ async def handle_user_account_callback(callback: CallbackQuery):
     await edit_message_text_safe(
         message=callback.message,
         text=text,
-        reply_markup=_with_recovery_button(
-            _public_usage_keyboard(),
-            enabled=_recovery_has_items(recovery_summary) or status in {"active", "trial", "grace"},
-        ),
+        reply_markup=_public_usage_keyboard(),
     )
 
 

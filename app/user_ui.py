@@ -141,7 +141,6 @@ def build_user_subscription_blocked_text(subscription: dict[str, Any] | None) ->
 def build_user_usage_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Восстановить работу", callback_data="user_recovery")],
             [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="user_plans")],
             [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
@@ -433,8 +432,6 @@ def build_user_payment_status_keyboard(invoice_id: int, payment_intent: dict[str
         payment_status = str(payment_intent.get("status") or "")
         if provider in MANUAL_PAYMENT_PROVIDERS and payment_status in {"created", "pending", "waiting_confirmation"}:
             rows.append([InlineKeyboardButton(text="📤 Прикрепить чек", callback_data=f"user_upload_receipt:{int(invoice_id)}")])
-    if payment_status == "paid":
-        rows.append([InlineKeyboardButton(text="🔄 Восстановить работу", callback_data="user_recovery")])
     rows.extend(
         [
             [InlineKeyboardButton(text="💳 К оплате", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
