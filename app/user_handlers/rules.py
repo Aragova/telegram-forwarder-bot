@@ -81,7 +81,7 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             "Создайте первое правило:\n"
             "1. выберите источник;\n"
             "2. выберите получателя;\n"
-            "3. задайте интервал публикации."
+            "3. настройте правило в карточке."
             if not rules
             else "⚙️ Мои правила"
         )
@@ -110,7 +110,7 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
                     "Создайте первое правило:\n"
                     "1. выберите источник;\n"
                     "2. выберите получателя;\n"
-                    "3. задайте интервал публикации."
+                    "3. настройте правило в карточке."
                 ),
                 reply_markup=build_user_rules_keyboard(rules, page=0, rules_page_size=ctx.rules_page_size, compact_rule_text=ctx.compact_rule_text),
             )

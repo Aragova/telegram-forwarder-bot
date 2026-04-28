@@ -5227,7 +5227,7 @@ def build_intro_list_keyboard(
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-@dp.callback_query(lambda c: c.data.startswith("video_intro_menu:"))
+@dp.callback_query(lambda c: c.data.startswith("video_intro_menu:") or c.data.startswith("user_rule_intros:"))
 async def handle_video_intro_menu(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -5309,7 +5309,7 @@ async def handle_intro_back(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
-@dp.callback_query(lambda c: c.data.startswith("caption_mode_menu:"))
+@dp.callback_query(lambda c: c.data.startswith("caption_mode_menu:") or c.data.startswith("user_rule_caption_mode:"))
 async def handle_caption_mode_menu(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -5478,7 +5478,7 @@ async def handle_intro_delete(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback, "Удалено")
 
-@dp.callback_query(lambda c: c.data.startswith("video_caption_menu:"))
+@dp.callback_query(lambda c: c.data.startswith("video_caption_menu:") or c.data.startswith("user_rule_caption:"))
 async def handle_video_caption_menu(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -6165,7 +6165,7 @@ async def handle_rule_to_list(callback: CallbackQuery):
         reply_markup=rules_list_keyboard(rules, page=0),
     )
 
-@dp.callback_query(lambda c: c.data.startswith("start_from_number:"))
+@dp.callback_query(lambda c: c.data.startswith("start_from_number:") or c.data.startswith("user_rule_start_from:"))
 async def handle_start_from_number(callback: CallbackQuery):
     try:
         _, rule_id_raw = parse_callback_parts(callback.data, "start_from_number", 2)
@@ -6196,7 +6196,7 @@ async def handle_start_from_number(callback: CallbackQuery):
     )
     await answer_callback_safe(callback)
 
-@dp.callback_query(lambda c: c.data.startswith("rollback:"))
+@dp.callback_query(lambda c: c.data.startswith("rollback:") or c.data.startswith("user_rule_rollback:"))
 async def rollback_handler(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -6341,7 +6341,7 @@ async def handle_rule_logs_refresh(callback: CallbackQuery):
         if "message is not modified" not in str(exc).lower():
             logger.exception("Ошибка handle_rule_logs_refresh: %s", exc)
 
-@dp.callback_query(lambda c: c.data.startswith("rescan_rule_menu:"))
+@dp.callback_query(lambda c: c.data.startswith("rescan_rule_menu:") or c.data.startswith("user_rule_rescan:"))
 async def handle_rescan_rule_menu(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -6460,7 +6460,7 @@ async def handle_rescan_rule_keep(callback: CallbackQuery):
         reply_markup=None,
     )
 
-@dp.callback_query(lambda c: c.data.startswith("change_interval:"))
+@dp.callback_query(lambda c: c.data.startswith("change_interval:") or c.data.startswith("user_rule_interval:"))
 async def handle_change_interval_callback(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -6485,7 +6485,7 @@ async def handle_change_interval_callback(callback: CallbackQuery):
         "prompt_message_id": prompt.message_id,
     }
 
-@dp.callback_query(lambda c: c.data.startswith("change_next_run:"))
+@dp.callback_query(lambda c: c.data.startswith("change_next_run:") or c.data.startswith("user_rule_time:"))
 async def handle_change_next_run_callback(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -6513,7 +6513,7 @@ async def handle_change_next_run_callback(callback: CallbackQuery):
 
     await answer_callback_safe(callback)
 
-@dp.callback_query(lambda c: c.data.startswith("change_fixed_times:"))
+@dp.callback_query(lambda c: c.data.startswith("change_fixed_times:") or c.data.startswith("user_rule_fixed_times:"))
 async def handle_change_fixed_times_callback(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -6567,7 +6567,26 @@ async def handle_set_interval_mode_callback(callback: CallbackQuery):
         "prompt_message_id": prompt.message_id,
     }
 
-@dp.callback_query(lambda c: c.data.startswith("trigger_now:"))
+@dp.callback_query(lambda c: c.data.startswith("user_rule_schedule_mode:"))
+async def handle_user_rule_schedule_mode_callback(callback: CallbackQuery):
+    try:
+        _, rule_id_raw, mode = callback.data.split(":")
+        rule_id = int(rule_id_raw)
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+
+    if mode == "interval":
+        callback.data = f"set_interval_mode:{rule_id}"
+        await handle_set_interval_mode_callback(callback)
+        return
+    if mode == "fixed":
+        callback.data = f"change_fixed_times:{rule_id}"
+        await handle_change_fixed_times_callback(callback)
+        return
+    await answer_callback_safe(callback, "Неизвестный режим расписания", show_alert=True)
+
+@dp.callback_query(lambda c: c.data.startswith("trigger_now:") or c.data.startswith("user_rule_send_now:"))
 async def handle_trigger_now_callback(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -6641,7 +6660,28 @@ async def handle_disable_rule_callback(callback: CallbackQuery):
             text="❌ Не удалось отключить правило",
         )
 
-@dp.callback_query(lambda c: c.data.startswith("toggle_rule_mode:"))
+@dp.callback_query(lambda c: c.data.startswith("user_rule_toggle:"))
+async def handle_user_rule_toggle_callback(callback: CallbackQuery):
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return
+
+    callback.data = f"{'disable_rule' if bool(getattr(rule, 'is_active', False)) else 'enable_rule'}:{rule_id}"
+    if bool(getattr(rule, "is_active", False)):
+        await handle_disable_rule_callback(callback)
+    else:
+        await handle_enable_rule_callback(callback)
+
+@dp.callback_query(lambda c: c.data.startswith("toggle_rule_mode:") or c.data.startswith("user_rule_switch_mode:"))
 async def handle_toggle_rule_mode(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -6720,7 +6760,7 @@ async def handle_enable_rule_callback(callback: CallbackQuery):
             text="❌ Не удалось включить правило",
         )
 
-@dp.callback_query(lambda c: c.data.startswith("delete_rule:"))
+@dp.callback_query(lambda c: c.data.startswith("delete_rule:") or c.data.startswith("user_rule_delete:"))
 async def handle_delete_rule_callback(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -7532,8 +7572,80 @@ async def handle_pick_rule_target(message: Message):
     choice = state["targets"][idx]
     state["choice"]["target_id"] = choice.channel_id
     state["choice"]["target_thread_id"] = choice.thread_id
-    state["action"] = "set_rule_interval"
-    await message.reply("Отправьте интервал в секундах, например 3600", reply_markup=get_cancel_keyboard())
+    user_id = message.from_user.id if message.from_user else settings.admin_id
+
+    if is_admin_user(user_id):
+        state["action"] = "set_rule_interval"
+        await message.reply("Отправьте интервал в секундах, например 3600", reply_markup=get_cancel_keyboard())
+        return
+
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    logger.info(
+        "пользователь выбрал источник source_id=%s thread_id=%s",
+        state["choice"]["source_id"],
+        state["choice"]["source_thread_id"],
+    )
+    logger.info(
+        "пользователь выбрал получатель target_id=%s thread_id=%s",
+        state["choice"]["target_id"],
+        state["choice"]["target_thread_id"],
+    )
+
+    rule_id = await run_db(_create_rule_sync, state["choice"], 3600, user_id)
+    if not rule_id:
+        await message.reply(
+            "⚠️ Не удалось создать правило: возможно, оно уже существует или достигнут лимит тарифа.",
+            reply_markup=get_main_menu(),
+        )
+        reset_user_state(message.from_user.id)
+        return
+
+    logger.info("создано правило rule_id=%s tenant_id=%s is_active=False mode=repost", rule_id, tenant_id)
+
+    scan_warning = ""
+    try:
+        logger.info("первичное сканирование начато rule_id=%s", rule_id)
+        rule = await run_db(db.get_rule, int(rule_id))
+        parsed_count = 0
+        if rule and getattr(rule, "source_thread_id", None):
+            parsed_count = await parse_group_history(
+                telethon_client,
+                db,
+                str(getattr(rule, "source_id", "")),
+                int(getattr(rule, "source_thread_id")),
+                clean_start=False,
+            )
+        elif rule:
+            parsed_count = await parse_channel_history(
+                telethon_client,
+                db,
+                str(getattr(rule, "source_id", "")),
+                clean_start=False,
+            )
+        backfilled_count = await run_db(db.backfill_rule, int(rule_id))
+        logger.info(
+            "первичное сканирование завершено rule_id=%s parsed_count=%s backfilled_count=%s",
+            rule_id,
+            parsed_count,
+            backfilled_count,
+        )
+    except Exception as exc:
+        logger.warning("первичное сканирование не удалось rule_id=%s error=%s", rule_id, exc)
+        scan_warning = (
+            "⚠️ Правило создано, но источник пока не удалось просканировать.\n\n"
+            "Проверьте доступ к источнику или попробуйте пересканировать позже."
+        )
+
+    invalidate_rule_card_cache(int(rule_id))
+    await ensure_rule_workers()
+    text, keyboard = await build_user_rule_card_payload(int(rule_id))
+    if scan_warning:
+        await message.answer(scan_warning, reply_markup=ReplyKeyboardRemove())
+    if text and keyboard:
+        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+    else:
+        await message.answer(f"✅ Правило создано #{rule_id}", reply_markup=get_main_menu())
+    reset_user_state(message.from_user.id)
 
 @dp.callback_query(lambda c: c.data.startswith("startpos_prev:"))
 async def handle_startpos_prev(callback: CallbackQuery):

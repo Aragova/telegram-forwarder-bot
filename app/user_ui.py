@@ -723,26 +723,26 @@ def build_user_rule_card_keyboard(*, rule_id: int, is_active: bool, schedule_mod
     is_fixed = str(schedule_mode or "interval").strip().lower() == "fixed"
     is_video = str(mode or "repost").strip().lower() == "video"
     rows.append(
-        [build_button(text=("🔁 Сделать плавающим" if is_fixed else "🔁 Сделать фиксированным"), callback_data=(f"set_interval_mode:{rule_id}" if is_fixed else f"change_fixed_times:{rule_id}"))]
+        [build_button(text=("🔁 Сделать плавающим" if is_fixed else "🔁 Сделать фиксированным"), callback_data=(f"user_rule_schedule_mode:{rule_id}:interval" if is_fixed else f"user_rule_schedule_mode:{rule_id}:fixed"))]
     )
     rows.append(
         [
-            build_button(text=("🕓 Фикс. время" if is_fixed else "⏱ Интервал"), callback_data=(f"change_fixed_times:{rule_id}" if is_fixed else f"change_interval:{rule_id}")),
-            build_button(text="🕓 Время", callback_data=f"change_next_run:{rule_id}"),
+            build_button(text=("🕓 Фикс. время" if is_fixed else "⏱ Интервал"), callback_data=(f"user_rule_schedule_mode:{rule_id}:fixed" if is_fixed else f"user_rule_interval:{rule_id}")),
+            build_button(text="🕓 Время", callback_data=f"user_rule_time:{rule_id}"),
         ]
     )
     if is_video:
         rows.append(
             [
-                build_button(text="🎬 Заставки", callback_data=f"video_intro_menu:{rule_id}"),
-                build_button(text="✍️ Подпись", callback_data=f"video_caption_menu:{rule_id}"),
+                build_button(text="🎬 Заставки", callback_data=f"user_rule_intros:{rule_id}"),
+                build_button(text="✍️ Подпись", callback_data=f"user_rule_caption:{rule_id}"),
             ]
         )
     rows.append([build_button(text="⚙️ Дополнительные функции", callback_data=f"user_rule_extra:{rule_id}", style="primary")])
     rows.append(
         [
             build_button(text="🔄 Обновить", callback_data=f"user_rule_refresh:{rule_id}", style="primary"),
-            build_button(text=("⏸ Выключить" if is_active else "▶️ Включить"), callback_data=(f"disable_rule:{rule_id}" if is_active else f"enable_rule:{rule_id}"), style=("danger" if is_active else "success")),
+            build_button(text=("⏸ Выключить" if is_active else "▶️ Включить"), callback_data=(f"user_rule_toggle:{rule_id}" if is_active else f"user_rule_toggle:{rule_id}"), style=("danger" if is_active else "success")),
         ]
     )
     rows.append([build_button(text="⬅️ К правилам", callback_data="user_rules"), build_button(text="🏠 Главное меню", callback_data="user_main")])
@@ -761,17 +761,18 @@ def build_user_rule_extra_text(*, rule_id: int, target_title: str) -> str:
 def build_user_rule_extra_keyboard(*, rule_id: int, mode: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     is_video = str(mode or "repost").strip().lower() == "video"
-    rows.append([build_button(text=("🔁 Сменить режим: Репост" if is_video else "🔁 Сменить режим: Видеоредактор"), callback_data=f"toggle_rule_mode:{rule_id}")])
+    target_mode = "repost" if is_video else "video"
+    rows.append([build_button(text=("🔁 Сменить режим: Репост" if is_video else "🔁 Сменить режим: Видеоредактор"), callback_data=f"user_rule_switch_mode:{rule_id}:{target_mode}")])
     if not is_video:
-        rows.append([build_button(text="✍️ Режим подписи", callback_data=f"caption_mode_menu:{rule_id}")])
+        rows.append([build_button(text="✍️ Режим подписи", callback_data=f"user_rule_caption_mode:{rule_id}")])
     rows.extend(
         [
-            [build_button(text="⚡ Отправить сейчас", callback_data=f"trigger_now:{rule_id}")],
-            [build_button(text="🔢 Начать с номера", callback_data=f"start_from_number:{rule_id}")],
-            [build_button(text="🔄 Пересканировать", callback_data=f"rescan_rule_menu:{rule_id}")],
-            [build_button(text="⏪ Откатить", callback_data=f"rollback:{rule_id}")],
+            [build_button(text="⚡ Отправить сейчас", callback_data=f"user_rule_send_now:{rule_id}")],
+            [build_button(text="🔢 Начать с номера", callback_data=f"user_rule_start_from:{rule_id}")],
+            [build_button(text="🔄 Пересканировать", callback_data=f"user_rule_rescan:{rule_id}")],
+            [build_button(text="⏪ Откатить", callback_data=f"user_rule_rollback:{rule_id}")],
             [build_button(text="📜 Логи правила", callback_data=f"user_rule_logs:{rule_id}")],
-            [build_button(text="🗑 Удалить правило", callback_data=f"delete_rule:{rule_id}", style="danger")],
+            [build_button(text="🗑 Удалить правило", callback_data=f"user_rule_delete:{rule_id}", style="danger")],
             [build_button(text="⬅️ Назад к правилу", callback_data=f"user_rule_open:{rule_id}")],
         ]
     )
