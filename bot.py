@@ -122,6 +122,7 @@ ui_policy: UIErrorPolicy | None = None
 last_notifications: dict[str, datetime] = {}
 rule_ui_tasks: dict[str, asyncio.Task] = {}
 user_handlers_ctx: UserHandlersContext | None = None
+admin_handlers_ctx: AdminHandlersContext | None = None
 
 preview_queue_cache: dict[int, dict[str, Any]] = {}
 preview_busy_users: set[int] = set()
@@ -7887,7 +7888,7 @@ async def _init_db_runtime() -> None:
 
 
 async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
-    global bot, telethon_client, reaction_clients, sender_service, ui_policy, runtime_context, user_handlers_ctx
+    global bot, telethon_client, reaction_clients, sender_service, ui_policy, runtime_context, user_handlers_ctx, admin_handlers_ctx
 
     bot = Bot(
         token=settings.bot_token,
@@ -7915,6 +7916,9 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
 
     telethon_client = await create_telethon_client()
     reaction_clients = await create_reaction_clients()
+    if admin_handlers_ctx is not None:
+        admin_handlers_ctx.bot = bot
+        admin_handlers_ctx.telethon_client = telethon_client
 
     sender_service = SenderService(
         bot=bot,
@@ -8164,6 +8168,7 @@ def _register_user_saas_handlers() -> None:
 
 
 def _register_admin_handlers() -> None:
+    global admin_handlers_ctx
     ctx = AdminHandlersContext(
         bot=bot,
         db=db,
@@ -8216,6 +8221,7 @@ def _register_admin_handlers() -> None:
     register_admin_queue_handlers(dp, ctx)
     register_admin_diagnostics_handlers(dp, ctx)
     register_admin_system_handlers(dp, ctx)
+    admin_handlers_ctx = ctx
 
 
 async def main(role: str = "all"):
