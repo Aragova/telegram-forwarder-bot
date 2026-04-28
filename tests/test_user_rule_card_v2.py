@@ -137,6 +137,7 @@ def test_user_card_has_no_admin_global_buttons():
     callbacks = " ".join(_callbacks(user_ui.build_user_rule_card_keyboard(rule_id=7, is_active=True, schedule_mode="interval", mode="repost")))
     for forbidden in ["diagnostics", "system", "queue", "reset", "worker", "scheduler"]:
         assert forbidden not in callbacks
+    assert "К моим правилам" not in " ".join(_texts(user_ui.build_user_rule_card_keyboard(rule_id=7, is_active=True, schedule_mode="interval", mode="repost"))[4])
 
 
 class _DummyCtx:
@@ -207,8 +208,47 @@ def test_user_card_callbacks_are_user_safe_namespaced():
         "user_rule_toggle:7",
     ]:
         assert expected in joined
-    for forbidden in ["change_interval:", "set_interval_mode:", "video_intro_menu:", "video_caption_menu:", "enable_rule:", "disable_rule:"]:
+    for forbidden in [
+        "change_interval:",
+        "set_interval_mode:",
+        "video_intro_menu:",
+        "video_caption_menu:",
+        "enable_rule:",
+        "disable_rule:",
+        "toggle_rule_mode:",
+        "trigger_now:",
+        "rollback:",
+        "delete_rule:",
+        "caption_mode_menu:",
+    ]:
         assert forbidden not in joined
+
+
+def test_extra_menus_have_exact_row_structure():
+    repost_rows = _texts(user_ui.build_user_rule_extra_keyboard(rule_id=3, mode="repost"))
+    assert repost_rows == [
+        ["🔁 Сменить режим: Видеоредактор"],
+        ["✍️ Режим подписи"],
+        ["⚡ Отправить сейчас"],
+        ["🔢 Начать с номера"],
+        ["🔄 Пересканировать"],
+        ["⏪ Откатить"],
+        ["📜 Логи правила"],
+        ["🗑 Удалить правило"],
+        ["⬅️ Назад к правилу"],
+    ]
+
+    video_rows = _texts(user_ui.build_user_rule_extra_keyboard(rule_id=59, mode="video"))
+    assert video_rows == [
+        ["🔁 Сменить режим: Репост"],
+        ["⚡ Отправить сейчас"],
+        ["🔢 Начать с номера"],
+        ["🔄 Пересканировать"],
+        ["⏪ Откатить"],
+        ["📜 Логи правила"],
+        ["🗑 Удалить правило"],
+        ["⬅️ Назад к правилу"],
+    ]
 
     
 def test_rule_callbacks_with_rule_id_are_not_admin_only_for_user_flows():

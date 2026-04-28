@@ -120,18 +120,23 @@ def test_user_card_hides_admin_only_buttons():
         bot.build_rule_extra_keyboard = original
     extra_callbacks = [button.callback_data or "" for row in extra_kb.inline_keyboard for button in row]
     extra_joined = " ".join(extra_callbacks)
-    assert "rule_logs:" not in extra_joined
-    assert "rescan_rule_menu:" not in extra_joined
-    assert "rollback:" not in extra_joined
+    assert " rule_logs:" not in f" {extra_joined}"
+    assert " rescan_rule_menu:" not in f" {extra_joined}"
+    assert " rollback:" not in f" {extra_joined}"
 
 
 def test_user_creation_flow_skips_interval_input_for_non_admin():
     source = Path("bot.py").read_text(encoding="utf-8")
-    block_start = source.find("async def handle_pick_rule_target")
+    block_start = source.find("async def handle_user_rule_pick_target_callback")
     assert block_start >= 0
     block = source[block_start:block_start + 2800]
-    assert "if is_admin_user(user_id):" in block
-    assert "state[\"action\"] = \"set_rule_interval\"" in block
     assert "rule_id = await run_db(_create_rule_sync, state[\"choice\"], 3600, user_id)" in block
     assert "parse_channel_history" in block or "parse_group_history" in block
     assert "db.backfill_rule" in block
+    assert "ReplyKeyboardRemove()" in source
+
+
+def test_user_creation_flow_uses_inline_pick_callbacks():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "user_rule_pick_source:" in source
+    assert "user_rule_pick_target:" in source

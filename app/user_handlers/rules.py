@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aiogram import Dispatcher
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from .context import UserHandlersContext
 from app import user_ui
@@ -188,11 +188,16 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
                 ),
             )
             return
-        keyboard = [[KeyboardButton(text=f"📤 {i}. {s.title}{f' (тема {s.thread_id})' if s.thread_id else ''}")] for i, s in enumerate(sources, 1)]
-        keyboard.append([KeyboardButton(text="❌ Отмена")])
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=f"📤 {i}. {s.title}{f' (тема {s.thread_id})' if s.thread_id else ''}", callback_data=f"user_rule_pick_source:{i - 1}")]
+                for i, s in enumerate(sources, 1)
+            ]
+            + [[InlineKeyboardButton(text="❌ Отмена", callback_data="user_main")]]
+        )
         ctx.user_states[user_id] = {"action": "pick_rule_source", "sources": sources}
         await ctx.answer_callback_safe_once(callback)
-        await callback.message.answer("Выберите источник", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True))
+        await ctx.edit_message_text_safe(message=callback.message, text="Выберите источник", reply_markup=keyboard)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_open:"))
     async def handle_user_rule_open(callback: CallbackQuery):
