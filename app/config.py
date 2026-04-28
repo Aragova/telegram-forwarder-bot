@@ -103,7 +103,10 @@ class Settings:
 
     lava_top_enabled: bool = str(os.getenv("LAVA_TOP_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
     lava_top_api_key: str = os.getenv("LAVA_TOP_API_KEY", "")
+    lava_top_api_base: str = os.getenv("LAVA_TOP_API_BASE", "https://gate.lava.top").rstrip("/")
     lava_top_webhook_secret: str = os.getenv("LAVA_TOP_WEBHOOK_SECRET", "")
+
+    public_base_url: str = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
     def validate(self) -> None:
         missing = []
