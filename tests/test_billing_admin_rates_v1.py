@@ -26,7 +26,9 @@ def test_billing_catalog_uses_saved_rate_and_fallback():
 def test_rate_input_formats():
     assert float("95.5") == 95.5
     assert float("95,5".replace(",", ".")) == 95.5
-    
+
+
 def test_admin_rate_input_not_captured_by_user_state_handler_source_guard():
     source = __import__("pathlib").Path("bot.py").read_text(encoding="utf-8")
     assert "admin_billing_rate_input" in source
+

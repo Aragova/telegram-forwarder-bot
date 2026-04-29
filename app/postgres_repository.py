@@ -5503,6 +5503,12 @@ class PostgresRepository(RepositoryProtocol):
     def get_billing_events(self, tenant_id: int, limit: int = 20) -> list[dict[str, Any]]:
         return self.billing_repo.get_billing_events(tenant_id=tenant_id, limit=limit)
 
+    def get_billing_exchange_rates(self) -> dict[str, float]:
+        return self.billing_repo.get_billing_exchange_rates()
+
+    def set_billing_exchange_rate(self, *, currency: str, new_value: float, admin_id: int | None = None) -> bool:
+        return self.billing_repo.set_billing_exchange_rate(currency=currency, new_value=new_value, admin_id=admin_id)
+
     def create_invoice(
         self,
         *,

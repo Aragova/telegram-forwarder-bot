@@ -94,6 +94,8 @@ def test_billing_and_usage_facade_compatibility(monkeypatch):
 
     assert repo.create_billing_event(1, "evt") == 11
     assert repo.get_billing_events(1)["method"] == "get_billing_events"
+    assert repo.get_billing_exchange_rates()["method"] == "get_billing_exchange_rates"
+    assert repo.set_billing_exchange_rate(currency="RUB", new_value=95.5, admin_id=1) is True
     assert repo.create_invoice(
         tenant_id=1,
         subscription_id=1,
