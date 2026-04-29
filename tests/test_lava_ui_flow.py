@@ -19,7 +19,7 @@ def test_lava_invoice_keyboard_uses_url_button():
     first_button = keyboard.inline_keyboard[0][0]
     assert first_button.url == "https://gate.lava.top/pay/abc"
     assert keyboard.inline_keyboard[1][0].callback_data == "user_invoice_check_payment:12"
-    assert keyboard.inline_keyboard[2][0].callback_data == "user_invoice:12"
+    assert keyboard.inline_keyboard[2][0].callback_data == "user_invoice_pay:12"
     assert keyboard.inline_keyboard[3][0].callback_data == "user_invoice_pay:12"
 
 

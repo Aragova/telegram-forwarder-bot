@@ -41,6 +41,8 @@ class LavaTopClient:
         currency: str = "USD",
         buyer_language: str = "RU",
         client_order_id: str | None = None,
+        payment_provider: str | None = None,
+        payment_method: str | None = None,
     ) -> LavaTopInvoiceResult:
         if httpx is None:
             raise LavaTopAPIError("Не установлен пакет httpx для работы Lava.top")
@@ -56,6 +58,10 @@ class LavaTopClient:
         }
         if client_order_id:
             payload["clientOrderId"] = str(client_order_id)
+        if payment_provider:
+            payload["paymentProvider"] = str(payment_provider)
+        if payment_method:
+            payload["paymentMethod"] = str(payment_method)
 
         headers = {
             "X-Api-Key": self._api_key,

@@ -7,6 +7,8 @@ from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app import user_ui
+from app.billing_catalog import format_price
+from app.payments.payment_matrix import methods_for_currency, method_by_code
 from app.config import settings
 from app.payments import LavaTopAPIError, PaymentService as LavaPaymentService
 from .context import UserHandlersContext
@@ -49,9 +51,29 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(
             message=callback.message,
-            text=user_ui.build_lava_subscription_text(),
-            reply_markup=user_ui.build_lava_subscription_keyboard(),
+            text=user_ui.build_billing_subscription_text(await ctx.run_db(ctx.subscription_service.get_active_subscription, await ctx.run_db(ctx.ensure_user_tenant, callback.from_user.id if callback.from_user else 0))),
+            reply_markup=user_ui.build_billing_subscription_keyboard(),
         )
+
+    
+    @dp.callback_query(lambda c: c.data == "user_billing_shop")
+    async def handle_user_billing_shop_callback(callback: CallbackQuery):
+        user_id = callback.from_user.id if callback.from_user else 0
+        if ctx.is_admin_user(user_id):
+            await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+            return
+        state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
+        currency = str(state.get("billing_currency") or "USD").upper()
+        prices = {t: {p: format_price(t, p, currency) for p in (1,3,6,12)} for t in ("basic","pro")}
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(message=callback.message, text=user_ui.build_billing_shop_text(currency), reply_markup=user_ui.build_billing_shop_keyboard(currency=currency, prices=prices, methods=methods_for_currency(currency)))
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_billing_currency:"))
+    async def handle_user_billing_currency_callback(callback: CallbackQuery):
+        user_id = callback.from_user.id if callback.from_user else 0
+        currency = (callback.data or "").split(":",1)[1].upper()
+        ctx.user_states[user_id] = {**(ctx.user_states.get(user_id) or {}), "billing_currency": currency}
+        await handle_user_billing_shop_callback(callback)
 
     @dp.callback_query(lambda c: c.data == "user_tariff_basic")
     async def handle_user_tariff_basic_callback(callback: CallbackQuery):
@@ -61,8 +83,8 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(
             message=callback.message,
-            text=user_ui.build_lava_subscription_text(),
-            reply_markup=user_ui.build_lava_subscription_keyboard(),
+            text=user_ui.build_billing_subscription_text(await ctx.run_db(ctx.subscription_service.get_active_subscription, await ctx.run_db(ctx.ensure_user_tenant, callback.from_user.id if callback.from_user else 0))),
+            reply_markup=user_ui.build_billing_subscription_keyboard(),
         )
 
     @dp.callback_query(lambda c: c.data == "user_pay_lava_basic")
@@ -248,6 +270,9 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         if ctx.is_admin_user(user_id):
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
+        await ctx.answer_callback_safe_once(callback)
+        await handle_user_billing_shop_callback(callback)
+        return
         invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
@@ -459,6 +484,23 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             ),
             reply_markup=user_ui.build_lava_invoice_keyboard(invoice_id=invoice_id, payment_url=invoice_view.payment_url),
         )
+
+    
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_billing_pick:"))
+    async def handle_user_billing_pick_callback(callback: CallbackQuery):
+        _, tariff, period, currency = (callback.data or "").split(":", 3)
+        methods = methods_for_currency(currency)
+        rows = [[InlineKeyboardButton(text=str(m.get("title")), callback_data=f"user_billing_pay:{tariff}:{period}:{currency}:{m.get('code')}")] for m in methods]
+        rows.append([InlineKeyboardButton(text="⬅️ К покупке", callback_data="user_billing_shop")])
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(message=callback.message, text=f"💳 Выберите способ оплаты\n\nТариф: {tariff.upper()}\nПериод: {period} мес\nСумма: {format_price(tariff, int(period), currency)}", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_billing_pay:"))
+    async def handle_user_billing_pay_callback(callback: CallbackQuery):
+        _, tariff, period, currency, method_code = (callback.data or "").split(":", 4)
+        method = method_by_code(currency, method_code) or {}
+        await ctx.answer_callback_safe_once(callback, "⏳ Создаю платёж…")
+        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {format_price(tariff, int(period), currency)}\n" f"Способ: {method.get('title','—')}\nСтатус: ожидаем подтверждение оплаты"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="user_billing_shop")],[InlineKeyboardButton(text="⬅️ К способам оплаты", callback_data=f"user_billing_pick:{tariff}:{period}:{currency}")]]))
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_upload_receipt:"))
     async def handle_user_upload_receipt_callback(callback: CallbackQuery):
