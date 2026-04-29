@@ -991,40 +991,73 @@ def build_user_rule_logs_keyboard(*, rule_id: int, has_logs: bool) -> InlineKeyb
 
 
 
-def build_billing_subscription_text(subscription: dict[str, Any] | None = None) -> str:
+def build_user_subscription_status_text(subscription: dict[str, Any] | None = None) -> str:
     sub = subscription or {}
     plan_name = str(sub.get("plan_name") or "FREE").upper()
-    status_line, date_line = _subscription_status_line(sub)
-    status_clean = "активна" if "активен" in status_line else "не активна"
-    date_value = date_line.split(":", 1)[1].strip() if ":" in date_line else "—"
+    is_active = plan_name not in {"FREE", ""} and str(sub.get("status") or "").lower() not in {"expired", "canceled"}
+    date_value = _format_subscription_date(sub.get("current_period_end") or sub.get("expires_at")) or "—"
+    if not is_active:
+        plan_name = "Free"
+        date_value = "—"
+    return f"💎 Подписка ViMi\n\nТекущий тариф: {plan_name}\nСтатус: {'активна' if is_active else 'не активна'}\nДействует до: {date_value}"
+
+
+def build_user_subscription_status_keyboard(subscription: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+    sub = subscription or {}
+    plan_name = str(sub.get("plan_name") or "FREE").upper()
+    is_active = plan_name not in {"FREE", ""} and str(sub.get("status") or "").lower() not in {"expired", "canceled"}
+    cta = "🔁 Продлить подписку" if is_active else "💎 Купить подписку"
+    rows = [[InlineKeyboardButton(text=cta, callback_data="user_subscription_plans")]]
+    if is_active and plan_name == "BASIC":
+        rows.append([InlineKeyboardButton(text="⬆️ Улучшить до PRO", callback_data="user_subscription_buy:pro")])
+    rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_user_subscription_plans_text() -> str:
     return (
-        "💎 Подписка ViMi\n\n"
-        f"Текущий тариф: {plan_name}\n"
-        f"Статус: {status_clean}\n"
-        f"Действует до: {date_value}"
+        "💎 Выберите тариф ViMi\n\n"
+        "BASIC\nДля одного Telegram-проекта и стабильного автопостинга.\n\n"
+        "Подходит, если вам нужно:\n"
+        "• подключить источники и получателей;\n"
+        "• автоматизировать публикации;\n"
+        "• пользоваться базовой очередью;\n"
+        "• запускать регулярный репост.\n\n"
+        "PRO\nДля активных каналов, видео-автоматизации и масштабирования.\n\n"
+        "Подходит, если вам нужно:\n"
+        "• больше правил и каналов;\n"
+        "• видеоредактор;\n"
+        "• заставки / интро;\n"
+        "• премиум-подписи;\n"
+        "• расширенные логи и диагностика;\n"
+        "• приоритетная обработка."
     )
 
 
-def build_billing_subscription_keyboard(subscription: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
-    _ = subscription
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Купить подписку / Продлить", callback_data="user_billing_shop")],[InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")]])
+def build_user_subscription_plans_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 BASIC", callback_data="user_subscription_buy:basic")],[InlineKeyboardButton(text="🚀 PRO", callback_data="user_subscription_buy:pro")],[InlineKeyboardButton(text="⬅️ Назад к подписке", callback_data="user_subscription")]])
 
 
-def build_billing_shop_text(currency: str) -> str:
-    return f"💎 Купить подписку\n\nВыберите валюту: {currency}\n\nВыберите тариф, срок и способ оплаты ниже."
+def build_user_tariff_purchase_text(tariff_code: str, currency: str, selected_period_months: int, prices: dict[int, str], methods: list[dict[str, Any]]) -> str:
+    title = "💎 BASIC" if str(tariff_code).lower()=="basic" else "🚀 PRO"
+    period_lines = [f"{'✅ ' if p==selected_period_months else ''}{p} месяц{'а' if p in (3,6,12) else ''} — {prices[p]}" for p in (1,3,6,12)]
+    method_lines = [str(m.get('title') or m.get('code')) for m in methods]
+    return f"{title}\n\nВыберите валюту:\n[🇷🇺 RUB] [🇺🇸 USD]\n[🇪🇺 EUR] [🇺🇦 UAH]\n\nПериод подписки:\n" + "\n".join(period_lines) + "\n\nСпособы оплаты:\n" + "\n".join(method_lines)
 
 
-def build_billing_shop_keyboard(*, currency: str, prices: dict[str, dict[int, str]], methods: list[dict[str, Any]]) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text="🇷🇺 RUB", callback_data="user_billing_currency:RUB"), InlineKeyboardButton(text="🇺🇸 USD", callback_data="user_billing_currency:USD"), InlineKeyboardButton(text="🇪🇺 EUR", callback_data="user_billing_currency:EUR"), InlineKeyboardButton(text="🇺🇦 UAH", callback_data="user_billing_currency:UAH")]]
-    for tariff in ("basic","pro"):
-        rows.append([InlineKeyboardButton(text=("BASIC" if tariff=="basic" else "PRO"), callback_data="noop")])
-        for period in (1,3,6,12):
-            rows.append([InlineKeyboardButton(text=f"{period} мес — {prices[tariff][period]}", callback_data=f"user_billing_pick:{tariff}:{period}:{currency}")])
-    rows.append([InlineKeyboardButton(text="Способы оплаты", callback_data="noop")])
-    for method in methods:
-        rows.append([InlineKeyboardButton(text=str(method.get("title") or method.get("code")), callback_data=f"user_billing_method:{method.get('code')}:{currency}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user_subscription")])
+def build_user_tariff_purchase_keyboard(*, tariff_code: str, currency: str, selected_period_months: int, methods: list[dict[str, Any]], pay_buttons: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    rows=[[InlineKeyboardButton(text="🇷🇺 RUB", callback_data=f"user_subscription_currency:{tariff_code}:RUB"),InlineKeyboardButton(text="🇺🇸 USD", callback_data=f"user_subscription_currency:{tariff_code}:USD")],[InlineKeyboardButton(text="🇪🇺 EUR", callback_data=f"user_subscription_currency:{tariff_code}:EUR"),InlineKeyboardButton(text="🇺🇦 UAH", callback_data=f"user_subscription_currency:{tariff_code}:UAH")]]
+    for p in (1,3,6,12):
+        mark="✅ " if p==selected_period_months else ""
+        rows.append([InlineKeyboardButton(text=f"{mark}{p} мес", callback_data=f"user_subscription_period:{tariff_code}:{currency}:{p}")])
+    for text, short_id in pay_buttons:
+        rows.append([InlineKeyboardButton(text=text, callback_data=f"user_subscription_pay:{short_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад к тарифам", callback_data="user_subscription_plans")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+# backward compatibility
+build_billing_subscription_text = build_user_subscription_status_text
+build_billing_subscription_keyboard = build_user_subscription_status_keyboard
 
 def build_lava_subscription_text() -> str:
     return (
