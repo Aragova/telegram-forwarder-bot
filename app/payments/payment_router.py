@@ -44,6 +44,8 @@ class PaymentRouter:
         currency: str,
         method_code: str,
         username: str | None = None,
+        attempt_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> PaymentStartResult:
         method = method_by_code(currency, method_code) or {}
         provider = str(method.get("provider") or "")
@@ -89,7 +91,7 @@ class PaymentRouter:
             )
             return PaymentStartResult(int(invoice_id), provider, str(method.get("title") or "—"), amount_text, payment_url=invoice_view.payment_url)
 
-        await self._call_service(self._payment_service.create_payment_for_invoice, int(invoice_id), provider)
+        await self._call_service(self._payment_service.create_payment_for_invoice, int(invoice_id), provider, attempt_id=attempt_id, idempotency_key=idempotency_key)
         return PaymentStartResult(int(invoice_id), provider, str(method.get("title") or "—"), amount_text, requires_receipt=True)
 
     def _build_purchase_context(self, period_months: int) -> dict[str, Any]:

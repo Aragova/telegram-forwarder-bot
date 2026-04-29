@@ -27,7 +27,7 @@ class PaymentService:
         self._subscription_service = SubscriptionService(repo)
         self._providers = self._build_providers()
 
-    def create_payment_for_invoice(self, invoice_id: int, provider: str) -> dict[str, Any]:
+    def create_payment_for_invoice(self, invoice_id: int, provider: str, *, attempt_id: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
         invoice = self._repo.get_invoice(int(invoice_id)) if hasattr(self._repo, "get_invoice") else None
         if not invoice:
             return {"ok": False, "error": "invoice_not_found"}
@@ -46,6 +46,17 @@ class PaymentService:
 
         amount = float(invoice.get("total") or 0)
         currency = str(invoice.get("currency") or "USD").upper()
+        active_intent = self._repo.get_active_payment_intent_for_invoice_provider(int(invoice_id), provider_key) if hasattr(self._repo, "get_active_payment_intent_for_invoice_provider") else None
+        if isinstance(active_intent, dict) and str(active_intent.get("status") or "") in {"created", "pending", "waiting_confirmation"}:
+            return {
+                "ok": True,
+                "payment_intent_id": int(active_intent.get("id") or 0),
+                "provider": provider_key,
+                "status": str(active_intent.get("status") or "created"),
+                "checkout_url": active_intent.get("external_checkout_url"),
+                "idempotent": True,
+            }
+
         intent_status = "waiting_confirmation" if provider_key in MANUAL_PROVIDER_TYPES else "created"
         intent_id = self._repo.create_payment_intent(
             tenant_id=tenant_id,
@@ -59,14 +70,19 @@ class PaymentService:
             return {"ok": False, "error": "create_payment_intent_failed"}
 
         result = adapter.create_payment(invoice=invoice, tenant=tenant or {"id": tenant_id})
-        self._repo.attach_provider_payload(int(intent_id), asdict(result))
+        payload = asdict(result)
+        if attempt_id:
+            payload["attempt_id"] = str(attempt_id)
+        if idempotency_key:
+            payload["idempotency_key"] = str(idempotency_key)
+        self._repo.attach_provider_payload(int(intent_id), payload)
         if result.external_checkout_url:
             self._repo.attach_checkout_url(int(intent_id), result.external_checkout_url, external_payment_id=result.external_payment_id)
         elif result.external_payment_id:
             self._repo.attach_provider_payload(int(intent_id), {**asdict(result), "external_payment_id": result.external_payment_id})
         self._repo.update_payment_intent_status(int(intent_id), result.status or intent_status, error_text=result.error_text)
 
-        return {"ok": True, "payment_intent_id": int(intent_id), "provider": provider_key, "status": result.status, "checkout_url": result.external_checkout_url, "message_ru": result.user_message_ru, "message_en": result.user_message_en, "payload": result.payload}
+        return {"ok": True, "payment_intent_id": int(intent_id), "provider": provider_key, "status": result.status, "checkout_url": result.external_checkout_url, "message_ru": result.user_message_ru, "message_en": result.user_message_en, "payload": result.payload, "idempotent": False}
 
     def get_available_payment_methods(self, tenant_id: int, invoice_id: int) -> list[dict[str, Any]]:
         _ = tenant_id
