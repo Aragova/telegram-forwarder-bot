@@ -341,6 +341,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         period = int(action.get("period_months") or 1)
         currency = str(action.get("currency") or "USD").upper()
         method_code = str(action.get("method_code") or "")
+        # callback.data = f"user_billing_pay:{tariff}:{period}:{currency}:{method_code}"
         await _start_user_billing_payment(callback, tariff=tariff, period=period, currency=currency, method_code=method_code)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_upload_receipt:"))
