@@ -45,4 +45,4 @@ def test_admin_rate_input_not_captured_by_user_state_handler_source_guard():
     assert "admin_billing_rate_input" in source
 
     assert "admin_billing_usd_price_input" in source
-
+    assert "db.set_billing_usd_price" in source

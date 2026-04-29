@@ -7174,6 +7174,36 @@ async def handle_stateful_private_inputs(message: Message):
     action = state.get("action")
     text = (message.text or "").strip()
 
+    if action == "admin_billing_usd_price_input":
+        raw = text.replace(",", ".")
+        try:
+            value = float(raw)
+        except Exception:
+            await message.reply("❌ Ошибка: введите положительное число.")
+            return
+        if value <= 0:
+            await message.reply("❌ Ошибка: цена должна быть больше 0.")
+            return
+        if value > 100000:
+            await message.reply("⚠️ Слишком большое значение. Введите более реалистичную цену.")
+            return
+        tariff_code = str(state.get("tariff_code") or "").lower()
+        period_months = int(state.get("period_months") or 0)
+        admin_id = message.from_user.id if message.from_user else settings.admin_id
+        ok = await run_db(
+            db.set_billing_usd_price,
+            tariff_code=tariff_code,
+            period_months=period_months,
+            new_price=value,
+            admin_id=admin_id,
+        )
+        if not ok:
+            await message.reply("❌ Не удалось сохранить цену.")
+            return
+        reset_user_state(admin_id)
+        await message.reply("✅ Цена сохранена.")
+        return
+
     if action == "awaiting_user_channel_id":
         user_id_safe = message.from_user.id if message.from_user else 0
         tenant_id = await run_db(ensure_user_tenant, user_id_safe)
