@@ -7,6 +7,56 @@ from app.repository_split_base import RepositorySplitBase
 
 
 class BillingRepository(RepositorySplitBase):
+    def get_billing_usd_prices(self) -> dict[str, dict[int, float]]:
+        prices: dict[str, dict[int, float]] = {"basic": {}, "pro": {}}
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT metadata_json
+                    FROM billing_events
+                    WHERE event_type = 'billing_usd_price_updated'
+                    ORDER BY id DESC
+                    """
+                )
+                rows = cur.fetchall() or []
+        for row in rows:
+            data = self.safe_json_loads((row or {}).get("metadata_json"), {})
+            tariff_code = str(data.get("tariff_code") or "").lower()
+            if tariff_code not in prices:
+                continue
+            try:
+                period_months = int(data.get("period_months"))
+                new_price = float(data.get("new_price"))
+            except Exception:
+                continue
+            if period_months in prices[tariff_code]:
+                continue
+            prices[tariff_code][period_months] = new_price
+        return prices
+
+    def set_billing_usd_price(self, *, tariff_code: str, period_months: int, new_price: float, admin_id: int | None = None) -> bool:
+        code = str(tariff_code or "").lower()
+        period = int(period_months)
+        if code not in {"basic", "pro"} or period not in {1, 3, 6, 12}:
+            return False
+        old_price = self.get_billing_usd_prices().get(code, {}).get(period)
+        self.create_billing_event(
+            1,
+            "billing_usd_price_updated",
+            event_source="admin_system",
+            currency="USD",
+            metadata={
+                "admin_id": admin_id,
+                "tariff_code": code,
+                "period_months": period,
+                "old_price": old_price,
+                "new_price": float(new_price),
+                "created_at": utc_now_iso(),
+            },
+        )
+        return True
+
     def create_billing_event(
         self,
         tenant_id: int,
