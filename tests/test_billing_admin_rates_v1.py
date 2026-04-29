@@ -31,3 +31,4 @@ def test_rate_input_formats():
 def test_admin_rate_input_not_captured_by_user_state_handler_source_guard():
     source = __import__("pathlib").Path("bot.py").read_text(encoding="utf-8")
     assert "admin_billing_rate_input" in source
+
