@@ -1,0 +1,100 @@
+import asyncio
+
+from app.payments.payment_router import PaymentRouter
+
+
+class _SubscriptionServiceSync:
+    def get_active_subscription(self, tenant_id: int):
+        return {
+            "id": 11,
+            "current_period_start": "2026-01-01",
+            "current_period_end": "2026-02-01",
+        }
+
+
+class _SubscriptionServiceAsync:
+    async def get_active_subscription(self, tenant_id: int):
+        return {
+            "id": 12,
+            "current_period_start": "2026-01-01",
+            "current_period_end": "2026-02-01",
+        }
+
+
+class _BillingService:
+    def ensure_billing_period(self, sub: dict):
+        return sub
+
+
+class _InvoiceService:
+    def __init__(self):
+        self.created = []
+        self.items = []
+        self.finalized = []
+
+    def create_draft_invoice(self, tenant_id, subscription_id, period_start, period_end, currency="RUB"):
+        self.created.append((tenant_id, subscription_id, period_start, period_end, currency))
+        return 101
+
+    def add_invoice_item(self, invoice_id, **kwargs):
+        self.items.append((invoice_id, kwargs))
+
+    def finalize_invoice(self, invoice_id):
+        self.finalized.append(invoice_id)
+
+
+class _PaymentService:
+    def __init__(self):
+        self.calls = []
+
+    def create_payment_for_invoice(self, invoice_id: int, provider: str):
+        self.calls.append((invoice_id, provider))
+
+
+def _build_router(subscription_service):
+    invoice_service = _InvoiceService()
+    payment_service = _PaymentService()
+    router = PaymentRouter(
+        ensure_user_tenant=lambda user_id: 7,
+        subscription_service=subscription_service,
+        billing_service=_BillingService(),
+        invoice_service=invoice_service,
+        payment_service=payment_service,
+    )
+    return router, invoice_service, payment_service
+
+
+def test_start_payment_supports_sync_subscription_service():
+    router, invoice_service, payment_service = _build_router(_SubscriptionServiceSync())
+
+    result = asyncio.run(
+        router.start_payment(
+            user_id=55,
+            tariff_code="basic",
+            period_months=1,
+            currency="RUB",
+            method_code="rub_card_sbp",
+            username="demo",
+        )
+    )
+
+    assert invoice_service.created
+    assert payment_service.calls == [(101, "manual_bank_card")]
+    assert result.requires_receipt is True
+
+
+def test_start_payment_supports_async_subscription_service():
+    router, _, payment_service = _build_router(_SubscriptionServiceAsync())
+
+    result = asyncio.run(
+        router.start_payment(
+            user_id=77,
+            tariff_code="basic",
+            period_months=1,
+            currency="RUB",
+            method_code="rub_card_sbp",
+        )
+    )
+
+    assert payment_service.calls == [(101, "manual_bank_card")]
+    assert result.requires_receipt is True
