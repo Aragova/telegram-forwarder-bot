@@ -75,7 +75,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
 
     async def _render_purchase(callback: CallbackQuery, tariff_code: str, currency: str, period: int | None):
         user_id = callback.from_user.id if callback.from_user else 0
-        prices = {p: format_price(tariff_code, p, currency) for p in (1, 3, 6, 12)}
+        prices = {p: format_price(tariff_code, p, currency, repo=ctx.db) for p in (1, 3, 6, 12)}
         if period is None:
             await ctx.edit_message_text_safe(
                 message=callback.message,
