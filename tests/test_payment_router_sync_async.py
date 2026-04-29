@@ -21,6 +21,11 @@ class _SubscriptionServiceAsync:
         }
 
 
+class _SubscriptionServiceEmpty:
+    def get_active_subscription(self, tenant_id: int):
+        return None
+
+
 class _BillingService:
     def ensure_billing_period(self, sub: dict):
         return sub
@@ -98,3 +103,51 @@ def test_start_payment_supports_async_subscription_service():
 
     assert payment_service.calls == [(101, "manual_bank_card")]
     assert result.requires_receipt is True
+
+
+def test_start_payment_manual_allows_first_purchase_without_active_subscription():
+    router, invoice_service, payment_service = _build_router(_SubscriptionServiceEmpty())
+
+    result = asyncio.run(
+        router.start_payment(
+            user_id=99,
+            tariff_code="basic",
+            period_months=1,
+            currency="RUB",
+            method_code="rub_card_sbp",
+        )
+    )
+
+    created = invoice_service.created[0]
+    assert created[1] == 0
+    assert created[2]
+    assert created[3]
+    assert payment_service.calls == [(101, "manual_bank_card")]
+    assert result.requires_receipt is True
+
+
+def test_start_payment_lava_allows_first_purchase_without_active_subscription(monkeypatch):
+    class _FakeLavaView:
+        payment_url = "https://lava.test/pay/101"
+
+    class _FakeLavaService:
+        async def create_lava_invoice_for_user_invoice(self, **kwargs):
+            return _FakeLavaView()
+
+    from app.payments import payment_router as payment_router_module
+
+    monkeypatch.setattr(payment_router_module, "LavaPaymentService", _FakeLavaService)
+    router, _, payment_service = _build_router(_SubscriptionServiceEmpty())
+
+    result = asyncio.run(
+        router.start_payment(
+            user_id=100,
+            tariff_code="basic",
+            period_months=1,
+            currency="RUB",
+            method_code="rub_lava",
+        )
+    )
+
+    assert payment_service.calls == []
+    assert result.payment_url == "https://lava.test/pay/101"

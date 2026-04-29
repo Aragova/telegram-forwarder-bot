@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import calendar
 import inspect
 from typing import Any
 
@@ -50,9 +52,10 @@ class PaymentRouter:
 
         tenant_id = await self._call_service(self._ensure_user_tenant, user_id)
         sub = await self._call_service(self._subscription_service.get_active_subscription, tenant_id)
-        if not sub:
-            raise ValueError("subscription_not_found")
-        sub = await self._call_service(self._billing_service.ensure_billing_period, sub)
+        if sub:
+            sub = await self._call_service(self._billing_service.ensure_billing_period, sub)
+        else:
+            sub = self._build_purchase_context(period_months)
         invoice_id = await self._call_service(
             self._invoice_service.create_draft_invoice,
             int(tenant_id),
@@ -74,7 +77,8 @@ class PaymentRouter:
 
         if provider == "lava_top":
             lava_service = LavaPaymentService()
-            invoice_view = await lava_service.create_lava_invoice_for_user_invoice(
+            invoice_view = await self._call_service(
+                lava_service.create_lava_invoice_for_user_invoice,
                 user_id=user_id,
                 invoice_id=int(invoice_id),
                 tariff_code=tariff_code,
@@ -87,3 +91,21 @@ class PaymentRouter:
 
         await self._call_service(self._payment_service.create_payment_for_invoice, int(invoice_id), provider)
         return PaymentStartResult(int(invoice_id), provider, str(method.get("title") or "—"), amount_text, requires_receipt=True)
+
+    def _build_purchase_context(self, period_months: int) -> dict[str, Any]:
+        started = datetime.now(timezone.utc)
+        ended = self._add_months(started, int(period_months))
+        return {
+            "id": 0,
+            "current_period_start": started.date().isoformat(),
+            "current_period_end": ended.date().isoformat(),
+        }
+
+    @staticmethod
+    def _add_months(value: datetime, months: int) -> datetime:
+        safe_months = max(int(months), 1)
+        month = value.month - 1 + safe_months
+        year = value.year + month // 12
+        month = month % 12 + 1
+        day = min(value.day, calendar.monthrange(year, month)[1])
+        return value.replace(year=year, month=month, day=day)
