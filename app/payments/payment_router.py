@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
 from app.billing_catalog import format_price
@@ -41,7 +42,8 @@ class PaymentRouter:
         amount_text = format_price(tariff_code, int(period_months), currency)
         amount = float(amount_text.split()[0])
 
-        tenant_id = await self._ensure_user_tenant(user_id)
+        tenant_id_value = self._ensure_user_tenant(user_id)
+        tenant_id = await tenant_id_value if inspect.isawaitable(tenant_id_value) else tenant_id_value
         sub = await self._subscription_service.get_active_subscription(tenant_id)
         if not sub:
             raise ValueError("subscription_not_found")
