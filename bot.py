@@ -2926,37 +2926,20 @@ async def handle_user_account_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
         await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
         return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant = await run_db(tenant_service.ensure_tenant_exists, user_id)
-    tenant_id = int(tenant.get("id") or 1)
-    subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", "ru")
-    usage_today = await run_db(usage_service.get_today_usage, tenant_id)
-    rules_count = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
-    status = str((subscription or {}).get("status") or "active")
-    logger.info("Пользователь открыл user_account user_id=%s tenant_id=%s", user_id, tenant_id)
-    text = _build_public_account_text(
-        user_id=user_id,
-        tenant_id=tenant_id,
-        subscription=subscription,
-        usage_today=usage_today,
-        rules_count=int(rules_count or 0),
-    )
-    if status == "grace":
-        await run_db(_write_billing_event, tenant_id, "subscription_grace_warning_shown", action="user_account", plan_name=str(subscription.get("plan_name") or "FREE"), usage_today=usage_today)
-        text += (
-            "\n\n⚠️ Льготный период\n\n"
-            "Оплата ещё не подтверждена. Функции временно доступны до окончания льготного периода."
-        )
-    elif _is_subscription_blocked_status(status):
-        text += (
-            "\n\n🔒 Подписка неактивна\n\n"
-            "Чтобы продолжить пользоваться автоматизацией, выберите тариф и оплатите счёт."
-        )
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(
         message=callback.message,
-        text=text,
-        reply_markup=_public_usage_keyboard(),
+        text=(
+            "Этот раздел больше не используется.\n\n"
+            "Управление тарифом и оплатой теперь находится в разделе:\n\n"
+            "💎 Подписка"
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="💎 Подписка", callback_data="user_subscription")],
+                [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
+            ]
+        ),
     )
 
 
@@ -2965,15 +2948,20 @@ async def handle_user_plans_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
         await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
         return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    subscription = await run_db(subscription_service.get_active_subscription, tenant_id) or _get_plan_info("FREE", "ru")
-    logger.info("Пользователь открыл user_plans user_id=%s", user_id)
     await answer_callback_safe_once(callback)
     await edit_message_text_safe(
         message=callback.message,
-        text=_build_public_plans_text(subscription),
-        reply_markup=_public_plans_keyboard(str(subscription.get("plan_name") or "FREE")),
+        text=(
+            "Этот раздел больше не используется.\n\n"
+            "Управление тарифом и оплатой теперь находится в разделе:\n\n"
+            "💎 Подписка"
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="💎 Подписка", callback_data="user_subscription")],
+                [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
+            ]
+        ),
     )
 
 
