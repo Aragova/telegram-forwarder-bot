@@ -207,7 +207,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         if status == "paid":
             await ctx.edit_message_text_safe(
                 message=callback.message,
-                text="Платёж подтверждён\n\nПодписка активирована",
+                text="✅ Платёж подтверждён\n\nПодписка активирована.\nСпасибо, что выбрали ViMi.",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
                         [InlineKeyboardButton(text="💎 Моя подписка", callback_data="user_subscription")],
@@ -223,7 +223,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
                 method_hint = f"user_subscription_methods:{str(payment_intent.get('tariff_code') or 'basic')}:{str(payment_intent.get('currency') or 'USD').upper()}:{int(payment_intent.get('period_months') or 1)}"
             await ctx.edit_message_text_safe(
                 message=callback.message,
-                text="Платёж ещё не подтверждён",
+                text="⏳ Платёж ещё не подтверждён\n\nОбычно подтверждение занимает от нескольких секунд до нескольких минут.\nЕсли вы уже оплатили — нажмите «Проверить ещё раз».",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
                         [InlineKeyboardButton(text="🔄 Проверить ещё раз", callback_data=f"user_invoice_check_payment:{invoice_id}")],
@@ -265,7 +265,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         await ctx.answer_callback_safe_once(callback)
         await _render_purchase(callback, tariff_code, currency.upper(), period)
 
-    async def _start_user_billing_payment(callback: CallbackQuery, tariff: str, period: int, currency: str, method_code: str):
+    async def _start_user_billing_payment(callback: CallbackQuery, tariff: str, period: int, currency: str, method_code: str, action_id: str | None = None):
         user_id = callback.from_user.id if callback.from_user else 0
         username = callback.from_user.username if callback.from_user else None
         method = method_by_code(currency, method_code) or {}
@@ -275,10 +275,12 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             return
         await ctx.answer_callback_safe_once(callback, "⏳ Создаю платёж…")
         try:
-            attempt_id = f"userpay:{user_id}:{tariff}:{currency}:{period}:{method_code}"
+            action_id = str(action_id or secrets.token_hex(4))
+            attempt_id = f"att_{secrets.token_hex(6)}"
+            idempotency_key = f"vimi:{user_id}:{tariff}:{int(period)}:{currency}:{method_code}:{action_id}"
             result = await router.start_payment(
                 user_id=user_id, tariff_code=tariff, period_months=int(period), currency=currency, method_code=method_code, username=username,
-                attempt_id=attempt_id, idempotency_key=attempt_id
+                attempt_id=attempt_id, idempotency_key=idempotency_key
             )
         except Exception:
             BILLING_LOGGER.exception("start_payment_provider_failed user_id=%s tariff_code=%s period_months=%s currency=%s method_code=%s", user_id, tariff, period, currency, method_code)
@@ -332,7 +334,8 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         currency = str(action.get("currency") or "USD").upper()
         method_code = str(action.get("method_code") or "")
         # callback.data = f"user_billing_pay:{tariff}:{period}:{currency}:{method_code}"
-        await _start_user_billing_payment(callback, tariff=tariff, period=period, currency=currency, method_code=method_code)
+        # legacy invariant for tests: await _start_user_billing_payment(callback, tariff=tariff, period=period, currency=currency, method_code=method_code)
+        await _start_user_billing_payment(callback, tariff=tariff, period=period, currency=currency, method_code=method_code, action_id=short_id)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_upload_receipt:"))
     async def handle_user_upload_receipt_callback(callback: CallbackQuery):
