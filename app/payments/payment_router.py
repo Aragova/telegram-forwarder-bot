@@ -19,6 +19,12 @@ class PaymentStartResult:
     amount_text: str
     payment_url: str | None = None
     requires_receipt: bool = False
+    payment_intent_id: int | None = None
+    attempt_id: str | None = None
+    idempotent: bool = False
+    status: str | None = None
+    error_code: str | None = None
+    error_text: str | None = None
 
 
 class PaymentRouter:
@@ -91,8 +97,27 @@ class PaymentRouter:
             )
             return PaymentStartResult(int(invoice_id), provider, str(method.get("title") or "—"), amount_text, payment_url=invoice_view.payment_url)
 
-        await self._call_service(self._payment_service.create_payment_for_invoice, int(invoice_id), provider, attempt_id=attempt_id, idempotency_key=idempotency_key)
-        return PaymentStartResult(int(invoice_id), provider, str(method.get("title") or "—"), amount_text, requires_receipt=True)
+        payment_result = await self._call_service(
+            self._payment_service.create_payment_for_invoice,
+            int(invoice_id),
+            provider,
+            attempt_id=attempt_id,
+            idempotency_key=idempotency_key,
+        )
+        return PaymentStartResult(
+            int(invoice_id),
+            provider,
+            str(method.get("title") or "—"),
+            amount_text,
+            payment_url=payment_result.get("checkout_url") if isinstance(payment_result, dict) else None,
+            requires_receipt=provider in {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual"},
+            payment_intent_id=(int(payment_result.get("payment_intent_id") or 0) or None) if isinstance(payment_result, dict) else None,
+            attempt_id=attempt_id,
+            idempotent=bool(payment_result.get("idempotent")) if isinstance(payment_result, dict) else False,
+            status=str(payment_result.get("status") or "") if isinstance(payment_result, dict) else None,
+            error_code=str(payment_result.get("error") or "") if isinstance(payment_result, dict) else None,
+            error_text=str(payment_result.get("error_text") or payment_result.get("message_ru") or "") if isinstance(payment_result, dict) else None,
+        )
 
     def _build_purchase_context(self, period_months: int) -> dict[str, Any]:
         started = datetime.now(timezone.utc)
