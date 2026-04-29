@@ -326,6 +326,17 @@ class RepositoryProtocol(Protocol):
     # BILLING / INVOICES
     # =========================================================
     def list_invoices_for_tenant(self, tenant_id: int, limit: int = 10) -> list[dict[str, Any]]: ...
+    def get_billing_exchange_rates(self) -> dict[str, float]: ...
+    def set_billing_exchange_rate(self, *, currency: str, new_value: float, admin_id: int | None = None) -> bool: ...
+    def get_billing_usd_prices(self) -> dict[str, dict[int, float]]: ...
+    def set_billing_usd_price(
+        self,
+        *,
+        tariff_code: str,
+        period_months: int,
+        new_price: float,
+        admin_id: int | None = None,
+    ) -> bool: ...
     def create_payment_intent(
         self,
         *,
