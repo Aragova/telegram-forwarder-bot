@@ -232,7 +232,7 @@ def build_user_subscription_blocked_text(subscription: dict[str, Any] | None) ->
     status = str((subscription or {}).get("status") or "expired")
     return (
         "🔒 Подписка неактивна\n\n"
-        "Чтобы продолжить пользоваться автоматизацией, выберите тариф и оплатите счёт.\n\n"
+        "Чтобы продолжить пользоваться автоматизацией, выберите тариф и оплатите подписку.\n\n"
         f"Тариф: {plan_name}\n"
         f"Статус: {status}"
     )
@@ -662,7 +662,7 @@ def build_user_payment_methods_keyboard(invoice_id: int, methods: list[dict[str,
         rows.append([InlineKeyboardButton(text="💳 Оплатить через Lava.top", callback_data=f"user_invoice_pay_lava:{int(invoice_id)}")])
     rows.extend(
         [
-            [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="⬅️ К способам оплаты", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_invoices")],
         ]
     )
@@ -706,7 +706,7 @@ def build_user_payment_result_keyboard(invoice_id: int, payment_result: dict[str
     rows.append([InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")])
     rows.extend(
         [
-            [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="⬅️ К способам оплаты", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
         ]
     )
@@ -719,7 +719,7 @@ def build_user_manual_receipt_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_manual_paid:{int(invoice_id)}")],
             [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
             [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"user_invoice_check_payment:{int(invoice_id)}")],
-            [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="⬅️ К способам оплаты", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
         ]
     )
@@ -736,7 +736,7 @@ def build_user_payment_status_keyboard(invoice_id: int, payment_intent: dict[str
     rows.extend(
         [
             [InlineKeyboardButton(text="💳 К оплате", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
-            [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="⬅️ К способам оплаты", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_invoices")],
         ]
     )
@@ -974,6 +974,43 @@ def build_user_rule_logs_keyboard(*, rule_id: int, has_logs: bool) -> InlineKeyb
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+
+
+def build_billing_subscription_text(subscription: dict[str, Any] | None = None) -> str:
+    sub = subscription or {}
+    plan_name = str(sub.get("plan_name") or "FREE").upper()
+    status_line, date_line = _subscription_status_line(sub)
+    status_clean = "активна" if "активен" in status_line else "не активна"
+    date_value = date_line.split(":", 1)[1].strip() if ":" in date_line else "—"
+    return (
+        "💎 Подписка ViMi\n\n"
+        f"Текущий тариф: {plan_name}\n"
+        f"Статус: {status_clean}\n"
+        f"Действует до: {date_value}"
+    )
+
+
+def build_billing_subscription_keyboard(subscription: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+    _ = subscription
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Купить подписку / Продлить", callback_data="user_billing_shop")],[InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")]])
+
+
+def build_billing_shop_text(currency: str) -> str:
+    return f"💎 Купить подписку\n\nВыберите валюту: {currency}\n\nВыберите тариф, срок и способ оплаты ниже."
+
+
+def build_billing_shop_keyboard(*, currency: str, prices: dict[str, dict[int, str]], methods: list[dict[str, Any]]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="🇷🇺 RUB", callback_data="user_billing_currency:RUB"), InlineKeyboardButton(text="🇺🇸 USD", callback_data="user_billing_currency:USD"), InlineKeyboardButton(text="🇪🇺 EUR", callback_data="user_billing_currency:EUR"), InlineKeyboardButton(text="🇺🇦 UAH", callback_data="user_billing_currency:UAH")]]
+    for tariff in ("basic","pro"):
+        rows.append([InlineKeyboardButton(text=("BASIC" if tariff=="basic" else "PRO"), callback_data="noop")])
+        for period in (1,3,6,12):
+            rows.append([InlineKeyboardButton(text=f"{period} мес — {prices[tariff][period]}", callback_data=f"user_billing_pick:{tariff}:{period}:{currency}")])
+    rows.append([InlineKeyboardButton(text="Способы оплаты", callback_data="noop")])
+    for method in methods:
+        rows.append([InlineKeyboardButton(text=str(method.get("title") or method.get("code")), callback_data=f"user_billing_method:{method.get('code')}:{currency}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user_subscription")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 def build_lava_subscription_text() -> str:
     return (
         "💎 Подписка ViMi\n\n"
@@ -997,11 +1034,10 @@ def build_lava_subscription_keyboard() -> InlineKeyboardMarkup:
 def build_lava_invoice_created_text(*, invoice_id: int, tariff_title: str, amount: float, currency: str) -> str:
     amount_text = f"{amount:.0f} {str(currency).upper()}"
     return (
-        "✅ Ссылка на оплату создана\n\n"
-        f"Счёт: #{int(invoice_id)}\n"
+        "✅ Платёж создан\n\n"
         f"Тариф: {tariff_title}\n"
         f"Сумма: {amount_text}\n"
-        "Статус: ожидает оплату\n\n"
+        "Статус: ожидаем подтверждение оплаты\n\n"
         "После оплаты нажмите «🔄 Проверить оплату», если уведомление ещё не пришло."
     )
 
@@ -1011,7 +1047,7 @@ def build_lava_invoice_keyboard(*, invoice_id: int, payment_url: str) -> InlineK
         inline_keyboard=[
             [InlineKeyboardButton(text="💳 Перейти к оплате", url=payment_url)],
             [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"user_invoice_check_payment:{int(invoice_id)}")],
-            [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+            [InlineKeyboardButton(text="⬅️ К способам оплаты", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
             [InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
         ]
     )

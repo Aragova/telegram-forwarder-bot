@@ -57,6 +57,8 @@ class PaymentService:
         user_id: int,
         username: str | None,
         email: str | None = None,
+        payment_provider: str | None = None,
+        payment_method: str | None = None,
     ) -> PaymentInvoiceView:
         basic_tariff = get_tariff("basic")
         return await self.create_lava_invoice_for_user_invoice(
@@ -79,6 +81,8 @@ class PaymentService:
         currency: str,
         username: str | None = None,
         email: str | None = None,
+        payment_provider: str | None = None,
+        payment_method: str | None = None,
     ) -> PaymentInvoiceView:
         _ = username
         if not settings.lava_top_enabled:
@@ -96,6 +100,8 @@ class PaymentService:
             currency=str(currency or tariff.currency).upper(),
             buyer_language="RU",
             client_order_id=client_order_id,
+            payment_provider=payment_provider,
+            payment_method=payment_method,
         )
 
         return PaymentInvoiceView(
