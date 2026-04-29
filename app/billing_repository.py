@@ -59,6 +59,49 @@ class BillingRepository(RepositorySplitBase):
             result.append(item)
         return result
 
+
+
+    def get_billing_exchange_rates(self) -> dict[str, float]:
+        currencies = ("RUB", "EUR", "UAH")
+        rates: dict[str, float] = {}
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                for currency in currencies:
+                    cur.execute(
+                        """
+                        SELECT metadata_json
+                        FROM billing_events
+                        WHERE event_type = 'billing_rate_updated'
+                          AND currency = %s
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (currency,),
+                    )
+                    row = cur.fetchone()
+                    data = self.safe_json_loads((row or {}).get("metadata_json"), {})
+                    value = data.get("new_value")
+                    if value is not None:
+                        try:
+                            rates[f"USD_TO_{currency}"] = float(value)
+                        except Exception:
+                            pass
+        return rates
+
+    def set_billing_exchange_rate(self, *, currency: str, new_value: float, admin_id: int | None = None) -> bool:
+        code = str(currency or "").upper()
+        if code not in {"RUB", "EUR", "UAH"}:
+            return False
+        old_value = self.get_billing_exchange_rates().get(f"USD_TO_{code}")
+        self.create_billing_event(
+            1,
+            "billing_rate_updated",
+            event_source="admin_system",
+            currency=code,
+            metadata={"old_value": old_value, "new_value": float(new_value), "admin_id": admin_id, "currency": code},
+        )
+        return True
+
     def create_invoice(
         self,
         *,
