@@ -123,8 +123,10 @@ def test_webhook_auth_without_basic_rejected():
 def test_webhook_auth_with_valid_basic_passes():
     old_login = settings.lava_top_webhook_login
     old_password = settings.lava_top_webhook_password
+    old_secret = settings.lava_top_webhook_secret
     settings.lava_top_webhook_login = "lava"
     settings.lava_top_webhook_password = "pass"
+    settings.lava_top_webhook_secret = ""
     token = base64.b64encode(b"lava:pass").decode("utf-8")
     try:
         result = verify_lava_webhook_auth({"Authorization": f"Basic {token}"}, "{}")
@@ -132,10 +134,15 @@ def test_webhook_auth_with_valid_basic_passes():
     finally:
         settings.lava_top_webhook_login = old_login
         settings.lava_top_webhook_password = old_password
+        settings.lava_top_webhook_secret = old_secret
 
 
 def test_webhook_signature_secret_supported():
+    old_login = settings.lava_top_webhook_login
+    old_password = settings.lava_top_webhook_password
     old_secret = settings.lava_top_webhook_secret
+    settings.lava_top_webhook_login = ""
+    settings.lava_top_webhook_password = ""
     settings.lava_top_webhook_secret = "secret"
     body = '{"id":"lava-1"}'
     sig = hmac.new(b"secret", body.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -143,4 +150,33 @@ def test_webhook_signature_secret_supported():
         result = verify_lava_webhook_auth({"X-LavaTop-Signature": sig}, body)
         assert result.ok is True
     finally:
+        settings.lava_top_webhook_login = old_login
+        settings.lava_top_webhook_password = old_password
+        settings.lava_top_webhook_secret = old_secret
+
+
+def test_webhook_auth_requires_basic_and_signature_when_both_configured():
+    old_login = settings.lava_top_webhook_login
+    old_password = settings.lava_top_webhook_password
+    old_secret = settings.lava_top_webhook_secret
+    settings.lava_top_webhook_login = "lava"
+    settings.lava_top_webhook_password = "pass"
+    settings.lava_top_webhook_secret = "secret"
+    body = '{"id":"lava-1"}'
+    token = base64.b64encode(b"lava:pass").decode("utf-8")
+    sig = hmac.new(b"secret", body.encode("utf-8"), hashlib.sha256).hexdigest()
+    try:
+        basic_only = verify_lava_webhook_auth({"Authorization": f"Basic {token}"}, body)
+        assert basic_only.ok is False
+        assert basic_only.reason == "signature_required"
+
+        sig_only = verify_lava_webhook_auth({"X-LavaTop-Signature": sig}, body)
+        assert sig_only.ok is False
+        assert sig_only.reason == "basic_auth_required"
+
+        both = verify_lava_webhook_auth({"Authorization": f"Basic {token}", "X-LavaTop-Signature": sig}, body)
+        assert both.ok is True
+    finally:
+        settings.lava_top_webhook_login = old_login
+        settings.lava_top_webhook_password = old_password
         settings.lava_top_webhook_secret = old_secret
