@@ -16,6 +16,7 @@ from .context import UserHandlersContext
 
 RECOVERY_CTA_EVENT_TYPE = "recovery_cta_shown_after_payment"
 LAVA_PAYMENT_LOGGER = logging.getLogger("forwarder.payments.lava")
+BILLING_LOGGER = logging.getLogger("forwarder.billing")
 
 
 def _admin_manual_payment_keyboard(payment_intent_id: int) -> InlineKeyboardMarkup:
@@ -254,15 +255,8 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         if ctx.is_admin_user(callback.from_user.id if callback.from_user else None):
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
-        user_id = callback.from_user.id if callback.from_user else 0
-        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
-        invoices = await ctx.run_db(ctx.get_user_invoices_payload, tenant_id, 10)
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(
-            message=callback.message,
-            text=user_ui.build_user_invoices_text(invoices),
-            reply_markup=user_ui.build_user_invoices_keyboard(invoices),
-        )
+        await handle_user_billing_shop_callback(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice:"))
     async def handle_user_invoice_callback(callback: CallbackQuery):
@@ -337,23 +331,8 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         if ctx.is_admin_user(user_id):
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
-        invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
-        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
-        invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
-        if not invoice:
-            await ctx.answer_callback_safe(callback, "Счёт не найден", show_alert=True)
-            return
-        if int(invoice.get("tenant_id") or 0) != int(tenant_id):
-            ctx.logger.warning("попытка открыть оплату чужого счёта user_id=%s invoice_id=%s", user_id, invoice_id)
-            await ctx.answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
-            return
-        methods = await ctx.run_db(ctx.payment_service.list_available_methods, invoice)
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(
-            message=callback.message,
-            text=user_ui.build_user_payment_methods_text(invoice, methods),
-            reply_markup=user_ui.build_user_payment_methods_keyboard(invoice_id, methods),
-        )
+        await handle_user_billing_shop_callback(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_pay_provider:"))
     async def handle_user_pay_provider_callback(callback: CallbackQuery):
@@ -394,87 +373,8 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice_pay_lava:"))
     async def handle_user_invoice_pay_lava_callback(callback: CallbackQuery):
-        user_id = callback.from_user.id if callback.from_user else 0
-        if ctx.is_admin_user(user_id):
-            await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-            return
-        raw = (callback.data or "").split(":", 1)
-        invoice_id = int(raw[1] or 0) if len(raw) > 1 else 0
-        if invoice_id <= 0:
-            await ctx.answer_callback_safe(callback, "Некорректный счёт", show_alert=True)
-            return
-        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
-        invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
-        if not invoice:
-            await ctx.answer_callback_safe(callback, "Счёт не найден", show_alert=True)
-            return
-        if int(invoice.get("tenant_id") or 0) != int(tenant_id):
-            ctx.logger.warning("попытка Lava оплаты чужого счёта user_id=%s invoice_id=%s", user_id, invoice_id)
-            await ctx.answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
-            return
-        if str(invoice.get("status") or "").lower() not in {"open", "pending"}:
-            await ctx.answer_callback_safe(callback, "Этот счёт нельзя оплатить через Lava.top", show_alert=True)
-            return
-        if not settings.lava_top_enabled:
-            await ctx.answer_callback_safe(callback, "Оплата через Lava.top сейчас выключена", show_alert=True)
-            return
-        items = await ctx.run_db(ctx.db.list_invoice_items, invoice_id) if hasattr(ctx.db, "list_invoice_items") else []
-        plan_name = (ctx.invoice_plan_name(invoice, items) if callable(ctx.invoice_plan_name) else "BASIC") or "BASIC"
-        tariff_code = str(plan_name).strip().lower()
-        amount = float(invoice.get("total") or 0)
-        currency = str(invoice.get("currency") or "USD").upper()
-
-        await ctx.answer_callback_safe_once(callback, "⏳ Создаю ссылку на оплату…")
-        lava_service = LavaPaymentService()
-        username = callback.from_user.username if callback.from_user else None
-        try:
-            invoice_view = await lava_service.create_lava_invoice_for_user_invoice(
-                user_id=user_id,
-                invoice_id=invoice_id,
-                tariff_code=tariff_code,
-                amount=amount,
-                currency=currency,
-                username=username,
-            )
-            if not invoice_view.payment_url:
-                raise LavaTopAPIError("Lava.top вернул пустую ссылку оплаты")
-        except Exception as exc:
-            status_code = exc.status_code if isinstance(exc, LavaTopAPIError) else None
-            LAVA_PAYMENT_LOGGER.warning(
-                "Ошибка создания invoice Lava.top user_id=%s internal_invoice_id=%s tariff_code=%s provider=lava_top status_code=%s",
-                user_id,
-                invoice_id,
-                tariff_code,
-                status_code,
-            )
-            methods = await ctx.run_db(ctx.payment_service.list_available_methods, invoice)
-            await ctx.edit_message_text_safe(
-                message=callback.message,
-                text="Не удалось создать ссылку оплаты Lava.top. Попробуйте позже или выберите другой способ оплаты.",
-                reply_markup=user_ui.build_user_payment_methods_keyboard(invoice_id, methods),
-            )
-            return
-
-        LAVA_PAYMENT_LOGGER.info(
-            "Invoice Lava.top создан user_id=%s internal_invoice_id=%s tariff_code=%s provider=lava_top lava_invoice_id=%s amount=%s currency=%s payment_url_present=%s",
-            user_id,
-            invoice_id,
-            tariff_code,
-            invoice_view.invoice_id,
-            invoice_view.amount,
-            invoice_view.currency,
-            bool(invoice_view.payment_url),
-        )
-        await ctx.edit_message_text_safe(
-            message=callback.message,
-            text=user_ui.build_lava_invoice_created_text(
-                invoice_id=invoice_id,
-                tariff_title=str(plan_name).upper(),
-                amount=invoice_view.amount,
-                currency=invoice_view.currency,
-            ),
-            reply_markup=user_ui.build_lava_invoice_keyboard(invoice_id=invoice_id, payment_url=invoice_view.payment_url),
-        )
+        await ctx.answer_callback_safe_once(callback)
+        await handle_user_billing_shop_callback(callback)
 
     
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_billing_pick:"))
@@ -488,10 +388,34 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_billing_pay:"))
     async def handle_user_billing_pay_callback(callback: CallbackQuery):
+        user_id = callback.from_user.id if callback.from_user else 0
+        username = callback.from_user.username if callback.from_user else None
         _, tariff, period, currency, method_code = (callback.data or "").split(":", 4)
         method = method_by_code(currency, method_code) or {}
+        if not bool(method.get("enabled", True)):
+            await ctx.answer_callback_safe_once(callback)
+            await ctx.edit_message_text_safe(message=callback.message, text="Этот способ оплаты скоро будет доступен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_billing_pick:{tariff}:{period}:{currency}")]]))
+            return
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        sub = await ctx.run_db(ctx.subscription_service.get_active_subscription, tenant_id)
+        if not sub:
+            await ctx.answer_callback_safe(callback, "Не удалось найти подписку", show_alert=True)
+            return
+        sub = await ctx.run_db(ctx.billing_service.ensure_billing_period, sub)
+        amount = float(format_price(tariff, int(period), currency).split()[0])
+        invoice_id = await ctx.run_db(ctx.invoice_service.create_draft_invoice, int(tenant_id), int(sub.get("id") or 0), str(sub.get("current_period_start")), str(sub.get("current_period_end")), currency=currency)
+        await ctx.run_db(ctx.invoice_service.add_invoice_item, int(invoice_id), item_type="base_plan", description=f"{tariff}:{period}", quantity=1, unit_price=amount, metadata={"plan_name": str(tariff).upper(), "period_months": int(period), "method_code": method_code, "provider": method.get("provider")})
+        await ctx.run_db(ctx.invoice_service.finalize_invoice, int(invoice_id))
         await ctx.answer_callback_safe_once(callback, "⏳ Создаю платёж…")
-        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {format_price(tariff, int(period), currency)}\n" f"Способ: {method.get('title','—')}\nСтатус: ожидаем подтверждение оплаты"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="user_billing_shop")],[InlineKeyboardButton(text="⬅️ К способам оплаты", callback_data=f"user_billing_pick:{tariff}:{period}:{currency}")]]))
+        provider = str(method.get("provider") or "")
+        BILLING_LOGGER.info("start_payment user_id=%s tariff_code=%s period_months=%s currency=%s amount=%s method_code=%s provider=%s internal_invoice_created=%s", user_id, tariff, period, currency, amount, method_code, provider, True)
+        if provider == "lava_top":
+            lava_service = LavaPaymentService()
+            invoice_view = await lava_service.create_lava_invoice_for_user_invoice(user_id=user_id, invoice_id=int(invoice_id), tariff_code=tariff, amount=amount, currency=currency, username=username, payment_provider=method.get("payment_provider"))
+            await ctx.edit_message_text_safe(message=callback.message, text=f"✅ Ссылка на оплату создана\n\nТариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {format_price(tariff, int(period), currency)}\nСпособ: {method.get('title','—')}\n\nПосле оплаты доступ активируется автоматически.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Перейти к оплате", url=invoice_view.payment_url)],[InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"user_invoice_check_payment:{int(invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_billing_pick:{tariff}:{period}:{currency}")]]))
+            return
+        await ctx.run_db(ctx.payment_service.create_payment_for_invoice, int(invoice_id), provider)
+        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {format_price(tariff, int(period), currency)}\n" f"Способ: {method.get('title','—')}\n\nПосле оплаты прикрепите чек сюда в чат."), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧾 Отправить чек", callback_data=f"user_upload_receipt:{int(invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_billing_pick:{tariff}:{period}:{currency}")]]))
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_upload_receipt:"))
     async def handle_user_upload_receipt_callback(callback: CallbackQuery):
