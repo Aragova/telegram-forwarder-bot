@@ -117,20 +117,19 @@ def build_user_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                build_button(text="👤 Мой аккаунт", callback_data="user_account"),
+                build_button(text="📡 Мои каналы", callback_data="user_channels"),
                 build_button(text="⚙️ Мои правила", callback_data="user_rules"),
             ],
             [
-                build_button(text="📡 Мои каналы", callback_data="user_channels"),
+                build_button(text="📊 Живой статус", callback_data="user_status"),
                 build_button(text="🌐 Language", callback_data="user_language", style="danger"),
             ],
             [
-                build_button(text="📊 Живой статус", callback_data="user_status"),
+                build_button(text="🆘 Поддержка", callback_data="user_support", style="primary"),
                 build_button(text="🌍 TimeZone", callback_data="user_timezone"),
             ],
             [
-                build_button(text="🆘 Поддержка", callback_data="user_support", style="primary"),
-                build_button(text="📘 Инструкция", callback_data="user_help"),
+                build_button(text="💎 Подписка", callback_data="user_subscription", style="primary"),
             ],
         ]
     )
@@ -496,18 +495,19 @@ def build_user_language_keyboard() -> InlineKeyboardMarkup:
 def build_user_support_text() -> str:
     return (
         "🆘 Поддержка ViMi\n\n"
-        "Мы поможем с настройкой каналов, правилами, оплатой и ошибками публикации.\n\n"
-        "Перед обращением подготовьте:\n"
-        "• номер правила, если вопрос по публикации;\n"
-        "• номер платежа, если вопрос по оплате;\n"
-        "• скрин ошибки, если она есть.\n\n"
-        "Нажмите кнопку ниже, чтобы открыть поддержку."
+        "Здесь можно получить помощь по настройке каналов, правилам, оплате и ошибкам публикации.\n\n"
+        "Что можно сделать:\n"
+        "• открыть поддержку;\n"
+        "• посмотреть инструкцию;\n"
+        "• проверить основные разделы помощи.\n\n"
+        "Если вопрос по оплате, приложите скрин оплаты."
     )
 
 
 def build_user_support_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [build_button(text="💬 Открыть поддержку", url="https://t.me/vimi_support_bot", style="primary")],
+        [build_button(text="🆘 Открыть поддержку", url="https://t.me/vimi_support_bot", style="primary")],
+        [build_button(text="📘 Инструкция", callback_data="user_help")],
         [build_button(text="⬅️ Главное меню", callback_data="user_main")],
     ])
 

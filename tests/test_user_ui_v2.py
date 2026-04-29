@@ -9,18 +9,19 @@ def _flatten_texts(markup):
 def test_user_main_menu_contains_required_buttons():
     kb = user_ui.build_user_main_keyboard()
     texts = _flatten_texts(kb)
-    assert "👤 Мой аккаунт" in texts
-    assert "⚙️ Мои правила" in texts
     assert "📡 Мои каналы" in texts
-    assert "🌐 Language" in texts
+    assert "⚙️ Мои правила" in texts
     assert "📊 Живой статус" in texts
+    assert "🌐 Language" in texts
     assert "🌍 TimeZone" in texts
     assert "🆘 Поддержка" in texts
-    assert "📘 Инструкция" in texts
+    assert "💎 Подписка" in texts
 
 
 def test_user_main_menu_not_contains_removed_buttons():
     texts = _flatten_texts(user_ui.build_user_main_keyboard())
+    assert "👤 Мой аккаунт" not in texts
+    assert "📘 Инструкция" not in texts
     assert "Моя очередь" not in texts
     assert "Использование" not in texts
     assert "Восстановить работу" not in texts
@@ -69,6 +70,26 @@ def test_single_button_rows_are_single_for_back_actions():
     assert len(kb.inline_keyboard[-1]) == 1
     tz = user_ui.build_user_timezone_keyboard()
     assert len(tz.inline_keyboard[-1]) == 1
+
+
+def test_user_main_menu_layout_and_callbacks():
+    kb = user_ui.build_user_main_keyboard()
+    assert kb.inline_keyboard[0][0].text == "📡 Мои каналы"
+    assert kb.inline_keyboard[0][0].callback_data == "user_channels"
+    assert kb.inline_keyboard[0][1].text == "⚙️ Мои правила"
+    assert kb.inline_keyboard[0][1].callback_data == "user_rules"
+    assert kb.inline_keyboard[-1][0].text == "💎 Подписка"
+    assert kb.inline_keyboard[-1][0].callback_data == "user_subscription"
+    assert len(kb.inline_keyboard[-1]) == 1
+
+
+def test_support_contains_instruction_entrypoint():
+    kb = user_ui.build_user_support_keyboard()
+    texts = _flatten_texts(kb)
+    assert "🆘 Открыть поддержку" in texts
+    assert "📘 Инструкция" in texts
+    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row if getattr(btn, "callback_data", None)]
+    assert "user_help" in callbacks
 
 
 def test_main_text_uses_subscription_plan_and_not_hardcoded_free():

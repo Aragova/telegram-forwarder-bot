@@ -149,8 +149,7 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
                     text=user_ui.build_user_subscription_blocked_text(subscription),
                     reply_markup=InlineKeyboardMarkup(
                         inline_keyboard=[
-                            [InlineKeyboardButton(text="💎 Тарифы", callback_data="user_plans")],
-                            [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
+                            [InlineKeyboardButton(text="💎 Подписка", callback_data="user_subscription")],
                             [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
                         ]
                     ),
