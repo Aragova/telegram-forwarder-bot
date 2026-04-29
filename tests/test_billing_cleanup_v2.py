@@ -20,8 +20,15 @@ def test_legacy_callbacks_show_deprecated_message() -> None:
 def test_payments_flow_uses_subscription_entry_and_router() -> None:
     source = Path("app/user_handlers/payments.py").read_text(encoding="utf-8")
     assert "user_subscription_pay:" in source
-    assert "callback.data = f\"user_billing_pay:" in source
+    assert "await _start_user_billing_payment(callback, tariff=tariff, period=period, currency=currency, method_code=method_code)" in source
     assert "router.start_payment(" in source
+
+
+def test_legacy_user_billing_pay_is_disabled() -> None:
+    source = Path("app/user_handlers/payments.py").read_text(encoding="utf-8")
+    assert "⚠️ Данные устарели.\\nОткройте оплату заново." in source
+    assert 'text="💎 Подписка"' in source
+    assert 'text="⬅️ Главное меню"' in source
 
 
 def test_short_id_has_owner_and_ttl_checks() -> None:
