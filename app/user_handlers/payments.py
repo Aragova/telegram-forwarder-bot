@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from typing import Any
 
 from aiogram import Dispatcher
@@ -43,6 +44,33 @@ def _is_recovery_cta_already_shown(events: list[dict[str, Any]], payment_intent_
 
 
 def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> None:
+    def _save_pay_action(user_id: int, action: dict[str, Any]) -> str:
+        state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
+        actions = state.get("subscription_pay_actions") if isinstance(state.get("subscription_pay_actions"), dict) else {}
+        short_id = secrets.token_urlsafe(6)[:8]
+        actions[short_id] = action
+        ctx.user_states[user_id] = {**state, "subscription_pay_actions": actions}
+        return short_id
+
+    async def _render_purchase(callback: CallbackQuery, tariff_code: str, currency: str, period: int):
+        user_id = callback.from_user.id if callback.from_user else 0
+        methods = methods_for_currency(currency)
+        prices = {p: format_price(tariff_code, p, currency) for p in (1, 3, 6, 12)}
+        pay_buttons: list[tuple[str, str]] = []
+        for method in methods:
+            short_id = _save_pay_action(user_id, {"tariff_code": tariff_code, "currency": currency, "period_months": period, "method_code": method.get("code")})
+            pay_buttons.append((str(method.get("title") or method.get("code")), short_id))
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=user_ui.build_user_tariff_purchase_text(tariff_code, currency, period, prices, methods),
+            reply_markup=user_ui.build_user_tariff_purchase_keyboard(
+                tariff_code=tariff_code,
+                currency=currency,
+                selected_period_months=period,
+                methods=methods,
+                pay_buttons=pay_buttons,
+            ),
+        )
 
     @dp.callback_query(lambda c: c.data == "user_subscription")
     async def handle_user_subscription_callback(callback: CallbackQuery):
@@ -52,29 +80,39 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(
             message=callback.message,
-            text=user_ui.build_billing_subscription_text(await ctx.run_db(ctx.subscription_service.get_active_subscription, await ctx.run_db(ctx.ensure_user_tenant, callback.from_user.id if callback.from_user else 0))),
-            reply_markup=user_ui.build_billing_subscription_keyboard(),
+            text=user_ui.build_user_subscription_status_text(await ctx.run_db(ctx.subscription_service.get_active_subscription, await ctx.run_db(ctx.ensure_user_tenant, callback.from_user.id if callback.from_user else 0))),
+            reply_markup=user_ui.build_user_subscription_status_keyboard(await ctx.run_db(ctx.subscription_service.get_active_subscription, await ctx.run_db(ctx.ensure_user_tenant, callback.from_user.id if callback.from_user else 0))),
         )
 
-    
-    @dp.callback_query(lambda c: c.data == "user_billing_shop")
-    async def handle_user_billing_shop_callback(callback: CallbackQuery):
-        user_id = callback.from_user.id if callback.from_user else 0
-        if ctx.is_admin_user(user_id):
-            await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-            return
-        state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
-        currency = str(state.get("billing_currency") or "USD").upper()
-        prices = {t: {p: format_price(t, p, currency) for p in (1,3,6,12)} for t in ("basic","pro")}
+    @dp.callback_query(lambda c: c.data == "user_subscription_plans" or c.data == "user_billing_shop")
+    async def handle_user_subscription_plans_callback(callback: CallbackQuery):
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(message=callback.message, text=user_ui.build_billing_shop_text(currency), reply_markup=user_ui.build_billing_shop_keyboard(currency=currency, prices=prices, methods=methods_for_currency(currency)))
+        await ctx.edit_message_text_safe(message=callback.message, text=user_ui.build_user_subscription_plans_text(), reply_markup=user_ui.build_user_subscription_plans_keyboard())
 
-    @dp.callback_query(lambda c: c.data and c.data.startswith("user_billing_currency:"))
-    async def handle_user_billing_currency_callback(callback: CallbackQuery):
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_subscription_buy:"))
+    async def handle_user_subscription_buy_callback(callback: CallbackQuery):
+        _, tariff_code = (callback.data or "").split(":", 1)
+        await ctx.answer_callback_safe_once(callback)
+        await _render_purchase(callback, str(tariff_code).lower(), "USD", 1)
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_subscription_currency:"))
+    async def handle_user_subscription_currency_callback(callback: CallbackQuery):
+        _, tariff_code, currency = (callback.data or "").split(":", 2)
         user_id = callback.from_user.id if callback.from_user else 0
-        currency = (callback.data or "").split(":",1)[1].upper()
-        ctx.user_states[user_id] = {**(ctx.user_states.get(user_id) or {}), "billing_currency": currency}
-        await handle_user_billing_shop_callback(callback)
+        state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
+        period = int(state.get("subscription_period_months") or 1)
+        await ctx.answer_callback_safe_once(callback)
+        await _render_purchase(callback, tariff_code, currency.upper(), period)
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_subscription_period:"))
+    async def handle_user_subscription_period_callback(callback: CallbackQuery):
+        _, tariff_code, currency, period_raw = (callback.data or "").split(":", 3)
+        period = int(period_raw or 1)
+        user_id = callback.from_user.id if callback.from_user else 0
+        state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
+        ctx.user_states[user_id] = {**state, "subscription_period_months": period}
+        await ctx.answer_callback_safe_once(callback)
+        await _render_purchase(callback, tariff_code, currency.upper(), period)
 
     @dp.callback_query(lambda c: c.data == "user_tariff_basic")
     async def handle_user_tariff_basic_callback(callback: CallbackQuery):
@@ -150,105 +188,24 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         if ctx.is_admin_user(callback.from_user.id if callback.from_user else None):
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
-        user_id = callback.from_user.id if callback.from_user else 0
-        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         plan_name = str((callback.data or "").split(":", 1)[1] if ":" in (callback.data or "") else "").upper()
-        ctx.logger.info("пользователь выбрал тариф plan_name=%s user_id=%s tenant_id=%s", plan_name, user_id, tenant_id)
-        if plan_name == "OWNER":
-            await ctx.answer_callback_safe(callback, "Тариф OWNER недоступен", show_alert=True)
-            return
-        if plan_name == "FREE":
-            await ctx.answer_callback_safe_once(callback)
-            await ctx.edit_message_text_safe(
-                message=callback.message,
-                text="Тариф FREE не требует оплаты.",
-                reply_markup=ctx.public_plans_keyboard(),
-            )
-            return
-        if plan_name not in {"BASIC", "PRO"}:
-            await ctx.answer_callback_safe(callback, "Разрешены только тарифы BASIC и PRO", show_alert=True)
-            return
-        current_sub = await ctx.run_db(ctx.subscription_service.get_active_subscription, tenant_id) or {}
-        current_plan = str(current_sub.get("plan_name") or "FREE").upper()
-        if current_plan == plan_name:
-            await ctx.answer_callback_safe_once(callback, "Этот тариф уже подключён")
-            await ctx.edit_message_text_safe(
-                message=callback.message,
-                text="✅ Этот тариф уже активен.\n\nВыберите другой план или вернитесь назад.",
-                reply_markup=ctx.public_plans_keyboard(current_plan),
-            )
-            return
-        plan = ctx.get_plan_info(plan_name, "ru")
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(
-            message=callback.message,
-            text=user_ui.build_user_plan_confirmation_text(plan),
-            reply_markup=user_ui.build_user_plan_confirmation_keyboard(plan_name),
-        )
-        return
+        if plan_name in {"BASIC", "PRO"}:
+            await _render_purchase(callback, plan_name.lower(), "USD", 1)
+            return
+        await handle_user_subscription_plans_callback(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_confirm_plan:"))
     async def handle_user_confirm_plan_callback(callback: CallbackQuery):
         if ctx.is_admin_user(callback.from_user.id if callback.from_user else None):
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
-        user_id = callback.from_user.id if callback.from_user else 0
-        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         plan_name = str((callback.data or "").split(":", 1)[1] if ":" in (callback.data or "") else "").upper()
-        if plan_name not in {"BASIC", "PRO"}:
-            await ctx.answer_callback_safe(callback, "Разрешены только тарифы BASIC и PRO", show_alert=True)
-            return
-
-        invoices = await ctx.run_db(ctx.get_user_invoices_payload, tenant_id, 10)
-        for invoice in invoices:
-            status = str(invoice.get("status") or "")
-            if status not in {"open", "draft"}:
-                continue
-            if ctx.invoice_plan_name(invoice, invoice.get("items") or []) == plan_name:
-                await ctx.answer_callback_safe_once(callback)
-                await ctx.edit_message_text_safe(
-                    message=callback.message,
-                    text=user_ui.build_user_invoice_text(invoice, invoice.get("items") or []),
-                    reply_markup=ctx.public_invoice_keyboard(int(invoice.get("id") or 0)),
-                )
-                return
-
-        sub = await ctx.run_db(ctx.subscription_service.get_active_subscription, tenant_id)
-        if not sub:
-            await ctx.answer_callback_safe(callback, "Не удалось найти активную подписку", show_alert=True)
-            return
-        sub = await ctx.run_db(ctx.billing_service.ensure_billing_period, sub)
-        plan = ctx.get_plan_info(plan_name, "ru")
-        invoice_id = await ctx.run_db(
-            ctx.invoice_service.create_draft_invoice,
-            int(tenant_id),
-            int(sub.get("id") or 0),
-            str(sub.get("current_period_start")),
-            str(sub.get("current_period_end")),
-            currency="USD",
-        )
-        if not invoice_id:
-            await ctx.answer_callback_safe(callback, "Не удалось создать платёж", show_alert=True)
-            return
-        await ctx.run_db(
-            ctx.invoice_service.add_invoice_item,
-            int(invoice_id),
-            item_type="base_plan",
-            description=plan_name,
-            quantity=1,
-            unit_price=float(plan.get("price") or 0),
-            metadata={"plan_name": plan_name},
-        )
-        await ctx.run_db(ctx.invoice_service.finalize_invoice, int(invoice_id))
-        invoice = await ctx.run_db(ctx.db.get_invoice, int(invoice_id)) if hasattr(ctx.db, "get_invoice") else {"id": int(invoice_id), "status": "open", "total": float(plan.get("price") or 0), "currency": "USD"}
-        items = await ctx.run_db(ctx.db.list_invoice_items, int(invoice_id)) if hasattr(ctx.db, "list_invoice_items") else []
-        ctx.logger.info("создан счёт invoice_id=%s tenant_id=%s plan=%s", invoice_id, tenant_id, plan_name)
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(
-            message=callback.message,
-            text=user_ui.build_user_invoice_text(invoice, items),
-            reply_markup=ctx.public_invoice_keyboard(int(invoice_id)),
-        )
+        if plan_name in {"BASIC", "PRO"}:
+            await _render_purchase(callback, plan_name.lower(), "USD", 1)
+            return
+        await handle_user_subscription_plans_callback(callback)
 
     @dp.callback_query(lambda c: c.data == "user_invoices")
     async def handle_user_invoices_callback(callback: CallbackQuery):
@@ -256,7 +213,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
-        await handle_user_billing_shop_callback(callback)
+        await handle_user_subscription_plans_callback(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice:"))
     async def handle_user_invoice_callback(callback: CallbackQuery):
@@ -265,7 +222,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
-        await handle_user_billing_shop_callback(callback)
+        await handle_user_subscription_plans_callback(callback)
         return
         invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
@@ -332,7 +289,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
-        await handle_user_billing_shop_callback(callback)
+        await handle_user_subscription_plans_callback(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_pay_provider:"))
     async def handle_user_pay_provider_callback(callback: CallbackQuery):
@@ -374,7 +331,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice_pay_lava:"))
     async def handle_user_invoice_pay_lava_callback(callback: CallbackQuery):
         await ctx.answer_callback_safe_once(callback)
-        await handle_user_billing_shop_callback(callback)
+        await handle_user_subscription_plans_callback(callback)
 
     
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_billing_pick:"))
@@ -416,6 +373,23 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             return
         await ctx.run_db(ctx.payment_service.create_payment_for_invoice, int(invoice_id), provider)
         await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {format_price(tariff, int(period), currency)}\n" f"Способ: {method.get('title','—')}\n\nПосле оплаты прикрепите чек сюда в чат."), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧾 Отправить чек", callback_data=f"user_upload_receipt:{int(invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_billing_pick:{tariff}:{period}:{currency}")]]))
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_subscription_pay:"))
+    async def handle_user_subscription_pay_callback(callback: CallbackQuery):
+        user_id = callback.from_user.id if callback.from_user else 0
+        short_id = (callback.data or "").split(":", 1)[1] if ":" in (callback.data or "") else ""
+        state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
+        actions = state.get("subscription_pay_actions") if isinstance(state.get("subscription_pay_actions"), dict) else {}
+        action = actions.get(short_id) if isinstance(actions.get(short_id), dict) else None
+        if not action:
+            await ctx.answer_callback_safe(callback, "Действие оплаты устарело. Выберите способ снова.", show_alert=True)
+            return
+        tariff = str(action.get("tariff_code") or "basic")
+        period = int(action.get("period_months") or 1)
+        currency = str(action.get("currency") or "USD").upper()
+        method_code = str(action.get("method_code") or "")
+        callback.data = f"user_billing_pay:{tariff}:{period}:{currency}:{method_code}"
+        await handle_user_billing_pay_callback(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_upload_receipt:"))
     async def handle_user_upload_receipt_callback(callback: CallbackQuery):
