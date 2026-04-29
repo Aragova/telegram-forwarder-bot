@@ -5509,6 +5509,17 @@ class PostgresRepository(RepositoryProtocol):
     def set_billing_exchange_rate(self, *, currency: str, new_value: float, admin_id: int | None = None) -> bool:
         return self.billing_repo.set_billing_exchange_rate(currency=currency, new_value=new_value, admin_id=admin_id)
 
+    def get_billing_usd_prices(self) -> dict[str, dict[int, float]]:
+        return self.billing_repo.get_billing_usd_prices()
+
+    def set_billing_usd_price(self, *, tariff_code: str, period_months: int, new_price: float, admin_id: int | None = None) -> bool:
+        return self.billing_repo.set_billing_usd_price(
+            tariff_code=tariff_code,
+            period_months=period_months,
+            new_price=new_price,
+            admin_id=admin_id,
+        )
+
     def create_invoice(
         self,
         *,
