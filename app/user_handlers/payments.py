@@ -160,7 +160,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             await ctx.answer_callback_safe_once(callback)
             await ctx.edit_message_text_safe(
                 message=callback.message,
-                text="Тариф FREE не требует создания счёта.",
+                text="Тариф FREE не требует оплаты.",
                 reply_markup=ctx.public_plans_keyboard(),
             )
             return
@@ -227,7 +227,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             currency="USD",
         )
         if not invoice_id:
-            await ctx.answer_callback_safe(callback, "Не удалось создать счёт", show_alert=True)
+            await ctx.answer_callback_safe(callback, "Не удалось создать платёж", show_alert=True)
             return
         await ctx.run_db(
             ctx.invoice_service.add_invoice_item,
@@ -276,7 +276,6 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         invoice_id = int((callback.data or "0").split(":", 1)[1] or 0)
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
-        items = await ctx.run_db(ctx.db.list_invoice_items, invoice_id) if hasattr(ctx.db, "list_invoice_items") else []
         if not invoice:
             await ctx.answer_callback_safe(callback, "Счёт не найден", show_alert=True)
             return
@@ -305,39 +304,31 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
         items = await ctx.run_db(ctx.db.list_invoice_items, invoice_id) if hasattr(ctx.db, "list_invoice_items") else []
         if not invoice:
-            await ctx.answer_callback_safe(callback, "Счёт не найден", show_alert=True)
+            await ctx.answer_callback_safe(callback, "Платёж не найден", show_alert=True)
             return
         if int(invoice.get("tenant_id") or 0) != int(tenant_id):
-            await ctx.answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+            await ctx.answer_callback_safe(callback, "⛔ Нет доступа к этому платежу", show_alert=True)
             return
 
         status = str(invoice.get("status") or "").lower()
         await ctx.answer_callback_safe_once(callback)
         if status == "paid":
-            sub = await ctx.run_db(ctx.subscription_service.get_active_subscription, tenant_id) or {}
-            plan_name = str(sub.get("plan_name") or "BASIC").upper()
             await ctx.edit_message_text_safe(
                 message=callback.message,
-                text=("✅ Оплата получена\n\n" f"Тариф {plan_name} активирован."),
+                text="Платёж подтверждён\n\nПодписка активирована",
                 reply_markup=user_ui.build_user_invoice_keyboard(invoice_id),
             )
             return
         if status in {"open", "draft", "pending"}:
             await ctx.edit_message_text_safe(
                 message=callback.message,
-                text=(
-                    user_ui.build_user_invoice_text(invoice, items)
-                    + "\n\nПлатёж ещё не подтверждён Lava.top. Попробуйте проверить чуть позже."
-                ),
+                text="Платёж ещё не подтверждён",
                 reply_markup=user_ui.build_user_invoice_keyboard(invoice_id),
             )
             return
         await ctx.edit_message_text_safe(
             message=callback.message,
-            text=(
-                user_ui.build_user_invoice_text(invoice, items)
-                + "\n\nПлатёж не прошёл или счёт закрыт. Создайте новый счёт и попробуйте снова."
-            ),
+            text="Платёж ещё не подтверждён",
             reply_markup=user_ui.build_user_invoice_keyboard(invoice_id),
         )
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice_pay:"))
@@ -623,7 +614,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
-                    [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+                    [InlineKeyboardButton(text="💳 Вернуться к платежу", callback_data=f"user_invoice:{int(invoice_id)}")],
                     [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
                 ]
             ),
@@ -676,12 +667,12 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         intent = await ctx.run_db(ctx.db.get_payment_intent, payment_intent_id) if hasattr(ctx.db, "get_payment_intent") else None
         if not invoice or not intent:
             ctx.user_states.pop(user_id, None)
-            await message.answer("❌ Счёт или оплата не найдены. Откройте счёт и начните заново.")
+            await message.answer("❌ Платёж не найден. Откройте раздел оплаты и начните заново.")
             return
         if int(invoice.get("tenant_id") or 0) != int(tenant_id) or int(intent.get("invoice_id") or 0) != int(invoice_id):
             ctx.logger.warning("попытка загрузки чека в чужую оплату user_id=%s invoice_id=%s intent_id=%s", user_id, invoice_id, payment_intent_id)
             ctx.user_states.pop(user_id, None)
-            await message.answer("⛔ Нет доступа к этому счёту.")
+            await message.answer("⛔ Нет доступа к этому платежу.")
             return
         if str(intent.get("provider") or "") not in ctx.manual_payment_providers:
             ctx.user_states.pop(user_id, None)
@@ -689,7 +680,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             return
         if str(intent.get("status") or "") not in ctx.manual_payment_active_statuses:
             ctx.user_states.pop(user_id, None)
-            await message.answer("❌ Эта заявка на оплату уже закрыта.\n\nОткройте счёт и создайте новую попытку оплаты, затем прикрепите чек.")
+            await message.answer("❌ Эта заявка на оплату уже закрыта.\n\nОткройте раздел оплаты и создайте новую попытку, затем прикрепите чек.")
             return
         receipt_kind = ""
         receipt_file_id = ""
@@ -740,7 +731,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
                 inline_keyboard=[
                     [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_manual_paid:{int(invoice_id)}")],
                     [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
-                    [InlineKeyboardButton(text="🧾 Вернуться к счёту", callback_data=f"user_invoice:{int(invoice_id)}")],
+                    [InlineKeyboardButton(text="💳 Вернуться к платежу", callback_data=f"user_invoice:{int(invoice_id)}")],
                     [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
                 ]
             ),

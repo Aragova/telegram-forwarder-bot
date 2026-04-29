@@ -388,7 +388,7 @@ def build_user_plan_confirmation_text(plan: dict[str, Any]) -> str:
             "──────────────\n\n"
             "Стоимость:\n"
             "💳 29 USD / месяц\n\n"
-            "После подтверждения будет создан счёт на оплату."
+            "После подтверждения будет создан платёж."
         )
     return (
         "🚀 BASIC\n\n"
@@ -401,7 +401,7 @@ def build_user_plan_confirmation_text(plan: dict[str, Any]) -> str:
         "──────────────\n\n"
         "Стоимость:\n"
         "💳 9 USD / месяц\n\n"
-        "После подтверждения будет создан счёт на оплату."
+        "После подтверждения будет создан платёж."
     )
 
 
@@ -409,7 +409,7 @@ def build_user_plan_confirmation_keyboard(plan_name: str) -> InlineKeyboardMarku
     normalized = str(plan_name or "").upper()
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [build_button(text=f"🧾 Создать счёт {normalized}", callback_data=f"user_confirm_plan:{normalized}", style=("success" if normalized == "PRO" else "primary"))],
+            [build_button(text=f"💳 Оплатить {normalized}", callback_data=f"user_confirm_plan:{normalized}", style=("success" if normalized == "PRO" else "primary"))],
             [build_button(text="⬅️ Назад к тарифам", callback_data="user_plans")],
         ]
     )
@@ -499,7 +499,7 @@ def build_user_support_text() -> str:
         "Мы поможем с настройкой каналов, правилами, оплатой и ошибками публикации.\n\n"
         "Перед обращением подготовьте:\n"
         "• номер правила, если вопрос по публикации;\n"
-        "• номер счёта, если вопрос по оплате;\n"
+        "• номер платежа, если вопрос по оплате;\n"
         "• скрин ошибки, если она есть.\n\n"
         "Нажмите кнопку ниже, чтобы открыть поддержку."
     )
@@ -523,7 +523,7 @@ def build_user_help_section_text(section: str) -> str:
         "modes": "🔁 Режимы\n\nРежим repost пересылает посты как есть. Режим video включает обработку видео и дополнительные параметры медиаконтента.",
         "schedule": "🕒 Расписание\n\nИспользуйте плавающий интервал или фиксированное время публикаций, чтобы выдерживать предсказуемый ритм контента.",
         "video": "🎬 Видеоредактор\n\nВ видеорежиме доступны интро, подписи и расширенная подготовка роликов перед публикацией.",
-        "payment": "💳 Оплата\n\nВыберите тариф BASIC или PRO, создайте счёт и оплатите удобным способом. После подтверждения тариф активируется автоматически.",
+        "payment": "💳 Оплата\n\nВыберите тариф BASIC или PRO, оформите платёж и оплатите удобным способом. После подтверждения тариф активируется автоматически.",
     }
     return mapping.get(section, "📘 Раздел не найден")
 
@@ -551,11 +551,11 @@ def build_user_help_keyboard() -> InlineKeyboardMarkup:
 
 def build_user_invoice_text(invoice: dict[str, Any], items: list[dict[str, Any]]) -> str:
     invoice_id = int(invoice.get("id") or 0)
-    status = str(invoice.get("status") or "draft")
+    status = _payment_status_label(str(invoice.get("status") or "draft"))
     currency = str(invoice.get("currency") or "USD").upper()
     total = float(invoice.get("total") or 0)
     plan_name = "UNKNOWN"
-    lines = [f"🧾 Счёт #{invoice_id}", ""]
+    lines = [f"💳 Платёж #{invoice_id}", ""]
     for item in items:
         meta = item.get("metadata_json") or {}
         if isinstance(meta, dict) and meta.get("plan_name"):
@@ -586,19 +586,19 @@ def build_user_invoice_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="💳 Перейти к оплате", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
             [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
             [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"user_invoice_check_payment:{int(invoice_id)}")],
-            [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
+            [InlineKeyboardButton(text="💳 Мои платежи", callback_data="user_invoices")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_plans")],
         ]
     )
 
 
 def build_user_invoices_text(invoices: list[dict[str, Any]]) -> str:
-    lines = ["🧾 Мои счета", ""]
+    lines = ["💳 Мои платежи", ""]
     if not invoices:
         lines.extend(
             [
-                "У вас пока нет счетов.",
-                "Выберите тариф, чтобы создать счёт.",
+                "У вас пока нет платежей.",
+                "Выберите тариф, чтобы продолжить оплату.",
             ]
         )
         return "\n".join(lines)
@@ -610,7 +610,7 @@ def build_user_invoices_text(invoices: list[dict[str, Any]]) -> str:
                 plan_name = str(meta.get("plan_name")).upper()
                 break
         lines.append(
-            f"#{int(invoice.get('id') or 0)} — {plan_name} — {float(invoice.get('total') or 0):.0f} {str(invoice.get('currency') or 'USD').upper()} — {str(invoice.get('status') or 'draft')}"
+            f"#{int(invoice.get('id') or 0)} — {plan_name} — {float(invoice.get('total') or 0):.0f} {str(invoice.get('currency') or 'USD').upper()} — {_payment_status_label(str(invoice.get('status') or 'draft'))}"
         )
     return "\n".join(lines)
 
@@ -622,7 +622,7 @@ def build_user_invoices_keyboard(invoices: list[dict[str, Any]]) -> InlineKeyboa
     else:
         for invoice in invoices:
             invoice_id = int(invoice.get("id") or 0)
-            rows.append([InlineKeyboardButton(text=f"Открыть счёт #{invoice_id}", callback_data=f"user_invoice:{invoice_id}")])
+            rows.append([InlineKeyboardButton(text=f"Открыть платёж #{invoice_id}", callback_data=f"user_invoice:{invoice_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -632,21 +632,35 @@ def payment_provider_title(provider: str) -> str:
     return PAYMENT_PROVIDER_TITLES_RU.get(key, key)
 
 
+def _payment_status_label(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    labels = {
+        "draft": "черновик",
+        "open": "ожидает оплаты",
+        "pending": "в обработке",
+        "created": "создан",
+        "paid": "подтверждён",
+        "failed": "отклонён",
+        "waiting_confirmation": "ожидает проверки",
+    }
+    return labels.get(normalized, normalized or "неизвестно")
+
+
 def build_user_payment_methods_text(invoice: dict[str, Any], methods: list[dict[str, Any]]) -> str:
     invoice_id = int(invoice.get("id") or 0)
     if not methods:
         return (
-            f"💳 Оплата счёта #{invoice_id}\n\n"
+            f"💳 Оплата #{invoice_id}\n\n"
             "Сейчас нет доступных способов оплаты.\n"
             "Попробуйте позже или обратитесь в поддержку."
         )
     total = float(invoice.get("total") or 0)
     currency = str(invoice.get("currency") or "USD").upper()
-    status = str(invoice.get("status") or "draft")
+    status = _payment_status_label(str(invoice.get("status") or "draft"))
     return (
-        f"💳 Оплата счёта #{invoice_id}\n\n"
+        f"💳 Оплата #{invoice_id}\n\n"
         f"Сумма: {total:.0f} {currency}\n"
-        f"Статус счёта: {status}\n\n"
+        f"Статус платежа: {status}\n\n"
         "Выберите способ оплаты:"
     )
 
@@ -676,7 +690,7 @@ def build_user_payment_result_text(invoice: dict[str, Any], payment_result: dict
     lines = [
         "💳 Оплата создана",
         "",
-        f"Счёт: #{invoice_id}",
+        f"Платёж: #{invoice_id}",
         f"Способ: {provider_title}",
         f"Статус: {status}",
     ]
@@ -749,7 +763,7 @@ def build_user_manual_receipt_request_text(invoice: dict[str, Any], payment_inte
     provider_title = payment_provider_title(str(payment_intent.get("provider") or ""))
     return (
         "💎 <b>Премиум-подтверждение оплаты</b>\n\n"
-        f"🧾 <b>Счёт:</b> #{invoice_id}\n"
+        f"💳 <b>Платёж:</b> #{invoice_id}\n"
         f"🔖 <b>Payment intent:</b> #{intent_id}\n"
         f"💳 <b>Способ оплаты:</b> {provider_title}\n\n"
         "📤 <b>Загрузите чек</b> файлом или фотографией прямо в этот чат.\n"
@@ -763,7 +777,7 @@ def build_user_manual_receipt_uploaded_text(invoice: dict[str, Any], payment_int
     intent_id = int(payment_intent.get("id") or 0)
     return (
         "✅ Чек прикреплён\n\n"
-        f"Счёт: #{invoice_id}\n"
+        f"Платёж: #{invoice_id}\n"
         f"Payment intent: #{intent_id}\n\n"
         "Теперь нажмите «✅ Я оплатил», чтобы отправить заявку администратору."
     )
@@ -771,17 +785,18 @@ def build_user_manual_receipt_uploaded_text(invoice: dict[str, Any], payment_int
 
 def build_user_payment_status_text(invoice: dict[str, Any], payment_intent: dict[str, Any] | None) -> str:
     invoice_id = int(invoice.get("id") or 0)
-    invoice_status = str(invoice.get("status") or "draft")
+    invoice_status = _payment_status_label(str(invoice.get("status") or "draft"))
     if not payment_intent:
         return (
             "📊 Статус оплаты\n\n"
-            f"Счёт: #{invoice_id}\n"
-            f"Статус счёта: {invoice_status}\n\n"
+            f"Платёж: #{invoice_id}\n"
+            f"Статус платежа: {invoice_status}\n\n"
             "Оплата ещё не создавалась."
         )
     intent_id = int(payment_intent.get("id") or 0)
     provider_title = payment_provider_title(str(payment_intent.get("provider") or ""))
     payment_status = str(payment_intent.get("status") or "created")
+    payment_status_label = _payment_status_label(payment_status)
     payload = payment_intent.get("confirmation_payload_json") if isinstance(payment_intent.get("confirmation_payload_json"), dict) else {}
     user_payload_status = str(payload.get("status") or "")
     description = "💳 Оплата создана"
@@ -795,11 +810,11 @@ def build_user_payment_status_text(invoice: dict[str, Any], payment_intent: dict
         description = "❌ Оплата отклонена"
     return (
         "📊 Статус оплаты\n\n"
-        f"Счёт: #{invoice_id}\n"
+        f"Платёж: #{invoice_id}\n"
         f"Payment intent: #{intent_id}\n"
         f"Способ: {provider_title}\n"
-        f"Статус счёта: {invoice_status}\n"
-        f"Статус оплаты: {payment_status}\n\n"
+        f"Статус платежа: {invoice_status}\n"
+        f"Статус оплаты: {payment_status_label}\n\n"
         f"{description}"
     )
 
