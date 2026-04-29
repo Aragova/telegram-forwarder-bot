@@ -209,14 +209,29 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             await ctx.edit_message_text_safe(
                 message=callback.message,
                 text="Платёж подтверждён\n\nПодписка активирована",
-                reply_markup=user_ui.build_user_payment_status_keyboard(invoice_id),
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="💎 Моя подписка", callback_data="user_subscription")],
+                        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="user_main")],
+                    ]
+                ),
             )
             return
         if status in {"open", "draft", "pending"}:
+            payment_intent = await ctx.find_latest_payment_intent_for_invoice(invoice_id, tenant_id)
+            method_hint = "user_subscription_plans"
+            if isinstance(payment_intent, dict):
+                method_hint = f"user_subscription_methods:{str(payment_intent.get('tariff_code') or 'basic')}:{str(payment_intent.get('currency') or 'USD').upper()}:{int(payment_intent.get('period_months') or 1)}"
             await ctx.edit_message_text_safe(
                 message=callback.message,
                 text="Платёж ещё не подтверждён",
-                reply_markup=user_ui.build_user_payment_status_keyboard(invoice_id),
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="🔄 Проверить ещё раз", callback_data=f"user_invoice_check_payment:{invoice_id}")],
+                        [InlineKeyboardButton(text="💳 Выбрать другой способ", callback_data=method_hint)],
+                        [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_main")],
+                    ]
+                ),
             )
             return
         await ctx.edit_message_text_safe(
@@ -284,8 +299,17 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_billing_pay:"))
     async def handle_user_billing_pay_callback(callback: CallbackQuery):
-        _, tariff, period, currency, method_code = (callback.data or "").split(":", 4)
-        await _start_user_billing_payment(callback, tariff=tariff, period=int(period), currency=currency, method_code=method_code)
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text="⚠️ Данные устарели.\nОткройте оплату заново.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="💎 Подписка", callback_data="user_subscription")],
+                    [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
+                ]
+            ),
+        )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_subscription_pay:"))
     async def handle_user_subscription_pay_callback(callback: CallbackQuery):
@@ -319,11 +343,11 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
         if not invoice:
-            await ctx.answer_callback_safe(callback, "Счёт не найден", show_alert=True)
+            await ctx.answer_callback_safe(callback, "Платёж не найден", show_alert=True)
             return
         if int(invoice.get("tenant_id") or 0) != int(tenant_id):
-            ctx.logger.warning("попытка загрузить чек по чужому счёту user_id=%s invoice_id=%s", user_id, invoice_id)
-            await ctx.answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+            ctx.logger.warning("попытка загрузить чек по чужому платежу user_id=%s invoice_id=%s", user_id, invoice_id)
+            await ctx.answer_callback_safe(callback, "⛔ Нет доступа к этому платежу", show_alert=True)
             return
         intent = await ctx.find_active_manual_payment_intent_for_invoice(int(invoice_id))
         if not intent:
@@ -354,11 +378,11 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
         if not invoice:
-            await ctx.answer_callback_safe(callback, "Счёт не найден", show_alert=True)
+            await ctx.answer_callback_safe(callback, "Платёж не найден", show_alert=True)
             return
         if int(invoice.get("tenant_id") or 0) != int(tenant_id):
             ctx.logger.warning("попытка просмотра статуса чужой оплаты user_id=%s invoice_id=%s", user_id, invoice_id)
-            await ctx.answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+            await ctx.answer_callback_safe(callback, "⛔ Нет доступа к этому платежу", show_alert=True)
             return
         payment_intent = await ctx.find_latest_payment_intent_for_invoice(invoice_id, tenant_id)
         await ctx.answer_callback_safe_once(callback)
@@ -379,18 +403,18 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
         if not invoice:
-            await ctx.answer_callback_safe(callback, "Счёт не найден", show_alert=True)
+            await ctx.answer_callback_safe(callback, "Платёж не найден", show_alert=True)
             return
         if int(invoice.get("tenant_id") or 0) != int(tenant_id):
             ctx.logger.warning("попытка чужой заявки user_id=%s invoice_id=%s", user_id, invoice_id)
-            await ctx.answer_callback_safe(callback, "⛔ Нет доступа к этому счёту", show_alert=True)
+            await ctx.answer_callback_safe(callback, "⛔ Нет доступа к этому платежу", show_alert=True)
             return
         if str(invoice.get("status") or "") == "paid":
-            await ctx.answer_callback_safe(callback, "✅ Этот счёт уже оплачен.", show_alert=True)
+            await ctx.answer_callback_safe(callback, "✅ Этот платёж уже подтверждён.", show_alert=True)
             return
         intent = await ctx.find_active_manual_payment_intent_for_invoice(int(invoice_id))
         if not intent:
-            await ctx.answer_callback_safe(callback, "❌ Не найдена активная ручная оплата по этому счёту.\nВернитесь к счёту и выберите способ оплаты.", show_alert=True)
+            await ctx.answer_callback_safe(callback, "❌ Активная ручная оплата не найдена.\nВернитесь в раздел подписки.", show_alert=True)
             return
         payment_intent_id = int(intent.get("id") or 0)
         payload = dict(intent.get("confirmation_payload_json") or {})

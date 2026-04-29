@@ -21,6 +21,7 @@ def _collect_payment_ui_texts() -> list[str]:
 def test_user_payment_ui_has_no_legacy_invoice_terms() -> None:
     forbidden = [
         "Счёт #",
+        "Счёт не найден",
         "Статус счёта",
         "open",
         "draft",
