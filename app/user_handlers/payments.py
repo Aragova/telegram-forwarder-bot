@@ -165,60 +165,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
 
     @dp.callback_query(lambda c: c.data == "user_pay_lava_basic")
     async def handle_user_pay_lava_basic_callback(callback: CallbackQuery):
-        user_id = callback.from_user.id if callback.from_user else 0
-        if ctx.is_admin_user(user_id):
-            await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-            return
-        await ctx.answer_callback_safe_once(callback, "⏳ Создаю ссылку на оплату…")
-
-        lava_service = LavaPaymentService()
-        username = callback.from_user.username if callback.from_user else None
-        LAVA_PAYMENT_LOGGER.info(
-            "Старт создания invoice Lava.top user_id=%s tariff_code=basic provider=lava_top",
-            user_id,
-        )
-        try:
-            invoice_view = await lava_service.create_lava_basic_invoice(
-                user_id=user_id,
-                username=username,
-            )
-            if not invoice_view.payment_url:
-                raise LavaTopAPIError("Lava.top вернул пустую ссылку оплаты")
-        except Exception as exc:
-            status_code = exc.status_code if isinstance(exc, LavaTopAPIError) else None
-            LAVA_PAYMENT_LOGGER.exception(
-                "Ошибка создания invoice Lava.top user_id=%s tariff_code=basic status_code=%s",
-                user_id,
-                status_code,
-            )
-            await ctx.edit_message_text_safe(
-                message=callback.message,
-                text=(
-                    "Не удалось создать ссылку оплаты. "
-                    "Попробуйте позже или напишите в поддержку."
-                ),
-                reply_markup=user_ui.build_lava_subscription_keyboard(),
-            )
-            return
-
-        LAVA_PAYMENT_LOGGER.info(
-            "Invoice Lava.top создан user_id=%s tariff_code=basic invoice_id=%s amount=%s currency=%s payment_url=%s",
-            user_id,
-            invoice_view.invoice_id,
-            invoice_view.amount,
-            invoice_view.currency,
-            bool(invoice_view.payment_url),
-        )
-        await ctx.edit_message_text_safe(
-            message=callback.message,
-            text=user_ui.build_lava_invoice_created_text(
-                invoice_id=0,
-                tariff_title="BASIC",
-                amount=invoice_view.amount,
-                currency=invoice_view.currency,
-            ),
-            reply_markup=user_ui.build_lava_invoice_keyboard(invoice_id=0, payment_url=invoice_view.payment_url),
-        )
+        await _show_legacy_flow_disabled(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_select_plan:"))
     async def handle_user_select_plan_callback(callback: CallbackQuery):
@@ -262,20 +209,20 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             await ctx.edit_message_text_safe(
                 message=callback.message,
                 text="Платёж подтверждён\n\nПодписка активирована",
-                reply_markup=user_ui.build_user_invoice_keyboard(invoice_id),
+                reply_markup=user_ui.build_user_payment_status_keyboard(invoice_id),
             )
             return
         if status in {"open", "draft", "pending"}:
             await ctx.edit_message_text_safe(
                 message=callback.message,
                 text="Платёж ещё не подтверждён",
-                reply_markup=user_ui.build_user_invoice_keyboard(invoice_id),
+                reply_markup=user_ui.build_user_payment_status_keyboard(invoice_id),
             )
             return
         await ctx.edit_message_text_safe(
             message=callback.message,
-            text="Платёж ещё не подтверждён",
-            reply_markup=user_ui.build_user_invoice_keyboard(invoice_id),
+            text="⚠️ Платёж не подтверждён\n\nДеньги не были зачислены в ViMi.\nВы можете попробовать ещё раз или выбрать другой способ оплаты.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Попробовать снова", callback_data="user_subscription_plans")],[InlineKeyboardButton(text="💳 Выбрать другой способ", callback_data="user_subscription_plans")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_main")]]),
         )
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice_pay:"))
     async def handle_user_invoice_pay_callback(callback: CallbackQuery):
@@ -292,12 +239,17 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
     
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_billing_pick:"))
     async def handle_user_billing_pick_callback(callback: CallbackQuery):
-        _, tariff, period, currency = (callback.data or "").split(":", 3)
-        methods = methods_for_currency(currency)
-        rows = [[InlineKeyboardButton(text=str(m.get("title")), callback_data=f"user_billing_pay:{tariff}:{period}:{currency}:{m.get('code')}")] for m in methods]
-        rows.append([InlineKeyboardButton(text="⬅️ К покупке", callback_data="user_billing_shop")])
+        await _show_legacy_flow_disabled(callback)
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_subscription_methods:"))
+    async def handle_user_subscription_methods_callback(callback: CallbackQuery):
+        _, tariff_code, currency, period_raw = (callback.data or "").split(":", 3)
+        period = int(period_raw or 1)
+        user_id = callback.from_user.id if callback.from_user else 0
+        state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
+        ctx.user_states[user_id] = {**state, "subscription_purchase": {"tariff_code": tariff_code, "currency": currency.upper(), "period_months": period}}
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(message=callback.message, text=f"💳 Выберите способ оплаты\n\nТариф: {tariff.upper()}\nПериод: {period} мес\nСумма: {format_price(tariff, int(period), currency)}", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await _render_purchase(callback, tariff_code, currency.upper(), period)
 
     async def _start_user_billing_payment(callback: CallbackQuery, tariff: str, period: int, currency: str, method_code: str):
         user_id = callback.from_user.id if callback.from_user else 0
@@ -305,17 +257,30 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         method = method_by_code(currency, method_code) or {}
         if not bool(method.get("enabled", True)):
             await ctx.answer_callback_safe_once(callback)
-            await ctx.edit_message_text_safe(message=callback.message, text="Этот способ оплаты скоро будет доступен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_billing_pick:{tariff}:{period}:{currency}")]]))
+            await ctx.edit_message_text_safe(message=callback.message, text="Этот способ оплаты скоро будет доступен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
             return
         await ctx.answer_callback_safe_once(callback, "⏳ Создаю платёж…")
-        result = await router.start_payment(
-            user_id=user_id, tariff_code=tariff, period_months=int(period), currency=currency, method_code=method_code, username=username
-        )
+        try:
+            result = await router.start_payment(
+                user_id=user_id, tariff_code=tariff, period_months=int(period), currency=currency, method_code=method_code, username=username
+            )
+        except Exception:
+            BILLING_LOGGER.exception("start_payment_provider_failed user_id=%s tariff_code=%s period_months=%s currency=%s method_code=%s", user_id, tariff, period, currency, method_code)
+            retry_short_id = _save_pay_action(
+                user_id,
+                {"tariff_code": tariff, "currency": currency, "period_months": period, "method_code": method_code},
+            )
+            await ctx.edit_message_text_safe(
+                message=callback.message,
+                text="⚠️ Не удалось создать ссылку оплаты\n\nМы не списали деньги.\nПопробуйте ещё раз или выберите другой способ оплаты.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Попробовать снова", callback_data=f"user_subscription_pay:{retry_short_id}")],[InlineKeyboardButton(text="💳 Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_main")]]),
+            )
+            return
         BILLING_LOGGER.info("start_payment user_id=%s tariff_code=%s period_months=%s currency=%s method_code=%s provider=%s internal_invoice_created=%s", user_id, tariff, period, currency, method_code, result.provider, True)
         if result.payment_url:
-            await ctx.edit_message_text_safe(message=callback.message, text=f"✅ Ссылка на оплату создана\n\nТариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {result.amount_text}\nСпособ: {result.method_title}\n\nПосле оплаты доступ активируется автоматически.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Перейти к оплате", url=result.payment_url)],[InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"user_invoice_check_payment:{int(result.invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_billing_pick:{tariff}:{period}:{currency}")]]))
+            await ctx.edit_message_text_safe(message=callback.message, text=f"✅ Ссылка на оплату создана\n\nТариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {result.amount_text}\nСпособ: {result.method_title}\n\nПосле оплаты доступ активируется автоматически.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Перейти к оплате", url=result.payment_url)],[InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"user_invoice_check_payment:{int(result.invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
             return
-        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {result.amount_text}\n" f"Способ: {result.method_title}\n\nПосле оплаты прикрепите чек сюда в чат."), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧾 Отправить чек", callback_data=f"user_upload_receipt:{int(result.invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_billing_pick:{tariff}:{period}:{currency}")]]))
+        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {result.amount_text}\n" f"Способ: {result.method_title}\n\nПосле оплаты прикрепите чек сюда в чат."), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧾 Отправить чек", callback_data=f"user_upload_receipt:{int(result.invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_billing_pay:"))
     async def handle_user_billing_pay_callback(callback: CallbackQuery):
