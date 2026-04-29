@@ -43,6 +43,14 @@ class _FakeRepo:
         rows = [p for p in self.payment_intents.values() if p["invoice_id"] == invoice_id]
         return rows[-1] if rows else None
 
+
+    def get_active_payment_intent_for_invoice_provider(self, invoice_id: int, provider: str):
+        rows = [
+            p for p in self.payment_intents.values()
+            if p["invoice_id"] == invoice_id and p.get("provider") == provider and str(p.get("status") or "") in {"created", "pending", "waiting_confirmation"}
+        ]
+        return rows[-1] if rows else None
+
     def get_payment_intent_by_external_id(self, external_payment_id: str):
         for row in self.payment_intents.values():
             if row.get("external_payment_id") == external_payment_id:
@@ -228,3 +236,25 @@ def test_payment_event_written_on_activation():
     out = service.create_payment_for_invoice(11, "manual_bank_card")
     service.confirm_manual_payment(out["payment_intent_id"], admin_id=100, note="approved")
     assert any(e["event_type"] == "payment_received" for e in repo.billing_events)
+
+
+def test_double_click_does_not_create_duplicate_active_lava_links():
+    settings.payment_enabled = True
+    settings.lava_top_enabled = True
+    repo, service = _service()
+    first = service.create_payment_for_invoice(11, "lava_top", attempt_id="a1", idempotency_key="a1")
+    second = service.create_payment_for_invoice(11, "lava_top", attempt_id="a1", idempotency_key="a1")
+    assert first["ok"] is True
+    assert second.get("idempotent") is True
+    assert first["payment_intent_id"] == second["payment_intent_id"]
+
+
+def test_retry_after_failed_creates_new_attempt():
+    settings.payment_enabled = True
+    settings.lava_top_enabled = True
+    repo, service = _service()
+    first = service.create_payment_for_invoice(11, "lava_top", attempt_id="a2", idempotency_key="a2")
+    repo.mark_payment_failed(first["payment_intent_id"], "provider_error")
+    second = service.create_payment_for_invoice(11, "lava_top", attempt_id="a3", idempotency_key="a3")
+    assert second["ok"] is True
+    assert second["payment_intent_id"] != first["payment_intent_id"]

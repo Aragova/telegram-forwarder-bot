@@ -52,8 +52,8 @@ class _PaymentService:
     def __init__(self):
         self.calls = []
 
-    def create_payment_for_invoice(self, invoice_id: int, provider: str):
-        self.calls.append((invoice_id, provider))
+    def create_payment_for_invoice(self, invoice_id: int, provider: str, **kwargs):
+        self.calls.append((invoice_id, provider, kwargs))
 
 
 def _build_router(subscription_service):
@@ -84,7 +84,7 @@ def test_start_payment_supports_sync_subscription_service():
     )
 
     assert invoice_service.created
-    assert payment_service.calls == [(101, "manual_bank_card")]
+    assert payment_service.calls == [(101, "manual_bank_card", {"attempt_id": None, "idempotency_key": None})]
     assert result.requires_receipt is True
 
 
@@ -101,7 +101,7 @@ def test_start_payment_supports_async_subscription_service():
         )
     )
 
-    assert payment_service.calls == [(101, "manual_bank_card")]
+    assert payment_service.calls == [(101, "manual_bank_card", {"attempt_id": None, "idempotency_key": None})]
     assert result.requires_receipt is True
 
 
@@ -122,7 +122,7 @@ def test_start_payment_manual_allows_first_purchase_without_active_subscription(
     assert created[1] == 0
     assert created[2]
     assert created[3]
-    assert payment_service.calls == [(101, "manual_bank_card")]
+    assert payment_service.calls == [(101, "manual_bank_card", {"attempt_id": None, "idempotency_key": None})]
     assert result.requires_receipt is True
 
 

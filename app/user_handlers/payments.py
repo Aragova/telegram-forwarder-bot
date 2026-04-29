@@ -195,7 +195,6 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         invoice_id = int(raw[1] or 0) if len(raw) > 1 else 0
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
-        items = await ctx.run_db(ctx.db.list_invoice_items, invoice_id) if hasattr(ctx.db, "list_invoice_items") else []
         if not invoice:
             await ctx.answer_callback_safe(callback, "Платёж не найден", show_alert=True)
             return
@@ -212,7 +211,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
                         [InlineKeyboardButton(text="💎 Моя подписка", callback_data="user_subscription")],
-                        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="user_main")],
+                        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="user_support")],
                     ]
                 ),
             )
@@ -229,7 +228,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
                     inline_keyboard=[
                         [InlineKeyboardButton(text="🔄 Проверить ещё раз", callback_data=f"user_invoice_check_payment:{invoice_id}")],
                         [InlineKeyboardButton(text="💳 Выбрать другой способ", callback_data=method_hint)],
-                        [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_main")],
+                        [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
                     ]
                 ),
             )
@@ -237,7 +236,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         await ctx.edit_message_text_safe(
             message=callback.message,
             text="⚠️ Платёж не подтверждён\n\nДеньги не были зачислены в ViMi.\nВы можете попробовать ещё раз или выбрать другой способ оплаты.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Попробовать снова", callback_data="user_subscription_plans")],[InlineKeyboardButton(text="💳 Выбрать другой способ", callback_data="user_subscription_plans")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_main")]]),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Попробовать снова", callback_data="user_subscription_plans")],[InlineKeyboardButton(text="💳 Выбрать другой способ", callback_data="user_subscription_plans")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]),
         )
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_invoice_pay:"))
     async def handle_user_invoice_pay_callback(callback: CallbackQuery):
@@ -276,8 +275,10 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             return
         await ctx.answer_callback_safe_once(callback, "⏳ Создаю платёж…")
         try:
+            attempt_id = f"userpay:{user_id}:{tariff}:{currency}:{period}:{method_code}"
             result = await router.start_payment(
-                user_id=user_id, tariff_code=tariff, period_months=int(period), currency=currency, method_code=method_code, username=username
+                user_id=user_id, tariff_code=tariff, period_months=int(period), currency=currency, method_code=method_code, username=username,
+                attempt_id=attempt_id, idempotency_key=attempt_id
             )
         except Exception:
             BILLING_LOGGER.exception("start_payment_provider_failed user_id=%s tariff_code=%s period_months=%s currency=%s method_code=%s", user_id, tariff, period, currency, method_code)
@@ -288,7 +289,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             await ctx.edit_message_text_safe(
                 message=callback.message,
                 text="⚠️ Не удалось создать ссылку оплаты\n\nМы не списали деньги.\nПопробуйте ещё раз или выберите другой способ оплаты.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Попробовать снова", callback_data=f"user_subscription_pay:{retry_short_id}")],[InlineKeyboardButton(text="💳 Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_main")]]),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Попробовать снова", callback_data=f"user_subscription_pay:{retry_short_id}")],[InlineKeyboardButton(text="💳 Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]),
             )
             return
         BILLING_LOGGER.info("start_payment user_id=%s tariff_code=%s period_months=%s currency=%s method_code=%s provider=%s internal_invoice_created=%s", user_id, tariff, period, currency, method_code, result.provider, True)
@@ -306,7 +307,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="💎 Подписка", callback_data="user_subscription")],
-                    [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
+                    [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_support")],
                 ]
             ),
         )
