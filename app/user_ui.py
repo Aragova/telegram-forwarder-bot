@@ -1038,21 +1038,83 @@ def build_user_subscription_plans_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 BASIC", callback_data="user_subscription_buy:basic")],[InlineKeyboardButton(text="🚀 PRO", callback_data="user_subscription_buy:pro")],[InlineKeyboardButton(text="⬅️ Назад к подписке", callback_data="user_subscription")]])
 
 
-def build_user_tariff_purchase_text(tariff_code: str, currency: str, selected_period_months: int, prices: dict[int, str], methods: list[dict[str, Any]]) -> str:
-    title = "💎 BASIC" if str(tariff_code).lower()=="basic" else "🚀 PRO"
-    period_lines = [f"{'✅ ' if p==selected_period_months else ''}{p} месяц{'а' if p in (3,6,12) else ''} — {prices[p]}" for p in (1,3,6,12)]
-    method_lines = [str(m.get('title') or m.get('code')) for m in methods]
-    return f"{title}\n\nВыберите валюту:\n[🇷🇺 RUB] [🇺🇸 USD]\n[🇪🇺 EUR] [🇺🇦 UAH]\n\nПериод подписки:\n" + "\n".join(period_lines) + "\n\nСпособы оплаты:\n" + "\n".join(method_lines)
+def _tariff_title_and_description(tariff_code: str) -> tuple[str, str]:
+    code = str(tariff_code or "basic").lower()
+    if code == "pro":
+        return "🚀 PRO", "Для активных каналов, видео-автоматизации и масштабирования."
+    return "💎 BASIC", "Для одного Telegram-проекта и стабильного автопостинга."
 
 
-def build_user_tariff_purchase_keyboard(*, tariff_code: str, currency: str, selected_period_months: int, methods: list[dict[str, Any]], pay_buttons: list[tuple[str, str]]) -> InlineKeyboardMarkup:
-    rows=[[InlineKeyboardButton(text="🇷🇺 RUB", callback_data=f"user_subscription_currency:{tariff_code}:RUB"),InlineKeyboardButton(text="🇺🇸 USD", callback_data=f"user_subscription_currency:{tariff_code}:USD")],[InlineKeyboardButton(text="🇪🇺 EUR", callback_data=f"user_subscription_currency:{tariff_code}:EUR"),InlineKeyboardButton(text="🇺🇦 UAH", callback_data=f"user_subscription_currency:{tariff_code}:UAH")]]
-    for p in (1,3,6,12):
-        mark="✅ " if p==selected_period_months else ""
-        rows.append([InlineKeyboardButton(text=f"{mark}{p} мес", callback_data=f"user_subscription_period:{tariff_code}:{currency}:{p}")])
-    for text, short_id in pay_buttons:
-        rows.append([InlineKeyboardButton(text=text, callback_data=f"user_subscription_pay:{short_id}")])
+def build_currency_switch_row(tariff_code: str, selected_currency: str) -> list[InlineKeyboardButton]:
+    currencies = [("USD", "🇺🇸"), ("RUB", "🇷🇺"), ("EUR", "🇪🇺"), ("UAH", "🇺🇦")]
+    current = str(selected_currency or "USD").upper()
+    return [
+        InlineKeyboardButton(
+            text=f"{'🟢 ' if c == current else ''}{flag} {c}",
+            callback_data=f"user_subscription_currency:{tariff_code}:{c}",
+        )
+        for c, flag in currencies
+    ]
+
+
+def build_period_rows(tariff_code: str, currency: str, prices: dict[int, str]) -> list[list[InlineKeyboardButton]]:
+    return [
+        [
+            InlineKeyboardButton(
+                text=f"🎉 {p} месяц{'а' if p in (3, 6, 12) else ''} — {prices[p]}",
+                callback_data=f"user_subscription_period:{tariff_code}:{currency}:{p}",
+            )
+        ]
+        for p in (1, 3, 6, 12)
+    ]
+
+
+def build_payment_method_rows(pay_buttons: list[tuple[str, str]]) -> list[list[InlineKeyboardButton]]:
+    return [[InlineKeyboardButton(text=text, callback_data=f"user_subscription_pay:{short_id}")] for text, short_id in pay_buttons]
+
+
+def build_user_tariff_period_select_text(tariff_code: str) -> str:
+    title, subtitle = _tariff_title_and_description(tariff_code)
+    return (
+        f"{title}\n\n"
+        f"{subtitle}\n\n"
+        "Откроется доступ к:\n"
+        "• автопостинг;\n"
+        "• очереди публикаций;\n"
+        "• управление правилами;\n"
+        "• стабильная публикация без ручной рутины.\n\n"
+        "🎉 Тариф со скидкой\n\n"
+        "🔻 Выберите срок подписки:"
+    )
+
+
+def build_user_tariff_period_select_keyboard(*, tariff_code: str, currency: str, prices: dict[int, str]) -> InlineKeyboardMarkup:
+    rows = [build_currency_switch_row(tariff_code, currency)]
+    rows.extend(build_period_rows(tariff_code, currency, prices))
     rows.append([InlineKeyboardButton(text="⬅️ Назад к тарифам", callback_data="user_subscription_plans")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_user_tariff_payment_select_text(tariff_code: str, currency: str, period_months: int, prices: dict[int, str]) -> str:
+    title, _ = _tariff_title_and_description(tariff_code)
+    flags = {"USD": "🇺🇸", "RUB": "🇷🇺", "EUR": "🇪🇺", "UAH": "🇺🇦"}
+    return (
+        f"{title}\n\n"
+        "Откроется доступ к:\n"
+        "• автопостинг;\n"
+        "• очереди публикаций;\n"
+        "• управление правилами;\n"
+        "• стабильная публикация без ручной рутины.\n\n"
+        f"Цена: {prices[period_months]} {flags.get(str(currency).upper(), '')}\n"
+        f"Срок действия: {period_months} месяц{'а' if period_months in (3, 6, 12) else ''}\n\n"
+        "🔻 Выберите систему оплаты:"
+    )
+
+
+def build_user_tariff_payment_select_keyboard(*, tariff_code: str, currency: str, pay_buttons: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    rows = [build_currency_switch_row(tariff_code, currency)]
+    rows.extend(build_payment_method_rows(pay_buttons))
+    rows.append([InlineKeyboardButton(text="⬅️ Назад к срокам", callback_data=f"user_subscription_back_to_periods:{tariff_code}:{currency}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 # backward compatibility

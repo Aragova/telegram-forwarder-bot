@@ -73,24 +73,25 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         ctx.user_states[user_id] = {**state, "subscription_pay_actions": actions}
         return short_id
 
-    async def _render_purchase(callback: CallbackQuery, tariff_code: str, currency: str, period: int):
+    async def _render_purchase(callback: CallbackQuery, tariff_code: str, currency: str, period: int | None):
         user_id = callback.from_user.id if callback.from_user else 0
-        methods = methods_for_currency(currency)
         prices = {p: format_price(tariff_code, p, currency) for p in (1, 3, 6, 12)}
+        if period is None:
+            await ctx.edit_message_text_safe(
+                message=callback.message,
+                text=user_ui.build_user_tariff_period_select_text(tariff_code),
+                reply_markup=user_ui.build_user_tariff_period_select_keyboard(tariff_code=tariff_code, currency=currency, prices=prices),
+            )
+            return
+        methods = methods_for_currency(currency)
         pay_buttons: list[tuple[str, str]] = []
         for method in methods:
             short_id = _save_pay_action(user_id, {"tariff_code": tariff_code, "currency": currency, "period_months": period, "method_code": method.get("code")})
             pay_buttons.append((str(method.get("title") or method.get("code")), short_id))
         await ctx.edit_message_text_safe(
             message=callback.message,
-            text=user_ui.build_user_tariff_purchase_text(tariff_code, currency, period, prices, methods),
-            reply_markup=user_ui.build_user_tariff_purchase_keyboard(
-                tariff_code=tariff_code,
-                currency=currency,
-                selected_period_months=period,
-                methods=methods,
-                pay_buttons=pay_buttons,
-            ),
+            text=user_ui.build_user_tariff_payment_select_text(tariff_code, currency, period, prices),
+            reply_markup=user_ui.build_user_tariff_payment_select_keyboard(tariff_code=tariff_code, currency=currency, pay_buttons=pay_buttons),
         )
 
     @dp.callback_query(lambda c: c.data == "user_subscription")
@@ -114,16 +115,21 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
     async def handle_user_subscription_buy_callback(callback: CallbackQuery):
         _, tariff_code = (callback.data or "").split(":", 1)
         await ctx.answer_callback_safe_once(callback)
-        await _render_purchase(callback, str(tariff_code).lower(), "USD", 1)
+        user_id = callback.from_user.id if callback.from_user else 0
+        state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
+        ctx.user_states[user_id] = {**state, "subscription_purchase": {"tariff_code": str(tariff_code).lower(), "currency": "USD", "period_months": None}}
+        await _render_purchase(callback, str(tariff_code).lower(), "USD", None)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_subscription_currency:"))
     async def handle_user_subscription_currency_callback(callback: CallbackQuery):
         _, tariff_code, currency = (callback.data or "").split(":", 2)
         user_id = callback.from_user.id if callback.from_user else 0
         state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
-        period = int(state.get("subscription_period_months") or 1)
+        purchase = state.get("subscription_purchase") if isinstance(state.get("subscription_purchase"), dict) else {}
+        period = purchase.get("period_months")
+        ctx.user_states[user_id] = {**state, "subscription_purchase": {"tariff_code": tariff_code, "currency": currency.upper(), "period_months": period}}
         await ctx.answer_callback_safe_once(callback)
-        await _render_purchase(callback, tariff_code, currency.upper(), period)
+        await _render_purchase(callback, tariff_code, currency.upper(), int(period) if period is not None else None)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_subscription_period:"))
     async def handle_user_subscription_period_callback(callback: CallbackQuery):
@@ -131,9 +137,19 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         period = int(period_raw or 1)
         user_id = callback.from_user.id if callback.from_user else 0
         state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
-        ctx.user_states[user_id] = {**state, "subscription_period_months": period}
+        ctx.user_states[user_id] = {**state, "subscription_purchase": {"tariff_code": tariff_code, "currency": currency.upper(), "period_months": period}}
         await ctx.answer_callback_safe_once(callback)
         await _render_purchase(callback, tariff_code, currency.upper(), period)
+
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_subscription_back_to_periods:"))
+    async def handle_user_subscription_back_to_periods_callback(callback: CallbackQuery):
+        _, tariff_code, currency = (callback.data or "").split(":", 2)
+        user_id = callback.from_user.id if callback.from_user else 0
+        state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
+        ctx.user_states[user_id] = {**state, "subscription_purchase": {"tariff_code": tariff_code, "currency": currency.upper(), "period_months": None}}
+        await ctx.answer_callback_safe_once(callback)
+        await _render_purchase(callback, tariff_code, currency.upper(), None)
 
     @dp.callback_query(lambda c: c.data == "user_tariff_basic")
     async def handle_user_tariff_basic_callback(callback: CallbackQuery):
