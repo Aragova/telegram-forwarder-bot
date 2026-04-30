@@ -12,6 +12,7 @@ from typing import Any, Callable
 from aiogram import Bot
 
 from app.config import settings
+from app.payments.lava_top_client import sanitize_lava_response_for_log
 from app.payments.payment_service import LavaClientOrderRef, parse_lava_client_order_id
 from app.subscription_service import SubscriptionService
 
@@ -89,6 +90,15 @@ class LavaWebhookActivationService:
         self._notifier = notifier
 
     def process_webhook(self, payload: dict[str, Any], raw_body: str) -> LavaWebhookProcessResult:
+        keys = sorted(payload.keys())
+        LOGGER.info(
+            "LAVA_WEBHOOK_RECEIVED_KEYS | keys=%s | contractId_present=%s | parentContractId_present=%s",
+            keys,
+            payload.get("contractId") is not None,
+            (payload.get("ParentContractId") is not None) or (payload.get("parentContractId") is not None),
+        )
+        LOGGER.debug("LAVA_WEBHOOK_RECEIVED_SAFE | payload=%s", sanitize_lava_response_for_log(payload))
+
         safe = _safe_payload(payload)
         provider_invoice_id = str(safe.get("id") or "")
         provider_event_id = str(payload.get("eventId") or payload.get("event_id") or provider_invoice_id or "")
