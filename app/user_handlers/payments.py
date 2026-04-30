@@ -10,6 +10,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from app import user_ui
 from app.billing_catalog import format_price
+from app.payments.crypto_wallets import get_crypto_wallet, list_crypto_wallets
+from app.payments.fixed_prices import format_crypto_price
 from app.payments.payment_matrix import methods_for_currency, method_by_code
 from app.payments.payment_router import PaymentRouter
 from app.config import settings
@@ -71,6 +73,15 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         short_id = secrets.token_urlsafe(6)[:8]
         actions[short_id] = {**action, "user_id": int(user_id), "created_at": int(time.time())}
         ctx.user_states[user_id] = {**state, "subscription_pay_actions": actions}
+        return short_id
+
+
+    def _save_crypto_action(user_id: int, action: dict[str, Any]) -> str:
+        state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
+        actions = state.get("subscription_crypto_actions") if isinstance(state.get("subscription_crypto_actions"), dict) else {}
+        short_id = secrets.token_urlsafe(6)[:8]
+        actions[short_id] = {**action, "user_id": int(user_id), "created_at": int(time.time())}
+        ctx.user_states[user_id] = {**state, "subscription_crypto_actions": actions}
         return short_id
 
     async def _render_purchase(callback: CallbackQuery, tariff_code: str, currency: str, period: int | None):
@@ -271,7 +282,20 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         method = method_by_code(currency, method_code) or {}
         if not bool(method.get("enabled", True)):
             await ctx.answer_callback_safe_once(callback)
+            if method_code == "stars":
+                await ctx.edit_message_text_safe(message=callback.message, text="⭐ Telegram Stars\n\nЭтот способ оплаты скоро будет доступен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]))
+                return
             await ctx.edit_message_text_safe(message=callback.message, text="Этот способ оплаты скоро будет доступен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
+            return
+        if method_code == "crypto":
+            amount_text = format_crypto_price(tariff, period)
+            rows = []
+            for wallet in list_crypto_wallets():
+                coin_short = _save_crypto_action(user_id, {"tariff_code": tariff, "currency": currency, "period_months": period, "method_code": method_code, "coin_code": wallet.get("code")})
+                rows.append([InlineKeyboardButton(text=str(wallet.get("title") or "—"), callback_data=f"user_subscription_crypto:{coin_short}")])
+            rows.append([InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")])
+            await ctx.answer_callback_safe_once(callback)
+            await ctx.edit_message_text_safe(message=callback.message, text=("₿ Crypto\n\nВыберите криптовалюту для оплаты.\n\n" f"Тариф: {tariff.upper()}\nСрок: {period} месяц\nСумма: {amount_text}"), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
             return
         await ctx.answer_callback_safe_once(callback, "⏳ Создаю платёж…")
         try:
@@ -298,7 +322,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         if result.payment_url:
             await ctx.edit_message_text_safe(message=callback.message, text=f"✅ Ссылка на оплату создана\n\nТариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {result.amount_text}\nСпособ: {result.method_title}\n\nПосле оплаты доступ активируется автоматически.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Перейти к оплате", url=result.payment_url)],[InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"user_invoice_check_payment:{int(result.invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
             return
-        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {result.amount_text}\n" f"Способ: {result.method_title}\n\nПосле оплаты прикрепите чек сюда в чат."), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧾 Отправить чек", callback_data=f"user_upload_receipt:{int(result.invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
+        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {result.amount_text}\n" f"Способ: {result.method_title}\n\nПосле оплаты прикрепите скриншот сюда в чат."), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧾 Отправить чек", callback_data=f"user_upload_receipt:{int(result.invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_billing_pay:"))
     async def handle_user_billing_pay_callback(callback: CallbackQuery):
@@ -336,6 +360,37 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         # callback.data = f"user_billing_pay:{tariff}:{period}:{currency}:{method_code}"
         # legacy invariant for tests: await _start_user_billing_payment(callback, tariff=tariff, period=period, currency=currency, method_code=method_code)
         await _start_user_billing_payment(callback, tariff=tariff, period=period, currency=currency, method_code=method_code, action_id=short_id)
+
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_subscription_crypto:"))
+    async def handle_user_subscription_crypto_callback(callback: CallbackQuery):
+        user_id = callback.from_user.id if callback.from_user else 0
+        short_id = (callback.data or "").split(":", 1)[1] if ":" in (callback.data or "") else ""
+        state = ctx.user_states.get(user_id) if isinstance(ctx.user_states.get(user_id), dict) else {}
+        actions = state.get("subscription_crypto_actions") if isinstance(state.get("subscription_crypto_actions"), dict) else {}
+        action = actions.get(short_id) if isinstance(actions.get(short_id), dict) else None
+        if not action or int(action.get("user_id") or 0) != int(user_id):
+            await ctx.answer_callback_safe(callback, "Данные устарели", show_alert=True)
+            return
+        if int(time.time()) - int(action.get("created_at") or 0) > PAY_ACTION_TTL_SECONDS:
+            actions.pop(short_id, None)
+            ctx.user_states[user_id] = {**state, "subscription_crypto_actions": actions}
+            await ctx.answer_callback_safe(callback, "Данные устарели", show_alert=True)
+            return
+        wallet = get_crypto_wallet(str(action.get("coin_code") or ""))
+        if not wallet:
+            await ctx.answer_callback_safe(callback, "Данные устарели", show_alert=True)
+            return
+        tariff = str(action.get("tariff_code") or "basic")
+        period = int(action.get("period_months") or 1)
+        currency = str(action.get("currency") or "USD").upper()
+        await _start_user_billing_payment(callback, tariff=tariff, period=period, currency=currency, method_code="crypto", action_id=short_id)
+        invoice = await ctx.run_db(ctx.db.get_last_invoice, await ctx.run_db(ctx.ensure_user_tenant, user_id)) if hasattr(ctx.db, "get_last_invoice") else None
+        invoice_id = int(invoice.get("id") or 0) if isinstance(invoice, dict) else 0
+        if invoice_id <= 0:
+            return
+        amount_text = format_crypto_price(tariff, period)
+        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nСрок: {period} месяц\nСумма: {amount_text}\n" f"Способ: {wallet.get('title')}\n\nPayment details:\n\n" f"{wallet.get('wallet_label')}:\n{wallet.get('wallet_address')}\n\n" "Pay the amount of the tariff you have chosen.\nAttach a screenshot of the receipt and send it for verification.\n\n" "You are paying an individual.\nThe money will be credited to the recipient's account.\n\n" "✏️ Отправьте скриншот оплаты:"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧾 Отправить подтверждение", callback_data=f"user_upload_receipt:{invoice_id}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]))
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_upload_receipt:"))
     async def handle_user_upload_receipt_callback(callback: CallbackQuery):
