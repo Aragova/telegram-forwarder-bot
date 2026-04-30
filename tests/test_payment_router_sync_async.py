@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 from app.payments.payment_router import PaymentRouter
 
@@ -206,7 +207,15 @@ def test_start_payment_lava_allows_first_purchase_without_active_subscription(mo
     assert intent["provider"] == "lava_top"
     assert intent["status"] == "checkout_opened"
     assert intent["provider_payload_json"]["lava_invoice_id"] == "inv_101"
+    assert intent["provider_payload_json"]["lava_payment_url"] == "https://lava.test/pay/101"
+    assert intent["provider_payload_json"]["lava_amount_total"]["amount"] == 10.0
     assert intent["provider_payload_json"]["lava_amount_total"]["currency"] == "RUB"
+
+
+def test_postgres_payment_intents_status_constraint_includes_checkout_opened():
+    source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+    assert "payment_intents_status_check" in source
+    assert "checkout_opened" in source
 
 
 def test_start_payment_uses_repo_usd_and_uah_rate_for_new_payment():
