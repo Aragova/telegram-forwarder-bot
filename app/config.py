@@ -99,6 +99,10 @@ class Settings:
 
     tribute_enabled: bool = str(os.getenv("TRIBUTE_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
     tribute_api_key: str = os.getenv("TRIBUTE_API_KEY", "")
+    tribute_api_base: str = os.getenv("TRIBUTE_API_BASE", "https://tribute.tg").rstrip("/")
+    tribute_success_url: str = os.getenv("TRIBUTE_SUCCESS_URL", "").strip()
+    tribute_fail_url: str = os.getenv("TRIBUTE_FAIL_URL", "").strip()
+    tribute_request_timeout_sec: int = int(os.getenv("TRIBUTE_REQUEST_TIMEOUT_SEC", "20") or 20)
     tribute_webhook_secret: str = os.getenv("TRIBUTE_WEBHOOK_SECRET", "")
 
     lava_top_enabled: bool = str(os.getenv("LAVA_TOP_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}

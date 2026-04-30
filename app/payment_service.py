@@ -82,7 +82,7 @@ class PaymentService:
         elif result.external_checkout_url:
             normalized_status = "checkout_opened"
         elif normalized_status in {"failed", "error", "canceled"}:
-            normalized_status = "provider_failed"
+            normalized_status = "failed"
         if result.external_checkout_url:
             self._repo.attach_checkout_url(int(intent_id), result.external_checkout_url, external_payment_id=result.external_payment_id)
         elif result.external_payment_id:
@@ -149,8 +149,8 @@ class PaymentService:
             self._repo.mark_payment_paid(int(intent["id"]), confirmation_payload=asdict(webhook))
             self.activate_subscription_after_payment(int(intent["id"]))
             return {"ok": True, "payment_intent_id": int(intent["id"]), "status": "paid"}
-        self._repo.mark_payment_failed(int(intent["id"]), webhook.error_text or "provider_failed", payload=asdict(webhook))
-        return {"ok": False, "error": "provider_failed"}
+        self._repo.mark_payment_failed(int(intent["id"]), webhook.error_text or "failed", payload=asdict(webhook))
+        return {"ok": False, "error": "failed"}
 
     def confirm_manual_payment(self, payment_intent_id: int, admin_id: int, note: str) -> bool:
         intent = self._repo.get_payment_intent(int(payment_intent_id))
