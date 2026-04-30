@@ -403,11 +403,24 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             attempt_id=f"crypto_{short_id}",
             idempotency_key=f"vimi:{user_id}:{tariff}:{int(period)}:{currency}:crypto:{short_id}",
         )
-        if not bool(result.requires_receipt) or int(result.invoice_id) <= 0:
+        allowed_statuses = {"waiting_confirmation", "created", "pending"}
+        if (
+            int(result.invoice_id) <= 0
+            or int(result.payment_intent_id or 0) <= 0
+            or not bool(result.requires_receipt)
+            or str(result.provider or "") != "crypto_manual"
+            or str(result.status or "").lower() not in allowed_statuses
+        ):
             await ctx.edit_message_text_safe(
                 message=callback.message,
-                text="⚠️ Не удалось создать платёж. Попробуйте ещё раз.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]),
+                text="⚠️ Не удалось создать ручную оплату",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="🔁 Попробовать снова", callback_data=f"user_subscription_crypto:{short_id}")],
+                        [InlineKeyboardButton(text="💳 Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],
+                        [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
+                    ]
+                ),
             )
             return
         payload = {
