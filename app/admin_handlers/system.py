@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from .context import AdminHandlersContext
 from app.billing_catalog import USD_PRICES
+from app.payments.fixed_prices import FIXED_CRYPTO_PRICES, FIXED_STARS_PRICES, format_crypto_price, format_stars_price
 
 
 def _normalize_button_text(text: str | None) -> str:
@@ -51,6 +52,40 @@ def _build_tariff_prices_text(ctx: AdminHandlersContext) -> str:
         f"{_line('pro', 1, pro)}\n{_line('pro', 3, pro)}\n{_line('pro', 6, pro)}\n{_line('pro', 12, pro)}"
     )
 
+
+
+
+def _build_fixed_prices_text(ctx: AdminHandlersContext) -> str:
+    return (
+        "💫 Фикс-цены Stars/Crypto\n\n"
+        "Эти цены задаются вручную и не зависят от курсов RUB/EUR/UAH.\n\n"
+        "⭐ Telegram Stars:\n"
+        "BASIC:\n"
+        f"1 месяц — {format_stars_price('basic', 1, repo=ctx.db)}\n"
+        f"3 месяца — {format_stars_price('basic', 3, repo=ctx.db)}\n"
+        f"6 месяцев — {format_stars_price('basic', 6, repo=ctx.db)}\n"
+        f"12 месяцев — {format_stars_price('basic', 12, repo=ctx.db)}\n\n"
+        "PRO:\n"
+        f"1 месяц — {format_stars_price('pro', 1, repo=ctx.db)}\n"
+        f"3 месяца — {format_stars_price('pro', 3, repo=ctx.db)}\n"
+        f"6 месяцев — {format_stars_price('pro', 6, repo=ctx.db)}\n"
+        f"12 месяцев — {format_stars_price('pro', 12, repo=ctx.db)}\n\n"
+        "₿ Crypto:\n"
+        "BASIC:\n"
+        f"1 месяц — {format_crypto_price('basic', 1, repo=ctx.db)}\n"
+        f"3 месяца — {format_crypto_price('basic', 3, repo=ctx.db)}\n"
+        f"6 месяцев — {format_crypto_price('basic', 6, repo=ctx.db)}\n"
+        f"12 месяцев — {format_crypto_price('basic', 12, repo=ctx.db)}\n\n"
+        "PRO:\n"
+        f"1 месяц — {format_crypto_price('pro', 1, repo=ctx.db)}\n"
+        f"3 месяца — {format_crypto_price('pro', 3, repo=ctx.db)}\n"
+        f"6 месяцев — {format_crypto_price('pro', 6, repo=ctx.db)}\n"
+        f"12 месяцев — {format_crypto_price('pro', 12, repo=ctx.db)}\n"
+    )
+
+
+def _build_fixed_prices_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⭐ Stars', callback_data='admin_fixed_prices_kind:stars')],[InlineKeyboardButton(text='₿ Crypto', callback_data='admin_fixed_prices_kind:crypto')],[InlineKeyboardButton(text='🔄 Обновить', callback_data='admin_fixed_prices')],[InlineKeyboardButton(text='⬅️ Назад в систему', callback_data='admin_fixed_prices_back')]])
 
 def _build_tariff_prices_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -137,6 +172,12 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         if not await ctx.is_admin(message):
             return
         await message.reply(_build_rates_text(ctx), reply_markup=_build_rates_kb())
+
+    @dp.message(lambda m: _normalize_button_text(m.text) == "💫 Фикс-цены Stars/Crypto")
+    async def handle_billing_fixed_menu(message: Message):
+        if not await ctx.is_admin(message):
+            return
+        await message.reply(_build_fixed_prices_text(ctx), reply_markup=_build_fixed_prices_kb())
 
     @dp.message(lambda m: _normalize_button_text(m.text) == "💵 Цены тарифов")
     async def handle_billing_usd_menu(message: Message):
@@ -271,6 +312,107 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         ctx.reset_user_state(message.from_user.id)
         await message.reply("✅ Цена сохранена.")
         await message.reply(_build_tariff_prices_text(ctx), reply_markup=_build_tariff_prices_kb())
+
+
+    @dp.callback_query(lambda c: c.data == "admin_fixed_prices")
+    async def handle_fixed_prices_callback(callback: CallbackQuery):
+        if not await ctx.is_admin(callback):
+            return
+        await callback.message.edit_text(_build_fixed_prices_text(ctx), reply_markup=_build_fixed_prices_kb())
+        await callback.answer()
+
+    @dp.callback_query(lambda c: c.data == "admin_fixed_prices_back")
+    async def handle_fixed_prices_back(callback: CallbackQuery):
+        if not await ctx.is_admin(callback):
+            return
+        await callback.message.answer("⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
+        await callback.answer()
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("admin_fixed_prices_kind:"))
+    async def handle_fixed_prices_kind(callback: CallbackQuery):
+        if not await ctx.is_admin(callback):
+            return
+        kind = str(callback.data).split(":", 1)[1]
+        title = "⭐ Telegram Stars — фикс-цены" if kind == "stars" else "₿ Crypto — фикс-цены"
+        lines = []
+        for code, label in (("basic", "💎 BASIC"), ("pro", "🚀 PRO")):
+            lines.append([InlineKeyboardButton(text=label, callback_data=f"admin_fixed_prices_plan:{kind}:{code}")])
+        lines.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_fixed_prices")])
+        await callback.message.edit_text(title, reply_markup=InlineKeyboardMarkup(inline_keyboard=lines))
+        await callback.answer()
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("admin_fixed_prices_plan:"))
+    async def handle_fixed_prices_plan(callback: CallbackQuery):
+        if not await ctx.is_admin(callback):
+            return
+        _, kind, code = str(callback.data).split(":")
+        icon = "⭐" if kind == "stars" else "₿"
+        rows = []
+        for period in (1,3,6,12):
+            val = format_stars_price(code, period, repo=ctx.db) if kind == "stars" else format_crypto_price(code, period, repo=ctx.db)
+            rows.append([InlineKeyboardButton(text=f"{period} месяц — {val}", callback_data=f"admin_fixed_price_edit:{kind}:{code}:{period}")])
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_fixed_prices_kind:{kind}")])
+        await callback.message.edit_text(f"{icon} {code.upper()} — {'Stars' if kind=='stars' else 'Crypto'}", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await callback.answer()
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("admin_fixed_price_edit:"))
+    async def handle_fixed_price_edit(callback: CallbackQuery):
+        if not await ctx.is_admin(callback):
+            return
+        _, kind, code, period = str(callback.data).split(":")
+        user_id = callback.from_user.id if callback.from_user else ctx.settings.admin_id
+        ctx.user_states[user_id] = {"action": "admin_fixed_price_input", "kind": kind, "tariff_code": code, "period_months": int(period)}
+        text = (
+            "Введите новую цену в Telegram Stars.\n\nПример:\n900"
+            if kind == "stars"
+            else "Введите фиксированную цену для Crypto.\n\nПримеры:\n9\n9.5\n$9\n$9.50"
+        )
+        await callback.message.edit_text(text)
+        await callback.answer()
+
+    @dp.message(lambda m: m.from_user is not None and ctx.user_states.get(m.from_user.id, {}).get("action") == "admin_fixed_price_input")
+    async def handle_fixed_price_input(message: Message):
+        if not await ctx.is_admin(message):
+            return
+        state = ctx.user_states.get(message.from_user.id, {})
+        kind = str(state.get("kind") or "")
+        code = str(state.get("tariff_code") or "")
+        period = int(state.get("period_months") or 0)
+        old_value = format_stars_price(code, period, repo=ctx.db) if kind == "stars" else format_crypto_price(code, period, repo=ctx.db)
+        raw = str(message.text or "").strip().replace(",", ".").replace("$", "")
+        admin_id = message.from_user.id if message.from_user else ctx.settings.admin_id
+        value = None
+        if kind == "stars":
+            if not raw.isdigit():
+                await message.reply("❌ Ошибка: введите целое положительное число.")
+                return
+            amount = int(raw)
+            if amount <= 0 or amount > 10000000:
+                await message.reply("⚠️ Некорректное значение. Введите число от 1 до 10000000.")
+                return
+            value = {"amount": amount}
+        else:
+            try:
+                amount_f = float(raw)
+            except Exception:
+                await message.reply("❌ Ошибка: введите число больше 0.")
+                return
+            if amount_f <= 0 or amount_f > 10000000:
+                await message.reply("⚠️ Некорректное значение. Введите число больше 0.")
+                return
+            amount = f"{amount_f:g}"
+            value = {"amount": amount, "display": f"${amount}"}
+        ok = await ctx.run_db(ctx.db.set_billing_fixed_price, kind=kind, tariff_code=code, period_months=period, value=value, admin_id=admin_id)
+        if not ok:
+            await message.reply("❌ Не удалось сохранить фикс-цену.")
+            return
+        new_value = format_stars_price(code, period, repo=ctx.db) if kind == "stars" else format_crypto_price(code, period, repo=ctx.db)
+        ctx.logger.info("Обновлена фикс-цена billing admin_id=%s kind=%s tariff_code=%s period_months=%s old_value=%s new_value=%s", admin_id, kind, code, period, old_value, new_value)
+        ctx.reset_user_state(message.from_user.id)
+        await message.reply(
+            "✅ Цена %s сохранена\n\n%s / %s месяц:\n%s → %s"
+            % ("Stars" if kind == "stars" else "Crypto", code.upper(), period, old_value, new_value)
+        )
 
     @dp.message(
         lambda m: _normalize_button_text(m.text)
