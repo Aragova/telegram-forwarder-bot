@@ -15,14 +15,12 @@ class TelegramStarsProvider:
     def create_payment(self, invoice: dict[str, Any], tenant: dict[str, Any], return_url: str | None = None) -> PaymentProviderResult:
         _ = tenant
         _ = return_url
-        external_id = f"tg-stars-{invoice.get('id')}"
         return PaymentProviderResult(
             provider=self.provider_name,
-            status="pending",
-            external_payment_id=external_id,
-            payload={"invoice_id": invoice.get("id"), "mode": "telegram_update"},
-            user_message_ru="⭐ Оплата через Telegram Stars запущена.",
-            user_message_en="⭐ Telegram Stars payment initialized.",
+            status="created",
+            payload={"invoice_id": invoice.get("id"), "mode": "native_invoice_required"},
+            user_message_ru="⭐ Для Telegram Stars используется нативный счёт внутри Telegram.",
+            user_message_en="⭐ Telegram Stars requires native Telegram invoice flow.",
         )
 
     def handle_webhook(self, headers: dict[str, Any], body: str) -> PaymentWebhookResult:

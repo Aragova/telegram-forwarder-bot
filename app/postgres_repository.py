@@ -5720,6 +5720,9 @@ class PostgresRepository(RepositoryProtocol):
     def attach_provider_payload(self, payment_intent_id: int, payload: dict[str, Any]) -> bool:
         return self.payment_repo.attach_provider_payload(payment_intent_id=payment_intent_id, payload=payload)
 
+    def attach_external_payment_id(self, payment_intent_id: int, external_payment_id: str) -> bool:
+        return self.payment_repo.attach_external_payment_id(payment_intent_id=payment_intent_id, external_payment_id=external_payment_id)
+
     def mark_payment_paid(self, payment_intent_id: int, *, confirmation_payload: dict[str, Any] | None = None) -> bool:
         return self.payment_repo.mark_payment_paid(payment_intent_id=payment_intent_id, confirmation_payload=confirmation_payload)
 

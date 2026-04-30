@@ -170,6 +170,22 @@ class PaymentRepository(RepositorySplitBase):
             conn.commit()
             return updated
 
+    def attach_external_payment_id(self, payment_intent_id: int, external_payment_id: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE payment_intents
+                    SET external_payment_id = %s,
+                        updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (str(external_payment_id), utc_now_iso(), int(payment_intent_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
     def mark_payment_paid(self, payment_intent_id: int, *, confirmation_payload: dict[str, Any] | None = None) -> bool:
         now_iso = utc_now_iso()
         with self.connect() as conn:
