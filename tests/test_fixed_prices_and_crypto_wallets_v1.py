@@ -46,3 +46,13 @@ def test_repo_fixed_prices_override_and_fallback():
     assert format_stars_price("basic", 3, repo=repo) == "2500 Stars"
     assert format_crypto_price("basic", 1, repo=repo) == "$9.5"
     assert format_crypto_price("basic", 3, repo=repo) == "$25"
+
+
+def test_uah_manual_bank_methods_and_cards():
+    uah_methods = {m["code"]: m for m in PAYMENT_MATRIX["UAH"]}
+    assert "uah_abank" in uah_methods
+    assert "uah_oschad" in uah_methods
+    assert "uah_pumb" in uah_methods
+    assert uah_methods["uah_abank"]["card"] == "4323347388778133"
+    assert uah_methods["uah_oschad"]["card"] == "4483820043174381"
+    assert uah_methods["uah_pumb"]["card"] == "5355280059027787"
