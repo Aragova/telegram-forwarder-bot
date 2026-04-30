@@ -34,6 +34,7 @@ class PaymentRouter:
         self._billing_service = billing_service
         self._invoice_service = invoice_service
         self._payment_service = payment_service
+        self._pricing_repo = getattr(invoice_service, "_repo", None)
 
     async def _call_service(self, func: Any, *args: Any, **kwargs: Any) -> Any:
         result = func(*args, **kwargs)
@@ -55,7 +56,7 @@ class PaymentRouter:
     ) -> PaymentStartResult:
         method = method_by_code(currency, method_code) or {}
         provider = str(method.get("provider") or "")
-        amount_text = format_price(tariff_code, int(period_months), currency)
+        amount_text = format_price(tariff_code, int(period_months), currency, repo=self._pricing_repo)
         amount = float(amount_text.split()[0])
 
         tenant_id = await self._call_service(self._ensure_user_tenant, user_id)

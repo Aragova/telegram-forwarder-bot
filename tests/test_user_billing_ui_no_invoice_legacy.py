@@ -68,3 +68,24 @@ def test_auto_receipt_handler_supports_crypto_manual_provider() -> None:
     assert '"crypto_manual"' in source
     assert "_find_active_manual_payment_for_user" in source
     assert "✅ Вы успешно отправили скриншот! Ожидайте ответа." in source
+
+
+def test_uah_manual_bank_screen_texts_and_guard() -> None:
+    source = Path("app/user_handlers/payments.py").read_text(encoding="utf-8")
+    details_source = Path("app/payments/manual_bank_details.py").read_text(encoding="utf-8")
+    assert "Payment details:" in source
+    assert "4323347388778133" in details_source
+    assert "4483820043174381" in details_source
+    assert "5355280059027787" in details_source
+    assert "✏️ Отправьте скриншот оплаты сюда в чат." in source
+    assert "ПРОВЕРИТЬ ОПЛАТУ" in source
+    assert "🆘 Поддержка" in source
+    assert "int(result.payment_intent_id or 0) > 0" in source
+
+
+def test_admin_notification_contains_bank_title_and_card_number() -> None:
+    source = Path("app/user_handlers/payments.py").read_text(encoding="utf-8")
+    assert "provider_payload_json" in source
+    assert "bank_title" in source
+    assert "card_number" in source
+    assert "Карта:" in source
