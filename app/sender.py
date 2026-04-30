@@ -1018,6 +1018,8 @@ class SenderService:
         target_id: str,
         source_message_ids: list[int],
         sent_message_id: int | None = None,
+        sent_message_ids: list[int] | None = None,
+        reaction_message_id: int | None = None,
         verify_result: dict | None = None,
         extra: dict | None = None,
     ) -> None:
@@ -1032,6 +1034,9 @@ class SenderService:
             "target_id": target_id,
             "source_message_ids": source_message_ids,
             "sent_message_id": sent_message_id,
+            "sent_message_ids": sent_message_ids or ([sent_message_id] if sent_message_id is not None else []),
+            "first_sent_message_id": sent_message_id,
+            "reaction_message_id": reaction_message_id if reaction_message_id is not None else sent_message_id,
             "verify_ok": verify_payload.get("ok"),
             "verify_grouped_id": verify_payload.get("grouped_id"),
             "verify_count": verify_payload.get("count"),
@@ -1071,6 +1076,8 @@ class SenderService:
         target_id: str,
         source_message_ids: list[int],
         sent_message_id: int | None = None,
+        sent_message_ids: list[int] | None = None,
+        reaction_message_id: int | None = None,
         verify_result: dict | None = None,
         extra: dict | None = None,
     ) -> None:
@@ -1083,6 +1090,8 @@ class SenderService:
             target_id=target_id,
             source_message_ids=source_message_ids,
             sent_message_id=sent_message_id,
+            sent_message_ids=sent_message_ids,
+            reaction_message_id=reaction_message_id,
             verify_result=verify_result,
             extra=extra,
         )
@@ -1708,6 +1717,7 @@ class SenderService:
                 return {
                     "ok": True,
                     "sent_message_id": first_id,
+                    "sent_message_ids": [int(m.id) for m in sent_messages if m],
                     "sent_count": len(sent_messages),
                     "error_text": None,
                 }
@@ -2049,180 +2059,76 @@ class SenderService:
         *,
         target_id,
         expected_count: int,
-        expected_first_caption: str | None = None,
-        min_message_id: int | None = None,
+        sent_message_ids: list[int] | None,
         target_thread_id: int | None = None,
+        target_grouped_id: int | None = None,
     ):
-        """
-        Проверка доставки альбома.
-
-        ВАЖНО:
-        - не завязана только на текст первого сообщения группы
-        - ищет совпадение по grouped_id + count + min_message_id
-        - подпись проверяет мягко: по ЛЮБОМУ сообщению группы
-        - если подпись не нашли, но count/min_message_id совпадают, считаем verify успешным
-        (иначе copy-альбомы могут ложно проваливаться и вызывать дубль через reupload)
-        """
         try:
-            entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
-            recent_messages = await self.telethon.get_messages(entity, limit=50)
-
-            if not recent_messages:
+            if not sent_message_ids:
                 return {
                     "ok": False,
-                    "error_text": "Не удалось проверить доставку: целевой канал пуст или недоступен",
+                    "error_text": "reupload_album_sent_ids_missing",
                     "grouped_id": None,
                     "count": 0,
                     "first_message_id": None,
+                    "sent_message_ids": [],
                 }
 
-            groups: dict[int, list] = {}
-            singles: list = []
+            entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
+            fetched = await self.telethon.get_messages(entity, ids=sent_message_ids)
+            fetched_list = fetched if isinstance(fetched, list) else [fetched]
+            fetched_list = [m for m in fetched_list if m]
+            actual_ids = sorted(int(m.id) for m in fetched_list)
 
-            for msg in recent_messages:
-                grouped_id = getattr(msg, "grouped_id", None)
-                if grouped_id:
-                    groups.setdefault(int(grouped_id), []).append(msg)
-                else:
-                    singles.append(msg)
-
-            normalized_expected = _normalize_source_text(expected_first_caption or "")
-            candidate_debug: list[dict] = []
-
-            for grouped_id, group_messages in groups.items():
-                group_messages = sorted(group_messages, key=lambda x: x.id)
-
-                group_count = len(group_messages)
-                group_first_message_id = min(int(m.id) for m in group_messages)
-                group_last_message_id = max(int(m.id) for m in group_messages)
-
-                candidate_debug.append({
-                    "grouped_id": grouped_id,
-                    "count": group_count,
-                    "first_message_id": group_first_message_id,
-                    "last_message_id": group_last_message_id,
-                })
-
-                if group_count != expected_count:
-                    continue
-
-                if min_message_id is not None and group_last_message_id < int(min_message_id):
-                    continue
-
-                # Собираем ВСЕ возможные тексты/подписи внутри группы
-                normalized_group_texts: list[str] = []
-                for msg in group_messages:
-                    raw_text = (
-                        getattr(msg, "text", None)
-                        or getattr(msg, "message", None)
-                        or ""
-                    )
-                    normalized_text = _normalize_source_text(raw_text)
-                    if normalized_text:
-                        normalized_group_texts.append(normalized_text)
-
-                # Если expected caption задан — пробуем мягкое совпадение
-                # по любому элементу группы, а не только по первому.
-                caption_matched = False
-                if normalized_expected:
-                    for actual_text in normalized_group_texts:
-                        if not actual_text:
-                            continue
-
-                        # мягкое сравнение:
-                        # - либо полное начало совпадает
-                        # - либо первые 120 символов совпадают
-                        # - либо expected содержится в actual
-                        # - либо actual содержится в expected
-                        expected_head = normalized_expected[:120]
-                        actual_head = actual_text[:120]
-
-                        if actual_text.startswith(normalized_expected):
-                            caption_matched = True
-                            break
-                        if normalized_expected.startswith(actual_text):
-                            caption_matched = True
-                            break
-                        if expected_head and actual_head and expected_head == actual_head:
-                            caption_matched = True
-                            break
-                        if normalized_expected in actual_text:
-                            caption_matched = True
-                            break
-                        if actual_text in normalized_expected:
-                            caption_matched = True
-                            break
-
-                # КРИТИЧЕСКОЕ ПРАВИЛО:
-                # если count совпал и группа свежая (min_message_id),
-                # то это уже достаточно сильный сигнал успеха.
-                # Caption используем как дополнительную проверку, но не как обязательную.
-                if normalized_expected:
-                    if caption_matched:
-                        return {
-                            "ok": True,
-                            "error_text": None,
-                            "grouped_id": grouped_id,
-                            "count": group_count,
-                            "first_message_id": group_first_message_id,
-                        }
-
-                    logger.warning(
-                        "verify_album_delivery: группа найдена по count/min_message_id, но подпись не совпала; считаю verify успешным, чтобы не создать дубль. grouped_id=%s count=%s first_message_id=%s expected_caption=%r actual_texts=%r",
-                        grouped_id,
-                        group_count,
-                        group_first_message_id,
-                        normalized_expected[:200],
-                        normalized_group_texts[:3],
-                    )
-                    return {
-                        "ok": True,
-                        "error_text": None,
-                        "grouped_id": grouped_id,
-                        "count": group_count,
-                        "first_message_id": group_first_message_id,
-                    }
-
-                # Если expected caption вообще не задан — совпадения по count + freshness достаточно
+            if len(actual_ids) != len(sent_message_ids):
                 return {
-                    "ok": True,
-                    "error_text": None,
-                    "grouped_id": grouped_id,
-                    "count": group_count,
-                    "first_message_id": group_first_message_id,
+                    "ok": False,
+                    "error_text": "verify_album_sent_ids_not_found",
+                    "grouped_id": None,
+                    "count": len(actual_ids),
+                    "first_message_id": min(actual_ids) if actual_ids else None,
+                    "sent_message_ids": actual_ids,
                 }
 
-            # fallback для случая expected_count == 1
-            if expected_count == 1 and singles:
-                singles_sorted = sorted(singles, key=lambda x: x.id, reverse=True)
+            grouped_ids = {int(m.grouped_id) for m in fetched_list if getattr(m, "grouped_id", None)}
+            if expected_count > 1 and len(grouped_ids) > 1:
+                return {
+                    "ok": False,
+                    "error_text": "verify_album_grouped_id_mismatch",
+                    "grouped_id": None,
+                    "count": len(actual_ids),
+                    "first_message_id": min(actual_ids),
+                    "sent_message_ids": actual_ids,
+                }
 
-                for single in singles_sorted:
-                    single_id = int(single.id)
+            grouped_id = next(iter(grouped_ids)) if grouped_ids else None
+            if target_grouped_id and grouped_id and int(target_grouped_id) != int(grouped_id):
+                return {
+                    "ok": False,
+                    "error_text": "verify_album_target_grouped_id_mismatch",
+                    "grouped_id": grouped_id,
+                    "count": len(actual_ids),
+                    "first_message_id": min(actual_ids),
+                    "sent_message_ids": actual_ids,
+                }
 
-                    if min_message_id is not None and single_id < int(min_message_id):
-                        continue
-
-                    return {
-                        "ok": True,
-                        "error_text": None,
-                        "grouped_id": None,
-                        "count": 1,
-                        "first_message_id": single_id,
-                    }
-
-            logger.warning(
-                "verify_album_delivery: не найден подходящий альбом. expected_count=%s min_message_id=%s candidates=%s",
-                expected_count,
-                min_message_id,
-                candidate_debug,
-            )
+            if len(actual_ids) != expected_count:
+                return {
+                    "ok": False,
+                    "error_text": "verify_album_count_mismatch",
+                    "grouped_id": grouped_id,
+                    "count": len(actual_ids),
+                    "first_message_id": min(actual_ids),
+                    "sent_message_ids": actual_ids,
+                }
 
             return {
-                "ok": False,
-                "error_text": "Проверка доставки не подтвердила появление альбома в цели",
-                "grouped_id": None,
-                "count": 0,
-                "first_message_id": None,
+                "ok": True,
+                "error_text": None,
+                "grouped_id": grouped_id,
+                "count": len(actual_ids),
+                "first_message_id": min(actual_ids),
+                "sent_message_ids": actual_ids,
             }
 
         except Exception as exc:
@@ -2233,9 +2139,10 @@ class SenderService:
                 "grouped_id": None,
                 "count": 0,
                 "first_message_id": None,
+                "sent_message_ids": [],
             }
 
-    async def _try_add_normal_reaction(self, client, entity, sent_message_id, session_name: str) -> bool:
+    async def _try_add_normal_reaction(self, client, entity, sent_message_id, session_name: str, rule_id: int | None = None) -> bool:
         emojis_to_try = REACTION_POOL[:]
         random.shuffle(emojis_to_try)
 
@@ -2253,14 +2160,11 @@ class SenderService:
                     )
                 )
 
-                logger.info(
-                    "Обычный реактор %s поставил реакцию %s на сообщение %s в %s",
-                    session_name,
-                    emoji,
-                    sent_message_id,
-                    entity,
-                )
-                return True
+                confirmed = await self._confirm_reaction(client, entity, sent_message_id, emoji)
+                if confirmed:
+                    logger.info("REACTION_CONFIRMED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reaction=%s", rule_id, entity, sent_message_id, session_name, emoji)
+                    return True
+                logger.warning("REACTION_NOT_CONFIRMED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reaction=%s", rule_id, entity, sent_message_id, session_name, emoji)
 
             except Exception as exc:
                 last_error = exc
@@ -2282,7 +2186,7 @@ class SenderService:
         )
         return False
 
-    async def _try_add_premium_reactions(self, client, entity, sent_message_id, session_name: str, fixed_reactions: list[str]) -> bool:
+    async def _try_add_premium_reactions(self, client, entity, sent_message_id, session_name: str, fixed_reactions: list[str], rule_id: int | None = None) -> bool:
         cleaned = []
         for emoji in fixed_reactions:
             emoji = (emoji or "").strip()
@@ -2347,7 +2251,21 @@ class SenderService:
         )
         return False
 
-    async def _add_reaction_if_possible(self, target_id, sent_message_id):
+    async def _confirm_reaction(self, client, entity, message_id: int, emoji: str) -> bool:
+        try:
+            msg = await client.get_messages(entity, ids=message_id)
+            reactions = getattr(msg, "reactions", None)
+            if not reactions:
+                return False
+            for result in getattr(reactions, "results", []) or []:
+                reaction = getattr(result, "reaction", None)
+                if getattr(reaction, "emoticon", None) == emoji:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    async def _add_reaction_if_possible(self, target_id, sent_message_id, rule_id: int | None = None):
         if not self.reaction_clients:
             return
 
@@ -2361,6 +2279,7 @@ class SenderService:
                         entity=entity,
                         sent_message_id=sent_message_id,
                         session_name=reactor.session_name,
+                        rule_id=rule_id,
                         fixed_reactions=reactor.fixed_reactions,
                     )
                 else:
@@ -2369,6 +2288,7 @@ class SenderService:
                         entity=entity,
                         sent_message_id=sent_message_id,
                         session_name=reactor.session_name,
+                        rule_id=rule_id,
                     )
 
             except Exception as exc:
@@ -4338,9 +4258,9 @@ class SenderService:
             verified = await self._verify_album_delivery(
                 target_id=target_id,
                 expected_count=len(message_ids),
-                expected_first_caption=first_source_caption,
-                min_message_id=reupload_result.get("sent_message_id"),
+                sent_message_ids=reupload_result.get("sent_message_ids"),
                 target_thread_id=target_thread_id,
+                target_grouped_id=reupload_result.get("target_grouped_id"),
             )
             attempts_debug.append({"stage": "verify_after_reupload", **verified})
 
@@ -4378,9 +4298,9 @@ class SenderService:
                 verified_retry = await self._verify_album_delivery(
                     target_id=target_id,
                     expected_count=len(message_ids),
-                    expected_first_caption=first_source_caption,
-                    min_message_id=reupload_result.get("sent_message_id"),
+                    sent_message_ids=reupload_result.get("sent_message_ids"),
                     target_thread_id=target_thread_id,
+                    target_grouped_id=reupload_result.get("target_grouped_id"),
                 )
                 attempts_debug.append({"stage": "verify_after_reupload_retry_only", **verified_retry})
 
@@ -4408,7 +4328,7 @@ class SenderService:
                 else:
                     sent_message_id = verified.get("first_message_id") or reupload_result.get("sent_message_id")
 
-                await self._add_reaction_if_possible(target_id, sent_message_id)
+                await self._add_reaction_if_possible(target_id, sent_message_id, rule_id=rule.id)
 
                 await self._log_delivery_final_success(
                     rule_id=rule.id,
@@ -4418,6 +4338,8 @@ class SenderService:
                     target_id=target_id,
                     source_message_ids=message_ids,
                     sent_message_id=sent_message_id,
+                    sent_message_ids=verified.get("sent_message_ids") or reupload_result.get("sent_message_ids"),
+                    reaction_message_id=sent_message_id,
                     verify_result=verified,
                     extra={
                         "caption_delivery_mode": caption_mode,
@@ -4733,6 +4655,7 @@ class SenderService:
                 return {
                     "ok": True,
                     "sent_message_id": sent_messages[0].message_id,
+                    "sent_message_ids": [int(m.message_id) for m in sent_messages],
                     "sent_count": len(sent_messages),
                     "error_text": None,
                 }
@@ -4786,6 +4709,7 @@ class SenderService:
             return {
                 "ok": True,
                 "sent_message_id": sent_ids[0] if sent_ids else None,
+                "sent_message_ids": sent_ids[:],
                 "sent_count": len(sent_ids),
                 "error_text": None,
             }
@@ -4794,6 +4718,7 @@ class SenderService:
             return {
                 "ok": False,
                 "sent_message_id": sent_ids[0] if sent_ids else None,
+                "sent_message_ids": sent_ids[:],
                 "sent_count": len(sent_ids),
                 "error_text": str(exc),
             }
@@ -4949,6 +4874,7 @@ class SenderService:
                 return {
                     "ok": True,
                     "sent_message_id": sent_messages[0].message_id,
+                    "sent_message_ids": [int(m.message_id) for m in sent_messages],
                     "sent_count": len(sent_messages),
                     "error_text": None,
                 }
