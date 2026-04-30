@@ -180,3 +180,14 @@ def test_webhook_auth_requires_basic_and_signature_when_both_configured():
         settings.lava_top_webhook_login = old_login
         settings.lava_top_webhook_password = old_password
         settings.lava_top_webhook_secret = old_secret
+
+
+def test_webhook_diagnostics_fields_do_not_break_processing():
+    repo = _FakeRepo()
+    service = LavaWebhookActivationService(repo)
+    payload = _payload("pending")
+    payload["contractId"] = "c-1"
+    payload["ParentContractId"] = "pc-1"
+    out = service.process_webhook(payload, '{}')
+    assert out.code == "ignored_pending"
+
