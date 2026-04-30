@@ -7861,7 +7861,14 @@ async def handle_stateful_private_inputs(message: Message):
         reset_user_state(user_id)
         return
 
-@dp.message(lambda m: m.photo or m.video or m.document)
+@dp.message(
+    lambda m:
+        m.chat.type == "private"
+        and m.from_user is not None
+        and is_admin_user(m.from_user.id)
+        and user_states.get(m.from_user.id, {}).get("action") == "intro_upload_wait_file"
+        and (m.photo or m.video or m.document)
+)
 async def handle_intro_file(message: Message):
     state = user_states.get(message.from_user.id)
     if not state or state.get("action") != "intro_upload_wait_file":

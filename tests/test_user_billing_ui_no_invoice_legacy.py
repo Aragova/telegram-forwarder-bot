@@ -1,4 +1,5 @@
 from app import user_ui
+from pathlib import Path
 
 
 def _collect_payment_ui_texts() -> list[str]:
@@ -30,3 +31,31 @@ def test_user_payment_ui_has_no_legacy_invoice_terms() -> None:
     text_blob = "\n".join(_collect_payment_ui_texts())
     for token in forbidden:
         assert token not in text_blob
+
+
+def test_crypto_flow_uses_created_result_and_no_last_invoice_lookup() -> None:
+    source = Path("app/user_handlers/payments.py").read_text(encoding="utf-8")
+    assert "handle_user_subscription_crypto_callback" in source
+    assert "get_last_invoice" not in source
+    assert "result = await router.start_payment(" in source
+    assert "result.invoice_id" in source
+    assert "result.payment_intent_id" in source
+    crypto_block = source.split("handle_user_subscription_crypto_callback", 1)[1].split('c.data.startswith("user_upload_receipt:")', 1)[0]
+    assert "user_upload_receipt" not in crypto_block
+    assert "ПРОВЕРИТЬ ОПЛАТУ" in source
+    assert "🆘 Поддержка" in source
+    assert "👉 Назад" in source
+    assert "🏠 Меню" in source
+
+
+def test_legacy_user_upload_receipt_message() -> None:
+    source = Path("app/user_handlers/payments.py").read_text(encoding="utf-8")
+    assert "Этот способ больше не используется." in source
+    assert "Просто отправьте скриншот оплаты сюда в чат." in source
+
+
+def test_auto_receipt_handler_supports_crypto_manual_provider() -> None:
+    source = Path("app/user_handlers/payments.py").read_text(encoding="utf-8")
+    assert '"crypto_manual"' in source
+    assert "_find_active_manual_payment_for_user" in source
+    assert "✅ Вы успешно отправили скриншот! Ожидайте ответа." in source

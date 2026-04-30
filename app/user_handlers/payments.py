@@ -392,13 +392,58 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         tariff = str(action.get("tariff_code") or "basic")
         period = int(action.get("period_months") or 1)
         currency = str(action.get("currency") or "USD").upper()
-        await _start_user_billing_payment(callback, tariff=tariff, period=period, currency=currency, method_code="crypto", action_id=short_id)
-        invoice = await ctx.run_db(ctx.db.get_last_invoice, await ctx.run_db(ctx.ensure_user_tenant, user_id)) if hasattr(ctx.db, "get_last_invoice") else None
-        invoice_id = int(invoice.get("id") or 0) if isinstance(invoice, dict) else 0
-        if invoice_id <= 0:
+        await ctx.answer_callback_safe_once(callback, "⏳ Создаю платёж…")
+        result = await router.start_payment(
+            user_id=user_id,
+            tariff_code=tariff,
+            period_months=int(period),
+            currency=currency,
+            method_code="crypto",
+            username=callback.from_user.username if callback.from_user else None,
+            attempt_id=f"crypto_{short_id}",
+            idempotency_key=f"vimi:{user_id}:{tariff}:{int(period)}:{currency}:crypto:{short_id}",
+        )
+        if not bool(result.requires_receipt) or int(result.invoice_id) <= 0:
+            await ctx.edit_message_text_safe(
+                message=callback.message,
+                text="⚠️ Не удалось создать платёж. Попробуйте ещё раз.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]),
+            )
             return
-        amount_text = format_crypto_price(tariff, period, repo=ctx.db)
-        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nСрок: {period} месяц\nСумма: {amount_text}\n" f"Способ: {wallet.get('title')}\n\nPayment details:\n\n" f"{wallet.get('wallet_label')}:\n\n{wallet.get('wallet_address')}\n\n" "Pay the amount of the tariff you have chosen.\nAttach a screenshot of the receipt and send it for verification😜\n\n__\nYou are paying an individual.\nThe money will be credited to the recipient's account.\n\n✏️ Отправьте скриншот оплаты сюда в чат."), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="ПРОВЕРИТЬ ОПЛАТУ", callback_data=f"user_invoice_check_payment:{invoice_id}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],[InlineKeyboardButton(text="👉 Назад", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}"), InlineKeyboardButton(text="🏠 Меню", callback_data="user_main")]]))
+        payload = {
+            "coin_code": str(wallet.get("code") or ""),
+            "wallet_title": str(wallet.get("title") or ""),
+            "wallet_label": str(wallet.get("wallet_label") or "Wallet address"),
+            "wallet_address": str(wallet.get("wallet_address") or ""),
+            "amount_display": format_crypto_price(tariff, period, repo=ctx.db),
+            "tariff_code": str(tariff),
+            "period_months": int(period),
+            "currency": str(currency).upper(),
+            "user_id": int(user_id),
+            "tenant_id": int(await ctx.run_db(ctx.ensure_user_tenant, user_id)),
+        }
+        if result.payment_intent_id and hasattr(ctx.db, "attach_provider_payload"):
+            await ctx.run_db(ctx.db.attach_provider_payload, int(result.payment_intent_id), payload)
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=(
+                "✅ Платёж создан\n\n"
+                f"Тариф: {tariff.upper()}\n"
+                f"Срок: {period} месяц\n"
+                f"Сумма: {payload['amount_display']}\n"
+                f"Способ: {wallet.get('title')}\n\n"
+                "Payment details:\n\n"
+                f"{payload['wallet_label']}:\n\n"
+                f"{payload['wallet_address']}\n\n"
+                "Pay the amount of the tariff you have chosen.\n"
+                "Attach a screenshot of the receipt and send it for verification😜\n\n"
+                "__\n"
+                "You are paying an individual.\n"
+                "The money will be credited to the recipient's account.\n\n"
+                "✏️ Отправьте скриншот оплаты сюда в чат."
+            ),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="ПРОВЕРИТЬ ОПЛАТУ", callback_data=f"user_invoice_check_payment:{int(result.invoice_id)}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],[InlineKeyboardButton(text="👉 Назад", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}"), InlineKeyboardButton(text="🏠 Меню", callback_data="user_main")]]),
+        )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_upload_receipt:"))
     async def handle_user_upload_receipt_callback(callback: CallbackQuery):
@@ -430,8 +475,8 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(
             message=callback.message,
-            text="Этот способ отправки больше не используется.\n\nПросто отправьте скриншот оплаты сюда в чат.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],[InlineKeyboardButton(text="🏠 Главное меню", callback_data="user_main")]]),
+            text="Этот способ больше не используется.\n\nПросто отправьте скриншот оплаты сюда в чат.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],[InlineKeyboardButton(text="🏠 Меню", callback_data="user_main")]]),
         )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_payment_status:"))
