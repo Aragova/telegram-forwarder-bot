@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import settings
+from app.payment_provider_protocol import PaymentProviderResult
 from app.payment_service import PaymentService
 
 
@@ -145,16 +146,17 @@ def test_manual_confirmation_marks_invoice_paid_and_events():
 def test_duplicate_webhook_is_idempotent():
     settings.payment_enabled = True
     settings.tribute_enabled = True
-    settings.tribute_webhook_secret = "secret"
+    settings.tribute_api_key = "secret"
     repo, service = _service()
+    service._providers["tribute"].create_payment = lambda **kwargs: PaymentProviderResult(provider="tribute", status="pending", external_payment_id="x-1", external_checkout_url="https://example.test/pay")
     out = service.create_payment_for_invoice(11, "tribute")
     intent_id = out["payment_intent_id"]
     repo.payment_intents[intent_id]["external_payment_id"] = "x-1"
-    body = '{"external_payment_id":"x-1","status":"paid","amount":29,"currency":"USD"}'
+    body = '{"name":"shop_order","payload":{"uuid":"x-1","status":"paid","amount":2900,"currency":"usd"}}'
     import hashlib, hmac
     sig = hmac.new(b"secret", body.encode("utf-8"), hashlib.sha256).hexdigest()
-    first = service.handle_provider_webhook("tribute", {"X-Tribute-Signature": sig}, body)
-    second = service.handle_provider_webhook("tribute", {"X-Tribute-Signature": sig}, body)
+    first = service.handle_provider_webhook("tribute", {"trbt-signature": sig}, body)
+    second = service.handle_provider_webhook("tribute", {"trbt-signature": sig}, body)
     assert first["ok"] is True
     assert second.get("idempotent") is True
 
@@ -201,15 +203,16 @@ def test_owner_does_not_require_payment():
 def test_failed_payment_does_not_activate():
     settings.payment_enabled = True
     settings.tribute_enabled = True
-    settings.tribute_webhook_secret = "secret"
+    settings.tribute_api_key = "secret"
     repo, service = _service()
+    service._providers["tribute"].create_payment = lambda **kwargs: PaymentProviderResult(provider="tribute", status="pending", external_payment_id="x-2", external_checkout_url="https://example.test/pay")
     out = service.create_payment_for_invoice(11, "tribute")
     intent_id = out["payment_intent_id"]
     repo.payment_intents[intent_id]["external_payment_id"] = "x-2"
-    body = '{"external_payment_id":"x-2","status":"failed","amount":29,"currency":"USD"}'
+    body = '{"name":"shop_order","payload":{"uuid":"x-2","status":"failed","amount":2900,"currency":"usd"}}'
     import hashlib, hmac
     sig = hmac.new(b"secret", body.encode("utf-8"), hashlib.sha256).hexdigest()
-    result = service.handle_provider_webhook("tribute", {"X-Tribute-Signature": sig}, body)
+    result = service.handle_provider_webhook("tribute", {"trbt-signature": sig}, body)
     assert result["ok"] is False
     assert repo.invoices[11]["status"] != "paid"
 
@@ -217,15 +220,16 @@ def test_failed_payment_does_not_activate():
 def test_amount_mismatch_rejected():
     settings.payment_enabled = True
     settings.tribute_enabled = True
-    settings.tribute_webhook_secret = "secret"
+    settings.tribute_api_key = "secret"
     repo, service = _service()
+    service._providers["tribute"].create_payment = lambda **kwargs: PaymentProviderResult(provider="tribute", status="pending", external_payment_id="x-3", external_checkout_url="https://example.test/pay")
     out = service.create_payment_for_invoice(11, "tribute")
     intent_id = out["payment_intent_id"]
     repo.payment_intents[intent_id]["external_payment_id"] = "x-3"
-    body = '{"external_payment_id":"x-3","status":"paid","amount":1,"currency":"USD"}'
+    body = '{"name":"shop_order","payload":{"uuid":"x-3","status":"paid","amount":100,"currency":"usd"}}'
     import hashlib, hmac
     sig = hmac.new(b"secret", body.encode("utf-8"), hashlib.sha256).hexdigest()
-    result = service.handle_provider_webhook("tribute", {"X-Tribute-Signature": sig}, body)
+    result = service.handle_provider_webhook("tribute", {"trbt-signature": sig}, body)
     assert result["ok"] is False
     assert result["error"] == "amount_mismatch"
 

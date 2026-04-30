@@ -7,6 +7,9 @@ from app.config import settings
 def _stars_enabled() -> bool:
     return bool(settings.payment_enabled and settings.telegram_stars_enabled)
 
+def _tribute_enabled() -> bool:
+    return bool(settings.payment_enabled and settings.tribute_enabled and settings.tribute_api_key)
+
 PAYMENT_MATRIX: dict[str, list[dict[str, Any]]] = {
     "RUB": [
         {"code": "rub_card_sbp", "title": "💳 Карта / СБП РФ", "provider": "manual_bank_card"},
@@ -18,7 +21,7 @@ PAYMENT_MATRIX: dict[str, list[dict[str, Any]]] = {
         {"code": "lava_card_usd", "title": "💳 Карта USD", "provider": "lava_top", "payment_provider": "UNLIMINT"},
         {"code": "lava_paypal_usd", "title": "🅿️ PayPal через Lava.top", "provider": "lava_top", "payment_provider": "PAYPAL"},
         {"code": "paypal_manual_usd", "title": "🅿️ PayPal вручную", "provider": "manual_paypal", "email": "hurremae@gmail.com"},
-        {"code": "tribute_usd", "title": "💎 Tribute", "provider": "tribute", "enabled": False},
+        {"code": "tribute_usd", "title": "💎 Tribute", "provider": "tribute", "enabled": _tribute_enabled()},
         {"code": "stars", "title": "⭐ Telegram Stars", "provider": "telegram_stars", "enabled": _stars_enabled()},
         {"code": "crypto", "title": "₿ Crypto", "provider": "crypto_manual"},
     ],
@@ -26,7 +29,7 @@ PAYMENT_MATRIX: dict[str, list[dict[str, Any]]] = {
         {"code": "lava_card_eur", "title": "💳 Карта EUR", "provider": "lava_top", "payment_provider": "UNLIMINT"},
         {"code": "lava_paypal_eur", "title": "🅿️ PayPal через Lava.top", "provider": "lava_top", "payment_provider": "PAYPAL"},
         {"code": "paypal_manual_eur", "title": "🅿️ PayPal вручную", "provider": "manual_paypal", "email": "hurremae@gmail.com"},
-        {"code": "tribute_eur", "title": "💎 Tribute", "provider": "tribute", "enabled": False},
+        {"code": "tribute_eur", "title": "💎 Tribute", "provider": "tribute", "enabled": _tribute_enabled()},
         {"code": "stars", "title": "⭐ Telegram Stars", "provider": "telegram_stars", "enabled": _stars_enabled()},
         {"code": "crypto", "title": "₿ Crypto", "provider": "crypto_manual"},
     ],
@@ -45,6 +48,8 @@ def methods_for_currency(currency: str) -> list[dict[str, Any]]:
     for method in items:
         if str(method.get("code")) == "stars":
             result.append({**method, "enabled": _stars_enabled()})
+        elif str(method.get("provider") or "") == "tribute":
+            result.append({**method, "enabled": _tribute_enabled()})
         else:
             result.append(dict(method))
     return result
