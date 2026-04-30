@@ -108,6 +108,7 @@ class Settings:
     lava_top_webhook_login: str = os.getenv("LAVA_TOP_WEBHOOK_LOGIN", "").strip()
     lava_top_webhook_password: str = os.getenv("LAVA_TOP_WEBHOOK_PASSWORD", "").strip()
     lava_top_basic_offer_id: str = os.getenv("LAVA_TOP_BASIC_OFFER_ID", "").strip()
+    lava_top_pro_offer_id: str = os.getenv("LAVA_TOP_PRO_OFFER_ID", "").strip()
 
     public_base_url: str = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
