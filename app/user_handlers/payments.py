@@ -23,6 +23,7 @@ RECOVERY_CTA_EVENT_TYPE = "recovery_cta_shown_after_payment"
 LAVA_PAYMENT_LOGGER = logging.getLogger("forwarder.payments.lava")
 BILLING_LOGGER = logging.getLogger("forwarder.billing")
 PAY_ACTION_TTL_SECONDS = 30 * 60
+MANUAL_PROVIDER_CODES = {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual", "manual_paypal", "paypal_manual", "uah_manual", "bank_manual", "manual"}
 
 
 def _admin_manual_payment_keyboard(payment_intent_id: int) -> InlineKeyboardMarkup:
@@ -222,24 +223,31 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
                         [InlineKeyboardButton(text="💎 Моя подписка", callback_data="user_subscription")],
-                        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="user_support")],
+                        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="user_main")],
                     ]
                 ),
             )
             return
         if status in {"open", "draft", "pending"}:
             payment_intent = await ctx.find_latest_payment_intent_for_invoice(invoice_id, tenant_id)
-            method_hint = "user_subscription_plans"
+            method_hint = f"user_subscription_methods:basic:{str(invoice.get('currency') or 'USD').upper()}:1"
+            receipt_uploaded = False
             if isinstance(payment_intent, dict):
                 method_hint = f"user_subscription_methods:{str(payment_intent.get('tariff_code') or 'basic')}:{str(payment_intent.get('currency') or 'USD').upper()}:{int(payment_intent.get('period_months') or 1)}"
+                payload = payment_intent.get("confirmation_payload_json") if isinstance(payment_intent.get("confirmation_payload_json"), dict) else {}
+                receipt_uploaded = bool(payload.get("receipt_uploaded"))
+            pending_text = (
+                "⏳ Оплата ожидает проверки\n\nМы получили ваше подтверждение.\nАдминистратор проверит платёж и активирует подписку.\n\nОбычно это занимает от нескольких минут до нескольких часов."
+                if receipt_uploaded
+                else "⏳ Оплата ожидает подтверждения\n\nОтправьте скриншот оплаты сюда в чат.\nПосле проверки администратор активирует подписку."
+            )
             await ctx.edit_message_text_safe(
                 message=callback.message,
-                text="⏳ Платёж ещё не подтверждён\n\nОбычно подтверждение занимает от нескольких секунд до нескольких минут.\nЕсли вы уже оплатили — нажмите «Проверить ещё раз».",
+                text=pending_text,
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="🔄 Проверить ещё раз", callback_data=f"user_invoice_check_payment:{invoice_id}")],
-                        [InlineKeyboardButton(text="💳 Выбрать другой способ", callback_data=method_hint)],
                         [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
+                        [InlineKeyboardButton(text="👉 Назад", callback_data=method_hint), InlineKeyboardButton(text="🏠 Меню", callback_data="user_main")],
                     ]
                 ),
             )
@@ -322,7 +330,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         if result.payment_url:
             await ctx.edit_message_text_safe(message=callback.message, text=f"✅ Ссылка на оплату создана\n\nТариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {result.amount_text}\nСпособ: {result.method_title}\n\nПосле оплаты доступ активируется автоматически.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Перейти к оплате", url=result.payment_url)],[InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"user_invoice_check_payment:{int(result.invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
             return
-        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {result.amount_text}\n" f"Способ: {result.method_title}\n\nПосле оплаты прикрепите скриншот сюда в чат."), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧾 Отправить чек", callback_data=f"user_upload_receipt:{int(result.invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
+        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nСрок: {period} месяц\nСумма: {result.amount_text}\n" f"Способ: {result.method_title}\n\n" "✏️ Отправьте скриншот оплаты сюда в чат."), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="ПРОВЕРИТЬ ОПЛАТУ", callback_data=f"user_invoice_check_payment:{int(result.invoice_id)}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],[InlineKeyboardButton(text="👉 Назад", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}"), InlineKeyboardButton(text="🏠 Меню", callback_data="user_main")]]))
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_billing_pay:"))
     async def handle_user_billing_pay_callback(callback: CallbackQuery):
@@ -390,7 +398,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         if invoice_id <= 0:
             return
         amount_text = format_crypto_price(tariff, period, repo=ctx.db)
-        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nСрок: {period} месяц\nСумма: {amount_text}\n" f"Способ: {wallet.get('title')}\n\nPayment details:\n\n" f"{wallet.get('wallet_label')}:\n{wallet.get('wallet_address')}\n\n" "Pay the amount of the tariff you have chosen.\nAttach a screenshot of the receipt and send it for verification.\n\n" "You are paying an individual.\nThe money will be credited to the recipient's account.\n\n" "✏️ Отправьте скриншот оплаты:"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧾 Отправить подтверждение", callback_data=f"user_upload_receipt:{invoice_id}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]))
+        await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nСрок: {period} месяц\nСумма: {amount_text}\n" f"Способ: {wallet.get('title')}\n\nPayment details:\n\n" f"{wallet.get('wallet_label')}:\n\n{wallet.get('wallet_address')}\n\n" "Pay the amount of the tariff you have chosen.\nAttach a screenshot of the receipt and send it for verification😜\n\n__\nYou are paying an individual.\nThe money will be credited to the recipient's account.\n\n✏️ Отправьте скриншот оплаты сюда в чат."), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="ПРОВЕРИТЬ ОПЛАТУ", callback_data=f"user_invoice_check_payment:{invoice_id}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],[InlineKeyboardButton(text="👉 Назад", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}"), InlineKeyboardButton(text="🏠 Меню", callback_data="user_main")]]))
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_upload_receipt:"))
     async def handle_user_upload_receipt_callback(callback: CallbackQuery):
@@ -422,9 +430,8 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(
             message=callback.message,
-            text=user_ui.build_user_manual_receipt_request_text(invoice, intent),
-            reply_markup=user_ui.build_user_manual_receipt_keyboard(invoice_id),
-            parse_mode="HTML",
+            text="Этот способ отправки больше не используется.\n\nПросто отправьте скриншот оплаты сюда в чат.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],[InlineKeyboardButton(text="🏠 Главное меню", callback_data="user_main")]]),
         )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_payment_status:"))
@@ -552,21 +559,24 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             except Exception as exc:
                 ctx.logger.warning("не удалось отправить уведомление администратору intent_id=%s: %s", payment_intent_id, exc)
 
-    @dp.message(lambda m: m.chat.type == "private" and m.from_user is not None and ctx.user_states.get(m.from_user.id, {}).get("action") == "awaiting_payment_receipt")
+    @dp.message(lambda m: m.chat.type == "private" and m.from_user is not None and (bool(m.photo) or bool(m.document)))
     async def handle_user_payment_receipt_message(message: Message):
         user_id = message.from_user.id if message.from_user else 0
         if ctx.is_admin_user(user_id):
             ctx.user_states.pop(user_id, None)
             return
-        state = ctx.user_states.get(user_id) or {}
-        invoice_id = int(state.get("invoice_id") or 0)
-        payment_intent_id = int(state.get("payment_intent_id") or 0)
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        intent = await _find_active_manual_payment_for_user(user_id, tenant_id)
+        if not intent:
+            await message.answer(
+                "⚠️ Не удалось найти активную ручную оплату\n\nОткройте раздел «Подписка» и выберите способ оплаты ещё раз.\nЕсли вы уже оплатили — напишите в поддержку.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Подписка", callback_data="user_subscription")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],[InlineKeyboardButton(text="🏠 Главное меню", callback_data="user_main")]]),
+            )
+            return
+        payment_intent_id = int(intent.get("id") or 0)
+        invoice_id = int(intent.get("invoice_id") or 0)
         invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
-        intent = await ctx.run_db(ctx.db.get_payment_intent, payment_intent_id) if hasattr(ctx.db, "get_payment_intent") else None
-        if not invoice or not intent:
-            ctx.user_states.pop(user_id, None)
-            await message.answer("❌ Платёж не найден. Откройте раздел оплаты и начните заново.")
+        if not invoice:
             return
         if int(invoice.get("tenant_id") or 0) != int(tenant_id) or int(intent.get("invoice_id") or 0) != int(invoice_id):
             ctx.logger.warning("попытка загрузки чека в чужую оплату user_id=%s invoice_id=%s intent_id=%s", user_id, invoice_id, payment_intent_id)
@@ -622,19 +632,33 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             }
         )
         await ctx.run_db(ctx.payment_service.save_manual_confirmation_payload, payment_intent_id, payload)
-        ctx.user_states.pop(user_id, None)
         ctx.logger.info("пользователь прикрепил чек invoice_id=%s intent_id=%s file_id=%s", invoice_id, payment_intent_id, receipt_file_id)
         await message.answer(
-            user_ui.build_user_manual_receipt_uploaded_text(invoice, intent),
+            "✅ Вы успешно отправили скриншот! Ожидайте ответа.\n\nМы передали подтверждение администратору.\nПосле проверки подписка будет активирована.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_manual_paid:{int(invoice_id)}")],
-                    [InlineKeyboardButton(text="📊 Статус оплаты", callback_data=f"user_payment_status:{int(invoice_id)}")],
-                    [InlineKeyboardButton(text="💳 Вернуться к платежу", callback_data=f"user_invoice:{int(invoice_id)}")],
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_invoice_pay:{int(invoice_id)}")],
+                    [InlineKeyboardButton(text="ПРОВЕРИТЬ ОПЛАТУ", callback_data=f"user_invoice_check_payment:{int(invoice_id)}")],
+                    [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
+                    [InlineKeyboardButton(text="👉 Назад", callback_data=f"user_subscription_methods:{str(intent.get('tariff_code') or 'basic')}:{str(intent.get('currency') or 'USD').upper()}:{int(intent.get('period_months') or 1)}"), InlineKeyboardButton(text="🏠 Меню", callback_data="user_main")],
                 ]
             ),
         )
+        if ctx.bot:
+            provider_title = user_ui.payment_provider_title(str(intent.get("provider") or ""))
+            user_label = f"@{message.from_user.username}" if message.from_user and message.from_user.username else "без username"
+            admin_text = (
+                "🧾 Новое подтверждение ручной оплаты\n\n"
+                f"Пользователь: {user_label} / {user_id}\n"
+                f"Тариф: {str(intent.get('tariff_code') or 'basic').upper()}\n"
+                f"Срок: {int(intent.get('period_months') or 1)} месяц\n"
+                f"Сумма: {intent.get('amount')} {str(intent.get('currency') or 'USD').upper()}\n"
+                f"Способ: {provider_title}\n"
+                "Статус: ожидает проверки"
+            )
+            if receipt_kind == "photo":
+                await ctx.bot.send_photo(ctx.settings.admin_id, receipt_file_id, caption=admin_text, reply_markup=_admin_manual_payment_keyboard(payment_intent_id))
+            else:
+                await ctx.bot.send_document(ctx.settings.admin_id, receipt_file_id, caption=admin_text, reply_markup=_admin_manual_payment_keyboard(payment_intent_id))
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("admin_confirm_manual_payment:"))
     async def handle_admin_confirm_manual_payment_callback(callback: CallbackQuery):
@@ -732,3 +756,24 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
                 await ctx.bot.send_message(user_id, "❌ Оплата не подтверждена\nПлатёж не найден или данные не совпали.\n\nПроверьте чек и отправьте заявку повторно.")
             except Exception as exc:
                 ctx.logger.warning("не удалось уведомить пользователя об отклонении user_id=%s intent_id=%s: %s", user_id, payment_intent_id, exc)
+    async def _find_active_manual_payment_for_user(user_id: int, tenant_id: int) -> dict[str, Any] | None:
+        if not hasattr(ctx.db, "list_payment_intents_for_tenant"):
+            return None
+        intents = await ctx.run_db(ctx.db.list_payment_intents_for_tenant, int(tenant_id), 50)
+        for intent in intents:
+            provider = str(intent.get("provider") or "").lower()
+            status = str(intent.get("status") or "").lower()
+            invoice_id = int(intent.get("invoice_id") or 0)
+            if provider not in MANUAL_PROVIDER_CODES and provider not in (ctx.manual_payment_providers or set()):
+                continue
+            if status not in (ctx.manual_payment_active_statuses or {"created", "pending", "waiting_confirmation"}):
+                continue
+            invoice = await ctx.run_db(ctx.db.get_invoice, invoice_id) if hasattr(ctx.db, "get_invoice") else None
+            if not invoice:
+                continue
+            if int(invoice.get("tenant_id") or 0) != int(tenant_id):
+                continue
+            if str(invoice.get("status") or "").lower() == "paid":
+                continue
+            return intent
+        return None

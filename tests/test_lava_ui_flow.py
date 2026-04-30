@@ -73,6 +73,6 @@ def test_check_payment_callback_exists_in_handlers_source():
     source = Path("app/user_handlers/payments.py").read_text(encoding="utf-8")
     assert "user_invoice_check_payment:" in source
     assert "build_user_invoice_keyboard" not in source
-    assert "🔄 Проверить ещё раз" in source
-    assert "💳 Выбрать другой способ" in source
+    assert "⏳ Оплата ожидает проверки" in source
+    assert "⏳ Оплата ожидает подтверждения" in source
     assert "💎 Моя подписка" in source
