@@ -12,6 +12,7 @@ from app import user_ui
 from app.billing_catalog import format_price
 from app.payments.crypto_wallets import get_crypto_wallet, list_crypto_wallets
 from app.payments.fixed_prices import format_crypto_price
+from app.payments.manual_bank_details import get_manual_bank_details
 from app.payments.payment_matrix import methods_for_currency, method_by_code
 from app.payments.payment_router import PaymentRouter
 from app.config import settings
