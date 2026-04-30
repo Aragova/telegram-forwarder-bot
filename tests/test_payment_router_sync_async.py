@@ -48,6 +48,14 @@ class _InvoiceService:
         self.finalized.append(invoice_id)
 
 
+class _PricingRepo:
+    def get_billing_usd_prices(self):
+        return {"basic": {1: 10.0}}
+
+    def get_billing_exchange_rates(self):
+        return {"USD_TO_UAH": 50.0}
+
+
 class _PaymentService:
     def __init__(self):
         self.calls = []
@@ -58,6 +66,20 @@ class _PaymentService:
 
 def _build_router(subscription_service):
     invoice_service = _InvoiceService()
+    payment_service = _PaymentService()
+    router = PaymentRouter(
+        ensure_user_tenant=lambda user_id: 7,
+        subscription_service=subscription_service,
+        billing_service=_BillingService(),
+        invoice_service=invoice_service,
+        payment_service=payment_service,
+    )
+    return router, invoice_service, payment_service
+
+
+def _build_router_with_pricing_repo(subscription_service):
+    invoice_service = _InvoiceService()
+    invoice_service._repo = _PricingRepo()
     payment_service = _PaymentService()
     router = PaymentRouter(
         ensure_user_tenant=lambda user_id: 7,
@@ -151,3 +173,18 @@ def test_start_payment_lava_allows_first_purchase_without_active_subscription(mo
 
     assert payment_service.calls == []
     assert result.payment_url == "https://lava.test/pay/101"
+
+
+def test_start_payment_uses_repo_usd_and_uah_rate_for_new_payment():
+    router, _, payment_service = _build_router_with_pricing_repo(_SubscriptionServiceEmpty())
+    payment_service.create_payment_for_invoice = lambda invoice_id, provider, **kwargs: {"payment_intent_id": 5, "status": "waiting_confirmation"}
+    result = asyncio.run(
+        router.start_payment(
+            user_id=101,
+            tariff_code="basic",
+            period_months=1,
+            currency="UAH",
+            method_code="uah_abank",
+        )
+    )
+    assert result.amount_text == "500 UAH"

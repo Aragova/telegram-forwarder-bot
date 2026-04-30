@@ -12,6 +12,7 @@ from app import user_ui
 from app.billing_catalog import format_price
 from app.payments.crypto_wallets import get_crypto_wallet, list_crypto_wallets
 from app.payments.fixed_prices import format_crypto_price
+from app.payments.manual_bank_details import get_manual_bank_details
 from app.payments.payment_matrix import methods_for_currency, method_by_code
 from app.payments.payment_router import PaymentRouter
 from app.config import settings
@@ -24,6 +25,7 @@ LAVA_PAYMENT_LOGGER = logging.getLogger("forwarder.payments.lava")
 BILLING_LOGGER = logging.getLogger("forwarder.billing")
 PAY_ACTION_TTL_SECONDS = 30 * 60
 MANUAL_PROVIDER_CODES = {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual", "manual_paypal", "paypal_manual", "uah_manual", "bank_manual", "manual"}
+UAH_MANUAL_PROVIDER_CODES = {"manual_bank_card", "bank_manual", "uah_manual", "manual"}
 
 
 def _admin_manual_payment_keyboard(payment_intent_id: int) -> InlineKeyboardMarkup:
@@ -284,6 +286,26 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         await ctx.answer_callback_safe_once(callback)
         await _render_purchase(callback, tariff_code, currency.upper(), period)
 
+    def _build_uah_manual_bank_screen(*, tariff: str, period: int, amount_text: str, invoice_id: int, method_details: dict[str, str], back_cb: str) -> tuple[str, InlineKeyboardMarkup]:
+        title = str(method_details.get("title") or "—")
+        card = str(method_details.get("card") or "")
+        instruction = str(method_details.get("instruction") or "")
+        text = (
+            "✅ Платёж создан\n\n"
+            f"Тариф: {tariff.upper()}\n"
+            f"Срок: {period} месяц\n"
+            f"Сумма: {amount_text}\n"
+            f"Способ: {title}\n\n"
+            "Payment details:\n\n"
+            f"{title}:\n"
+            f"{card}\n\n"
+            f"{instruction}\n\n"
+            "После оплаты прикрепите ЧЕК из приложения и отправьте его сюда в чат для проверки.\n\n"
+            "✏️ Отправьте скриншот оплаты сюда в чат."
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="ПРОВЕРИТЬ ОПЛАТУ", callback_data=f"user_invoice_check_payment:{int(invoice_id)}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],[InlineKeyboardButton(text="👉 Назад", callback_data=back_cb), InlineKeyboardButton(text="🏠 Меню", callback_data="user_main")]])
+        return text, kb
+
     async def _start_user_billing_payment(callback: CallbackQuery, tariff: str, period: int, currency: str, method_code: str, action_id: str | None = None):
         user_id = callback.from_user.id if callback.from_user else 0
         username = callback.from_user.username if callback.from_user else None
@@ -329,6 +351,46 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         BILLING_LOGGER.info("start_payment user_id=%s tariff_code=%s period_months=%s currency=%s method_code=%s provider=%s internal_invoice_created=%s", user_id, tariff, period, currency, method_code, result.provider, True)
         if result.payment_url:
             await ctx.edit_message_text_safe(message=callback.message, text=f"✅ Ссылка на оплату создана\n\nТариф: {tariff.upper()}\nПериод: {period} месяц\nСумма: {result.amount_text}\nСпособ: {result.method_title}\n\nПосле оплаты доступ активируется автоматически.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Перейти к оплате", url=result.payment_url)],[InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"user_invoice_check_payment:{int(result.invoice_id)}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
+            return
+        method_details = get_manual_bank_details(method_code)
+        is_uah_bank_manual = (
+            bool(method_details)
+            and (
+                method_code in {"uah_abank", "uah_oschad", "uah_pumb"}
+                or bool(method.get("card"))
+            )
+            and bool(result.requires_receipt)
+            and int(result.invoice_id or 0) > 0
+            and int(result.payment_intent_id or 0) > 0
+            and str(result.provider or "") in UAH_MANUAL_PROVIDER_CODES
+            and str(result.status or "").lower() in {"waiting_confirmation", "created", "pending"}
+        )
+        if is_uah_bank_manual:
+            provider_payload = {
+                "method_code": str(method_code),
+                "bank_title": str(method_details.get("title") or result.method_title),
+                "card_number": str(method_details.get("card") or method.get("card") or ""),
+                "amount_text": str(result.amount_text),
+                "tariff_code": str(tariff),
+                "period_months": int(period),
+                "currency": str(currency).upper(),
+                "user_id": int(user_id),
+                "tenant_id": int(await ctx.run_db(ctx.ensure_user_tenant, user_id)),
+            }
+            await ctx.run_db(ctx.db.attach_provider_payload, int(result.payment_intent_id), provider_payload)
+            text, kb = _build_uah_manual_bank_screen(
+                tariff=tariff,
+                period=period,
+                amount_text=result.amount_text,
+                invoice_id=int(result.invoice_id),
+                method_details=method_details,
+                back_cb=f"user_subscription_methods:{tariff}:{currency}:{period}",
+            )
+            await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+            return
+        if bool(method_details) and int(result.payment_intent_id or 0) <= 0:
+            retry_short_id = _save_pay_action(user_id,{"tariff_code": tariff, "currency": currency, "period_months": period, "method_code": method_code})
+            await ctx.edit_message_text_safe(message=callback.message, text="⚠️ Не удалось создать ручную оплату\n\nМы не списали деньги.\nПопробуйте снова или выберите другой способ оплаты.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Попробовать снова", callback_data=f"user_subscription_pay:{retry_short_id}")],[InlineKeyboardButton(text="💳 Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]))
             return
         await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nСрок: {period} месяц\nСумма: {result.amount_text}\n" f"Способ: {result.method_title}\n\n" "✏️ Отправьте скриншот оплаты сюда в чат."), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="ПРОВЕРИТЬ ОПЛАТУ", callback_data=f"user_invoice_check_payment:{int(result.invoice_id)}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],[InlineKeyboardButton(text="👉 Назад", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}"), InlineKeyboardButton(text="🏠 Меню", callback_data="user_main")]]))
 
@@ -584,7 +646,9 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             ),
         )
         if ctx.bot:
-            provider_title = user_ui.payment_provider_title(str(intent.get("provider") or ""))
+            provider_payload = intent.get("provider_payload_json") if isinstance(intent.get("provider_payload_json"), dict) else {}
+            provider_title = str(provider_payload.get("bank_title") or user_ui.payment_provider_title(str(intent.get("provider") or "")))
+            provider_card = str(provider_payload.get("card_number") or "")
             try:
                 await ctx.bot.send_message(
                     ctx.settings.admin_id,
@@ -702,15 +766,19 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             ),
         )
         if ctx.bot:
-            provider_title = user_ui.payment_provider_title(str(intent.get("provider") or ""))
+            provider_payload = intent.get("provider_payload_json") if isinstance(intent.get("provider_payload_json"), dict) else {}
+            provider_title = str(provider_payload.get("bank_title") or user_ui.payment_provider_title(str(intent.get("provider") or "")))
+            provider_card = str(provider_payload.get("card_number") or "")
             user_label = f"@{message.from_user.username}" if message.from_user and message.from_user.username else "без username"
+            amount_text = str(provider_payload.get("amount_text") or f"{intent.get('amount')} {str(intent.get('currency') or 'USD').upper()}")
             admin_text = (
                 "🧾 Новое подтверждение ручной оплаты\n\n"
                 f"Пользователь: {user_label} / {user_id}\n"
                 f"Тариф: {str(intent.get('tariff_code') or 'basic').upper()}\n"
                 f"Срок: {int(intent.get('period_months') or 1)} месяц\n"
-                f"Сумма: {intent.get('amount')} {str(intent.get('currency') or 'USD').upper()}\n"
+                f"Сумма: {amount_text}\n"
                 f"Способ: {provider_title}\n"
+                f"Карта: {provider_card}\n"
                 "Статус: ожидает проверки"
             )
             if receipt_kind == "photo":
