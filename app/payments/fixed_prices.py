@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from app.billing_catalog import USD_PRICES
@@ -28,15 +29,34 @@ FIXED_CRYPTO_PRICES: dict[str, dict[int, dict[str, str]]] = {
 def get_stars_price(tariff_code: str, period_months: int, repo: Any | None = None) -> int | None:
     code = str(tariff_code).lower()
     period = int(period_months)
+    if code not in {"basic", "pro"} or period not in {1, 3, 6, 12}:
+        return None
     if repo and hasattr(repo, "get_billing_fixed_prices"):
         saved = repo.get_billing_fixed_prices("stars") or {}
         raw = (saved.get(code) or {}).get(period)
-        if isinstance(raw, dict) and raw.get("amount") is not None:
+        if raw is None:
+            raw = (saved.get(code) or {}).get(str(period))
+        if isinstance(raw, dict):
+            candidate = raw.get("stars")
+            if candidate is None:
+                candidate = raw.get("amount")
+            if candidate is None:
+                candidate = raw.get("value")
+        else:
+            candidate = raw
+        if candidate is not None:
             try:
-                return int(raw.get("amount"))
+                amount = int(candidate)
+                if amount > 0:
+                    return amount
+                LOGGER.warning("STARS_PRICE_MISSING invalid_non_positive tariff_code=%s period_months=%s", code, period)
+                return None
             except Exception:
-                pass
-    return FIXED_STARS_PRICES.get(code, {}).get(period)
+                LOGGER.warning("STARS_PRICE_MISSING invalid_type tariff_code=%s period_months=%s", code, period)
+                return None
+        return None
+    value = FIXED_STARS_PRICES.get(code, {}).get(period)
+    return int(value) if isinstance(value, int) and value > 0 else None
 
 
 def format_stars_price(tariff_code: str, period_months: int, repo: Any | None = None) -> str:
@@ -66,3 +86,4 @@ def get_crypto_price(tariff_code: str, period_months: int, repo: Any | None = No
 
 def format_crypto_price(tariff_code: str, period_months: int, repo: Any | None = None) -> str:
     return str(get_crypto_price(tariff_code, period_months, repo=repo).get("display") or "—")
+LOGGER = logging.getLogger("forwarder.payments.telegram_stars")

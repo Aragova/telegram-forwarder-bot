@@ -15,6 +15,7 @@ from app.payments.fixed_prices import format_crypto_price
 from app.payments.manual_bank_details import get_manual_bank_details
 from app.payments.payment_matrix import methods_for_currency, method_by_code
 from app.payments.payment_router import PaymentRouter
+from app.payments.telegram_stars_service import TelegramStarsService, parse_stars_payload
 from app.config import settings
 from app.payments import LavaTopAPIError, PaymentService as LavaPaymentService
 from .context import UserHandlersContext
@@ -23,6 +24,7 @@ from .context import UserHandlersContext
 RECOVERY_CTA_EVENT_TYPE = "recovery_cta_shown_after_payment"
 LAVA_PAYMENT_LOGGER = logging.getLogger("forwarder.payments.lava")
 BILLING_LOGGER = logging.getLogger("forwarder.billing")
+STARS_LOGGER = logging.getLogger("forwarder.payments.telegram_stars")
 PAY_ACTION_TTL_SECONDS = 30 * 60
 MANUAL_PROVIDER_CODES = {"manual_bank_card", "card_provider", "sbp_provider", "crypto_manual", "manual_paypal", "paypal_manual", "uah_manual", "bank_manual", "manual"}
 UAH_MANUAL_PROVIDER_CODES = {"manual_bank_card", "bank_manual", "uah_manual", "manual"}
@@ -58,6 +60,14 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         billing_service=ctx.billing_service,
         invoice_service=ctx.invoice_service,
         payment_service=ctx.payment_service,
+    )
+    stars_service = TelegramStarsService(
+        repo=ctx.db,
+        subscription_service=ctx.subscription_service,
+        billing_service=ctx.billing_service,
+        invoice_service=ctx.invoice_service,
+        payment_service=ctx.payment_service,
+        ensure_user_tenant=ctx.ensure_user_tenant,
     )
 
     async def _show_legacy_flow_disabled(callback: CallbackQuery) -> None:
@@ -313,7 +323,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         if not bool(method.get("enabled", True)):
             await ctx.answer_callback_safe_once(callback)
             if method_code == "stars":
-                await ctx.edit_message_text_safe(message=callback.message, text="⭐ Telegram Stars\n\nЭтот способ оплаты скоро будет доступен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]))
+                await ctx.edit_message_text_safe(message=callback.message, text="⭐ Telegram Stars временно недоступен\n\nВыберите другой способ оплаты или напишите в поддержку.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]))
                 return
             await ctx.edit_message_text_safe(message=callback.message, text="Этот способ оплаты скоро будет доступен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
             return
@@ -326,6 +336,24 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             rows.append([InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")])
             await ctx.answer_callback_safe_once(callback)
             await ctx.edit_message_text_safe(message=callback.message, text=("₿ Crypto\n\nВыберите криптовалюту для оплаты.\n\n" f"Тариф: {tariff.upper()}\nСрок: {period} месяц\nСумма: {amount_text}"), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            return
+        if method_code == "stars":
+            await ctx.answer_callback_safe_once(callback, "⏳ Создаю счёт Telegram Stars…")
+            if not settings.payment_enabled or not settings.telegram_stars_enabled:
+                await ctx.edit_message_text_safe(message=callback.message, text="⭐ Telegram Stars временно недоступен\n\nВыберите другой способ оплаты или напишите в поддержку.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]))
+                return
+            try:
+                context = await stars_service.create_stars_invoice_context(user_id=user_id, username=username, tariff_code=tariff, period_months=period, currency=currency, method_code=method_code, attempt_id=f"att_{secrets.token_hex(6)}", idempotency_key=f"vimi:{user_id}:{tariff}:{int(period)}:{currency}:stars")
+                await stars_service.send_stars_invoice(bot=ctx.bot, chat_id=user_id, context=context)
+            except ValueError as exc:
+                text = "⚠️ Цена в Telegram Stars не настроена\n\nДля этого тарифа и периода пока нет цены.\nВыберите другой способ оплаты." if "не настроена" in str(exc).lower() else "Не удалось создать счёт Telegram Stars"
+                await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]))
+                return
+            except Exception:
+                STARS_LOGGER.exception("STARS_PAYMENT_START_FAILED user_id=%s tariff_code=%s period=%s", user_id, tariff, period)
+                await ctx.edit_message_text_safe(message=callback.message, text="Не удалось создать счёт Telegram Stars", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]))
+                return
+            await ctx.edit_message_text_safe(message=callback.message, text="⭐ Счёт Telegram Stars отправлен\n\nЗавершите оплату в Telegram.\nПосле успешной оплаты подписка активируется автоматически.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Моя подписка", callback_data="user_subscription")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]))
             return
         await ctx.answer_callback_safe_once(callback, "⏳ Создаю платёж…")
         try:
@@ -680,6 +708,51 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
                 ctx.logger.info("заявка с чеком отправлена админу intent_id=%s", payment_intent_id)
             except Exception as exc:
                 ctx.logger.warning("не удалось отправить уведомление администратору intent_id=%s: %s", payment_intent_id, exc)
+
+    @dp.pre_checkout_query()
+    async def handle_stars_pre_checkout_query(pre_checkout_query):
+        try:
+            payload = parse_stars_payload(str(pre_checkout_query.invoice_payload or ""))
+            intent = await ctx.run_db(ctx.db.get_payment_intent, int(payload.payment_intent_id))
+            invoice = await ctx.run_db(ctx.db.get_invoice, int(payload.invoice_id))
+            if not intent or not invoice or str(intent.get("provider") or "") != "telegram_stars" or str(pre_checkout_query.currency or "").upper() != "XTR":
+                raise ValueError("invalid")
+            if int(payload.user_id) != int(pre_checkout_query.from_user.id or 0) or int(pre_checkout_query.total_amount or 0) != int(float(intent.get("amount") or 0)):
+                raise ValueError("mismatch")
+            if str(intent.get("status") or "") == "paid" or str(invoice.get("status") or "") == "paid":
+                raise ValueError("already_paid")
+            await pre_checkout_query.answer(ok=True)
+            STARS_LOGGER.info("STARS_PRECHECKOUT_APPROVED user_id=%s payment_intent_id=%s", payload.user_id, payload.payment_intent_id)
+        except Exception:
+            await pre_checkout_query.answer(ok=False, error_message="Не удалось подтвердить счёт. Откройте оплату заново.")
+            STARS_LOGGER.warning("STARS_PRECHECKOUT_REJECTED")
+
+    @dp.message(lambda message: message.successful_payment is not None)
+    async def handle_stars_successful_payment(message: Message):
+        successful = message.successful_payment
+        if not successful or str(successful.currency or "").upper() != "XTR":
+            return
+        try:
+            payload = parse_stars_payload(str(successful.invoice_payload or ""))
+        except ValueError:
+            return
+        intent = await ctx.run_db(ctx.db.get_payment_intent, int(payload.payment_intent_id))
+        if not intent or str(intent.get("provider") or "") != "telegram_stars":
+            return
+        if str(intent.get("status") or "") == "paid":
+            await message.answer("✅ Эта оплата уже обработана\n\nПодписка уже активирована.")
+            return
+        if int(payload.user_id) != int(message.from_user.id if message.from_user else 0) or int(successful.total_amount or 0) != int(float(intent.get("amount") or 0)):
+            STARS_LOGGER.warning("STARS_PAYMENT_AMOUNT_MISMATCH payment_intent_id=%s", payload.payment_intent_id)
+            return
+        confirmation_payload = {"provider": "telegram_stars", "telegram_payment_charge_id": str(successful.telegram_payment_charge_id or ""), "provider_payment_charge_id": str(successful.provider_payment_charge_id or ""), "telegram_user_id": int(payload.user_id), "total_amount": int(successful.total_amount or 0), "currency": "XTR", "invoice_payload": str(successful.invoice_payload or ""), "message_id": int(message.message_id or 0), "paid_at": ctx.utc_now_iso()}
+        await ctx.run_db(ctx.db.attach_external_payment_id, int(payload.payment_intent_id), str(successful.telegram_payment_charge_id or ""))
+        await ctx.run_db(ctx.db.mark_payment_paid, int(payload.payment_intent_id), confirmation_payload=confirmation_payload)
+        ok = await ctx.run_db(ctx.payment_service.activate_subscription_after_payment, int(payload.payment_intent_id))
+        if ok:
+            await message.answer("✅ Оплата получена\n\nТариф BASIC активирован.\nПериод: 1 месяц\n\nСпасибо, что выбрали ViMi 🚀")
+        else:
+            await message.answer("✅ Оплата получена\n\nМы сохранили платёж, но подписка не активировалась автоматически.\nНапишите в поддержку — доступ можно восстановить вручную.")
 
     @dp.message(lambda m: m.chat.type == "private" and m.from_user is not None and (bool(m.photo) or bool(m.document)))
     async def handle_user_payment_receipt_message(message: Message):
