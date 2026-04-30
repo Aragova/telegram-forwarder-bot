@@ -2967,6 +2967,13 @@ async def handle_user_plans_callback(callback: CallbackQuery):
 
 @dp.pre_checkout_query()
 async def handle_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
+    payload = str(getattr(pre_checkout_query, "invoice_payload", "") or "")
+    if payload.startswith("vimi:stars:"):
+        logger.warning(
+            "LEGACY_PRECHECKOUT_SKIP_STARS | user_id=%s",
+            pre_checkout_query.from_user.id if pre_checkout_query.from_user else None,
+        )
+        return
     await pre_checkout_query.answer(ok=True)
 
 
@@ -2975,7 +2982,15 @@ async def handle_successful_payment(message: Message):
     successful = getattr(message, "successful_payment", None)
     if not successful:
         return
-    external_id = str(getattr(successful, "invoice_payload", "") or getattr(successful, "provider_payment_charge_id", ""))
+    payload = str(getattr(successful, "invoice_payload", "") or "")
+    if payload.startswith("vimi:stars:"):
+        logger.warning(
+            "LEGACY_SUCCESSFUL_PAYMENT_SKIP_STARS | user_id=%s | message_id=%s",
+            message.from_user.id if message.from_user else None,
+            message.message_id,
+        )
+        return
+    external_id = str(payload or getattr(successful, "provider_payment_charge_id", ""))
     if not external_id:
         return
     intent = await run_db(db.get_payment_intent_by_external_id, external_id) if hasattr(db, "get_payment_intent_by_external_id") else None
