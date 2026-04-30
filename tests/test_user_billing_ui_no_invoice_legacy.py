@@ -90,7 +90,6 @@ def test_admin_notification_contains_bank_title_and_card_number() -> None:
     assert "card_number" in source
     assert "Карта:" in source
 
-
 def test_manual_bank_details_helper_is_imported_for_uah_flow() -> None:
     source = Path("app/user_handlers/payments.py").read_text(encoding="utf-8")
     assert "from app.payments.manual_bank_details import get_manual_bank_details" in source
