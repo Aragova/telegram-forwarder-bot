@@ -59,9 +59,33 @@ class _PricingRepo:
 class _PaymentService:
     def __init__(self):
         self.calls = []
+        self._repo = _PaymentRepo()
 
     def create_payment_for_invoice(self, invoice_id: int, provider: str, **kwargs):
         self.calls.append((invoice_id, provider, kwargs))
+
+class _PaymentRepo:
+    def __init__(self):
+        self.intents = {}
+        self.seq = 0
+
+    def create_payment_intent(self, **payload):
+        self.seq += 1
+        self.intents[self.seq] = {"id": self.seq, **payload}
+        return self.seq
+
+    def attach_provider_payload(self, payment_intent_id: int, payload: dict):
+        self.intents[payment_intent_id]["provider_payload_json"] = payload
+        return True
+
+    def attach_checkout_url(self, payment_intent_id: int, checkout_url: str, *, external_payment_id=None):
+        self.intents[payment_intent_id]["external_checkout_url"] = checkout_url
+        self.intents[payment_intent_id]["external_payment_id"] = external_payment_id
+        return True
+
+    def update_payment_intent_status(self, payment_intent_id: int, status: str, *, error_text=None):
+        self.intents[payment_intent_id]["status"] = status
+        return True
 
 
 def _build_router(subscription_service):
@@ -150,7 +174,10 @@ def test_start_payment_manual_allows_first_purchase_without_active_subscription(
 
 def test_start_payment_lava_allows_first_purchase_without_active_subscription(monkeypatch):
     class _FakeLavaView:
+        invoice_id = "inv_101"
         payment_url = "https://lava.test/pay/101"
+        amount = 10.0
+        currency = "RUB"
 
     class _FakeLavaService:
         async def create_lava_invoice_for_user_invoice(self, **kwargs):
@@ -173,6 +200,13 @@ def test_start_payment_lava_allows_first_purchase_without_active_subscription(mo
 
     assert payment_service.calls == []
     assert result.payment_url == "https://lava.test/pay/101"
+    assert result.payment_intent_id == 1
+    assert result.status == "checkout_opened"
+    intent = payment_service._repo.intents[1]
+    assert intent["provider"] == "lava_top"
+    assert intent["status"] == "checkout_opened"
+    assert intent["provider_payload_json"]["lava_invoice_id"] == "inv_101"
+    assert intent["provider_payload_json"]["lava_amount_total"]["currency"] == "RUB"
 
 
 def test_start_payment_uses_repo_usd_and_uah_rate_for_new_payment():
@@ -188,3 +222,31 @@ def test_start_payment_uses_repo_usd_and_uah_rate_for_new_payment():
         )
     )
     assert result.amount_text == "500 UAH"
+
+
+def test_start_payment_lava_without_payment_url_does_not_expose_link(monkeypatch):
+    class _FakeLavaView:
+        invoice_id = "inv_102"
+        payment_url = ""
+        amount = 10.0
+        currency = "USD"
+
+    class _FakeLavaService:
+        async def create_lava_invoice_for_user_invoice(self, **kwargs):
+            return _FakeLavaView()
+
+    from app.payments import payment_router as payment_router_module
+
+    monkeypatch.setattr(payment_router_module, "LavaPaymentService", _FakeLavaService)
+    router, _, _payment_service = _build_router(_SubscriptionServiceEmpty())
+    result = asyncio.run(
+        router.start_payment(
+            user_id=222,
+            tariff_code="basic",
+            period_months=1,
+            currency="USD",
+            method_code="lava_card_usd",
+        )
+    )
+    assert result.payment_url is None
+    assert result.status == "pending"
