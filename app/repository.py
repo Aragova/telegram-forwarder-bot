@@ -337,6 +337,16 @@ class RepositoryProtocol(Protocol):
         new_price: float,
         admin_id: int | None = None,
     ) -> bool: ...
+    def get_billing_fixed_prices(self, kind: str) -> dict[str, dict[int, dict[str, Any]]]: ...
+    def set_billing_fixed_price(
+        self,
+        *,
+        kind: str,
+        tariff_code: str,
+        period_months: int,
+        value: Any,
+        admin_id: int | None = None,
+    ) -> bool: ...
     def create_payment_intent(
         self,
         *,

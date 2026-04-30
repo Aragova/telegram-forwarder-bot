@@ -5520,6 +5520,18 @@ class PostgresRepository(RepositoryProtocol):
             admin_id=admin_id,
         )
 
+    def get_billing_fixed_prices(self, kind: str) -> dict[str, dict[int, dict[str, Any]]]:
+        return self.billing_repo.get_billing_fixed_prices(kind)
+
+    def set_billing_fixed_price(self, *, kind: str, tariff_code: str, period_months: int, value: Any, admin_id: int | None = None) -> bool:
+        return self.billing_repo.set_billing_fixed_price(
+            kind=kind,
+            tariff_code=tariff_code,
+            period_months=period_months,
+            value=value,
+            admin_id=admin_id,
+        )
+
     def create_invoice(
         self,
         *,

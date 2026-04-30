@@ -25,25 +25,44 @@ FIXED_CRYPTO_PRICES: dict[str, dict[int, dict[str, str]]] = {
 }
 
 
-def get_stars_price(tariff_code: str, period_months: int) -> int | None:
-    return FIXED_STARS_PRICES.get(str(tariff_code).lower(), {}).get(int(period_months))
+def get_stars_price(tariff_code: str, period_months: int, repo: Any | None = None) -> int | None:
+    code = str(tariff_code).lower()
+    period = int(period_months)
+    if repo and hasattr(repo, "get_billing_fixed_prices"):
+        saved = repo.get_billing_fixed_prices("stars") or {}
+        raw = (saved.get(code) or {}).get(period)
+        if isinstance(raw, dict) and raw.get("amount") is not None:
+            try:
+                return int(raw.get("amount"))
+            except Exception:
+                pass
+    return FIXED_STARS_PRICES.get(code, {}).get(period)
 
 
-def format_stars_price(tariff_code: str, period_months: int) -> str:
-    value = get_stars_price(tariff_code, period_months)
+def format_stars_price(tariff_code: str, period_months: int, repo: Any | None = None) -> str:
+    value = get_stars_price(tariff_code, period_months, repo=repo)
     if value is not None:
         return f"{int(value)} Stars"
     usd = int(USD_PRICES[str(tariff_code).lower()][int(period_months)])
     return f"{usd * 100} Stars"
 
 
-def get_crypto_price(tariff_code: str, period_months: int) -> dict[str, str]:
-    value = FIXED_CRYPTO_PRICES.get(str(tariff_code).lower(), {}).get(int(period_months))
+def get_crypto_price(tariff_code: str, period_months: int, repo: Any | None = None) -> dict[str, str]:
+    code = str(tariff_code).lower()
+    period = int(period_months)
+    if repo and hasattr(repo, "get_billing_fixed_prices"):
+        saved = repo.get_billing_fixed_prices("crypto") or {}
+        raw = (saved.get(code) or {}).get(period)
+        if isinstance(raw, dict) and raw.get("amount") is not None:
+            amount = str(raw.get("amount"))
+            display = str(raw.get("display") or f"${amount}")
+            return {"amount": amount, "display": display}
+    value = FIXED_CRYPTO_PRICES.get(code, {}).get(period)
     if value:
         return value
     usd = int(USD_PRICES[str(tariff_code).lower()][int(period_months)])
     return {"amount": str(usd), "display": f"${usd}"}
 
 
-def format_crypto_price(tariff_code: str, period_months: int) -> str:
-    return str(get_crypto_price(tariff_code, period_months).get("display") or "—")
+def format_crypto_price(tariff_code: str, period_months: int, repo: Any | None = None) -> str:
+    return str(get_crypto_price(tariff_code, period_months, repo=repo).get("display") or "—")

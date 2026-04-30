@@ -57,6 +57,66 @@ class BillingRepository(RepositorySplitBase):
         )
         return True
 
+    def get_billing_fixed_prices(self, kind: str) -> dict[str, dict[int, dict[str, Any]]]:
+        kind_code = str(kind or "").lower()
+        if kind_code not in {"stars", "crypto"}:
+            return {"basic": {}, "pro": {}}
+        prices: dict[str, dict[int, dict[str, Any]]] = {"basic": {}, "pro": {}}
+        event_type = f"billing_fixed_price_{kind_code}_updated"
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT metadata_json
+                    FROM billing_events
+                    WHERE event_type = %s
+                    ORDER BY id DESC
+                    """,
+                    (event_type,),
+                )
+                rows = cur.fetchall() or []
+        for row in rows:
+            data = self.safe_json_loads((row or {}).get("metadata_json"), {})
+            tariff_code = str(data.get("tariff_code") or "").lower()
+            if tariff_code not in prices:
+                continue
+            try:
+                period_months = int(data.get("period_months"))
+            except Exception:
+                continue
+            if period_months in prices[tariff_code]:
+                continue
+            new_value = data.get("new_value")
+            if isinstance(new_value, dict):
+                prices[tariff_code][period_months] = new_value
+        return prices
+
+    def set_billing_fixed_price(self, *, kind: str, tariff_code: str, period_months: int, value: Any, admin_id: int | None = None) -> bool:
+        kind_code = str(kind or "").lower()
+        code = str(tariff_code or "").lower()
+        period = int(period_months)
+        if kind_code not in {"stars", "crypto"} or code not in {"basic", "pro"} or period not in {1, 3, 6, 12}:
+            return False
+        if not isinstance(value, dict):
+            return False
+        old_value = self.get_billing_fixed_prices(kind_code).get(code, {}).get(period)
+        self.create_billing_event(
+            1,
+            f"billing_fixed_price_{kind_code}_updated",
+            event_source="admin_system",
+            currency="USD",
+            metadata={
+                "admin_id": admin_id,
+                "kind": kind_code,
+                "tariff_code": code,
+                "period_months": period,
+                "old_value": old_value,
+                "new_value": value,
+                "created_at": utc_now_iso(),
+            },
+        )
+        return True
+
     def create_billing_event(
         self,
         tenant_id: int,

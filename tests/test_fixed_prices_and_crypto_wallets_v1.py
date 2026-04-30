@@ -30,3 +30,19 @@ def test_fixed_crypto_price_independent_from_currency():
 
 def test_stars_price_format():
     assert "Stars" in format_stars_price("basic", 1)
+
+
+class _Repo:
+    def __init__(self):
+        self.fixed = {}
+    def get_billing_fixed_prices(self, kind):
+        return self.fixed.get(kind, {})
+
+
+def test_repo_fixed_prices_override_and_fallback():
+    repo = _Repo()
+    repo.fixed = {"stars": {"basic": {1: {"amount": 950}}}, "crypto": {"basic": {1: {"amount": "9.5", "display": "$9.5"}}}}
+    assert format_stars_price("basic", 1, repo=repo) == "950 Stars"
+    assert format_stars_price("basic", 3, repo=repo) == "2500 Stars"
+    assert format_crypto_price("basic", 1, repo=repo) == "$9.5"
+    assert format_crypto_price("basic", 3, repo=repo) == "$25"

@@ -19,6 +19,7 @@ def test_admin_system_menu_contains_rates_button():
     texts = [btn.text for row in kb.keyboard for btn in row]
     assert "💱 Курсы валют" in texts
     assert "💵 Цены тарифов" in texts
+    assert "💫 Фикс-цены Stars/Crypto" in texts
 
 
 def test_billing_catalog_uses_saved_rate_and_fallback():

@@ -288,7 +288,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             await ctx.edit_message_text_safe(message=callback.message, text="Этот способ оплаты скоро будет доступен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
             return
         if method_code == "crypto":
-            amount_text = format_crypto_price(tariff, period)
+            amount_text = format_crypto_price(tariff, period, repo=ctx.db)
             rows = []
             for wallet in list_crypto_wallets():
                 coin_short = _save_crypto_action(user_id, {"tariff_code": tariff, "currency": currency, "period_months": period, "method_code": method_code, "coin_code": wallet.get("code")})
@@ -389,7 +389,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         invoice_id = int(invoice.get("id") or 0) if isinstance(invoice, dict) else 0
         if invoice_id <= 0:
             return
-        amount_text = format_crypto_price(tariff, period)
+        amount_text = format_crypto_price(tariff, period, repo=ctx.db)
         await ctx.edit_message_text_safe(message=callback.message, text=("✅ Платёж создан\n\n" f"Тариф: {tariff.upper()}\nСрок: {period} месяц\nСумма: {amount_text}\n" f"Способ: {wallet.get('title')}\n\nPayment details:\n\n" f"{wallet.get('wallet_label')}:\n{wallet.get('wallet_address')}\n\n" "Pay the amount of the tariff you have chosen.\nAttach a screenshot of the receipt and send it for verification.\n\n" "You are paying an individual.\nThe money will be credited to the recipient's account.\n\n" "✏️ Отправьте скриншот оплаты:"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧾 Отправить подтверждение", callback_data=f"user_upload_receipt:{invoice_id}")],[InlineKeyboardButton(text="⬅️ Выбрать другой способ", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")]]))
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_upload_receipt:"))
