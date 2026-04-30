@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone, timedelta
@@ -574,7 +575,7 @@ class PostgresRepository(RepositoryProtocol):
                 'telegram_stars','telegram_payments','paypal','card_provider','sbp_provider',
                 'crypto_manual','tribute','lava_top','manual_bank_card'
             )),
-            status TEXT NOT NULL CHECK(status IN ('created','pending','waiting_confirmation','paid','failed','expired','canceled')),
+            status TEXT NOT NULL CHECK(status IN ('created','pending','waiting_confirmation','checkout_opened','paid','failed','expired','canceled')),
             amount NUMERIC(12,2) NOT NULL DEFAULT 0,
             currency TEXT NOT NULL DEFAULT 'USD',
             external_payment_id TEXT NULL,
@@ -813,7 +814,52 @@ class PostgresRepository(RepositoryProtocol):
                 )
             conn.commit()
 
+        self._ensure_payment_intents_status_constraint()
         self._ensure_default_plans()
+
+    def _ensure_payment_intents_status_constraint(self) -> None:
+        required_statuses = {
+            "created",
+            "pending",
+            "waiting_confirmation",
+            "checkout_opened",
+            "paid",
+            "failed",
+            "canceled",
+        }
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT pg_get_constraintdef(c.oid) AS def
+                    FROM pg_constraint c
+                    JOIN pg_class t ON t.oid = c.conrelid
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE c.contype = 'c'
+                      AND c.conname = 'payment_intents_status_check'
+                      AND t.relname = 'payment_intents'
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                existing_statuses: set[str] = set()
+                if row and row.get("def"):
+                    existing_statuses = set(re.findall(r"'([^']+)'", str(row["def"])))
+
+                merged_statuses = sorted(existing_statuses | required_statuses)
+                if existing_statuses and "checkout_opened" in existing_statuses:
+                    return
+
+                quoted = ", ".join(f"'{status}'" for status in merged_statuses)
+                cur.execute("ALTER TABLE payment_intents DROP CONSTRAINT IF EXISTS payment_intents_status_check")
+                cur.execute(
+                    f"""
+                    ALTER TABLE payment_intents
+                    ADD CONSTRAINT payment_intents_status_check
+                    CHECK (status IN ({quoted}))
+                    """
+                )
+            conn.commit()
 
     def _ensure_default_plans(self) -> None:
         self.subscription_repo.ensure_default_plans()
