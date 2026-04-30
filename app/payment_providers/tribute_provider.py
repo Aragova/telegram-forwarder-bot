@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -43,7 +42,7 @@ class TributeProvider:
         }
         logger.info("TRIBUTE_CREATE_ORDER_START tenant_id=%s invoice_id=%s amount=%s currency=%s provider=tribute", tenant_id, invoice_id, amount_major, str(invoice.get("currency") or "USD").upper())
         try:
-            raw = asyncio.run(TributeClient().create_shop_order(payload))
+            raw = TributeClient().create_shop_order(payload)
         except TributeAPIError as exc:
             logger.warning("TRIBUTE_CREATE_ORDER_FAILED tenant_id=%s invoice_id=%s status_code=%s error=%s", tenant_id, invoice_id, exc.status_code, str(exc))
             return PaymentProviderResult(provider=self.provider_name, status="failed", payload={"error": "tribute_create_order_failed", "invoice_id": invoice_id, "tenant_id": tenant_id}, error_text="tribute_create_order_failed", user_message_ru="Не удалось создать ссылку Tribute. Попробуйте другой способ оплаты или напишите в поддержку.")

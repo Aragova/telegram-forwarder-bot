@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 from pathlib import Path
 import sys
 
@@ -7,6 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import settings
 from app.payment_provider_protocol import PaymentProviderResult
+
+from app.payment_providers.tribute_client import TributeAPIError, TributeClient
+from app.payment_providers.tribute_provider import TributeProvider
 from app.payment_service import PaymentService
 
 
@@ -262,3 +267,66 @@ def test_retry_after_failed_creates_new_attempt():
     second = service.create_payment_for_invoice(11, "lava_top", attempt_id="a3", idempotency_key="a3")
     assert second["ok"] is True
     assert second["payment_intent_id"] != first["payment_intent_id"]
+
+
+def test_tribute_client_create_shop_order_is_sync():
+    assert not inspect.iscoroutinefunction(TributeClient.create_shop_order)
+
+
+def test_tribute_provider_create_payment_inside_event_loop(monkeypatch):
+    settings.payment_enabled = True
+    settings.tribute_enabled = True
+    settings.tribute_api_key = "secret"
+
+    def _fake_create_shop_order(self, payload):
+        return {"uuid": "order_123", "paymentUrl": "https://tribute.tg/pay/123", "webappPaymentUrl": "https://tribute.tg/webapp/pay/123"}
+
+    monkeypatch.setattr(TributeClient, "create_shop_order", _fake_create_shop_order)
+    provider = TributeProvider()
+    async def _run_inside_loop():
+        return provider.create_payment(invoice={"id": 35, "tenant_id": 5, "total": 9.0, "currency": "USD", "tariff_code": "basic"}, tenant={"id": 5})
+
+    result = asyncio.run(_run_inside_loop())
+
+    assert result.provider == "tribute"
+    assert result.status == "pending"
+    assert result.external_payment_id == "order_123"
+    assert result.external_checkout_url == "https://tribute.tg/webapp/pay/123"
+
+
+def test_tribute_provider_returns_failed_on_tribute_api_error(monkeypatch):
+    settings.payment_enabled = True
+    settings.tribute_enabled = True
+    settings.tribute_api_key = "super-secret-key"
+
+    def _raise_error(self, payload):
+        raise TributeAPIError("tribute_api_request_error")
+
+    monkeypatch.setattr(TributeClient, "create_shop_order", _raise_error)
+    provider = TributeProvider()
+    result = provider.create_payment(invoice={"id": 35, "tenant_id": 5, "total": 9.0, "currency": "USD", "tariff_code": "basic"}, tenant={"id": 5})
+
+    assert result.status == "failed"
+    assert result.error_text == "tribute_create_order_failed"
+    assert "super-secret-key" not in str(result.error_text or "")
+
+
+def test_tribute_provider_prefers_webapp_checkout_url(monkeypatch):
+    settings.payment_enabled = True
+    settings.tribute_enabled = True
+    settings.tribute_api_key = "secret"
+
+    def _fake_create_shop_order(self, payload):
+        return {"uuid": "order_123", "paymentUrl": "https://tribute.tg/pay/123", "webappPaymentUrl": "https://tribute.tg/webapp/pay/123"}
+
+    monkeypatch.setattr(TributeClient, "create_shop_order", _fake_create_shop_order)
+    provider = TributeProvider()
+    async def _run_inside_loop():
+        return provider.create_payment(invoice={"id": 35, "tenant_id": 5, "total": 9.0, "currency": "USD", "tariff_code": "basic"}, tenant={"id": 5})
+
+    result = asyncio.run(_run_inside_loop())
+
+    assert result.provider == "tribute"
+    assert result.status == "pending"
+    assert result.external_payment_id == "order_123"
+    assert result.external_checkout_url == "https://tribute.tg/webapp/pay/123"
