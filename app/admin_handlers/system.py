@@ -402,7 +402,18 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
                 return
             amount = f"{amount_f:g}"
             value = {"amount": amount, "display": f"${amount}"}
-        ok = await ctx.run_db(ctx.db.set_billing_fixed_price, kind=kind, tariff_code=code, period_months=period, value=value, admin_id=admin_id)
+        try:
+            ok = await ctx.run_db(ctx.db.set_billing_fixed_price, kind=kind, tariff_code=code, period_months=period, value=value, admin_id=admin_id)
+        except Exception:
+            ctx.logger.exception(
+                "Ошибка сохранения фикс-цены kind=%s tariff_code=%s period=%s admin_id=%s",
+                kind,
+                code,
+                period,
+                admin_id,
+            )
+            await message.reply("❌ Не удалось сохранить фикс-цену. Ошибка записана в лог.")
+            return
         if not ok:
             await message.reply("❌ Не удалось сохранить фикс-цену.")
             return

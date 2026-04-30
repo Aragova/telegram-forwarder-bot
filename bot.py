@@ -7152,7 +7152,7 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
         m.chat.type == "private"
         and m.from_user is not None
         and user_states.get(m.from_user.id) is not None
-        and user_states.get(m.from_user.id, {}).get("action") not in {"admin_billing_rate_input", "admin_billing_usd_price_input"}
+        and user_states.get(m.from_user.id, {}).get("action") not in {"admin_billing_rate_input", "admin_billing_usd_price_input", "admin_fixed_price_input"}
         and m.text is not None
         and not is_menu_navigation_text(m.text)
         and (m.text or "").strip() not in {"📺 Канал", "👥 Группа с темой", "📤 Источник", "📥 Получатель"}
