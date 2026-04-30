@@ -2222,14 +2222,25 @@ class SenderService:
                     )
                 )
 
-                logger.info(
-                    "Premium-реактор %s поставил реакции %s на сообщение %s в %s",
+                confirmed = await self._confirm_reaction_set(client, entity, sent_message_id, variant)
+                if confirmed:
+                    logger.info(
+                        "PREMIUM_REACTION_CONFIRMED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reactions=%s",
+                        rule_id,
+                        entity,
+                        sent_message_id,
+                        session_name,
+                        variant,
+                    )
+                    return True
+                logger.warning(
+                    "REACTION_NOT_CONFIRMED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reactions=%s",
+                    rule_id,
+                    entity,
+                    sent_message_id,
                     session_name,
                     variant,
-                    sent_message_id,
-                    entity,
                 )
-                return True
 
             except Exception as exc:
                 last_error = exc
@@ -2264,6 +2275,51 @@ class SenderService:
             return False
         except Exception:
             return False
+
+    async def _confirm_reaction_set(self, client, entity, message_id: int, emojis: list[str]) -> bool:
+        try:
+            msg = await client.get_messages(entity, ids=message_id)
+            reactions = getattr(msg, "reactions", None)
+            if not reactions:
+                return False
+            actual_emojis: set[str] = set()
+            for result in getattr(reactions, "results", []) or []:
+                reaction = getattr(result, "reaction", None)
+                emoticon = getattr(reaction, "emoticon", None)
+                if emoticon:
+                    actual_emojis.add(emoticon)
+            expected = {emoji for emoji in (emojis or []) if emoji}
+            return bool(expected) and expected.issubset(actual_emojis)
+        except Exception:
+            return False
+
+    async def _select_reaction_message_id(self, target_id, sent_message_ids: list[int] | None) -> tuple[int | None, str]:
+        ids = sorted({int(x) for x in (sent_message_ids or []) if x is not None})
+        if not ids:
+            return None, "missing_sent_message_ids"
+
+        entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
+        try:
+            fetched = await self.telethon.get_messages(entity, ids=ids)
+            fetched_list = fetched if isinstance(fetched, list) else [fetched]
+            fetched_by_id = {int(m.id): m for m in fetched_list if m}
+        except Exception:
+            fetched_by_id = {}
+
+        for mid in ids:
+            msg = fetched_by_id.get(mid)
+            if not msg:
+                continue
+            text_value = (
+                getattr(msg, "raw_text", None)
+                or getattr(msg, "text", None)
+                or getattr(msg, "message", None)
+                or ""
+            ).strip()
+            if text_value:
+                return mid, "caption_message"
+
+        return ids[0], "first_album_message"
 
     async def _add_reaction_if_possible(self, target_id, sent_message_id, rule_id: int | None = None):
         if not self.reaction_clients:
@@ -3853,8 +3909,7 @@ class SenderService:
                 verified = await self._verify_album_delivery(
                     target_id=target_id,
                     expected_count=len(message_ids),
-                    expected_first_caption=first_source_caption,
-                    min_message_id=copy_result.get("sent_message_id"),
+                    sent_message_ids=copy_result.get("sent_message_ids"),
                     target_thread_id=target_thread_id,
                 )
                 attempts_debug.append({"stage": "verify_after_copy", **verified})
@@ -3893,8 +3948,7 @@ class SenderService:
                     verified_retry = await self._verify_album_delivery(
                         target_id=target_id,
                         expected_count=len(message_ids),
-                        expected_first_caption=first_source_caption,
-                        min_message_id=copy_result.get("sent_message_id"),
+                        sent_message_ids=copy_result.get("sent_message_ids"),
                         target_thread_id=target_thread_id,
                     )
                     attempts_debug.append({"stage": "verify_after_copy_retry_only", **verified_retry})
@@ -4065,8 +4119,7 @@ class SenderService:
                 verified = await self._verify_album_delivery(
                     target_id=target_id,
                     expected_count=len(message_ids),
-                    expected_first_caption=first_source_caption,
-                    min_message_id=copy_retry_result.get("sent_message_id"),
+                    sent_message_ids=copy_retry_result.get("sent_message_ids"),
                     target_thread_id=target_thread_id,
                 )
                 attempts_debug.append({"stage": "verify_after_copy_retry", **verified})
@@ -4105,8 +4158,7 @@ class SenderService:
                     verified_retry = await self._verify_album_delivery(
                         target_id=target_id,
                         expected_count=len(message_ids),
-                        expected_first_caption=first_source_caption,
-                        min_message_id=copy_retry_result.get("sent_message_id"),
+                        sent_message_ids=copy_retry_result.get("sent_message_ids"),
                         target_thread_id=target_thread_id,
                     )
                     attempts_debug.append({"stage": "verify_after_copy_retry_only_second", **verified_retry})
@@ -4323,12 +4375,15 @@ class SenderService:
                     verified = verified_retry
 
             if verified["ok"]:
-                if self._is_self_loop_rule(rule):
-                    sent_message_id = reupload_result.get("sent_message_id")
-                else:
-                    sent_message_id = verified.get("first_message_id") or reupload_result.get("sent_message_id")
+                sent_message_ids = verified.get("sent_message_ids") or reupload_result.get("sent_message_ids") or []
+                reaction_message_id, reaction_target_reason = await self._select_reaction_message_id(
+                    target_id=target_id,
+                    sent_message_ids=sent_message_ids,
+                )
+                sent_message_id = (sent_message_ids[0] if sent_message_ids else None) or reupload_result.get("sent_message_id")
 
-                await self._add_reaction_if_possible(target_id, sent_message_id, rule_id=rule.id)
+                if reaction_message_id:
+                    await self._add_reaction_if_possible(target_id, reaction_message_id, rule_id=rule.id)
 
                 await self._log_delivery_final_success(
                     rule_id=rule.id,
@@ -4338,12 +4393,13 @@ class SenderService:
                     target_id=target_id,
                     source_message_ids=message_ids,
                     sent_message_id=sent_message_id,
-                    sent_message_ids=verified.get("sent_message_ids") or reupload_result.get("sent_message_ids"),
-                    reaction_message_id=sent_message_id,
+                    sent_message_ids=sent_message_ids,
+                    reaction_message_id=reaction_message_id,
                     verify_result=verified,
                     extra={
                         "caption_delivery_mode": caption_mode,
                         "requires_builder": requires_builder,
+                        "reaction_target_reason": reaction_target_reason,
                     },
                 )
 
@@ -4412,9 +4468,9 @@ class SenderService:
                 verified = await self._verify_album_delivery(
                     target_id=target_id,
                     expected_count=len(message_ids),
-                    expected_first_caption=first_source_caption,
-                    min_message_id=reupload_retry_result.get("sent_message_id"),
+                    sent_message_ids=reupload_retry_result.get("sent_message_ids"),
                     target_thread_id=target_thread_id,
+                    target_grouped_id=reupload_retry_result.get("target_grouped_id"),
                 )
                 attempts_debug.append({"stage": "verify_after_reupload_retry", **verified})
 
@@ -4452,9 +4508,9 @@ class SenderService:
                     verified_retry = await self._verify_album_delivery(
                         target_id=target_id,
                         expected_count=len(message_ids),
-                        expected_first_caption=first_source_caption,
-                        min_message_id=reupload_retry_result.get("sent_message_id"),
+                        sent_message_ids=reupload_retry_result.get("sent_message_ids"),
                         target_thread_id=target_thread_id,
+                        target_grouped_id=reupload_retry_result.get("target_grouped_id"),
                     )
                     attempts_debug.append({"stage": "verify_after_reupload_retry_only_second", **verified_retry})
 
@@ -4478,12 +4534,15 @@ class SenderService:
                         verified = verified_retry
 
                 if verified["ok"]:
-                    if self._is_self_loop_rule(rule):
-                        sent_message_id = reupload_retry_result.get("sent_message_id")
-                    else:
-                        sent_message_id = verified.get("first_message_id") or reupload_retry_result.get("sent_message_id")
+                    sent_message_ids = verified.get("sent_message_ids") or reupload_retry_result.get("sent_message_ids") or []
+                    reaction_message_id, reaction_target_reason = await self._select_reaction_message_id(
+                        target_id=target_id,
+                        sent_message_ids=sent_message_ids,
+                    )
+                    sent_message_id = (sent_message_ids[0] if sent_message_ids else None) or reupload_retry_result.get("sent_message_id")
 
-                    await self._add_reaction_if_possible(target_id, sent_message_id)
+                    if reaction_message_id:
+                        await self._add_reaction_if_possible(target_id, reaction_message_id, rule_id=rule.id)
 
                     await self._log_delivery_final_success(
                         rule_id=rule.id,
@@ -4493,10 +4552,13 @@ class SenderService:
                         target_id=target_id,
                         source_message_ids=message_ids,
                         sent_message_id=sent_message_id,
+                        sent_message_ids=sent_message_ids,
+                        reaction_message_id=reaction_message_id,
                         verify_result=verified,
                         extra={
                             "caption_delivery_mode": caption_mode,
                             "requires_builder": requires_builder,
+                            "reaction_target_reason": reaction_target_reason,
                         },
                     )
 
