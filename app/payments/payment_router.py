@@ -85,6 +85,28 @@ class PaymentRouter:
         await self._call_service(self._invoice_service.finalize_invoice, int(invoice_id))
 
         if provider == "lava_top":
+            intent_id: int | None = None
+            repo = getattr(self._payment_service, "_repo", None)
+            if repo and hasattr(repo, "create_payment_intent"):
+                intent_id = repo.create_payment_intent(
+                    tenant_id=int(tenant_id),
+                    invoice_id=int(invoice_id),
+                    provider="lava_top",
+                    status="created",
+                    amount=float(amount),
+                    currency=str(currency or "USD").upper(),
+                )
+            if not intent_id:
+                return PaymentStartResult(
+                    int(invoice_id),
+                    provider,
+                    str(method.get("title") or "—"),
+                    amount_text,
+                    payment_intent_id=None,
+                    status="provider_failed",
+                    error_code="create_payment_intent_failed",
+                    error_text="Не удалось создать ссылку оплаты",
+                )
             lava_service = LavaPaymentService()
             invoice_view = await self._call_service(
                 lava_service.create_lava_invoice_for_user_invoice,
@@ -96,7 +118,48 @@ class PaymentRouter:
                 username=username,
                 payment_provider=method.get("payment_provider"),
             )
-            return PaymentStartResult(int(invoice_id), provider, str(method.get("title") or "—"), amount_text, payment_url=invoice_view.payment_url)
+            if not invoice_view.payment_url:
+                return PaymentStartResult(
+                    int(invoice_id),
+                    provider,
+                    str(method.get("title") or "—"),
+                    amount_text,
+                    payment_intent_id=int(intent_id),
+                    status="pending",
+                )
+            if repo and hasattr(repo, "attach_provider_payload"):
+                payload = {
+                    "lava_invoice_id": str(invoice_view.invoice_id or ""),
+                    "lava_amount_total": {"amount": float(invoice_view.amount), "currency": str(invoice_view.currency).upper()},
+                    "lava_status": "new",
+                    "lava_payment_url": str(invoice_view.payment_url),
+                    "status": "new",
+                    "id": str(invoice_view.invoice_id or ""),
+                    "paymentUrl": str(invoice_view.payment_url),
+                    "amountTotal": {"amount": float(invoice_view.amount), "currency": str(invoice_view.currency).upper()},
+                    "tariff_code": str(tariff_code),
+                    "period_months": int(period_months),
+                    "currency": str(currency or "").upper(),
+                    "amount_text": str(amount_text),
+                    "method_code": str(method_code),
+                    "payment_provider": method.get("payment_provider"),
+                    "payment_method": method.get("payment_method"),
+                    "offer_id": str(tariff_code),
+                }
+                repo.attach_provider_payload(int(intent_id), payload)
+            if repo and hasattr(repo, "attach_checkout_url"):
+                repo.attach_checkout_url(int(intent_id), str(invoice_view.payment_url), external_payment_id=str(invoice_view.invoice_id or ""))
+            if repo and hasattr(repo, "update_payment_intent_status"):
+                repo.update_payment_intent_status(int(intent_id), "checkout_opened")
+            return PaymentStartResult(
+                int(invoice_id),
+                provider,
+                str(method.get("title") or "—"),
+                amount_text,
+                payment_url=invoice_view.payment_url,
+                payment_intent_id=int(intent_id),
+                status="checkout_opened",
+            )
 
         payment_result = await self._call_service(
             self._payment_service.create_payment_for_invoice,
