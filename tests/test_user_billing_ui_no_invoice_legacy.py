@@ -40,17 +40,21 @@ def test_crypto_flow_uses_created_result_and_no_last_invoice_lookup() -> None:
     assert "result = await router.start_payment(" in source
     assert "result.invoice_id" in source
     assert "result.payment_intent_id" in source
+
     assert "result.provider or \"\") != \"crypto_manual\"" in source
     assert "result.status or \"\").lower() not in allowed_statuses" in source
+
     crypto_block = source.split("handle_user_subscription_crypto_callback", 1)[1].split('c.data.startswith("user_upload_receipt:")', 1)[0]
     assert "user_upload_receipt" not in crypto_block
     assert "ПРОВЕРИТЬ ОПЛАТУ" in source
     assert "🆘 Поддержка" in source
     assert "👉 Назад" in source
     assert "🏠 Меню" in source
+
     assert "⚠️ Не удалось создать ручную оплату" in source
     assert "🔁 Попробовать снова" in source
     assert "💳 Выбрать другой способ" in source
+
 
 
 def test_legacy_user_upload_receipt_message() -> None:
