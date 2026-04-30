@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import secrets
 from dataclasses import dataclass
@@ -67,14 +68,21 @@ class TelegramStarsService:
         self._payment_service = payment_service
         self._ensure_user_tenant = ensure_user_tenant
 
+    async def _call_maybe_async(self, func: Any, *args: Any, **kwargs: Any) -> Any:
+        result = func(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+
     async def create_stars_invoice_context(self, *, user_id: int, username: str | None, tariff_code: str, period_months: int, currency: str, method_code: str, attempt_id: str | None = None, idempotency_key: str | None = None) -> StarsInvoiceContext:
         _ = username
         if not settings.payment_enabled or not settings.telegram_stars_enabled:
             raise ValueError("Telegram Stars отключен")
-        tenant_id = int(await self._ensure_user_tenant(int(user_id)))
-        sub = await self._subscription_service.get_active_subscription(tenant_id)
+        tenant_id = int(await self._call_maybe_async(self._ensure_user_tenant, int(user_id)))
+        sub = await self._call_maybe_async(self._subscription_service.get_active_subscription, tenant_id)
         if sub:
-            sub = await self._billing_service.ensure_billing_period(sub)
+            sub = await self._call_maybe_async(self._billing_service.ensure_billing_period, sub)
         else:
             from app.payments.payment_router import PaymentRouter
             sub = PaymentRouter._build_purchase_context(PaymentRouter, int(period_months))
@@ -82,17 +90,17 @@ class TelegramStarsService:
         if stars_amount is None:
             LOGGER.warning("STARS_PRICE_MISSING tenant_id=%s user_id=%s tariff_code=%s period_months=%s", tenant_id, user_id, tariff_code, period_months)
             raise ValueError("Цена в Telegram Stars не настроена")
-        invoice_id = await self._invoice_service.create_draft_invoice(tenant_id, int(sub.get("id") or 0), str(sub.get("current_period_start")), str(sub.get("current_period_end")), currency="XTR")
-        await self._invoice_service.add_invoice_item(int(invoice_id), item_type="base_plan", description=f"{tariff_code}:{int(period_months)}", quantity=1, unit_price=float(stars_amount), metadata={"plan_name": str(tariff_code).upper(), "period_months": int(period_months), "method_code": str(method_code), "provider": "telegram_stars", "currency": "XTR", "stars_amount": int(stars_amount)})
-        await self._invoice_service.finalize_invoice(int(invoice_id))
-        payment_intent_id = self._repo.create_payment_intent(tenant_id=tenant_id, invoice_id=int(invoice_id), provider="telegram_stars", status="created", amount=float(stars_amount), currency="XTR")
+        invoice_id = await self._call_maybe_async(self._invoice_service.create_draft_invoice, tenant_id, int(sub.get("id") or 0), str(sub.get("current_period_start")), str(sub.get("current_period_end")), currency="XTR")
+        await self._call_maybe_async(self._invoice_service.add_invoice_item, int(invoice_id), item_type="base_plan", description=f"{tariff_code}:{int(period_months)}", quantity=1, unit_price=float(stars_amount), metadata={"plan_name": str(tariff_code).upper(), "period_months": int(period_months), "method_code": str(method_code), "provider": "telegram_stars", "currency": "XTR", "stars_amount": int(stars_amount)})
+        await self._call_maybe_async(self._invoice_service.finalize_invoice, int(invoice_id))
+        payment_intent_id = await self._call_maybe_async(self._repo.create_payment_intent, tenant_id=tenant_id, invoice_id=int(invoice_id), provider="telegram_stars", status="created", amount=float(stars_amount), currency="XTR")
         payload = build_stars_payload(payment_intent_id=int(payment_intent_id), invoice_id=int(invoice_id), user_id=int(user_id))
         provider_payload_json = {"provider": "telegram_stars", "invoice_id": int(invoice_id), "payment_intent_id": int(payment_intent_id), "telegram_user_id": int(user_id), "tariff_code": str(tariff_code).lower(), "period_months": int(period_months), "stars_amount": int(stars_amount), "currency": "XTR", "payload": payload, "title": f"ViMi {str(tariff_code).upper()} — {int(period_months)} месяц", "description": "Подписка ViMi на выбранный период. Доступ активируется автоматически после оплаты.", "attempt_id": attempt_id, "idempotency_key": idempotency_key}
-        self._repo.attach_provider_payload(int(payment_intent_id), provider_payload_json)
+        await self._call_maybe_async(self._repo.attach_provider_payload, int(payment_intent_id), provider_payload_json)
         return StarsInvoiceContext(tenant_id=tenant_id, user_id=int(user_id), invoice_id=int(invoice_id), payment_intent_id=int(payment_intent_id), tariff_code=str(tariff_code).lower(), period_months=int(period_months), stars_amount=int(stars_amount), currency="XTR", title=provider_payload_json["title"], description=provider_payload_json["description"], payload=payload)
 
     async def send_stars_invoice(self, *, bot: Any, chat_id: int, context: StarsInvoiceContext) -> None:
         LOGGER.info("STARS_INVOICE_SEND_START user_id=%s payment_intent_id=%s", context.user_id, context.payment_intent_id)
         await bot.send_invoice(chat_id=int(chat_id), title=context.title, description=context.description, payload=context.payload, provider_token="", currency="XTR", prices=[LabeledPrice(label=f"{context.tariff_code.upper()} {context.period_months} мес", amount=int(context.stars_amount))])
-        self._repo.update_payment_intent_status(int(context.payment_intent_id), "pending")
+        await self._call_maybe_async(self._repo.update_payment_intent_status, int(context.payment_intent_id), "pending")
         LOGGER.info("STARS_INVOICE_SENT user_id=%s payment_intent_id=%s", context.user_id, context.payment_intent_id)
