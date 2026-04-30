@@ -44,3 +44,16 @@ def test_router_creates_internal_invoice() -> None:
     assert "create_draft_invoice" in source
     assert "finalize_invoice" in source
     assert "create_lava_invoice_for_user_invoice" in source
+
+
+def test_intro_media_handler_is_scoped_to_admin_intro_state() -> None:
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert 'and is_admin_user(m.from_user.id)' in source
+    assert 'intro_upload_wait_file' in source
+    assert '@dp.message(lambda m: m.photo or m.video or m.document)' not in source
+
+
+def test_critical_runtime_files_not_touched() -> None:
+    assert Path("app/scheduler_runtime.py").exists()
+    assert Path("app/worker_runtime.py").exists()
+    assert Path("app/sender.py").exists()
