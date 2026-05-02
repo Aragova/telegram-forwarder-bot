@@ -16,6 +16,7 @@ from .telegram_client import ReactionClientInfo
 from .video_processor import VideoProcessor
 from .scheduler_service import SchedulerService
 from .reaction_runtime_resolver import ReactionRuntimeResolver
+from .tenant_reaction_executor import TenantReactionExecutor
 from telethon.tl.types import (
     MessageEntityBold,
     MessageEntityItalic,
@@ -2499,11 +2500,35 @@ class SenderService:
                 plan.tenant_id,
                 len(plan.tenant_accounts),
             )
+            executor = TenantReactionExecutor(
+                api_id=settings.api_id,
+                api_hash=settings.api_hash,
+                base_dir=settings.base_dir,
+            )
+            try:
+                result = await executor.add_reactions(
+                    tenant_id=int(plan.tenant_id or 0),
+                    accounts=plan.tenant_accounts,
+                    target_id=target_id,
+                    message_id=int(sent_message_id),
+                    rule_id=rule_id,
+                )
+            except Exception:
+                logger.exception(
+                    "REACTION_RUNTIME_TENANT_FAILED | rule_id=%s | tenant_id=%s",
+                    rule_id,
+                    plan.tenant_id,
+                )
+                return
+
             logger.info(
-                "REACTION_RUNTIME_TENANT_DEFERRED | rule_id=%s | tenant_id=%s | accounts=%s | reason=worker_not_enabled_yet",
+                "REACTION_RUNTIME_TENANT_DONE | rule_id=%s | tenant_id=%s | attempted=%s | confirmed=%s | failed=%s | skipped=%s",
                 rule_id,
                 plan.tenant_id,
-                len(plan.tenant_accounts),
+                result.get("attempted", 0),
+                result.get("confirmed", 0),
+                result.get("failed", 0),
+                result.get("skipped", 0),
             )
             return
 
