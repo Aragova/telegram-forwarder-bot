@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -36,6 +37,40 @@ class TenantReactionExecutor:
                 exc.__class__.__name__,
             )
 
+    def _normalize_fixed_reactions(self, raw) -> list[str]:
+        """
+        Принимает fixed_reactions_json из БД или уже готовый list.
+        Возвращает безопасный list[str].
+        """
+        if raw is None:
+            return []
+
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, str):
+            value = raw.strip()
+            if not value:
+                return []
+            try:
+                parsed = json.loads(value)
+            except Exception:
+                return []
+            if not isinstance(parsed, list):
+                return []
+            items = parsed
+        else:
+            return []
+
+        result = []
+        for item in items:
+            emoji = str(item or "").strip()
+            if not emoji:
+                continue
+            if emoji not in result:
+                result.append(emoji)
+
+        return result
+
     async def add_reactions(
         self,
         *,
@@ -60,19 +95,23 @@ class TenantReactionExecutor:
         for account in accounts or []:
             account_id = account.get("id")
             session_name = str(account.get("session_name") or "").strip()
-            fixed_reactions = account.get("fixed_reactions_json") or []
-            if not isinstance(fixed_reactions, list):
-                fixed_reactions = []
+            raw_reactions = (
+                account.get("fixed_reactions")
+                if account.get("fixed_reactions") is not None
+                else account.get("fixed_reactions_json")
+            )
+            fixed_reactions = self._normalize_fixed_reactions(raw_reactions)
 
             if not fixed_reactions:
                 result["skipped"] += 1
                 result["results"].append({"account_id": account_id, "status": "skipped", "reason": "no_fixed_reactions"})
                 logger.info(
-                    "TENANT_REACTION_ACCOUNT_SKIPPED | tenant_id=%s | account_id=%s | rule_id=%s | reason=%s",
+                    "TENANT_REACTION_ACCOUNT_SKIPPED | tenant_id=%s | account_id=%s | rule_id=%s | reason=%s | raw_type=%s",
                     tenant_id,
                     account_id,
                     rule_id,
                     "no_fixed_reactions",
+                    type(raw_reactions).__name__,
                 )
                 continue
 
