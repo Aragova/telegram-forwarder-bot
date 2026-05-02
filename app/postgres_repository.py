@@ -2762,6 +2762,38 @@ class PostgresRepository(RepositoryProtocol):
 
         return [int(row["message_id"]) for row in rows]
 
+    def get_last_sent_post_for_reaction_test(self, tenant_id: int, rule_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        target_id,
+                        COALESCE(
+                            NULLIF(extra_json::json->>'reaction_message_id', '')::BIGINT,
+                            NULLIF(extra_json::json->>'sent_message_id', '')::BIGINT
+                        ) AS message_id
+                    FROM audit_log
+                    WHERE tenant_id = %s
+                      AND rule_id = %s
+                      AND event_type = 'delivery_sent'
+                      AND target_id IS NOT NULL
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (tenant_id, rule_id),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        message_id = row.get("message_id")
+        if not message_id:
+            return None
+        return {
+            "target_id": str(row["target_id"]),
+            "message_id": int(message_id),
+        }
+
     def mark_rule_messages_sent(
         self,
         rule_id: int,
