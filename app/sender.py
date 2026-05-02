@@ -303,24 +303,61 @@ class SenderService:
         )
 
     def _extract_sent_message_id(self, sent_msg) -> int | None:
-        if not sent_msg:
+        ids = self._extract_sent_message_ids(sent_msg)
+        return ids[0] if ids else None
+
+    def _extract_sent_message_ids(self, sent_result) -> list[int]:
+        def _extract_one(item) -> list[int]:
+            if item is None:
+                return []
+            if isinstance(item, dict):
+                values = []
+                for key in ("message_id", "id"):
+                    val = item.get(key)
+                    if val is not None:
+                        try:
+                            values.append(int(val))
+                        except Exception:
+                            pass
+                return values
+            for attr in ("message_id", "id"):
+                try:
+                    val = getattr(item, attr, None)
+                    if val is not None:
+                        return [int(val)]
+                except Exception:
+                    continue
+            return []
+
+        if sent_result is None:
+            return []
+        raw_items = list(sent_result) if isinstance(sent_result, (list, tuple)) else [sent_result]
+        ids: list[int] = []
+        for item in raw_items:
+            ids.extend(_extract_one(item))
+        return [x for x in ids if isinstance(x, int)]
+
+    async def _validate_reaction_target_message(self, *, rule_id: int | None, source_channel: str, target_id: str, source_message_ids: list[int], sent_message_id: int | None, delivery_id: int | None = None, max_age_seconds: int = 300) -> int | None:
+        logger.info("REACTION_TARGET_VALIDATE_START | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_id=%s", rule_id, delivery_id, target_id, sent_message_id)
+        if sent_message_id is None or int(sent_message_id) <= 0:
+            logger.warning("REACTION_SKIPPED_INVALID_TARGET_MESSAGE | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, source_message_ids)
             return None
-
-        try:
-            message_id = getattr(sent_msg, "message_id", None)
-            if message_id is not None:
-                return int(message_id)
-        except Exception:
-            pass
-
-        try:
-            message_id = getattr(sent_msg, "id", None)
-            if message_id is not None:
-                return int(message_id)
-        except Exception:
-            pass
-
-        return None
+        entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
+        msg = await self.telethon.get_messages(entity, ids=int(sent_message_id))
+        if not msg:
+            logger.warning("REACTION_SKIPPED_TARGET_MESSAGE_NOT_FOUND | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_id=%s", rule_id, delivery_id, target_id, sent_message_id)
+            return None
+        now_ts = int(time.time())
+        msg_ts = int(getattr(msg, "date").timestamp()) if getattr(msg, "date", None) else 0
+        age_seconds = now_ts - msg_ts if msg_ts else 10**9
+        if age_seconds > int(max_age_seconds):
+            logger.warning("REACTION_BLOCKED_STALE_SENT_MESSAGE_ID | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | message_date=%s | age_seconds=%s | max_age_seconds=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, getattr(msg, "date", None), age_seconds, max_age_seconds, source_message_ids)
+            return None
+        if str(source_channel) == str(target_id) and int(sent_message_id) in {int(x) for x in (source_message_ids or [])}:
+            logger.warning("REACTION_BLOCKED_SOURCE_MESSAGE_ID | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, source_message_ids)
+            return None
+        logger.info("REACTION_TARGET_VALIDATE_OK | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_id=%s | message_date=%s | age_seconds=%s", rule_id, delivery_id, target_id, sent_message_id, getattr(msg, "date", None), age_seconds)
+        return int(sent_message_id)
 
     def _normalize_video_caption_entities(self, raw_entities) -> list[dict]:
         if not raw_entities:
@@ -820,7 +857,10 @@ class SenderService:
             is_album=is_album,
         )
 
-    def _mark_delivery_sent_sync(self, delivery_id: int) -> None:
+    def _mark_delivery_sent_sync(self, delivery_id: int, *, sent_message_id: int | None = None, sent_message_ids: list[int] | None = None, target_id: str | None = None, delivery_method: str | None = None) -> None:
+        if hasattr(self.db, "mark_delivery_sent_with_target_message"):
+            self.db.mark_delivery_sent_with_target_message(delivery_id, sent_message_id=sent_message_id, sent_message_ids=sent_message_ids, target_id=target_id, delivery_method=delivery_method)
+            return
         self.db.mark_delivery_sent(delivery_id)
 
     def _mark_many_deliveries_sent_sync(self, delivery_ids: list[int]) -> None:
@@ -2170,9 +2210,9 @@ class SenderService:
 
                 confirmed = await self._confirm_reaction(client, entity, sent_message_id, emoji)
                 if confirmed:
-                    logger.info("REACTION_CONFIRMED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reaction=%s", rule_id, entity, sent_message_id, session_name, emoji)
+                    logger.info("REACTION_VISIBLE_CONFIRMED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reaction=%s", rule_id, entity, sent_message_id, session_name, emoji)
                     return True
-                logger.warning("REACTION_NOT_CONFIRMED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reaction=%s", rule_id, entity, sent_message_id, session_name, emoji)
+                logger.warning("REACTION_NOT_VISIBLE_AFTER_SEND | rule_id=%s | target_id=%s | message_id=%s | session=%s | reaction=%s", rule_id, entity, sent_message_id, session_name, emoji)
 
             except Exception as exc:
                 last_error = exc
@@ -2252,24 +2292,26 @@ class SenderService:
                 )
                 continue
 
-            confirmed = await self._confirm_reaction_set(client, entity, sent_message_id, variant)
+            confirmed, visible_reactions = await self._confirm_reaction_set(client, entity, sent_message_id, variant)
             if confirmed:
                 logger.info(
-                    "PREMIUM_REACTION_CONFIRMED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reactions=%s",
+                    "PREMIUM_REACTION_VISIBLE_CONFIRMED | rule_id=%s | target_id=%s | message_id=%s | session=%s | requested_reactions=%s | visible_reactions=%s",
                     rule_id,
                     entity,
                     sent_message_id,
                     session_name,
                     variant,
+                    visible_reactions,
                 )
             else:
                 logger.warning(
-                    "PREMIUM_REACTION_CONFIRM_SOFT_FAILED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reactions=%s | reason=request_accepted_but_confirm_failed",
+                    "PREMIUM_REACTION_NOT_VISIBLE_AFTER_SEND | rule_id=%s | target_id=%s | message_id=%s | session=%s | requested_reactions=%s",
                     rule_id,
                     entity,
                     sent_message_id,
                     session_name,
                     variant,
+                    visible_reactions,
                 )
             return True
 
@@ -2288,7 +2330,7 @@ class SenderService:
             msg = await client.get_messages(entity, ids=message_id)
             reactions = getattr(msg, "reactions", None)
             if not reactions:
-                return False
+                return False, []
             for result in getattr(reactions, "results", []) or []:
                 reaction = getattr(result, "reaction", None)
                 actual = _normalize_reaction_emoji(getattr(reaction, "emoticon", None))
@@ -2298,7 +2340,7 @@ class SenderService:
         except Exception:
             return False
 
-    async def _confirm_reaction_set(self, client, entity, message_id: int, emojis: list[str]) -> bool:
+    async def _confirm_reaction_set(self, client, entity, message_id: int, emojis: list[str]) -> tuple[bool, list[str]]:
         try:
             msg = await client.get_messages(entity, ids=message_id)
             reactions = getattr(msg, "reactions", None)
@@ -2338,7 +2380,8 @@ class SenderService:
                 for emoji in (emojis or [])
                 if _normalize_reaction_emoji(emoji)
             }
-            confirmed = bool(expected) and expected.issubset(actual_emojis)
+            visible = sorted(actual_emojis)
+            confirmed = bool(expected.intersection(actual_emojis))
             if not confirmed:
                 logger.warning(
                     "CONFIRM_REACTION_SET_DEBUG | target_id=%s | message_id=%s | expected=%s | observed=%s",
@@ -2347,9 +2390,9 @@ class SenderService:
                     emojis,
                     observed,
                 )
-            return confirmed
+            return confirmed, visible
         except Exception:
-            return False
+            return False, []
 
     async def _select_reaction_message_id(self, target_id, sent_message_ids: list[int] | None) -> tuple[int | None, str]:
         ids = sorted({int(x) for x in (sent_message_ids or []) if x is not None})
@@ -2450,8 +2493,27 @@ class SenderService:
         rule,
         target_id,
         sent_message_id,
+        source_channel: str = "",
+        source_message_ids: list[int] | None = None,
+        delivery_id: int | None = None,
+        max_age_seconds: int = 300,
     ) -> None:
         rule_id = int(getattr(rule, "id", 0) or 0)
+        if str(source_channel) and str(source_channel) == str(target_id):
+            logger.info("SELF_TARGET_REPOST_DETECTED | rule_id=%s | source_id=%s | target_id=%s", rule_id, source_channel, target_id)
+        validated_id = await self._validate_reaction_target_message(
+            rule_id=rule_id,
+            source_channel=str(source_channel or ""),
+            target_id=str(target_id),
+            source_message_ids=source_message_ids or [],
+            sent_message_id=sent_message_id,
+            delivery_id=delivery_id,
+            max_age_seconds=max_age_seconds,
+        )
+        if not validated_id:
+            return
+        sent_message_id = validated_id
+
         resolver = ReactionRuntimeResolver(self.db)
 
         try:
@@ -3216,10 +3278,12 @@ class SenderService:
             logger.warning("VIDEO STAGE RETRY | неуспешная отправка для delivery_id=%s", delivery_id)
             return {"ok": False, "fallback_to_legacy": False, "retryable": True}
 
-        sent_message_id = self._extract_sent_message_id(sent_msg)
+        sent_message_ids = self._extract_sent_message_ids(sent_msg)
+        sent_message_id = sent_message_ids[0] if sent_message_ids else None
+        logger.info("DELIVERY_SENT_MESSAGE_IDS_EXTRACTED | rule_id=%s | delivery_id=%s | method=%s | source_message_ids=%s | sent_message_ids=%s | result_type=%s", rule_id, delivery_id, "video_send", [], sent_message_ids, type(sent_msg).__name__)
         if sent_message_id:
             await self._add_reaction_if_possible(payload.get("target_id"), int(sent_message_id))
-        await run_db(self._mark_delivery_sent_sync, delivery_id)
+        await run_db(self._mark_delivery_sent_sync, delivery_id, sent_message_id=sent_message_id, sent_message_ids=sent_message_ids, target_id=str(payload.get("target_id") or ""), delivery_method="video_send")
         await run_db(self._touch_rule_after_send_sync, rule_id, int(payload.get("interval") or 0))
         logger.info("VIDEO SEND DONE | отправка завершена для delivery_id=%s", delivery_id)
         return {"ok": True, "fallback_to_legacy": False}
@@ -3896,7 +3960,9 @@ class SenderService:
                     pass
 
             if sent_msg:
-                sent_message_id = self._extract_sent_message_id(sent_msg)
+                sent_message_ids = self._extract_sent_message_ids(sent_msg)
+                sent_message_id = sent_message_ids[0] if sent_message_ids else None
+                logger.info("DELIVERY_SENT_MESSAGE_IDS_EXTRACTED | rule_id=%s | delivery_id=%s | method=%s | source_message_ids=%s | sent_message_ids=%s | result_type=%s", rule.id, delivery_id, "video_process", [message_id], sent_message_ids, type(sent_msg).__name__)
 
                 try:
                     if sent_message_id:
@@ -3904,6 +3970,10 @@ class SenderService:
                             rule=rule,
                             target_id=target_id,
                             sent_message_id=sent_message_id,
+                            source_channel=source_channel,
+                            source_message_ids=[message_id],
+                            delivery_id=delivery_id,
+                            max_age_seconds=900,
                         )
                     else:
                         logger.warning(
