@@ -5,6 +5,9 @@ from .config import settings
 
 # ЖЁСТКО ЗАКРЕПЛЁННЫЕ НАБОРЫ ДЛЯ PREMIUM-СЕССИЙ
 # ключ = имя session БЕЗ .session
+# LEGACY/DEV MODE: глобальные reaction sessions используются только для текущего
+# single-tenant/dev режима. В SaaS runtime нужно использовать tenant-scoped
+# reaction_accounts.
 PREMIUM_REACTION_SETS: dict[str, list[str]] = {
     "reactor_premium_1": ["🔥", "❤️", "🥰"],
     "reactor_premium_2": ["😍", "🔥", "😘"],

@@ -590,6 +590,72 @@ class PostgresRepository(RepositoryProtocol):
             error_text TEXT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS reaction_accounts(
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL,
+            session_name TEXT NOT NULL,
+            telegram_user_id BIGINT NULL,
+            username TEXT NULL,
+            phone_hint TEXT NULL,
+            is_premium BOOLEAN NOT NULL DEFAULT FALSE,
+            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled','auth_required','flood_wait','limited','error')),
+            fixed_reactions_json TEXT NULL,
+            last_checked_at TEXT NULL,
+            last_error TEXT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS rule_reaction_settings(
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL,
+            rule_id BIGINT NOT NULL,
+            enabled BOOLEAN NOT NULL DEFAULT FALSE,
+            mode TEXT NOT NULL DEFAULT 'premium_then_normal' CHECK(mode IN ('off','premium_only','normal_only','premium_then_normal','random_pool')),
+            preset_json TEXT NULL,
+            max_accounts_per_post BIGINT NOT NULL DEFAULT 3,
+            delay_min_sec BIGINT NOT NULL DEFAULT 3,
+            delay_max_sec BIGINT NOT NULL DEFAULT 30,
+            premium_first BOOLEAN NOT NULL DEFAULT TRUE,
+            stop_after_premium_success BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS reaction_jobs(
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL,
+            rule_id BIGINT NULL,
+            delivery_id BIGINT NULL,
+            target_id TEXT NOT NULL,
+            message_id BIGINT NOT NULL,
+            account_id BIGINT NULL,
+            reaction_payload_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','leased','done','retry','failed','skipped')),
+            attempts BIGINT NOT NULL DEFAULT 0,
+            max_attempts BIGINT NOT NULL DEFAULT 3,
+            run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            lease_until TIMESTAMPTZ NULL,
+            locked_by TEXT NULL,
+            error_text TEXT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS reaction_events(
+            id BIGSERIAL PRIMARY KEY,
+            reaction_job_id BIGINT NULL,
+            tenant_id BIGINT NULL,
+            rule_id BIGINT NULL,
+            delivery_id BIGINT NULL,
+            account_id BIGINT NULL,
+            event_type TEXT NOT NULL,
+            status TEXT NULL,
+            error_text TEXT NULL,
+            extra_json TEXT NULL,
+            created_at TEXT NOT NULL
+        );
+
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'repost';
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_trim_seconds BIGINT DEFAULT 120;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_add_intro BOOLEAN DEFAULT FALSE;
@@ -794,6 +860,60 @@ class PostgresRepository(RepositoryProtocol):
                 )
                 cur.execute(
                     """
+                    CREATE INDEX IF NOT EXISTS idx_reaction_accounts_tenant_status
+                    ON reaction_accounts(tenant_id, status)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_reaction_accounts_tenant_session
+                    ON reaction_accounts(tenant_id, session_name)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_reaction_settings_tenant_rule
+                    ON rule_reaction_settings(tenant_id, rule_id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_rule_reaction_settings_rule
+                    ON rule_reaction_settings(rule_id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reaction_jobs_status_run_at
+                    ON reaction_jobs(status, run_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reaction_jobs_tenant_status
+                    ON reaction_jobs(tenant_id, status)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reaction_jobs_delivery
+                    ON reaction_jobs(delivery_id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reaction_events_tenant_created
+                    ON reaction_events(tenant_id, created_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reaction_events_job
+                    ON reaction_events(reaction_job_id)
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_dedup_key_unique
                     ON jobs(dedup_key)
                     WHERE dedup_key IS NOT NULL
@@ -898,6 +1018,160 @@ class PostgresRepository(RepositoryProtocol):
                 count = cur.rowcount
             conn.commit()
             return int(count or 0)
+
+    # =========================================================
+    # SAAS REACTIONS FOUNDATION
+    # =========================================================
+
+    def create_reaction_account(
+        self,
+        *,
+        tenant_id: int,
+        session_name: str,
+        telegram_user_id: int | None = None,
+        username: str | None = None,
+        phone_hint: str | None = None,
+        is_premium: bool = False,
+        fixed_reactions: list[str] | None = None,
+        status: str = "active",
+    ) -> int | None:
+        now_iso = utc_now_iso()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO reaction_accounts(
+                        tenant_id, session_name, telegram_user_id, username, phone_hint,
+                        is_premium, status, fixed_reactions_json, created_at
+                    )
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    RETURNING id
+                    """,
+                    (tenant_id, session_name, telegram_user_id, username, phone_hint, is_premium, status, _json_dumps(fixed_reactions or []), now_iso),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return int(row["id"]) if row and row.get("id") is not None else None
+
+    def list_reaction_accounts_for_tenant(self, tenant_id: int, active_only: bool = False) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if active_only:
+                    cur.execute(
+                        """
+                        SELECT * FROM reaction_accounts
+                        WHERE tenant_id = %s AND status = 'active'
+                        ORDER BY id ASC
+                        """,
+                        (tenant_id,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT * FROM reaction_accounts
+                        WHERE tenant_id = %s
+                        ORDER BY id ASC
+                        """,
+                        (tenant_id,),
+                    )
+                rows = cur.fetchall() or []
+        return [dict(row) for row in rows]
+
+    def set_reaction_account_status(self, account_id: int, tenant_id: int, status: str, last_error: str | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE reaction_accounts
+                    SET status = %s, last_error = %s, updated_at = %s
+                    WHERE id = %s AND tenant_id = %s
+                    """,
+                    (status, last_error, utc_now_iso(), account_id, tenant_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+        return bool(updated)
+
+    def upsert_rule_reaction_settings(self, *, tenant_id: int, rule_id: int, enabled: bool, mode: str, preset: dict[str, Any] | list[Any] | None = None, max_accounts_per_post: int = 3, delay_min_sec: int = 3, delay_max_sec: int = 30, premium_first: bool = True, stop_after_premium_success: bool = False) -> int | None:
+        now_iso = utc_now_iso()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO rule_reaction_settings(
+                        tenant_id, rule_id, enabled, mode, preset_json, max_accounts_per_post,
+                        delay_min_sec, delay_max_sec, premium_first, stop_after_premium_success,
+                        created_at, updated_at
+                    )
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(tenant_id, rule_id)
+                    DO UPDATE SET
+                        enabled = EXCLUDED.enabled,
+                        mode = EXCLUDED.mode,
+                        preset_json = EXCLUDED.preset_json,
+                        max_accounts_per_post = EXCLUDED.max_accounts_per_post,
+                        delay_min_sec = EXCLUDED.delay_min_sec,
+                        delay_max_sec = EXCLUDED.delay_max_sec,
+                        premium_first = EXCLUDED.premium_first,
+                        stop_after_premium_success = EXCLUDED.stop_after_premium_success,
+                        updated_at = EXCLUDED.updated_at
+                    RETURNING id
+                    """,
+                    (tenant_id, rule_id, enabled, mode, _json_dumps(preset), max_accounts_per_post, delay_min_sec, delay_max_sec, premium_first, stop_after_premium_success, now_iso, now_iso),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return int(row["id"]) if row and row.get("id") is not None else None
+
+    def get_rule_reaction_settings_for_tenant(self, tenant_id: int, rule_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM rule_reaction_settings
+                    WHERE tenant_id = %s AND rule_id = %s
+                    LIMIT 1
+                    """,
+                    (tenant_id, rule_id),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def enqueue_reaction_job(self, *, tenant_id: int, target_id: str, message_id: int, reaction_payload: dict[str, Any], rule_id: int | None = None, delivery_id: int | None = None, account_id: int | None = None, run_at: str | None = None, max_attempts: int = 3) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO reaction_jobs(
+                        tenant_id, rule_id, delivery_id, target_id, message_id, account_id,
+                        reaction_payload_json, status, max_attempts, run_at
+                    )
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,'pending',%s,COALESCE(%s, NOW()))
+                    RETURNING id
+                    """,
+                    (tenant_id, rule_id, delivery_id, target_id, message_id, account_id, _json_dumps(reaction_payload) or "{}", max_attempts, run_at),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return int(row["id"]) if row and row.get("id") is not None else None
+
+    def log_reaction_event(self, *, event_type: str, reaction_job_id: int | None = None, tenant_id: int | None = None, rule_id: int | None = None, delivery_id: int | None = None, account_id: int | None = None, status: str | None = None, error_text: str | None = None, extra: dict[str, Any] | list[Any] | None = None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO reaction_events(
+                        reaction_job_id, tenant_id, rule_id, delivery_id, account_id,
+                        event_type, status, error_text, extra_json, created_at
+                    )
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    RETURNING id
+                    """,
+                    (reaction_job_id, tenant_id, rule_id, delivery_id, account_id, event_type, status, error_text, _json_dumps(extra), utc_now_iso()),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return int(row["id"]) if row and row.get("id") is not None else None
 
     # =========================================================
     # CHANNELS
