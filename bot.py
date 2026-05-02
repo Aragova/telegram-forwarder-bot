@@ -76,6 +76,10 @@ from app.payment_service import PaymentService
 from app.recovery_service import RecoveryService
 from app.saas_bootstrap import ensure_owner_and_default_tenant_bootstrap
 from app.i18n import get_user_language, set_user_language, t as tr
+from app.reaction_ui import (
+    build_rule_reaction_accounts_keyboard_with_items,
+    build_rule_reaction_accounts_text,
+)
 from app import product_ui
 from app import access_control, user_ui
 from app.user_handlers import (
@@ -2059,6 +2063,29 @@ async def stop_forwarding() -> None:
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id if message.from_user else settings.admin_id
+    text = (message.text or "").strip()
+    payload = text[len("/start"):].strip() if text.startswith("/start") else ""
+    deeplink_match = re.fullmatch(r"reaction_accounts_(\d+)", payload)
+    if deeplink_match:
+        rule_id = int(deeplink_match.group(1))
+        owned = await run_db(is_rule_owned_by_user, rule_id, user_id)
+        if not owned:
+            await message.answer("⛔ Нет доступа к этому правилу")
+            return
+        tenant_id = await run_db(ensure_user_tenant, user_id)
+        accounts = await run_db(db.list_reaction_accounts_for_tenant, tenant_id, False)
+        logger.info(
+            "USER_REACTION_ACCOUNTS_DEEPLINK_OPENED | tenant_id=%s | rule_id=%s | user_id=%s",
+            tenant_id,
+            rule_id,
+            user_id,
+        )
+        await message.answer(
+            build_rule_reaction_accounts_text(accounts),
+            reply_markup=build_rule_reaction_accounts_keyboard_with_items(rule_id, accounts),
+        )
+        return
+
     if _is_admin_user(user_id):
         reset_user_state(user_id)
         await message.reply("📋 Главное меню", reply_markup=get_main_menu())

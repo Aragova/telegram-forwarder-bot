@@ -36,7 +36,12 @@ def _success_page(result: dict, *, recovered: bool = False) -> web.Response:
     )
     if recovered:
         body += "<div class='w'>Подключение уже завершено. Мы восстановили экран успеха после технического сбоя отображения.</div>"
-    body += "<p><a href='https://t.me/topposter69_bot'>Вернуться в Telegram-бот</a></p>"
+    rule_id = result.get("rule_id")
+    if rule_id is not None:
+        bot_url = f"https://t.me/topposter69_bot?start=reaction_accounts_{int(rule_id)}"
+    else:
+        bot_url = "https://t.me/topposter69_bot"
+    body += f"<p><a href='{bot_url}'>Открыть мои аккаунты-реакторы</a></p>"
     return web.Response(text=_layout("Успех", body), content_type="text/html")
 
 
@@ -63,6 +68,9 @@ def _recover_success_result(request: web.Request, payload: dict) -> dict | None:
         "username": account.get("username"),
         "is_premium": account.get("is_premium"),
         "phone_hint": account.get("phone_hint"),
+        "tenant_id": payload["tenant_id"],
+        "rule_id": payload["rule_id"],
+        "user_id": payload["user_id"],
         "recovered_after_error": True,
     }
 
@@ -158,6 +166,9 @@ async def code_submit(request: web.Request) -> web.Response:
             LOGGER.info("REACTION_ONBOARDING_PASSWORD_REQUIRED | tenant_id=%s | rule_id=%s | user_id=%s | phone_hint=%s", payload["tenant_id"], payload["rule_id"], payload["user_id"], mask)
             return _password_page(token, str(data.get("phone") or ""))
         LOGGER.info("REACTION_ONBOARDING_SUCCESS | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | telegram_user_id=%s | is_premium=%s", payload["tenant_id"], payload["rule_id"], payload["user_id"], result.get("account_id"), result.get("telegram_user_id"), result.get("is_premium"))
+        result["tenant_id"] = payload["tenant_id"]
+        result["rule_id"] = payload["rule_id"]
+        result["user_id"] = payload["user_id"]
         return _success_page(result)
     except ValueError as exc:
         LOGGER.warning("REACTION_ONBOARDING_FAILED | error_type=ValueError")
@@ -193,6 +204,9 @@ async def password_submit(request: web.Request) -> web.Response:
         service: ReactionAuthService = request.app["auth_service"]
         result = await service.complete_password_login(tenant_id=payload["tenant_id"], rule_id=payload["rule_id"], user_id=payload["user_id"], password=str(data.get("password") or ""), phone=str(data.get("phone") or ""))
         LOGGER.info("REACTION_ONBOARDING_SUCCESS | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | telegram_user_id=%s | is_premium=%s", payload["tenant_id"], payload["rule_id"], payload["user_id"], result.get("account_id"), result.get("telegram_user_id"), result.get("is_premium"))
+        result["tenant_id"] = payload["tenant_id"]
+        result["rule_id"] = payload["rule_id"]
+        result["user_id"] = payload["user_id"]
         return _success_page(result)
     except ValueError as exc:
         if str(exc) == "Неверный 2FA-пароль. Проверьте пароль и попробуйте снова.":
