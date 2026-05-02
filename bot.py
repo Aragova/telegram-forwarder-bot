@@ -56,7 +56,7 @@ from app.sender import SenderService
 telethon_client = None
 from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIErrorPolicy
-from app.reaction_auth_state import is_reaction_auth_state
+from app.reaction_auth_state import is_reaction_auth_state, is_reaction_account_reactions_input_state
 from app.scheduler_service import SchedulerService
 from app.runtime_roles import normalize_runtime_role, run_role as run_runtime_role
 from app.health_service import get_system_health, update_heartbeat
@@ -3103,6 +3103,7 @@ async def handle_live_status(message: Message):
         and m.from_user is not None
         and _is_admin_user(m.from_user.id)
         and normalize_reply_text(m.text) in ADMIN_REPLY_KEYBOARD_ALIASES
+        and not is_reaction_account_reactions_input_state(user_states, m.from_user.id)
     )
 )
 async def handle_admin_reply_keyboard_router(message: Message):
@@ -7155,6 +7156,7 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
         and m.from_user is not None
         and user_states.get(m.from_user.id) is not None
         and not is_reaction_auth_state(user_states, m.from_user.id)
+        and not is_reaction_account_reactions_input_state(user_states, m.from_user.id)
         and user_states.get(m.from_user.id, {}).get("action") not in {"admin_billing_rate_input", "admin_billing_usd_price_input", "admin_fixed_price_input"}
         and m.text is not None
         and not is_menu_navigation_text(m.text)
@@ -7170,7 +7172,7 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
 )
 async def handle_stateful_private_inputs(message: Message):
     user_id = message.from_user.id if message.from_user else None
-    if is_reaction_auth_state(user_states, user_id):
+    if is_reaction_auth_state(user_states, user_id) or is_reaction_account_reactions_input_state(user_states, user_id):
         return
     state = user_states.get(user_id) if user_id is not None else None
     if not state:
