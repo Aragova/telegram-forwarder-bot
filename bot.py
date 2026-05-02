@@ -56,6 +56,7 @@ from app.sender import SenderService
 telethon_client = None
 from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIErrorPolicy
+from app.reaction_auth_state import is_reaction_auth_state
 from app.scheduler_service import SchedulerService
 from app.runtime_roles import normalize_runtime_role, run_role as run_runtime_role
 from app.health_service import get_system_health, update_heartbeat
@@ -7141,6 +7142,8 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
 )
 async def handle_stateful_private_inputs(message: Message):
     user_id = message.from_user.id if message.from_user else None
+    if is_reaction_auth_state(user_states, user_id):
+        return
     state = user_states.get(user_id) if user_id is not None else None
     if not state:
         return
@@ -8882,10 +8885,10 @@ def _register_user_saas_handlers() -> None:
         manual_payment_providers=MANUAL_PAYMENT_PROVIDERS,
         manual_payment_active_statuses=MANUAL_PAYMENT_ACTIVE_STATUSES,
     )
-    register_user_rule_handlers(dp, ctx)
     register_user_reaction_handlers(dp, ctx)
     register_user_payment_handlers(dp, ctx)
     register_user_recovery_handlers(dp, ctx)
+    register_user_rule_handlers(dp, ctx)
     user_handlers_ctx = ctx
 
 
