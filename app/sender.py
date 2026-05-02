@@ -3561,7 +3561,7 @@ class SenderService:
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
                 pipeline_stage="copy_single",
-                pipeline_result="ok" if valid_sent_message_ids else "failed",
+                pipeline_result="ok" if sent_message_id else "failed",
                 source_channel=source_channel,
                 target_id=target_id,
                 source_message_ids=source_message_ids,
@@ -3575,14 +3575,16 @@ class SenderService:
             )
 
             if sent_message_id:
+                candidate_sent_message_ids = [int(sent_message_id)] if sent_message_id else []
+                authoritative_sent_message_id = int(sent_message_id) if sent_message_id else None
                 await self._add_reaction_for_rule_if_possible(
-                            rule=rule,
-                            target_id=target_id,
-                            sent_message_id=authoritative_sent_message_id,
-                            source_channel=str(source_channel or ""),
-                            source_message_ids=source_message_ids,
-                            delivery_id=delivery_id,
-                        )
+                    rule=rule,
+                    target_id=target_id,
+                    sent_message_id=authoritative_sent_message_id,
+                    source_channel=str(source_channel or ""),
+                    source_message_ids=source_message_ids,
+                    delivery_id=delivery_id,
+                )
 
                 await self._log_delivery_final_success(
                     rule_id=rule.id,
@@ -3599,7 +3601,14 @@ class SenderService:
                     },
                 )
 
-                await run_db(self._mark_delivery_sent_sync, delivery_id, sent_message_id=authoritative_sent_message_id, sent_message_ids=valid_sent_message_ids, target_id=str(target_id), delivery_method="reupload_single")
+                await run_db(
+                    self._mark_delivery_sent_sync,
+                    delivery_id,
+                    sent_message_id=authoritative_sent_message_id,
+                    sent_message_ids=candidate_sent_message_ids,
+                    target_id=str(target_id),
+                    delivery_method="copy_single",
+                )
                 return True
         else:
             await self._log_delivery_pipeline_step(
@@ -3655,7 +3664,14 @@ class SenderService:
                 },
             )
 
-            await run_db(self._mark_delivery_sent_sync, delivery_id, sent_message_id=authoritative_sent_message_id, sent_message_ids=valid_sent_message_ids, target_id=str(target_id), delivery_method="reupload_single")
+            await run_db(
+                self._mark_delivery_sent_sync,
+                delivery_id,
+                sent_message_id=int(message_id),
+                sent_message_ids=[int(message_id)],
+                target_id=str(target_id),
+                delivery_method="self_loop_copy_only_single",
+            )
             return True
 
         # =========================================================
