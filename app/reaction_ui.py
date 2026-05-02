@@ -46,7 +46,6 @@ def build_rule_reactions_keyboard(
             [InlineKeyboardButton(text=toggle_text, callback_data=f"{callback_prefix}_toggle:{rule_id}")],
             [InlineKeyboardButton(text="➕ Подключить аккаунт-реактор", callback_data=f"{callback_prefix}_add_account:{rule_id}")],
             [InlineKeyboardButton(text="👥 Мои аккаунты-реакторы", callback_data=f"{callback_prefix}_accounts:{rule_id}")],
-            [InlineKeyboardButton(text="🎭 Набор реакций", callback_data=f"{callback_prefix}_preset:{rule_id}")],
             [InlineKeyboardButton(text="🧪 Тест реакции", callback_data=f"{callback_prefix}_test:{rule_id}")],
             [InlineKeyboardButton(text="⬅️ Назад в дополнительные функции", callback_data=back_callback or f"user_rule_extra:{rule_id}")],
             [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"{callback_prefix}_refresh:{rule_id}")],

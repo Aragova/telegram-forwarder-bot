@@ -18,7 +18,6 @@ from app.reaction_ui import (
     build_reaction_web_onboarding_text,
     build_rule_reaction_accounts_text,
     build_rule_reaction_back_keyboard,
-    build_rule_reaction_preset_text,
     build_rule_reaction_test_text,
     build_rule_reactions_keyboard,
     build_rule_reactions_text,
@@ -293,8 +292,21 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
         rule_id = int((callback.data or "").split(":", 1)[1])
         if not await ensure_rule_callback_access(ctx, callback, rule_id):
             return
+        user_id = callback.from_user.id if callback.from_user else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        accounts = await ctx.run_db(ctx.db.list_reaction_accounts_for_tenant, tenant_id, False)
+        ctx.logger.info("USER_REACTION_PRESET_REDIRECT_TO_ACCOUNTS | tenant_id=%s | rule_id=%s | user_id=%s", tenant_id, rule_id, user_id)
+        redirect_text = (
+            "🎭 Набор реакций настраивается в карточке конкретного аккаунта-реактора.\n\n"
+            "Выберите аккаунт ниже.\n\n"
+            f"{build_rule_reaction_accounts_text(accounts)}"
+        )
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(message=callback.message, text=build_rule_reaction_preset_text(), reply_markup=build_rule_reaction_back_keyboard(rule_id))
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=redirect_text,
+            reply_markup=build_rule_reaction_accounts_keyboard_with_items(rule_id, accounts),
+        )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_reactions_test:"))
     async def handle_user_rule_reactions_test(callback: CallbackQuery):
