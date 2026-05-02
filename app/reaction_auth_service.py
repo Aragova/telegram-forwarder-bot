@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import re
 
@@ -7,6 +8,8 @@ from telethon import TelegramClient
 from telethon.errors import PasswordHashInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError, SessionPasswordNeededError
 
 from app.reaction_service import ReactionService
+
+logger = logging.getLogger("forwarder.reaction.auth")
 
 
 class ReactionAuthService:
@@ -57,6 +60,19 @@ class ReactionAuthService:
             auto_reconnect=True,
         )
 
+    async def _disconnect_safely(self, client, *, tenant_id: int, rule_id: int, user_id: int, stage: str) -> None:
+        try:
+            await client.disconnect()
+        except Exception as exc:
+            logger.warning(
+                "REACTION_AUTH_DISCONNECT_SUPPRESSED | tenant_id=%s | rule_id=%s | user_id=%s | stage=%s | error_type=%s",
+                tenant_id,
+                rule_id,
+                user_id,
+                stage,
+                exc.__class__.__name__,
+            )
+
     async def start_phone_login(self, *, tenant_id: int, rule_id: int, user_id: int, phone: str) -> dict:
         normalized_phone = self.normalize_phone(phone)
         tmp_session_path = self.build_tmp_session_path(tenant_id, user_id, rule_id)
@@ -64,7 +80,13 @@ class ReactionAuthService:
         try:
             await client.connect()
             if await client.is_user_authorized():
-                await client.disconnect()
+                await self._disconnect_safely(
+                    client,
+                    tenant_id=tenant_id,
+                    rule_id=rule_id,
+                    user_id=user_id,
+                    stage="start_phone_login_reconnect",
+                )
                 self.cleanup_tmp_session(tenant_id=tenant_id, rule_id=rule_id, user_id=user_id)
                 client = self.create_client(tmp_session_path)
                 await client.connect()
@@ -77,7 +99,13 @@ class ReactionAuthService:
                 "requires_code": True,
             }
         finally:
-            await client.disconnect()
+            await self._disconnect_safely(
+                client,
+                tenant_id=tenant_id,
+                rule_id=rule_id,
+                user_id=user_id,
+                stage="start_phone_login",
+            )
 
     async def complete_code_login(self, *, tenant_id: int, rule_id: int, user_id: int, phone: str, phone_code_hash: str, code: str) -> dict:
         tmp_session_path = self.build_tmp_session_path(tenant_id, user_id, rule_id)
@@ -101,7 +129,13 @@ class ReactionAuthService:
                 phone=phone,
             )
         finally:
-            await client.disconnect()
+            await self._disconnect_safely(
+                client,
+                tenant_id=tenant_id,
+                rule_id=rule_id,
+                user_id=user_id,
+                stage="complete_code_login",
+            )
 
     async def complete_password_login(self, *, tenant_id: int, rule_id: int, user_id: int, password: str, phone: str) -> dict:
         tmp_session_path = self.build_tmp_session_path(tenant_id, user_id, rule_id)
@@ -120,7 +154,13 @@ class ReactionAuthService:
                 phone=phone,
             )
         finally:
-            await client.disconnect()
+            await self._disconnect_safely(
+                client,
+                tenant_id=tenant_id,
+                rule_id=rule_id,
+                user_id=user_id,
+                stage="complete_password_login",
+            )
 
     async def finalize_authorized_client(self, *, tenant_id: int, rule_id: int, user_id: int, client: TelegramClient, phone: str) -> dict:
         me = await client.get_me()
