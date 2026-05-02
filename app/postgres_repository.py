@@ -1092,6 +1092,113 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
         return bool(updated)
 
+    def get_reaction_account_for_tenant(self, tenant_id: int, account_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM reaction_accounts
+                    WHERE tenant_id = %s AND id = %s
+                    LIMIT 1
+                    """,
+                    (tenant_id, account_id),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def update_reaction_account_status_for_tenant(
+        self,
+        tenant_id: int,
+        account_id: int,
+        status: str,
+        last_error: str | None = None,
+    ) -> bool:
+        allowed_statuses = {"active", "disabled", "auth_required", "flood_wait", "limited", "error"}
+        status_value = str(status or "").strip().lower()
+        if status_value not in allowed_statuses:
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE reaction_accounts
+                    SET status = %s,
+                        last_error = %s,
+                        updated_at = %s
+                    WHERE tenant_id = %s AND id = %s
+                    """,
+                    (status_value, last_error, utc_now_iso(), tenant_id, account_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+        return bool(updated)
+
+    def delete_reaction_account_for_tenant(self, tenant_id: int, account_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM reaction_accounts
+                    WHERE tenant_id = %s AND id = %s
+                    LIMIT 1
+                    """,
+                    (tenant_id, account_id),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                deleted_row = dict(row)
+                cur.execute(
+                    """
+                    DELETE FROM reaction_accounts
+                    WHERE tenant_id = %s AND id = %s
+                    """,
+                    (tenant_id, account_id),
+                )
+            conn.commit()
+        return deleted_row
+
+    def upsert_reaction_account_for_tenant(
+        self,
+        *,
+        tenant_id: int,
+        session_name: str,
+        telegram_user_id: int | None = None,
+        username: str | None = None,
+        phone_hint: str | None = None,
+        is_premium: bool = False,
+        fixed_reactions: list[str] | None = None,
+    ) -> int | None:
+        now_iso = utc_now_iso()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO reaction_accounts(
+                        tenant_id, session_name, telegram_user_id, username, phone_hint,
+                        is_premium, status, fixed_reactions_json, created_at, updated_at
+                    )
+                    VALUES(%s,%s,%s,%s,%s,%s,'active',%s,%s,%s)
+                    ON CONFLICT (tenant_id, session_name)
+                    DO UPDATE SET
+                        telegram_user_id = EXCLUDED.telegram_user_id,
+                        username = EXCLUDED.username,
+                        phone_hint = EXCLUDED.phone_hint,
+                        is_premium = EXCLUDED.is_premium,
+                        status = 'active',
+                        fixed_reactions_json = COALESCE(reaction_accounts.fixed_reactions_json, EXCLUDED.fixed_reactions_json),
+                        last_error = NULL,
+                        updated_at = EXCLUDED.updated_at
+                    RETURNING id
+                    """,
+                    (tenant_id, session_name, telegram_user_id, username, phone_hint, is_premium, _json_dumps(fixed_reactions or []), now_iso, now_iso),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return int(row["id"]) if row and row.get("id") is not None else None
+
     def upsert_rule_reaction_settings(self, *, tenant_id: int, rule_id: int, enabled: bool, mode: str, preset: dict[str, Any] | list[Any] | None = None, max_accounts_per_post: int = 3, delay_min_sec: int = 3, delay_max_sec: int = 30, premium_first: bool = True, stop_after_premium_success: bool = False) -> int | None:
         now_iso = utc_now_iso()
         with self.connect() as conn:

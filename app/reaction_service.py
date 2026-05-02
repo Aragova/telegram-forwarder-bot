@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
+
+LOGGER = logging.getLogger("forwarder.reaction.service")
 
 
 class ReactionService:
@@ -29,6 +32,23 @@ class ReactionService:
 
     def select_reaction_accounts_for_tenant(self, tenant_id: int, *, active_only: bool = True) -> list[dict[str, Any]]:
         return self.db.list_reaction_accounts_for_tenant(tenant_id=tenant_id, active_only=active_only)
+
+    def delete_reaction_account_session_files(self, tenant_id: int, session_name: str) -> list[str]:
+        session_dir = self.get_session_dir_for_tenant(tenant_id)
+        base_path = session_dir / f"{session_name}.session"
+        suffixes = ("", "-journal", "-wal", "-shm")
+        deleted: list[str] = []
+        for suffix in suffixes:
+            path = Path(f"{base_path}{suffix}")
+            try:
+                path.relative_to(session_dir)
+            except ValueError:
+                continue
+            if path.exists():
+                path.unlink(missing_ok=True)
+                deleted.append(path.name)
+        LOGGER.info("REACTION_ACCOUNT_SESSION_FILES_DELETED | tenant_id=%s | files_deleted=%s", tenant_id, len(deleted))
+        return deleted
 
     def enqueue_reaction_jobs_for_delivery(
         self,
