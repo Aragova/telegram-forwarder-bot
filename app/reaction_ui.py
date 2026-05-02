@@ -117,3 +117,56 @@ def build_rule_reaction_test_text() -> str:
         "🧪 Тест реакции\n\n"
         "Тест будет доступен после подключения аккаунтов-реакторов в этом workspace."
     )
+
+
+def build_reaction_auth_phone_text(rule_id: int) -> str:
+    return (
+        "➕ Подключение аккаунта-реактора\n\n"
+        "Введите номер Telegram-аккаунта, который принадлежит вам или вашей команде.\n\n"
+        "Формат:\n"
+        "+79991234567\n\n"
+        "Важно:\n"
+        "• не подключайте чужие аккаунты;\n"
+        "• коды Telegram и 2FA-пароли не сохраняются;\n"
+        "• аккаунт будет привязан только к вашему workspace."
+    )
+
+
+def build_reaction_auth_code_text(phone_hint: str) -> str:
+    return f"📩 Код отправлен в Telegram\n\nВведите код, который пришёл на аккаунт {phone_hint}."
+
+
+def build_reaction_auth_password_text(phone_hint: str) -> str:
+    return (
+        "🔐 Требуется 2FA-пароль\n\n"
+        f"На аккаунте {phone_hint} включена двухэтапная защита.\n"
+        "Введите 2FA-пароль.\n"
+        "Пароль не сохраняется."
+    )
+
+
+def build_reaction_auth_success_text(account: dict[str, Any]) -> str:
+    username = account.get("username")
+    ident = f"@{username}" if username else f"ID {account.get('telegram_user_id')}"
+    return (
+        "✅ Аккаунт-реактор подключён\n\n"
+        f"Аккаунт: {ident}\n"
+        f"Premium: {'да' if account.get('is_premium') else 'нет'}\n"
+        "Статус: active\n\n"
+        "Теперь он отображается в разделе “👥 Мои аккаунты-реакторы”."
+    )
+
+
+def build_reaction_auth_error_text(error: str) -> str:
+    return f"❌ Ошибка подключения: {error}"
+
+
+def build_reaction_auth_cancel_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отменить подключение", callback_data=f"rule_reactions_auth_cancel:{rule_id}")]])
+
+
+def build_reaction_auth_success_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Мои аккаунты-реакторы", callback_data=f"rule_reactions_accounts:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"rule_reactions:{rule_id}")],
+    ])
