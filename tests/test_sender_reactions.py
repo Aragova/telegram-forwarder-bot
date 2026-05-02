@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -204,3 +205,34 @@ def test_confirm_target_delivery_message_ids_with_retry_eventual_success():
         )
     )
     assert validated == [77]
+
+
+def test_mark_delivery_sent_sync_uses_passed_sent_message_id():
+    class FakeDb:
+        def __init__(self):
+            self.captured = None
+
+        def mark_delivery_sent_with_target_message(self, delivery_id, **kwargs):
+            self.captured = (delivery_id, kwargs)
+
+    svc = _service()
+    svc.db = FakeDb()
+    svc._mark_delivery_sent_sync(
+        99,
+        sent_message_id=12345,
+        sent_message_ids=[12345, 12346],
+        target_id="-1001",
+        delivery_method="reupload_single",
+    )
+    assert svc.db.captured is not None
+    delivery_id, kwargs = svc.db.captured
+    assert delivery_id == 99
+    assert kwargs["sent_message_id"] == 12345
+    assert kwargs["sent_message_ids"] == [12345, 12346]
+    assert kwargs["target_id"] == "-1001"
+    assert kwargs["delivery_method"] == "reupload_single"
+
+
+def test_mark_delivery_sent_sync_has_no_authoritative_sent_message_id_reference():
+    source = inspect.getsource(SenderService._mark_delivery_sent_sync)
+    assert "authoritative_sent_message_id" not in source
