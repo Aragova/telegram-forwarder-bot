@@ -16,7 +16,6 @@ from .telegram_client import ReactionClientInfo
 from .video_processor import VideoProcessor
 from .scheduler_service import SchedulerService
 from .reaction_runtime_resolver import ReactionRuntimeResolver
-from .tenant_reaction_executor import TenantReactionExecutor
 from telethon.tl.types import (
     MessageEntityBold,
     MessageEntityItalic,
@@ -2500,36 +2499,28 @@ class SenderService:
                 plan.tenant_id,
                 len(plan.tenant_accounts),
             )
-            executor = TenantReactionExecutor(
-                api_id=settings.api_id,
-                api_hash=settings.api_hash,
-                base_dir=settings.base_dir,
-            )
+            account_ids = [int(a["id"]) for a in (plan.tenant_accounts or []) if a.get("id") is not None]
             try:
-                result = await executor.add_reactions(
+                job_id = await run_db(
+                    self.db.enqueue_reaction_job,
                     tenant_id=int(plan.tenant_id or 0),
-                    accounts=plan.tenant_accounts,
+                    rule_id=rule_id,
                     target_id=target_id,
                     message_id=int(sent_message_id),
-                    rule_id=rule_id,
+                    account_ids=account_ids,
+                    max_attempts=3,
+                )
+                logger.info(
+                    "REACTION_JOB_ENQUEUED | tenant_id=%s | rule_id=%s | job_id=%s | target_id=%s | message_id=%s | accounts=%s",
+                    plan.tenant_id,
+                    rule_id,
+                    job_id,
+                    target_id,
+                    sent_message_id,
+                    len(account_ids),
                 )
             except Exception:
-                logger.exception(
-                    "REACTION_RUNTIME_TENANT_FAILED | rule_id=%s | tenant_id=%s",
-                    rule_id,
-                    plan.tenant_id,
-                )
-                return
-
-            logger.info(
-                "REACTION_RUNTIME_TENANT_DONE | rule_id=%s | tenant_id=%s | attempted=%s | confirmed=%s | failed=%s | skipped=%s",
-                rule_id,
-                plan.tenant_id,
-                result.get("attempted", 0),
-                result.get("confirmed", 0),
-                result.get("failed", 0),
-                result.get("skipped", 0),
-            )
+                logger.exception("REACTION_JOB_ENQUEUE_FAILED | tenant_id=%s | rule_id=%s", plan.tenant_id, rule_id)
             return
 
 
