@@ -7,9 +7,13 @@ from app.config import settings
 from app.reaction_auth_service import ReactionAuthService
 from app.reaction_onboarding_token import create_reaction_onboarding_token
 from app.reaction_ui import (
+    build_rule_reaction_account_delete_confirm_keyboard,
+    build_rule_reaction_account_delete_confirm_text,
+    build_rule_reaction_account_detail_keyboard,
+    build_rule_reaction_account_detail_text,
+    build_rule_reaction_accounts_keyboard_with_items,
     build_reaction_web_onboarding_keyboard,
     build_reaction_web_onboarding_text,
-    build_rule_reaction_accounts_keyboard,
     build_rule_reaction_accounts_text,
     build_rule_reaction_back_keyboard,
     build_rule_reaction_preset_text,
@@ -81,7 +85,115 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
         accounts = await ctx.run_db(ctx.db.list_reaction_accounts_for_tenant, tenant_id, False)
         ctx.logger.info("USER_REACTION_ACCOUNTS_UI_OPENED | tenant_id=%s | rule_id=%s | user_id=%s", tenant_id, rule_id, user_id)
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(message=callback.message, text=build_rule_reaction_accounts_text(accounts), reply_markup=build_rule_reaction_accounts_keyboard(rule_id))
+        await ctx.edit_message_text_safe(message=callback.message, text=build_rule_reaction_accounts_text(accounts), reply_markup=build_rule_reaction_accounts_keyboard_with_items(rule_id, accounts))
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_reactions_account:"))
+    async def handle_user_rule_reactions_account(callback: CallbackQuery):
+        _, rule_id_raw, account_id_raw = (callback.data or "0:0:0").split(":")
+        rule_id = int(rule_id_raw)
+        account_id = int(account_id_raw)
+        if not await ensure_rule_callback_access(ctx, callback, rule_id):
+            return
+        user_id = callback.from_user.id if callback.from_user else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        account = await ctx.run_db(ctx.db.get_reaction_account_for_tenant, tenant_id, account_id)
+        await ctx.answer_callback_safe_once(callback)
+        if not account:
+            await ctx.edit_message_text_safe(message=callback.message, text="Аккаунт не найден.")
+            return
+        ctx.logger.info("USER_REACTION_ACCOUNT_OPENED | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s", tenant_id, rule_id, user_id, account_id)
+        await ctx.edit_message_text_safe(message=callback.message, text=build_rule_reaction_account_detail_text(account), reply_markup=build_rule_reaction_account_detail_keyboard(rule_id, account_id, str(account.get("status") or "")))
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_reactions_account_disable:"))
+    async def handle_user_rule_reactions_account_disable(callback: CallbackQuery):
+        _, rule_id_raw, account_id_raw = (callback.data or "0:0:0").split(":")
+        rule_id = int(rule_id_raw)
+        account_id = int(account_id_raw)
+        if not await ensure_rule_callback_access(ctx, callback, rule_id):
+            return
+        user_id = callback.from_user.id if callback.from_user else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        await ctx.run_db(ctx.db.update_reaction_account_status_for_tenant, tenant_id, account_id, "disabled", None)
+        account = await ctx.run_db(ctx.db.get_reaction_account_for_tenant, tenant_id, account_id)
+        await ctx.answer_callback_safe_once(callback)
+        if not account:
+            await ctx.edit_message_text_safe(message=callback.message, text="Аккаунт не найден.")
+            return
+        ctx.logger.info("USER_REACTION_ACCOUNT_DISABLED | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s", tenant_id, rule_id, user_id, account_id)
+        await ctx.edit_message_text_safe(message=callback.message, text=build_rule_reaction_account_detail_text(account), reply_markup=build_rule_reaction_account_detail_keyboard(rule_id, account_id, str(account.get("status") or "")))
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_reactions_account_enable:"))
+    async def handle_user_rule_reactions_account_enable(callback: CallbackQuery):
+        _, rule_id_raw, account_id_raw = (callback.data or "0:0:0").split(":")
+        rule_id = int(rule_id_raw)
+        account_id = int(account_id_raw)
+        if not await ensure_rule_callback_access(ctx, callback, rule_id):
+            return
+        user_id = callback.from_user.id if callback.from_user else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        await ctx.run_db(ctx.db.update_reaction_account_status_for_tenant, tenant_id, account_id, "active", None)
+        account = await ctx.run_db(ctx.db.get_reaction_account_for_tenant, tenant_id, account_id)
+        await ctx.answer_callback_safe_once(callback)
+        if not account:
+            await ctx.edit_message_text_safe(message=callback.message, text="Аккаунт не найден.")
+            return
+        ctx.logger.info("USER_REACTION_ACCOUNT_ENABLED | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s", tenant_id, rule_id, user_id, account_id)
+        await ctx.edit_message_text_safe(message=callback.message, text=build_rule_reaction_account_detail_text(account), reply_markup=build_rule_reaction_account_detail_keyboard(rule_id, account_id, str(account.get("status") or "")))
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_reactions_account_delete_confirm:"))
+    async def handle_user_rule_reactions_account_delete_confirm(callback: CallbackQuery):
+        _, rule_id_raw, account_id_raw = (callback.data or "0:0:0").split(":")
+        rule_id = int(rule_id_raw)
+        account_id = int(account_id_raw)
+        if not await ensure_rule_callback_access(ctx, callback, rule_id):
+            return
+        user_id = callback.from_user.id if callback.from_user else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        account = await ctx.run_db(ctx.db.get_reaction_account_for_tenant, tenant_id, account_id)
+        await ctx.answer_callback_safe_once(callback)
+        if not account:
+            await ctx.edit_message_text_safe(message=callback.message, text="Аккаунт не найден.")
+            return
+        ctx.logger.info("USER_REACTION_ACCOUNT_DELETE_CONFIRM_OPENED | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s", tenant_id, rule_id, user_id, account_id)
+        await ctx.edit_message_text_safe(message=callback.message, text=build_rule_reaction_account_delete_confirm_text(account), reply_markup=build_rule_reaction_account_delete_confirm_keyboard(rule_id, account_id))
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_reactions_account_delete:"))
+    async def handle_user_rule_reactions_account_delete(callback: CallbackQuery):
+        _, rule_id_raw, account_id_raw = (callback.data or "0:0:0").split(":")
+        rule_id = int(rule_id_raw)
+        account_id = int(account_id_raw)
+        if not await ensure_rule_callback_access(ctx, callback, rule_id):
+            return
+        user_id = callback.from_user.id if callback.from_user else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        deleted = await ctx.run_db(ctx.db.delete_reaction_account_for_tenant, tenant_id, account_id)
+        files_deleted = []
+        if deleted and deleted.get("session_name"):
+            files_deleted = auth_service.reaction_service.delete_reaction_account_session_files(tenant_id, str(deleted.get("session_name")))
+        accounts = await ctx.run_db(ctx.db.list_reaction_accounts_for_tenant, tenant_id, False)
+        ctx.logger.info("USER_REACTION_ACCOUNT_DELETED | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | files_deleted=%s", tenant_id, rule_id, user_id, account_id, len(files_deleted))
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(message=callback.message, text="✅ Аккаунт-реактор удалён. Теперь его можно подключить заново.\n\n" + build_rule_reaction_accounts_text(accounts), reply_markup=build_rule_reaction_accounts_keyboard_with_items(rule_id, accounts))
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_reactions_account_reconnect:"))
+    async def handle_user_rule_reactions_account_reconnect(callback: CallbackQuery):
+        _, rule_id_raw, account_id_raw = (callback.data or "0:0:0").split(":")
+        rule_id = int(rule_id_raw)
+        account_id = int(account_id_raw)
+        if not await ensure_rule_callback_access(ctx, callback, rule_id):
+            return
+        user_id = callback.from_user.id if callback.from_user else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        account = await ctx.run_db(ctx.db.get_reaction_account_for_tenant, tenant_id, account_id)
+        await ctx.answer_callback_safe_once(callback)
+        if not account:
+            await ctx.edit_message_text_safe(message=callback.message, text="Аккаунт не найден.")
+            return
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text="Для переподключения удалите аккаунт и добавьте его заново.",
+            reply_markup=build_rule_reaction_account_delete_confirm_keyboard(rule_id, account_id),
+        )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_reactions_add_account:"))
     async def handle_user_rule_reactions_add_account(callback: CallbackQuery):

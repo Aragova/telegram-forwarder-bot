@@ -76,10 +76,72 @@ def build_rule_reaction_accounts_text(accounts: list[dict[str, Any]]) -> str:
 
 
 def build_rule_reaction_accounts_keyboard(rule_id: int, *, callback_prefix: str = "user_rule_reactions") -> InlineKeyboardMarkup:
+    return build_rule_reaction_accounts_keyboard_with_items(rule_id, [], callback_prefix=callback_prefix)
+
+
+def build_rule_reaction_accounts_keyboard_with_items(
+    rule_id: int,
+    accounts: list[dict[str, Any]],
+    *,
+    callback_prefix: str = "user_rule_reactions",
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for row in accounts:
+        username = row.get("username")
+        tg_uid = row.get("telegram_user_id")
+        label = f"@{username}" if username else (f"ID {tg_uid}" if tg_uid else "без username")
+        status = row.get("status") or "unknown"
+        rows.append([InlineKeyboardButton(text=f"👤 {label} · {status}", callback_data=f"{callback_prefix}_account:{rule_id}:{row.get('id')}")])
+    rows.extend([
+        [InlineKeyboardButton(text="➕ Подключить аккаунт", callback_data=f"{callback_prefix}_add_account:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"{callback_prefix}:{rule_id}")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_rule_reaction_account_detail_text(account: dict[str, Any]) -> str:
+    username = account.get("username")
+    ident = f"@{username}" if username else f"ID {account.get('telegram_user_id')}"
+    return (
+        "👤 Аккаунт-реактор\n\n"
+        f"Аккаунт: {ident}\n"
+        f"Telegram ID: {account.get('telegram_user_id')}\n"
+        f"Premium: {'да' if account.get('is_premium') else 'нет'}\n"
+        f"Статус: {account.get('status') or 'unknown'}\n"
+        f"Набор: {account.get('fixed_reactions_json') or '[]'}"
+    )
+
+
+def build_rule_reaction_account_detail_keyboard(rule_id: int, account_id: int, status: str) -> InlineKeyboardMarkup:
+    is_active = str(status or "").strip().lower() == "active"
+    toggle_text = "⛔ Отключить" if is_active else "✅ Включить"
+    toggle_cb = f"user_rule_reactions_account_disable:{rule_id}:{account_id}" if is_active else f"user_rule_reactions_account_enable:{rule_id}:{account_id}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Подключить аккаунт", callback_data=f"{callback_prefix}_add_account:{rule_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"{callback_prefix}:{rule_id}")],
+            [InlineKeyboardButton(text=toggle_text, callback_data=toggle_cb)],
+            [InlineKeyboardButton(text="🔄 Переподключить", callback_data=f"user_rule_reactions_account_reconnect:{rule_id}:{account_id}")],
+            [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"user_rule_reactions_account_delete_confirm:{rule_id}:{account_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад к аккаунтам", callback_data=f"user_rule_reactions_accounts:{rule_id}")],
+        ]
+    )
+
+
+def build_rule_reaction_account_delete_confirm_text(account: dict[str, Any]) -> str:
+    username = account.get("username")
+    ident = f"@{username}" if username else f"ID {account.get('telegram_user_id')}"
+    return (
+        "🗑 Удаление аккаунта-реактора\n\n"
+        f"Вы действительно хотите удалить {ident}?\n\n"
+        "Будет удалена запись аккаунта и session-файл на сервере.\n"
+        "Если нужно, вы сможете подключить аккаунт заново через защищённую страницу."
+    )
+
+
+def build_rule_reaction_account_delete_confirm_keyboard(rule_id: int, account_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"user_rule_reactions_account_delete:{rule_id}:{account_id}")],
+            [InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"user_rule_reactions_account:{rule_id}:{account_id}")],
         ]
     )
 
