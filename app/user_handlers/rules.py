@@ -276,3 +276,39 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             text=user_ui.build_user_rule_logs_text(rule_id=rule_id, log_rows=rows),
             reply_markup=user_ui.build_user_rule_logs_keyboard(rule_id=rule_id, has_logs=bool(rows)),
         )
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_reactions:"))
+    async def handle_user_rule_reactions(callback: CallbackQuery):
+        rule_id = int((callback.data or "").split(":", 1)[1])
+        if not await ensure_rule_callback_access(ctx, callback, rule_id):
+            return
+        user_id = callback.from_user.id if callback.from_user else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        settings = await ctx.run_db(ctx.db.get_rule_reaction_settings_for_tenant, tenant_id, rule_id) if hasattr(ctx.db, "get_rule_reaction_settings_for_tenant") else None
+        accounts = await ctx.run_db(ctx.db.list_reaction_accounts_for_tenant, tenant_id, False) if hasattr(ctx.db, "list_reaction_accounts_for_tenant") else []
+        enabled = bool(settings and settings.get("enabled"))
+        active = sum(1 for row in accounts if str(row.get("status") or "").strip().lower() == "active")
+        premium = sum(1 for row in accounts if bool(row.get("is_premium")))
+        ordinary = max(len(accounts) - premium, 0)
+        status = "🟢 Включены" if enabled else "⚪️ Выключены"
+        mode = str((settings or {}).get("mode") or "premium_then_normal")
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=(
+                f"⚙️ Реакции правила #{rule_id}\n\n"
+                f"Статус: {status}\n"
+                f"Режим: {mode}\n"
+                f"Аккаунтов-реакторов: {len(accounts)}\n"
+                f"Активных: {active}\n"
+                f"Premium: {premium}\n"
+                f"Обычных: {ordinary}\n\n"
+                "Подключите аккаунты вашей команды, чтобы они автоматически ставили реакции под публикациями ваших правил.\n\n"
+                "🚧 Подключение и тестирование аккаунтов будет включено следующим обновлением."
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад в дополнительные функции", callback_data=f"user_rule_extra:{rule_id}")],
+                ]
+            ),
+        )
