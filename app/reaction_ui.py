@@ -105,7 +105,7 @@ def build_rule_reaction_connect_text() -> str:
     )
 
 
-def build_reaction_web_onboarding_text(rule_id: int) -> str:
+def build_reaction_web_onboarding_text(rule_id: int, *, web_enabled: bool) -> str:
     return (
         "➕ Подключение аккаунта-реактора\n\n"
         "Подключение Telegram-аккаунта нельзя выполнять через чат бота: Telegram может заблокировать попытку входа, "
@@ -114,8 +114,8 @@ def build_reaction_web_onboarding_text(rule_id: int) -> str:
         "• открыть защищённую HTTPS-страницу ViMi;\n"
         "• ввести код только на этой странице;\n"
         "• после успешного входа аккаунт будет привязан к вашему workspace.\n\n"
-        "🚧 Защищённая страница подключения будет включена следующим обновлением.\n\n"
-        "Ваши коды Telegram и 2FA-пароли не должны отправляться в этот чат."
+                + ("✅ Защищённая страница подключения доступна по кнопке ниже.\n\n" if web_enabled else "🚧 Защищённая страница подключения пока не включена.\n\n")
+        + "Ваши коды Telegram и 2FA-пароли не должны отправляться в этот чат."
     )
 
 

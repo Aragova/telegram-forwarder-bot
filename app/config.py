@@ -115,6 +115,11 @@ class Settings:
     lava_top_pro_offer_id: str = os.getenv("LAVA_TOP_PRO_OFFER_ID", "").strip()
 
     public_base_url: str = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    reaction_onboarding_enabled: bool = str(os.getenv("REACTION_ONBOARDING_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    reaction_onboarding_secret: str = os.getenv("REACTION_ONBOARDING_SECRET", "")
+    reaction_onboarding_token_ttl_sec: int = int(os.getenv("REACTION_ONBOARDING_TOKEN_TTL_SEC", "900") or 900)
+    reaction_onboarding_port: int = int(os.getenv("REACTION_ONBOARDING_PORT", "8091") or 8091)
+    reaction_onboarding_public_path: str = os.getenv("REACTION_ONBOARDING_PUBLIC_PATH", "/reaction-auth").strip() or "/reaction-auth"
 
     def validate(self) -> None:
         missing = []
