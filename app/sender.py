@@ -1031,7 +1031,7 @@ class SenderService:
 
     def _mark_delivery_sent_sync(self, delivery_id: int, *, sent_message_id: int | None = None, sent_message_ids: list[int] | None = None, target_id: str | None = None, delivery_method: str | None = None) -> None:
         if hasattr(self.db, "mark_delivery_sent_with_target_message"):
-            self.db.mark_delivery_sent_with_target_message(delivery_id, sent_message_id=authoritative_sent_message_id, sent_message_ids=sent_message_ids, target_id=target_id, delivery_method=delivery_method)
+            self.db.mark_delivery_sent_with_target_message(delivery_id, sent_message_id=sent_message_id, sent_message_ids=sent_message_ids, target_id=target_id, delivery_method=delivery_method)
             return
         self.db.mark_delivery_sent(delivery_id)
 
@@ -3803,7 +3803,14 @@ class SenderService:
                 },
             )
 
-            await run_db(self._mark_delivery_sent_sync, delivery_id)
+            await run_db(
+                self._mark_delivery_sent_sync,
+                delivery_id,
+                sent_message_id=authoritative_sent_message_id,
+                sent_message_ids=valid_sent_message_ids,
+                target_id=str(target_id),
+                delivery_method="reupload_single",
+            )
             return True
 
         logger.warning("REUPLOAD_SINGLE_TARGET_VERIFY_FAILED | rule_id=%s | delivery_id=%s | source_channel=%s | source_message_id=%s | target_id=%s | candidate_sent_message_ids=%s | reason=target_message_not_found_after_send", rule.id, delivery_id, source_channel, message_id, target_id, candidate_sent_message_ids)
