@@ -681,6 +681,12 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_start TEXT NULL;
         ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_end TEXT NULL;
         ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS updated_at TEXT NULL;
+        ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS not_before TIMESTAMPTZ NULL;
+        ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ NULL;
+        ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS account_ids_json TEXT NULL;
+        ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS result_json TEXT NULL;
+        ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ NULL;
         """
 
         self.client.execute_script(init_sql)
@@ -898,6 +904,24 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     CREATE INDEX IF NOT EXISTS idx_reaction_jobs_delivery
                     ON reaction_jobs(delivery_id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reaction_jobs_status_not_before
+                    ON reaction_jobs(status, not_before, id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reaction_jobs_tenant_rule
+                    ON reaction_jobs(tenant_id, rule_id, id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reaction_jobs_locked
+                    ON reaction_jobs(status, locked_at)
                     """
                 )
                 cur.execute(
@@ -1296,23 +1320,93 @@ class PostgresRepository(RepositoryProtocol):
                 row = cur.fetchone()
         return dict(row) if row else None
 
-    def enqueue_reaction_job(self, *, tenant_id: int, target_id: str, message_id: int, reaction_payload: dict[str, Any], rule_id: int | None = None, delivery_id: int | None = None, account_id: int | None = None, run_at: str | None = None, max_attempts: int = 3) -> int | None:
+    def enqueue_reaction_job(self, *, tenant_id: int, rule_id: int, target_id: str, message_id: int, account_ids: list[int] | None = None, not_before: str | None = None, max_attempts: int = 3, reaction_payload: dict[str, Any] | None = None, delivery_id: int | None = None, account_id: int | None = None, run_at: str | None = None) -> int | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO reaction_jobs(
                         tenant_id, rule_id, delivery_id, target_id, message_id, account_id,
-                        reaction_payload_json, status, max_attempts, run_at
+                        reaction_payload_json, status, max_attempts, run_at, account_ids_json, not_before
                     )
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,'pending',%s,COALESCE(%s, NOW()))
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,'pending',%s,COALESCE(%s, NOW()),%s,%s)
                     RETURNING id
                     """,
-                    (tenant_id, rule_id, delivery_id, target_id, message_id, account_id, _json_dumps(reaction_payload) or "{}", max_attempts, run_at),
+                    (tenant_id, rule_id, delivery_id, target_id, message_id, account_id, _json_dumps(reaction_payload) or "{}", max_attempts, run_at, _json_dumps(account_ids), not_before),
                 )
                 row = cur.fetchone()
             conn.commit()
         return int(row["id"]) if row and row.get("id") is not None else None
+
+    def lease_due_reaction_job(self, *, worker_id: str, lock_timeout_seconds: int = 300) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH candidate AS (
+                        SELECT id
+                        FROM reaction_jobs
+                        WHERE (
+                            status = 'pending'
+                            AND (not_before IS NULL OR not_before <= NOW())
+                        )
+                        OR (
+                            status = 'processing'
+                            AND locked_at < NOW() - make_interval(secs => %s)
+                            AND attempt_count < max_attempts
+                        )
+                        ORDER BY id
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT 1
+                    )
+                    UPDATE reaction_jobs j
+                    SET status='processing',
+                        locked_at=NOW(),
+                        locked_by=%s,
+                        attempt_count=COALESCE(attempt_count, 0)+1,
+                        updated_at=NOW()
+                    FROM candidate
+                    WHERE j.id = candidate.id
+                    RETURNING j.*
+                    """,
+                    (int(lock_timeout_seconds), worker_id),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return dict(row) if row else None
+
+    def mark_reaction_job_done(self, *, job_id: int, result: dict) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE reaction_jobs SET status='done', processed_at=NOW(), result_json=%s, error_text=NULL, updated_at=NOW() WHERE id=%s",
+                    (_json_dumps(result) or "{}", job_id),
+                )
+            conn.commit()
+
+    def mark_reaction_job_failed(self, *, job_id: int, error_text: str, result: dict | None = None, retry_after_seconds: int | None = None) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if retry_after_seconds is None:
+                    cur.execute(
+                        "UPDATE reaction_jobs SET status='failed', processed_at=NOW(), result_json=%s, error_text=%s, updated_at=NOW() WHERE id=%s",
+                        (_json_dumps(result), error_text, job_id),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE reaction_jobs SET status='pending', not_before=NOW() + make_interval(secs => %s), result_json=%s, error_text=%s, updated_at=NOW() WHERE id=%s",
+                        (int(retry_after_seconds), _json_dumps(result), error_text, job_id),
+                    )
+            conn.commit()
+
+    def mark_reaction_job_skipped(self, *, job_id: int, result: dict) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE reaction_jobs SET status='skipped', processed_at=NOW(), result_json=%s, updated_at=NOW() WHERE id=%s",
+                    (_json_dumps(result) or "{}", job_id),
+                )
+            conn.commit()
 
     def log_reaction_event(self, *, event_type: str, reaction_job_id: int | None = None, tenant_id: int | None = None, rule_id: int | None = None, delivery_id: int | None = None, account_id: int | None = None, status: str | None = None, error_text: str | None = None, extra: dict[str, Any] | list[Any] | None = None) -> int | None:
         with self.connect() as conn:

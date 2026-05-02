@@ -64,6 +64,7 @@ from app.ops_health_service import build_operational_snapshot
 from app.preflight_checks import PreflightError, run_preflight_checks
 from app.runtime_context import RuntimeContext
 from app.worker_runtime import run_heavy_worker, run_light_worker
+from app.reaction_worker import ReactionWorker
 from app.scheduler_runtime import run_scheduler_loop
 from app.job_watchdog import run_watchdog_loop
 from app.tenant_service import TenantService
@@ -119,6 +120,7 @@ runtime_context: RuntimeContext | None = None
 posting_active = False
 job_worker_tasks: list[asyncio.Task] = []
 job_workers_stop_event: asyncio.Event | None = None
+reaction_worker_task: asyncio.Task | None = None
 scheduler_runtime_task: asyncio.Task | None = None
 job_watchdog_task: asyncio.Task | None = None
 workers_runtime_enabled = True
@@ -8697,7 +8699,7 @@ async def _shutdown_runtime(
     close_telegram_clients: bool,
     close_bot_session: bool,
 ) -> None:
-    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task
+    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task
 
     if stop_workers_runtime:
         await stop_job_workers_runtime()
@@ -8717,6 +8719,10 @@ async def _shutdown_runtime(
         job_watchdog_task.cancel()
         await asyncio.gather(job_watchdog_task, return_exceptions=True)
     job_watchdog_task = None
+    if reaction_worker_task and not reaction_worker_task.done():
+        reaction_worker_task.cancel()
+        await asyncio.gather(reaction_worker_task, return_exceptions=True)
+    reaction_worker_task = None
 
     if close_telegram_clients and telethon_client:
         try:
@@ -8809,7 +8815,7 @@ async def _start_worker_role() -> None:
 
 
 async def _start_all_role() -> None:
-    global workers_runtime_enabled, posting_active, scheduler_runtime_task, job_watchdog_task
+    global workers_runtime_enabled, posting_active, scheduler_runtime_task, job_watchdog_task, reaction_worker_task
     workers_runtime_enabled = True
     posting_active = False
     await _init_db_runtime()
@@ -8828,6 +8834,10 @@ async def _start_all_role() -> None:
         )
     if job_watchdog_task is None or job_watchdog_task.done():
         job_watchdog_task = asyncio.create_task(run_watchdog_loop(db, interval_seconds=10.0))
+    if reaction_worker_task is None or reaction_worker_task.done():
+        reaction_worker = ReactionWorker(db=db, worker_id="reaction-worker-1", poll_interval_sec=2.0, lock_timeout_seconds=300)
+        reaction_worker_task = asyncio.create_task(reaction_worker.run_forever())
+        logger.info("Reaction worker запущен: reaction-worker-1")
     await start_job_workers_runtime()
     logger.info("STARTUP | Legacy режим all запущен")
     await dp.start_polling(
