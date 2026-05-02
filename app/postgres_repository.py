@@ -1134,6 +1134,29 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
         return bool(updated)
 
+    def update_reaction_account_fixed_reactions_for_tenant(
+        self,
+        tenant_id: int,
+        account_id: int,
+        fixed_reactions: list[str],
+    ) -> bool:
+        now_iso = utc_now_iso()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE reaction_accounts
+                    SET fixed_reactions_json = %s,
+                        updated_at = %s
+                    WHERE tenant_id = %s
+                      AND id = %s
+                    """,
+                    (_json_dumps(fixed_reactions or []), now_iso, tenant_id, account_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+        return bool(updated)
+
     def delete_reaction_account_for_tenant(self, tenant_id: int, account_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
