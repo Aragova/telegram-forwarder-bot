@@ -2305,7 +2305,7 @@ class SenderService:
                 )
             else:
                 logger.warning(
-                    "PREMIUM_REACTION_NOT_VISIBLE_AFTER_SEND | rule_id=%s | target_id=%s | message_id=%s | session=%s | requested_reactions=%s",
+                    "PREMIUM_REACTION_NOT_VISIBLE_AFTER_SEND | rule_id=%s | target_id=%s | message_id=%s | session=%s | requested_reactions=%s | visible_reactions=%s",
                     rule_id,
                     entity,
                     sent_message_id,
@@ -2313,7 +2313,7 @@ class SenderService:
                     variant,
                     visible_reactions,
                 )
-            return True
+            return bool(confirmed)
 
         logger.warning(
             "Premium-реактор %s не смог поставить ни один вариант реакций на сообщение %s в %s. Последняя ошибка: %s",
@@ -2330,7 +2330,7 @@ class SenderService:
             msg = await client.get_messages(entity, ids=message_id)
             reactions = getattr(msg, "reactions", None)
             if not reactions:
-                return False, []
+                return False
             for result in getattr(reactions, "results", []) or []:
                 reaction = getattr(result, "reaction", None)
                 actual = _normalize_reaction_emoji(getattr(reaction, "emoticon", None))

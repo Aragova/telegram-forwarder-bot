@@ -52,3 +52,10 @@ def test_validate_reaction_target_message():
 
     svc = _service(fresh)
     assert asyncio.run(svc._validate_reaction_target_message(rule_id=1, source_channel='a', target_id='b', source_message_ids=[1], sent_message_id=10)) == 10
+
+
+def test_confirm_reaction_without_reactions_returns_strict_false():
+    svc = _service(SimpleNamespace(reactions=None))
+    confirmed = asyncio.run(svc._confirm_reaction(svc.telethon, entity="chat", message_id=1, emoji="🔥"))
+    assert confirmed is False
+    assert not confirmed
