@@ -51,6 +51,21 @@ def _phone_page(token: str) -> web.Response:
     return web.Response(text=_layout("Подключение", body), content_type="text/html")
 
 
+def _password_page(token: str, phone: str, error_text: str | None = None) -> web.Response:
+    error_html = f"<div class='w'>{html.escape(error_text)}</div>" if error_text else ""
+    body = (
+        "<h1>Требуется 2FA</h1>"
+        f"{error_html}"
+        "<p>Введите пароль двухэтапной защиты. Пароль не сохраняется.</p>"
+        f"<form method='post' action='{settings.reaction_onboarding_public_path}/password'>"
+        f"<input type='hidden' name='token' value='{html.escape(token)}'>"
+        f"<input type='hidden' name='phone' value='{html.escape(phone)}'>"
+        "<input name='password' type='password' required>"
+        "<button type='submit'>Завершить подключение</button></form>"
+    )
+    return web.Response(text=_layout("2FA", body), content_type="text/html")
+
+
 async def page_open(request: web.Request) -> web.Response:
     token = request.query.get("token", "")
     try:
@@ -100,13 +115,7 @@ async def code_submit(request: web.Request) -> web.Response:
         if result.get("status") == "password_required":
             mask = service.mask_phone(str(data.get("phone") or ""))
             LOGGER.info("REACTION_ONBOARDING_PASSWORD_REQUIRED | tenant_id=%s | rule_id=%s | user_id=%s | phone_hint=%s", payload["tenant_id"], payload["rule_id"], payload["user_id"], mask)
-            body = (
-                "<h1>Требуется 2FA</h1><p>Введите пароль двухэтапной защиты. Пароль не сохраняется.</p>"
-                f"<form method='post' action='{settings.reaction_onboarding_public_path}/password'>"
-                f"<input type='hidden' name='token' value='{html.escape(token)}'><input type='hidden' name='phone' value='{html.escape(str(data.get('phone') or ''))}'>"
-                "<input name='password' type='password' required><button type='submit'>Завершить подключение</button></form>"
-            )
-            return web.Response(text=_layout("2FA", body), content_type="text/html")
+            return _password_page(token, str(data.get("phone") or ""))
         LOGGER.info("REACTION_ONBOARDING_SUCCESS | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | telegram_user_id=%s | is_premium=%s", payload["tenant_id"], payload["rule_id"], payload["user_id"], result.get("account_id"), result.get("telegram_user_id"), result.get("is_premium"))
         ident = f"@{result.get('username')}" if result.get("username") else f"ID {result.get('telegram_user_id')}"
         body = f"<h1>Аккаунт-реактор подключён</h1><p>{html.escape(ident)}</p><p>Premium: {'да' if result.get('is_premium') else 'нет'}</p><p>{html.escape(result.get('phone_hint') or '')}</p><p><a href='https://t.me/topposter69_bot'>Вернуться в Telegram-бот</a></p>"
@@ -127,9 +136,15 @@ async def password_submit(request: web.Request) -> web.Response:
         ident = f"@{result.get('username')}" if result.get("username") else f"ID {result.get('telegram_user_id')}"
         body = f"<h1>Аккаунт-реактор подключён</h1><p>{html.escape(ident)}</p><p>Premium: {'да' if result.get('is_premium') else 'нет'}</p><p>{html.escape(result.get('phone_hint') or '')}</p><p><a href='https://t.me/topposter69_bot'>Вернуться в Telegram-бот</a></p>"
         return web.Response(text=_layout("Успех", body), content_type="text/html")
+    except ValueError as exc:
+        if str(exc) == "Неверный 2FA-пароль. Проверьте пароль и попробуйте снова.":
+            LOGGER.warning("REACTION_ONBOARDING_FAILED | error_type=ValueError | reason=password_invalid")
+            return _password_page(token, str(data.get("phone") or ""), error_text=str(exc))
+        LOGGER.warning("REACTION_ONBOARDING_FAILED | error_type=ValueError")
+        return _error_page(str(exc))
     except Exception as exc:
         LOGGER.warning("REACTION_ONBOARDING_FAILED | error_type=%s", exc.__class__.__name__)
-        return _error_page(str(exc) if isinstance(exc, ValueError) else "Не удалось завершить вход")
+        return _error_page("Не удалось завершить вход. Попробуйте заново из Telegram-бота.")
 
 
 async def health(_: web.Request) -> web.Response:

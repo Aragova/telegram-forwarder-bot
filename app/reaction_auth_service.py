@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 
 from telethon import TelegramClient
-from telethon.errors import PhoneCodeExpiredError, PhoneCodeInvalidError, SessionPasswordNeededError
+from telethon.errors import PasswordHashInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError, SessionPasswordNeededError
 
 from app.reaction_service import ReactionService
 
@@ -108,7 +108,10 @@ class ReactionAuthService:
         client = self.create_client(tmp_session_path)
         try:
             await client.connect()
-            await client.sign_in(password=password)
+            try:
+                await client.sign_in(password=password)
+            except PasswordHashInvalidError:
+                raise ValueError("Неверный 2FA-пароль. Проверьте пароль и попробуйте снова.")
             return await self.finalize_authorized_client(
                 tenant_id=tenant_id,
                 rule_id=rule_id,
