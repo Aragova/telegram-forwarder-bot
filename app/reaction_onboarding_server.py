@@ -342,3 +342,7 @@ def create_app() -> web.Application:
 
 def main() -> None:
     web.run_app(create_app(), host="0.0.0.0", port=settings.reaction_onboarding_port)
+
+
+if __name__ == "__main__":
+    main()
