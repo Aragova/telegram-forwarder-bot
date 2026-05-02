@@ -1757,3 +1757,5 @@ body.legal-simple-page .legal-simple-footer a {
     height: 23px;
   }
 }
+
+.auth-page{min-height:calc(100vh - 72px);display:flex;align-items:center;justify-content:center;padding:44px 0 56px}.auth-wrap{width:min(560px,100%);text-align:center}.auth-logo-wrap{display:flex;justify-content:center;margin-bottom:20px}.auth-logo{width:64px;height:auto;filter:drop-shadow(0 10px 20px rgba(40,48,96,.14))}.auth-title{margin:0;font-size:clamp(36px,4.2vw,52px);line-height:1;letter-spacing:-.04em}.auth-subtitle{margin:16px auto 0;max-width:500px;color:#617096;font-size:18px;line-height:1.5}.auth-card{margin-top:28px;background:rgba(255,255,255,.95);border:1px solid #e3e9f6;border-radius:20px;box-shadow:var(--soft);padding:28px}.auth-telegram-btn{width:100%}.auth-widget-placeholder{margin-top:14px;padding:14px;border:1px dashed #cdd8f5;border-radius:12px;color:#5d6f99;font-weight:600;background:#f6f9ff}.auth-back-link{display:inline-block;margin-top:20px;color:#41558c;font-weight:700}.auth-back-link:hover{color:#6d57f5}@media(max-width:640px){.auth-page{min-height:calc(100vh - 64px);padding:26px 0 34px}.auth-subtitle{font-size:16px}.auth-card{padding:20px}}

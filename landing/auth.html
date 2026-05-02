@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ViMi — Авторизация</title>
+  <meta name="description" content="Вход в SaaS-кабинет ViMi для управления автопостингом Telegram-каналов." />
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="index.html" aria-label="ViMi"><img src="assets/vimi-logo.png" alt="ViMi" class="brand-logo-img"></a>
+
+    <div class="header-actions">
+      <button class="lang-select" id="langToggle" type="button" aria-label="Сменить язык">
+        <span id="currentLang">RU</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="auth-page section-shell">
+    <section class="auth-wrap">
+      <div class="auth-logo-wrap">
+        <img src="assets/vimi-logo.png" alt="ViMi" class="auth-logo" />
+      </div>
+
+      <h1 class="auth-title" data-i18n="auth_title">Войти в ViMi</h1>
+      <p class="auth-subtitle" data-i18n="auth_subtitle">Управляйте автопостингом, очередями и реакциями Telegram-каналов из одного кабинета.</p>
+
+      <article class="auth-card" aria-label="Авторизация ViMi">
+        <button class="btn btn-primary btn-xl auth-telegram-btn" type="button" aria-label="Войти через Telegram">
+          <span data-i18n="auth_signin_telegram">Войти через Telegram</span>
+        </button>
+
+        <div class="auth-widget-placeholder" data-i18n="auth_widget_placeholder">
+          Здесь будет подключен Telegram Login Widget
+        </div>
+        <!-- TODO: Подключить Telegram Login Widget после финальной проверки backend-авторизации и валидации подписи. -->
+      </article>
+
+      <a class="auth-back-link" href="index.html" data-i18n="auth_back_home">Вернуться на главную</a>
+    </section>
+  </main>
+
+  <script src="auth.js"></script>
+</body>
+</html>
