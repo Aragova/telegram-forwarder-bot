@@ -631,7 +631,7 @@ class PostgresRepository(RepositoryProtocol):
             message_id BIGINT NOT NULL,
             account_id BIGINT NULL,
             reaction_payload_json TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','leased','done','retry','failed','skipped')),
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','leased','processing','done','retry','failed','skipped')),
             attempts BIGINT NOT NULL DEFAULT 0,
             max_attempts BIGINT NOT NULL DEFAULT 3,
             run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -959,6 +959,7 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
 
         self._ensure_payment_intents_status_constraint()
+        self._ensure_reaction_jobs_status_constraint()
         self._ensure_default_plans()
 
     def _ensure_payment_intents_status_constraint(self) -> None:
@@ -1004,6 +1005,25 @@ class PostgresRepository(RepositoryProtocol):
                     """
                 )
             conn.commit()
+
+
+    def _ensure_reaction_jobs_status_constraint(self) -> None:
+        statuses = ["pending", "leased", "processing", "done", "retry", "failed", "skipped"]
+        quoted = ", ".join(f"'{status}'" for status in statuses)
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("ALTER TABLE reaction_jobs DROP CONSTRAINT IF EXISTS reaction_jobs_status_check")
+                cur.execute(
+                    f"""
+                    ALTER TABLE reaction_jobs
+                    ADD CONSTRAINT reaction_jobs_status_check
+                    CHECK (status IN ({quoted}))
+                    """
+                )
+            conn.commit()
+
+        logger.info("REACTION_JOBS_STATUS_CONSTRAINT_SYNCED")
 
     def _ensure_default_plans(self) -> None:
         self.subscription_repo.ensure_default_plans()
