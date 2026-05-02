@@ -43,15 +43,23 @@ def create_reaction_onboarding_token(
 def verify_reaction_onboarding_token(token: str, *, secret: str) -> dict:
     if not secret:
         raise ValueError("Onboarding token secret не настроен")
+    invalid_link_error = "Ссылка подключения недействительна или устарела. Откройте подключение заново из Telegram-бота."
+    if not isinstance(token, str) or not token:
+        raise ValueError(invalid_link_error)
+    parts = token.split(".")
+    if len(parts) != 2:
+        raise ValueError(invalid_link_error)
+    payload_part, sig_part = parts
+    if not payload_part or not sig_part:
+        raise ValueError(invalid_link_error)
     try:
-        payload_part, sig_part = str(token or "").split(".", 1)
         expected_sig = hmac.new(secret.encode("utf-8"), payload_part.encode("ascii"), hashlib.sha256).digest()
         got_sig = _b64url_decode(sig_part)
         if not hmac.compare_digest(expected_sig, got_sig):
-            raise ValueError("Некорректный токен подключения")
+            raise ValueError(invalid_link_error)
         payload = json.loads(_b64url_decode(payload_part).decode("utf-8"))
         if not isinstance(payload, dict):
-            raise ValueError("Некорректный токен подключения")
+            raise ValueError(invalid_link_error)
         if int(payload.get("exp") or 0) < int(time.time()):
             raise ValueError("Ссылка подключения истекла. Откройте подключение заново из бота")
         for key in ("tenant_id", "user_id", "rule_id"):
@@ -60,4 +68,4 @@ def verify_reaction_onboarding_token(token: str, *, secret: str) -> dict:
     except ValueError:
         raise
     except Exception as exc:
-        raise ValueError("Некорректный токен подключения") from exc
+        raise ValueError(invalid_link_error) from exc
