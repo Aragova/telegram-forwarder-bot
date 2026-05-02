@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -118,6 +119,7 @@ def build_rule_reaction_account_detail_keyboard(rule_id: int, account_id: int, s
     toggle_cb = f"user_rule_reactions_account_disable:{rule_id}:{account_id}" if is_active else f"user_rule_reactions_account_enable:{rule_id}:{account_id}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="🎭 Набор реакций", callback_data=f"user_rule_reactions_account_reactions:{rule_id}:{account_id}")],
             [InlineKeyboardButton(text=toggle_text, callback_data=toggle_cb)],
             [InlineKeyboardButton(text="🔄 Переподключить", callback_data=f"user_rule_reactions_account_reconnect:{rule_id}:{account_id}")],
             [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"user_rule_reactions_account_delete_confirm:{rule_id}:{account_id}")],
@@ -149,6 +151,77 @@ def build_rule_reaction_account_delete_confirm_keyboard(rule_id: int, account_id
 def build_rule_reaction_back_keyboard(rule_id: int, *, callback_prefix: str = "user_rule_reactions") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"{callback_prefix}:{rule_id}")]]
+    )
+
+
+def _looks_like_emoji_cluster(cluster: str) -> bool:
+    if not cluster:
+        return False
+    for ch in cluster:
+        code = ord(ch)
+        if ch in {"\ufe0f", "\u200d"} or 0x1F3FB <= code <= 0x1F3FF:
+            continue
+        if unicodedata.category(ch) == "So":
+            return True
+        if (
+            0x1F300 <= code <= 0x1FAFF
+            or 0x2600 <= code <= 0x27BF
+            or 0x2300 <= code <= 0x23FF
+            or 0x1F1E6 <= code <= 0x1F1FF
+        ):
+            return True
+    return False
+
+
+def normalize_fixed_reactions_input(text: str, *, is_premium: bool) -> list[str]:
+    cleaned = (text or "").replace(",", " ").strip()
+    if not cleaned:
+        raise ValueError("Введите хотя бы одну реакцию.")
+    normalized_text = cleaned.replace("\ufe0f", "")
+    candidates = normalized_text.split() if " " in normalized_text else list(normalized_text)
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        cluster = item.strip()
+        if not cluster or not _looks_like_emoji_cluster(cluster):
+            continue
+        if cluster in seen:
+            continue
+        seen.add(cluster)
+        result.append(cluster)
+    if not result:
+        raise ValueError("Введите хотя бы одну реакцию.")
+    limit = 3 if is_premium else 1
+    return result[:limit]
+
+
+def build_reaction_account_reactions_text(account: dict[str, Any]) -> str:
+    username = account.get("username")
+    ident = f"@{username}" if username else f"ID {account.get('telegram_user_id')}"
+    current_raw = account.get("fixed_reactions_json") or "[]"
+    current_set = str(current_raw)
+    is_premium = bool(account.get("is_premium"))
+    account_type = "Premium" if is_premium else "обычный"
+    limit_line = "Для Premium: до 3 emoji." if is_premium else "Для обычного аккаунта: 1 emoji."
+    return (
+        "🎭 Набор реакций\n\n"
+        f"Аккаунт: {ident}\n"
+        f"Тип: {account_type}\n\n"
+        "Текущий набор:\n"
+        f"{current_set}\n\n"
+        "Введите новый набор реакций сообщением.\n\n"
+        f"{limit_line}\n"
+        "Пример:\n"
+        "🔥 ❤️ 🥰"
+    )
+
+
+def build_reaction_account_reactions_keyboard(rule_id: int, account_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🧹 Очистить набор", callback_data=f"user_rule_reactions_account_reactions_clear:{rule_id}:{account_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад к аккаунту", callback_data=f"user_rule_reactions_account:{rule_id}:{account_id}")],
+        ]
     )
 
 
