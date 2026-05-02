@@ -4,6 +4,7 @@ from .channels import register_admin_channel_handlers
 from .queue import register_admin_queue_handlers
 from .diagnostics import register_admin_diagnostics_handlers
 from .system import register_admin_system_handlers
+from .reaction_handlers import register_admin_reaction_handlers
 
 __all__ = [
     "AdminHandlersContext",
@@ -12,4 +13,5 @@ __all__ = [
     "register_admin_queue_handlers",
     "register_admin_diagnostics_handlers",
     "register_admin_system_handlers",
+    "register_admin_reaction_handlers",
 ]

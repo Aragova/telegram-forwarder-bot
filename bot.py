@@ -90,6 +90,7 @@ from app.admin_handlers import (
     register_admin_queue_handlers,
     register_admin_diagnostics_handlers,
     register_admin_system_handlers,
+    register_admin_reaction_handlers,
 )
 
 logger = setup_logging(settings.log_level)
@@ -3763,35 +3764,6 @@ def build_rule_extra_keyboard(rule_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_rule_reactions_keyboard(rule_id: int, enabled: bool) -> InlineKeyboardMarkup:
-    toggle_text = "⚪️ Выключить реакции" if enabled else "🟢 Включить реакции"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=toggle_text, callback_data=f"rule_reactions_toggle:{rule_id}")],
-            [InlineKeyboardButton(text="➕ Подключить аккаунт-реактор", callback_data=f"rule_reactions_add_account:{rule_id}")],
-            [InlineKeyboardButton(text="👥 Мои аккаунты-реакторы", callback_data=f"rule_reactions_accounts:{rule_id}")],
-            [InlineKeyboardButton(text="🎭 Набор реакций", callback_data=f"rule_reactions_preset:{rule_id}")],
-            [InlineKeyboardButton(text="🧪 Тест реакции", callback_data=f"rule_reactions_test:{rule_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад в дополнительные функции", callback_data=f"rule_extra_menu:{rule_id}")],
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_reactions_refresh:{rule_id}")],
-        ]
-    )
-
-
-def build_rule_reaction_accounts_keyboard(rule_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Подключить аккаунт", callback_data=f"rule_reactions_add_account:{rule_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"rule_reactions:{rule_id}")],
-        ]
-    )
-
-
-def build_rule_reaction_back_keyboard(rule_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"rule_reactions:{rule_id}")]]
-    )
-
 def build_caption_mode_keyboard(rule_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -6213,268 +6185,6 @@ async def handle_rule_extra_menu(callback: CallbackQuery):
             return
         logger.exception("Ошибка открытия доп. функций rule_id=%s: %s", rule_id, exc)
 
-
-def _resolve_reaction_tenant_id(user_id: int, rule) -> int:
-    if _is_admin_user(user_id):
-        return int(getattr(rule, "tenant_id", 0) or 1)
-    return int(get_current_tenant_for_user(user_id))
-
-
-def _build_reaction_rule_text(rule_id: int, settings: dict[str, Any] | None, accounts: list[dict[str, Any]]) -> str:
-    enabled = bool(settings and settings.get("enabled"))
-    mode = str((settings or {}).get("mode") or "premium_then_normal")
-    total = len(accounts)
-    active = sum(1 for row in accounts if str(row.get("status") or "").strip().lower() == "active")
-    premium = sum(1 for row in accounts if bool(row.get("is_premium")))
-    ordinary = max(total - premium, 0)
-    status = "🟢 Включены" if enabled else "⚪️ Выключены"
-    lines = [
-        f"⚙️ Реакции правила #{rule_id}",
-        "",
-        f"Статус: {status}",
-        f"Режим: {mode}",
-        f"Аккаунтов-реакторов: {total}",
-        f"Активных: {active}",
-        f"Premium: {premium}",
-        f"Обычных: {ordinary}",
-        "",
-        "Как это работает:",
-        "Реакции должны ставиться аккаунтами, которые принадлежат владельцу этого правила. "
-        "Глобальные аккаунты сервиса используются только в legacy/dev режиме.",
-    ]
-    if total == 0:
-        lines.extend(["", "Пока нет подключённых аккаунтов-реакторов."])
-    return "\n".join(lines)
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_reactions:") or c.data.startswith("rule_reactions_refresh:"))
-async def handle_rule_reactions(callback: CallbackQuery):
-    prefix = "rule_reactions_refresh:"
-    if callback.data.startswith("rule_reactions:"):
-        prefix = "rule_reactions:"
-    try:
-        rule_id = int(callback.data.split(":", 1)[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-    tenant_id = _resolve_reaction_tenant_id(user_id, rule)
-    settings = await run_db(db.get_rule_reaction_settings_for_tenant, tenant_id, rule_id)
-    accounts = await run_db(db.list_reaction_accounts_for_tenant, tenant_id, False)
-    logger.info("REACTION_UI_OPENED | tenant_id=%s | rule_id=%s | user_id=%s", tenant_id, rule_id, user_id)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=_build_reaction_rule_text(rule_id, settings, accounts),
-        reply_markup=build_rule_reactions_keyboard(rule_id, bool(settings and settings.get("enabled"))),
-    )
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_reactions_toggle:"))
-async def handle_rule_reactions_toggle(callback: CallbackQuery):
-    rule_id = int(callback.data.split(":", 1)[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-    tenant_id = _resolve_reaction_tenant_id(user_id, rule)
-    settings = await run_db(db.get_rule_reaction_settings_for_tenant, tenant_id, rule_id)
-    next_enabled = False
-    if not settings:
-        next_enabled = True
-        await run_db(
-            db.upsert_rule_reaction_settings,
-            tenant_id=tenant_id,
-            rule_id=rule_id,
-            enabled=True,
-            mode="premium_then_normal",
-            preset=None,
-            max_accounts_per_post=3,
-            delay_min_sec=3,
-            delay_max_sec=30,
-            premium_first=True,
-            stop_after_premium_success=False,
-        )
-    else:
-        next_enabled = not bool(settings.get("enabled"))
-        await run_db(
-            db.upsert_rule_reaction_settings,
-            tenant_id=tenant_id,
-            rule_id=rule_id,
-            enabled=next_enabled,
-            mode=str(settings.get("mode") or "premium_then_normal"),
-            preset=settings.get("preset_json"),
-            max_accounts_per_post=int(settings.get("max_accounts_per_post") or 3),
-            delay_min_sec=int(settings.get("delay_min_sec") or 3),
-            delay_max_sec=int(settings.get("delay_max_sec") or 30),
-            premium_first=bool(settings.get("premium_first", True)),
-            stop_after_premium_success=bool(settings.get("stop_after_premium_success", False)),
-        )
-    logger.info("REACTION_RULE_SETTINGS_TOGGLED | tenant_id=%s | rule_id=%s | enabled=%s", tenant_id, rule_id, next_enabled)
-    callback.data = f"rule_reactions:{rule_id}"
-    await handle_rule_reactions(callback)
-
-@dp.callback_query(lambda c: c.data.startswith("video_caption_mode_menu:"))
-async def handle_video_caption_mode_menu(callback: CallbackQuery):
-    try:
-        rule_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-
-    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "video":
-        await answer_callback_safe(callback, "Для репоста это меню недоступно", show_alert=True)
-        return
-
-    try:
-        edited = await edit_message_text_safe(
-            message=callback.message,
-            text = await run_db(build_video_caption_mode_menu_text, rule_id),
-            parse_mode="HTML",
-            reply_markup=build_video_caption_mode_keyboard(rule_id),
-        )
-
-        if not edited:
-            await send_message_safe(
-                chat_id=callback.message.chat.id,
-                text=build_video_caption_mode_menu_text(rule_id),
-                parse_mode="HTML",
-                reply_markup=build_video_caption_mode_keyboard(rule_id),
-            )
-    except Exception as exc:
-        if "message is not modified" in str(exc).lower():
-            await answer_callback_safe_once(callback, "Уже открыто")
-            return
-        logger.exception("Ошибка handle_video_caption_mode_menu: %s", exc)
-        await answer_callback_safe(callback, "Не удалось открыть меню", show_alert=True)
-        return
-
-    await answer_callback_safe_once(callback)
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_reactions_accounts:"))
-async def handle_rule_reactions_accounts(callback: CallbackQuery):
-    rule_id = int(callback.data.split(":", 1)[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-    tenant_id = _resolve_reaction_tenant_id(user_id, rule)
-    accounts = await run_db(db.list_reaction_accounts_for_tenant, tenant_id, False)
-    logger.info("REACTION_ACCOUNTS_UI_OPENED | tenant_id=%s | rule_id=%s | user_id=%s", tenant_id, rule_id, user_id)
-    lines = ["👥 Аккаунты-реакторы", "", "Аккаунты, подключённые к этому workspace/tenant.", ""]
-    if not accounts:
-        lines.append("Нет подключённых аккаунтов.")
-    else:
-        for row in accounts:
-            username = row.get("username")
-            tg_uid = row.get("telegram_user_id")
-            ident = f"@{username}" if username else (f"id:{tg_uid}" if tg_uid else "без username")
-            reactions = row.get("fixed_reactions_json") or "[]"
-            reactions_short = str(reactions)
-            if len(reactions_short) > 40:
-                reactions_short = reactions_short[:37] + "..."
-            lines.extend([
-                f"#{row.get('id')} · {ident}",
-                f"Premium: {'да' if row.get('is_premium') else 'нет'} · Статус: {row.get('status') or 'unknown'}",
-                f"Набор: {reactions_short}",
-                "",
-            ])
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text="\n".join(lines).strip(),
-        reply_markup=build_rule_reaction_accounts_keyboard(rule_id),
-    )
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_reactions_add_account:"))
-async def handle_rule_reactions_add_account(callback: CallbackQuery):
-    rule_id = int(callback.data.split(":", 1)[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-    tenant_id = _resolve_reaction_tenant_id(user_id, rule)
-    user_states[user_id] = {"state": "reaction_account_connect_intro", "rule_id": rule_id, "tenant_id": tenant_id}
-    logger.info("REACTION_ACCOUNT_CONNECT_UI_OPENED | tenant_id=%s | rule_id=%s | user_id=%s", tenant_id, rule_id, user_id)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            "➕ Подключение аккаунта-реактора\n\n"
-            "Аккаунт-реактор — это Telegram-аккаунт владельца канала или команды, который будет автоматически "
-            "ставить реакции под публикациями ваших правил.\n\n"
-            "Важно:\n"
-            "• используйте только свои аккаунты или аккаунты вашей команды;\n"
-            "• не подключайте чужие аккаунты;\n"
-            "• коды Telegram и 2FA-пароли нельзя показывать третьим лицам;\n"
-            "• глобальные аккаунты сервиса не используются для чужих клиентов.\n\n"
-            "Статус:\n"
-            "🚧 Подключение аккаунтов будет включено следующим обновлением."
-        ),
-        reply_markup=build_rule_reaction_back_keyboard(rule_id),
-    )
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_reactions_preset:"))
-async def handle_rule_reactions_preset(callback: CallbackQuery):
-    rule_id = int(callback.data.split(":", 1)[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            "🎭 Набор реакций\n\n"
-            "Сейчас правило использует будущий SaaS-набор:\n"
-            "premium_then_normal\n\n"
-            "В следующем обновлении здесь можно будет выбрать:\n"
-            "• premium набор до 3 реакций;\n"
-            "• ordinary pool;\n"
-            "• количество аккаунтов;\n"
-            "• задержку между реакциями."
-        ),
-        reply_markup=build_rule_reaction_back_keyboard(rule_id),
-    )
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_reactions_test:"))
-async def handle_rule_reactions_test(callback: CallbackQuery):
-    rule_id = int(callback.data.split(":", 1)[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            "🧪 Тест реакции\n\n"
-            "Тест будет доступен после подключения аккаунтов-реакторов в этом workspace."
-        ),
-        reply_markup=build_rule_reaction_back_keyboard(rule_id),
-    )
 
 async def _apply_caption_delivery_mode(
     callback: CallbackQuery,
@@ -9233,12 +8943,14 @@ def _register_admin_handlers() -> None:
         start_forwarding=start_forwarding,
         stop_forwarding=stop_forwarding,
         is_posting_active=lambda: posting_active,
+        ensure_rule_callback_access=ensure_rule_callback_access,
     )
     register_admin_menu_handlers(dp, ctx)
     register_admin_channel_handlers(dp, ctx)
     register_admin_queue_handlers(dp, ctx)
     register_admin_diagnostics_handlers(dp, ctx)
     register_admin_system_handlers(dp, ctx)
+    register_admin_reaction_handlers(dp, ctx)
     admin_handlers_ctx = ctx
 
 
