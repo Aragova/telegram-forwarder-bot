@@ -105,6 +105,36 @@ def build_rule_reaction_connect_text() -> str:
     )
 
 
+def build_reaction_web_onboarding_text(rule_id: int) -> str:
+    return (
+        "➕ Подключение аккаунта-реактора\n\n"
+        "Подключение Telegram-аккаунта нельзя выполнять через чат бота: Telegram может заблокировать попытку входа, "
+        "если login-code отправить в другой Telegram-чат.\n\n"
+        "Правильный способ подключения:\n"
+        "• открыть защищённую HTTPS-страницу ViMi;\n"
+        "• ввести код только на этой странице;\n"
+        "• после успешного входа аккаунт будет привязан к вашему workspace.\n\n"
+        "🚧 Защищённая страница подключения будет включена следующим обновлением.\n\n"
+        "Ваши коды Telegram и 2FA-пароли не должны отправляться в этот чат."
+    )
+
+
+def build_reaction_web_onboarding_keyboard(
+    rule_id: int,
+    onboarding_url: str | None = None,
+    *,
+    callback_prefix: str = "user_rule_reactions",
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if onboarding_url:
+        rows.append([InlineKeyboardButton(text="🌐 Открыть защищённое подключение", url=onboarding_url)])
+    rows.extend([
+        [InlineKeyboardButton(text="👥 Мои аккаунты-реакторы", callback_data=f"{callback_prefix}_accounts:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"{callback_prefix}:{rule_id}")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def build_rule_reaction_preset_text() -> str:
     return (
         "🎭 Набор реакций\n\n"

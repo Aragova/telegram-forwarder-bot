@@ -10,6 +10,11 @@ from app.reaction_service import ReactionService
 
 
 class ReactionAuthService:
+    """Auth-сервис для подключения reaction-аккаунтов только через защищённый web onboarding flow.
+
+    Важно: нельзя использовать этот сервис для ввода Telegram login-code/2FA через Telegram-бота.
+    """
+
     def __init__(self, db, *, api_id: int, api_hash: str):
         self.db = db
         self.api_id = api_id
