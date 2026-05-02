@@ -949,6 +949,7 @@ def build_user_rule_extra_keyboard(*, rule_id: int, mode: str) -> InlineKeyboard
         rows.append([build_button(text="✍️ Режим подписи", callback_data=f"user_rule_caption_mode:{rule_id}")])
     rows.extend(
         [
+            [build_button(text="⚙️ Реакции", callback_data=f"user_rule_reactions:{rule_id}")],
             [build_button(text="⚡ Отправить сейчас", callback_data=f"user_rule_send_now:{rule_id}")],
             [build_button(text="🔢 Начать с номера", callback_data=f"user_rule_start_from:{rule_id}")],
             [build_button(text="🔄 Пересканировать", callback_data=f"user_rule_rescan:{rule_id}")],
