@@ -30,6 +30,7 @@ from telethon.tl.types import (
 
 logger = logging.getLogger("forwarder")
 MAX_INVALID_MP4_RETRY = 1
+MAX_NORMAL_REACTION_ATTEMPTS = 5
 
 async def run_db(callable_obj, *args, **kwargs):
     """
@@ -2145,6 +2146,7 @@ class SenderService:
     async def _try_add_normal_reaction(self, client, entity, sent_message_id, session_name: str, rule_id: int | None = None) -> bool:
         emojis_to_try = REACTION_POOL[:]
         random.shuffle(emojis_to_try)
+        emojis_to_try = emojis_to_try[:MAX_NORMAL_REACTION_ATTEMPTS]
 
         last_error = None
 
@@ -2168,6 +2170,16 @@ class SenderService:
 
             except Exception as exc:
                 last_error = exc
+                exc_text = str(exc).lower()
+                if "floodwait" in exc.__class__.__name__.lower() or "flood wait" in exc_text:
+                    logger.warning(
+                        "NORMAL_REACTION_STOP_ON_FLOOD_WAIT | session=%s | message_id=%s | target_id=%s | error=%s",
+                        session_name,
+                        sent_message_id,
+                        entity,
+                        exc,
+                    )
+                    break
                 logger.warning(
                     "Обычный реактор %s не смог поставить реакцию %s на сообщение %s в %s: %s",
                     session_name,
@@ -2283,15 +2295,46 @@ class SenderService:
             msg = await client.get_messages(entity, ids=message_id)
             reactions = getattr(msg, "reactions", None)
             if not reactions:
+                logger.warning(
+                    "CONFIRM_REACTION_SET_DEBUG | target_id=%s | message_id=%s | expected=%s | observed=%s",
+                    entity,
+                    message_id,
+                    emojis,
+                    {"reactions": None},
+                )
                 return False
             actual_emojis: set[str] = set()
+            observed_results: list[dict[str, Any]] = []
             for result in getattr(reactions, "results", []) or []:
                 reaction = getattr(result, "reaction", None)
                 emoticon = getattr(reaction, "emoticon", None)
+                observed_results.append(
+                    {
+                        "result_class": result.__class__.__name__,
+                        "reaction_class": reaction.__class__.__name__ if reaction else None,
+                        "emoticon": emoticon,
+                        "document_id": getattr(reaction, "document_id", None) if reaction else None,
+                        "count": getattr(result, "count", None),
+                    }
+                )
                 if emoticon:
                     actual_emojis.add(emoticon)
+            observed = {
+                "reactions_class": reactions.__class__.__name__,
+                "results": observed_results,
+                "recent_reactions_len": len(getattr(reactions, "recent_reactions", []) or []),
+            }
             expected = {emoji for emoji in (emojis or []) if emoji}
-            return bool(expected) and expected.issubset(actual_emojis)
+            confirmed = bool(expected) and expected.issubset(actual_emojis)
+            if not confirmed:
+                logger.warning(
+                    "CONFIRM_REACTION_SET_DEBUG | target_id=%s | message_id=%s | expected=%s | observed=%s",
+                    entity,
+                    message_id,
+                    emojis,
+                    observed,
+                )
+            return confirmed
         except Exception:
             return False
 
@@ -2328,27 +2371,57 @@ class SenderService:
             return
 
         entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
+        premium_reactors: list[ReactionClientInfo] = []
+        normal_reactors: list[ReactionClientInfo] = []
 
         for reactor in self.reaction_clients:
-            try:
-                if reactor.is_premium and reactor.fixed_reactions:
-                    await self._try_add_premium_reactions(
-                        client=reactor.client,
-                        entity=entity,
-                        sent_message_id=sent_message_id,
-                        session_name=reactor.session_name,
-                        rule_id=rule_id,
-                        fixed_reactions=reactor.fixed_reactions,
-                    )
-                else:
-                    await self._try_add_normal_reaction(
-                        client=reactor.client,
-                        entity=entity,
-                        sent_message_id=sent_message_id,
-                        session_name=reactor.session_name,
-                        rule_id=rule_id,
-                    )
+            if reactor.is_premium and reactor.fixed_reactions:
+                premium_reactors.append(reactor)
+            else:
+                normal_reactors.append(reactor)
 
+        premium_accepted = False
+
+        for reactor in premium_reactors:
+            try:
+                premium_result = await self._try_add_premium_reactions(
+                    client=reactor.client,
+                    entity=entity,
+                    sent_message_id=sent_message_id,
+                    session_name=reactor.session_name,
+                    rule_id=rule_id,
+                    fixed_reactions=reactor.fixed_reactions,
+                )
+                if premium_result:
+                    premium_accepted = True
+
+            except Exception as exc:
+                logger.warning(
+                    "Реактор %s упал на сообщении %s в %s: %s",
+                    reactor.session_name,
+                    sent_message_id,
+                    target_id,
+                    exc,
+                )
+
+        if premium_accepted:
+            logger.info(
+                "REACTION_NORMAL_SKIPPED_AFTER_PREMIUM | rule_id=%s | target_id=%s | message_id=%s",
+                rule_id,
+                entity,
+                sent_message_id,
+            )
+            return
+
+        for reactor in normal_reactors:
+            try:
+                await self._try_add_normal_reaction(
+                    client=reactor.client,
+                    entity=entity,
+                    sent_message_id=sent_message_id,
+                    session_name=reactor.session_name,
+                    rule_id=rule_id,
+                )
             except Exception as exc:
                 logger.warning(
                     "Реактор %s упал на сообщении %s в %s: %s",
