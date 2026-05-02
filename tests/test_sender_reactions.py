@@ -143,3 +143,64 @@ def test_validate_sent_message_ids_for_delivery_passes_full_context():
     assert captured["delivery_id"] == 460298
     assert captured["source_channel"] == "-1002546799428"
     assert captured["source_message_ids"] == [299, 300]
+
+class RetryTelethon:
+    def __init__(self, messages):
+        self.messages = list(messages)
+
+    async def get_messages(self, entity, ids):
+        if self.messages:
+            return self.messages.pop(0)
+        return None
+
+
+def test_confirm_target_delivery_message_ids_rejects_missing():
+    svc = _service(None)
+    validated = asyncio.run(
+        svc._confirm_target_delivery_message_ids(
+            rule_id=1,
+            delivery_id=2,
+            source_channel="-100",
+            target_id="-200",
+            source_message_ids=[10],
+            candidate_sent_message_ids=[55],
+            method="reupload_single",
+        )
+    )
+    assert validated == []
+
+
+def test_confirm_target_delivery_message_ids_self_target_rejects_source_id():
+    now = datetime.now(timezone.utc)
+    svc = _service(SimpleNamespace(id=10, date=now))
+    validated = asyncio.run(
+        svc._confirm_target_delivery_message_ids(
+            rule_id=1,
+            delivery_id=2,
+            source_channel="-100",
+            target_id="-100",
+            source_message_ids=[10],
+            candidate_sent_message_ids=[10],
+            method="reupload_single",
+        )
+    )
+    assert validated == []
+
+
+def test_confirm_target_delivery_message_ids_with_retry_eventual_success():
+    now = datetime.now(timezone.utc)
+    svc = _service()
+    svc.telethon = RetryTelethon([None, SimpleNamespace(id=77, date=now)])
+
+    validated = asyncio.run(
+        svc._confirm_target_delivery_message_ids_with_retry(
+            rule_id=1,
+            delivery_id=2,
+            source_channel="-100",
+            target_id="-200",
+            source_message_ids=[10],
+            candidate_sent_message_ids=[77],
+            method="reupload_single",
+        )
+    )
+    assert validated == [77]

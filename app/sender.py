@@ -436,6 +436,101 @@ class SenderService:
             reason,
         )
         return []
+
+    async def _confirm_target_delivery_message_ids(
+        self,
+        *,
+        rule_id: int | None,
+        delivery_id: int | None,
+        source_channel: str,
+        target_id: str,
+        source_message_ids: list[int],
+        candidate_sent_message_ids: list[int],
+        method: str,
+        max_age_seconds: int = 300,
+    ) -> list[int]:
+        normalized_candidates: list[int] = []
+        for value in candidate_sent_message_ids or []:
+            try:
+                normalized_candidates.append(int(value))
+            except Exception:
+                continue
+
+        logger.info(
+            "DELIVERY_TARGET_CONFIRM_START | rule_id=%s | delivery_id=%s | method=%s | source_channel=%s | target_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s",
+            rule_id,
+            delivery_id,
+            method,
+            source_channel,
+            target_id,
+            source_message_ids,
+            normalized_candidates,
+        )
+
+        if not hasattr(self.telethon, "get_messages"):
+            logger.warning(
+                "DELIVERY_TARGET_CONFIRM_SKIPPED_NO_GET_MESSAGES | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s",
+                rule_id,
+                delivery_id,
+                method,
+                target_id,
+                normalized_candidates,
+            )
+            return normalized_candidates
+
+        if not normalized_candidates:
+            logger.warning(
+                "DELIVERY_TARGET_CONFIRM_FAILED | rule_id=%s | delivery_id=%s | method=%s | source_channel=%s | target_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s | reason=%s",
+                rule_id, delivery_id, method, source_channel, target_id, source_message_ids, normalized_candidates, "no_candidate_ids"
+            )
+            return []
+
+        valid_ids = await self._validate_sent_message_ids_for_delivery(
+            rule_id=rule_id,
+            delivery_id=delivery_id,
+            source_channel=source_channel,
+            target_id=target_id,
+            source_message_ids=source_message_ids,
+            candidate_sent_message_ids=normalized_candidates,
+            method=method,
+            max_age_seconds=max_age_seconds,
+        )
+
+        if not valid_ids:
+            logger.warning(
+                "DELIVERY_TARGET_CONFIRM_FAILED | rule_id=%s | delivery_id=%s | method=%s | source_channel=%s | target_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s | reason=%s",
+                rule_id, delivery_id, method, source_channel, target_id, source_message_ids, normalized_candidates, "all_candidates_rejected"
+            )
+            return []
+
+        logger.info(
+            "DELIVERY_TARGET_CONFIRM_OK | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | valid_sent_message_ids=%s",
+            rule_id,
+            delivery_id,
+            method,
+            target_id,
+            valid_ids,
+        )
+        return valid_ids
+
+    async def _confirm_target_delivery_message_ids_with_retry(
+        self,
+        **kwargs,
+    ) -> list[int]:
+        attempts = (0.0, 0.7, 1.5)
+        last_reason = "target_message_not_found_after_send"
+        for attempt_no, delay_seconds in enumerate(attempts, start=1):
+            if delay_seconds > 0:
+                logger.info(
+                    "DELIVERY_TARGET_CONFIRM_RETRY | rule_id=%s | delivery_id=%s | attempt=%s | delay=%s | candidate_sent_message_ids=%s | reason=%s",
+                    kwargs.get("rule_id"), kwargs.get("delivery_id"), attempt_no, delay_seconds, kwargs.get("candidate_sent_message_ids"), last_reason
+                )
+                await asyncio.sleep(delay_seconds)
+            valid_ids = await self._confirm_target_delivery_message_ids(**kwargs)
+            if valid_ids:
+                return valid_ids
+        return []
+
     def _normalize_video_caption_entities(self, raw_entities) -> list[dict]:
         if not raw_entities:
             return []
@@ -936,7 +1031,7 @@ class SenderService:
 
     def _mark_delivery_sent_sync(self, delivery_id: int, *, sent_message_id: int | None = None, sent_message_ids: list[int] | None = None, target_id: str | None = None, delivery_method: str | None = None) -> None:
         if hasattr(self.db, "mark_delivery_sent_with_target_message"):
-            self.db.mark_delivery_sent_with_target_message(delivery_id, sent_message_id=sent_message_id, sent_message_ids=sent_message_ids, target_id=target_id, delivery_method=delivery_method)
+            self.db.mark_delivery_sent_with_target_message(delivery_id, sent_message_id=authoritative_sent_message_id, sent_message_ids=sent_message_ids, target_id=target_id, delivery_method=delivery_method)
             return
         self.db.mark_delivery_sent(delivery_id)
 
@@ -1041,6 +1136,8 @@ class SenderService:
                 "target_thread_id": target_thread_id,
                 "source_message_id": source_message_id,
                 "sent_message_id": sent_message_id,
+                "candidate_sent_message_ids": candidate_sent_message_ids,
+                "valid_sent_message_ids": valid_sent_message_ids,
                 "fallback_mode": fallback_mode,
                 "caption_delivery_mode": caption_delivery_mode,
                 "selected_mode": selected_mode,
@@ -3359,11 +3456,24 @@ class SenderService:
             return {"ok": False, "fallback_to_legacy": False, "retryable": True}
 
         sent_message_ids = self._extract_sent_message_ids(sent_msg)
-        sent_message_id = sent_message_ids[0] if sent_message_ids else None
+        valid_sent_message_ids = await self._confirm_target_delivery_message_ids_with_retry(
+            rule_id=rule_id,
+            delivery_id=delivery_id,
+            source_channel=str(payload.get("source_channel") or ""),
+            target_id=str(payload.get("target_id") or ""),
+            source_message_ids=[int(payload.get("message_id"))] if payload.get("message_id") else [],
+            candidate_sent_message_ids=sent_message_ids,
+            method="video_send",
+            max_age_seconds=900,
+        )
+        sent_message_id = valid_sent_message_ids[0] if valid_sent_message_ids else None
         logger.info("DELIVERY_SENT_MESSAGE_IDS_EXTRACTED | rule_id=%s | delivery_id=%s | method=%s | source_message_ids=%s | sent_message_ids=%s | result_type=%s", rule_id, delivery_id, "video_send", [], sent_message_ids, type(sent_msg).__name__)
         if sent_message_id:
             await self._add_reaction_if_possible(payload.get("target_id"), int(sent_message_id))
-        await run_db(self._mark_delivery_sent_sync, delivery_id, sent_message_id=sent_message_id, sent_message_ids=sent_message_ids, target_id=str(payload.get("target_id") or ""), delivery_method="video_send")
+        else:
+            logger.warning("DELIVERY_FALSE_SUCCESS_PREVENTED | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s | action=retry_or_faulty", rule_id, delivery_id, "video_send", payload.get("target_id"), sent_message_ids)
+            return {"ok": False, "fallback_to_legacy": False, "retryable": True}
+        await run_db(self._mark_delivery_sent_sync, delivery_id, sent_message_id=sent_message_id, sent_message_ids=valid_sent_message_ids, target_id=str(payload.get("target_id") or ""), delivery_method="video_send")
         await run_db(self._touch_rule_after_send_sync, rule_id, int(payload.get("interval") or 0))
         logger.info("VIDEO SEND DONE | отправка завершена для delivery_id=%s", delivery_id)
         return {"ok": True, "fallback_to_legacy": False}
@@ -3451,7 +3561,7 @@ class SenderService:
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
                 pipeline_stage="copy_single",
-                pipeline_result="ok" if sent_message_id else "failed",
+                pipeline_result="ok" if valid_sent_message_ids else "failed",
                 source_channel=source_channel,
                 target_id=target_id,
                 source_message_ids=source_message_ids,
@@ -3468,7 +3578,10 @@ class SenderService:
                 await self._add_reaction_for_rule_if_possible(
                             rule=rule,
                             target_id=target_id,
-                            sent_message_id=sent_message_id,
+                            sent_message_id=authoritative_sent_message_id,
+                            source_channel=str(source_channel or ""),
+                            source_message_ids=source_message_ids,
+                            delivery_id=delivery_id,
                         )
 
                 await self._log_delivery_final_success(
@@ -3486,7 +3599,7 @@ class SenderService:
                     },
                 )
 
-                await run_db(self._mark_delivery_sent_sync, delivery_id)
+                await run_db(self._mark_delivery_sent_sync, delivery_id, sent_message_id=authoritative_sent_message_id, sent_message_ids=valid_sent_message_ids, target_id=str(target_id), delivery_method="reupload_single")
                 return True
         else:
             await self._log_delivery_pipeline_step(
@@ -3542,7 +3655,7 @@ class SenderService:
                 },
             )
 
-            await run_db(self._mark_delivery_sent_sync, delivery_id)
+            await run_db(self._mark_delivery_sent_sync, delivery_id, sent_message_id=authoritative_sent_message_id, sent_message_ids=valid_sent_message_ids, target_id=str(target_id), delivery_method="reupload_single")
             return True
 
         # =========================================================
@@ -3637,17 +3750,27 @@ class SenderService:
             target_thread_id,
             post_row=post_row,
         )
+        candidate_sent_message_ids = [int(sent_message_id)] if sent_message_id else []
+        valid_sent_message_ids = await self._confirm_target_delivery_message_ids_with_retry(
+            rule_id=rule.id,
+            delivery_id=delivery_id,
+            source_channel=str(source_channel or ""),
+            target_id=str(target_id),
+            source_message_ids=source_message_ids,
+            candidate_sent_message_ids=candidate_sent_message_ids,
+            method="reupload_single",
+        )
 
         await self._log_delivery_pipeline_step(
             rule_id=rule.id,
             delivery_ids=delivery_ids,
             event_type="delivery_pipeline_step",
             pipeline_stage="reupload_single",
-            pipeline_result="ok" if sent_message_id else "failed",
+            pipeline_result="ok" if valid_sent_message_ids else "failed",
             source_channel=source_channel,
             target_id=target_id,
             source_message_ids=source_message_ids,
-            error_text=None if sent_message_id else "reupload_single не сработал",
+            error_text=None if valid_sent_message_ids else "target_message_not_found_after_send",
             extra={
                 "attempt_no": 1,
                 "sent_message_id": sent_message_id,
@@ -3656,7 +3779,9 @@ class SenderService:
             },
         )
 
-        if sent_message_id:
+        if valid_sent_message_ids:
+            logger.info("REUPLOAD_SINGLE_TARGET_VERIFY_OK | rule_id=%s | delivery_id=%s | source_channel=%s | source_message_id=%s | target_id=%s | valid_sent_message_ids=%s", rule.id, delivery_id, source_channel, message_id, target_id, valid_sent_message_ids)
+            authoritative_sent_message_id = int(valid_sent_message_ids[0])
             await self._add_reaction_for_rule_if_possible(
                             rule=rule,
                             target_id=target_id,
@@ -3670,7 +3795,7 @@ class SenderService:
                 source_channel=source_channel,
                 target_id=target_id,
                 source_message_ids=source_message_ids,
-                sent_message_id=sent_message_id,
+                sent_message_id=authoritative_sent_message_id,
                 verify_result=None,
                 extra={
                     "caption_delivery_mode": caption_mode,
@@ -3680,6 +3805,9 @@ class SenderService:
 
             await run_db(self._mark_delivery_sent_sync, delivery_id)
             return True
+
+        logger.warning("REUPLOAD_SINGLE_TARGET_VERIFY_FAILED | rule_id=%s | delivery_id=%s | source_channel=%s | source_message_id=%s | target_id=%s | candidate_sent_message_ids=%s | reason=target_message_not_found_after_send", rule.id, delivery_id, source_channel, message_id, target_id, candidate_sent_message_ids)
+        logger.warning("DELIVERY_FALSE_SUCCESS_PREVENTED | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s | action=retry_or_faulty", rule.id, delivery_id, "reupload_single", target_id, candidate_sent_message_ids)
 
         # =========================================================
         # 5) DEBUG: fallback disabled
@@ -4041,7 +4169,17 @@ class SenderService:
 
             if sent_msg:
                 sent_message_ids = self._extract_sent_message_ids(sent_msg)
-                sent_message_id = sent_message_ids[0] if sent_message_ids else None
+                valid_sent_message_ids = await self._confirm_target_delivery_message_ids_with_retry(
+                    rule_id=rule.id,
+                    delivery_id=delivery_id,
+                    source_channel=str(source_channel or ""),
+                    target_id=str(target_id),
+                    source_message_ids=[int(message_id)],
+                    candidate_sent_message_ids=sent_message_ids,
+                    method="video_process",
+                    max_age_seconds=900,
+                )
+                sent_message_id = valid_sent_message_ids[0] if valid_sent_message_ids else None
                 logger.info("DELIVERY_SENT_MESSAGE_IDS_EXTRACTED | rule_id=%s | delivery_id=%s | method=%s | source_message_ids=%s | sent_message_ids=%s | result_type=%s", rule.id, delivery_id, "video_process", [message_id], sent_message_ids, type(sent_msg).__name__)
 
                 try:
@@ -4057,7 +4195,7 @@ class SenderService:
                         )
                     else:
                         logger.warning(
-                            "VIDEO_REACTION | не удалось извлечь sent_message_id после process_video | rule=%s | delivery=%s | target=%s",
+                            "VIDEO_REACTION | не удалось подтвердить sent_message_id после process_video | rule=%s | delivery=%s | target=%s",
                             rule.id,
                             delivery_id,
                             target_id,
