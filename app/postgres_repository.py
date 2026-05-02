@@ -411,7 +411,11 @@ class PostgresRepository(RepositoryProtocol):
             error_text TEXT NULL,
             attempt_count BIGINT NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
-            sent_at TEXT NULL
+            sent_at TEXT NULL,
+            sent_message_id BIGINT NULL,
+            sent_message_ids_json JSONB NULL,
+            target_id_snapshot TEXT NULL,
+            delivery_method TEXT NULL
         );
 
         CREATE TABLE IF NOT EXISTS jobs(
@@ -673,6 +677,10 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE channels ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
         ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
+        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS sent_message_id BIGINT NULL;
+        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS sent_message_ids_json JSONB NULL;
+        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS target_id_snapshot TEXT NULL;
+        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS delivery_method TEXT NULL;
         ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
         ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS grace_started_at TEXT NULL;
         ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS grace_ends_at TEXT NULL;
@@ -3888,6 +3896,25 @@ class PostgresRepository(RepositoryProtocol):
     # =========================================================
     # DELIVERY STATUS
     # =========================================================
+
+    def mark_delivery_sent_with_target_message(self, delivery_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None, target_id: str | None, delivery_method: str | None):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'sent',
+                        sent_at = %s,
+                        error_text = NULL,
+                        sent_message_id = %s,
+                        sent_message_ids_json = %s,
+                        target_id_snapshot = %s,
+                        delivery_method = %s
+                    WHERE id = %s
+                    """,
+                    (utc_now_iso(), sent_message_id, _json_dumps(sent_message_ids or []), target_id, delivery_method, delivery_id),
+                )
+            conn.commit()
 
     def mark_delivery_sent(self, delivery_id: int):
         with self.connect() as conn:
