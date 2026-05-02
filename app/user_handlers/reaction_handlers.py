@@ -19,7 +19,6 @@ from app.reaction_ui import (
     build_reaction_web_onboarding_text,
     build_rule_reaction_accounts_text,
     build_rule_reaction_back_keyboard,
-    build_rule_reaction_test_text,
     build_rule_reactions_keyboard,
     build_rule_reactions_text,
     normalize_fixed_reactions_input,
@@ -314,8 +313,61 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
         rule_id = int((callback.data or "").split(":", 1)[1])
         if not await ensure_rule_callback_access(ctx, callback, rule_id):
             return
+        user_id = callback.from_user.id if callback.from_user else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        ctx.logger.info("USER_REACTION_TEST_REQUESTED | tenant_id=%s | rule_id=%s | user_id=%s", tenant_id, rule_id, user_id)
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(message=callback.message, text=build_rule_reaction_test_text(), reply_markup=build_rule_reaction_back_keyboard(rule_id))
+        settings_row = await ctx.run_db(ctx.db.get_rule_reaction_settings_for_tenant, tenant_id, rule_id)
+        if not (settings_row and settings_row.get("enabled")):
+            await ctx.edit_message_text_safe(message=callback.message, text="Реакции выключены для этого правила.", reply_markup=build_rule_reaction_back_keyboard(rule_id))
+            return
+        active_accounts = await ctx.run_db(ctx.db.list_reaction_accounts_for_tenant, tenant_id, True)
+        account_ids = [int(a["id"]) for a in (active_accounts or []) if a.get("id") is not None]
+        if not account_ids:
+            ctx.logger.info("USER_REACTION_TEST_SKIPPED_NO_ACTIVE_ACCOUNTS | tenant_id=%s | rule_id=%s | user_id=%s", tenant_id, rule_id, user_id)
+            await ctx.edit_message_text_safe(message=callback.message, text="Сначала подключите аккаунт-реактор.", reply_markup=build_rule_reaction_back_keyboard(rule_id))
+            return
+        last_sent = await ctx.run_db(ctx.db.get_last_sent_post_for_reaction_test, tenant_id, rule_id)
+        if not last_sent:
+            ctx.logger.info("USER_REACTION_TEST_SKIPPED_NO_SENT_POST | tenant_id=%s | rule_id=%s | user_id=%s", tenant_id, rule_id, user_id)
+            await ctx.edit_message_text_safe(
+                message=callback.message,
+                text="Пока нет опубликованного поста для теста. Сначала отправьте один пост по этому правилу.",
+                reply_markup=build_rule_reaction_back_keyboard(rule_id),
+            )
+            return
+        try:
+            job_id = await ctx.run_db(
+                ctx.db.enqueue_reaction_job,
+                tenant_id=tenant_id,
+                rule_id=rule_id,
+                target_id=str(last_sent["target_id"]),
+                message_id=int(last_sent["message_id"]),
+                account_ids=account_ids,
+                max_attempts=3,
+            )
+            ctx.logger.info(
+                "USER_REACTION_TEST_ENQUEUED | tenant_id=%s | rule_id=%s | user_id=%s | job_id=%s | target_id=%s | message_id=%s | accounts=%s",
+                tenant_id,
+                rule_id,
+                user_id,
+                job_id,
+                last_sent["target_id"],
+                last_sent["message_id"],
+                len(account_ids),
+            )
+            await ctx.edit_message_text_safe(
+                message=callback.message,
+                text=f"✅ Тест реакций запущен. Аккаунтов: {len(account_ids)}. Реакции будут поставлены на последний опубликованный пост.",
+                reply_markup=build_rule_reaction_back_keyboard(rule_id),
+            )
+        except Exception:
+            ctx.logger.exception("USER_REACTION_TEST_FAILED | tenant_id=%s | rule_id=%s | user_id=%s", tenant_id, rule_id, user_id)
+            await ctx.edit_message_text_safe(
+                message=callback.message,
+                text="Не удалось запустить тест реакций. Повторите попытку позже.",
+                reply_markup=build_rule_reaction_back_keyboard(rule_id),
+            )
 
     @dp.message(
         lambda m: m.from_user is not None
