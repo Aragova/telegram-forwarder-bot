@@ -338,7 +338,7 @@ class SenderService:
         return [x for x in ids if isinstance(x, int)]
 
     async def _validate_reaction_target_message(self, *, rule_id: int | None, source_channel: str, target_id: str, source_message_ids: list[int], sent_message_id: int | None, delivery_id: int | None = None, max_age_seconds: int = 300) -> int | None:
-        logger.info("REACTION_TARGET_VALIDATE_START | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_id=%s", rule_id, delivery_id, target_id, sent_message_id)
+        logger.info("REACTION_TARGET_VALIDATE_START | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, source_message_ids)
         if sent_message_id is None or int(sent_message_id) <= 0:
             logger.warning("REACTION_SKIPPED_INVALID_TARGET_MESSAGE | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, source_message_ids)
             return None
@@ -359,6 +359,83 @@ class SenderService:
         logger.info("REACTION_TARGET_VALIDATE_OK | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_id=%s | message_date=%s | age_seconds=%s", rule_id, delivery_id, target_id, sent_message_id, getattr(msg, "date", None), age_seconds)
         return int(sent_message_id)
 
+
+    async def _validate_sent_message_ids_for_delivery(
+        self,
+        *,
+        rule_id: int | None,
+        delivery_id: int | None,
+        source_channel: str,
+        target_id: str,
+        source_message_ids: list[int],
+        candidate_sent_message_ids: list[int],
+        method: str,
+        max_age_seconds: int = 300,
+    ) -> list[int]:
+        normalized_candidates: list[int] = []
+        for value in candidate_sent_message_ids or []:
+            try:
+                normalized_candidates.append(int(value))
+            except Exception:
+                continue
+
+        logger.info(
+            "DELIVERY_SENT_MESSAGE_IDS_VALIDATE_START | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s",
+            rule_id,
+            delivery_id,
+            method,
+            target_id,
+            normalized_candidates,
+        )
+
+        valid_ids: list[int] = []
+        for candidate_id in normalized_candidates:
+            try:
+                validated = await self._validate_reaction_target_message(
+                    rule_id=rule_id,
+                    source_channel=str(source_channel or ""),
+                    target_id=str(target_id),
+                    source_message_ids=source_message_ids or [],
+                    sent_message_id=candidate_id,
+                    delivery_id=delivery_id,
+                    max_age_seconds=max_age_seconds,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "DELIVERY_SENT_MESSAGE_IDS_VALIDATE_ITEM_FAILED | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | sent_message_id=%s | error=%s",
+                    rule_id,
+                    delivery_id,
+                    method,
+                    target_id,
+                    candidate_id,
+                    exc,
+                )
+                continue
+            if validated:
+                valid_ids.append(int(validated))
+
+        if valid_ids:
+            logger.info(
+                "DELIVERY_SENT_MESSAGE_IDS_VALIDATE_OK | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | valid_sent_message_ids=%s",
+                rule_id,
+                delivery_id,
+                method,
+                target_id,
+                valid_ids,
+            )
+            return valid_ids
+
+        reason = "no_candidate_ids" if not normalized_candidates else "all_candidates_rejected"
+        logger.warning(
+            "DELIVERY_SENT_MESSAGE_IDS_VALIDATE_EMPTY | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s | reason=%s",
+            rule_id,
+            delivery_id,
+            method,
+            target_id,
+            normalized_candidates,
+            reason,
+        )
+        return []
     def _normalize_video_caption_entities(self, raw_entities) -> list[dict]:
         if not raw_entities:
             return []
@@ -1755,10 +1832,11 @@ class SenderService:
             if sent_messages:
                 first_id = int(sent_messages[0].id)
                 logger.info(
-                    "TELETHON_ALBUM_SEND | OK_ORIGINAL_MEDIA | target=%s | thread=%s | sent_count=%s | first_message_id=%s",
+                    "TELETHON_ALBUM_SEND | OK_ORIGINAL_MEDIA | target=%s | thread=%s | sent_count=%s | sent_message_ids=%s | first_message_id=%s",
                     target_id,
                     target_thread_id,
                     len(sent_messages),
+                    [int(m.id) for m in sent_messages if m],
                     first_id,
                 )
                 return {
@@ -1849,15 +1927,17 @@ class SenderService:
 
             first_id = int(sent_messages[0].id)
             logger.info(
-                "TELETHON_ALBUM_SEND | OK_FILE_PATH | target=%s | thread=%s | sent_count=%s | first_message_id=%s",
+                "TELETHON_ALBUM_SEND | OK_FILE_PATH | target=%s | thread=%s | sent_count=%s | sent_message_ids=%s | first_message_id=%s",
                 target_id,
                 target_thread_id,
                 len(sent_messages),
+                [int(m.id) for m in sent_messages if m],
                 first_id,
             )
             return {
                 "ok": True,
                 "sent_message_id": first_id,
+                "sent_message_ids": [int(m.id) for m in sent_messages if m],
                 "sent_count": len(sent_messages),
                 "error_text": None,
             }
@@ -4660,6 +4740,9 @@ class SenderService:
                         rule=rule,
                         target_id=target_id,
                         sent_message_id=reaction_message_id,
+                        source_channel=str(source_channel or ""),
+                        source_message_ids=message_ids,
+                        delivery_id=(delivery_ids[0] if delivery_ids else None),
                     )
 
                 await self._log_delivery_final_success(
@@ -4714,10 +4797,28 @@ class SenderService:
                 )
 
                 sent_message_ids = reupload_result.get("sent_message_ids") or []
-                sent_message_id = (sent_message_ids[0] if sent_message_ids else None) or reupload_result.get("sent_message_id")
+                logger.info(
+                    "DELIVERY_SENT_MESSAGE_IDS_EXTRACTED | rule_id=%s | delivery_id=%s | method=%s | source_message_ids=%s | sent_message_ids=%s | result_type=%s",
+                    rule.id,
+                    (delivery_ids[0] if delivery_ids else None),
+                    "reupload_album_unverified_success",
+                    message_ids,
+                    sent_message_ids,
+                    type(reupload_result).__name__,
+                )
+                valid_sent_message_ids = await self._validate_sent_message_ids_for_delivery(
+                    rule_id=rule.id,
+                    delivery_id=(delivery_ids[0] if delivery_ids else None),
+                    source_channel=str(source_channel or ""),
+                    target_id=str(target_id),
+                    source_message_ids=message_ids,
+                    candidate_sent_message_ids=sent_message_ids,
+                    method="reupload_album_unverified_success",
+                )
+                sent_message_id = valid_sent_message_ids[0] if valid_sent_message_ids else None
                 reaction_message_id, reaction_target_reason = await self._select_reaction_message_id(
                     target_id=target_id,
-                    sent_message_ids=sent_message_ids,
+                    sent_message_ids=valid_sent_message_ids,
                 )
 
                 await self._log_delivery_final_success(
@@ -4728,7 +4829,7 @@ class SenderService:
                     target_id=target_id,
                     source_message_ids=message_ids,
                     sent_message_id=sent_message_id,
-                    sent_message_ids=sent_message_ids,
+                    sent_message_ids=valid_sent_message_ids,
                     reaction_message_id=reaction_message_id,
                     verify_result=verified,
                     extra={
@@ -4740,6 +4841,8 @@ class SenderService:
                         "verify_grouped_id": verified.get("grouped_id"),
                         "verify_first_message_id": verified.get("first_message_id"),
                         "first_sent_message_id": reupload_result.get("sent_message_id"),
+                        "candidate_sent_message_ids": sent_message_ids,
+                        "valid_sent_message_ids": valid_sent_message_ids,
                         "sent_count": reupload_sent_count,
                         "expected_count": expected_count,
                     },
@@ -4748,29 +4851,41 @@ class SenderService:
                 if reaction_message_id:
                     try:
                         logger.info(
-                            "REACTION_AFTER_REUPLOAD_UNVERIFIED | start | rule_id=%s | target_id=%s | message_id=%s",
+                            "REACTION_AFTER_REUPLOAD_UNVERIFIED_VALIDATED | start | rule_id=%s | delivery_id=%s | target_id=%s | message_id=%s | valid_sent_message_ids=%s",
                             rule.id,
+                            (delivery_ids[0] if delivery_ids else None),
                             target_id,
                             reaction_message_id,
+                            valid_sent_message_ids,
                         )
                         await self._add_reaction_for_rule_if_possible(
-                        rule=rule,
-                        target_id=target_id,
-                        sent_message_id=reaction_message_id,
-                    )
+                            rule=rule,
+                            target_id=target_id,
+                            sent_message_id=reaction_message_id,
+                            source_channel=str(source_channel or ""),
+                            source_message_ids=message_ids,
+                            delivery_id=(delivery_ids[0] if delivery_ids else None),
+                        )
                     except Exception as exc:
                         logger.warning(
-                            "REACTION_AFTER_REUPLOAD_UNVERIFIED | failed | rule_id=%s | target_id=%s | message_id=%s | error=%s",
+                            "REACTION_AFTER_REUPLOAD_UNVERIFIED_VALIDATED | failed | rule_id=%s | delivery_id=%s | target_id=%s | message_id=%s | error=%s",
                             rule.id,
+                            (delivery_ids[0] if delivery_ids else None),
                             target_id,
                             reaction_message_id,
                             exc,
                         )
                 else:
                     logger.warning(
-                        "REACTION_AFTER_REUPLOAD_UNVERIFIED | skipped_no_message_id | rule_id=%s | target_id=%s",
+                        "REACTION_SKIPPED_UNVERIFIED_ALBUM_SENT_IDS | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | method=%s | candidate_sent_message_ids=%s | source_message_ids=%s | reason=%s",
                         rule.id,
+                        (delivery_ids[0] if delivery_ids else None),
+                        source_channel,
                         target_id,
+                        "reupload_album_unverified_success",
+                        sent_message_ids,
+                        message_ids,
+                        verified.get("error_text") or "verify_album_sent_ids_not_found",
                     )
 
                 await run_db(self._mark_many_deliveries_sent_sync, delivery_ids)
@@ -5190,9 +5305,10 @@ class SenderService:
             )
 
             logger.info(
-                "REUPLOAD_ALBUM | TELETHON_RESULT | ok=%s | sent_message_id=%s | sent_count=%s | error=%s",
+                "REUPLOAD_ALBUM | TELETHON_RESULT | ok=%s | sent_message_id=%s | sent_message_ids=%s | sent_count=%s | error=%s",
                 telethon_result.get("ok"),
                 telethon_result.get("sent_message_id"),
+                telethon_result.get("sent_message_ids"),
                 telethon_result.get("sent_count"),
                 telethon_result.get("error_text"),
             )
