@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import unicodedata
+from datetime import datetime
 from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -53,23 +55,68 @@ def build_rule_reactions_keyboard(
     )
 
 
+
+
+def _status_label(status_raw: Any) -> str:
+    status = str(status_raw or "").strip().lower()
+    if status == "active":
+        return "🟢 активен"
+    if status in {"disabled", "inactive"}:
+        return "⚪️ отключён"
+    if status in {"error", "failed", "banned", "auth_required"}:
+        return "🔴 ошибка"
+    return f"⚪️ {status or 'unknown'}"
+
+
+def _account_identity(row: dict[str, Any]) -> str:
+    username = (row.get("username") or "").strip()
+    if username:
+        return f"@{username}"
+    phone = str(row.get("phone_hint") or "").strip()
+    if phone:
+        return phone
+    tg_uid = row.get("telegram_user_id")
+    if tg_uid:
+        return f"ID {tg_uid}"
+    return "без имени"
+
+
+def _format_reactions(value: Any) -> str:
+    raw = value
+    parsed: list[str] = []
+    if isinstance(raw, list):
+        parsed = [str(x) for x in raw if str(x).strip()]
+    elif isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                parsed = [str(x) for x in data if str(x).strip()]
+        except Exception:
+            parsed = []
+    return " ".join(parsed) if parsed else "по умолчанию"
+
+
+def _format_connected_at(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "н/д"
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return raw
+
 def build_rule_reaction_accounts_text(accounts: list[dict[str, Any]]) -> str:
     lines = ["👥 Аккаунты-реакторы", "", "Аккаунты, подключённые к этому workspace/tenant.", ""]
     if not accounts:
         lines.append("Нет подключённых аккаунтов.")
     else:
         for row in accounts:
-            username = row.get("username")
-            tg_uid = row.get("telegram_user_id")
-            ident = f"@{username}" if username else (f"id:{tg_uid}" if tg_uid else "без username")
-            reactions = row.get("fixed_reactions_json") or "[]"
-            reactions_short = str(reactions)
-            if len(reactions_short) > 40:
-                reactions_short = reactions_short[:37] + "..."
             lines.extend([
-                f"#{row.get('id')} · {ident}",
-                f"Premium: {'да' if row.get('is_premium') else 'нет'} · Статус: {row.get('status') or 'unknown'}",
-                f"Набор: {reactions_short}",
+                f"#{row.get('id')} · {_account_identity(row)}",
+                f"Статус: {_status_label(row.get('status'))}",
+                f"Реакции: {_format_reactions(row.get('fixed_reactions_json'))}",
+                f"Подключён: {_format_connected_at(row.get('created_at'))}",
                 "",
             ])
     return "\n".join(lines).strip()
@@ -87,10 +134,8 @@ def build_rule_reaction_accounts_keyboard_with_items(
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for row in accounts:
-        username = row.get("username")
-        tg_uid = row.get("telegram_user_id")
-        label = f"@{username}" if username else (f"ID {tg_uid}" if tg_uid else "без username")
-        status = row.get("status") or "unknown"
+        label = _account_identity(row)
+        status = _status_label(row.get("status"))
         rows.append([InlineKeyboardButton(text=f"👤 {label} · {status}", callback_data=f"{callback_prefix}_account:{rule_id}:{row.get('id')}")])
     rows.extend([
         [InlineKeyboardButton(text="➕ Подключить аккаунт", callback_data=f"{callback_prefix}_add_account:{rule_id}")],
@@ -100,15 +145,15 @@ def build_rule_reaction_accounts_keyboard_with_items(
 
 
 def build_rule_reaction_account_detail_text(account: dict[str, Any]) -> str:
-    username = account.get("username")
-    ident = f"@{username}" if username else f"ID {account.get('telegram_user_id')}"
     return (
         "👤 Аккаунт-реактор\n\n"
-        f"Аккаунт: {ident}\n"
+        f"Account ID: {account.get('id')}\n"
+        f"Аккаунт: {_account_identity(account)}\n"
         f"Telegram ID: {account.get('telegram_user_id')}\n"
+        f"Статус: {_status_label(account.get('status'))}\n"
         f"Premium: {'да' if account.get('is_premium') else 'нет'}\n"
-        f"Статус: {account.get('status') or 'unknown'}\n"
-        f"Набор: {account.get('fixed_reactions_json') or '[]'}"
+        f"Текущие реакции: {_format_reactions(account.get('fixed_reactions_json'))}\n"
+        f"Подключён: {_format_connected_at(account.get('created_at'))}"
     )
 
 
@@ -118,7 +163,7 @@ def build_rule_reaction_account_detail_keyboard(rule_id: int, account_id: int, s
     toggle_cb = f"user_rule_reactions_account_disable:{rule_id}:{account_id}" if is_active else f"user_rule_reactions_account_enable:{rule_id}:{account_id}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🎭 Набор реакций", callback_data=f"user_rule_reactions_account_reactions:{rule_id}:{account_id}")],
+            [InlineKeyboardButton(text="🎭 Изменить реакции", callback_data=f"user_rule_reactions_account_reactions:{rule_id}:{account_id}")],
             [InlineKeyboardButton(text=toggle_text, callback_data=toggle_cb)],
             [InlineKeyboardButton(text="🔄 Переподключить", callback_data=f"user_rule_reactions_account_reconnect:{rule_id}:{account_id}")],
             [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"user_rule_reactions_account_delete_confirm:{rule_id}:{account_id}")],
