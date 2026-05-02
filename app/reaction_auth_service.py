@@ -136,12 +136,13 @@ class ReactionAuthService:
             final_session_path.unlink(missing_ok=True)
             tmp_session_path.rename(final_session_path)
         self.cleanup_tmp_session(tenant_id=tenant_id, rule_id=rule_id, user_id=user_id)
+        phone_hint = self.mask_phone(phone)
         account_id = self.db.upsert_reaction_account_for_tenant(
             tenant_id=tenant_id,
             session_name=final_session_name,
             telegram_user_id=telegram_user_id,
             username=username,
-            phone_hint=self.mask_phone(phone),
+            phone_hint=phone_hint,
             is_premium=is_premium,
             fixed_reactions=[],
         )
@@ -151,7 +152,7 @@ class ReactionAuthService:
             "telegram_user_id": telegram_user_id,
             "username": username,
             "is_premium": is_premium,
-            "phone_hint": self.mask_phone(phone),
+            "phone_hint": phone_hint,
         }
 
     def cleanup_tmp_session(self, *, tenant_id: int, rule_id: int, user_id: int) -> None:

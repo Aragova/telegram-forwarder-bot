@@ -26,6 +26,47 @@ def _error_page(msg: str) -> web.Response:
     return web.Response(text=_layout("Ошибка", body), content_type="text/html")
 
 
+def _success_page(result: dict, *, recovered: bool = False) -> web.Response:
+    ident = f"@{result.get('username')}" if result.get("username") else f"ID {result.get('telegram_user_id')}"
+    body = (
+        "<h1>Аккаунт-реактор подключён</h1>"
+        f"<p>{html.escape(ident)}</p>"
+        f"<p>Premium: {'да' if result.get('is_premium') else 'нет'}</p>"
+        f"<p>{html.escape(result.get('phone_hint') or '')}</p>"
+    )
+    if recovered:
+        body += "<div class='w'>Подключение уже завершено. Мы восстановили экран успеха после технического сбоя отображения.</div>"
+    body += "<p><a href='https://t.me/topposter69_bot'>Вернуться в Telegram-бот</a></p>"
+    return web.Response(text=_layout("Успех", body), content_type="text/html")
+
+
+def _recover_success_result(request: web.Request, payload: dict) -> dict | None:
+    repo = request.app.get("repo")
+    if not repo:
+        return None
+
+    tenant_id = int(payload["tenant_id"])
+    telegram_user_id = int(payload["user_id"])
+
+    account = repo.get_active_reaction_account_by_telegram_user_for_tenant(
+        tenant_id=tenant_id,
+        telegram_user_id=telegram_user_id,
+    )
+
+    if not account:
+        return None
+
+    return {
+        "status": "success",
+        "account_id": account.get("id"),
+        "telegram_user_id": account.get("telegram_user_id"),
+        "username": account.get("username"),
+        "is_premium": account.get("is_premium"),
+        "phone_hint": account.get("phone_hint"),
+        "recovered_after_error": True,
+    }
+
+
 def _token_payload(token: str) -> dict:
     _ensure_onboarding_available()
     return verify_reaction_onboarding_token(token, secret=settings.reaction_onboarding_secret)
@@ -117,12 +158,31 @@ async def code_submit(request: web.Request) -> web.Response:
             LOGGER.info("REACTION_ONBOARDING_PASSWORD_REQUIRED | tenant_id=%s | rule_id=%s | user_id=%s | phone_hint=%s", payload["tenant_id"], payload["rule_id"], payload["user_id"], mask)
             return _password_page(token, str(data.get("phone") or ""))
         LOGGER.info("REACTION_ONBOARDING_SUCCESS | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | telegram_user_id=%s | is_premium=%s", payload["tenant_id"], payload["rule_id"], payload["user_id"], result.get("account_id"), result.get("telegram_user_id"), result.get("is_premium"))
-        ident = f"@{result.get('username')}" if result.get("username") else f"ID {result.get('telegram_user_id')}"
-        body = f"<h1>Аккаунт-реактор подключён</h1><p>{html.escape(ident)}</p><p>Premium: {'да' if result.get('is_premium') else 'нет'}</p><p>{html.escape(result.get('phone_hint') or '')}</p><p><a href='https://t.me/topposter69_bot'>Вернуться в Telegram-бот</a></p>"
-        return web.Response(text=_layout("Успех", body), content_type="text/html")
+        return _success_page(result)
+    except ValueError as exc:
+        LOGGER.warning("REACTION_ONBOARDING_FAILED | error_type=ValueError")
+        return _error_page(str(exc))
     except Exception as exc:
-        LOGGER.warning("REACTION_ONBOARDING_FAILED | error_type=%s", exc.__class__.__name__)
-        return _error_page(str(exc) if isinstance(exc, ValueError) else "Не удалось завершить вход")
+        LOGGER.exception(
+            "REACTION_ONBOARDING_FAILED | tenant_id=%s | rule_id=%s | user_id=%s | error_type=%s",
+            payload.get("tenant_id") if 'payload' in locals() else None,
+            payload.get("rule_id") if 'payload' in locals() else None,
+            payload.get("user_id") if 'payload' in locals() else None,
+            exc.__class__.__name__,
+        )
+        if 'payload' in locals():
+            recovered = _recover_success_result(request, payload)
+            if recovered:
+                LOGGER.warning(
+                    "REACTION_ONBOARDING_SUCCESS_RECOVERED | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | original_error_type=%s",
+                    payload.get("tenant_id"),
+                    payload.get("rule_id"),
+                    payload.get("user_id"),
+                    recovered.get("account_id"),
+                    exc.__class__.__name__,
+                )
+                return _success_page(recovered, recovered=True)
+        return _error_page("Не удалось завершить вход")
 
 
 async def password_submit(request: web.Request) -> web.Response:
@@ -133,9 +193,7 @@ async def password_submit(request: web.Request) -> web.Response:
         service: ReactionAuthService = request.app["auth_service"]
         result = await service.complete_password_login(tenant_id=payload["tenant_id"], rule_id=payload["rule_id"], user_id=payload["user_id"], password=str(data.get("password") or ""), phone=str(data.get("phone") or ""))
         LOGGER.info("REACTION_ONBOARDING_SUCCESS | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | telegram_user_id=%s | is_premium=%s", payload["tenant_id"], payload["rule_id"], payload["user_id"], result.get("account_id"), result.get("telegram_user_id"), result.get("is_premium"))
-        ident = f"@{result.get('username')}" if result.get("username") else f"ID {result.get('telegram_user_id')}"
-        body = f"<h1>Аккаунт-реактор подключён</h1><p>{html.escape(ident)}</p><p>Premium: {'да' if result.get('is_premium') else 'нет'}</p><p>{html.escape(result.get('phone_hint') or '')}</p><p><a href='https://t.me/topposter69_bot'>Вернуться в Telegram-бот</a></p>"
-        return web.Response(text=_layout("Успех", body), content_type="text/html")
+        return _success_page(result)
     except ValueError as exc:
         if str(exc) == "Неверный 2FA-пароль. Проверьте пароль и попробуйте снова.":
             LOGGER.warning("REACTION_ONBOARDING_FAILED | error_type=ValueError | reason=password_invalid")
@@ -143,7 +201,26 @@ async def password_submit(request: web.Request) -> web.Response:
         LOGGER.warning("REACTION_ONBOARDING_FAILED | error_type=ValueError")
         return _error_page(str(exc))
     except Exception as exc:
-        LOGGER.warning("REACTION_ONBOARDING_FAILED | error_type=%s", exc.__class__.__name__)
+        LOGGER.exception(
+            "REACTION_ONBOARDING_FAILED | tenant_id=%s | rule_id=%s | user_id=%s | error_type=%s",
+            payload.get("tenant_id") if "payload" in locals() else None,
+            payload.get("rule_id") if "payload" in locals() else None,
+            payload.get("user_id") if "payload" in locals() else None,
+            exc.__class__.__name__,
+        )
+
+        recovered = _recover_success_result(request, payload) if "payload" in locals() else None
+        if recovered:
+            LOGGER.warning(
+                "REACTION_ONBOARDING_SUCCESS_RECOVERED | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | original_error_type=%s",
+                payload.get("tenant_id"),
+                payload.get("rule_id"),
+                payload.get("user_id"),
+                recovered.get("account_id"),
+                exc.__class__.__name__,
+            )
+            return _success_page(recovered, recovered=True)
+
         return _error_page("Не удалось завершить вход. Попробуйте заново из Telegram-бота.")
 
 
@@ -154,6 +231,7 @@ async def health(_: web.Request) -> web.Response:
 def create_app() -> web.Application:
     app = web.Application()
     repo = create_repository()
+    app["repo"] = repo
     app["auth_service"] = ReactionAuthService(repo, api_id=settings.api_id, api_hash=settings.api_hash)
     app.router.add_get(settings.reaction_onboarding_public_path, page_open)
     app.router.add_get(f"{settings.reaction_onboarding_public_path}/", page_open)

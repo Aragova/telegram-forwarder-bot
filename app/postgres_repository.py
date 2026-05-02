@@ -1160,6 +1160,35 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
         return deleted_row
 
+    def get_active_reaction_account_by_telegram_user_for_tenant(self, tenant_id: int, telegram_user_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        tenant_id,
+                        session_name,
+                        telegram_user_id,
+                        username,
+                        phone_hint,
+                        is_premium,
+                        status,
+                        fixed_reactions_json,
+                        created_at,
+                        updated_at
+                    FROM reaction_accounts
+                    WHERE tenant_id = %s
+                      AND telegram_user_id = %s
+                      AND status = 'active'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (tenant_id, telegram_user_id),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
     def upsert_reaction_account_for_tenant(
         self,
         *,
