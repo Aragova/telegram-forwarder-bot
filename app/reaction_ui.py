@@ -32,17 +32,23 @@ def build_rule_reactions_text(rule_id: int, settings: dict[str, Any] | None, acc
     return "\n".join(lines)
 
 
-def build_rule_reactions_keyboard(rule_id: int, enabled: bool) -> InlineKeyboardMarkup:
+def build_rule_reactions_keyboard(
+    rule_id: int,
+    enabled: bool,
+    *,
+    callback_prefix: str = "user_rule_reactions",
+    back_callback: str | None = None,
+) -> InlineKeyboardMarkup:
     toggle_text = "⚪️ Выключить реакции" if enabled else "🟢 Включить реакции"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=toggle_text, callback_data=f"rule_reactions_toggle:{rule_id}")],
-            [InlineKeyboardButton(text="➕ Подключить аккаунт-реактор", callback_data=f"rule_reactions_add_account:{rule_id}")],
-            [InlineKeyboardButton(text="👥 Мои аккаунты-реакторы", callback_data=f"rule_reactions_accounts:{rule_id}")],
-            [InlineKeyboardButton(text="🎭 Набор реакций", callback_data=f"rule_reactions_preset:{rule_id}")],
-            [InlineKeyboardButton(text="🧪 Тест реакции", callback_data=f"rule_reactions_test:{rule_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад в дополнительные функции", callback_data=f"rule_extra_menu:{rule_id}")],
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_reactions_refresh:{rule_id}")],
+            [InlineKeyboardButton(text=toggle_text, callback_data=f"{callback_prefix}_toggle:{rule_id}")],
+            [InlineKeyboardButton(text="➕ Подключить аккаунт-реактор", callback_data=f"{callback_prefix}_add_account:{rule_id}")],
+            [InlineKeyboardButton(text="👥 Мои аккаунты-реакторы", callback_data=f"{callback_prefix}_accounts:{rule_id}")],
+            [InlineKeyboardButton(text="🎭 Набор реакций", callback_data=f"{callback_prefix}_preset:{rule_id}")],
+            [InlineKeyboardButton(text="🧪 Тест реакции", callback_data=f"{callback_prefix}_test:{rule_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад в дополнительные функции", callback_data=back_callback or f"user_rule_extra:{rule_id}")],
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"{callback_prefix}_refresh:{rule_id}")],
         ]
     )
 
@@ -69,18 +75,18 @@ def build_rule_reaction_accounts_text(accounts: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip()
 
 
-def build_rule_reaction_accounts_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+def build_rule_reaction_accounts_keyboard(rule_id: int, *, callback_prefix: str = "user_rule_reactions") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Подключить аккаунт", callback_data=f"rule_reactions_add_account:{rule_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"rule_reactions:{rule_id}")],
+            [InlineKeyboardButton(text="➕ Подключить аккаунт", callback_data=f"{callback_prefix}_add_account:{rule_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"{callback_prefix}:{rule_id}")],
         ]
     )
 
 
-def build_rule_reaction_back_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+def build_rule_reaction_back_keyboard(rule_id: int, *, callback_prefix: str = "user_rule_reactions") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"rule_reactions:{rule_id}")]]
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"{callback_prefix}:{rule_id}")]]
     )
 
 
@@ -161,12 +167,12 @@ def build_reaction_auth_error_text(error: str) -> str:
     return f"❌ Ошибка подключения: {error}"
 
 
-def build_reaction_auth_cancel_keyboard(rule_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отменить подключение", callback_data=f"rule_reactions_auth_cancel:{rule_id}")]])
+def build_reaction_auth_cancel_keyboard(rule_id: int, *, callback_prefix: str = "user_rule_reactions") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отменить подключение", callback_data=f"{callback_prefix}_auth_cancel:{rule_id}")]])
 
 
-def build_reaction_auth_success_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+def build_reaction_auth_success_keyboard(rule_id: int, *, callback_prefix: str = "user_rule_reactions") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Мои аккаунты-реакторы", callback_data=f"rule_reactions_accounts:{rule_id}")],
-        [InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"rule_reactions:{rule_id}")],
+        [InlineKeyboardButton(text="👥 Мои аккаунты-реакторы", callback_data=f"{callback_prefix}_accounts:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к реакциям", callback_data=f"{callback_prefix}:{rule_id}")],
     ])
