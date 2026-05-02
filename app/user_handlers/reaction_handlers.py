@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.config import settings
 from app.reaction_auth_service import ReactionAuthService
+from app.reaction_onboarding_token import create_reaction_onboarding_token
 from app.reaction_ui import (
     build_reaction_web_onboarding_keyboard,
     build_reaction_web_onboarding_text,
@@ -91,12 +92,23 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         auth_service.cleanup_tmp_session(tenant_id=tenant_id, rule_id=rule_id, user_id=user_id)
         ctx.user_states.pop(user_id, None)
-        ctx.logger.info("USER_REACTION_ONBOARDING_OPENED | tenant_id=%s | rule_id=%s | user_id=%s", tenant_id, rule_id, user_id)
+        web_enabled = bool(settings.reaction_onboarding_enabled and settings.public_base_url and settings.reaction_onboarding_secret)
+        onboarding_url = None
+        if web_enabled:
+            token = create_reaction_onboarding_token(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                rule_id=rule_id,
+                secret=settings.reaction_onboarding_secret,
+                ttl_sec=settings.reaction_onboarding_token_ttl_sec,
+            )
+            onboarding_url = f"{settings.public_base_url}{settings.reaction_onboarding_public_path}?token={token}"
+        ctx.logger.info("USER_REACTION_ONBOARDING_OPENED | tenant_id=%s | rule_id=%s | user_id=%s | web_enabled=%s", tenant_id, rule_id, user_id, web_enabled)
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(
             message=callback.message,
-            text=build_reaction_web_onboarding_text(rule_id),
-            reply_markup=build_reaction_web_onboarding_keyboard(rule_id, onboarding_url=None),
+            text=build_reaction_web_onboarding_text(rule_id, web_enabled=web_enabled),
+            reply_markup=build_reaction_web_onboarding_keyboard(rule_id, onboarding_url=onboarding_url),
         )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_reactions_auth_cancel:"))
