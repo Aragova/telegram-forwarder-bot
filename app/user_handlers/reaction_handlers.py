@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.config import settings
 from app.reaction_auth_service import ReactionAuthService
+from app.reaction_auth_state import REACTION_AUTH_STATES
 from app.reaction_ui import (
     build_reaction_auth_cancel_keyboard,
     build_reaction_auth_code_text,
@@ -127,7 +128,7 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(message=callback.message, text=build_rule_reaction_test_text(), reply_markup=build_rule_reaction_back_keyboard(rule_id))
 
-    @dp.message(lambda m: m.from_user is not None and (ctx.user_states.get(m.from_user.id) or {}).get("state") in {"reaction_auth_wait_phone", "reaction_auth_wait_code", "reaction_auth_wait_password"} and (ctx.user_states.get(m.from_user.id) or {}).get("flow") == "user_rule_reactions")
+    @dp.message(lambda m: m.from_user is not None and (ctx.user_states.get(m.from_user.id) or {}).get("state") in REACTION_AUTH_STATES and (ctx.user_states.get(m.from_user.id) or {}).get("flow") == "user_rule_reactions")
     async def handle_user_reaction_auth_messages(message: Message):
         user_id = message.from_user.id if message.from_user else 0
         state = ctx.user_states.get(user_id) or {}
@@ -138,6 +139,8 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
             ctx.user_states.pop(user_id, None)
             await message.answer("Сессия подключения устарела. Начните заново.")
             return
+        text_kind = "phone_candidate" if phase == "reaction_auth_wait_phone" else ("code_candidate" if phase == "reaction_auth_wait_code" else "password_candidate")
+        ctx.logger.info("USER_REACTION_AUTH_MESSAGE_RECEIVED | tenant_id=%s | rule_id=%s | user_id=%s | phase=%s | text_kind=%s", tenant_id, rule_id, user_id, phase, text_kind)
         try:
             if phase == "reaction_auth_wait_phone":
                 result = await auth_service.start_phone_login(tenant_id=tenant_id, rule_id=rule_id, user_id=user_id, phone=message.text or "")
@@ -173,4 +176,4 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
             auth_service.cleanup_tmp_session(tenant_id=tenant_id, rule_id=rule_id, user_id=user_id)
             ctx.user_states.pop(user_id, None)
             ctx.logger.info("USER_REACTION_AUTH_FAILED | tenant_id=%s | rule_id=%s | user_id=%s | error_type=%s", tenant_id, rule_id, user_id, "unexpected")
-            await message.answer(build_reaction_auth_error_text("Не удалось подключить аккаунт. Начните заново."), reply_markup=build_reaction_auth_cancel_keyboard(rule_id))
+            await message.answer(build_reaction_auth_error_text("Не удалось отправить код. Попробуйте позже или начните заново."), reply_markup=build_reaction_auth_cancel_keyboard(rule_id))
