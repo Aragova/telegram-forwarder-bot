@@ -4294,6 +4294,13 @@ class SenderService:
             },
         )
 
+        expected_count = len(message_ids)
+        reupload_sent_count = int(reupload_result.get("sent_count") or 0)
+        upload_confirmed_by_send_result = (
+            reupload_result.get("ok") is True
+            and reupload_sent_count >= expected_count
+        )
+
         if reupload_result["ok"]:
             await self._log_delivery_pipeline_step(
                 rule_id=rule.id,
@@ -4400,6 +4407,65 @@ class SenderService:
                         "caption_delivery_mode": caption_mode,
                         "requires_builder": requires_builder,
                         "reaction_target_reason": reaction_target_reason,
+                    },
+                )
+
+                await run_db(self._mark_many_deliveries_sent_sync, delivery_ids)
+                return True
+
+            if upload_confirmed_by_send_result:
+                logger.warning(
+                    "REUPLOAD_ALBUM | verify не подтвердил альбом, но отправка уже подтверждена Telethon | "
+                    "rule_id=%s | sent_count=%s | expected_count=%s | error=%s",
+                    rule.id,
+                    reupload_sent_count,
+                    expected_count,
+                    verified.get("error_text"),
+                )
+
+                await self._log_delivery_pipeline_step(
+                    rule_id=rule.id,
+                    delivery_ids=delivery_ids,
+                    event_type="delivery_pipeline_step",
+                    pipeline_stage="verify_after_reupload",
+                    pipeline_result="soft_failed_upload_confirmed",
+                    source_channel=source_channel,
+                    target_id=target_id,
+                    source_message_ids=message_ids,
+                    error_text=verified.get("error_text"),
+                    extra={
+                        "verify_result": self._serialize_pipeline_verify_result(verified),
+                        "sent_count": reupload_sent_count,
+                        "expected_count": expected_count,
+                        "sent_message_id": reupload_result.get("sent_message_id"),
+                        "source_message_ids": message_ids,
+                        "reason": "upload_confirmed_by_telethon_send_result",
+                    },
+                )
+
+                sent_message_ids = reupload_result.get("sent_message_ids") or []
+                sent_message_id = (sent_message_ids[0] if sent_message_ids else None) or reupload_result.get("sent_message_id")
+
+                await self._log_delivery_final_success(
+                    rule_id=rule.id,
+                    delivery_ids=delivery_ids,
+                    final_method="reupload_album_unverified_success",
+                    source_channel=source_channel,
+                    target_id=target_id,
+                    source_message_ids=message_ids,
+                    sent_message_id=sent_message_id,
+                    sent_message_ids=sent_message_ids,
+                    verify_result=verified,
+                    extra={
+                        "caption_delivery_mode": caption_mode,
+                        "requires_builder": requires_builder,
+                        "verify_ok": False,
+                        "verify_count": verified.get("count"),
+                        "verify_grouped_id": verified.get("grouped_id"),
+                        "verify_first_message_id": verified.get("first_message_id"),
+                        "first_sent_message_id": reupload_result.get("sent_message_id"),
+                        "sent_count": reupload_sent_count,
+                        "expected_count": expected_count,
                     },
                 )
 
