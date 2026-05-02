@@ -4447,6 +4447,10 @@ class SenderService:
 
                 sent_message_ids = reupload_result.get("sent_message_ids") or []
                 sent_message_id = (sent_message_ids[0] if sent_message_ids else None) or reupload_result.get("sent_message_id")
+                reaction_message_id, reaction_target_reason = await self._select_reaction_message_id(
+                    target_id=target_id,
+                    sent_message_ids=sent_message_ids,
+                )
 
                 await self._log_delivery_final_success(
                     rule_id=rule.id,
@@ -4457,10 +4461,12 @@ class SenderService:
                     source_message_ids=message_ids,
                     sent_message_id=sent_message_id,
                     sent_message_ids=sent_message_ids,
+                    reaction_message_id=reaction_message_id,
                     verify_result=verified,
                     extra={
                         "caption_delivery_mode": caption_mode,
                         "requires_builder": requires_builder,
+                        "reaction_target_reason": reaction_target_reason,
                         "verify_ok": False,
                         "verify_count": verified.get("count"),
                         "verify_grouped_id": verified.get("grouped_id"),
@@ -4470,6 +4476,30 @@ class SenderService:
                         "expected_count": expected_count,
                     },
                 )
+
+                if reaction_message_id:
+                    try:
+                        logger.info(
+                            "REACTION_AFTER_REUPLOAD_UNVERIFIED | start | rule_id=%s | target_id=%s | message_id=%s",
+                            rule.id,
+                            target_id,
+                            reaction_message_id,
+                        )
+                        await self._add_reaction_if_possible(target_id, reaction_message_id, rule_id=rule.id)
+                    except Exception as exc:
+                        logger.warning(
+                            "REACTION_AFTER_REUPLOAD_UNVERIFIED | failed | rule_id=%s | target_id=%s | message_id=%s | error=%s",
+                            rule.id,
+                            target_id,
+                            reaction_message_id,
+                            exc,
+                        )
+                else:
+                    logger.warning(
+                        "REACTION_AFTER_REUPLOAD_UNVERIFIED | skipped_no_message_id | rule_id=%s | target_id=%s",
+                        rule.id,
+                        target_id,
+                    )
 
                 await run_db(self._mark_many_deliveries_sent_sync, delivery_ids)
                 return True
