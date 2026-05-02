@@ -2200,7 +2200,8 @@ class SenderService:
             )
             return False
 
-        # Пробуем сперва полный набор, потом 2, потом 1
+        # Пробуем сперва полный набор, потом 2, потом 1.
+        # Fallback на следующий вариант только при исключении RPC.
         variants = []
         if len(cleaned) >= 3:
             variants.append(cleaned[:3])
@@ -2221,27 +2222,6 @@ class SenderService:
                         add_to_recent=False,
                     )
                 )
-
-                confirmed = await self._confirm_reaction_set(client, entity, sent_message_id, variant)
-                if confirmed:
-                    logger.info(
-                        "PREMIUM_REACTION_CONFIRMED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reactions=%s",
-                        rule_id,
-                        entity,
-                        sent_message_id,
-                        session_name,
-                        variant,
-                    )
-                    return True
-                logger.warning(
-                    "REACTION_NOT_CONFIRMED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reactions=%s",
-                    rule_id,
-                    entity,
-                    sent_message_id,
-                    session_name,
-                    variant,
-                )
-
             except Exception as exc:
                 last_error = exc
                 logger.warning(
@@ -2252,6 +2232,28 @@ class SenderService:
                     entity,
                     exc,
                 )
+                continue
+
+            confirmed = await self._confirm_reaction_set(client, entity, sent_message_id, variant)
+            if confirmed:
+                logger.info(
+                    "PREMIUM_REACTION_CONFIRMED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reactions=%s",
+                    rule_id,
+                    entity,
+                    sent_message_id,
+                    session_name,
+                    variant,
+                )
+            else:
+                logger.warning(
+                    "PREMIUM_REACTION_CONFIRM_SOFT_FAILED | rule_id=%s | target_id=%s | message_id=%s | session=%s | reactions=%s | reason=request_accepted_but_confirm_failed",
+                    rule_id,
+                    entity,
+                    sent_message_id,
+                    session_name,
+                    variant,
+                )
+            return True
 
         logger.warning(
             "Premium-реактор %s не смог поставить ни один вариант реакций на сообщение %s в %s. Последняя ошибка: %s",
