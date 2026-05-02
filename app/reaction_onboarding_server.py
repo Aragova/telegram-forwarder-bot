@@ -12,6 +12,9 @@ from app.repository_factory import create_repository
 
 LOGGER = logging.getLogger("forwarder.reaction.onboarding.http")
 
+SAFE_TOKEN_ERROR_TEXT = "Ссылка подключения недействительна или устарела. Откройте подключение заново из Telegram-бота."
+SAFE_UNEXPECTED_ERROR_TEXT = "Не удалось открыть подключение. Попробуйте заново из Telegram-бота."
+
 
 def _layout(title: str, body: str) -> str:
     return f"""<!doctype html><html lang='ru'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
@@ -52,8 +55,10 @@ async def page_open(request: web.Request) -> web.Response:
     token = request.query.get("token", "")
     try:
         payload = _token_payload(token)
-    except ValueError as exc:
-        return _error_page(str(exc))
+    except ValueError:
+        return _error_page(SAFE_TOKEN_ERROR_TEXT)
+    except Exception:
+        return _error_page(SAFE_UNEXPECTED_ERROR_TEXT)
     LOGGER.info("REACTION_ONBOARDING_PAGE_OPENED | tenant_id=%s | rule_id=%s | user_id=%s", payload["tenant_id"], payload["rule_id"], payload["user_id"])
     return _phone_page(token)
 
@@ -136,6 +141,7 @@ def create_app() -> web.Application:
     repo = create_repository()
     app["auth_service"] = ReactionAuthService(repo, api_id=settings.api_id, api_hash=settings.api_hash)
     app.router.add_get(settings.reaction_onboarding_public_path, page_open)
+    app.router.add_get(f"{settings.reaction_onboarding_public_path}/", page_open)
     app.router.add_post(f"{settings.reaction_onboarding_public_path}/phone", phone_submit)
     app.router.add_post(f"{settings.reaction_onboarding_public_path}/code", code_submit)
     app.router.add_post(f"{settings.reaction_onboarding_public_path}/password", password_submit)
