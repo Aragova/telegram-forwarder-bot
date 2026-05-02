@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.config import settings
 from app.reaction_auth_service import ReactionAuthService
+from app.reaction_auth_state import REACTION_ACCOUNT_REACTIONS_INPUT_STATE, is_reaction_account_reactions_input_state
 from app.reaction_onboarding_token import create_reaction_onboarding_token
 from app.reaction_ui import (
     build_reaction_account_reactions_keyboard,
@@ -124,7 +125,7 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
             await ctx.edit_message_text_safe(message=callback.message, text="Аккаунт не найден.")
             return
         ctx.user_states[user_id] = {
-            "state": "reaction_account_reactions_wait_input",
+            "state": REACTION_ACCOUNT_REACTIONS_INPUT_STATE,
             "flow": "user_rule_reactions",
             "rule_id": rule_id,
             "account_id": account_id,
@@ -318,12 +319,22 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
 
     @dp.message(
         lambda m: m.from_user is not None
-        and (ctx.user_states.get(m.from_user.id) or {}).get("state") == "reaction_account_reactions_wait_input"
-        and (ctx.user_states.get(m.from_user.id) or {}).get("flow") == "user_rule_reactions"
+        and is_reaction_account_reactions_input_state(ctx.user_states, m.from_user.id)
     )
     async def handle_user_reaction_account_reactions_input(message: Message):
         user_id = message.from_user.id if message.from_user else 0
         state = ctx.user_states.get(user_id) or {}
+        rule_id = int(state.get("rule_id") or 0)
+        account_id = int(state.get("account_id") or 0)
+        tenant_id = int(state.get("tenant_id") or 0)
+        ctx.logger.info(
+            "USER_REACTION_ACCOUNT_REACTIONS_MESSAGE_RECEIVED | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | text_kind=%s",
+            tenant_id,
+            rule_id,
+            user_id,
+            account_id,
+            "text" if message.text else "non_text",
+        )
         if str((message.text or "").strip()).lower() in {"/start", "/menu", "❌ отмена"}:
             ctx.user_states.pop(user_id, None)
             await message.answer("Действие отменено.")
@@ -332,9 +343,6 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
         if not text:
             await message.answer("Не удалось распознать реакции. Отправьте 1 emoji для обычного аккаунта или до 3 emoji для Premium.")
             return
-        rule_id = int(state.get("rule_id") or 0)
-        account_id = int(state.get("account_id") or 0)
-        tenant_id = int(state.get("tenant_id") or 0)
         account = await ctx.run_db(ctx.db.get_reaction_account_for_tenant, tenant_id, account_id)
         if not account:
             ctx.user_states.pop(user_id, None)
@@ -346,6 +354,7 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
             await message.answer("Не удалось распознать реакции. Отправьте 1 emoji для обычного аккаунта или до 3 emoji для Premium.")
             return
         await ctx.run_db(ctx.db.update_reaction_account_fixed_reactions_for_tenant, tenant_id, account_id, normalized)
+        ctx.logger.info("USER_REACTION_ACCOUNT_REACTIONS_UPDATED | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | count=%s", tenant_id, rule_id, user_id, account_id, len(normalized))
         ctx.user_states.pop(user_id, None)
         updated_account = await ctx.run_db(ctx.db.get_reaction_account_for_tenant, tenant_id, account_id)
         if not updated_account:
