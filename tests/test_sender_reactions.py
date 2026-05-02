@@ -59,3 +59,87 @@ def test_confirm_reaction_without_reactions_returns_strict_false():
     confirmed = asyncio.run(svc._confirm_reaction(svc.telethon, entity="chat", message_id=1, emoji="🔥"))
     assert confirmed is False
     assert not confirmed
+
+
+def test_validate_sent_message_ids_for_delivery_stale_is_skipped():
+    now = datetime.now(timezone.utc)
+    stale = SimpleNamespace(id=777, date=now - timedelta(seconds=1000))
+    svc = _service(stale)
+
+    validated = asyncio.run(
+        svc._validate_sent_message_ids_for_delivery(
+            rule_id=15,
+            delivery_id=460298,
+            source_channel="-1002546799428",
+            target_id="-1002546799428",
+            source_message_ids=[299, 300, 301, 302],
+            candidate_sent_message_ids=[777],
+            method="reupload_album_unverified_success",
+            max_age_seconds=300,
+        )
+    )
+    assert validated == []
+
+
+def test_validate_sent_message_ids_for_delivery_fresh_ok():
+    now = datetime.now(timezone.utc)
+    fresh = SimpleNamespace(id=888, date=now)
+    svc = _service(fresh)
+
+    validated = asyncio.run(
+        svc._validate_sent_message_ids_for_delivery(
+            rule_id=15,
+            delivery_id=460298,
+            source_channel="-100",
+            target_id="-200",
+            source_message_ids=[1, 2],
+            candidate_sent_message_ids=[888],
+            method="reupload_album_unverified_success",
+        )
+    )
+    assert validated == [888]
+
+
+def test_validate_sent_message_ids_for_delivery_self_target_source_id_blocked():
+    now = datetime.now(timezone.utc)
+    fresh = SimpleNamespace(id=300, date=now)
+    svc = _service(fresh)
+
+    validated = asyncio.run(
+        svc._validate_sent_message_ids_for_delivery(
+            rule_id=15,
+            delivery_id=460298,
+            source_channel="-1002546799428",
+            target_id="-1002546799428",
+            source_message_ids=[299, 300, 301, 302],
+            candidate_sent_message_ids=[300],
+            method="reupload_album_unverified_success",
+        )
+    )
+    assert validated == []
+
+
+def test_validate_sent_message_ids_for_delivery_passes_full_context():
+    svc = _service(SimpleNamespace(id=901, date=datetime.now(timezone.utc)))
+    captured = {}
+
+    async def _fake_validate(**kwargs):
+        captured.update(kwargs)
+        return kwargs["sent_message_id"]
+
+    svc._validate_reaction_target_message = _fake_validate
+    validated = asyncio.run(
+        svc._validate_sent_message_ids_for_delivery(
+            rule_id=15,
+            delivery_id=460298,
+            source_channel="-1002546799428",
+            target_id="-1002546799428",
+            source_message_ids=[299, 300],
+            candidate_sent_message_ids=[901],
+            method="reupload_album_unverified_success",
+        )
+    )
+    assert validated == [901]
+    assert captured["delivery_id"] == 460298
+    assert captured["source_channel"] == "-1002546799428"
+    assert captured["source_message_ids"] == [299, 300]
