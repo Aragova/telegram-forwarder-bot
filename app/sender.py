@@ -15,6 +15,7 @@ from .repository_models import utc_now_iso
 from .telegram_client import ReactionClientInfo
 from .video_processor import VideoProcessor
 from .scheduler_service import SchedulerService
+from .reaction_runtime_resolver import ReactionRuntimeResolver
 from telethon.tl.types import (
     MessageEntityBold,
     MessageEntityItalic,
@@ -2443,6 +2444,70 @@ class SenderService:
                     exc,
                 )
 
+    async def _add_reaction_for_rule_if_possible(
+        self,
+        *,
+        rule,
+        target_id,
+        sent_message_id,
+    ) -> None:
+        rule_id = int(getattr(rule, "id", 0) or 0)
+        resolver = ReactionRuntimeResolver(self.db)
+
+        try:
+            plan = resolver.resolve_for_rule(rule)
+        except Exception as exc:
+            logger.warning(
+                "REACTION_RUNTIME_RESOLVE_FAILED | rule_id=%s | error_type=%s",
+                rule_id,
+                exc.__class__.__name__,
+            )
+            await self._add_reaction_if_possible(target_id, sent_message_id, rule_id=rule_id)
+            return
+
+        if plan.use_legacy_reactors:
+            logger.info(
+                "REACTION_RUNTIME_SELECTED | rule_id=%s | mode=legacy_admin | reason=%s | legacy_clients=%s",
+                rule_id,
+                plan.reason,
+                len(self.reaction_clients or []),
+            )
+            await self._add_reaction_if_possible(target_id, sent_message_id, rule_id=rule_id)
+            return
+
+        if plan.mode == "disabled":
+            logger.info(
+                "REACTION_RUNTIME_SKIPPED | rule_id=%s | mode=disabled | reason=%s",
+                rule_id,
+                plan.reason,
+            )
+            return
+
+        if plan.mode == "no_accounts":
+            logger.info(
+                "REACTION_RUNTIME_SKIPPED | rule_id=%s | mode=no_accounts | tenant_id=%s | reason=%s",
+                rule_id,
+                plan.tenant_id,
+                plan.reason,
+            )
+            return
+
+        if plan.use_tenant_reactors:
+            logger.info(
+                "REACTION_RUNTIME_SELECTED | rule_id=%s | mode=tenant_saas | tenant_id=%s | accounts=%s",
+                rule_id,
+                plan.tenant_id,
+                len(plan.tenant_accounts),
+            )
+            logger.info(
+                "REACTION_RUNTIME_TENANT_DEFERRED | rule_id=%s | tenant_id=%s | accounts=%s | reason=worker_not_enabled_yet",
+                rule_id,
+                plan.tenant_id,
+                len(plan.tenant_accounts),
+            )
+            return
+
+
     async def process_rule_once(self, rule):
         schedule_mode = getattr(rule, "schedule_mode", "interval") or "interval"
 
@@ -3240,7 +3305,11 @@ class SenderService:
             )
 
             if sent_message_id:
-                await self._add_reaction_if_possible(target_id, sent_message_id)
+                await self._add_reaction_for_rule_if_possible(
+                            rule=rule,
+                            target_id=target_id,
+                            sent_message_id=sent_message_id,
+                        )
 
                 await self._log_delivery_final_success(
                     rule_id=rule.id,
@@ -3428,7 +3497,11 @@ class SenderService:
         )
 
         if sent_message_id:
-            await self._add_reaction_if_possible(target_id, sent_message_id)
+            await self._add_reaction_for_rule_if_possible(
+                            rule=rule,
+                            target_id=target_id,
+                            sent_message_id=sent_message_id,
+                        )
 
             await self._log_delivery_final_success(
                 rule_id=rule.id,
@@ -3537,7 +3610,11 @@ class SenderService:
                     disable_web_page_preview=True,
                 )
 
-                await self._add_reaction_if_possible(target_id, sent.message_id)
+                await self._add_reaction_for_rule_if_possible(
+                            rule=rule,
+                            target_id=target_id,
+                            sent_message_id=sent.message_id,
+                        )
 
                 text_fallback_ok = True
                 text_fallback_sent_message_id = sent.message_id
@@ -3807,7 +3884,11 @@ class SenderService:
 
                 try:
                     if sent_message_id:
-                        await self._add_reaction_if_possible(target_id, sent_message_id)
+                        await self._add_reaction_for_rule_if_possible(
+                            rule=rule,
+                            target_id=target_id,
+                            sent_message_id=sent_message_id,
+                        )
                     else:
                         logger.warning(
                             "VIDEO_REACTION | не удалось извлечь sent_message_id после process_video | rule=%s | delivery=%s | target=%s",
@@ -4061,7 +4142,11 @@ class SenderService:
 
                 if verified["ok"]:
                     sent_message_id = verified.get("first_message_id") or copy_result.get("sent_message_id")
-                    await self._add_reaction_if_possible(target_id, sent_message_id)
+                    await self._add_reaction_for_rule_if_possible(
+                            rule=rule,
+                            target_id=target_id,
+                            sent_message_id=sent_message_id,
+                        )
 
                     await self._log_delivery_final_success(
                         rule_id=rule.id,
@@ -4119,7 +4204,11 @@ class SenderService:
 
             try:
                 if first_album_message_id:
-                    await self._add_reaction_if_possible(target_id, first_album_message_id)
+                    await self._add_reaction_for_rule_if_possible(
+                        rule=rule,
+                        target_id=target_id,
+                        sent_message_id=first_album_message_id,
+                    )
             except Exception as exc:
                 logger.warning(
                     "SELF_LOOP_REACTION | album | не удалось поставить реакцию на исходное сообщение %s в %s: %s",
@@ -4271,7 +4360,11 @@ class SenderService:
 
                 if verified["ok"]:
                     sent_message_id = verified.get("first_message_id") or copy_retry_result.get("sent_message_id")
-                    await self._add_reaction_if_possible(target_id, sent_message_id)
+                    await self._add_reaction_for_rule_if_possible(
+                            rule=rule,
+                            target_id=target_id,
+                            sent_message_id=sent_message_id,
+                        )
 
                     await self._log_delivery_final_success(
                         rule_id=rule.id,
@@ -4477,7 +4570,11 @@ class SenderService:
                 sent_message_id = (sent_message_ids[0] if sent_message_ids else None) or reupload_result.get("sent_message_id")
 
                 if reaction_message_id:
-                    await self._add_reaction_if_possible(target_id, reaction_message_id, rule_id=rule.id)
+                    await self._add_reaction_for_rule_if_possible(
+                        rule=rule,
+                        target_id=target_id,
+                        sent_message_id=reaction_message_id,
+                    )
 
                 await self._log_delivery_final_success(
                     rule_id=rule.id,
@@ -4570,7 +4667,11 @@ class SenderService:
                             target_id,
                             reaction_message_id,
                         )
-                        await self._add_reaction_if_possible(target_id, reaction_message_id, rule_id=rule.id)
+                        await self._add_reaction_for_rule_if_possible(
+                        rule=rule,
+                        target_id=target_id,
+                        sent_message_id=reaction_message_id,
+                    )
                     except Exception as exc:
                         logger.warning(
                             "REACTION_AFTER_REUPLOAD_UNVERIFIED | failed | rule_id=%s | target_id=%s | message_id=%s | error=%s",
@@ -4725,7 +4826,11 @@ class SenderService:
                     sent_message_id = (sent_message_ids[0] if sent_message_ids else None) or reupload_retry_result.get("sent_message_id")
 
                     if reaction_message_id:
-                        await self._add_reaction_if_possible(target_id, reaction_message_id, rule_id=rule.id)
+                        await self._add_reaction_for_rule_if_possible(
+                        rule=rule,
+                        target_id=target_id,
+                        sent_message_id=reaction_message_id,
+                    )
 
                     await self._log_delivery_final_success(
                         rule_id=rule.id,
@@ -4801,7 +4906,11 @@ class SenderService:
         if one_by_one_result["ok"]:
             sent_message_id = one_by_one_result.get("sent_message_id")
             if sent_message_id:
-                await self._add_reaction_if_possible(target_id, sent_message_id)
+                await self._add_reaction_for_rule_if_possible(
+                            rule=rule,
+                            target_id=target_id,
+                            sent_message_id=sent_message_id,
+                        )
 
             await self._log_delivery_final_success(
                 rule_id=rule.id,
