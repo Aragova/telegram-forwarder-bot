@@ -30,7 +30,7 @@ from telethon.tl.types import (
 
 logger = logging.getLogger("forwarder")
 MAX_INVALID_MP4_RETRY = 1
-MAX_NORMAL_REACTION_ATTEMPTS = 5
+MAX_NORMAL_REACTION_ATTEMPTS = 3
 
 async def run_db(callable_obj, *args, **kwargs):
     """
@@ -39,6 +39,7 @@ async def run_db(callable_obj, *args, **kwargs):
     return await asyncio.to_thread(callable_obj, *args, **kwargs)
 
 REACTION_POOL = ["❤", "🔥", "🥰", "🤩", "😍", "⚡", "🍌", "🏆", "🍓", "💋", "💘", "🦄", "😘", "😎"]
+NORMAL_REACTION_POOL = ["🔥", "❤", "🥰", "😍", "😘", "💋", "🍓", "⚡"]
 DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK = False
 DEBUG_FORCE_SKIP_COPY_SINGLE = False
 DEBUG_FORCE_SKIP_COPY_ALBUM = False
@@ -246,6 +247,10 @@ def _markdownish_to_html(text: str) -> str:
 def _prepare_html_text(text: str | None) -> str | None:
     prepared = _markdownish_to_html(text or "")
     return prepared or None
+
+
+def _normalize_reaction_emoji(value: str | None) -> str:
+    return (value or "").replace("\ufe0f", "").strip()
 
 def _detect_message_media_kind(message) -> str:
     """
@@ -2144,7 +2149,7 @@ class SenderService:
             }
 
     async def _try_add_normal_reaction(self, client, entity, sent_message_id, session_name: str, rule_id: int | None = None) -> bool:
-        emojis_to_try = REACTION_POOL[:]
+        emojis_to_try = NORMAL_REACTION_POOL[:]
         random.shuffle(emojis_to_try)
         emojis_to_try = emojis_to_try[:MAX_NORMAL_REACTION_ATTEMPTS]
 
@@ -2278,13 +2283,15 @@ class SenderService:
 
     async def _confirm_reaction(self, client, entity, message_id: int, emoji: str) -> bool:
         try:
+            normalized_expected = _normalize_reaction_emoji(emoji)
             msg = await client.get_messages(entity, ids=message_id)
             reactions = getattr(msg, "reactions", None)
             if not reactions:
                 return False
             for result in getattr(reactions, "results", []) or []:
                 reaction = getattr(result, "reaction", None)
-                if getattr(reaction, "emoticon", None) == emoji:
+                actual = _normalize_reaction_emoji(getattr(reaction, "emoticon", None))
+                if actual == normalized_expected:
                     return True
             return False
         except Exception:
@@ -2317,14 +2324,19 @@ class SenderService:
                         "count": getattr(result, "count", None),
                     }
                 )
-                if emoticon:
-                    actual_emojis.add(emoticon)
+                normalized_emoticon = _normalize_reaction_emoji(emoticon)
+                if normalized_emoticon:
+                    actual_emojis.add(normalized_emoticon)
             observed = {
                 "reactions_class": reactions.__class__.__name__,
                 "results": observed_results,
                 "recent_reactions_len": len(getattr(reactions, "recent_reactions", []) or []),
             }
-            expected = {emoji for emoji in (emojis or []) if emoji}
+            expected = {
+                _normalize_reaction_emoji(emoji)
+                for emoji in (emojis or [])
+                if _normalize_reaction_emoji(emoji)
+            }
             confirmed = bool(expected) and expected.issubset(actual_emojis)
             if not confirmed:
                 logger.warning(
@@ -2406,12 +2418,12 @@ class SenderService:
 
         if premium_accepted:
             logger.info(
-                "REACTION_NORMAL_SKIPPED_AFTER_PREMIUM | rule_id=%s | target_id=%s | message_id=%s",
+                "REACTION_NORMAL_CONTINUE_AFTER_PREMIUM | rule_id=%s | target_id=%s | message_id=%s | normal_count=%s",
                 rule_id,
                 entity,
                 sent_message_id,
+                len(normal_reactors),
             )
-            return
 
         for reactor in normal_reactors:
             try:
