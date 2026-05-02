@@ -229,6 +229,7 @@ def test_extra_menus_have_exact_row_structure():
     assert repost_rows == [
         ["🔁 Сменить режим: Видеоредактор"],
         ["✍️ Режим подписи"],
+        ["⚙️ Реакции"],
         ["⚡ Отправить сейчас"],
         ["🔢 Начать с номера"],
         ["🔄 Пересканировать"],
@@ -241,6 +242,7 @@ def test_extra_menus_have_exact_row_structure():
     video_rows = _texts(user_ui.build_user_rule_extra_keyboard(rule_id=59, mode="video"))
     assert video_rows == [
         ["🔁 Сменить режим: Репост"],
+        ["⚙️ Реакции"],
         ["⚡ Отправить сейчас"],
         ["🔢 Начать с номера"],
         ["🔄 Пересканировать"],
