@@ -277,29 +277,3 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             reply_markup=user_ui.build_user_rule_logs_keyboard(rule_id=rule_id, has_logs=bool(rows)),
         )
 
-    @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_reactions:"))
-    async def handle_user_rule_reactions(callback: CallbackQuery):
-        rule_id = int((callback.data or "").split(":", 1)[1])
-        if not await ensure_rule_callback_access(ctx, callback, rule_id):
-            return
-        user_id = callback.from_user.id if callback.from_user else 0
-        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
-        settings = await ctx.run_db(ctx.db.get_rule_reaction_settings_for_tenant, tenant_id, rule_id) if hasattr(ctx.db, "get_rule_reaction_settings_for_tenant") else None
-        accounts = await ctx.run_db(ctx.db.list_reaction_accounts_for_tenant, tenant_id, False) if hasattr(ctx.db, "list_reaction_accounts_for_tenant") else []
-        status = "🟢 Включены" if bool(settings and settings.get("enabled")) else "⚪️ Выключены"
-        mode = str((settings or {}).get("mode") or "premium_then_normal")
-        await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(
-            message=callback.message,
-            text=(
-                f"⚙️ Реакции правила #{rule_id}\n\n"
-                f"Статус: {status}\n"
-                f"Режим: {mode}\n"
-                f"Аккаунтов-реакторов: {len(accounts)}\n\n"
-                "Подключите аккаунты вашей команды, чтобы они автоматически ставили реакции под публикациями ваших правил.\n\n"
-                "🚧 Подключение аккаунтов и детальные настройки будут включены следующим обновлением."
-            ),
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад в дополнительные функции", callback_data=f"user_rule_extra:{rule_id}")]]
-            ),
-        )

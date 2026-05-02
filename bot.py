@@ -81,6 +81,7 @@ from app.user_handlers import (
     UserHandlersContext,
     register_user_payment_handlers,
     register_user_recovery_handlers,
+    register_user_reaction_handlers,
     register_user_rule_handlers,
 )
 from app.admin_handlers import (
@@ -90,7 +91,6 @@ from app.admin_handlers import (
     register_admin_queue_handlers,
     register_admin_diagnostics_handlers,
     register_admin_system_handlers,
-    register_admin_reaction_handlers,
 )
 
 logger = setup_logging(settings.log_level)
@@ -3709,12 +3709,6 @@ def build_rule_extra_keyboard(rule_id: int) -> InlineKeyboardMarkup:
                 callback_data=f"caption_mode_menu:{rule_id}",
             )
         ])
-    rows.append([
-        InlineKeyboardButton(
-            text="⚙️ Реакции",
-            callback_data=f"rule_reactions:{rule_id}",
-        )
-    ])
 
     rows.extend([
         [
@@ -8889,6 +8883,7 @@ def _register_user_saas_handlers() -> None:
         manual_payment_active_statuses=MANUAL_PAYMENT_ACTIVE_STATUSES,
     )
     register_user_rule_handlers(dp, ctx)
+    register_user_reaction_handlers(dp, ctx)
     register_user_payment_handlers(dp, ctx)
     register_user_recovery_handlers(dp, ctx)
     user_handlers_ctx = ctx
@@ -8950,7 +8945,6 @@ def _register_admin_handlers() -> None:
     register_admin_queue_handlers(dp, ctx)
     register_admin_diagnostics_handlers(dp, ctx)
     register_admin_system_handlers(dp, ctx)
-    register_admin_reaction_handlers(dp, ctx)
     admin_handlers_ctx = ctx
 
 
