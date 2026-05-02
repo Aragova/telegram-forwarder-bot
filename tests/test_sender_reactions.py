@@ -236,3 +236,12 @@ def test_mark_delivery_sent_sync_uses_passed_sent_message_id():
 def test_mark_delivery_sent_sync_has_no_authoritative_sent_message_id_reference():
     source = inspect.getsource(SenderService._mark_delivery_sent_sync)
     assert "authoritative_sent_message_id" not in source
+
+
+def test_copy_single_path_does_not_reference_unbound_valid_sent_message_ids():
+    source = inspect.getsource(SenderService._deliver_single)
+    copy_single_block_start = source.index("if use_copy_first:")
+    mark_sent_call = source.index("delivery_method=\"copy_single\"")
+    block = source[copy_single_block_start:mark_sent_call]
+    assert "pipeline_result=\"ok\" if valid_sent_message_ids else \"failed\"" not in block
+    assert "sent_message_ids=valid_sent_message_ids" not in block
