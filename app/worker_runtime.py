@@ -118,6 +118,59 @@ def _safe_payload(job: dict) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _row_get(row, key, default=None):
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
+def _extract_delivery_ids_from_payload(payload: dict) -> list[int]:
+    if not isinstance(payload, dict):
+        return []
+    raw_ids = payload.get("delivery_ids")
+    if isinstance(raw_ids, list):
+        result: list[int] = []
+        for value in raw_ids:
+            try:
+                result.append(int(value))
+            except Exception:
+                continue
+        if result:
+            return result
+    delivery_id = payload.get("delivery_id")
+    try:
+        return [int(delivery_id)] if delivery_id is not None else []
+    except Exception:
+        return []
+
+
+def _delivery_ids_already_sent(repo, delivery_ids: list[int]) -> bool:
+    if not delivery_ids:
+        return False
+    for delivery_id in delivery_ids:
+        row = repo.get_delivery(int(delivery_id))
+        if str(_row_get(row, "status", "") or "").strip().lower() == "sent":
+            return True
+    return False
+
+
+def _complete_job_if_delivery_already_sent(repo, job_id: int, payload: dict, *, stage: str) -> bool:
+    delivery_ids = _extract_delivery_ids_from_payload(payload)
+    if not delivery_ids:
+        return False
+    if not _delivery_ids_already_sent(repo, delivery_ids):
+        return False
+    logger.info("IDEMPOTENCY_GUARD_ALREADY_SENT | job_id=%s | stage=%s | delivery_ids=%s", int(job_id), stage, delivery_ids)
+    repo.complete_job(int(job_id))
+    logger.info("JOB_COMPLETED_BY_IDEMPOTENCY_GUARD | job_id=%s | stage=%s | delivery_ids=%s", int(job_id), stage, delivery_ids)
+    return True
+
+
 def _heavy_stage_key(job_type: str) -> str | None:
     value = str(job_type or "").strip().lower()
     if value == "video_download":
@@ -341,6 +394,16 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     logger.info("JOB PROCESSING | %s обрабатывает задачу #%s (%s)", worker_id, job_id, job_type)
     result: dict[str, Any] | None = None
     try:
+        if job_type in {"repost_single", "repost_album", "video_delivery", "video_send"}:
+            guarded = await asyncio.to_thread(
+                _complete_job_if_delivery_already_sent,
+                repo,
+                job_id,
+                payload,
+                stage="before_sender",
+            )
+            if guarded:
+                return True
         if job_type == "repost_single":
             repost_result = await sender_service.execute_repost_single_from_job(**payload)
             if isinstance(repost_result, dict):
@@ -450,6 +513,16 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
             return True
 
+        guarded = await asyncio.to_thread(
+            _complete_job_if_delivery_already_sent,
+            repo,
+            job_id,
+            payload,
+            stage="after_unsuccessful_result",
+        )
+        if guarded:
+            return True
+
         retryable = bool(payload.get("retryable", True))
         error_text = "Исполнитель вернул неуспешный результат"
         if isinstance(result, dict):
@@ -481,6 +554,16 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         return True
 
     except Exception as exc:
+        guarded = await asyncio.to_thread(
+            _complete_job_if_delivery_already_sent,
+            repo,
+            job_id,
+            payload,
+            stage="after_exception",
+        )
+        if guarded:
+            logger.warning("JOB_EXCEPTION_SUPPRESSED_AFTER_SENT | job_id=%s | error=%s", job_id, exc)
+            return True
         attempts = int(job.get("attempts") or 0) + 1
         max_attempts = int(job.get("max_attempts") or 3)
         if attempts >= max_attempts:
