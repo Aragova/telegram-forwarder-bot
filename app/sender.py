@@ -17,6 +17,7 @@ from .video_processor import VideoProcessor
 from .scheduler_service import SchedulerService
 from .reaction_runtime_resolver import ReactionRuntimeResolver
 from .delivery_idempotency import build_delivery_idempotency_key, extract_sent_message_ids_from_attempt, normalize_valid_sent_message_ids
+from .telegram_send_result import telegram_send_result_from_raw
 from telethon.tl.types import (
     MessageEntityBold,
     MessageEntityItalic,
@@ -3811,8 +3812,26 @@ class SenderService:
                 message_id,
                 target_thread_id,
             )
-            copy_sent_ids = [int(x) for x in (copy_result.get("sent_ids") or []) if str(x).isdigit()]
-            valid_sent_ids = normalize_valid_sent_message_ids(copy_sent_ids)
+            send_result = telegram_send_result_from_raw(
+                copy_result.get("raw_result"),
+                method="copy_single",
+                fallback_sent_ids=copy_result.get("sent_ids") or [],
+                error_text=copy_result.get("error_text"),
+                attempted=bool(copy_result.get("attempted", True)),
+            )
+            copy_sent_ids = send_result.sent_message_ids
+            valid_sent_ids = send_result.sent_message_ids
+            log_fn = logger.info if send_result.ok else logger.warning
+            log_fn(
+                "TELEGRAM_SEND_RESULT | method=%s | ok=%s | sent_message_ids=%s | sent_message_id=%s | raw_result_type=%s | error_text=%s | retryable=%s",
+                send_result.method,
+                send_result.ok,
+                send_result.sent_message_ids,
+                send_result.sent_message_id,
+                send_result.raw_result_type,
+                send_result.error_text,
+                send_result.retryable,
+            )
             if idempotency_key and valid_sent_ids:
                 await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=valid_sent_ids, telegram_method="copy_single")
                 logger.info("DELIVERY_ATTEMPT_ACCEPTED | operation=single | key=%s | delivery_id=%s | sent_message_ids=%s", idempotency_key, delivery_id, valid_sent_ids)
@@ -4097,7 +4116,17 @@ class SenderService:
             target_thread_id,
             post_row=post_row,
         )
-        candidate_sent_message_ids = [int(sent_message_id)] if sent_message_id else []
+        send_result = telegram_send_result_from_raw(
+            None,
+            method="reupload_single",
+            fallback_sent_ids=[sent_message_id] if sent_message_id else None,
+        )
+        log_fn = logger.info if send_result.ok else logger.warning
+        log_fn(
+            "TELEGRAM_SEND_RESULT | method=%s | ok=%s | sent_message_ids=%s | sent_message_id=%s | raw_result_type=%s | error_text=%s | retryable=%s",
+            send_result.method, send_result.ok, send_result.sent_message_ids, send_result.sent_message_id, send_result.raw_result_type, send_result.error_text, send_result.retryable
+        )
+        candidate_sent_message_ids = send_result.sent_message_ids
         valid_sent_message_ids = await self._confirm_target_delivery_message_ids_with_retry(
             rule_id=rule.id,
             delivery_id=delivery_id,
@@ -5694,7 +5723,7 @@ class SenderService:
                 message_thread_id=target_thread_id,
             )
             sent_ids = self._extract_sent_message_ids(sent)
-            return {"attempted": True, "sent_ids": sent_ids, "fallback_allowed": False, "raw_result_type": type(sent).__name__}
+            return {"attempted": True, "sent_ids": sent_ids, "fallback_allowed": False, "raw_result_type": type(sent).__name__, "raw_result": sent}
         except Exception as exc:
             logger.warning(
                 "Не удалось скопировать сообщение %s/%s в %s: %s",
@@ -5834,7 +5863,20 @@ class SenderService:
                 telethon_result.get("error_text"),
             )
 
-            if telethon_result["ok"]:
+            send_result = telegram_send_result_from_raw(
+                telethon_result,
+                method="reupload_album",
+                fallback_sent_ids=telethon_result.get("sent_message_ids"),
+                error_text=telethon_result.get("error_text"),
+            )
+            log_fn = logger.info if send_result.ok else logger.warning
+            log_fn(
+                "TELEGRAM_SEND_RESULT | method=%s | ok=%s | sent_message_ids=%s | sent_message_id=%s | raw_result_type=%s | error_text=%s | retryable=%s",
+                send_result.method, send_result.ok, send_result.sent_message_ids, send_result.sent_message_id, send_result.raw_result_type, send_result.error_text, send_result.retryable
+            )
+            if send_result.ok:
+                telethon_result["sent_message_ids"] = send_result.sent_message_ids
+                telethon_result["sent_message_id"] = send_result.sent_message_id
                 return telethon_result
 
             caption_index = None
