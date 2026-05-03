@@ -97,3 +97,9 @@ def test_admin_reply_keyboard_router_contains_operational_actions() -> None:
     assert "await stop_forwarding()" in source
     assert "reply_markup=get_system_menu()" in source
     assert "reply_markup=get_main_menu()" in source
+
+
+def test_stateful_private_handler_uses_existing_admin_helper() -> None:
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "await is_admin(message)" in source
+    assert "is_admin_message(" not in source

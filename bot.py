@@ -7241,7 +7241,7 @@ async def handle_stateful_private_inputs(message: Message):
     action = state.get("action")
     text = (message.text or "").strip()
     if state.get("state") == "awaiting_video_clip_duration" and state.get("flow") == "rule_video_clip_duration":
-        if not await is_admin_message(message):
+        if not await is_admin(message):
             return
         rule_id = int(state.get("rule_id") or 0)
         parsed = parse_video_clip_duration_input(text)
