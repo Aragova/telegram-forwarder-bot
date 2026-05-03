@@ -2277,7 +2277,7 @@ class SenderService:
                     getattr(rule, "id", None),
                     message_id,
                 )
-                return True
+                return {"ok": True, "sent_message_ids": sent_message_ids}
 
         logger.info(
             "CAPTION_MODE_DETECT | album | rule_id=%s | requires_builder=False | items=%s",
@@ -3099,6 +3099,7 @@ class SenderService:
     ) -> bool:
         normalized_schedule_mode = str(schedule_mode or "interval")
         normalized_mode = str(mode or "video")
+        idempotency_key = build_delivery_idempotency_key(operation_kind="video_send", delivery_id=int(delivery_id), target_id=str(target_id))
         logger.info(
             "JOB EXECUTOR | video_delivery | start | rule_id=%s | delivery_id=%s | message_id=%s | mode=%s | schedule_mode=%s",
             rule_id,
@@ -3107,34 +3108,63 @@ class SenderService:
             normalized_mode,
             normalized_schedule_mode,
         )
+        has_attempt_ledger = all(
+            hasattr(self.db, name)
+            for name in (
+                "get_delivery_attempt_by_idempotency_key",
+                "create_delivery_attempt",
+                "mark_delivery_attempt_sending",
+                "mark_delivery_attempt_accepted",
+                "mark_delivery_attempt_failed",
+            )
+        )
         try:
+            attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key) if has_attempt_ledger else None
+            cached_sent_ids = extract_sent_message_ids_from_attempt(attempt)
+            if attempt and str(attempt.get("status") or "").lower() in {"accepted", "verified"} and cached_sent_ids:
+                logger.info(
+                    "DELIVERY_ATTEMPT_CACHE_HIT | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s | sent_message_ids=%s",
+                    delivery_id,
+                    rule_id,
+                    target_id,
+                    idempotency_key,
+                    cached_sent_ids,
+                )
+                await run_db(self._mark_delivery_sent_sync, int(delivery_id), sent_message_id=int(cached_sent_ids[0]), sent_message_ids=cached_sent_ids, target_id=str(target_id), delivery_method="idempotency_cache")
+                return True
+
+            if has_attempt_ledger:
+                await run_db(self.db.create_delivery_attempt, delivery_id=int(delivery_id), rule_id=int(rule_id), tenant_id=1, job_id=None, idempotency_key=idempotency_key, operation_kind="video_send", status="created", telegram_method=None, target_id=str(target_id), source_message_ids=[int(message_id)] if message_id else None, sent_message_ids=None, error_text=None)
+                logger.info("DELIVERY_ATTEMPT_CREATED | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s", delivery_id, rule_id, target_id, idempotency_key)
+                await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="video_delivery")
+                logger.info("DELIVERY_ATTEMPT_SENDING | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s", delivery_id, rule_id, target_id, idempotency_key)
+
             rule = await run_db(self.db.get_rule, int(rule_id))
             if not rule:
                 raise RuntimeError(f"Правило #{rule_id} не найдено для video_delivery")
-            ok = await self._deliver_single_video(
-                rule,
-                int(delivery_id),
-                int(message_id),
-                str(source_channel),
-                str(target_id),
-                target_thread_id,
-            )
+            outcome = await self._deliver_single_video(rule, int(delivery_id), int(message_id), str(source_channel), str(target_id), target_thread_id)
+            ok = bool(outcome.get("ok")) if isinstance(outcome, dict) else bool(outcome)
+            raw_sent_ids = outcome.get("sent_message_ids") if isinstance(outcome, dict) else None
+            valid_sent_ids = normalize_valid_sent_message_ids(raw_sent_ids)
+            if valid_sent_ids and has_attempt_ledger:
+                await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=valid_sent_ids, telegram_method="video_delivery")
+                logger.info("DELIVERY_ATTEMPT_ACCEPTED | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s | sent_message_ids=%s", delivery_id, rule_id, target_id, idempotency_key, valid_sent_ids)
+            elif raw_sent_ids is not None and has_attempt_ledger:
+                logger.warning("DELIVERY_ATTEMPT_ACCEPTED_SKIPPED_INVALID_IDS | operation=video_send | job_type=video_delivery | delivery_id=%s | idempotency_key=%s | raw_sent_message_ids=%s", delivery_id, idempotency_key, raw_sent_ids)
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
+            if not ok and has_attempt_ledger:
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
+                logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s", delivery_id, rule_id, target_id, idempotency_key)
             if ok:
-                logger.info(
-                    "JOB EXECUTOR | video_delivery | success | rule_id=%s | delivery_id=%s",
-                    rule_id,
-                    delivery_id,
-                )
+                logger.info("JOB EXECUTOR | video_delivery | success | rule_id=%s | delivery_id=%s", rule_id, delivery_id)
             else:
-                logger.warning(
-                    "JOB EXECUTOR | video_delivery | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат",
-                    rule_id,
-                    delivery_id,
-                )
+                logger.warning("JOB EXECUTOR | video_delivery | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат", rule_id, delivery_id)
             return bool(ok)
         except Exception as exc:
+            if has_attempt_ledger:
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=str(exc))
+                logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s", delivery_id, rule_id, target_id, idempotency_key)
             logger.warning(
                 "JOB EXECUTOR | video_delivery | failed | rule_id=%s | delivery_id=%s | error=%s",
                 rule_id,
@@ -4172,7 +4202,7 @@ class SenderService:
                 )
 
                 await run_db(self._mark_delivery_sent_sync, delivery_id)
-                return True
+                return {"ok": True, "sent_message_ids": []}
 
             except Exception as exc:
                 await self._log_delivery_pipeline_step(
@@ -4353,7 +4383,7 @@ class SenderService:
                 )
 
                 await run_db(self._mark_delivery_sent_sync, delivery_id)
-                return True
+                return {"ok": True, "sent_message_ids": []}
 
             source_video_path = await self._download_video_source(
                 message,
@@ -4456,7 +4486,7 @@ class SenderService:
                     selected_mode=selected_mode,
                     caption_requires_premium=requires_premium,
                 )
-                return True
+                return {"ok": True, "sent_message_ids": sent_message_ids}
 
             await run_db(
                 self._finalize_video_failure_sync,
