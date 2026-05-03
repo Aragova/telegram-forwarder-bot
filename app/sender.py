@@ -3478,7 +3478,75 @@ class SenderService:
     ) -> dict:
         delivery_id = int(payload.get("delivery_id") or 0)
         rule_id = int(payload.get("rule_id") or 0)
+        target_id = str(payload.get("target_id") or "")
+        tenant_id = int(payload.get("tenant_id") or 1)
+        source_message_id = int(payload.get("message_id")) if payload.get("message_id") else None
+        idempotency_key = build_delivery_idempotency_key(
+            operation_kind="video_send",
+            delivery_id=int(delivery_id),
+            target_id=target_id,
+        )
+        has_attempt_ledger = all(
+            hasattr(self.db, method_name)
+            for method_name in (
+                "get_delivery_attempt_by_idempotency_key",
+                "create_delivery_attempt",
+                "mark_delivery_attempt_sending",
+                "mark_delivery_attempt_accepted",
+                "mark_delivery_attempt_failed",
+            )
+        )
         logger.info("VIDEO SEND START | старт отправки для delivery_id=%s | rule_id=%s | stage=send", delivery_id, rule_id)
+        if has_attempt_ledger:
+            attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
+            cached_sent_ids = extract_sent_message_ids_from_attempt(attempt)
+            if isinstance(attempt, dict) and str(attempt.get("status") or "") in {"accepted", "verified"} and cached_sent_ids:
+                logger.info(
+                    "DELIVERY_ATTEMPT_CACHE_HIT | operation_kind=video_send | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s | sent_message_ids=%s",
+                    delivery_id,
+                    rule_id,
+                    target_id,
+                    idempotency_key,
+                    cached_sent_ids,
+                )
+                return {
+                    "ok": True,
+                    "sent_message_ids": cached_sent_ids,
+                    "sent_message_id": int(cached_sent_ids[0]),
+                    "idempotency_key": idempotency_key,
+                    "cache_hit": True,
+                    "fallback_to_legacy": False,
+                }
+            await run_db(
+                self.db.create_delivery_attempt,
+                delivery_id=int(delivery_id),
+                rule_id=int(rule_id),
+                tenant_id=int(tenant_id),
+                job_id=None,
+                idempotency_key=idempotency_key,
+                operation_kind="video_send",
+                status="created",
+                telegram_method=None,
+                target_id=target_id,
+                source_message_ids=[source_message_id] if source_message_id else None,
+                sent_message_ids=None,
+                error_text=None,
+            )
+            logger.info(
+                "DELIVERY_ATTEMPT_CREATED | operation_kind=video_send | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s",
+                delivery_id,
+                rule_id,
+                target_id,
+                idempotency_key,
+            )
+            await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="video_send")
+            logger.info(
+                "DELIVERY_ATTEMPT_SENDING | operation_kind=video_send | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s",
+                delivery_id,
+                rule_id,
+                target_id,
+                idempotency_key,
+            )
         if int(artifact_version or 1) != 1 or int(pipeline_version or 1) != 1:
             logger.warning(
                 "VIDEO FALLBACK TO LEGACY | неподдерживаемая версия контракта artifact=%s pipeline=%s | delivery_id=%s",
@@ -3517,9 +3585,33 @@ class SenderService:
         )
         if not sent_msg:
             logger.warning("VIDEO STAGE RETRY | неуспешная отправка для delivery_id=%s", delivery_id)
+            if has_attempt_ledger:
+                await run_db(
+                    self.db.mark_delivery_attempt_failed,
+                    idempotency_key,
+                    status="failed_before_send",
+                    error_text="send_with_retry returned empty result",
+                )
+                logger.info(
+                    "DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation_kind=video_send | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s",
+                    delivery_id,
+                    rule_id,
+                    target_id,
+                    idempotency_key,
+                )
             return {"ok": False, "fallback_to_legacy": False, "retryable": True}
 
         sent_message_ids = self._extract_sent_message_ids(sent_msg)
+        if has_attempt_ledger and sent_message_ids:
+            await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=sent_message_ids, telegram_method="video_send")
+            logger.info(
+                "DELIVERY_ATTEMPT_ACCEPTED | operation_kind=video_send | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s | sent_message_ids=%s",
+                delivery_id,
+                rule_id,
+                target_id,
+                idempotency_key,
+                sent_message_ids,
+            )
         valid_sent_message_ids = await self._confirm_target_delivery_message_ids_with_retry(
             rule_id=rule_id,
             delivery_id=delivery_id,
