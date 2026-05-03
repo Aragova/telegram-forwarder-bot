@@ -4446,7 +4446,7 @@ class SenderService:
             requires_premium = caption_payload["requires_premium"]
             selected_mode = caption_payload["selected_mode"]
 
-            trim_seconds = int(getattr(rule, "video_trim_seconds", 120) or 120)
+            clip_duration_seconds = int(getattr(rule, "video_clip_duration_seconds", None) or 118)
 
             stage_logger = self._build_video_stage_logger(
                 rule=rule,
@@ -4470,7 +4470,8 @@ class SenderService:
                     "target_thread_id": target_thread_id,
                     "source_message_id": message_id,
                     "media_kind": media_kind,
-                    "trim_seconds": trim_seconds,
+                    "trim_seconds": int(getattr(rule, "video_trim_seconds", 120) or 120),
+                    "video_clip_duration_seconds": clip_duration_seconds,
                     "horizontal_intro_id": getattr(horizontal_intro, "id", None),
                     "vertical_intro_id": getattr(vertical_intro, "id", None),
                     "horizontal_intro_name": getattr(horizontal_intro, "display_name", None),
@@ -4542,6 +4543,7 @@ class SenderService:
                     caption_entities_json=caption_entities_json,
                     caption_send_mode=selected_mode,
                     input_file_path=str(source_video_path),
+                    clip_duration_seconds=clip_duration_seconds,
                     stage_logger=stage_logger,
                 )
             finally:

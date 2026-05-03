@@ -124,6 +124,7 @@ class Rule:
 
     mode: str = "repost"
     video_trim_seconds: int = 120
+    video_clip_duration_seconds: int = 118
     video_add_intro: bool = False
     video_intro_horizontal: str | None = None
     video_intro_vertical: str | None = None
