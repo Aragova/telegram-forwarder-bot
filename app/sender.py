@@ -3787,7 +3787,7 @@ class SenderService:
                     target_id=str(target_id),
                     delivery_method="copy_single",
                 )
-                await run_db(self._touch_rule_after_send_sync, rule.id, int(rule.interval_seconds or 0))
+                await run_db(self._touch_rule_after_send_sync, rule.id, int(getattr(rule, "interval", 0) or 0))
                 return True
             if copy_result.get("attempted"):
                 error_text = "copy_single_uncertain_no_fallback: copy_message was attempted but target confirmation failed; manual review required"
