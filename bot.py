@@ -81,6 +81,11 @@ from app.reaction_ui import (
     build_rule_reaction_accounts_keyboard_with_items,
     build_rule_reaction_accounts_text,
 )
+from app.video_clip_duration import (
+    format_duration_ru,
+    is_video_clip_duration_in_bounds,
+    parse_video_clip_duration_input,
+)
 from app import product_ui
 from app import access_control, user_ui
 from app.user_handlers import (
@@ -3462,6 +3467,9 @@ def build_rule_card_text(row) -> str:
         caption_mode_value = get_rule_caption_mode_value(rule_id, row=row)
         caption_mode_text = caption_delivery_mode_to_text(caption_mode_value)
         caption_mode_line = f"\n✍️ Режим подписи: {safe_html(caption_mode_text)}"
+    elif mode == "video":
+        clip_seconds = int((row["video_clip_duration_seconds"] if "video_clip_duration_seconds" in row.keys() else None) or 118)
+        caption_mode_line = f"\n🎞 Длина видео: {safe_html(format_duration_ru(clip_seconds))}"
 
     return (
         f"<b>Правило #{row['id']}</b>\n"
@@ -3732,6 +3740,13 @@ def build_rule_extra_keyboard(rule_id: int) -> InlineKeyboardMarkup:
             callback_data=f"toggle_rule_mode:{rule_id}",
         )
     ])
+    if mode == "video":
+        rows.append([
+            InlineKeyboardButton(
+                text="🎞 Длина видео",
+                callback_data=f"rule_video_clip_duration:{rule_id}",
+            )
+        ])
 
     if mode == "repost":
         rows.append([
@@ -3787,6 +3802,7 @@ def build_rule_extra_keyboard(rule_id: int) -> InlineKeyboardMarkup:
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 def build_caption_mode_keyboard(rule_id: int) -> InlineKeyboardMarkup:
@@ -6142,6 +6158,9 @@ async def handle_rule_card(callback: CallbackQuery):
         return
     if not await ensure_rule_callback_access(callback, rule_id):
         return
+    state = user_states.get(callback.from_user.id if callback.from_user else 0, {})
+    if state.get("state") == "awaiting_video_clip_duration" and state.get("flow") == "rule_video_clip_duration":
+        reset_user_state(callback.from_user.id if callback.from_user else 0)
 
     # отвечаем мгновенно
     await answer_callback_safe_once(callback)
@@ -6209,6 +6228,45 @@ async def handle_rule_extra_menu(callback: CallbackQuery):
         if "message is not modified" in str(exc).lower():
             return
         logger.exception("Ошибка открытия доп. функций rule_id=%s: %s", rule_id, exc)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_video_clip_duration:"))
+async def handle_rule_video_clip_duration(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return
+    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "video":
+        await answer_callback_safe(callback, "Эта настройка доступна только для режима Видеоредактор", show_alert=True)
+        return
+    user_states[callback.from_user.id] = {
+        "state": "awaiting_video_clip_duration",
+        "flow": "rule_video_clip_duration",
+        "rule_id": rule_id,
+        "return_to": "rule_card",
+    }
+    current = int(getattr(rule, "video_clip_duration_seconds", None) or 118)
+    logger.info("VIDEO_CLIP_DURATION_UI_OPEN | rule_id=%s | admin_id=%s | current=%s", rule_id, callback.from_user.id, current)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=(
+            "🎞 Длина видео\n\n"
+            f"Правило #{rule_id}\n"
+            f"Текущая длина: {format_duration_ru(current)}\n\n"
+            "Эта настройка управляет только куском из исходного видео.\n"
+            "Заставка добавляется отдельно и не меняется.\n\n"
+            "Введите новую длину:\n• 60\n• 1:30\n• 2:00\n\n"
+            "Допустимо: от 10 сек до 10 мин."
+        ),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")]]),
+    )
 
 
 async def _apply_caption_delivery_mode(
@@ -7182,6 +7240,48 @@ async def handle_stateful_private_inputs(message: Message):
 
     action = state.get("action")
     text = (message.text or "").strip()
+    if state.get("state") == "awaiting_video_clip_duration" and state.get("flow") == "rule_video_clip_duration":
+        if not await is_admin_message(message):
+            return
+        rule_id = int(state.get("rule_id") or 0)
+        parsed = parse_video_clip_duration_input(text)
+        if parsed is None:
+            logger.info("VIDEO_CLIP_DURATION_INPUT_INVALID | rule_id=%s | admin_id=%s | raw=%s", rule_id, user_id, text)
+            await message.reply("❌ Не удалось распознать длительность.\n\nВведите число секунд, например:\n60\n\nИли формат минуты:секунды:\n1:30\n2:00")
+            return
+        if parsed < 10:
+            await message.reply("❌ Минимальная длина видео — 10 секунд.\nВведите значение от 10 секунд до 10 минут.")
+            return
+        if parsed > 600:
+            await message.reply("❌ Максимальная длина видео — 10 минут.\nВведите значение от 10 секунд до 10 минут.")
+            return
+        if not is_video_clip_duration_in_bounds(parsed):
+            await message.reply("❌ Введите значение от 10 секунд до 10 минут.")
+            return
+        before = await run_db(db.get_rule, rule_id)
+        old_value = int(getattr(before, "video_clip_duration_seconds", None) or 118) if before else 118
+        ok = await run_db(db.update_rule_video_clip_duration_seconds, rule_id, parsed)
+        if not ok:
+            await message.reply("❌ Не удалось сохранить длину видео.")
+            return
+        await run_db(
+            db.log_rule_change,
+            rule_id=rule_id,
+            admin_id=message.from_user.id if message.from_user else settings.admin_id,
+            event_type="rule_video_clip_duration_updated",
+            old_value={"video_clip_duration_seconds": old_value},
+            new_value={"video_clip_duration_seconds": parsed},
+            extra={"admin_id": message.from_user.id if message.from_user else settings.admin_id, "source": "admin_ui"},
+        )
+        logger.info("VIDEO_CLIP_DURATION_UPDATED | rule_id=%s | admin_id=%s | old_value=%s | new_value=%s", rule_id, user_id, old_value, parsed)
+        reset_user_state(user_id)
+        invalidate_rule_card_cache(rule_id)
+        await message.reply("✅ Длина видео обновлена\n\nТеперь из исходника будет вырезаться: "
+                            f"{format_duration_ru(parsed)}\nЗаставка останется отдельно.")
+        text, reply_markup, _ = await build_rule_card_payload_cached(rule_id)
+        if text and reply_markup:
+            await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+        return
 
     if action == "admin_billing_usd_price_input":
         raw = text.replace(",", ".")

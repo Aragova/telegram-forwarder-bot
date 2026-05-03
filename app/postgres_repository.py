@@ -135,6 +135,7 @@ class PostgresRepository(RepositoryProtocol):
             target_title=data.get("target_title"),
             mode=data.get("mode", "repost"),
             video_trim_seconds=int(data.get("video_trim_seconds") or 120),
+            video_clip_duration_seconds=int(data.get("video_clip_duration_seconds") or 118),
             video_add_intro=bool(data.get("video_add_intro") or 0),
             video_intro_horizontal=data.get("video_intro_horizontal"),
             video_intro_vertical=data.get("video_intro_vertical"),
@@ -356,6 +357,7 @@ class PostgresRepository(RepositoryProtocol):
             mode TEXT NOT NULL DEFAULT 'repost',
 
             video_trim_seconds BIGINT DEFAULT 120,
+            video_clip_duration_seconds INTEGER DEFAULT 118,
             video_add_intro BOOLEAN DEFAULT FALSE,
             video_intro_horizontal TEXT NULL,
             video_intro_vertical TEXT NULL,
@@ -680,6 +682,7 @@ class PostgresRepository(RepositoryProtocol):
 
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'repost';
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_trim_seconds BIGINT DEFAULT 120;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_clip_duration_seconds INTEGER DEFAULT 118;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_add_intro BOOLEAN DEFAULT FALSE;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_horizontal TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_vertical TEXT NULL;
@@ -719,6 +722,13 @@ class PostgresRepository(RepositoryProtocol):
 
         with self.connect() as conn:
             with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET video_clip_duration_seconds = 118
+                    WHERE video_clip_duration_seconds IS NULL
+                    """
+                )
                 cur.execute(
                     """
                     UPDATE channels
@@ -2431,6 +2441,7 @@ class PostgresRepository(RepositoryProtocol):
                         fixed_times_json,
                         mode,
                         video_trim_seconds,
+                        video_clip_duration_seconds,
                         video_add_intro,
                         video_intro_horizontal,
                         video_intro_vertical,
@@ -2444,7 +2455,7 @@ class PostgresRepository(RepositoryProtocol):
                         %s, %s, %s, %s,
                         %s, %s, %s, FALSE, %s, NULL,
                         'interval', NULL, 'repost',
-                        120, FALSE, NULL, NULL, NULL, NULL, NULL, NULL, %s
+                        120, 118, FALSE, NULL, NULL, NULL, NULL, NULL, NULL, %s
                     )
                     ON CONFLICT DO NOTHING
                     RETURNING id
@@ -3240,6 +3251,21 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     UPDATE routing
                     SET video_trim_seconds = %s
+                    WHERE id = %s
+                    """,
+                    (int(seconds), rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def update_rule_video_clip_duration_seconds(self, rule_id: int, seconds: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET video_clip_duration_seconds = %s
                     WHERE id = %s
                     """,
                     (int(seconds), rule_id),
@@ -5332,6 +5358,7 @@ class PostgresRepository(RepositoryProtocol):
                         r.mode,
 
                         r.video_trim_seconds,
+                        r.video_clip_duration_seconds,
                         r.video_add_intro,
                         r.video_intro_horizontal,
                         r.video_intro_vertical,
@@ -5369,6 +5396,7 @@ class PostgresRepository(RepositoryProtocol):
                         r.fixed_times_json,
                         r.mode,
                         r.video_trim_seconds,
+                        r.video_clip_duration_seconds,
                         r.video_add_intro,
                         r.video_intro_horizontal,
                         r.video_intro_vertical,
@@ -5473,6 +5501,7 @@ class PostgresRepository(RepositoryProtocol):
                 "fixed_times_json": rule.fixed_times_json,
                 "mode": rule.mode,
                 "video_trim_seconds": rule.video_trim_seconds,
+                "video_clip_duration_seconds": getattr(rule, "video_clip_duration_seconds", 118),
                 "video_add_intro": rule.video_add_intro,
                 "video_intro_horizontal": rule.video_intro_horizontal,
                 "video_intro_vertical": rule.video_intro_vertical,

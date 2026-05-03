@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import logging
 from .config import settings as config
+from .video_clip_duration import calculate_center_clip_window
 from aiogram import Bot
 from aiogram.types import FSInputFile, MessageEntity
 from telethon import types as tl_types
@@ -1388,6 +1389,7 @@ class VideoProcessor:
         caption_entities_json=None,
         caption_send_mode="plain",
         input_file_path=None,
+        clip_duration_seconds=None,
         stage_logger=None,
     ):
         async with self.semaphore:
@@ -1403,6 +1405,7 @@ class VideoProcessor:
                 caption_entities_json,
                 caption_send_mode,
                 input_file_path,
+                clip_duration_seconds,
                 stage_logger,
                 send_output=True,
             )
@@ -1415,6 +1418,7 @@ class VideoProcessor:
         intro_name_horizontal=None,
         intro_name_vertical=None,
         stage_logger=None,
+        clip_duration_seconds=None,
     ):
         async with self.semaphore:
             return await self._process_video_internal(
@@ -1430,6 +1434,7 @@ class VideoProcessor:
                 caption_send_mode="plain",
                 input_file_path=input_file_path,
                 stage_logger=stage_logger,
+                clip_duration_seconds=clip_duration_seconds,
                 send_output=False,
             )
 
@@ -1446,6 +1451,7 @@ class VideoProcessor:
         caption_entities_json=None,
         caption_send_mode="plain",
         input_file_path=None,
+        clip_duration_seconds=None,
         stage_logger=None,
         send_output=True,
     ):
@@ -1613,17 +1619,15 @@ class VideoProcessor:
             logger.info(f"   Причина:  {profile['reason']}")
 
             intro_duration = config.intro_duration
-            target_duration = config.max_video_duration
-            main_cut_duration = target_duration - intro_duration
-
-            if main_cut_duration < 0:
-                logger.warning("⚠️ Заставка длиннее целевого видео")
-                main_cut_duration = target_duration
-                add_intro = False
+            requested_clip = max(10, min(600, int(clip_duration_seconds or 118)))
+            source_duration = float(video_info["duration"])
+            clip_window = calculate_center_clip_window(source_duration, requested_clip)
 
             # CUT
-            if video_info['duration'] > main_cut_duration:
-                start_time = (video_info['duration'] - main_cut_duration) / 2
+            if clip_window.should_cut:
+                main_cut_duration = float(clip_window.duration)
+                start_time = float(clip_window.start_time)
+                logger.info("VIDEO_CLIP_PLAN | source_duration=%s | requested_clip=%s | start=%s | end=%s | intro_unchanged=true", source_duration, requested_clip, start_time, start_time + main_cut_duration)
                 logger.info(f"✂️ [3/8] Обрезка ({start_time:.1f}с -> {main_cut_duration}с)")
                 self._stage_started(
                     stage_logger,
@@ -1637,6 +1641,7 @@ class VideoProcessor:
                 success, exact_start, exact_duration = await self.cut_video_fast(input_path, clipped_main_path, start_time, main_cut_duration, stage_logger=stage_logger)
 
                 if success:
+                    logger.info("VIDEO_CLIP_CUT_OK | start=%s | duration=%s", exact_start, exact_duration)
                     clipped_info = await self.get_video_info(clipped_main_path, use_cache=False)
 
                     self._stage_completed(
@@ -1711,11 +1716,11 @@ class VideoProcessor:
                             error_text="Не удалось обрезать видео",
                         )
 
+                        logger.error("VIDEO_CLIP_CUT_FAILED | start=%s | duration=%s", start_time, main_cut_duration)
                         return False
             else:
-                logger.info(f"📹 [3/8] Видео короче {main_cut_duration}с, копирую")
+                logger.info("VIDEO_CLIP_SKIP_SOURCE_SHORTER | source_duration=%s | requested_clip=%s | action=use_full_source", source_duration, requested_clip)
                 shutil.copy2(input_path, clipped_main_path)
-
                 clipped_info = await self.get_video_info(clipped_main_path, use_cache=False)
                 needs_normalize = (
                     clipped_info['width'] != profile['target_width'] or
