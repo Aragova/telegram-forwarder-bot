@@ -550,6 +550,31 @@ class SenderService:
                 return valid_ids
         return []
 
+    async def _run_post_send_step_safe(
+        self,
+        *,
+        step_name: str,
+        rule_id: int | None,
+        delivery_id: int | None,
+        idempotency_key: str | None = None,
+        accepted_sent_message_ids: list[int] | None = None,
+        coro_factory=None,
+    ) -> dict:
+        try:
+            result = await coro_factory()
+            return {"ok": True, "result": result}
+        except Exception as exc:
+            logger.warning(
+                "POST_SEND_STEP_FAILED_NON_FATAL | step_name=%s | rule_id=%s | delivery_id=%s | idempotency_key=%s | accepted_sent_message_ids=%s | error=%s",
+                step_name,
+                rule_id,
+                delivery_id,
+                idempotency_key,
+                accepted_sent_message_ids or [],
+                exc,
+            )
+            return {"ok": False, "error": str(exc)}
+
     def _normalize_video_caption_entities(self, raw_entities) -> list[dict]:
         if not raw_entities:
             return []
@@ -3146,11 +3171,29 @@ class SenderService:
             ok = bool(outcome.get("ok")) if isinstance(outcome, dict) else bool(outcome)
             raw_sent_ids = outcome.get("sent_message_ids") if isinstance(outcome, dict) else None
             valid_sent_ids = normalize_valid_sent_message_ids(raw_sent_ids)
+            post_send_accepted = bool(valid_sent_ids)
             if valid_sent_ids and has_attempt_ledger:
                 await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=valid_sent_ids, telegram_method="video_delivery")
                 logger.info("DELIVERY_ATTEMPT_ACCEPTED | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s | sent_message_ids=%s", delivery_id, rule_id, target_id, idempotency_key, valid_sent_ids)
             elif raw_sent_ids is not None and has_attempt_ledger:
                 logger.warning("DELIVERY_ATTEMPT_ACCEPTED_SKIPPED_INVALID_IDS | operation=video_send | job_type=video_delivery | delivery_id=%s | idempotency_key=%s | raw_sent_message_ids=%s", delivery_id, idempotency_key, raw_sent_ids)
+            if post_send_accepted and not ok:
+                logger.warning(
+                    "DELIVERY_SENT_UNVERIFIED_AFTER_ACCEPTED | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | sent_message_ids=%s",
+                    delivery_id,
+                    rule_id,
+                    target_id,
+                    valid_sent_ids,
+                )
+                ok = True
+                await run_db(
+                    self._mark_delivery_sent_sync,
+                    int(delivery_id),
+                    sent_message_id=int(valid_sent_ids[0]),
+                    sent_message_ids=valid_sent_ids,
+                    target_id=str(target_id),
+                    delivery_method="video_delivery_unverified",
+                )
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
             if not ok and has_attempt_ledger:
@@ -3651,24 +3694,42 @@ class SenderService:
                 delivery_id,
                 sent_message_ids,
             )
-        valid_sent_message_ids = await self._confirm_target_delivery_message_ids_with_retry(
+        confirm_result = await self._run_post_send_step_safe(
+            step_name="verify_after_video_send",
             rule_id=rule_id,
             delivery_id=delivery_id,
-            source_channel=str(payload.get("source_channel") or ""),
-            target_id=str(payload.get("target_id") or ""),
-            source_message_ids=[int(payload.get("message_id"))] if payload.get("message_id") else [],
-            candidate_sent_message_ids=sent_message_ids,
-            method="video_send",
-            max_age_seconds=900,
+            idempotency_key=idempotency_key,
+            accepted_sent_message_ids=valid_sent_ids,
+            coro_factory=lambda: self._confirm_target_delivery_message_ids_with_retry(
+                rule_id=rule_id,
+                delivery_id=delivery_id,
+                source_channel=str(payload.get("source_channel") or ""),
+                target_id=str(payload.get("target_id") or ""),
+                source_message_ids=[int(payload.get("message_id"))] if payload.get("message_id") else [],
+                candidate_sent_message_ids=sent_message_ids,
+                method="video_send",
+                max_age_seconds=900,
+            ),
         )
+        valid_sent_message_ids = confirm_result.get("result") or []
         sent_message_id = valid_sent_message_ids[0] if valid_sent_message_ids else None
         logger.info("DELIVERY_SENT_MESSAGE_IDS_EXTRACTED | rule_id=%s | delivery_id=%s | method=%s | source_message_ids=%s | sent_message_ids=%s | result_type=%s", rule_id, delivery_id, "video_send", [], sent_message_ids, type(sent_msg).__name__)
         if sent_message_id:
-            await self._add_reaction_if_possible(payload.get("target_id"), int(sent_message_id))
+            await self._run_post_send_step_safe(
+                step_name="reaction_after_video_send",
+                rule_id=rule_id,
+                delivery_id=delivery_id,
+                idempotency_key=idempotency_key,
+                accepted_sent_message_ids=valid_sent_ids,
+                coro_factory=lambda: self._add_reaction_if_possible(payload.get("target_id"), int(sent_message_id)),
+            )
+        elif valid_sent_ids:
+            sent_message_id = int(valid_sent_ids[0])
+            logger.warning("DELIVERY_SENT_UNVERIFIED_AFTER_ACCEPTED | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | sent_message_ids=%s", rule_id, delivery_id, "video_send", payload.get("target_id"), valid_sent_ids)
         else:
             logger.warning("DELIVERY_FALSE_SUCCESS_PREVENTED | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s | action=retry_or_faulty", rule_id, delivery_id, "video_send", payload.get("target_id"), sent_message_ids)
             return {"ok": False, "fallback_to_legacy": False, "retryable": True}
-        await run_db(self._mark_delivery_sent_sync, delivery_id, sent_message_id=sent_message_id, sent_message_ids=valid_sent_message_ids, target_id=str(payload.get("target_id") or ""), delivery_method="video_send")
+        await run_db(self._mark_delivery_sent_sync, delivery_id, sent_message_id=sent_message_id, sent_message_ids=(valid_sent_message_ids or valid_sent_ids), target_id=str(payload.get("target_id") or ""), delivery_method="video_send")
         await run_db(self._touch_rule_after_send_sync, rule_id, int(payload.get("interval") or 0))
         logger.info("VIDEO SEND DONE | отправка завершена для delivery_id=%s", delivery_id)
         return {"ok": True, "fallback_to_legacy": False}
@@ -3760,20 +3821,30 @@ class SenderService:
             logger.info("COPY_SINGLE_RESULT_RAW_TYPE | rule_id=%s | delivery_id=%s | raw_type=%s", rule.id, delivery_id, copy_result.get("raw_result_type"))
             logger.info("COPY_SINGLE_EXTRACTED_SENT_IDS | rule_id=%s | delivery_id=%s | sent_ids=%s", rule.id, delivery_id, copy_sent_ids)
             valid_copy_sent_ids: list[int] = []
+            post_send_warnings: list[str] = []
             if copy_sent_ids:
                 logger.info("COPY_SINGLE_TARGET_CONFIRM_START | rule_id=%s | delivery_id=%s | target_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s", rule.id, delivery_id, target_id, source_message_ids, copy_sent_ids)
-                valid_copy_sent_ids = await self._confirm_target_delivery_message_ids_with_retry(
+                confirm_result = await self._run_post_send_step_safe(
+                    step_name="verify_after_copy_single",
                     rule_id=rule.id,
                     delivery_id=delivery_id,
-                    source_channel=str(source_channel or ""),
-                    target_id=str(target_id),
-                    source_message_ids=source_message_ids,
-                    candidate_sent_message_ids=copy_sent_ids,
-                    method="copy_single",
+                    idempotency_key=idempotency_key,
+                    accepted_sent_message_ids=valid_sent_ids,
+                    coro_factory=lambda: self._confirm_target_delivery_message_ids_with_retry(
+                        rule_id=rule.id,
+                        delivery_id=delivery_id,
+                        source_channel=str(source_channel or ""),
+                        target_id=str(target_id),
+                        source_message_ids=source_message_ids,
+                        candidate_sent_message_ids=copy_sent_ids,
+                        method="copy_single",
+                    ),
                 )
+                valid_copy_sent_ids = confirm_result.get("result") or []
                 if valid_copy_sent_ids:
                     logger.info("COPY_SINGLE_TARGET_CONFIRM_OK | rule_id=%s | delivery_id=%s | valid_sent_message_ids=%s", rule.id, delivery_id, valid_copy_sent_ids)
                 else:
+                    post_send_warnings.append("verify_failed_after_accepted")
                     logger.warning("COPY_SINGLE_TARGET_CONFIRM_FAILED | rule_id=%s | delivery_id=%s | candidate_sent_message_ids=%s", rule.id, delivery_id, copy_sent_ids)
 
             await self._log_delivery_pipeline_step(
@@ -3797,14 +3868,23 @@ class SenderService:
             if valid_copy_sent_ids:
                 candidate_sent_message_ids = valid_copy_sent_ids
                 authoritative_sent_message_id = int(valid_copy_sent_ids[0])
-                await self._add_reaction_for_rule_if_possible(
-                    rule=rule,
-                    target_id=target_id,
-                    sent_message_id=authoritative_sent_message_id,
-                    source_channel=str(source_channel or ""),
-                    source_message_ids=source_message_ids,
+                reaction_result = await self._run_post_send_step_safe(
+                    step_name="reaction_after_copy_single",
+                    rule_id=rule.id,
                     delivery_id=delivery_id,
+                    idempotency_key=idempotency_key,
+                    accepted_sent_message_ids=valid_sent_ids,
+                    coro_factory=lambda: self._add_reaction_for_rule_if_possible(
+                        rule=rule,
+                        target_id=target_id,
+                        sent_message_id=authoritative_sent_message_id,
+                        source_channel=str(source_channel or ""),
+                        source_message_ids=source_message_ids,
+                        delivery_id=delivery_id,
+                    ),
                 )
+                if not reaction_result.get("ok"):
+                    post_send_warnings.append("reaction_failed_after_accepted")
 
                 await self._log_delivery_final_success(
                     rule_id=rule.id,
@@ -3830,6 +3910,17 @@ class SenderService:
                     delivery_method="copy_single",
                 )
                 await run_db(self._touch_rule_after_send_sync, rule.id, int(getattr(rule, "interval", 0) or 0))
+                return True
+            if valid_sent_ids:
+                logger.warning("DELIVERY_SENT_UNVERIFIED_AFTER_ACCEPTED | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_ids=%s | warnings=%s", rule.id, delivery_id, target_id, valid_sent_ids, post_send_warnings)
+                await run_db(
+                    self._mark_delivery_sent_sync,
+                    delivery_id,
+                    sent_message_id=int(valid_sent_ids[0]),
+                    sent_message_ids=valid_sent_ids,
+                    target_id=str(target_id),
+                    delivery_method="copy_single_unverified",
+                )
                 return True
             if copy_result.get("attempted"):
                 error_text = "copy_single_uncertain_no_fallback: copy_message was attempted but target confirmation failed; manual review required"
@@ -4637,6 +4728,7 @@ class SenderService:
             )
 
             if copy_result["ok"]:
+                accepted_copy_sent_ids = normalize_valid_sent_message_ids(copy_result.get("sent_message_ids") or [])
                 await self._log_delivery_pipeline_step(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
@@ -4649,12 +4741,20 @@ class SenderService:
                     extra={"attempt_no": 1},
                 )
 
-                verified = await self._verify_album_delivery(
-                    target_id=target_id,
-                    expected_count=len(message_ids),
-                    sent_message_ids=copy_result.get("sent_message_ids"),
-                    target_thread_id=target_thread_id,
+                verify_step = await self._run_post_send_step_safe(
+                    step_name="verify_after_copy_album",
+                    rule_id=rule.id,
+                    delivery_id=delivery_ids[0] if delivery_ids else None,
+                    idempotency_key=idempotency_key,
+                    accepted_sent_message_ids=accepted_copy_sent_ids,
+                    coro_factory=lambda: self._verify_album_delivery(
+                        target_id=target_id,
+                        expected_count=len(message_ids),
+                        sent_message_ids=copy_result.get("sent_message_ids"),
+                        target_thread_id=target_thread_id,
+                    ),
                 )
+                verified = verify_step.get("result") or {"ok": False, "error_text": "verify_after_copy_album_failed_non_fatal"}
                 attempts_debug.append({"stage": "verify_after_copy", **verified})
 
                 await self._log_delivery_pipeline_step(
@@ -4717,11 +4817,18 @@ class SenderService:
 
                 if verified["ok"]:
                     sent_message_id = verified.get("first_message_id") or copy_result.get("sent_message_id")
-                    await self._add_reaction_for_rule_if_possible(
+                    await self._run_post_send_step_safe(
+                        step_name="reaction_after_copy_album",
+                        rule_id=rule.id,
+                        delivery_id=delivery_ids[0] if delivery_ids else None,
+                        idempotency_key=idempotency_key,
+                        accepted_sent_message_ids=accepted_copy_sent_ids,
+                        coro_factory=lambda: self._add_reaction_for_rule_if_possible(
                             rule=rule,
                             target_id=target_id,
                             sent_message_id=sent_message_id,
-                        )
+                        ),
+                    )
 
                     await self._log_delivery_final_success(
                         rule_id=rule.id,
@@ -4738,6 +4845,10 @@ class SenderService:
                         },
                     )
 
+                    await run_db(self._mark_many_deliveries_sent_sync, delivery_ids)
+                    return True
+                if accepted_copy_sent_ids:
+                    logger.warning("DELIVERY_SENT_UNVERIFIED_AFTER_ACCEPTED | rule_id=%s | delivery_ids=%s | target_id=%s | sent_message_ids=%s", rule.id, delivery_ids, target_id, accepted_copy_sent_ids)
                     await run_db(self._mark_many_deliveries_sent_sync, delivery_ids)
                     return True
         else:
