@@ -28,6 +28,18 @@ def build_delivery_idempotency_key(*, operation_kind: str, delivery_id: int | No
     return f"delivery:{int(delivery_id or 0)}:target:{target}:{kind or 'unknown'}"
 
 
+def normalize_valid_sent_message_ids(values) -> list[int]:
+    result: list[int] = []
+    for value in values or []:
+        try:
+            message_id = int(value)
+        except Exception:
+            continue
+        if message_id > 0:
+            result.append(message_id)
+    return result
+
+
 def extract_sent_message_ids_from_attempt(attempt: dict[str, Any] | None) -> list[int]:
     if not isinstance(attempt, dict):
         return []
@@ -41,10 +53,4 @@ def extract_sent_message_ids_from_attempt(attempt: dict[str, Any] | None) -> lis
             return []
     if not isinstance(raw, list):
         return []
-    result: list[int] = []
-    for value in raw:
-        try:
-            result.append(int(value))
-        except Exception:
-            continue
-    return result
+    return normalize_valid_sent_message_ids(raw)

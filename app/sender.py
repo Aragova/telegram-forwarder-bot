@@ -16,7 +16,7 @@ from .telegram_client import ReactionClientInfo
 from .video_processor import VideoProcessor
 from .scheduler_service import SchedulerService
 from .reaction_runtime_resolver import ReactionRuntimeResolver
-from .delivery_idempotency import build_delivery_idempotency_key, extract_sent_message_ids_from_attempt
+from .delivery_idempotency import build_delivery_idempotency_key, extract_sent_message_ids_from_attempt, normalize_valid_sent_message_ids
 from telethon.tl.types import (
     MessageEntityBold,
     MessageEntityItalic,
@@ -3602,14 +3602,23 @@ class SenderService:
             return {"ok": False, "fallback_to_legacy": False, "retryable": True}
 
         sent_message_ids = self._extract_sent_message_ids(sent_msg)
-        if has_attempt_ledger and sent_message_ids:
-            await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=sent_message_ids, telegram_method="video_send")
+        valid_sent_ids = normalize_valid_sent_message_ids(sent_message_ids)
+        if has_attempt_ledger and valid_sent_ids:
+            await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=valid_sent_ids, telegram_method="video_send")
             logger.info(
                 "DELIVERY_ATTEMPT_ACCEPTED | operation_kind=video_send | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s | sent_message_ids=%s",
                 delivery_id,
                 rule_id,
                 target_id,
                 idempotency_key,
+                valid_sent_ids,
+            )
+        elif has_attempt_ledger:
+            logger.warning(
+                "DELIVERY_ATTEMPT_ACCEPTED_SKIPPED_INVALID_IDS | operation_kind=%s | idempotency_key=%s | delivery_id=%s | raw_sent_message_ids=%s",
+                "video_send",
+                idempotency_key,
+                delivery_id,
                 sent_message_ids,
             )
         valid_sent_message_ids = await self._confirm_target_delivery_message_ids_with_retry(
@@ -3712,9 +3721,12 @@ class SenderService:
                 target_thread_id,
             )
             copy_sent_ids = [int(x) for x in (copy_result.get("sent_ids") or []) if str(x).isdigit()]
-            if idempotency_key and copy_sent_ids:
-                await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=copy_sent_ids, telegram_method="copy_single")
-                logger.info("DELIVERY_ATTEMPT_ACCEPTED | operation=single | key=%s | delivery_id=%s | sent_message_ids=%s", idempotency_key, delivery_id, copy_sent_ids)
+            valid_sent_ids = normalize_valid_sent_message_ids(copy_sent_ids)
+            if idempotency_key and valid_sent_ids:
+                await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=valid_sent_ids, telegram_method="copy_single")
+                logger.info("DELIVERY_ATTEMPT_ACCEPTED | operation=single | key=%s | delivery_id=%s | sent_message_ids=%s", idempotency_key, delivery_id, valid_sent_ids)
+            elif idempotency_key:
+                logger.warning("DELIVERY_ATTEMPT_ACCEPTED_SKIPPED_INVALID_IDS | operation=%s | key=%s | delivery_id=%s | raw_sent_message_ids=%s", "single", idempotency_key, delivery_id, copy_sent_ids)
             logger.info("COPY_SINGLE_RESULT_RAW_TYPE | rule_id=%s | delivery_id=%s | raw_type=%s", rule.id, delivery_id, copy_result.get("raw_result_type"))
             logger.info("COPY_SINGLE_EXTRACTED_SENT_IDS | rule_id=%s | delivery_id=%s | sent_ids=%s", rule.id, delivery_id, copy_sent_ids)
             valid_copy_sent_ids: list[int] = []
@@ -4568,9 +4580,12 @@ class SenderService:
             attempts_debug.append({"stage": "copy_album", **copy_result})
             if idempotency_key and copy_result.get("ok") and copy_result.get("sent_message_ids"):
                 sent_ids = [int(x) for x in (copy_result.get("sent_message_ids") or []) if str(x).isdigit()]
-                if sent_ids:
-                    await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=sent_ids, telegram_method="copy_album")
-                    logger.info("DELIVERY_ATTEMPT_ACCEPTED | operation=album | key=%s | sent_message_ids=%s", idempotency_key, sent_ids)
+                valid_sent_ids = normalize_valid_sent_message_ids(sent_ids)
+                if valid_sent_ids:
+                    await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=valid_sent_ids, telegram_method="copy_album")
+                    logger.info("DELIVERY_ATTEMPT_ACCEPTED | operation=album | key=%s | sent_message_ids=%s", idempotency_key, valid_sent_ids)
+                else:
+                    logger.warning("DELIVERY_ATTEMPT_ACCEPTED_SKIPPED_INVALID_IDS | operation=%s | key=%s | delivery_id=%s | raw_sent_message_ids=%s", "album", idempotency_key, delivery_id, sent_ids)
 
             await self._log_delivery_pipeline_step(
                 rule_id=rule.id,
