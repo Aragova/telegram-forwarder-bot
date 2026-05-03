@@ -1,4 +1,4 @@
-from app.delivery_idempotency import build_delivery_idempotency_key, extract_sent_message_ids_from_attempt
+from app.delivery_idempotency import build_delivery_idempotency_key, extract_sent_message_ids_from_attempt, normalize_valid_sent_message_ids
 
 
 def test_key_builder_single():
@@ -20,3 +20,12 @@ def test_extract_sent_ids():
     assert extract_sent_message_ids_from_attempt({"sent_message_ids_json": "[1,2,3]"}) == [1, 2, 3]
     assert extract_sent_message_ids_from_attempt({"sent_message_ids_json": None}) == []
     assert extract_sent_message_ids_from_attempt({"sent_message_ids_json": "oops"}) == []
+
+
+def test_normalize_valid_sent_message_ids_filters_zero_and_invalid():
+    assert normalize_valid_sent_message_ids([0, "0", None, "123", 456, -1]) == [123, 456]
+
+
+def test_extract_sent_message_ids_from_attempt_filters_zero_and_invalid():
+    attempt = {"sent_message_ids_json": [0, "0", None, "123", 456, -1]}
+    assert extract_sent_message_ids_from_attempt(attempt) == [123, 456]

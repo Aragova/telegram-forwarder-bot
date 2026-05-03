@@ -118,3 +118,34 @@ def test_video_send_marks_accepted_before_followup_error(tmp_path: Path):
     accepted_calls = [call for call in repo.calls if call[0] == "accepted"]
     assert accepted_calls
     assert accepted_calls[0][2] == [778]
+
+
+def test_video_send_skips_accept_for_invalid_zero_sent_id(tmp_path: Path):
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    class _ZeroVideoProcessor(FakeVideoProcessor):
+        async def send_with_retry(self, *_args, **_kwargs):
+            return {"message_id": 0}
+
+    service.video_processor = _ZeroVideoProcessor()
+    processed_file = tmp_path / "video.mp4"
+    processed_file.write_bytes(b"ok")
+
+    result = asyncio.run(
+        service.execute_video_send_from_job(
+            delivery_id=12,
+            rule_id=1,
+            tenant_id=1,
+            target_id="-1003",
+            message_id=123,
+            processed_video_path=str(processed_file),
+            artifact_version=1,
+            pipeline_version=1,
+        )
+    )
+
+    accepted_calls = [call for call in repo.calls if call[0] == "accepted"]
+    assert not accepted_calls
+    assert result["ok"] is False
+    assert result["retryable"] is True
