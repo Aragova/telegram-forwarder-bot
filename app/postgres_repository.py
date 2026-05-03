@@ -417,6 +417,24 @@ class PostgresRepository(RepositoryProtocol):
             target_id_snapshot TEXT NULL,
             delivery_method TEXT NULL
         );
+        CREATE TABLE IF NOT EXISTS delivery_attempts (
+            id BIGSERIAL PRIMARY KEY,
+            delivery_id BIGINT NOT NULL,
+            rule_id BIGINT NOT NULL,
+            tenant_id BIGINT NOT NULL DEFAULT 1,
+            job_id BIGINT NULL,
+            idempotency_key TEXT NOT NULL,
+            operation_kind TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('created','sending','accepted','verified','failed_before_send','failed_after_send')),
+            telegram_method TEXT NULL,
+            target_id TEXT NULL,
+            source_message_ids_json JSONB NULL,
+            sent_message_ids_json JSONB NULL,
+            error_text TEXT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(idempotency_key)
+        );
 
         CREATE TABLE IF NOT EXISTS jobs(
             id BIGSERIAL PRIMARY KEY,
@@ -870,6 +888,24 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     CREATE INDEX IF NOT EXISTS idx_jobs_queue_status_run_at
                     ON jobs(queue, status, run_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_delivery_attempts_delivery_id
+                    ON delivery_attempts(delivery_id, created_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_delivery_attempts_rule_id
+                    ON delivery_attempts(rule_id, created_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_delivery_attempts_status
+                    ON delivery_attempts(status, updated_at)
                     """
                 )
                 cur.execute(
@@ -3948,6 +3984,86 @@ class PostgresRepository(RepositoryProtocol):
                     (utc_now_iso(), sent_message_id, _json_dumps(sent_message_ids or []), target_id, delivery_method, delivery_id),
                 )
             conn.commit()
+
+    def get_delivery_attempt_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM delivery_attempts WHERE idempotency_key = %s", (str(idempotency_key or ""),))
+                return cur.fetchone()
+
+    def create_delivery_attempt(self, *, delivery_id: int, rule_id: int, tenant_id: int, job_id: int | None, idempotency_key: str, operation_kind: str, status: str, telegram_method: str | None = None, target_id: str | None = None, source_message_ids: list[int] | None = None, sent_message_ids: list[int] | None = None, error_text: str | None = None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO delivery_attempts(
+                        delivery_id, rule_id, tenant_id, job_id, idempotency_key, operation_kind, status, telegram_method, target_id,
+                        source_message_ids_json, sent_message_ids_json, error_text, created_at, updated_at
+                    )
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, NOW(), NOW())
+                    ON CONFLICT(idempotency_key) DO NOTHING
+                    RETURNING id
+                    """,
+                    (delivery_id, rule_id, tenant_id, job_id, str(idempotency_key), str(operation_kind), str(status), telegram_method, target_id, _json_dumps(source_message_ids), _json_dumps(sent_message_ids), (error_text or None)),
+                )
+                row = cur.fetchone()
+                if row:
+                    conn.commit()
+                    return int(row["id"])
+                cur.execute("SELECT id FROM delivery_attempts WHERE idempotency_key = %s", (str(idempotency_key),))
+                existing = cur.fetchone()
+            conn.commit()
+            return int(existing["id"]) if existing else None
+
+    def mark_delivery_attempt_sending(self, idempotency_key: str, *, job_id: int | None = None, telegram_method: str | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts
+                    SET status = 'sending', job_id = COALESCE(%s, job_id), telegram_method = COALESCE(%s, telegram_method), updated_at = NOW()
+                    WHERE idempotency_key = %s
+                      AND status IN ('created', 'failed_before_send')
+                    """,
+                    (job_id, telegram_method, str(idempotency_key)),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+            return updated
+
+    def mark_delivery_attempt_accepted(self, idempotency_key: str, *, sent_message_ids: list[int], telegram_method: str | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts
+                    SET status = 'accepted', sent_message_ids_json = %s::jsonb, telegram_method = COALESCE(%s, telegram_method), updated_at = NOW(), error_text = NULL
+                    WHERE idempotency_key = %s
+                    """,
+                    (_json_dumps([int(x) for x in (sent_message_ids or [])]), telegram_method, str(idempotency_key)),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+            return updated
+
+    def mark_delivery_attempt_failed(self, idempotency_key: str, *, status: str, error_text: str) -> bool:
+        normalized = str(status or "")
+        if normalized not in {"failed_before_send", "failed_after_send"}:
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts
+                    SET status = %s, error_text = %s, updated_at = NOW()
+                    WHERE idempotency_key = %s
+                      AND status NOT IN ('accepted', 'verified')
+                    """,
+                    (normalized, (error_text or "")[:1000], str(idempotency_key)),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+            return updated
 
     def mark_delivery_sent(self, delivery_id: int):
         with self.connect() as conn:

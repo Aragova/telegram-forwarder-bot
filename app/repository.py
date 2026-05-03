@@ -241,6 +241,44 @@ class RepositoryProtocol(Protocol):
     # =========================================================
     def mark_delivery_sent(self, delivery_id: int): ...
     def mark_delivery_sent_with_target_message(self, delivery_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None, target_id: str | None, delivery_method: str | None): ...
+    def get_delivery_attempt_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None: ...
+    def create_delivery_attempt(
+        self,
+        *,
+        delivery_id: int,
+        rule_id: int,
+        tenant_id: int,
+        job_id: int | None,
+        idempotency_key: str,
+        operation_kind: str,
+        status: str,
+        telegram_method: str | None = None,
+        target_id: str | None = None,
+        source_message_ids: list[int] | None = None,
+        sent_message_ids: list[int] | None = None,
+        error_text: str | None = None,
+    ) -> int | None: ...
+    def mark_delivery_attempt_sending(
+        self,
+        idempotency_key: str,
+        *,
+        job_id: int | None = None,
+        telegram_method: str | None = None,
+    ) -> bool: ...
+    def mark_delivery_attempt_accepted(
+        self,
+        idempotency_key: str,
+        *,
+        sent_message_ids: list[int],
+        telegram_method: str | None = None,
+    ) -> bool: ...
+    def mark_delivery_attempt_failed(
+        self,
+        idempotency_key: str,
+        *,
+        status: str,
+        error_text: str,
+    ) -> bool: ...
     def mark_many_deliveries_sent(self, delivery_ids): ...
     def mark_delivery_faulty(self, delivery_id: int, error_text: str): ...
     def mark_delivery_pending(self, delivery_id: int): ...
