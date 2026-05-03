@@ -310,6 +310,11 @@ class SenderService:
         def _extract_one(item) -> list[int]:
             if item is None:
                 return []
+            if isinstance(item, (list, tuple)):
+                nested: list[int] = []
+                for nested_item in item:
+                    nested.extend(_extract_one(nested_item))
+                return nested
             if isinstance(item, dict):
                 values = []
                 for key in ("message_id", "id"):
@@ -319,6 +324,13 @@ class SenderService:
                             values.append(int(val))
                         except Exception:
                             pass
+                if values:
+                    return values
+                for nested_key in ("message", "result", "data"):
+                    if nested_key in item:
+                        nested_values = _extract_one(item.get(nested_key))
+                        if nested_values:
+                            return nested_values
                 return values
             for attr in ("message_id", "id"):
                 try:
@@ -327,6 +339,12 @@ class SenderService:
                         return [int(val)]
                 except Exception:
                     continue
+            for key in ("message", "result", "data"):
+                nested_obj = getattr(item, key, None)
+                if nested_obj is not None:
+                    nested_values = _extract_one(nested_obj)
+                    if nested_values:
+                        return nested_values
             return []
 
         if sent_result is None:
@@ -2220,7 +2238,7 @@ class SenderService:
         rule,
         source_channel: str,
         message_id: int,
-    ) -> bool:
+    ) -> bool | dict[str, object]:
         post_row = self._get_post_row_for_rule_message(rule, source_channel, message_id)
         if not post_row:
             return False
@@ -2917,6 +2935,19 @@ class SenderService:
                     delivery_id,
                 )
             else:
+                delivery_row = await run_db(self.db.get_delivery, int(delivery_id))
+                uncertain_error = "copy_single_uncertain_no_fallback"
+                if (
+                    isinstance(delivery_row, dict)
+                    and str(delivery_row.get("status") or "") == "faulty"
+                    and uncertain_error in str(delivery_row.get("error_text") or "")
+                ):
+                    logger.warning(
+                        "JOB EXECUTOR | repost_single | non_retryable_uncertain | rule_id=%s | delivery_id=%s",
+                        rule_id,
+                        delivery_id,
+                    )
+                    return {"ok": False, "retryable": False, "error_text": str(delivery_row.get("error_text") or uncertain_error)}
                 logger.warning(
                     "JOB EXECUTOR | repost_single | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат",
                     rule_id,
@@ -3549,34 +3580,53 @@ class SenderService:
                 },
             )
 
-            sent_message_id = await self._copy_single_via_bot(
+            copy_result = await self._copy_single_via_bot(
                 source_channel,
                 target_id,
                 message_id,
                 target_thread_id,
             )
+            copy_sent_ids = [int(x) for x in (copy_result.get("sent_ids") or []) if str(x).isdigit()]
+            logger.info("COPY_SINGLE_RESULT_RAW_TYPE | rule_id=%s | delivery_id=%s | raw_type=%s", rule.id, delivery_id, copy_result.get("raw_result_type"))
+            logger.info("COPY_SINGLE_EXTRACTED_SENT_IDS | rule_id=%s | delivery_id=%s | sent_ids=%s", rule.id, delivery_id, copy_sent_ids)
+            valid_copy_sent_ids: list[int] = []
+            if copy_sent_ids:
+                logger.info("COPY_SINGLE_TARGET_CONFIRM_START | rule_id=%s | delivery_id=%s | target_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s", rule.id, delivery_id, target_id, source_message_ids, copy_sent_ids)
+                valid_copy_sent_ids = await self._confirm_target_delivery_message_ids_with_retry(
+                    rule_id=rule.id,
+                    delivery_id=delivery_id,
+                    source_channel=str(source_channel or ""),
+                    target_id=str(target_id),
+                    source_message_ids=source_message_ids,
+                    candidate_sent_message_ids=copy_sent_ids,
+                    method="copy_single",
+                )
+                if valid_copy_sent_ids:
+                    logger.info("COPY_SINGLE_TARGET_CONFIRM_OK | rule_id=%s | delivery_id=%s | valid_sent_message_ids=%s", rule.id, delivery_id, valid_copy_sent_ids)
+                else:
+                    logger.warning("COPY_SINGLE_TARGET_CONFIRM_FAILED | rule_id=%s | delivery_id=%s | candidate_sent_message_ids=%s", rule.id, delivery_id, copy_sent_ids)
 
             await self._log_delivery_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
                 pipeline_stage="copy_single",
-                pipeline_result="ok" if sent_message_id else "failed",
+                pipeline_result="ok" if valid_copy_sent_ids else "failed",
                 source_channel=source_channel,
                 target_id=target_id,
                 source_message_ids=source_message_ids,
-                error_text=None if sent_message_id else "copy_message не сработал",
+                error_text=None if valid_copy_sent_ids else "copy_message не сработал",
                 extra={
                     "attempt_no": 1,
-                    "sent_message_id": sent_message_id,
+                    "sent_message_id": valid_copy_sent_ids[0] if valid_copy_sent_ids else None,
                     "caption_delivery_mode": caption_mode,
                     "requires_builder": requires_builder,
                 },
             )
 
-            if sent_message_id:
-                candidate_sent_message_ids = [int(sent_message_id)] if sent_message_id else []
-                authoritative_sent_message_id = int(sent_message_id) if sent_message_id else None
+            if valid_copy_sent_ids:
+                candidate_sent_message_ids = valid_copy_sent_ids
+                authoritative_sent_message_id = int(valid_copy_sent_ids[0])
                 await self._add_reaction_for_rule_if_possible(
                     rule=rule,
                     target_id=target_id,
@@ -3593,7 +3643,7 @@ class SenderService:
                     source_channel=source_channel,
                     target_id=target_id,
                     source_message_ids=source_message_ids,
-                    sent_message_id=sent_message_id,
+                    sent_message_id=authoritative_sent_message_id,
                     verify_result=None,
                     extra={
                         "caption_delivery_mode": caption_mode,
@@ -3609,7 +3659,27 @@ class SenderService:
                     target_id=str(target_id),
                     delivery_method="copy_single",
                 )
+                await run_db(self._touch_rule_after_send_sync, rule.id, int(rule.interval_seconds or 0))
                 return True
+            if copy_result.get("attempted"):
+                error_text = "copy_single_uncertain_no_fallback: copy_message was attempted but target confirmation failed; manual review required"
+                logger.warning("COPY_SINGLE_UNCERTAIN_NO_FALLBACK | rule_id=%s | delivery_id=%s | reason=copy_attempted_without_verified_target_message", rule.id, delivery_id)
+                await run_db(self._mark_delivery_faulty_sync, delivery_id, error_text)
+                await self._log_delivery_final_failure(
+                    rule_id=rule.id,
+                    delivery_ids=delivery_ids,
+                    final_method="copy_single_uncertain_no_fallback",
+                    source_channel=source_channel,
+                    target_id=target_id,
+                    source_message_ids=source_message_ids,
+                    error_text=error_text,
+                    attempts_debug=[
+                        {"stage": "copy_single", "ok": False, "attempted": True, "candidate_sent_message_ids": copy_sent_ids},
+                    ],
+                    extra={"non_retryable": True, "manual_review_required": True},
+                )
+                return False
+            logger.info("COPY_TO_REUPLOAD_FALLBACK_ALLOWED | rule_id=%s | delivery_id=%s | reason=copy_not_attempted", rule.id, delivery_id)
         else:
             await self._log_delivery_pipeline_step(
                 rule_id=rule.id,
@@ -5325,7 +5395,7 @@ class SenderService:
             logger.warning(
                 "COPY_SINGLE | TEST MODE | принудительно пропускаю Bot API copy_message для проверки Telethon"
             )
-            return None
+            return {"attempted": False, "sent_ids": [], "fallback_allowed": True, "raw_result_type": "debug_skip"}
 
         try:
             sent = await self.bot.copy_message(
@@ -5334,7 +5404,8 @@ class SenderService:
                 message_id=message_id,
                 message_thread_id=target_thread_id,
             )
-            return sent.message_id
+            sent_ids = self._extract_sent_message_ids(sent)
+            return {"attempted": True, "sent_ids": sent_ids, "fallback_allowed": False, "raw_result_type": type(sent).__name__}
         except Exception as exc:
             logger.warning(
                 "Не удалось скопировать сообщение %s/%s в %s: %s",
@@ -5343,7 +5414,7 @@ class SenderService:
                 target_id,
                 exc,
             )
-            return None
+            return {"attempted": True, "sent_ids": [], "fallback_allowed": False, "raw_result_type": "exception", "error_text": str(exc)}
 
     async def _copy_album_via_bot(self, source_channel, target_id, message_ids, target_thread_id):
         if DEBUG_FORCE_SKIP_COPY_ALBUM:

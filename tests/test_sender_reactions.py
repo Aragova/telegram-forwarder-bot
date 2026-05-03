@@ -30,6 +30,8 @@ def test_extract_sent_message_ids_variants():
     assert svc._extract_sent_message_ids((SimpleNamespace(id=3), SimpleNamespace(id=4))) == [3, 4]
     assert svc._extract_sent_message_ids({"message_id": 5}) == [5]
     assert svc._extract_sent_message_ids({"id": 6}) == [6]
+    assert svc._extract_sent_message_ids({"result": {"message_id": 7}}) == [7]
+    assert svc._extract_sent_message_ids(SimpleNamespace(result=SimpleNamespace(message_id=8))) == [8]
     assert svc._extract_sent_message_ids(None) == []
     assert svc._extract_sent_message_ids(object()) == []
 
@@ -245,3 +247,37 @@ def test_copy_single_path_does_not_reference_unbound_valid_sent_message_ids():
     block = source[copy_single_block_start:mark_sent_call]
     assert "pipeline_result=\"ok\" if valid_sent_message_ids else \"failed\"" not in block
     assert "sent_message_ids=valid_sent_message_ids" not in block
+
+
+def test_copy_single_uncertain_result_stops_without_reupload():
+    source = inspect.getsource(SenderService._deliver_single)
+    assert "COPY_SINGLE_UNCERTAIN_NO_FALLBACK" in source
+    assert "if copy_result.get(\"attempted\")" in source
+    assert "return False" in source[source.index("COPY_SINGLE_UNCERTAIN_NO_FALLBACK"):source.index("COPY_TO_REUPLOAD_FALLBACK_ALLOWED")]
+
+
+def test_copy_single_has_confirmation_gate_before_mark_sent():
+    source = inspect.getsource(SenderService._deliver_single)
+    confirm_call_pos = source.index("method=\"copy_single\"")
+    mark_sent_pos = source.index("delivery_method=\"copy_single\"")
+    assert confirm_call_pos < mark_sent_pos
+
+
+def test_copy_single_fallback_allowed_only_when_not_attempted():
+    source = inspect.getsource(SenderService._deliver_single)
+    allowed_pos = source.index("COPY_TO_REUPLOAD_FALLBACK_ALLOWED")
+    attempted_guard_pos = source.rfind("if copy_result.get(\"attempted\")", 0, allowed_pos)
+    assert attempted_guard_pos != -1
+
+
+def test_copy_single_uncertain_marks_faulty_and_manual_review_error():
+    source = inspect.getsource(SenderService._deliver_single)
+    assert "copy_single_uncertain_no_fallback: copy_message was attempted but target confirmation failed; manual review required" in source
+    assert "_mark_delivery_faulty_sync" in source
+    assert "non_retryable" in source
+
+
+def test_execute_repost_single_returns_non_retryable_for_uncertain_faulty():
+    source = inspect.getsource(SenderService.execute_repost_single_from_job)
+    assert "non_retryable_uncertain" in source
+    assert "retryable\": False" in source
