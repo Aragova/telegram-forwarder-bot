@@ -342,9 +342,19 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     result: dict[str, Any] | None = None
     try:
         if job_type == "repost_single":
-            ok = await sender_service.execute_repost_single_from_job(**payload)
+            repost_result = await sender_service.execute_repost_single_from_job(**payload)
+            if isinstance(repost_result, dict):
+                result = repost_result
+                ok = bool(repost_result.get("ok"))
+            else:
+                ok = bool(repost_result)
         elif job_type == "repost_album":
-            ok = await sender_service.execute_repost_album_from_job(**payload)
+            repost_album_result = await sender_service.execute_repost_album_from_job(**payload)
+            if isinstance(repost_album_result, dict):
+                result = repost_album_result
+                ok = bool(repost_album_result.get("ok"))
+            else:
+                ok = bool(repost_album_result)
         elif job_type == "video_download":
             _log_video_stage_event("VIDEO DOWNLOAD START | запуск стадии скачивания", int(payload.get("delivery_id") or 0))
             result = await sender_service.execute_video_download_from_job(

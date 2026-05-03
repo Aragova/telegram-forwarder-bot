@@ -268,3 +268,16 @@ def test_copy_single_fallback_allowed_only_when_not_attempted():
     allowed_pos = source.index("COPY_TO_REUPLOAD_FALLBACK_ALLOWED")
     attempted_guard_pos = source.rfind("if copy_result.get(\"attempted\")", 0, allowed_pos)
     assert attempted_guard_pos != -1
+
+
+def test_copy_single_uncertain_marks_faulty_and_manual_review_error():
+    source = inspect.getsource(SenderService._deliver_single)
+    assert "copy_single_uncertain_no_fallback: copy_message was attempted but target confirmation failed; manual review required" in source
+    assert "_mark_delivery_faulty_sync" in source
+    assert "non_retryable" in source
+
+
+def test_execute_repost_single_returns_non_retryable_for_uncertain_faulty():
+    source = inspect.getsource(SenderService.execute_repost_single_from_job)
+    assert "non_retryable_uncertain" in source
+    assert "retryable\": False" in source

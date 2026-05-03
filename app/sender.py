@@ -2238,7 +2238,7 @@ class SenderService:
         rule,
         source_channel: str,
         message_id: int,
-    ) -> bool:
+    ) -> bool | dict[str, object]:
         post_row = self._get_post_row_for_rule_message(rule, source_channel, message_id)
         if not post_row:
             return False
@@ -2935,6 +2935,19 @@ class SenderService:
                     delivery_id,
                 )
             else:
+                delivery_row = await run_db(self.db.get_delivery, int(delivery_id))
+                uncertain_error = "copy_single_uncertain_no_fallback"
+                if (
+                    isinstance(delivery_row, dict)
+                    and str(delivery_row.get("status") or "") == "faulty"
+                    and uncertain_error in str(delivery_row.get("error_text") or "")
+                ):
+                    logger.warning(
+                        "JOB EXECUTOR | repost_single | non_retryable_uncertain | rule_id=%s | delivery_id=%s",
+                        rule_id,
+                        delivery_id,
+                    )
+                    return {"ok": False, "retryable": False, "error_text": str(delivery_row.get("error_text") or uncertain_error)}
                 logger.warning(
                     "JOB EXECUTOR | repost_single | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат",
                     rule_id,
@@ -3649,7 +3662,22 @@ class SenderService:
                 await run_db(self._touch_rule_after_send_sync, rule.id, int(rule.interval_seconds or 0))
                 return True
             if copy_result.get("attempted"):
+                error_text = "copy_single_uncertain_no_fallback: copy_message was attempted but target confirmation failed; manual review required"
                 logger.warning("COPY_SINGLE_UNCERTAIN_NO_FALLBACK | rule_id=%s | delivery_id=%s | reason=copy_attempted_without_verified_target_message", rule.id, delivery_id)
+                await run_db(self._mark_delivery_faulty_sync, delivery_id, error_text)
+                await self._log_delivery_final_failure(
+                    rule_id=rule.id,
+                    delivery_ids=delivery_ids,
+                    final_method="copy_single_uncertain_no_fallback",
+                    source_channel=source_channel,
+                    target_id=target_id,
+                    source_message_ids=source_message_ids,
+                    error_text=error_text,
+                    attempts_debug=[
+                        {"stage": "copy_single", "ok": False, "attempted": True, "candidate_sent_message_ids": copy_sent_ids},
+                    ],
+                    extra={"non_retryable": True, "manual_review_required": True},
+                )
                 return False
             logger.info("COPY_TO_REUPLOAD_FALLBACK_ALLOWED | rule_id=%s | delivery_id=%s | reason=copy_not_attempted", rule.id, delivery_id)
         else:
