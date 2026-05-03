@@ -16,6 +16,7 @@ from .telegram_client import ReactionClientInfo
 from .video_processor import VideoProcessor
 from .scheduler_service import SchedulerService
 from .reaction_runtime_resolver import ReactionRuntimeResolver
+from .delivery_idempotency import build_delivery_idempotency_key, extract_sent_message_ids_from_attempt
 from telethon.tl.types import (
     MessageEntityBold,
     MessageEntityItalic,
@@ -2914,6 +2915,17 @@ class SenderService:
             normalized_mode,
             normalized_schedule_mode,
         )
+        idempotency_key = build_delivery_idempotency_key(operation_kind="single", delivery_id=int(delivery_id), target_id=str(target_id))
+        attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
+        cached_ids = extract_sent_message_ids_from_attempt(attempt)
+        if isinstance(attempt, dict) and str(attempt.get("status") or "") in {"accepted", "verified"} and cached_ids:
+            logger.info("DELIVERY_ATTEMPT_CACHE_HIT | operation=single | key=%s | delivery_id=%s | sent_message_ids=%s", idempotency_key, delivery_id, cached_ids)
+            await run_db(self._mark_delivery_sent_sync, int(delivery_id), sent_message_id=int(cached_ids[0]), sent_message_ids=cached_ids, target_id=str(target_id), delivery_method="idempotency_cache")
+            return True
+        await run_db(self.db.create_delivery_attempt, delivery_id=int(delivery_id), rule_id=int(rule_id), tenant_id=1, job_id=None, idempotency_key=idempotency_key, operation_kind="single", status="created", target_id=str(target_id), source_message_ids=[int(message_id)])
+        logger.info("DELIVERY_ATTEMPT_CREATED | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
+        await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="copy_single")
+        logger.info("DELIVERY_ATTEMPT_SENDING | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
         try:
             rule = await run_db(self.db.get_rule, int(rule_id))
             if not rule:
@@ -2925,6 +2937,7 @@ class SenderService:
                 str(source_channel),
                 str(target_id),
                 target_thread_id,
+                idempotency_key=idempotency_key,
             )
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
@@ -2935,6 +2948,8 @@ class SenderService:
                     delivery_id,
                 )
             else:
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
+                logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
                 delivery_row = await run_db(self.db.get_delivery, int(delivery_id))
                 uncertain_error = "copy_single_uncertain_no_fallback"
                 if (
@@ -2955,6 +2970,8 @@ class SenderService:
                 )
             return bool(ok)
         except Exception as exc:
+            await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=str(exc))
+            logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
             logger.warning(
                 "JOB EXECUTOR | repost_single | failed | rule_id=%s | delivery_id=%s | error=%s",
                 rule_id,
@@ -2995,6 +3012,17 @@ class SenderService:
             normalized_mode,
             normalized_schedule_mode,
         )
+        album_source_ids = [int(x) for x in (delivery_ids or [])]
+        idempotency_key = build_delivery_idempotency_key(operation_kind="album", rule_id=int(rule_id), target_id=str(target_id), media_group_id=media_group_id, source_message_ids=album_source_ids)
+        attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
+        cached_ids = extract_sent_message_ids_from_attempt(attempt)
+        if isinstance(attempt, dict) and str(attempt.get("status") or "") in {"accepted", "verified"} and cached_ids:
+            logger.info("DELIVERY_ATTEMPT_CACHE_HIT | operation=album | key=%s | sent_message_ids=%s", idempotency_key, cached_ids)
+            return True
+        await run_db(self.db.create_delivery_attempt, delivery_id=int(delivery_id or 0), rule_id=int(rule_id), tenant_id=1, job_id=None, idempotency_key=idempotency_key, operation_kind="album", status="created", target_id=str(target_id), source_message_ids=album_source_ids)
+        logger.info("DELIVERY_ATTEMPT_CREATED | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
+        await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="copy_album")
+        logger.info("DELIVERY_ATTEMPT_SENDING | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
         try:
             rule = await run_db(self.db.get_rule, int(rule_id))
             if not rule:
@@ -3018,6 +3046,7 @@ class SenderService:
                 str(source_channel),
                 str(target_id),
                 target_thread_id,
+                idempotency_key=idempotency_key,
             )
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
@@ -3028,6 +3057,8 @@ class SenderService:
                     delivery_id,
                 )
             else:
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
+                logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
                 logger.warning(
                     "JOB EXECUTOR | repost_album | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат",
                     rule_id,
@@ -3035,6 +3066,8 @@ class SenderService:
                 )
             return bool(ok)
         except Exception as exc:
+            await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=str(exc))
+            logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
             logger.warning(
                 "JOB EXECUTOR | repost_album | failed | rule_id=%s | delivery_id=%s | error=%s",
                 rule_id,
@@ -3509,7 +3542,7 @@ class SenderService:
         logger.info("VIDEO SEND DONE | отправка завершена для delivery_id=%s", delivery_id)
         return {"ok": True, "fallback_to_legacy": False}
 
-    async def _deliver_single(self, rule, delivery_id, message_id, source_channel, target_id, target_thread_id):
+    async def _deliver_single(self, rule, delivery_id, message_id, source_channel, target_id, target_thread_id, idempotency_key: str | None = None):
         post_id = await run_db(self._get_post_id_by_delivery_sync, delivery_id)
         delivery_ids = [int(delivery_id)]
         source_message_ids = [int(message_id)]
@@ -3587,6 +3620,9 @@ class SenderService:
                 target_thread_id,
             )
             copy_sent_ids = [int(x) for x in (copy_result.get("sent_ids") or []) if str(x).isdigit()]
+            if idempotency_key and copy_sent_ids:
+                await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=copy_sent_ids, telegram_method="copy_single")
+                logger.info("DELIVERY_ATTEMPT_ACCEPTED | operation=single | key=%s | delivery_id=%s | sent_message_ids=%s", idempotency_key, delivery_id, copy_sent_ids)
             logger.info("COPY_SINGLE_RESULT_RAW_TYPE | rule_id=%s | delivery_id=%s | raw_type=%s", rule.id, delivery_id, copy_result.get("raw_result_type"))
             logger.info("COPY_SINGLE_EXTRACTED_SENT_IDS | rule_id=%s | delivery_id=%s | sent_ids=%s", rule.id, delivery_id, copy_sent_ids)
             valid_copy_sent_ids: list[int] = []
@@ -4351,7 +4387,7 @@ class SenderService:
             )
             return False
 
-    async def _deliver_album(self, rule, album_rows, source_channel, target_id, target_thread_id):
+    async def _deliver_album(self, rule, album_rows, source_channel, target_id, target_thread_id, idempotency_key: str | None = None):
         delivery_ids = [int(r["delivery_id"]) for r in album_rows]
         message_ids = [int(r["message_id"]) for r in album_rows]
 
@@ -4438,6 +4474,11 @@ class SenderService:
                 target_thread_id=target_thread_id,
             )
             attempts_debug.append({"stage": "copy_album", **copy_result})
+            if idempotency_key and copy_result.get("ok") and copy_result.get("sent_message_ids"):
+                sent_ids = [int(x) for x in (copy_result.get("sent_message_ids") or []) if str(x).isdigit()]
+                if sent_ids:
+                    await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=sent_ids, telegram_method="copy_album")
+                    logger.info("DELIVERY_ATTEMPT_ACCEPTED | operation=album | key=%s | sent_message_ids=%s", idempotency_key, sent_ids)
 
             await self._log_delivery_pipeline_step(
                 rule_id=rule.id,
