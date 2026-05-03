@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .delivery_result import normalize_delivery_result
 from .job_service import (
     enqueue_video_download,
     enqueue_video_delivery_fallback,
@@ -405,19 +406,15 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             if guarded:
                 return True
         if job_type == "repost_single":
-            repost_result = await sender_service.execute_repost_single_from_job(**payload)
-            if isinstance(repost_result, dict):
-                result = repost_result
-                ok = bool(repost_result.get("ok"))
-            else:
-                ok = bool(repost_result)
+            raw_result = await sender_service.execute_repost_single_from_job(**payload)
+            delivery_result = normalize_delivery_result(raw_result)
+            result = delivery_result.to_dict()
+            ok = delivery_result.ok
         elif job_type == "repost_album":
-            repost_album_result = await sender_service.execute_repost_album_from_job(**payload)
-            if isinstance(repost_album_result, dict):
-                result = repost_album_result
-                ok = bool(repost_album_result.get("ok"))
-            else:
-                ok = bool(repost_album_result)
+            raw_result = await sender_service.execute_repost_album_from_job(**payload)
+            delivery_result = normalize_delivery_result(raw_result)
+            result = delivery_result.to_dict()
+            ok = delivery_result.ok
         elif job_type == "video_download":
             _log_video_stage_event("VIDEO DOWNLOAD START | запуск стадии скачивания", int(payload.get("delivery_id") or 0))
             result = await sender_service.execute_video_download_from_job(
@@ -485,23 +482,49 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             ok = False
         elif job_type == "video_send":
             _log_video_stage_event("VIDEO SEND START | запуск стадии отправки", int(payload.get("delivery_id") or 0))
-            result = await sender_service.execute_video_send_from_job(**payload)
-            if result.get("fallback_to_legacy"):
+            raw_result = await sender_service.execute_video_send_from_job(**payload)
+            delivery_result = normalize_delivery_result(raw_result)
+            result = delivery_result.to_dict()
+            if delivery_result.fallback_to_legacy:
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
                 await asyncio.to_thread(repo.complete_job, job_id)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
-            ok = bool(result.get("ok"))
+            ok = delivery_result.ok
             if ok:
                 cleanup_video_artifacts(payload, mode="success")
                 _log_video_stage_event("VIDEO SEND DONE | стадия отправки завершена", int(payload.get("delivery_id") or 0))
         elif job_type == "video_delivery":
-            ok = await sender_service.execute_video_delivery_from_job(**payload)
+            raw_result = await sender_service.execute_video_delivery_from_job(**payload)
+            delivery_result = normalize_delivery_result(raw_result)
+            result = delivery_result.to_dict()
+            ok = delivery_result.ok
         else:
             await asyncio.to_thread(repo.fail_job, job_id, f"Неподдерживаемый job_type: {job_type}")
             logger.warning("JOB FAILED | %s завершил задачу #%s с ошибкой: неподдерживаемый тип", worker_id, job_id)
             return True
+
+        if result is not None:
+            result_retryable = bool(result.get("retryable", True))
+            log_needed = bool(
+                (not ok)
+                or bool(result.get("cache_hit"))
+                or bool(result.get("accepted"))
+                or bool(result.get("fallback_to_legacy"))
+            )
+            if log_needed:
+                logger.info(
+                    "DELIVERY_RESULT_NORMALIZED | job_id=%s | job_type=%s | ok=%s | retryable=%s | accepted=%s | cache_hit=%s | fallback_to_legacy=%s | sent_message_ids=%s",
+                    job_id,
+                    job_type,
+                    ok,
+                    result_retryable,
+                    bool(result.get("accepted")),
+                    bool(result.get("cache_hit")),
+                    bool(result.get("fallback_to_legacy")),
+                    result.get("sent_message_ids") or [],
+                )
 
         if ok:
             await asyncio.to_thread(repo.complete_job, job_id)
