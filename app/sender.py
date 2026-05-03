@@ -3416,12 +3416,21 @@ class SenderService:
             logger.warning("VIDEO FALLBACK TO LEGACY | правило не найдено для process | delivery_id=%s", delivery_id)
             return {"ok": False, "fallback_to_legacy": True, "retryable": False}
 
+        clip_duration_seconds = int(getattr(rule, "video_clip_duration_seconds", None) or 118)
+        logger.info(
+            "VIDEO_PROCESS_CLIP_DURATION | rule_id=%s | delivery_id=%s | clip_duration_seconds=%s",
+            rule_id,
+            delivery_id,
+            clip_duration_seconds,
+        )
+
         horizontal_intro, vertical_intro = await run_db(self._get_rule_intro_items_sync, rule)
         processed_result = await self.video_processor.build_processed_video(
             input_file_path=str(source_video_path),
             add_intro=bool(getattr(rule, "video_add_intro", False)),
             intro_name_horizontal=getattr(horizontal_intro, "file_name", None) if horizontal_intro else None,
             intro_name_vertical=getattr(vertical_intro, "file_name", None) if vertical_intro else None,
+            clip_duration_seconds=clip_duration_seconds,
         )
         if not processed_result:
             logger.warning("VIDEO STAGE FAILED | VideoProcessor не смог обработать файл для delivery_id=%s", delivery_id)
