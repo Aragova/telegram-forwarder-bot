@@ -1717,7 +1717,7 @@ class PostgresRepository(RepositoryProtocol):
         - использует тот же builder, что queue / position / start-from-position
         - возвращает весь logical item обратно в pending
         - сбрасывает sent_at / error_text / attempt_count
-        - двигает next_run_at на сейчас
+        - двигает next_run_at с безопасной задержкой
         """
         try:
             rule = self.get_rule(rule_id)
@@ -1730,6 +1730,8 @@ class PostgresRepository(RepositoryProtocol):
 
             mode = (getattr(rule, "mode", "repost") or "repost").strip().lower()
             now_iso = utc_now_iso()
+            next_retry_iso = datetime.now(timezone.utc) + timedelta(seconds=7)
+            next_retry_iso_str = next_retry_iso.isoformat()
 
             with self.connect() as conn:
                 with conn.cursor() as cur:
@@ -1847,7 +1849,7 @@ class PostgresRepository(RepositoryProtocol):
                         SET next_run_at = %s
                         WHERE id = %s
                         """,
-                        (now_iso, rule_id),
+                        (next_retry_iso_str, rule_id),
                     )
 
                     cur.execute(
@@ -1881,7 +1883,7 @@ class PostgresRepository(RepositoryProtocol):
                                     "sent_at": None,
                                     "error_text": None,
                                     "attempt_count": 0,
-                                    "next_run_at": now_iso,
+                                    "next_run_at": next_retry_iso_str,
                                 }
                             ),
                             _json_dumps(
@@ -1923,7 +1925,7 @@ class PostgresRepository(RepositoryProtocol):
                 "first_post_id": selected.get("first_post_id"),
                 "first_message_id": selected.get("first_message_id"),
                 "media_group_id": selected.get("media_group_id"),
-                "next_run_at": now_iso,
+                "next_run_at": next_retry_iso_str,
                 "rolled_back_delivery_ids": delivery_ids,
                 "rolled_back_post_ids": post_ids,
                 "rolled_back_message_ids": message_ids,
@@ -3288,31 +3290,13 @@ class PostgresRepository(RepositoryProtocol):
 
                 schedule_mode = row["schedule_mode"] or "interval"
                 rule_mode = (row.get("mode") or "repost").strip().lower()
-                if pending_count <= 0:
-                    next_run_iso = None
-                else:
-                    actual_interval = int(row["interval"] or interval or 0)
-                    next_run_iso, resolution = self._compute_next_run_after_send(
-                        conn,
-                        rule_id=rule_id,
-                        schedule_mode=str(schedule_mode),
-                        fixed_times_json=row["fixed_times_json"],
-                        interval_value=actual_interval,
-                        now_dt=now_dt,
-                    )
-                    if resolution == "fixed_fallback_interval":
-                        logger.warning(
-                            "RULE NEXT RUN FIXED FALLBACK | rule_id=%s | fixed_times пустые/некорректные, используем interval=%s | next_run_at=%s",
-                            rule_id,
-                            actual_interval,
-                            next_run_iso,
-                        )
+                next_run_iso = row.get("next_run_at")
 
                 cur.execute(
                     """
                     UPDATE routing
                     SET last_sent_at = %s,
-                        next_run_at = %s
+                        next_run_at = COALESCE(next_run_at, %s)
                     WHERE id = %s
                     """,
                     (now_iso, next_run_iso, rule_id),
@@ -3678,6 +3662,7 @@ class PostgresRepository(RepositoryProtocol):
                     SELECT mode, schedule_mode, interval
                     FROM routing
                     WHERE id = %s
+                    FOR UPDATE
                     LIMIT 1
                     """,
                     (rule_id,),
@@ -3915,6 +3900,21 @@ class PostgresRepository(RepositoryProtocol):
                     conn.rollback()
                     return None
 
+                reserved_next_run_at = None
+                if schedule_mode == "fixed":
+                    reserved_next_run_at = self._compute_next_run_for_rule_conn(conn, int(rule_id))
+                else:
+                    reserve_from = datetime.now(timezone.utc) + timedelta(seconds=max(interval, 1))
+                    reserved_next_run_at = self._find_next_interval_slot(conn, reserve_from, exclude_rule_id=int(rule_id))
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET next_run_at = %s
+                    WHERE id = %s
+                    """,
+                    (reserved_next_run_at, int(rule_id)),
+                )
+
             conn.commit()
             return {
                 "status": "created",
@@ -3923,6 +3923,7 @@ class PostgresRepository(RepositoryProtocol):
                 "tenant_id": tenant_id,
                 "dedup_key": dedup_key,
                 "job_type": job_type,
+                "reserved_next_run_at": reserved_next_run_at,
             }
 
     # =========================================================
