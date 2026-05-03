@@ -2302,7 +2302,7 @@ class SenderService:
                     getattr(rule, "id", None),
                     message_id,
                 )
-                return {"ok": True, "sent_message_ids": sent_message_ids}
+                return True
 
         logger.info(
             "CAPTION_MODE_DETECT | album | rule_id=%s | requires_builder=False | items=%s",
@@ -4577,7 +4577,7 @@ class SenderService:
                     selected_mode=selected_mode,
                     caption_requires_premium=requires_premium,
                 )
-                return {"ok": True, "sent_message_ids": sent_message_ids}
+                return True
 
             await run_db(
                 self._finalize_video_failure_sync,
