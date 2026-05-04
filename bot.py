@@ -96,6 +96,8 @@ from app.saved_posts_service import (
     get_saved_post_preview_caption,
     get_saved_post_short_description,
     send_saved_post_content,
+    summarize_aiogram_message_for_saved_post,
+    summarize_saved_post_entities,
 )
 from app import product_ui
 from app import access_control, user_ui
@@ -8097,7 +8099,22 @@ async def handle_stateful_private_inputs(message: Message):
 
     if state.get("state") == "awaiting_repost_campaign_saved_post":
         rule_id = int(state.get("rule_id") or 0)
+        message_summary = summarize_aiogram_message_for_saved_post(message)
+        logger.info(
+            "SAVED_POST_INCOMING_MESSAGE | rule_id=%s | summary=%s",
+            rule_id,
+            message_summary,
+        )
         content_json = build_saved_post_content_from_aiogram_message(message)
+        entity_summary = summarize_saved_post_entities(content_json)
+        logger.info(
+            "SAVED_POST_CAPTURED | rule_id=%s | kind=%s | text_len=%s | caption_len=%s | entity_summary=%s",
+            rule_id,
+            content_json.get("kind"),
+            len(content_json.get("text") or ""),
+            len(content_json.get("caption") or ""),
+            entity_summary,
+        )
         saved_post_id = await run_db(
             db.create_saved_post,
             rule_id=rule_id,
@@ -8120,8 +8137,27 @@ async def handle_stateful_private_inputs(message: Message):
             saved_post_id,
             str(content_json.get("kind") or "text"),
         )
+        kind_label = get_saved_post_short_description(content_json)
+        kind = str(content_json.get("kind") or "text")
+        caption_len = len(content_json.get("caption") or "")
+        caption_entities_count = len(content_json.get("caption_entities") or [])
+        is_media_kind = kind in {"photo", "video", "animation", "document"}
+
+        footer = "Форматирование и premium emoji сохранены."
+        if is_media_kind and caption_len == 0:
+            footer = (
+                "⚠️ Подпись у сохранённого медиа пустая.\n"
+                "Если в оригинале была подпись, Telegram не передал её боту. "
+                "Попробуйте отправить пост боту напрямую, а не пересылкой из канала."
+            )
+        elif is_media_kind and caption_entities_count == 0:
+            footer = (
+                "⚠️ Текст сохранён, но форматирование/premium emoji не были переданы Telegram.\n"
+                "Для 1 в 1 сохранения попробуйте отправить пост боту напрямую."
+            )
+
         await message.answer(
-            f"✅ Рекламный пост сохранён\n\nID: #{saved_post_id}\nТип: {get_saved_post_short_description(content_json)}\n\nФорматирование и premium emoji сохранены.",
+            f"✅ Рекламный пост сохранён\n\nID: #{saved_post_id}\nТип: {kind_label}\n\n{footer}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="👁 Предпросмотр поста", callback_data=f"rule_repost_campaign_post_preview:{rule_id}")],
                 [InlineKeyboardButton(text="💰 К рекламной кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
