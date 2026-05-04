@@ -145,6 +145,8 @@ class PostgresRepository(RepositoryProtocol):
             video_caption_entities_json=data.get("video_caption_entities_json"),
             caption_delivery_mode=data.get("caption_delivery_mode", "auto"),
             video_caption_delivery_mode=data.get("video_caption_delivery_mode", "auto"),
+            repost_campaign_enabled=bool(data.get("repost_campaign_enabled") or False),
+            repost_campaign_show_seconds=int(data.get("repost_campaign_show_seconds") or 0),
         )
 
     def _find_next_interval_slot(
