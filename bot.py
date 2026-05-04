@@ -6373,9 +6373,28 @@ async def handle_rule_repost_campaign_show_set(callback: CallbackQuery):
     await run_db(db.update_rule_repost_campaign_settings, rule_id, enabled=True, show_seconds=seconds)
     invalidate_rule_card_cache(rule_id)
     try:
-        await run_db(db.log_rule_change, rule_id, "repost_campaign_show_set", f"show_seconds={seconds}", callback.from_user.id if callback.from_user else settings.admin_id)
-    except Exception:
-        logger.warning("Не удалось записать аудит изменения кампании rule_id=%s", rule_id)
+        await run_db(
+            db.log_rule_change,
+            event_type="repost_campaign_show_seconds_changed",
+            rule_id=rule_id,
+            admin_id=callback.from_user.id if callback.from_user else settings.admin_id,
+            old_value=None,
+            new_value={
+                "repost_campaign_enabled": True,
+                "repost_campaign_show_seconds": seconds,
+            },
+            extra={
+                "source": "admin_ui",
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "Не удалось записать аудит изменения кампании rule_id=%s event_type=%s: %s",
+            rule_id,
+            "repost_campaign_show_seconds_changed",
+            exc,
+            exc_info=True,
+        )
     await _render_repost_campaign_menu(callback, rule_id)
     await answer_callback_safe_once(callback, "Срок показа обновлён")
 
