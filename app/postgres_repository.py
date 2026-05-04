@@ -147,6 +147,7 @@ class PostgresRepository(RepositoryProtocol):
             video_caption_delivery_mode=data.get("video_caption_delivery_mode", "auto"),
             repost_campaign_enabled=bool(data.get("repost_campaign_enabled") or False),
             repost_campaign_show_seconds=int(data.get("repost_campaign_show_seconds") or 0),
+            repost_campaign_saved_post_id=(int(data.get("repost_campaign_saved_post_id")) if data.get("repost_campaign_saved_post_id") is not None else None),
         )
 
     def _find_next_interval_slot(
@@ -698,6 +699,7 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_vertical_id BIGINT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_enabled BOOLEAN NOT NULL DEFAULT FALSE;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_show_seconds BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_saved_post_id BIGINT NULL;
         ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dedup_key TEXT NULL;
         ALTER TABLE channels ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
@@ -742,6 +744,29 @@ class PostgresRepository(RepositoryProtocol):
         ON rule_repost_campaign_targets(rule_id, target_id, COALESCE(target_thread_id, -1));
         CREATE INDEX IF NOT EXISTS idx_rule_repost_campaign_targets_rule
         ON rule_repost_campaign_targets(rule_id, is_active);
+
+
+
+        CREATE TABLE IF NOT EXISTS saved_posts (
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL DEFAULT 1,
+            rule_id BIGINT NULL,
+            title TEXT NULL,
+            status TEXT NOT NULL DEFAULT 'ready',
+            post_type TEXT NOT NULL DEFAULT 'single',
+            content_json JSONB NOT NULL,
+            source_chat_id TEXT NULL,
+            source_message_id BIGINT NULL,
+            source_media_group_id TEXT NULL,
+            created_by BIGINT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NULL,
+            archived_at TIMESTAMPTZ NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_saved_posts_tenant_status
+        ON saved_posts(tenant_id, status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_saved_posts_rule_status
+        ON saved_posts(rule_id, status, created_at DESC);
 
         CREATE TABLE IF NOT EXISTS delivery_campaign_copies (
             id BIGSERIAL PRIMARY KEY, delivery_id BIGINT NOT NULL, rule_id BIGINT NOT NULL,
@@ -6998,6 +7023,50 @@ class PostgresRepository(RepositoryProtocol):
                 row = cur.fetchone()
         return int(row["cnt"] if row else 0)
 
+
+    def create_saved_post(self, *, rule_id: int | None, title: str | None, content: dict[str, Any], source_chat_id: str | None, source_message_id: int | None, source_media_group_id: str | None, created_by: int | None) -> int | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO saved_posts(rule_id,title,content_json,source_chat_id,source_message_id,source_media_group_id,created_by)
+                    VALUES (%s,%s,%s::jsonb,%s,%s,%s,%s)
+                    RETURNING id
+                """, (rule_id, title, json.dumps(content, ensure_ascii=False), source_chat_id, source_message_id, source_media_group_id, created_by))
+                row = cur.fetchone()
+                return int(row["id"]) if row else None
+
+    def get_saved_post(self, saved_post_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM saved_posts WHERE id=%s AND archived_at IS NULL", (int(saved_post_id),))
+                return cur.fetchone()
+
+    def list_saved_posts(self, *, rule_id: int | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if rule_id is None:
+                    cur.execute("SELECT * FROM saved_posts WHERE archived_at IS NULL AND status='ready' ORDER BY created_at DESC LIMIT %s", (int(limit),))
+                else:
+                    cur.execute("SELECT * FROM saved_posts WHERE archived_at IS NULL AND status='ready' AND rule_id=%s ORDER BY created_at DESC LIMIT %s", (int(rule_id), int(limit)))
+                return cur.fetchall() or []
+
+    def update_saved_post_content(self, saved_post_id: int, *, title: str | None, content: dict[str, Any]) -> bool:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE saved_posts SET title=%s, content_json=%s::jsonb, updated_at=NOW() WHERE id=%s", (title, json.dumps(content, ensure_ascii=False), int(saved_post_id)))
+                return cur.rowcount > 0
+
+    def archive_saved_post(self, saved_post_id: int) -> bool:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE saved_posts SET archived_at=NOW(), status='archived', updated_at=NOW() WHERE id=%s", (int(saved_post_id),))
+                return cur.rowcount > 0
+
+    def set_rule_repost_campaign_saved_post(self, rule_id: int, saved_post_id: int | None) -> bool:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE routing SET repost_campaign_saved_post_id=%s WHERE id=%s", (saved_post_id, int(rule_id)))
+                return cur.rowcount > 0
 
     def update_rule_repost_campaign_settings(self, rule_id: int, *, enabled: bool, show_seconds: int) -> bool:
         with self.connect() as conn:
