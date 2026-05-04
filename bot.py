@@ -86,6 +86,10 @@ from app.video_clip_duration import (
     is_video_clip_duration_in_bounds,
     parse_video_clip_duration_input,
 )
+from app.repost_campaign_service import (
+    format_campaign_show_seconds_ru,
+    normalize_campaign_show_seconds,
+)
 from app import product_ui
 from app import access_control, user_ui
 from app.user_handlers import (
@@ -3471,6 +3475,30 @@ def build_rule_card_text(row) -> str:
         clip_seconds = int((row["video_clip_duration_seconds"] if "video_clip_duration_seconds" in row.keys() else None) or 118)
         caption_mode_line = f"\n🎞 Длина видео: {safe_html(format_duration_ru(clip_seconds))}"
 
+    repost_campaign_line = ""
+    if (
+        settings.repost_campaign_admin_test_enabled
+        and mode == "repost"
+    ):
+        enabled = bool(row["repost_campaign_enabled"]) if "repost_campaign_enabled" in row.keys() else False
+        if not enabled:
+            repost_campaign_line = "\n💰 Рекламная кампания: выключена"
+        else:
+            try:
+                summary = db.get_rule_repost_campaign_summary(rule_id)
+                show_seconds = int(row["repost_campaign_show_seconds"] or 0) if "repost_campaign_show_seconds" in row.keys() else 0
+                show_seconds_ru = format_campaign_show_seconds_ru(show_seconds)
+                targets_active = int((summary or {}).get("targets_active") or 0)
+                targets_with_errors = int((summary or {}).get("targets_with_errors") or 0)
+                repost_campaign_line = (
+                    "\n💰 Рекламная кампания"
+                    f"\n⏳ Показ: {safe_html(show_seconds_ru)}"
+                    f"\n📣 Каналы: {targets_active} активных / {targets_with_errors} требуют проверки"
+                )
+            except Exception:
+                logger.exception("Не удалось собрать сводку рекламной кампании, rule_id=%s", rule_id)
+                repost_campaign_line = "\n💰 Рекламная кампания: данные временно недоступны"
+
     return (
         f"<b>Правило #{row['id']}</b>\n"
         f"👉 {safe_html(target_title)}\n\n"
@@ -3482,6 +3510,7 @@ def build_rule_card_text(row) -> str:
         f"⚠️ Ошибки: {faulty}\n"
         f"📍 Позиция: {safe_html(position_text)}"
         f"{caption_mode_line}"
+        f"{repost_campaign_line}"
     )
 
 def build_start_position_text(
@@ -3700,6 +3729,13 @@ def build_rule_card_keyboard(
                 callback_data=f"rule_extra_menu:{rule_id}",
             )
         ])
+        if settings.repost_campaign_admin_test_enabled and mode == "repost":
+            rows.append([
+                InlineKeyboardButton(
+                    text="💰 Рекламная кампания",
+                    callback_data=f"rule_repost_campaign_menu:{rule_id}",
+                )
+            ])
 
     control_text = "⏸ Выключить" if is_active else "▶️ Включить"
     control_callback = f"disable_rule:{rule_id}" if is_active else f"enable_rule:{rule_id}"
@@ -6228,6 +6264,194 @@ async def handle_rule_extra_menu(callback: CallbackQuery):
         if "message is not modified" in str(exc).lower():
             return
         logger.exception("Ошибка открытия доп. функций rule_id=%s: %s", rule_id, exc)
+
+def _build_repost_campaign_menu_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏳ Срок показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
+        [InlineKeyboardButton(text="📣 Каналы кампании", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
+        [InlineKeyboardButton(text="👁 Предпросмотр кампании", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
+        [InlineKeyboardButton(text="📊 История кампаний", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+        [InlineKeyboardButton(text="❌ Отключить кампанию", callback_data=f"rule_repost_campaign_disable:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")],
+    ])
+
+async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int) -> bool:
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return False
+    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "repost":
+        await answer_callback_safe(callback, "Рекламная кампания доступна только для режима репоста", show_alert=True)
+        return False
+    try:
+        summary = await run_db(db.get_rule_repost_campaign_summary, rule_id)
+    except Exception:
+        logger.exception("Не удалось открыть меню рекламной кампании, rule_id=%s", rule_id)
+        summary = {}
+    show_seconds_ru = format_campaign_show_seconds_ru(int(getattr(rule, "repost_campaign_show_seconds", 0) or 0))
+    targets_active = int((summary or {}).get("targets_active") or 0)
+    targets_ready = int((summary or {}).get("targets_ready") or 0)
+    text = (
+        "💰 Рекламная кампания\n\n"
+        "Тестовый режим для админа.\n\n"
+        "Новый репост из этого правила будет опубликован в основной канал и каналы кампании.\n"
+        "После окончания срока показа бот автоматически удалит рекламные публикации.\n\n"
+        f"⏳ Срок показа: {show_seconds_ru}\n"
+        f"📣 Каналы кампании: {targets_active}\n"
+        f"🧪 Готовность: {targets_ready} / {targets_active}"
+    )
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=_build_repost_campaign_menu_keyboard(rule_id))
+    return True
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_menu:"))
+async def handle_rule_repost_campaign_menu(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await _render_repost_campaign_menu(callback, rule_id):
+        return
+    await answer_callback_safe_once(callback)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_show_menu:"))
+async def handle_rule_repost_campaign_show_menu(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return
+    show_seconds_ru = format_campaign_show_seconds_ru(int(getattr(rule, "repost_campaign_show_seconds", 0) or 0))
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1 минута 🧪", callback_data=f"rule_repost_campaign_show_set:{rule_id}:60")],
+        [InlineKeyboardButton(text="15 минут", callback_data=f"rule_repost_campaign_show_set:{rule_id}:900")],
+        [InlineKeyboardButton(text="1 час", callback_data=f"rule_repost_campaign_show_set:{rule_id}:3600")],
+        [InlineKeyboardButton(text="2 часа", callback_data=f"rule_repost_campaign_show_set:{rule_id}:7200")],
+        [InlineKeyboardButton(text="6 часов", callback_data=f"rule_repost_campaign_show_set:{rule_id}:21600")],
+        [InlineKeyboardButton(text="12 часов", callback_data=f"rule_repost_campaign_show_set:{rule_id}:43200")],
+        [InlineKeyboardButton(text="24 часа", callback_data=f"rule_repost_campaign_show_set:{rule_id}:86400")],
+        [InlineKeyboardButton(text="48 часов", callback_data=f"rule_repost_campaign_show_set:{rule_id}:172800")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    text = (
+        "⏳ Срок показа рекламы\n\n"
+        "Выберите, сколько рекламный пост должен оставаться в каналах кампании.\n"
+        "После этого бот автоматически удалит опубликованные копии.\n\n"
+        f"Текущий срок: {show_seconds_ru}"
+    )
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+    await answer_callback_safe_once(callback)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_show_set:"))
+async def handle_rule_repost_campaign_show_set(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        _, rule_id_raw, seconds_raw = callback.data.split(":")
+        rule_id = int(rule_id_raw)
+        seconds = normalize_campaign_show_seconds(int(seconds_raw))
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    await run_db(db.update_rule_repost_campaign_settings, rule_id, enabled=True, show_seconds=seconds)
+    invalidate_rule_card_cache(rule_id)
+    try:
+        await run_db(db.log_rule_change, rule_id, "repost_campaign_show_set", f"show_seconds={seconds}", callback.from_user.id if callback.from_user else settings.admin_id)
+    except Exception:
+        logger.warning("Не удалось записать аудит изменения кампании rule_id=%s", rule_id)
+    await _render_repost_campaign_menu(callback, rule_id)
+    await answer_callback_safe_once(callback, "Срок показа обновлён")
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_disable:"))
+async def handle_rule_repost_campaign_disable(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    await run_db(db.update_rule_repost_campaign_settings, rule_id, enabled=False, show_seconds=0)
+    invalidate_rule_card_cache(rule_id)
+    await _render_repost_campaign_menu(callback, rule_id)
+    await answer_callback_safe_once(callback, "Рекламная кампания выключена")
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_targets:"))
+async def handle_rule_repost_campaign_targets(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    await edit_message_text_safe(
+        message=callback.message,
+        text="📣 Каналы кампании\n\nЭтот раздел будет добавлен следующим шагом.\n\nСейчас можно только включить срок показа рекламной кампании.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]]),
+    )
+    await answer_callback_safe_once(callback)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_preview:"))
+async def handle_rule_repost_campaign_preview(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    await edit_message_text_safe(
+        message=callback.message,
+        text="👁 Предпросмотр кампании\n\nСледующий repost из этого правила будет опубликован в основной канал.\n\nКаналы кампании и массовое добавление будут подключены следующим шагом.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]]),
+    )
+    await answer_callback_safe_once(callback)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_history:"))
+async def handle_rule_repost_campaign_history(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    await edit_message_text_safe(
+        message=callback.message,
+        text="📊 История кампаний\n\nИстория запусков будет добавлена после подключения каналов кампании.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]]),
+    )
+    await answer_callback_safe_once(callback)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_video_clip_duration:"))
 async def handle_rule_video_clip_duration(callback: CallbackQuery):
