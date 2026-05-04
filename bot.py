@@ -6408,10 +6408,66 @@ async def handle_rule_repost_campaign_targets(callback: CallbackQuery):
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return
+    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "repost":
+        await answer_callback_safe(callback, "Рекламная кампания доступна только для режима репоста", show_alert=True)
+        return
+    summary = await run_db(db.get_rule_repost_campaign_summary, rule_id)
+    active = int((summary or {}).get("targets_active") or 0)
+    ready = int((summary or {}).get("targets_ready") or 0)
+    with_errors = int((summary or {}).get("targets_with_errors") or 0)
     await edit_message_text_safe(
         message=callback.message,
-        text="📣 Каналы кампании\n\nЭтот раздел будет добавлен следующим шагом.\n\nСейчас можно только включить срок показа рекламной кампании.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]]),
+        text=(
+            "📣 Каналы кампании\n\n"
+            "Каналы, куда рекламный пост будет дополнительно отправляться после публикации в основной канал.\n\n"
+            f"Активных: {active}\n"
+            f"Готовы к работе: {ready}\n"
+            f"Требуют проверки: {with_errors}\n\n"
+            "Срок показа задаётся в меню рекламной кампании."
+        ),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📥 Добавить списком", callback_data=f"rule_repost_campaign_add_list:{rule_id}")],
+            [InlineKeyboardButton(text="📋 Список каналов", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")],
+            [InlineKeyboardButton(text="🧪 Проверить права", callback_data=f"rule_repost_campaign_check:{rule_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        ]),
+    )
+    await answer_callback_safe_once(callback)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_add_list:"))
+async def handle_rule_repost_campaign_add_list(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return
+    user_states[callback.from_user.id] = {"action": "awaiting_repost_campaign_targets_list", "rule_id": rule_id}
+    await edit_message_text_safe(
+        message=callback.message,
+        text=(
+            "📥 Добавление каналов кампании\n\n"
+            "Отправьте список каналов, каждый с новой строки.\n\n"
+            "Можно использовать:\n"
+            "@channel_username\n"
+            "-1001234567890\n\n"
+            "Пример:\n"
+            "@my_channel\n"
+            "-1001234567890"
+        ),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_targets:{rule_id}")]]),
     )
     await answer_callback_safe_once(callback)
 
@@ -6431,6 +6487,106 @@ async def handle_rule_repost_campaign_preview(callback: CallbackQuery):
         message=callback.message,
         text="👁 Предпросмотр кампании\n\nСледующий repost из этого правила будет опубликован в основной канал.\n\nКаналы кампании и массовое добавление будут подключены следующим шагом.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]]),
+    )
+    await answer_callback_safe_once(callback)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_targets_list:"))
+async def handle_rule_repost_campaign_targets_list(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    targets = await run_db(db.list_rule_repost_campaign_targets, rule_id, active_only=False)
+    if not targets:
+        text = "📋 Список каналов кампании\n\nПока не добавлено ни одного канала."
+    else:
+        lines: list[str] = ["📋 Список каналов кампании", ""]
+        for idx, row in enumerate(targets[:30], 1):
+            has_error = bool(row.get("last_check_error"))
+            is_active = bool(row.get("is_active"))
+            icon = "⚠️" if has_error else ("🟢" if is_active else "⏸")
+            title = str(row.get("title") or row.get("target_id") or "")
+            if has_error:
+                lines.append(f"{idx}. {icon} {title} — {row.get('last_check_error')}")
+            else:
+                lines.append(f"{idx}. {icon} {title}")
+        if len(targets) > 30:
+            lines.extend(["", f"Показаны первые 30 из {len(targets)}."])
+        text = "\n".join(lines)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏸ Выключить по ID", callback_data=f"rule_repost_campaign_target_disable_prompt:{rule_id}")],
+            [InlineKeyboardButton(text="▶️ Включить по ID", callback_data=f"rule_repost_campaign_target_enable_prompt:{rule_id}")],
+            [InlineKeyboardButton(text="🗑 Удалить по ID", callback_data=f"rule_repost_campaign_target_remove_prompt:{rule_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
+        ]),
+    )
+    await answer_callback_safe_once(callback)
+
+async def _open_repost_campaign_target_id_prompt(callback: CallbackQuery, *, action: str, title: str, rule_id: int) -> None:
+    user_states[callback.from_user.id] = {"action": action, "rule_id": rule_id}
+    await edit_message_text_safe(
+        message=callback.message,
+        text=f"{title}\n\nОтправьте ID строки из списка каналов.\nНапример: 12",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")]]),
+    )
+    await answer_callback_safe_once(callback)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_disable_prompt:"))
+async def handle_repost_campaign_target_disable_prompt(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    await _open_repost_campaign_target_id_prompt(callback, action="awaiting_repost_campaign_target_disable_id", title="⏸ Выключение канала кампании", rule_id=rule_id)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_enable_prompt:"))
+async def handle_repost_campaign_target_enable_prompt(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    await _open_repost_campaign_target_id_prompt(callback, action="awaiting_repost_campaign_target_enable_id", title="▶️ Включение канала кампании", rule_id=rule_id)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_remove_prompt:"))
+async def handle_repost_campaign_target_remove_prompt(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    await _open_repost_campaign_target_id_prompt(callback, action="awaiting_repost_campaign_target_remove_id", title="🗑 Удаление канала кампании", rule_id=rule_id)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_check:"))
+async def handle_rule_repost_campaign_check(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    await edit_message_text_safe(
+        message=callback.message,
+        text=(
+            "🧪 Проверка прав каналов\n\n"
+            "Полная проверка прав публикации и удаления будет добавлена отдельным шагом.\n\n"
+            "Сейчас список каналов сохраняется, а ошибки отправки/удаления будут фиксироваться при первой реальной кампании."
+        ),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_targets:{rule_id}")]]),
     )
     await answer_callback_safe_once(callback)
 
@@ -7450,7 +7606,7 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
         and not (m.text or "").startswith("📥 ")
         and (
             not (m.text or "").strip().startswith("-100")
-            or user_states.get(m.from_user.id, {}).get("action") in {"awaiting_user_channel_id", "awaiting_user_channel_thread_id"}
+            or user_states.get(m.from_user.id, {}).get("action") in {"awaiting_user_channel_id", "awaiting_user_channel_thread_id", "awaiting_repost_campaign_targets_list"}
         )
     )
 )
@@ -7613,6 +7769,100 @@ async def handle_stateful_private_inputs(message: Message):
                     [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
                 ]
             ),
+        )
+        return
+
+    if action == "awaiting_repost_campaign_targets_list":
+        rule_id = int(state.get("rule_id") or 0)
+        raw_lines = [line.strip() for line in text.splitlines()]
+        total = len(raw_lines)
+        unique_values: list[str] = []
+        seen: set[str] = set()
+        invalid = 0
+        for value in raw_lines:
+            if not value:
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            is_valid = value.startswith("@") or value.startswith("-100") or bool(re.fullmatch(r"-\d+", value))
+            if not is_valid:
+                invalid += 1
+                continue
+            unique_values.append(value)
+        added = 0
+        skipped = 0
+        for value in unique_values:
+            row_id = await run_db(
+                db.add_rule_repost_campaign_target,
+                rule_id=rule_id,
+                target_id=value,
+                target_thread_id=None,
+                title=value,
+                created_by=message.from_user.id if message.from_user else settings.admin_id,
+            )
+            if row_id:
+                added += 1
+            else:
+                skipped += 1
+        try:
+            await run_db(
+                db.log_rule_change,
+                event_type="repost_campaign_targets_list_added",
+                rule_id=rule_id,
+                admin_id=message.from_user.id if message.from_user else settings.admin_id,
+                extra={"added": added, "skipped": skipped, "invalid": invalid, "total": total},
+            )
+        except Exception:
+            logger.warning("Не удалось записать аудит добавления каналов кампании rule_id=%s", rule_id)
+        reset_user_state(user_id)
+        invalidate_rule_card_cache(rule_id)
+        await message.answer(
+            "📥 Каналы обработаны\n\n"
+            f"✅ Добавлено: {added}\n"
+            f"⚠️ Уже были или пропущены: {skipped}\n"
+            f"❌ Ошибки формата: {invalid}\n\n"
+            f"Всего строк: {total}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 К списку каналов", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")]]),
+        )
+        return
+
+    if action in {"awaiting_repost_campaign_target_disable_id", "awaiting_repost_campaign_target_enable_id", "awaiting_repost_campaign_target_remove_id"}:
+        rule_id = int(state.get("rule_id") or 0)
+        if not text.isdigit():
+            await message.answer("Нужно отправить номер строки из списка")
+            return
+        idx = int(text)
+        targets = await run_db(db.list_rule_repost_campaign_targets, rule_id, active_only=False)
+        if idx < 1 or idx > len(targets):
+            await message.answer("Такого номера в списке нет")
+            return
+        target_row_id = int(targets[idx - 1]["id"])
+        event_type = ""
+        if action == "awaiting_repost_campaign_target_disable_id":
+            await run_db(db.set_rule_repost_campaign_target_active, target_row_id, False)
+            event_type = "repost_campaign_target_disabled"
+        elif action == "awaiting_repost_campaign_target_enable_id":
+            await run_db(db.set_rule_repost_campaign_target_active, target_row_id, True)
+            event_type = "repost_campaign_target_enabled"
+        else:
+            await run_db(db.remove_rule_repost_campaign_target, target_row_id)
+            event_type = "repost_campaign_target_removed"
+        try:
+            await run_db(
+                db.log_rule_change,
+                event_type=event_type,
+                rule_id=rule_id,
+                admin_id=message.from_user.id if message.from_user else settings.admin_id,
+                extra={"target_row_id": target_row_id, "list_index": idx},
+            )
+        except Exception:
+            logger.warning("Не удалось записать аудит действия по каналу кампании rule_id=%s row_id=%s", rule_id, target_row_id)
+        reset_user_state(user_id)
+        invalidate_rule_card_cache(rule_id)
+        await message.answer(
+            "✅ Готово",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 Вернуться к списку каналов", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")]]),
         )
         return
 
