@@ -7025,7 +7025,7 @@ class PostgresRepository(RepositoryProtocol):
 
 
     def create_saved_post(self, *, rule_id: int | None, title: str | None, content: dict[str, Any], source_chat_id: str | None, source_message_id: int | None, source_media_group_id: str | None, created_by: int | None) -> int | None:
-        with self._connect() as conn:
+        with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO saved_posts(rule_id,title,content_json,source_chat_id,source_message_id,source_media_group_id,created_by)
@@ -7036,13 +7036,13 @@ class PostgresRepository(RepositoryProtocol):
                 return int(row["id"]) if row else None
 
     def get_saved_post(self, saved_post_id: int) -> dict[str, Any] | None:
-        with self._connect() as conn:
+        with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM saved_posts WHERE id=%s AND archived_at IS NULL", (int(saved_post_id),))
                 return cur.fetchone()
 
     def list_saved_posts(self, *, rule_id: int | None = None, limit: int = 20) -> list[dict[str, Any]]:
-        with self._connect() as conn:
+        with self.connect() as conn:
             with conn.cursor() as cur:
                 if rule_id is None:
                     cur.execute("SELECT * FROM saved_posts WHERE archived_at IS NULL AND status='ready' ORDER BY created_at DESC LIMIT %s", (int(limit),))
@@ -7051,19 +7051,19 @@ class PostgresRepository(RepositoryProtocol):
                 return cur.fetchall() or []
 
     def update_saved_post_content(self, saved_post_id: int, *, title: str | None, content: dict[str, Any]) -> bool:
-        with self._connect() as conn:
+        with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE saved_posts SET title=%s, content_json=%s::jsonb, updated_at=NOW() WHERE id=%s", (title, json.dumps(content, ensure_ascii=False), int(saved_post_id)))
                 return cur.rowcount > 0
 
     def archive_saved_post(self, saved_post_id: int) -> bool:
-        with self._connect() as conn:
+        with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE saved_posts SET archived_at=NOW(), status='archived', updated_at=NOW() WHERE id=%s", (int(saved_post_id),))
                 return cur.rowcount > 0
 
     def set_rule_repost_campaign_saved_post(self, rule_id: int, saved_post_id: int | None) -> bool:
-        with self._connect() as conn:
+        with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE routing SET repost_campaign_saved_post_id=%s WHERE id=%s", (saved_post_id, int(rule_id)))
                 return cur.rowcount > 0
