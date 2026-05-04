@@ -104,3 +104,66 @@ def get_saved_post_short_description(content: dict[str, Any]) -> str:
     kind = str(content.get("kind") or "text")
     mapping = {"text": "текст", "photo": "фото", "video": "видео", "animation": "анимация", "document": "документ"}
     return mapping.get(kind, kind)
+
+
+async def send_saved_post_content(
+    *,
+    bot,
+    chat_id: int | str,
+    content: dict[str, Any],
+    reply_markup=None,
+) -> dict[str, Any]:
+    kind = str(content.get("kind") or "text")
+
+    if kind == "text":
+        msg = await bot.send_message(
+            chat_id=chat_id,
+            text=content.get("text") or "",
+            entities=deserialize_message_entities(content.get("entities")),
+            reply_markup=reply_markup,
+        )
+    elif kind == "photo":
+        media = content.get("media") or {}
+        msg = await bot.send_photo(
+            chat_id=chat_id,
+            photo=media["file_id"],
+            caption=content.get("caption"),
+            caption_entities=deserialize_message_entities(content.get("caption_entities")),
+            reply_markup=reply_markup,
+        )
+    elif kind == "video":
+        media = content.get("media") or {}
+        msg = await bot.send_video(
+            chat_id=chat_id,
+            video=media["file_id"],
+            caption=content.get("caption"),
+            caption_entities=deserialize_message_entities(content.get("caption_entities")),
+            reply_markup=reply_markup,
+        )
+    elif kind == "animation":
+        media = content.get("media") or {}
+        msg = await bot.send_animation(
+            chat_id=chat_id,
+            animation=media["file_id"],
+            caption=content.get("caption"),
+            caption_entities=deserialize_message_entities(content.get("caption_entities")),
+            reply_markup=reply_markup,
+        )
+    elif kind == "document":
+        media = content.get("media") or {}
+        msg = await bot.send_document(
+            chat_id=chat_id,
+            document=media["file_id"],
+            caption=content.get("caption"),
+            caption_entities=deserialize_message_entities(content.get("caption_entities")),
+            reply_markup=reply_markup,
+        )
+    else:
+        raise ValueError(f"Unsupported saved post kind: {kind}")
+
+    return {
+        "ok": True,
+        "message_id": msg.message_id,
+        "chat_id": str(chat_id),
+        "kind": kind,
+    }

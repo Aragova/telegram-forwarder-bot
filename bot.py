@@ -95,6 +95,7 @@ from app.saved_posts_service import (
     deserialize_message_entities,
     get_saved_post_preview_caption,
     get_saved_post_short_description,
+    send_saved_post_content,
 )
 from app import product_ui
 from app import access_control, user_ui
@@ -6278,16 +6279,21 @@ async def handle_rule_extra_menu(callback: CallbackQuery):
             return
         logger.exception("Ошибка открытия доп. функций rule_id=%s: %s", rule_id, exc)
 
-def _build_repost_campaign_menu_keyboard(rule_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def _build_repost_campaign_menu_keyboard(rule_id: int, *, show_test_send: bool = False) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton(text="⏳ Срок показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
         [InlineKeyboardButton(text="📣 Каналы кампании", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
         [InlineKeyboardButton(text="📝 Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
         [InlineKeyboardButton(text="👁 Предпросмотр кампании", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
         [InlineKeyboardButton(text="📊 История кампаний", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+    ]
+    if show_test_send:
+        rows.append([InlineKeyboardButton(text="🚀 Тестовый запуск", callback_data=f"rule_repost_campaign_test_send:{rule_id}")])
+    rows.extend([
         [InlineKeyboardButton(text="❌ Отключить кампанию", callback_data=f"rule_repost_campaign_disable:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")],
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int) -> bool:
     rule = await run_db(db.get_rule, rule_id)
@@ -6340,7 +6346,11 @@ async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int) ->
         f"🧪 Готовность: {targets_ready} / {targets_active}\n"
         f"{saved_post_line}"
     )
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=_build_repost_campaign_menu_keyboard(rule_id))
+    await edit_message_text_safe(
+        message=callback.message,
+        text=text,
+        reply_markup=_build_repost_campaign_menu_keyboard(rule_id, show_test_send=bool(saved_post_id)),
+    )
     return True
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_menu:"))
@@ -6595,6 +6605,96 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
         )
         await callback.message.answer(
             "⚠️ Не удалось показать рекламный пост.\n\nПопробуйте заменить пост через “➕ Добавить / заменить пост”."
+        )
+
+    await answer_callback_safe_once(callback)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_test_send:"))
+async def handle_rule_repost_campaign_test_send(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return
+    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "repost":
+        await answer_callback_safe(callback, "Рекламная кампания доступна только для режима репоста", show_alert=True)
+        return
+
+    saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None)
+    if not saved_post_id:
+        await answer_callback_safe(callback, "Рекламный пост не выбран", show_alert=True)
+        return
+
+    saved_post = await run_db(db.get_saved_post, int(saved_post_id))
+    if not saved_post:
+        await answer_callback_safe(callback, "Рекламный пост не найден", show_alert=True)
+        return
+
+    target_id = getattr(rule, "target_id", None)
+    content = saved_post.get("content_json") or saved_post.get("content") or {}
+
+    try:
+        result = await send_saved_post_content(bot=bot, chat_id=target_id, content=content)
+        logger.info(
+            "REPOST_CAMPAIGN_TEST_SEND_DONE | rule_id=%s | saved_post_id=%s | target_id=%s | message_id=%s",
+            rule_id,
+            saved_post_id,
+            target_id,
+            result.get("message_id"),
+        )
+        try:
+            await run_db(
+                db.log_rule_change,
+                event_type="repost_campaign_test_send_done",
+                rule_id=rule_id,
+                admin_id=callback.from_user.id if callback.from_user else settings.admin_id,
+                old_value=None,
+                new_value={"saved_post_id": int(saved_post_id), "target_id": str(target_id), "message_id": result.get("message_id")},
+                extra={"source": "admin_ui"},
+            )
+        except Exception as audit_exc:
+            logger.warning("Не удалось записать аудит тестового запуска rule_id=%s: %s", rule_id, audit_exc, exc_info=True)
+
+        await callback.message.answer(
+            "✅ Тестовый запуск выполнен\n\nРекламный пост отправлен в основной канал правила.\n"
+            f"Message ID: {result.get('message_id')}"
+        )
+    except Exception as exc:
+        logger.warning(
+            "REPOST_CAMPAIGN_TEST_SEND_FAILED | rule_id=%s | saved_post_id=%s | target_id=%s | error=%s",
+            rule_id,
+            saved_post_id,
+            target_id,
+            exc,
+            exc_info=True,
+        )
+        try:
+            await run_db(
+                db.log_rule_change,
+                event_type="repost_campaign_test_send_failed",
+                rule_id=rule_id,
+                admin_id=callback.from_user.id if callback.from_user else settings.admin_id,
+                old_value=None,
+                new_value=None,
+                extra={"source": "admin_ui", "saved_post_id": int(saved_post_id), "target_id": str(target_id), "error": str(exc)},
+            )
+        except Exception as audit_exc:
+            logger.warning("Не удалось записать аудит ошибки тестового запуска rule_id=%s: %s", rule_id, audit_exc, exc_info=True)
+
+        await callback.message.answer(
+            "❌ Не удалось отправить рекламный пост\n\n"
+            "Проверьте, что бот добавлен в основной канал и имеет право публиковать сообщения."
         )
 
     await answer_callback_safe_once(callback)
