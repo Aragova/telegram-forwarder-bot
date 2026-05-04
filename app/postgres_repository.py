@@ -145,6 +145,8 @@ class PostgresRepository(RepositoryProtocol):
             video_caption_entities_json=data.get("video_caption_entities_json"),
             caption_delivery_mode=data.get("caption_delivery_mode", "auto"),
             video_caption_delivery_mode=data.get("video_caption_delivery_mode", "auto"),
+            repost_campaign_enabled=bool(data.get("repost_campaign_enabled") or False),
+            repost_campaign_show_seconds=int(data.get("repost_campaign_show_seconds") or 0),
         )
 
     def _find_next_interval_slot(
@@ -7002,6 +7004,73 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return True
 
+    def get_rule_repost_campaign_summary(self, rule_id: int) -> dict[str, Any]:
+        default = {
+            "enabled": False,
+            "show_seconds": 0,
+            "targets_total": 0,
+            "targets_active": 0,
+            "targets_ready": 0,
+            "targets_with_errors": 0,
+        }
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT
+                            COALESCE(repost_campaign_enabled, FALSE) AS enabled,
+                            COALESCE(repost_campaign_show_seconds, 0) AS show_seconds
+                        FROM routing
+                        WHERE id = %s
+                        LIMIT 1
+                        """,
+                        (int(rule_id),),
+                    )
+                    rule_row = cur.fetchone()
+                    if not rule_row:
+                        return default
+                    cur.execute(
+                        """
+                        SELECT
+                            COUNT(*) AS targets_total,
+                            COUNT(*) FILTER (WHERE is_active = TRUE) AS targets_active,
+                            COUNT(*) FILTER (
+                                WHERE is_active = TRUE
+                                  AND COALESCE(can_post, TRUE) = TRUE
+                                  AND COALESCE(can_delete, TRUE) = TRUE
+                                  AND (last_check_error IS NULL OR last_check_error = '')
+                            ) AS targets_ready,
+                            COUNT(*) FILTER (
+                                WHERE is_active = TRUE
+                                  AND (
+                                      COALESCE(can_post, TRUE) = FALSE
+                                      OR COALESCE(can_delete, TRUE) = FALSE
+                                      OR (last_check_error IS NOT NULL AND last_check_error <> '')
+                                  )
+                            ) AS targets_with_errors
+                        FROM rule_repost_campaign_targets
+                        WHERE rule_id = %s
+                        """,
+                        (int(rule_id),),
+                    )
+                    targets_row = cur.fetchone() or {}
+            return {
+                "enabled": bool(rule_row["enabled"]),
+                "show_seconds": int(rule_row["show_seconds"] or 0),
+                "targets_total": int(targets_row.get("targets_total") or 0),
+                "targets_active": int(targets_row.get("targets_active") or 0),
+                "targets_ready": int(targets_row.get("targets_ready") or 0),
+                "targets_with_errors": int(targets_row.get("targets_with_errors") or 0),
+            }
+        except Exception as exc:
+            logger.exception(
+                "REPOST_CAMPAIGN_SUMMARY_FAILED | rule_id=%s | error=%s",
+                rule_id,
+                exc,
+            )
+            return default
+
     def add_rule_repost_campaign_target(self, *, rule_id: int, target_id: str, target_thread_id: int | None, title: str | None, created_by: int | None) -> int | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -7015,6 +7084,20 @@ class PostgresRepository(RepositoryProtocol):
                 if active_only: cur.execute("SELECT * FROM rule_repost_campaign_targets WHERE rule_id=%s AND is_active=TRUE ORDER BY id", (int(rule_id),))
                 else: cur.execute("SELECT * FROM rule_repost_campaign_targets WHERE rule_id=%s ORDER BY id", (int(rule_id),))
                 return [dict(x) for x in cur.fetchall() or []]
+
+    def remove_rule_repost_campaign_target(self, row_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM rule_repost_campaign_targets WHERE id=%s", (int(row_id),))
+            conn.commit()
+            return True
+
+    def set_rule_repost_campaign_target_active(self, row_id: int, is_active: bool) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE rule_repost_campaign_targets SET is_active=%s, updated_at=NOW() WHERE id=%s", (bool(is_active), int(row_id)))
+            conn.commit()
+            return True
 
     def create_delivery_campaign_copy(self, *, delivery_id: int, rule_id: int, target_id: str, target_thread_id: int | None, target_title: str | None) -> int | None:
         with self.connect() as conn:
