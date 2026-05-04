@@ -11,7 +11,6 @@ def test_repost_campaign_repository_methods_exist():
     assert hasattr(repo, "remove_rule_repost_campaign_target")
     assert hasattr(repo, "set_rule_repost_campaign_target_active")
 
-
 def test_row_to_rule_maps_repost_campaign_fields():
     repo = PostgresRepository()
     row = {
@@ -49,3 +48,4 @@ def test_row_to_rule_maps_repost_campaign_fields():
 
     assert rule.repost_campaign_enabled is True
     assert rule.repost_campaign_show_seconds == 86400
+
