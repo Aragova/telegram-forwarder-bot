@@ -720,6 +720,7 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS account_ids_json TEXT NULL;
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS result_json TEXT NULL;
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NULL;
 
 
         CREATE TABLE IF NOT EXISTS rule_repost_campaign_targets (
@@ -734,6 +735,7 @@ class PostgresRepository(RepositoryProtocol):
             last_check_at TIMESTAMPTZ NULL,
             last_check_error TEXT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NULL,
             created_by BIGINT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_repost_campaign_targets_unique
@@ -7095,9 +7097,17 @@ class PostgresRepository(RepositoryProtocol):
     def set_rule_repost_campaign_target_active(self, row_id: int, is_active: bool) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE rule_repost_campaign_targets SET is_active=%s, updated_at=NOW() WHERE id=%s", (bool(is_active), int(row_id)))
+                cur.execute(
+                    """
+                    UPDATE rule_repost_campaign_targets
+                    SET is_active = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (bool(is_active), int(row_id)),
+                )
             conn.commit()
-            return True
+            return cur.rowcount > 0
 
     def create_delivery_campaign_copy(self, *, delivery_id: int, rule_id: int, target_id: str, target_thread_id: int | None, target_title: str | None) -> int | None:
         with self.connect() as conn:
