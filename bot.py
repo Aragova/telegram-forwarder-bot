@@ -95,6 +95,7 @@ from app.saved_posts_service import (
     deserialize_message_entities,
     get_saved_post_preview_caption,
     get_saved_post_short_description,
+    saved_post_requires_premium_send,
     send_saved_post_content,
     summarize_aiogram_message_for_saved_post,
     summarize_saved_post_entities,
@@ -6589,11 +6590,23 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
     content = saved_post.get("content_json") or saved_post.get("content") or {}
     kind = str(content.get("kind") or "text")
     preview_keyboard = _build_repost_campaign_post_preview_keyboard(rule_id)
+    method = "bot_api"
+    needs_premium = saved_post_requires_premium_send(content)
+    source_chat_id = saved_post.get("source_chat_id")
+    source_message_id = saved_post.get("source_message_id")
 
     try:
-        if kind == "photo":
+        if needs_premium and source_chat_id and source_message_id:
+            sent = await bot.copy_message(
+                chat_id=callback.message.chat.id,
+                from_chat_id=source_chat_id,
+                message_id=source_message_id,
+                reply_markup=preview_keyboard,
+            )
+            method = "copy_message"
+        elif kind == "photo":
             media = content.get("media") or {}
-            await callback.message.answer_photo(
+            sent = await callback.message.answer_photo(
                 photo=media["file_id"],
                 caption=content.get("caption") or None,
                 caption_entities=deserialize_message_entities(content.get("caption_entities")),
@@ -6601,7 +6614,7 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
             )
         elif kind == "video":
             media = content.get("media") or {}
-            await callback.message.answer_video(
+            sent = await callback.message.answer_video(
                 video=media["file_id"],
                 caption=content.get("caption") or None,
                 caption_entities=deserialize_message_entities(content.get("caption_entities")),
@@ -6609,7 +6622,7 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
             )
         elif kind == "animation":
             media = content.get("media") or {}
-            await callback.message.answer_animation(
+            sent = await callback.message.answer_animation(
                 animation=media["file_id"],
                 caption=content.get("caption") or None,
                 caption_entities=deserialize_message_entities(content.get("caption_entities")),
@@ -6617,23 +6630,29 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
             )
         elif kind == "document":
             media = content.get("media") or {}
-            await callback.message.answer_document(
+            sent = await callback.message.answer_document(
                 document=media["file_id"],
                 caption=content.get("caption") or None,
                 caption_entities=deserialize_message_entities(content.get("caption_entities")),
                 reply_markup=preview_keyboard,
             )
         else:
-            await callback.message.answer(
+            sent = await callback.message.answer(
                 content.get("text") or get_saved_post_preview_caption(content),
                 entities=deserialize_message_entities(content.get("entities")),
                 reply_markup=preview_keyboard,
             )
+        if needs_premium and (not source_chat_id or not source_message_id):
+            await callback.message.answer(
+                "⚠️ У поста есть premium emoji, но нет исходного сообщения для copy_message.\n\n"
+                "Замените рекламный пост заново через “🔁 Заменить пост”."
+            )
         logger.info(
-            "REPOST_CAMPAIGN_SAVED_POST_PREVIEW_SENT | rule_id=%s | saved_post_id=%s | kind=%s",
+            "REPOST_CAMPAIGN_SAVED_POST_PREVIEW_SENT | rule_id=%s | saved_post_id=%s | kind=%s | method=%s",
             rule_id,
             saved_post_id,
             kind,
+            method,
         )
     except Exception as exc:
         logger.warning(
@@ -6713,15 +6732,30 @@ async def handle_rule_repost_campaign_test_send(callback: CallbackQuery):
 
     target_id = getattr(rule, "target_id", None)
     content = saved_post.get("content_json") or saved_post.get("content") or {}
+    method = "bot_api"
+    needs_premium = saved_post_requires_premium_send(content)
+    source_chat_id = saved_post.get("source_chat_id")
+    source_message_id = saved_post.get("source_message_id")
 
     try:
-        result = await send_saved_post_content(bot=bot, chat_id=target_id, content=content)
+        if needs_premium and source_chat_id and source_message_id:
+            sent = await bot.copy_message(chat_id=target_id, from_chat_id=source_chat_id, message_id=source_message_id)
+            result = {"ok": True, "message_id": sent.message_id, "chat_id": str(target_id), "kind": str(content.get("kind") or "text")}
+            method = "copy_message"
+        else:
+            result = await send_saved_post_content(bot=bot, chat_id=target_id, content=content)
+            if needs_premium and (not source_chat_id or not source_message_id):
+                await callback.message.answer(
+                    "⚠️ У поста есть premium emoji, но нет исходного сообщения для copy_message.\n\n"
+                    "Замените рекламный пост заново через “🔁 Заменить пост”."
+                )
         logger.info(
-            "REPOST_CAMPAIGN_TEST_SEND_DONE | rule_id=%s | saved_post_id=%s | target_id=%s | message_id=%s",
+            "REPOST_CAMPAIGN_TEST_SEND_DONE | rule_id=%s | saved_post_id=%s | target_id=%s | message_id=%s | method=%s",
             rule_id,
             saved_post_id,
             target_id,
             result.get("message_id"),
+            method,
         )
         try:
             await run_db(
