@@ -11,6 +11,8 @@ JOB_TYPE_VIDEO_DELIVERY = "video_delivery"
 JOB_TYPE_VIDEO_DOWNLOAD = "video_download"
 JOB_TYPE_VIDEO_PROCESS = "video_process"
 JOB_TYPE_VIDEO_SEND = "video_send"
+JOB_TYPE_REPOST_CAMPAIGN_SEND_COPY = "repost_campaign_send_copy"
+JOB_TYPE_REPOST_CAMPAIGN_DELETE_COPY = "repost_campaign_delete_copy"
 
 JOB_QUEUE_BY_TYPE = {
     JOB_TYPE_REPOST_SINGLE: "light",
@@ -19,6 +21,8 @@ JOB_QUEUE_BY_TYPE = {
     JOB_TYPE_VIDEO_DOWNLOAD: "heavy",
     JOB_TYPE_VIDEO_PROCESS: "heavy",
     JOB_TYPE_VIDEO_SEND: "heavy",
+    JOB_TYPE_REPOST_CAMPAIGN_SEND_COPY: "light",
+    JOB_TYPE_REPOST_CAMPAIGN_DELETE_COPY: "light",
 }
 
 JOB_PRIORITY_BY_TYPE = {
@@ -30,6 +34,8 @@ JOB_PRIORITY_BY_TYPE = {
     JOB_TYPE_VIDEO_PROCESS: 180,
     JOB_TYPE_VIDEO_DOWNLOAD: 200,
     JOB_TYPE_VIDEO_DELIVERY: 200,
+    JOB_TYPE_REPOST_CAMPAIGN_SEND_COPY: 110,
+    JOB_TYPE_REPOST_CAMPAIGN_DELETE_COPY: 300,
 }
 
 
@@ -257,3 +263,21 @@ def enqueue_video_send(repo, payload: dict[str, Any]) -> int | None:
     if job_id is not None:
         logger.info("JOB CREATED | Создана задача video_send для delivery #%s (job #%s)", delivery_id, job_id)
     return job_id
+
+
+def build_dedup_key_for_repost_campaign_send_copy(copy_id: int) -> str:
+    return f"repost_campaign_send_copy:copy:{int(copy_id)}"
+
+
+def build_dedup_key_for_repost_campaign_delete_copy(copy_id: int) -> str:
+    return f"repost_campaign_delete_copy:copy:{int(copy_id)}"
+
+
+def enqueue_repost_campaign_send_copy(repo, copy_id: int, *, run_at: str | None = None) -> int | None:
+    payload = {"job_type": JOB_TYPE_REPOST_CAMPAIGN_SEND_COPY, "copy_id": int(copy_id)}
+    return repo.create_job(job_type=JOB_TYPE_REPOST_CAMPAIGN_SEND_COPY,payload=payload,queue=JOB_QUEUE_BY_TYPE[JOB_TYPE_REPOST_CAMPAIGN_SEND_COPY],priority=JOB_PRIORITY_BY_TYPE[JOB_TYPE_REPOST_CAMPAIGN_SEND_COPY],dedup_key=build_dedup_key_for_repost_campaign_send_copy(copy_id),run_at=run_at)
+
+
+def enqueue_repost_campaign_delete_copy(repo, copy_id: int, *, run_at: str | None = None) -> int | None:
+    payload = {"job_type": JOB_TYPE_REPOST_CAMPAIGN_DELETE_COPY, "copy_id": int(copy_id)}
+    return repo.create_job(job_type=JOB_TYPE_REPOST_CAMPAIGN_DELETE_COPY,payload=payload,queue=JOB_QUEUE_BY_TYPE[JOB_TYPE_REPOST_CAMPAIGN_DELETE_COPY],priority=JOB_PRIORITY_BY_TYPE[JOB_TYPE_REPOST_CAMPAIGN_DELETE_COPY],dedup_key=build_dedup_key_for_repost_campaign_delete_copy(copy_id),run_at=run_at)

@@ -25,7 +25,7 @@ from .worker_resource_policy import POLICY, WorkerResourcePolicy
 
 logger = logging.getLogger("forwarder")
 
-_LIGHT_JOB_TYPES = {"repost_single", "repost_album"}
+_LIGHT_JOB_TYPES = {"repost_single", "repost_album", "repost_campaign_send_copy", "repost_campaign_delete_copy"}
 _HEAVY_STAGE_TYPES = {"video_download", "video_process", "video_send", "video_delivery"}
 
 
@@ -395,7 +395,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     logger.info("JOB PROCESSING | %s обрабатывает задачу #%s (%s)", worker_id, job_id, job_type)
     result: dict[str, Any] | None = None
     try:
-        if job_type in {"repost_single", "repost_album", "video_delivery", "video_send"}:
+        if job_type in {"repost_single", "repost_album", "repost_campaign_send_copy", "repost_campaign_delete_copy", "video_delivery", "video_send"}:
             guarded = await asyncio.to_thread(
                 _complete_job_if_delivery_already_sent,
                 repo,

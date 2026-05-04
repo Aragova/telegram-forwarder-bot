@@ -121,6 +121,10 @@ class Settings:
     reaction_onboarding_port: int = int(os.getenv("REACTION_ONBOARDING_PORT", "8091") or 8091)
     reaction_onboarding_public_path: str = os.getenv("REACTION_ONBOARDING_PUBLIC_PATH", "/reaction-auth").strip() or "/reaction-auth"
 
+    repost_campaign_admin_test_enabled: bool = str(
+        os.getenv("REPOST_CAMPAIGN_ADMIN_TEST_ENABLED", "false")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
     def validate(self) -> None:
         missing = []
         for key in ("bot_token", "admin_id", "api_id", "api_hash", "phone_number"):
