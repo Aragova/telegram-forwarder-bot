@@ -50,3 +50,14 @@ def test_row_to_rule_maps_repost_campaign_fields():
     assert rule.repost_campaign_enabled is True
     assert rule.repost_campaign_show_seconds == 86400
 
+
+
+def test_saved_posts_repository_methods_exist():
+    repo = PostgresRepository()
+
+    assert hasattr(repo, "create_saved_post")
+    assert hasattr(repo, "get_saved_post")
+    assert hasattr(repo, "list_saved_posts")
+    assert hasattr(repo, "update_saved_post_content")
+    assert hasattr(repo, "archive_saved_post")
+    assert hasattr(repo, "set_rule_repost_campaign_saved_post")
