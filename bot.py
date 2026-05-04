@@ -6502,12 +6502,123 @@ async def handle_rule_repost_campaign_preview(callback: CallbackQuery):
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
-    await edit_message_text_safe(
-        message=callback.message,
-        text="👁 Предпросмотр кампании\n\nСледующий repost из этого правила будет опубликован в основной канал.\n\nКаналы кампании и массовое добавление будут подключены следующим шагом.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]]),
-    )
-    await answer_callback_safe_once(callback)
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return
+    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "repost":
+        await answer_callback_safe(callback, "Рекламная кампания доступна только для режима репоста", show_alert=True)
+        return
+
+    try:
+        summary = await run_db(db.get_rule_repost_campaign_summary, rule_id)
+        summary = summary or {}
+        enabled = bool(summary.get("enabled"))
+        show_seconds = int(summary.get("show_seconds") or 0)
+        targets_active = int(summary.get("targets_active") or 0)
+        targets_ready = int(summary.get("targets_ready") or 0)
+        targets_with_errors = int(summary.get("targets_with_errors") or 0)
+        show_seconds_ru = format_campaign_show_seconds_ru(show_seconds)
+
+        if (not enabled) or show_seconds <= 0:
+            await edit_message_text_safe(
+                message=callback.message,
+                text=(
+                    "👁 Предпросмотр кампании\n\n"
+                    "Рекламная кампания сейчас выключена.\n\n"
+                    "Чтобы предпросмотр был полным:\n"
+                    "1. задайте срок показа\n"
+                    "2. добавьте каналы кампании"
+                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⏳ Срок показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
+                    [InlineKeyboardButton(text="📣 Каналы кампании", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+                ]),
+            )
+            await answer_callback_safe_once(callback)
+            return
+
+        targets = await run_db(db.list_rule_repost_campaign_targets, rule_id, active_only=True)
+        targets = targets or []
+        target_lines: list[str] = []
+        for idx, row in enumerate(targets[:10], 1):
+            has_error = bool(row.get("last_check_error"))
+            icon = "⚠️" if has_error else "🟢"
+            title = str(row.get("title") or row.get("target_id") or "")
+            target_lines.append(f"{idx}. {icon} {title}")
+        if len(targets) > 10:
+            target_lines.append(f"…и ещё {len(targets) - 10} каналов")
+        targets_preview = "\n".join(target_lines) if target_lines else "—"
+
+        next_item_text = "Следующий пост: данные временно недоступны"
+        try:
+            next_item = await run_db(db.get_rule_queue_item_by_position, rule_id, 1)
+            if next_item:
+                position = next_item.get("position")
+                kind = str(next_item.get("kind") or "single")
+                source_channel = next_item.get("source_channel")
+                msg_count = len(next_item.get("message_ids") or [])
+                next_item_text = (
+                    f"Позиция {position or 1}: {kind}, источник {source_channel}, сообщений: {msg_count}"
+                )
+        except Exception:
+            logger.warning("REPOST_CAMPAIGN_PREVIEW_QUEUE_UNAVAILABLE | rule_id=%s", rule_id, exc_info=True)
+
+        warning_lines: list[str] = []
+        if targets_active == 0:
+            warning_lines.extend([
+                "",
+                "⚠️ Активных каналов кампании пока нет.",
+                "",
+                "Основной repost будет работать как обычно, но дополнительные каналы кампании не получат копию.",
+            ])
+        if targets_with_errors > 0:
+            warning_lines.extend([
+                "",
+                f"⚠️ Есть каналы, которые требуют проверки: {targets_with_errors}",
+                "",
+                "Перед боевой кампанией проверьте права бота в этих каналах.",
+            ])
+
+        text = (
+            "👁 Предпросмотр кампании\n\n"
+            f"Правило #{rule_id}\n"
+            "Режим: репост\n\n"
+            f"⏳ Срок показа: {show_seconds_ru}\n"
+            f"📣 Каналы кампании: {targets_active} активных\n"
+            f"🧪 Готовность: {targets_ready} / {targets_active}\n"
+            + "\n".join(warning_lines)
+            + "\n\nЧто произойдёт при следующей публикации:\n"
+            "1. Пост будет опубликован в основной канал правила.\n"
+            "2. Затем бот создаст копии для активных каналов кампании.\n"
+            f"3. Каждая копия будет удалена через {show_seconds_ru}.\n\n"
+            "Следующий пост:\n"
+            f"{next_item_text}\n\n"
+            "Каналы кампании:\n"
+            f"{targets_preview}\n\n"
+            "Это только предпросмотр. Публикация не запускается."
+        )
+        logger.info(
+            "REPOST_CAMPAIGN_PREVIEW_OPENED | rule_id=%s | active_targets=%s | show_seconds=%s",
+            rule_id,
+            targets_active,
+            show_seconds,
+        )
+        await edit_message_text_safe(
+            message=callback.message,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⏳ Срок показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
+                [InlineKeyboardButton(text="📣 Каналы кампании", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
+                [InlineKeyboardButton(text="🔄 Обновить предпросмотр", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+            ]),
+        )
+        await answer_callback_safe_once(callback)
+    except Exception as exc:
+        logger.exception("REPOST_CAMPAIGN_PREVIEW_FAILED | rule_id=%s | error=%s", rule_id, exc)
+        await answer_callback_safe(callback, "Не удалось открыть предпросмотр кампании", show_alert=True)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_targets_list:"))
 async def handle_rule_repost_campaign_targets_list(callback: CallbackQuery):
