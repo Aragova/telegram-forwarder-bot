@@ -694,6 +694,8 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS fixed_times_json TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_horizontal_id BIGINT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_vertical_id BIGINT NULL;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_show_seconds BIGINT NOT NULL DEFAULT 0;
         ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dedup_key TEXT NULL;
         ALTER TABLE channels ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS tenant_id BIGINT NULL;
@@ -716,6 +718,40 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS account_ids_json TEXT NULL;
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS result_json TEXT NULL;
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ NULL;
+
+
+        CREATE TABLE IF NOT EXISTS rule_repost_campaign_targets (
+            id BIGSERIAL PRIMARY KEY,
+            rule_id BIGINT NOT NULL,
+            target_id TEXT NOT NULL,
+            target_thread_id BIGINT NULL,
+            title TEXT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            can_post BOOLEAN NULL,
+            can_delete BOOLEAN NULL,
+            last_check_at TIMESTAMPTZ NULL,
+            last_check_error TEXT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            created_by BIGINT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_repost_campaign_targets_unique
+        ON rule_repost_campaign_targets(rule_id, target_id, COALESCE(target_thread_id, -1));
+        CREATE INDEX IF NOT EXISTS idx_rule_repost_campaign_targets_rule
+        ON rule_repost_campaign_targets(rule_id, is_active);
+
+        CREATE TABLE IF NOT EXISTS delivery_campaign_copies (
+            id BIGSERIAL PRIMARY KEY, delivery_id BIGINT NOT NULL, rule_id BIGINT NOT NULL,
+            target_kind TEXT NOT NULL DEFAULT 'extra', target_id TEXT NOT NULL, target_thread_id BIGINT NULL, target_title TEXT NULL,
+            send_status TEXT NOT NULL DEFAULT 'pending', send_error_text TEXT NULL, sent_at TIMESTAMPTZ NULL, sent_message_id BIGINT NULL, sent_message_ids_json JSONB NULL, delivery_method TEXT NULL,
+            delete_after_at TIMESTAMPTZ NULL, delete_status TEXT NOT NULL DEFAULT 'none', deleted_at TIMESTAMPTZ NULL, delete_attempt_count BIGINT NOT NULL DEFAULT 0, delete_error_text TEXT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_campaign_copies_unique
+        ON delivery_campaign_copies(delivery_id, target_id, COALESCE(target_thread_id, -1));
+        CREATE INDEX IF NOT EXISTS idx_delivery_campaign_copies_delivery ON delivery_campaign_copies(delivery_id);
+        CREATE INDEX IF NOT EXISTS idx_delivery_campaign_copies_rule_status ON delivery_campaign_copies(rule_id, send_status, delete_status);
+        CREATE INDEX IF NOT EXISTS idx_delivery_campaign_copies_delete ON delivery_campaign_copies(delete_status, delete_after_at);
+
         """
 
         self.client.execute_script(init_sql)
@@ -6957,3 +6993,61 @@ class PostgresRepository(RepositoryProtocol):
                 )
                 row = cur.fetchone()
         return int(row["cnt"] if row else 0)
+
+
+    def update_rule_repost_campaign_settings(self, rule_id: int, *, enabled: bool, show_seconds: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE routing SET repost_campaign_enabled=%s, repost_campaign_show_seconds=%s WHERE id=%s", (bool(enabled), int(show_seconds), int(rule_id)))
+            conn.commit()
+            return True
+
+    def add_rule_repost_campaign_target(self, *, rule_id: int, target_id: str, target_thread_id: int | None, title: str | None, created_by: int | None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO rule_repost_campaign_targets(rule_id,target_id,target_thread_id,title,created_by) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (rule_id,target_id,COALESCE(target_thread_id,-1)) DO NOTHING RETURNING id""", (int(rule_id), str(target_id), target_thread_id, title, created_by))
+                row=cur.fetchone()
+            conn.commit(); return int(row['id']) if row else None
+
+    def list_rule_repost_campaign_targets(self, rule_id: int, *, active_only: bool = False) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if active_only: cur.execute("SELECT * FROM rule_repost_campaign_targets WHERE rule_id=%s AND is_active=TRUE ORDER BY id", (int(rule_id),))
+                else: cur.execute("SELECT * FROM rule_repost_campaign_targets WHERE rule_id=%s ORDER BY id", (int(rule_id),))
+                return [dict(x) for x in cur.fetchall() or []]
+
+    def create_delivery_campaign_copy(self, *, delivery_id: int, rule_id: int, target_id: str, target_thread_id: int | None, target_title: str | None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO delivery_campaign_copies(delivery_id,rule_id,target_id,target_thread_id,target_title) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (delivery_id,target_id,COALESCE(target_thread_id,-1)) DO NOTHING RETURNING id""", (int(delivery_id), int(rule_id), str(target_id), target_thread_id, target_title))
+                row=cur.fetchone()
+            conn.commit(); return int(row['id']) if row else None
+
+    def get_delivery_campaign_copy(self, copy_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT *, COALESCE(sent_message_ids_json, '[]'::jsonb) AS sent_message_ids_json FROM delivery_campaign_copies WHERE id=%s", (int(copy_id),)); r=cur.fetchone()
+                if not r: return None
+                d=dict(r); d['sent_message_ids']=_safe_json_loads(d.get('sent_message_ids_json'), [])
+                return d
+
+    def mark_delivery_campaign_copy_processing(self, copy_id: int) -> bool:
+        return self._update_copy_status(copy_id, 'send_status', 'processing')
+
+    def mark_delivery_campaign_copy_sent(self, copy_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None, delivery_method: str | None, delete_after_at: str | None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE delivery_campaign_copies SET send_status='sent', sent_at=NOW(), sent_message_id=%s, sent_message_ids_json=%s, delivery_method=%s, delete_after_at=%s, delete_status='scheduled', updated_at=NOW() WHERE id=%s", (sent_message_id, _json_dumps(sent_message_ids or []), delivery_method, delete_after_at, int(copy_id)))
+            conn.commit(); return True
+
+    def _update_copy_status(self, copy_id: int, field: str, value: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE delivery_campaign_copies SET {field}=%s, updated_at=NOW() WHERE id=%s", (value, int(copy_id)))
+            conn.commit(); return True
+
+    def mark_delivery_campaign_copy_send_failed(self, copy_id: int, error_text: str) -> bool: return self._update_copy_status(copy_id,'send_status','failed')
+    def mark_delivery_campaign_copy_delete_processing(self, copy_id: int) -> bool: return self._update_copy_status(copy_id,'delete_status','processing')
+    def mark_delivery_campaign_copy_deleted(self, copy_id: int) -> bool: return self._update_copy_status(copy_id,'delete_status','deleted')
+    def mark_delivery_campaign_copy_delete_failed(self, copy_id: int, error_text: str) -> bool: return self._update_copy_status(copy_id,'delete_status','failed')
+    def mark_delivery_campaign_copy_delete_skipped(self, copy_id: int, reason: str) -> bool: return self._update_copy_status(copy_id,'delete_status','skipped')
