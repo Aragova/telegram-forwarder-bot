@@ -3592,6 +3592,20 @@ class SenderService:
                     idempotency_key,
                     cached_sent_ids,
                 )
+                await run_db(
+                    self._mark_delivery_sent_sync,
+                    int(delivery_id),
+                    sent_message_id=int(cached_sent_ids[0]),
+                    sent_message_ids=cached_sent_ids,
+                    target_id=str(target_id),
+                    delivery_method="idempotency_cache",
+                )
+                logger.info(
+                    "DELIVERY_MARKED_SENT_FROM_CACHE_HIT | delivery_id=%s | rule_id=%s | sent_message_ids=%s",
+                    delivery_id,
+                    rule_id,
+                    cached_sent_ids,
+                )
                 return {
                     "ok": True,
                     "sent_message_ids": cached_sent_ids,
