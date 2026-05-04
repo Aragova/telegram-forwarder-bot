@@ -6468,7 +6468,19 @@ async def handle_rule_repost_campaign_disable(callback: CallbackQuery):
     await answer_callback_safe_once(callback, "Рекламная кампания выключена")
 
 
-async def _render_repost_campaign_post_menu(callback: CallbackQuery, rule_id: int) -> bool:
+def _should_answer_new_message_for_callback(callback: CallbackQuery) -> bool:
+    message = getattr(callback, "message", None)
+    if not message:
+        return True
+    return not bool(getattr(message, "text", None))
+
+
+async def _render_repost_campaign_post_menu(
+    callback: CallbackQuery,
+    rule_id: int,
+    *,
+    force_new_message: bool = False,
+) -> bool:
     try:
         rule = await run_db(db.get_rule, rule_id)
         if not rule:
@@ -6493,16 +6505,30 @@ async def _render_repost_campaign_post_menu(callback: CallbackQuery, rule_id: in
                 [InlineKeyboardButton(text="➕ Добавить пост", callback_data=f"rule_repost_campaign_post_add:{rule_id}")],
             ])
         buttons.append([InlineKeyboardButton(text="⬅️ Назад к кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")])
-        await edit_message_text_safe(
-            message=callback.message,
-            text=(
-                "📝 Рекламный пост кампании\n\n"
-                f"Текущий пост: {status}\n\n"
-                "Пост хранится отдельно от очереди канала-источника.\n"
-                "Его можно повторно использовать в будущих кампаниях."
-            ),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        text = (
+            "📝 Рекламный пост кампании\n\n"
+            f"Текущий пост: {status}\n\n"
+            "Пост хранится отдельно от очереди канала-источника.\n"
+            "Его можно повторно использовать в будущих кампаниях."
         )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        if force_new_message:
+            logger.info(
+                "REPOST_CAMPAIGN_POST_MENU_RENDER_NEW_MESSAGE | rule_id=%s | reason=callback_from_media_message",
+                rule_id,
+            )
+            await callback.message.answer(
+                text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        else:
+            logger.info("REPOST_CAMPAIGN_POST_MENU_RENDER_EDIT | rule_id=%s", rule_id)
+            await edit_message_text_safe(
+                message=callback.message,
+                text=text,
+                reply_markup=keyboard,
+            )
         return True
     except Exception as exc:
         logger.warning("REPOST_CAMPAIGN_SAVED_POST_MENU_FAILED | rule_id=%s | error=%s", rule_id, exc)
@@ -6519,7 +6545,8 @@ async def handle_rule_repost_campaign_post_menu(callback: CallbackQuery):
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
-    if not await _render_repost_campaign_post_menu(callback, rule_id):
+    force_new = _should_answer_new_message_for_callback(callback)
+    if not await _render_repost_campaign_post_menu(callback, rule_id, force_new_message=force_new):
         return
     await answer_callback_safe_once(callback)
 
@@ -6642,7 +6669,11 @@ async def handle_rule_repost_campaign_post_unlink(callback: CallbackQuery):
         await run_db(db.set_rule_repost_campaign_saved_post, rule_id, None)
         invalidate_rule_card_cache(rule_id)
         logger.info("REPOST_CAMPAIGN_SAVED_POST_UNLINKED | rule_id=%s | old_saved_post_id=%s", rule_id, old_saved_post_id)
-        await _render_repost_campaign_post_menu(callback, rule_id)
+        await _render_repost_campaign_post_menu(
+            callback,
+            rule_id,
+            force_new_message=_should_answer_new_message_for_callback(callback),
+        )
         await answer_callback_safe_once(callback, "Рекламный пост убран из кампании")
     except Exception as exc:
         logger.warning("REPOST_CAMPAIGN_SAVED_POST_UNLINK_FAILED | rule_id=%s | error=%s", rule_id, exc)
@@ -6749,7 +6780,21 @@ async def handle_rule_repost_campaign_post_add(callback: CallbackQuery):
         return
     rule_id = int(callback.data.split(":")[1])
     user_states[callback.from_user.id] = {"state": "awaiting_repost_campaign_saved_post", "rule_id": rule_id}
-    await edit_message_text_safe(message=callback.message, text=("🔁 Замена рекламного поста\n\nОтправьте или перешлите новый рекламный пост.\n\nМожно отправить:\n• текст\n• фото с подписью\n• видео с подписью\n• документ\n\nФорматирование, ссылки и premium emoji будут сохранены.\nСтарый пост останется в библиотеке, но кампания будет привязана к новому посту."), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")]]))
+    text = (
+        "🔁 Замена рекламного поста\n\nОтправьте или перешлите новый рекламный пост.\n\n"
+        "Можно отправить:\n• текст\n• фото с подписью\n• видео с подписью\n• документ\n\n"
+        "Форматирование, ссылки и premium emoji будут сохранены.\n"
+        "Старый пост останется в библиотеке, но кампания будет привязана к новому посту."
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад к рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")]
+        ]
+    )
+    if _should_answer_new_message_for_callback(callback):
+        await callback.message.answer(text, reply_markup=keyboard)
+    else:
+        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
     await answer_callback_safe_once(callback)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_targets:"))
