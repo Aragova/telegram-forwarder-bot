@@ -90,7 +90,12 @@ from app.repost_campaign_service import (
     format_campaign_show_seconds_ru,
     normalize_campaign_show_seconds,
 )
-from app.saved_posts_service import build_saved_post_content_from_aiogram_message, get_saved_post_short_description
+from app.saved_posts_service import (
+    build_saved_post_content_from_aiogram_message,
+    deserialize_message_entities,
+    get_saved_post_preview_caption,
+    get_saved_post_short_description,
+)
 from app import product_ui
 from app import access_control, user_ui
 from app.user_handlers import (
@@ -6481,7 +6486,7 @@ async def handle_rule_repost_campaign_post_menu(callback: CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="➕ Добавить / заменить пост", callback_data=f"rule_repost_campaign_post_add:{rule_id}")],
             [InlineKeyboardButton(text="📚 Выбрать из библиотеки", callback_data=f"rule_repost_campaign_post_stub:{rule_id}")],
-            [InlineKeyboardButton(text="👁 Предпросмотр поста", callback_data=f"rule_repost_campaign_post_stub:{rule_id}")],
+            [InlineKeyboardButton(text="👁 Предпросмотр поста", callback_data=f"rule_repost_campaign_post_preview:{rule_id}")],
             [InlineKeyboardButton(text="🗑 Убрать из кампании", callback_data=f"rule_repost_campaign_post_stub:{rule_id}")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
         ])
@@ -6491,6 +6496,113 @@ async def handle_rule_repost_campaign_post_menu(callback: CallbackQuery):
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_stub:"))
 async def handle_rule_repost_campaign_post_stub(callback: CallbackQuery):
     await answer_callback_safe_once(callback, "Будет добавлено следующим шагом")
+
+
+
+
+def _build_repost_campaign_post_preview_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Это рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
+        [InlineKeyboardButton(text="✏️ Редактировать текст", callback_data=f"rule_repost_campaign_post_edit_stub:{rule_id}")],
+        [InlineKeyboardButton(text="🔁 Заменить пост", callback_data=f"rule_repost_campaign_post_add:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
+    ])
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_preview:"))
+async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return
+
+    saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None)
+    if not saved_post_id:
+        await answer_callback_safe(callback, "Рекламный пост не выбран", show_alert=True)
+        return
+
+    saved_post = await run_db(db.get_saved_post, int(saved_post_id))
+    if not saved_post:
+        await answer_callback_safe(callback, "Рекламный пост не найден", show_alert=True)
+        return
+
+    content = saved_post.get("content_json") or saved_post.get("content") or {}
+    kind = str(content.get("kind") or "text")
+    preview_keyboard = _build_repost_campaign_post_preview_keyboard(rule_id)
+
+    try:
+        if kind == "photo":
+            media = content.get("media") or {}
+            await callback.message.answer_photo(
+                photo=media["file_id"],
+                caption=content.get("caption") or None,
+                caption_entities=deserialize_message_entities(content.get("caption_entities")),
+                reply_markup=preview_keyboard,
+            )
+        elif kind == "video":
+            media = content.get("media") or {}
+            await callback.message.answer_video(
+                video=media["file_id"],
+                caption=content.get("caption") or None,
+                caption_entities=deserialize_message_entities(content.get("caption_entities")),
+                reply_markup=preview_keyboard,
+            )
+        elif kind == "animation":
+            media = content.get("media") or {}
+            await callback.message.answer_animation(
+                animation=media["file_id"],
+                caption=content.get("caption") or None,
+                caption_entities=deserialize_message_entities(content.get("caption_entities")),
+                reply_markup=preview_keyboard,
+            )
+        elif kind == "document":
+            media = content.get("media") or {}
+            await callback.message.answer_document(
+                document=media["file_id"],
+                caption=content.get("caption") or None,
+                caption_entities=deserialize_message_entities(content.get("caption_entities")),
+                reply_markup=preview_keyboard,
+            )
+        else:
+            await callback.message.answer(
+                content.get("text") or get_saved_post_preview_caption(content),
+                entities=deserialize_message_entities(content.get("entities")),
+                reply_markup=preview_keyboard,
+            )
+        logger.info(
+            "REPOST_CAMPAIGN_SAVED_POST_PREVIEW_SENT | rule_id=%s | saved_post_id=%s | kind=%s",
+            rule_id,
+            saved_post_id,
+            kind,
+        )
+    except Exception as exc:
+        logger.warning(
+            "REPOST_CAMPAIGN_SAVED_POST_PREVIEW_FAILED | rule_id=%s | saved_post_id=%s | error=%s",
+            rule_id,
+            saved_post_id,
+            exc,
+        )
+        await callback.message.answer(
+            "⚠️ Не удалось показать рекламный пост.\n\nПопробуйте заменить пост через “➕ Добавить / заменить пост”."
+        )
+
+    await answer_callback_safe_once(callback)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_edit_stub:"))
+async def handle_rule_repost_campaign_post_edit_stub(callback: CallbackQuery):
+    await answer_callback_safe_once(callback, "Редактирование текста будет добавлено следующим шагом")
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_add:"))
 async def handle_rule_repost_campaign_post_add(callback: CallbackQuery):

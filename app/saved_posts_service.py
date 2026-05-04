@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from aiogram.types import MessageEntity
+
 
 def serialize_message_entities(entities) -> list[dict[str, Any]]:
     if not entities:
@@ -60,6 +62,42 @@ def build_saved_post_content_from_aiogram_message(message) -> dict[str, Any]:
         "media": media,
         "forward_origin": {"chat_id": str(message.chat.id) if getattr(message, "chat", None) else None, "message_id": getattr(message, "message_id", None)},
     }
+
+
+def deserialize_message_entities(raw_entities: list[dict[str, Any]] | None) -> list[MessageEntity] | None:
+    if not raw_entities:
+        return None
+    items: list[MessageEntity] = []
+    for raw in raw_entities:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            items.append(MessageEntity(**raw))
+        except Exception:
+            continue
+    return items or None
+
+
+def get_saved_post_preview_caption(content: dict[str, Any]) -> str:
+    kind = str(content.get("kind") or "text")
+    text = str(content.get("text") or "").strip()
+    caption = str(content.get("caption") or "").strip()
+
+    if kind == "text":
+        if text:
+            return text
+        return "Рекламный текст пустой."
+
+    label_map = {
+        "photo": "Фото",
+        "video": "Видео",
+        "animation": "Анимация",
+        "document": "Документ",
+    }
+    label = label_map.get(kind, "Пост")
+    if caption:
+        return f"{label}: {caption}"
+    return f"{label} без подписи."
 
 
 def get_saved_post_short_description(content: dict[str, Any]) -> str:

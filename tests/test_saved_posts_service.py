@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from app.saved_posts_service import (
     build_saved_post_content_from_aiogram_message,
+    deserialize_message_entities,
     get_saved_post_short_description,
     serialize_message_entities,
 )
@@ -54,3 +55,15 @@ def test_build_content_photo_contains_file_and_caption_entities():
 
 def test_short_description_readable():
     assert get_saved_post_short_description({"kind": "photo"}) == "фото"
+
+
+def test_deserialize_message_entities_preserves_custom_emoji_id():
+    raw_entities = [{"type": "custom_emoji", "offset": 0, "length": 2, "custom_emoji_id": "999"}]
+    result = deserialize_message_entities(raw_entities)
+    assert result is not None
+    assert result[0].custom_emoji_id == "999"
+
+
+def test_deserialize_message_entities_empty_returns_none():
+    assert deserialize_message_entities([]) is None
+    assert deserialize_message_entities(None) is None
