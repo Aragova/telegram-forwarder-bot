@@ -1847,7 +1847,11 @@ class PostgresRepository(RepositoryProtocol):
                             status,
                             sent_at,
                             error_text,
-                            attempt_count
+                            attempt_count,
+                            sent_message_id,
+                            sent_message_ids_json,
+                            target_id_snapshot,
+                            delivery_method
                         FROM deliveries
                         WHERE id = ANY(%s)
                         ORDER BY id ASC
@@ -1874,6 +1878,10 @@ class PostgresRepository(RepositoryProtocol):
                                 "sent_at": row["sent_at"],
                                 "error_text": row["error_text"],
                                 "attempt_count": row["attempt_count"],
+                                "sent_message_id": row["sent_message_id"],
+                                "sent_message_ids_json": row["sent_message_ids_json"],
+                                "target_id_snapshot": row["target_id_snapshot"],
+                                "delivery_method": row["delivery_method"],
                             }
                         )
 
@@ -1883,11 +1891,24 @@ class PostgresRepository(RepositoryProtocol):
                         SET status = 'pending',
                             sent_at = NULL,
                             error_text = NULL,
-                            attempt_count = 0
+                            attempt_count = 0,
+                            sent_message_id = NULL,
+                            sent_message_ids_json = NULL,
+                            target_id_snapshot = NULL,
+                            delivery_method = NULL
                         WHERE id = %s
                         """,
                         [(delivery_id,) for delivery_id in delivery_ids],
                     )
+
+                    cur.execute(
+                        """
+                        DELETE FROM delivery_attempts
+                        WHERE delivery_id = ANY(%s)
+                        """,
+                        (delivery_ids,),
+                    )
+                    deleted_attempts_count = int(cur.rowcount or 0)
 
                     cur.execute(
                         """
@@ -1929,6 +1950,11 @@ class PostgresRepository(RepositoryProtocol):
                                     "sent_at": None,
                                     "error_text": None,
                                     "attempt_count": 0,
+                                    "sent_message_id": None,
+                                    "sent_message_ids_json": None,
+                                    "target_id_snapshot": None,
+                                    "delivery_method": None,
+                                    "deleted_delivery_attempts_count": deleted_attempts_count,
                                     "next_run_at": next_retry_iso_str,
                                 }
                             ),
@@ -1946,6 +1972,8 @@ class PostgresRepository(RepositoryProtocol):
                                     "rolled_back_post_ids": post_ids,
                                     "rolled_back_message_ids": message_ids,
                                     "rolled_back_count": len(delivery_ids),
+                                    "reset_send_state": True,
+                                    "deleted_delivery_attempts_count": deleted_attempts_count,
                                 }
                             ),
                         ),
@@ -1953,6 +1981,12 @@ class PostgresRepository(RepositoryProtocol):
 
                 conn.commit()
 
+            logger.info(
+                "rollback_last_delivery: reset send state and deleted attempts, rule_id=%s, delivery_ids=%s, deleted_attempts_count=%s",
+                rule_id,
+                delivery_ids,
+                deleted_attempts_count,
+            )
             logger.info(
                 "rollback_last_delivery: rule_id=%s, mode=%s, kind=%s, position=%s, rolled_back_count=%s",
                 rule_id,

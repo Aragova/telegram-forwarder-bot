@@ -18,6 +18,7 @@ class _FakeCursor:
         self.executemany_calls: list[tuple[str, list[tuple]]] = []
         self.execute_calls: list[tuple[str, tuple | None]] = []
         self.rowcount = 1
+        self.script = script
 
     def __enter__(self):
         return self
@@ -35,6 +36,10 @@ class _FakeCursor:
 
         if "FROM deliveries WHERE id = ANY(%s) ORDER BY id ASC" in q:
             self._fetchall = self.script.get("current_rows", [])
+            return
+
+        if "DELETE FROM delivery_attempts WHERE delivery_id = ANY(%s)" in q:
+            self.rowcount = int(self.script.get("deleted_attempts_count", 0))
             return
 
         self._fetchall = []
@@ -147,9 +152,10 @@ def test_rollback_repost_rolls_back_whole_album():
             _mk_row(3, post_id=103, message_id=203, status="pending"),
         ],
         "current_rows": [
-            {"id": 1, "post_id": 101, "status": "sent", "sent_at": "x", "error_text": None, "attempt_count": 1},
-            {"id": 2, "post_id": 102, "status": "sent", "sent_at": "x", "error_text": None, "attempt_count": 1},
+            {"id": 1, "post_id": 101, "status": "sent", "sent_at": "x", "error_text": None, "attempt_count": 1, "sent_message_id": 9001, "sent_message_ids_json": "[9001,9002]", "target_id_snapshot": "target-a", "delivery_method": "copy"},
+            {"id": 2, "post_id": 102, "status": "sent", "sent_at": "x", "error_text": None, "attempt_count": 1, "sent_message_id": 9002, "sent_message_ids_json": "[9001,9002]", "target_id_snapshot": "target-a", "delivery_method": "copy"},
         ],
+        "deleted_attempts_count": 2,
     }
     repo = _RepoForTests(script=script)
     repo._rule = SimpleNamespace(mode="repost")
@@ -164,7 +170,17 @@ def test_rollback_repost_rolls_back_whole_album():
         if "UPDATE deliveries SET status = 'pending'" in call[0]
     ]
     assert len(updates) == 1
+    assert "sent_message_id = NULL" in updates[0][0]
+    assert "sent_message_ids_json = NULL" in updates[0][0]
+    assert "delivery_method = NULL" in updates[0][0]
     assert [x[0] for x in updates[0][1]] == [1, 2]
+
+    delete_calls = [
+        call for call in repo.fake_conn.cursor_obj.execute_calls
+        if "DELETE FROM delivery_attempts WHERE delivery_id = ANY(%s)" in call[0]
+    ]
+    assert len(delete_calls) == 1
+    assert delete_calls[0][1] == ([1, 2],)
     assert repo.fake_conn.committed is True
 
 
