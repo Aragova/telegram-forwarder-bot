@@ -4,11 +4,14 @@ from app.saved_posts_service import (
     build_saved_post_content_from_aiogram_message,
     deserialize_message_entities,
     get_saved_post_short_description,
+    saved_post_entities_to_telethon,
+    saved_post_requires_premium_send,
     serialize_message_entities,
     send_saved_post_content,
     summarize_aiogram_message_for_saved_post,
     summarize_saved_post_entities,
 )
+from telethon.tl import types as tl_types
 
 
 def test_serialize_entities_keeps_custom_emoji_id():
@@ -182,3 +185,18 @@ def test_custom_emoji_entity_roundtrip_saved_post_content():
     roundtrip = deserialize_message_entities(content["caption_entities"])
     assert roundtrip is not None
     assert roundtrip[0].custom_emoji_id == "555"
+
+
+def test_saved_post_requires_premium_send_true_for_custom_emoji():
+    assert saved_post_requires_premium_send({"entities": [{"type": "custom_emoji", "offset": 0, "length": 1, "custom_emoji_id": "1"}]}) is True
+
+
+def test_saved_post_requires_premium_send_false_for_plain_entities():
+    assert saved_post_requires_premium_send({"entities": [{"type": "bold", "offset": 0, "length": 2}]}) is False
+
+
+def test_saved_post_entities_to_telethon_custom_emoji():
+    entities = saved_post_entities_to_telethon([{"type": "custom_emoji", "offset": 0, "length": 1, "custom_emoji_id": "777"}])
+    assert len(entities) == 1
+    assert isinstance(entities[0], tl_types.MessageEntityCustomEmoji)
+    assert entities[0].document_id == 777

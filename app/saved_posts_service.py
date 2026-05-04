@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from aiogram.types import MessageEntity
+from telethon.tl import types as tl_types
+
+logger = logging.getLogger("forwarder")
 
 
 def summarize_aiogram_message_for_saved_post(message) -> dict[str, Any]:
@@ -124,9 +128,65 @@ def deserialize_message_entities(raw_entities: list[dict[str, Any]] | None) -> l
             continue
         try:
             items.append(MessageEntity(**raw))
-        except Exception:
+        except Exception as exc:
+            logger.warning("Некорректная entity в saved_post пропущена: %s | raw=%s", exc, raw)
             continue
     return items or None
+
+
+def saved_post_requires_premium_send(content: dict[str, Any]) -> bool:
+    entities = content.get("entities") or []
+    caption_entities = content.get("caption_entities") or []
+    return any(
+        str(item.get("type")) == "custom_emoji" or item.get("custom_emoji_id")
+        for item in [*entities, *caption_entities]
+        if isinstance(item, dict)
+    )
+
+
+def saved_post_entities_to_telethon(raw_entities: list[dict[str, Any]] | None) -> list:
+    if not raw_entities:
+        return []
+
+    items: list = []
+    for raw in raw_entities:
+        if not isinstance(raw, dict):
+            continue
+        entity_type = str(raw.get("type") or "")
+        offset = raw.get("offset")
+        length = raw.get("length")
+        if not isinstance(offset, int) or not isinstance(length, int):
+            continue
+        try:
+            if entity_type == "bold":
+                items.append(tl_types.MessageEntityBold(offset=offset, length=length))
+            elif entity_type == "italic":
+                items.append(tl_types.MessageEntityItalic(offset=offset, length=length))
+            elif entity_type == "underline":
+                items.append(tl_types.MessageEntityUnderline(offset=offset, length=length))
+            elif entity_type in {"strikethrough", "strike"}:
+                items.append(tl_types.MessageEntityStrike(offset=offset, length=length))
+            elif entity_type == "code":
+                items.append(tl_types.MessageEntityCode(offset=offset, length=length))
+            elif entity_type == "pre":
+                items.append(tl_types.MessageEntityPre(offset=offset, length=length, language=str(raw.get("language") or "")))
+            elif entity_type == "text_link":
+                url = str(raw.get("url") or "")
+                if not url:
+                    raise ValueError("missing url")
+                items.append(tl_types.MessageEntityTextUrl(offset=offset, length=length, url=url))
+            elif entity_type == "url":
+                items.append(tl_types.MessageEntityUrl(offset=offset, length=length))
+            elif entity_type == "mention":
+                items.append(tl_types.MessageEntityMention(offset=offset, length=length))
+            elif entity_type == "custom_emoji":
+                custom_emoji_id = raw.get("custom_emoji_id")
+                if custom_emoji_id is None:
+                    raise ValueError("missing custom_emoji_id")
+                items.append(tl_types.MessageEntityCustomEmoji(offset=offset, length=length, document_id=int(custom_emoji_id)))
+        except Exception:
+            continue
+    return items
 
 
 def get_saved_post_preview_caption(content: dict[str, Any]) -> str:
