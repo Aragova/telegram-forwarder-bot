@@ -86,6 +86,14 @@ def test_video_send_cache_hit_skips_actual_send(tmp_path: Path):
     assert result["ok"] is True
     assert result["cache_hit"] is True
     assert result["sent_message_ids"] == [777]
+    mark_sent_calls = [call for call in repo.calls if call[0] == "mark_delivery_sent"]
+    assert mark_sent_calls
+    _, args, kwargs = mark_sent_calls[0]
+    assert args[0] == 10
+    assert kwargs["sent_message_id"] == 777
+    assert kwargs["sent_message_ids"] == [777]
+    assert kwargs["target_id"] == "-1001"
+    assert kwargs["delivery_method"] == "idempotency_cache"
 
 
 def test_video_send_marks_accepted_before_followup_error(tmp_path: Path):
