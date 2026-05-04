@@ -6300,6 +6300,31 @@ async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int) ->
     show_seconds_ru = format_campaign_show_seconds_ru(int(getattr(rule, "repost_campaign_show_seconds", 0) or 0))
     targets_active = int((summary or {}).get("targets_active") or 0)
     targets_ready = int((summary or {}).get("targets_ready") or 0)
+    saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None)
+    if saved_post_id:
+        try:
+            saved_post = await run_db(db.get_saved_post, int(saved_post_id))
+        except Exception as exc:
+            logger.warning(
+                "Не удалось получить рекламный пост кампании rule_id=%s saved_post_id=%s: %s",
+                rule_id,
+                saved_post_id,
+                exc,
+                exc_info=True,
+            )
+            saved_post = None
+
+        if saved_post:
+            try:
+                content = saved_post.get("content_json") or saved_post.get("content") or {}
+                saved_post_description = get_saved_post_short_description(content)
+            except Exception:
+                saved_post_description = "пост"
+            saved_post_line = f"📝 Рекламный пост: #{saved_post_id} · {saved_post_description}\n"
+        else:
+            saved_post_line = "📝 Рекламный пост: не найден\n"
+    else:
+        saved_post_line = "📝 Рекламный пост: не выбран\n"
     text = (
         "💰 Рекламная кампания\n\n"
         "Тестовый режим для админа.\n\n"
