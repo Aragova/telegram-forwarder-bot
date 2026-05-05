@@ -100,15 +100,13 @@ from app.repost_campaign_ui import (
 )
 from app.saved_posts_service import (
     build_saved_post_content_from_aiogram_message,
-    deserialize_message_entities,
     get_saved_post_preview_caption,
     get_saved_post_short_description,
-    saved_post_requires_premium_send,
-    send_saved_post_content_via_telethon,
-    send_saved_post_content,
     summarize_aiogram_message_for_saved_post,
     summarize_saved_post_entities,
 )
+from app.saved_post_entities import saved_post_requires_premium_send
+from app.saved_post_renderer import send_saved_post_content_via_telethon, send_saved_post_content
 from app import product_ui
 from app import access_control, user_ui
 from app.user_handlers import (
