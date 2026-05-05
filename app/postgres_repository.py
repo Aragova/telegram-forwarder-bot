@@ -7219,6 +7219,21 @@ class PostgresRepository(RepositoryProtocol):
                 row = cur.fetchone()
                 return dict(row) if row else None
 
+    def get_campaign_run_message(self, message_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM campaign_run_messages
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (int(message_id),),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
     def list_campaign_runs_for_rule(self, rule_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as conn:
             with conn.cursor() as cur:

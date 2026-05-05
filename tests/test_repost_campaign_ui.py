@@ -1,4 +1,5 @@
 from app.repost_campaign_ui import (
+    build_repost_campaign_delete_result_view,
     build_repost_campaign_history_view,
     build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
@@ -246,3 +247,32 @@ def test_preview_uses_readiness_block():
         readiness={"post_status_text": "✅ выбран", "show_seconds_status_text": "✅ 1 час", "targets_status_text": "✅ 2", "checks_status_text": "✅ ок", "summary_text": "✅ готово"},
     )
     assert "🚦 Готовность кампании" in text
+
+
+def test_details_shows_retry_button_for_failed_delete():
+    details = {"ok": True, "run_id": 10, "run": {"id": 10}, "messages": [{"id": 33, "send_status": "sent", "sent_message_id": 777, "delete_status": "failed"}], "summary": {}}
+    _, keyboard = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    texts = _texts_from_keyboard(keyboard)
+    callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert "🔁 Повторить удаление #1" in texts
+    assert "rule_repost_campaign_delete_message:3:10:33" in callbacks
+
+
+def test_details_shows_delete_now_for_pending():
+    details = {"ok": True, "run_id": 10, "run": {"id": 10}, "messages": [{"id": 33, "send_status": "sent", "sent_message_id": 777, "delete_status": "pending"}], "summary": {}}
+    _, keyboard = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    texts = _texts_from_keyboard(keyboard)
+    assert "🧹 Удалить сейчас #1" in texts
+
+
+def test_delete_result_success_view():
+    text, _ = build_repost_campaign_delete_result_view(
+        rule_id=3,
+        result={"ok": True, "target_id": "-1001", "message_id": 1024, "method": "telethon", "extra": {"campaign_run_id": 10}},
+    )
+    assert "🧹 Публикация удалена" in text
+
+
+def test_delete_result_failed_view():
+    text, _ = build_repost_campaign_delete_result_view(rule_id=3, result={"ok": False, "error_text": "no rights", "extra": {"campaign_run_id": 10}})
+    assert "❌ Не удалось удалить публикацию" in text

@@ -22,6 +22,7 @@ def test_repost_campaign_repository_methods_exist():
         "mark_campaign_run_message_delete_failed",
         "reset_stuck_campaign_delete_processing",
         "get_campaign_run",
+        "get_campaign_run_message",
         "list_campaign_runs_for_rule",
         "list_campaign_run_messages",
     ]
