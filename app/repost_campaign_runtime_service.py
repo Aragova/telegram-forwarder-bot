@@ -581,6 +581,58 @@ class RepostCampaignRuntimeService:
                 "error_text": "Не удалось загрузить детали запуска",
             }
 
+    def get_campaign_control_center(self, *, rule_id: int) -> dict:
+        try:
+            readiness = self.get_campaign_readiness(rule_id=rule_id)
+            history = self.get_campaign_history(rule_id=rule_id, limit=5)
+            last_run = (history.get("summary") or {}).get("last_run")
+            last_run_details = None
+            if last_run and last_run.get("id"):
+                last_run_details = self.get_campaign_run_details(rule_id=rule_id, run_id=int(last_run["id"]))
+
+            issues: list[str] = []
+            for warning in readiness.get("warnings", []):
+                issues.append(str(warning))
+
+            details_summary = ((last_run_details or {}).get("summary") or {}) if (last_run_details or {}).get("ok") else {}
+            failed = int(details_summary.get("failed") or 0)
+            delete_failed = int(details_summary.get("delete_failed") or 0)
+            delete_pending = int(details_summary.get("delete_pending") or 0)
+            if failed > 0:
+                issues.append(f"Ошибок отправки в последнем запуске: {failed}")
+            if delete_failed > 0:
+                issues.append(f"Ошибок удаления в последнем запуске: {delete_failed}")
+            if delete_pending > 0:
+                issues.append(f"Ожидают автоудаления: {delete_pending}")
+
+            self.logger.info(
+                "REPOST_CAMPAIGN_CONTROL_CENTER_OPENED | rule_id=%s | last_run_id=%s | issues=%s",
+                rule_id,
+                (last_run or {}).get("id"),
+                len(issues),
+            )
+            return {
+                "ok": True,
+                "rule_id": rule_id,
+                "readiness": readiness,
+                "history": history,
+                "last_run": last_run,
+                "last_run_details": last_run_details,
+                "issues": issues,
+            }
+        except Exception as exc:
+            self.logger.exception("REPOST_CAMPAIGN_CONTROL_CENTER_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            return {
+                "ok": False,
+                "rule_id": rule_id,
+                "error_text": "Не удалось загрузить центр управления кампанией",
+                "readiness": None,
+                "history": None,
+                "last_run": None,
+                "last_run_details": None,
+                "issues": [],
+            }
+
     async def delete_campaign_run_message_now(
         self,
         *,

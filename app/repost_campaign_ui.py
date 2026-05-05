@@ -3,6 +3,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.repost_campaign_view_model import (
+    build_campaign_control_center_view_model,
     build_campaign_run_item_view,
     build_campaign_run_message_view,
     format_campaign_datetime_text,
@@ -28,34 +29,47 @@ def format_repost_campaign_readiness_block(readiness: dict | None) -> str:
 
 
 def build_repost_campaign_menu_view(
-    *, rule_id: int, summary: dict, saved_post_line: str, readiness: dict | None = None
+    *,
+    rule_id: int,
+    summary: dict,
+    saved_post_line: str,
+    readiness: dict | None = None,
+    control_center: dict | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    show_seconds_text = str((summary or {}).get("show_seconds_text") or "не задан")
-    targets_active = int((summary or {}).get("targets_active") or 0)
-    saved_post_id = (summary or {}).get("saved_post_id")
+    cc_payload = control_center
+    if cc_payload is None:
+        cc_payload = {"ok": bool(readiness), "readiness": readiness, "last_run": None, "last_run_details": None, "issues": []}
+    vm = build_campaign_control_center_view_model(summary=summary, saved_post_line=saved_post_line, control_center=cc_payload)
     readiness_block = format_repost_campaign_readiness_block(readiness)
     text = (
         "💰 Рекламная кампания\n\n"
-        "Рекламная кампания публикует выбранный пост в основной канал и подключённые площадки.\n"
-        "После окончания срока показа бот автоматически удалит рекламные публикации.\n\n"
-        f"⏳ Срок показа: {show_seconds_text}\n"
-        f"📣 Каналы кампании: {targets_active}\n"
-        f"{saved_post_line}\n\n"
-        f"{readiness_block}"
+        "🧭 Центр управления\n"
+        f"Правило #{rule_id}\n\n"
+        f"{vm['status_title']}\n\n"
+        f"{vm['post_line']}\n"
+        f"{vm['targets_line']}\n"
+        f"{vm['show_seconds_line']}\n"
+        f"{vm['delete_line']}\n\n"
+        f"{readiness_block}\n\n"
+        f"{vm['last_run_block']}\n\n"
+        f"{vm['issues_block']}"
     )
-    rows = [
-        [InlineKeyboardButton(text="⏳ Срок показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
-        [InlineKeyboardButton(text="📣 Каналы кампании", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
-        [InlineKeyboardButton(text="📝 Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-        [InlineKeyboardButton(text="👁 Предпросмотр кампании", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
-        [InlineKeyboardButton(text="📊 История кампаний", callback_data=f"rule_repost_campaign_history:{rule_id}")],
-    ]
-    if saved_post_id:
-        test_button_text = "📤 Проверить публикацию"
-        rows.append([InlineKeyboardButton(text=test_button_text, callback_data=f"rule_repost_campaign_test_send:{rule_id}")])
-    if saved_post_id and readiness and readiness.get("ready") is True:
+    rows = []
+    if vm["can_launch"]:
         rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
+    if vm["can_check_publication"]:
+        rows.append([InlineKeyboardButton(text="📤 Проверить публикацию", callback_data=f"rule_repost_campaign_test_send:{rule_id}")])
     rows.extend([
+        [InlineKeyboardButton(text="📝 Креатив", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
+        [InlineKeyboardButton(text="⏳ Срок", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
+        [InlineKeyboardButton(text="📣 Площадки", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
+        [InlineKeyboardButton(text="📊 История", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+        [InlineKeyboardButton(text="👁 Предпросмотр", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
+    ])
+    if vm["last_run_id"]:
+        rows.append([InlineKeyboardButton(text="📄 Последний запуск", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{vm['last_run_id']}")])
+    rows.extend([
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
         [InlineKeyboardButton(text="❌ Отключить кампанию", callback_data=f"rule_repost_campaign_disable:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")],
     ])

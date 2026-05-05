@@ -6353,12 +6353,29 @@ async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int) ->
     except Exception as exc:
         readiness = None
         logger.warning("REPOST_CAMPAIGN_READINESS_FAILED | rule_id=%s | error=%s", rule_id, exc)
+    control_center = None
+    try:
+        control_center = await run_db(lambda: runtime.get_campaign_control_center(rule_id=rule_id))
+    except Exception as exc:
+        logger.warning(
+            "REPOST_CAMPAIGN_CONTROL_CENTER_UI_FAILED | rule_id=%s | error=%s",
+            rule_id,
+            exc,
+            exc_info=True,
+        )
 
     text, keyboard = build_repost_campaign_menu_view(
         rule_id=rule_id,
-        summary={"show_seconds_text": show_seconds_ru, "targets_active": targets_active, "targets_ready": targets_ready, "saved_post_id": saved_post_id},
+        summary={
+            "show_seconds_text": show_seconds_ru,
+            "show_seconds": int(getattr(rule, "repost_campaign_show_seconds", 0) or 0),
+            "targets_active": targets_active,
+            "targets_ready": targets_ready,
+            "saved_post_id": saved_post_id,
+        },
         saved_post_line=saved_post_line,
         readiness=readiness,
+        control_center=control_center,
     )
     await edit_message_text_safe(
         message=callback.message,
