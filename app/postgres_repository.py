@@ -781,6 +781,71 @@ class PostgresRepository(RepositoryProtocol):
         CREATE INDEX IF NOT EXISTS idx_delivery_campaign_copies_rule_status ON delivery_campaign_copies(rule_id, send_status, delete_status);
         CREATE INDEX IF NOT EXISTS idx_delivery_campaign_copies_delete ON delivery_campaign_copies(delete_status, delete_after_at);
 
+        CREATE TABLE IF NOT EXISTS campaign_runs (
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL DEFAULT 1,
+            rule_id BIGINT NOT NULL,
+            saved_post_id BIGINT NOT NULL,
+            run_type TEXT NOT NULL DEFAULT 'test'
+                CHECK (run_type IN ('test','manual','scheduled','retry')),
+            status TEXT NOT NULL DEFAULT 'created'
+                CHECK (status IN ('created','sending','partial','sent','failed','cancelled')),
+            render_mode TEXT NULL,
+            show_seconds BIGINT NOT NULL DEFAULT 0,
+            targets_total BIGINT NOT NULL DEFAULT 0,
+            targets_success BIGINT NOT NULL DEFAULT 0,
+            targets_failed BIGINT NOT NULL DEFAULT 0,
+            started_by BIGINT NULL,
+            started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            finished_at TIMESTAMPTZ NULL,
+            error_text TEXT NULL,
+            report_json JSONB NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_campaign_runs_rule_created
+        ON campaign_runs(rule_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_campaign_runs_saved_post
+        ON campaign_runs(saved_post_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_campaign_runs_status
+        ON campaign_runs(status, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS campaign_run_messages (
+            id BIGSERIAL PRIMARY KEY,
+            run_id BIGINT NOT NULL,
+            rule_id BIGINT NOT NULL,
+            saved_post_id BIGINT NOT NULL,
+            target_kind TEXT NOT NULL DEFAULT 'main'
+                CHECK (target_kind IN ('main','extra')),
+            target_id TEXT NOT NULL,
+            target_thread_id BIGINT NULL,
+            target_title TEXT NULL,
+            send_status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (send_status IN ('pending','sending','sent','failed')),
+            render_mode TEXT NULL,
+            sent_message_id BIGINT NULL,
+            sent_message_ids_json JSONB NULL,
+            sent_at TIMESTAMPTZ NULL,
+            send_error_text TEXT NULL,
+            show_seconds BIGINT NOT NULL DEFAULT 0,
+            delete_after_at TIMESTAMPTZ NULL,
+            delete_status TEXT NOT NULL DEFAULT 'none'
+                CHECK (delete_status IN ('none','pending','processing','deleted','failed')),
+            deleted_at TIMESTAMPTZ NULL,
+            delete_error_text TEXT NULL,
+            delete_attempt_count BIGINT NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_campaign_run_messages_run
+        ON campaign_run_messages(run_id);
+        CREATE INDEX IF NOT EXISTS idx_campaign_run_messages_rule_status
+        ON campaign_run_messages(rule_id, send_status, delete_status);
+        CREATE INDEX IF NOT EXISTS idx_campaign_run_messages_delete
+        ON campaign_run_messages(delete_status, delete_after_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_run_messages_unique_target
+        ON campaign_run_messages(run_id, target_kind, target_id, COALESCE(target_thread_id, -1));
+
         """
 
         self.client.execute_script(init_sql)
@@ -7067,6 +7132,104 @@ class PostgresRepository(RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute("UPDATE routing SET repost_campaign_saved_post_id=%s WHERE id=%s", (saved_post_id, int(rule_id)))
                 return cur.rowcount > 0
+
+    def create_campaign_run(self, *, rule_id: int, saved_post_id: int, run_type: str, status: str, show_seconds: int, started_by: int | None, render_mode: str | None = None, targets_total: int = 0) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_runs(tenant_id, rule_id, saved_post_id, run_type, status, render_mode, show_seconds, targets_total, started_by)
+                    VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (int(rule_id), int(saved_post_id), str(run_type), str(status), render_mode, int(show_seconds), int(targets_total), started_by),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return int(row["id"]) if row else None
+
+    def update_campaign_run_status(self, run_id: int, *, status: str, render_mode: str | None = None, targets_success: int | None = None, targets_failed: int | None = None, error_text: str | None = None, report: dict[str, Any] | None = None, finish: bool = False) -> bool:
+        set_parts = ["status=%s", "updated_at=NOW()"]
+        params: list[Any] = [str(status)]
+        if render_mode is not None:
+            set_parts.append("render_mode=%s")
+            params.append(render_mode)
+        if targets_success is not None:
+            set_parts.append("targets_success=%s")
+            params.append(int(targets_success))
+        if targets_failed is not None:
+            set_parts.append("targets_failed=%s")
+            params.append(int(targets_failed))
+        if error_text is not None:
+            set_parts.append("error_text=%s")
+            params.append(error_text)
+        if report is not None:
+            set_parts.append("report_json=%s::jsonb")
+            params.append(_json_dumps(report))
+        if finish:
+            set_parts.append("finished_at=NOW()")
+        params.append(int(run_id))
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE campaign_runs SET {', '.join(set_parts)} WHERE id=%s", tuple(params))
+            conn.commit()
+            return True
+
+    def create_campaign_run_message(self, *, run_id: int, rule_id: int, saved_post_id: int, target_kind: str, target_id: str, target_thread_id: int | None = None, target_title: str | None = None, show_seconds: int = 0, delete_after_at: str | None = None) -> int | None:
+        delete_status = "pending" if delete_after_at else "none"
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_run_messages(run_id, rule_id, saved_post_id, target_kind, target_id, target_thread_id, target_title, show_seconds, delete_after_at, delete_status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (int(run_id), int(rule_id), int(saved_post_id), str(target_kind), str(target_id), target_thread_id, target_title, int(show_seconds), delete_after_at, delete_status),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return int(row["id"]) if row else None
+
+    def mark_campaign_run_message_sending(self, message_id: int, *, render_mode: str | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_run_messages SET send_status='sending', render_mode=%s, updated_at=NOW() WHERE id=%s", (render_mode, int(message_id)))
+            conn.commit()
+            return True
+
+    def mark_campaign_run_message_sent(self, message_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None = None, render_mode: str | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_run_messages SET send_status='sent', sent_message_id=%s, sent_message_ids_json=%s::jsonb, render_mode=%s, sent_at=NOW(), updated_at=NOW() WHERE id=%s", (sent_message_id, _json_dumps(sent_message_ids), render_mode, int(message_id)))
+            conn.commit()
+            return True
+
+    def mark_campaign_run_message_failed(self, message_id: int, *, error_text: str, render_mode: str | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_run_messages SET send_status='failed', send_error_text=%s, render_mode=%s, updated_at=NOW() WHERE id=%s", (error_text, render_mode, int(message_id)))
+            conn.commit()
+            return True
+
+    def get_campaign_run(self, run_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_runs WHERE id=%s", (int(run_id),))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def list_campaign_runs_for_rule(self, rule_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_runs WHERE rule_id=%s ORDER BY created_at DESC LIMIT %s", (int(rule_id), int(limit)))
+                return [dict(row) for row in (cur.fetchall() or [])]
+
+    def list_campaign_run_messages(self, run_id: int) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_run_messages WHERE run_id=%s ORDER BY id ASC", (int(run_id),))
+                return [dict(row) for row in (cur.fetchall() or [])]
 
     def update_rule_repost_campaign_settings(self, rule_id: int, *, enabled: bool, show_seconds: int) -> bool:
         with self.connect() as conn:

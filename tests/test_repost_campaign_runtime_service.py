@@ -10,6 +10,14 @@ class _FakeRepo:
         self._rule = rule
         self._saved_post = saved_post
         self._summary = summary or {}
+        self.create_campaign_run_calls = []
+        self.update_campaign_run_status_calls = []
+        self.create_campaign_run_message_calls = []
+        self.mark_campaign_run_message_sending_calls = []
+        self.mark_campaign_run_message_sent_calls = []
+        self.mark_campaign_run_message_failed_calls = []
+        self.next_run_id = 101
+        self.next_run_message_id = 1001
 
     def get_rule(self, rule_id):
         return self._rule
@@ -20,12 +28,38 @@ class _FakeRepo:
     def get_rule_repost_campaign_summary(self, rule_id):
         return self._summary
 
+    def create_campaign_run(self, **kwargs):
+        self.create_campaign_run_calls.append(kwargs)
+        return self.next_run_id
+
+    def update_campaign_run_status(self, run_id, **kwargs):
+        self.update_campaign_run_status_calls.append((run_id, kwargs))
+        return True
+
+    def create_campaign_run_message(self, **kwargs):
+        self.create_campaign_run_message_calls.append(kwargs)
+        return self.next_run_message_id
+
+    def mark_campaign_run_message_sending(self, message_id, **kwargs):
+        self.mark_campaign_run_message_sending_calls.append((message_id, kwargs))
+        return True
+
+    def mark_campaign_run_message_sent(self, message_id, **kwargs):
+        self.mark_campaign_run_message_sent_calls.append((message_id, kwargs))
+        return True
+
+    def mark_campaign_run_message_failed(self, message_id, **kwargs):
+        self.mark_campaign_run_message_failed_calls.append((message_id, kwargs))
+        return True
+
 
 class _FakeRenderer:
     def __init__(self, result):
         self.result = result
+        self.calls = []
 
     async def send(self, **kwargs):
+        self.calls.append(kwargs)
         return self.result
 
 
@@ -56,6 +90,50 @@ def test_test_send_success():
     assert result.message_id == 123
     assert result.method == "bot_api"
     assert result.target_id == "-1001"
+
+
+def test_send_creates_run_and_message_on_success():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, target_id="-1001", repost_campaign_show_seconds=300)
+    saved_post = {"content_json": {"kind": "photo"}}
+    repo = _FakeRepo(rule=rule, saved_post=saved_post)
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="photo", chat_id="-1001", message_id=123))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+
+    result = asyncio.run(runtime.test_send_saved_post_to_main_target(rule_id=33, admin_id=777))
+
+    assert len(repo.create_campaign_run_calls) == 1
+    assert len(repo.create_campaign_run_message_calls) == 1
+    assert len(repo.mark_campaign_run_message_sending_calls) == 1
+    assert len(repo.mark_campaign_run_message_sent_calls) == 1
+    assert repo.update_campaign_run_status_calls[-1][1]["status"] == "sent"
+    assert result.extra["campaign_run_id"] == repo.next_run_id
+
+
+def test_send_marks_run_failed_on_renderer_error():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, target_id="-1001", repost_campaign_show_seconds=300)
+    saved_post = {"content_json": {"kind": "photo"}}
+    repo = _FakeRepo(rule=rule, saved_post=saved_post)
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=False, method="telethon_builder", kind="photo", error_text="Telethon error"))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+
+    result = asyncio.run(runtime.test_send_saved_post_to_main_target(rule_id=34))
+    assert len(repo.mark_campaign_run_message_failed_calls) == 1
+    assert repo.update_campaign_run_status_calls[-1][1]["status"] == "failed"
+    assert result.ok is False
+    assert result.extra["campaign_run_id"] == repo.next_run_id
+
+
+def test_send_does_not_render_if_run_creation_failed():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, target_id="-1001", repost_campaign_show_seconds=300)
+    saved_post = {"content_json": {"kind": "photo"}}
+    repo = _FakeRepo(rule=rule, saved_post=saved_post)
+    repo.next_run_id = None
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="photo", chat_id="-1001", message_id=123))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+
+    result = asyncio.run(runtime.test_send_saved_post_to_main_target(rule_id=35))
+    assert len(renderer.calls) == 0
+    assert result.ok is False
 
 
 def test_test_send_premium_failure_propagated():
