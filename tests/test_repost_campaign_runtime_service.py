@@ -30,6 +30,7 @@ class _FakeRepo:
         self.reset_stuck_campaign_delete_processing_calls = []
         self.set_target_active_calls = []
         self.remove_target_calls = []
+        self.update_target_check_calls = []
 
     def get_rule(self, rule_id):
         return self._rule
@@ -100,6 +101,10 @@ class _FakeRepo:
 
     def remove_rule_repost_campaign_target(self, target_row_id):
         self.remove_target_calls.append(target_row_id)
+        return True
+
+    def update_rule_repost_campaign_target_check_result(self, row_id, *, title=None, last_check_error=None):
+        self.update_target_check_calls.append((row_id, title, last_check_error))
         return True
 
 
@@ -525,3 +530,48 @@ def test_get_campaign_control_center_handles_exception():
     result = runtime.get_campaign_control_center(rule_id=9)
     assert result["ok"] is False
     assert "Не удалось загрузить центр управления кампанией" in result["error_text"]
+
+
+class _FakeChecker:
+    def __init__(self, result):
+        self.result = result
+
+    async def check_target(self, **kwargs):
+        return self.result
+
+
+def test_check_one_success_saves_result():
+    repo=_FakeRepo(rule=SimpleNamespace(mode="repost")); repo._targets=[{"id":1,"target_id":"-1001","title":"A"}]
+    checker=_FakeChecker(SimpleNamespace(ok=True,target_id="-1001",title="A",error_text=None,can_view=True,can_publish=True,can_delete=True))
+    rt=RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), target_checker=checker)
+    result=asyncio.run(rt.check_campaign_target(rule_id=1,target_row_id=1))
+    assert result["ok"] is True
+    assert repo.update_target_check_calls[0] == (1, "A", None)
+
+
+def test_check_one_failed_saves_error():
+    repo=_FakeRepo(rule=SimpleNamespace(mode="repost")); repo._targets=[{"id":1,"target_id":"-1001","title":"A"}]
+    checker=_FakeChecker(SimpleNamespace(ok=False,target_id="-1001",title="A",error_text="err",can_view=True,can_publish=False,can_delete=None))
+    rt=RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), target_checker=checker)
+    result=asyncio.run(rt.check_campaign_target(rule_id=1,target_row_id=1))
+    assert result["ok"] is False
+    assert repo.update_target_check_calls[0] == (1, "A", "err")
+
+
+def test_checker_unavailable():
+    rt=RepostCampaignRuntimeService(repo=_FakeRepo(rule=SimpleNamespace(mode="repost")), renderer=_FakeRenderer(None), target_checker=None)
+    result=asyncio.run(rt.check_campaign_target(rule_id=1,target_row_id=1))
+    assert result["error_text"] == "Сервис проверки прав недоступен"
+
+
+def test_batch_check_summary():
+    repo=_FakeRepo(rule=SimpleNamespace(mode="repost")); repo._targets=[{"id":1,"target_id":"-1"},{"id":2,"target_id":"-2"}]
+    class C:
+        async def check_target(self, **kwargs):
+            tid=kwargs["target_id"]; ok=tid=="-1"
+            return SimpleNamespace(ok=ok,target_id=tid,title=tid,error_text=None if ok else "err",can_view=True,can_publish=ok,can_delete=None)
+    rt=RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), target_checker=C())
+    result=asyncio.run(rt.check_campaign_targets(rule_id=1))
+    assert result["checked"] == 2
+    assert result["passed"] == 1
+    assert result["failed"] == 1

@@ -130,6 +130,7 @@ def build_campaign_target_item_view(target: dict, *, index: int | None = None) -
         "can_enable": can_enable,
         "can_remove": True,
         "status_icon": status_icon,
+        "check_action_text": "🔎 Проверить",
     }
 
 
