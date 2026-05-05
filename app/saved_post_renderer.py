@@ -2,12 +2,144 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from app.saved_post_entities import deserialize_message_entities, saved_post_entities_to_telethon
+from app.saved_post_entities import saved_post_requires_premium_send
 
 logger = logging.getLogger("forwarder")
+
+
+@dataclass(frozen=True)
+class SavedPostRenderResult:
+    ok: bool
+    method: str
+    kind: str
+    chat_id: str | None = None
+    message_id: int | None = None
+    error_text: str | None = None
+    premium_required: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "ok": self.ok,
+            "method": self.method,
+            "kind": self.kind,
+            "chat_id": self.chat_id,
+            "message_id": self.message_id,
+            "error_text": self.error_text,
+            "premium_required": self.premium_required,
+        }
+
+
+class SavedPostRenderer:
+    def __init__(
+        self,
+        *,
+        bot,
+        telethon_client=None,
+        temp_dir: str | Path = "media/temp",
+        logger_=None,
+    ):
+        self.bot = bot
+        self.telethon_client = telethon_client
+        self.temp_dir = Path(temp_dir)
+        self.logger = logger_ or logger
+
+    def detect_render_method(self, content: dict[str, Any]) -> str:
+        if saved_post_requires_premium_send(content):
+            return "telethon_builder"
+        return "bot_api"
+
+    async def send(
+        self,
+        *,
+        chat_id: int | str,
+        content: dict[str, Any],
+        reply_markup=None,
+        allow_premium: bool = True,
+    ) -> SavedPostRenderResult:
+        kind = str(content.get("kind") or "text")
+        premium_required = saved_post_requires_premium_send(content)
+        method = self.detect_render_method(content)
+        self.logger.info(
+            "SAVED_POST_RENDER_SEND_START | chat_id=%s | kind=%s | method=%s | premium_required=%s",
+            chat_id,
+            kind,
+            method,
+            premium_required,
+        )
+        try:
+            if method == "telethon_builder":
+                if not allow_premium:
+                    return SavedPostRenderResult(
+                        ok=False,
+                        method="telethon_builder",
+                        kind=kind,
+                        chat_id=str(chat_id),
+                        error_text="Premium-отправка запрещена для этого сценария",
+                        premium_required=True,
+                    )
+                if self.telethon_client is None:
+                    return SavedPostRenderResult(
+                        ok=False,
+                        method="telethon_builder",
+                        kind=kind,
+                        chat_id=str(chat_id),
+                        error_text="Telethon client недоступен для premium-отправки",
+                        premium_required=True,
+                    )
+                raw = await send_saved_post_content_via_telethon(
+                    bot=self.bot,
+                    telethon_client=self.telethon_client,
+                    chat_id=chat_id,
+                    content=content,
+                    temp_dir=self.temp_dir,
+                )
+            else:
+                raw = await send_saved_post_content(
+                    bot=self.bot,
+                    chat_id=chat_id,
+                    content=content,
+                    reply_markup=reply_markup,
+                )
+            result = SavedPostRenderResult(
+                ok=True,
+                method=str(raw.get("method") or method),
+                kind=str(raw.get("kind") or kind),
+                chat_id=str(raw.get("chat_id") or chat_id),
+                message_id=raw.get("message_id"),
+                premium_required=premium_required,
+            )
+            self.logger.info(
+                "SAVED_POST_RENDER_SEND_DONE | chat_id=%s | kind=%s | method=%s | message_id=%s | premium_required=%s",
+                chat_id,
+                kind,
+                result.method,
+                result.message_id,
+                premium_required,
+            )
+            return result
+        except Exception as exc:
+            self.logger.warning(
+                "SAVED_POST_RENDER_SEND_FAILED | chat_id=%s | kind=%s | method=%s | premium_required=%s | error=%s",
+                chat_id,
+                kind,
+                method,
+                premium_required,
+                exc,
+                exc_info=True,
+            )
+            return SavedPostRenderResult(
+                ok=False,
+                method=method,
+                kind=kind,
+                chat_id=str(chat_id),
+                error_text=str(exc),
+                premium_required=premium_required,
+            )
 
 
 def _guess_media_extension(kind: str, media: dict[str, Any]) -> str:

@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.saved_post_renderer import send_saved_post_content
+from app.saved_post_renderer import SavedPostRenderer, send_saved_post_content
 
 
 class _FakeSentMessage:
@@ -46,3 +46,45 @@ def test_send_saved_post_content_unsupported_kind_raises():
     bot = _FakeBot()
     with pytest.raises(ValueError, match="Unsupported saved post kind"):
         asyncio.run(send_saved_post_content(bot=bot, chat_id=-100123, content={"kind": "sticker"}))
+
+
+def test_saved_post_renderer_detect_render_method_plain():
+    renderer = SavedPostRenderer(bot=_FakeBot(), telethon_client=None)
+    assert renderer.detect_render_method({"kind": "text", "text": "hello", "entities": []}) == "bot_api"
+
+
+def test_saved_post_renderer_detect_render_method_premium():
+    renderer = SavedPostRenderer(bot=_FakeBot(), telethon_client=None)
+    content = {
+        "kind": "text",
+        "text": "x",
+        "entities": [
+            {"type": "custom_emoji", "offset": 0, "length": 1, "custom_emoji_id": "123"}
+        ],
+    }
+    assert renderer.detect_render_method(content) == "telethon_builder"
+
+
+def test_saved_post_renderer_send_plain_returns_render_result():
+    bot = _FakeBot()
+    renderer = SavedPostRenderer(bot=bot, telethon_client=None)
+    result = asyncio.run(renderer.send(chat_id=-100123, content={"kind": "text", "text": "Привет"}))
+    assert result.ok is True
+    assert result.method == "bot_api"
+    assert result.message_id == 101
+
+
+def test_saved_post_renderer_send_premium_without_telethon_returns_structured_error():
+    renderer = SavedPostRenderer(bot=_FakeBot(), telethon_client=None)
+    premium_content = {
+        "kind": "text",
+        "text": "x",
+        "entities": [
+            {"type": "custom_emoji", "offset": 0, "length": 1, "custom_emoji_id": "123"}
+        ],
+    }
+    result = asyncio.run(renderer.send(chat_id=1, content=premium_content))
+    assert result.ok is False
+    assert result.method == "telethon_builder"
+    assert result.premium_required is True
+    assert "Telethon" in (result.error_text or "")
