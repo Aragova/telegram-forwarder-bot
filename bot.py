@@ -105,8 +105,7 @@ from app.saved_posts_service import (
     summarize_aiogram_message_for_saved_post,
     summarize_saved_post_entities,
 )
-from app.saved_post_entities import saved_post_requires_premium_send
-from app.saved_post_renderer import send_saved_post_content_via_telethon, send_saved_post_content
+from app.saved_post_renderer import SavedPostRenderer
 from app import product_ui
 from app import access_control, user_ui
 from app.user_handlers import (
@@ -6546,8 +6545,13 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
     content = saved_post.get("content_json") or saved_post.get("content") or {}
     kind = str(content.get("kind") or "text")
     preview_keyboard = _build_repost_campaign_post_preview_keyboard(rule_id)
-    method = "bot_api"
-    needs_premium = saved_post_requires_premium_send(content)
+    renderer = SavedPostRenderer(
+        bot=bot,
+        telethon_client=telethon_client,
+        temp_dir=settings.temp_dir,
+    )
+    method = renderer.detect_render_method(content)
+    needs_premium = method == "telethon_builder"
     custom_emoji_count = sum(
         1
         for item in [*(content.get("entities") or []), *(content.get("caption_entities") or [])]
@@ -6562,54 +6566,22 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
         )
 
     try:
-        if needs_premium:
-            result = await send_saved_post_content_via_telethon(
-                bot=bot,
-                telethon_client=telethon_client,
-                chat_id=callback.message.chat.id,
-                content=content,
-                temp_dir="/tmp",
+        result = await renderer.send(
+            chat_id=callback.message.chat.id,
+            content=content,
+            reply_markup=preview_keyboard,
+        )
+        method = result.method
+        if not result.ok:
+            error_text = (
+                "❌ Не удалось показать рекламный пост\n\n"
+                f"{result.error_text or 'Неизвестная ошибка'}"
             )
-            method = "telethon_builder"
-            await callback.message.answer("✅ Предпросмотр premium-поста отправлен через Telethon builder.", reply_markup=preview_keyboard)
-        elif kind == "photo":
-            media = content.get("media") or {}
-            sent = await callback.message.answer_photo(
-                photo=media["file_id"],
-                caption=content.get("caption") or None,
-                caption_entities=deserialize_message_entities(content.get("caption_entities")),
-                reply_markup=preview_keyboard,
-            )
-        elif kind == "video":
-            media = content.get("media") or {}
-            sent = await callback.message.answer_video(
-                video=media["file_id"],
-                caption=content.get("caption") or None,
-                caption_entities=deserialize_message_entities(content.get("caption_entities")),
-                reply_markup=preview_keyboard,
-            )
-        elif kind == "animation":
-            media = content.get("media") or {}
-            sent = await callback.message.answer_animation(
-                animation=media["file_id"],
-                caption=content.get("caption") or None,
-                caption_entities=deserialize_message_entities(content.get("caption_entities")),
-                reply_markup=preview_keyboard,
-            )
-        elif kind == "document":
-            media = content.get("media") or {}
-            sent = await callback.message.answer_document(
-                document=media["file_id"],
-                caption=content.get("caption") or None,
-                caption_entities=deserialize_message_entities(content.get("caption_entities")),
-                reply_markup=preview_keyboard,
-            )
-        else:
-            sent = await callback.message.answer(
-                content.get("text") or get_saved_post_preview_caption(content),
-                entities=deserialize_message_entities(content.get("entities")),
-                reply_markup=preview_keyboard,
-            )
+            if result.premium_required:
+                error_text += "\n\nPremium-оформление требует Telethon-отправки. Проверьте, что аккаунт-парсер активен."
+            await callback.message.answer(error_text)
+            await answer_callback_safe_once(callback)
+            return
         logger.info(
             "REPOST_CAMPAIGN_SAVED_POST_PREVIEW_SENT | rule_id=%s | saved_post_id=%s | kind=%s | method=%s",
             rule_id,
@@ -6624,15 +6596,10 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
             saved_post_id,
             exc,
         )
-        if needs_premium:
-            await callback.message.answer(
-                "❌ Не удалось показать рекламный пост с premium-форматированием.\n\n"
-                "Проверьте, что аккаунт-парсер активен. Обычный предпросмотр через Bot API может исказить premium emoji."
-            )
-        else:
-            await callback.message.answer(
-                "⚠️ Не удалось показать рекламный пост.\n\nПопробуйте заменить пост через “➕ Добавить / заменить пост”."
-            )
+        await callback.message.answer(
+            "❌ Не удалось показать рекламный пост\n\n"
+            f"{exc}"
+        )
 
     await answer_callback_safe_once(callback)
 
@@ -6701,8 +6668,13 @@ async def handle_rule_repost_campaign_test_send(callback: CallbackQuery):
 
     target_id = getattr(rule, "target_id", None)
     content = saved_post.get("content_json") or saved_post.get("content") or {}
-    method = "bot_api"
-    needs_premium = saved_post_requires_premium_send(content)
+    renderer = SavedPostRenderer(
+        bot=bot,
+        telethon_client=telethon_client,
+        temp_dir=settings.temp_dir,
+    )
+    method = renderer.detect_render_method(content)
+    needs_premium = method == "telethon_builder"
     kind = str(content.get("kind") or "text")
     custom_emoji_count = sum(
         1
@@ -6718,23 +6690,36 @@ async def handle_rule_repost_campaign_test_send(callback: CallbackQuery):
         )
 
     try:
-        if needs_premium:
-            result = await send_saved_post_content_via_telethon(
-                bot=bot,
-                telethon_client=telethon_client,
-                chat_id=target_id,
-                content=content,
-                temp_dir="/tmp",
+        result = await renderer.send(
+            chat_id=target_id,
+            content=content,
+        )
+        method = result.method
+        if not result.ok:
+            logger.warning(
+                "REPOST_CAMPAIGN_TEST_SEND_FAILED | rule_id=%s | saved_post_id=%s | target_id=%s | error=%s | method=%s",
+                rule_id,
+                saved_post_id,
+                target_id,
+                result.error_text,
+                method,
+                exc_info=True,
             )
-            method = "telethon_builder"
-        else:
-            result = await send_saved_post_content(bot=bot, chat_id=target_id, content=content)
+            error_text = (
+                "❌ Не удалось отправить рекламный пост\n\n"
+                f"{result.error_text or 'Неизвестная ошибка'}"
+            )
+            if result.premium_required:
+                error_text += "\n\nPremium-оформление требует Telethon-отправки. Проверьте права аккаунта-парсера в канале."
+            await callback.message.answer(error_text)
+            await answer_callback_safe_once(callback)
+            return
         logger.info(
             "REPOST_CAMPAIGN_TEST_SEND_DONE | rule_id=%s | saved_post_id=%s | target_id=%s | message_id=%s | method=%s",
             rule_id,
             saved_post_id,
             target_id,
-            result.get("message_id"),
+            result.message_id,
             method,
         )
         try:
@@ -6744,7 +6729,7 @@ async def handle_rule_repost_campaign_test_send(callback: CallbackQuery):
                 rule_id=rule_id,
                 admin_id=callback.from_user.id if callback.from_user else settings.admin_id,
                 old_value=None,
-                new_value={"saved_post_id": int(saved_post_id), "target_id": str(target_id), "message_id": result.get("message_id")},
+                new_value={"saved_post_id": int(saved_post_id), "target_id": str(target_id), "message_id": result.message_id},
                 extra={"source": "admin_ui"},
             )
         except Exception as audit_exc:
@@ -6752,7 +6737,8 @@ async def handle_rule_repost_campaign_test_send(callback: CallbackQuery):
 
         await callback.message.answer(
             "✅ Тестовый запуск выполнен\n\nРекламный пост отправлен в основной канал правила.\n"
-            f"Message ID: {result.get('message_id')}"
+            f"Message ID: {result.message_id}\n"
+            f"Метод: {result.method}"
         )
     except Exception as exc:
         logger.warning(
