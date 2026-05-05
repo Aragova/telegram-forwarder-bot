@@ -75,6 +75,7 @@ class SavedPostRenderer:
             method,
             premium_required,
         )
+        raw: dict[str, Any] | None = None
         try:
             if method == "telethon_builder":
                 if not allow_premium:
@@ -137,6 +138,11 @@ class SavedPostRenderer:
                 exc,
                 exc_info=True,
             )
+            message_ids = None
+            if raw:
+                message_ids = raw.get("message_ids") or (
+                    [raw.get("message_id")] if raw.get("message_id") else None
+                )
             return SavedPostRenderResult(
                 ok=False,
                 method=method,
@@ -144,7 +150,7 @@ class SavedPostRenderer:
                 chat_id=str(chat_id),
                 error_text=str(exc),
                 premium_required=premium_required,
-                message_ids=raw.get("message_ids") or ([raw.get("message_id")] if raw.get("message_id") else None),
+                message_ids=message_ids,
             )
 
 
