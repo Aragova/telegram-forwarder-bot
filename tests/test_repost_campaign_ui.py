@@ -1,4 +1,5 @@
 from app.repost_campaign_ui import (
+    build_repost_campaign_more_view,
     build_repost_campaign_delete_result_view,
     build_repost_campaign_history_view,
     build_repost_campaign_launch_result_view,
@@ -89,7 +90,7 @@ def test_format_readiness_block_warning():
     assert "⚠️ Кампания не готова: исправьте пункты выше" in block
 
 
-def test_menu_includes_readiness_block():
+def test_menu_compact_main_view():
     text, _ = build_repost_campaign_menu_view(
         rule_id=3,
         summary={"show_seconds_text": "12 часов", "targets_active": 1, "saved_post_id": 13},
@@ -103,7 +104,10 @@ def test_menu_includes_readiness_block():
             "summary_text": "✅ Кампания готова к тестовому запуску",
         },
     )
-    assert "🚦 Готовность кампании" in text
+    assert "🚦 Готовность кампании" not in text
+    assert "⚠️ Требует внимания" not in text
+    assert "📊 Последний запуск\n\n" not in text
+    assert "Можно запускать кампанию." in text
 
 
 def test_menu_shows_launch_button_when_ready():
@@ -115,6 +119,7 @@ def test_menu_shows_launch_button_when_ready():
     )
     texts = _texts_from_keyboard(keyboard)
     assert "🚀 Запустить кампанию" in texts
+    assert "⚙️ Ещё" in texts
 
 
 def test_menu_hides_launch_button_when_not_ready():
@@ -288,7 +293,7 @@ def test_menu_has_no_internal_test_copy():
     )
     assert "Тестовый режим" not in text
     assert "админ" not in text.lower()
-    assert "🧭 Центр управления" in text
+    assert "🧭 Центр управления" not in text
 
 
 def test_check_publication_button_and_callback():
@@ -300,8 +305,35 @@ def test_check_publication_button_and_callback():
     )
     texts = _texts_from_keyboard(keyboard)
     callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert "⚙️ Ещё" in texts
+    assert "rule_repost_campaign_more:9" in callbacks
+
+
+def test_menu_button_count_is_reasonable():
+    _, keyboard = build_repost_campaign_menu_view(
+        rule_id=9,
+        summary={"saved_post_id": 10, "show_seconds": 60, "targets_active": 1},
+        saved_post_line="📝 Рекламный пост: #10",
+        readiness={"ready": True},
+    )
+    count = sum(len(row) for row in keyboard.inline_keyboard)
+    assert count <= 9
+
+
+def test_more_view_contains_service_actions():
+    _, keyboard = build_repost_campaign_more_view(rule_id=3, saved_post_id=10, last_run_id=5)
+    texts = _texts_from_keyboard(keyboard)
     assert "📤 Проверить публикацию" in texts
-    assert "rule_repost_campaign_test_send:9" in callbacks
+    assert "📄 Последний запуск" in texts
+    assert "🔄 Обновить кампанию" in texts
+    assert "❌ Отключить кампанию" in texts
+
+
+def test_more_view_hides_optional_buttons():
+    _, keyboard = build_repost_campaign_more_view(rule_id=3, saved_post_id=None, last_run_id=None)
+    texts = _texts_from_keyboard(keyboard)
+    assert "📤 Проверить публикацию" not in texts
+    assert "📄 Последний запуск" not in texts
 
 
 def test_history_order_old_to_new():
@@ -344,7 +376,7 @@ def test_show_menu_has_no_test_emoji():
 
 def test_menu_renders_control_center_title():
     text, _ = build_repost_campaign_menu_view(rule_id=3, summary={}, saved_post_line="📝 Рекламный пост: не выбран", readiness={"ready": False}, control_center={"ok": True, "readiness": {"ready": False}, "issues": []})
-    assert "🧭 Центр управления" in text
+    assert "🧭 Центр управления" not in text
 
 
 def test_menu_shows_last_run_button():
@@ -357,8 +389,8 @@ def test_menu_shows_last_run_button():
     )
     texts = _texts_from_keyboard(keyboard)
     callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
-    assert "📄 Последний запуск" in texts
-    assert "rule_repost_campaign_history_detail:3:4" in callbacks
+    assert "⚙️ Ещё" in texts
+    assert "rule_repost_campaign_history_detail:3:4" not in callbacks
 
 
 def test_menu_button_grouping():
@@ -371,12 +403,12 @@ def test_menu_button_grouping():
     )
     texts = _texts_from_keyboard(keyboard)
     assert "🚀 Запустить кампанию" in texts
-    assert "📤 Проверить публикацию" in texts
     assert "📝 Креатив" in texts
     assert "⏳ Срок" in texts
     assert "📣 Площадки" in texts
     assert "📊 История" in texts
     assert "👁 Предпросмотр" in texts
+    assert "⚙️ Ещё" in texts
 
 
 def test_menu_opens_without_control_center():
