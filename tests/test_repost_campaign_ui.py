@@ -32,7 +32,8 @@ def test_post_menu_view_with_saved_post_has_expected_buttons():
 def test_show_menu_view_has_presets_and_back():
     _, keyboard = build_repost_campaign_show_menu_view(rule_id=3, current_show_seconds_text="1 час")
     texts = _texts_from_keyboard(keyboard)
-    assert "1 минута 🧪" in texts
+    assert "1 минута" in texts
+    assert "1 минута 🧪" not in texts
     assert "48 часов" in texts
     assert "⬅️ Назад" in texts
 
@@ -180,9 +181,9 @@ def test_history_with_sent_run():
     text, _ = build_repost_campaign_history_view(rule_id=3, history=history)
     assert "📊 История кампаний" in text
     assert "#1" in text
-    assert "🧪 Тестовый запуск" in text
+    assert "📤 Проверочная публикация" in text
     assert "✅ Отправлено" in text
-    assert "Premium-отправка через аккаунт" in text
+    assert "Premium-отправка" in text
     assert "Каналы: 1/1" in text
 
 
@@ -276,3 +277,66 @@ def test_delete_result_success_view():
 def test_delete_result_failed_view():
     text, _ = build_repost_campaign_delete_result_view(rule_id=3, result={"ok": False, "error_text": "no rights", "extra": {"campaign_run_id": 10}})
     assert "❌ Не удалось удалить публикацию" in text
+
+
+def test_menu_has_no_internal_test_copy():
+    text, _ = build_repost_campaign_menu_view(
+        rule_id=3,
+        summary={"show_seconds_text": "12 часов", "targets_active": 1, "saved_post_id": 13},
+        saved_post_line="📝 Рекламный пост: #13 · фото",
+        readiness={"ready": True},
+    )
+    assert "Тестовый режим" not in text
+    assert "админ" not in text.lower()
+    assert "Рекламная кампания публикует выбранный пост" in text
+
+
+def test_check_publication_button_and_callback():
+    _, keyboard = build_repost_campaign_menu_view(
+        rule_id=9,
+        summary={"saved_post_id": 10},
+        saved_post_line="📝 Рекламный пост: #10",
+        readiness={"ready": False},
+    )
+    texts = _texts_from_keyboard(keyboard)
+    callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert "📤 Проверить публикацию" in texts
+    assert "rule_repost_campaign_test_send:9" in callbacks
+
+
+def test_history_order_old_to_new():
+    history = {
+        "ok": True,
+        "runs": [
+            {"id": 4, "run_type": "manual", "status": "sent"},
+            {"id": 3, "run_type": "manual", "status": "sent"},
+            {"id": 2, "run_type": "manual", "status": "sent"},
+            {"id": 1, "run_type": "manual", "status": "sent"},
+        ],
+        "summary": {"last_run": {"id": 4}},
+    }
+    text, _ = build_repost_campaign_history_view(rule_id=3, history=history)
+    assert text.index("#1") < text.index("#4")
+
+
+def test_history_buttons_use_real_run_ids():
+    history = {
+        "ok": True,
+        "runs": [
+            {"id": 4, "run_type": "manual", "status": "sent"},
+            {"id": 3, "run_type": "manual", "status": "sent"},
+            {"id": 2, "run_type": "manual", "status": "sent"},
+        ],
+        "summary": {"last_run": {"id": 4}},
+    }
+    _, keyboard = build_repost_campaign_history_view(rule_id=3, history=history)
+    texts = _texts_from_keyboard(keyboard)
+    assert "📄 Детали последнего запуска" in texts
+    assert "📄 Детали #3" in texts
+    assert "📄 #1" not in texts
+
+
+def test_show_menu_has_no_test_emoji():
+    _, keyboard = build_repost_campaign_show_menu_view(rule_id=5, current_show_seconds_text="1 час")
+    texts = _texts_from_keyboard(keyboard)
+    assert "1 минута 🧪" not in texts
