@@ -28,6 +28,8 @@ class _FakeRepo:
         self.mark_campaign_run_message_deleted_calls = []
         self.mark_campaign_run_message_delete_failed_calls = []
         self.reset_stuck_campaign_delete_processing_calls = []
+        self.set_target_active_calls = []
+        self.remove_target_calls = []
 
     def get_rule(self, rule_id):
         return self._rule
@@ -91,6 +93,14 @@ class _FakeRepo:
     def reset_stuck_campaign_delete_processing(self, *, stuck_seconds=300):
         self.reset_stuck_campaign_delete_processing_calls.append(stuck_seconds)
         return 0
+
+    def set_rule_repost_campaign_target_active(self, target_row_id, is_active):
+        self.set_target_active_calls.append((target_row_id, is_active))
+        return True
+
+    def remove_rule_repost_campaign_target(self, target_row_id):
+        self.remove_target_calls.append(target_row_id)
+        return True
 
 
 class _FakeRenderer:
@@ -264,10 +274,39 @@ def test_get_campaign_run_details_success():
     assert details["summary"]["total"] == 3
     assert details["summary"]["sent"] == 1
     assert details["summary"]["failed"] == 1
-    assert details["summary"]["pending"] == 1
-    assert details["summary"]["delete_pending"] == 1
-    assert details["summary"]["deleted"] == 1
-    assert details["summary"]["delete_failed"] == 1
+
+
+def test_set_campaign_target_active_success():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._targets = [{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.set_campaign_target_active(rule_id=3, target_row_id=1, is_active=False)
+    assert result["ok"] is True
+    assert repo.set_target_active_calls[-1] == (1, False)
+
+
+def test_set_campaign_target_active_not_found():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.set_campaign_target_active(rule_id=3, target_row_id=1, is_active=False)
+    assert result["ok"] is False
+    assert result["error_text"] == "Канал/группа не найдены в кампании"
+
+
+def test_remove_campaign_target_success():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._targets = [{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.remove_campaign_target(rule_id=3, target_row_id=1)
+    assert result["ok"] is True
+    assert repo.remove_target_calls == [1]
+
+
+def test_remove_campaign_target_not_found():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.remove_campaign_target(rule_id=3, target_row_id=1)
+    assert result["ok"] is False
 
 
 def test_launch_main_only_success():

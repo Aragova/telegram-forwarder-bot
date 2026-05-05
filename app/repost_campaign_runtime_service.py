@@ -73,6 +73,68 @@ class RepostCampaignRuntimeService:
 
         return rule, saved_post
 
+    def get_campaign_target(self, *, rule_id: int, target_row_id: int) -> dict | None:
+        targets = self.repo.list_rule_repost_campaign_targets(rule_id, active_only=False) or []
+        return next((t for t in targets if int(t.get("id") or 0) == int(target_row_id)), None)
+
+    def set_campaign_target_active(
+        self,
+        *,
+        rule_id: int,
+        target_row_id: int,
+        is_active: bool,
+        admin_id: int | None = None,
+    ) -> dict:
+        _ = admin_id
+        rule = self.repo.get_rule(rule_id)
+        if not rule:
+            return {"ok": False, "error_text": "Правило не найдено"}
+        target = self.get_campaign_target(rule_id=rule_id, target_row_id=target_row_id)
+        if not target:
+            return {"ok": False, "error_text": "Канал/группа не найдены в кампании"}
+        try:
+            ok = bool(self.repo.set_rule_repost_campaign_target_active(target_row_id, is_active))
+            if ok:
+                self.logger.info("REPOST_CAMPAIGN_TARGET_STATUS_UPDATED | rule_id=%s | target_row_id=%s | is_active=%s", rule_id, target_row_id, is_active)
+            else:
+                self.logger.warning("REPOST_CAMPAIGN_TARGET_STATUS_FAILED | rule_id=%s | target_row_id=%s | error=%s", rule_id, target_row_id, "update_failed")
+            return {
+                "ok": ok,
+                "rule_id": rule_id,
+                "target_row_id": target_row_id,
+                "target_title": target.get("title") or target.get("target_id"),
+                "is_active": is_active,
+                "error_text": None if ok else "Не удалось обновить статус канала/группы",
+            }
+        except Exception as exc:
+            self.logger.warning("REPOST_CAMPAIGN_TARGET_STATUS_FAILED | rule_id=%s | target_row_id=%s | error=%s", rule_id, target_row_id, exc)
+            return {"ok": False, "error_text": "Не удалось обновить статус канала/группы"}
+
+    def remove_campaign_target(self, *, rule_id: int, target_row_id: int, admin_id: int | None = None) -> dict:
+        _ = admin_id
+        rule = self.repo.get_rule(rule_id)
+        if not rule:
+            return {"ok": False, "error_text": "Правило не найдено"}
+        target = self.get_campaign_target(rule_id=rule_id, target_row_id=target_row_id)
+        if not target:
+            return {"ok": False, "error_text": "Канал/группа не найдены в кампании"}
+        try:
+            ok = bool(self.repo.remove_rule_repost_campaign_target(target_row_id))
+            if ok:
+                self.logger.info("REPOST_CAMPAIGN_TARGET_REMOVED | rule_id=%s | target_row_id=%s", rule_id, target_row_id)
+            else:
+                self.logger.warning("REPOST_CAMPAIGN_TARGET_REMOVE_FAILED | rule_id=%s | target_row_id=%s | error=%s", rule_id, target_row_id, "remove_failed")
+            return {
+                "ok": ok,
+                "rule_id": rule_id,
+                "target_row_id": target_row_id,
+                "target_title": target.get("title") or target.get("target_id"),
+                "error_text": None if ok else "Не удалось удалить канал/группу",
+            }
+        except Exception as exc:
+            self.logger.warning("REPOST_CAMPAIGN_TARGET_REMOVE_FAILED | rule_id=%s | target_row_id=%s | error=%s", rule_id, target_row_id, exc)
+            return {"ok": False, "error_text": "Не удалось удалить канал/группу"}
+
     async def preview_saved_post(self, *, rule_id: int, admin_chat_id: int | str, reply_markup=None) -> RepostCampaignActionResult:
         loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="preview_saved_post")
         if isinstance(loaded, RepostCampaignActionResult):

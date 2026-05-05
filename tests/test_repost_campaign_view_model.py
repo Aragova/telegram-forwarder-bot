@@ -1,4 +1,5 @@
 from app.repost_campaign_view_model import (
+    build_campaign_target_item_view,
     build_campaign_run_item_view,
     build_campaign_run_message_view,
     format_campaign_delete_status_text,
@@ -70,6 +71,25 @@ def test_run_type_test_uses_product_copy():
 
 def test_run_type_manual_uses_campaign_copy():
     assert format_campaign_run_type_text("manual") == "🚀 Кампания"
+
+
+def test_build_campaign_target_item_view_active():
+    view = build_campaign_target_item_view({"id": 1, "target_id": "-1001", "title": "Channel", "is_active": True}, index=1)
+    assert "🟢" in view["title"]
+    assert view["can_pause"] is True
+    assert view["can_enable"] is False
+
+
+def test_build_campaign_target_item_view_paused():
+    view = build_campaign_target_item_view({"id": 1, "target_id": "-1001", "title": "Channel", "is_active": False}, index=1)
+    assert "⏸" in view["title"]
+    assert view["can_enable"] is True
+
+
+def test_build_campaign_target_item_view_error():
+    view = build_campaign_target_item_view({"id": 1, "target_id": "-1001", "title": "Channel", "is_active": True, "last_check_error": "not enough rights"}, index=1)
+    assert "⚠️" in view["title"]
+    assert view["error_line"]
 
 from app.repost_campaign_view_model import build_campaign_control_center_view_model
 
