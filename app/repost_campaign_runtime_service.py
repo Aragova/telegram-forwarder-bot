@@ -309,3 +309,101 @@ class RepostCampaignRuntimeService:
                 else "⚠️ Кампания не готова: исправьте пункты выше"
             ),
         }
+
+    def get_campaign_history(self, *, rule_id: int, limit: int = 10) -> dict:
+        try:
+            rule = self.repo.get_rule(rule_id)
+            if not rule:
+                return {
+                    "ok": False,
+                    "rule_id": rule_id,
+                    "error_text": "Правило не найдено",
+                    "runs": [],
+                    "summary": {},
+                }
+            runs = self.repo.list_campaign_runs_for_rule(rule_id, limit=limit)
+            total = len(runs)
+            sent = sum(1 for row in runs if row.get("status") == "sent")
+            failed = sum(1 for row in runs if row.get("status") == "failed")
+            partial = sum(1 for row in runs if row.get("status") == "partial")
+            sending = sum(1 for row in runs if row.get("status") in {"created", "sending"})
+            last_run = runs[0] if runs else None
+            self.logger.info("REPOST_CAMPAIGN_HISTORY_OPENED | rule_id=%s | runs=%s", rule_id, total)
+            return {
+                "ok": True,
+                "rule_id": rule_id,
+                "runs": runs,
+                "summary": {
+                    "total": total,
+                    "sent": sent,
+                    "failed": failed,
+                    "partial": partial,
+                    "sending": sending,
+                    "last_run": last_run,
+                },
+            }
+        except Exception as exc:
+            self.logger.exception("REPOST_CAMPAIGN_HISTORY_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            return {
+                "ok": False,
+                "rule_id": rule_id,
+                "error_text": "Не удалось загрузить историю кампаний",
+                "runs": [],
+                "summary": {},
+            }
+
+    def get_campaign_run_details(self, *, rule_id: int, run_id: int) -> dict:
+        try:
+            run = self.repo.get_campaign_run(run_id)
+            if not run:
+                return {"ok": False, "rule_id": rule_id, "run_id": run_id, "error_text": "Запуск кампании не найден"}
+            if int(run.get("rule_id") or 0) != int(rule_id):
+                return {
+                    "ok": False,
+                    "rule_id": rule_id,
+                    "run_id": run_id,
+                    "error_text": "Запуск не относится к этому правилу",
+                }
+            messages = self.repo.list_campaign_run_messages(run_id)
+            total = len(messages)
+            sent = sum(1 for row in messages if row.get("send_status") == "sent")
+            failed = sum(1 for row in messages if row.get("send_status") == "failed")
+            pending = sum(1 for row in messages if row.get("send_status") in {"pending", "sending"})
+            delete_pending = sum(1 for row in messages if row.get("delete_status") == "pending")
+            deleted = sum(1 for row in messages if row.get("delete_status") == "deleted")
+            delete_failed = sum(1 for row in messages if row.get("delete_status") == "failed")
+            self.logger.info(
+                "REPOST_CAMPAIGN_RUN_DETAILS_OPENED | rule_id=%s | run_id=%s | messages=%s",
+                rule_id,
+                run_id,
+                total,
+            )
+            return {
+                "ok": True,
+                "rule_id": rule_id,
+                "run_id": run_id,
+                "run": run,
+                "messages": messages,
+                "summary": {
+                    "total": total,
+                    "sent": sent,
+                    "failed": failed,
+                    "pending": pending,
+                    "delete_pending": delete_pending,
+                    "deleted": deleted,
+                    "delete_failed": delete_failed,
+                },
+            }
+        except Exception as exc:
+            self.logger.exception(
+                "REPOST_CAMPAIGN_RUN_DETAILS_FAILED | rule_id=%s | run_id=%s | error=%s",
+                rule_id,
+                run_id,
+                exc,
+            )
+            return {
+                "ok": False,
+                "rule_id": rule_id,
+                "run_id": run_id,
+                "error_text": "Не удалось загрузить детали запуска",
+            }

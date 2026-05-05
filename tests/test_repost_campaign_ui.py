@@ -1,7 +1,9 @@
 from app.repost_campaign_ui import (
+    build_repost_campaign_history_view,
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
     build_repost_campaign_preview_view,
+    build_repost_campaign_run_details_view,
     build_repost_campaign_show_menu_view,
     format_repost_campaign_readiness_block,
 )
@@ -99,3 +101,63 @@ def test_menu_includes_readiness_block():
         },
     )
     assert "🚦 Готовность кампании" in text
+
+
+def test_history_empty_state():
+    text, keyboard = build_repost_campaign_history_view(rule_id=3, history={"ok": True, "runs": [], "summary": {}})
+    texts = _texts_from_keyboard(keyboard)
+    assert "Пока запусков нет" in text
+    assert "🚀 К рекламной кампании" in texts
+    assert "🔄 Обновить" in texts
+
+
+def test_history_with_sent_run():
+    history = {
+        "ok": True,
+        "runs": [{
+            "id": 1, "run_type": "test", "status": "sent", "saved_post_id": 13, "render_mode": "telethon_builder",
+            "targets_total": 1, "targets_success": 1, "targets_failed": 0, "started_at": "2026-05-05T13:05:19+00:00",
+        }],
+        "summary": {"total": 1, "sent": 1, "partial": 0, "failed": 0, "sending": 0, "last_run": {"id": 1}},
+    }
+    text, _ = build_repost_campaign_history_view(rule_id=3, history=history)
+    assert "📊 История кампаний" in text
+    assert "#1" in text
+    assert "🧪 Тестовый запуск" in text
+    assert "✅ Отправлено" in text
+    assert "Premium-отправка через аккаунт" in text
+    assert "Каналы: 1/1" in text
+
+
+def test_history_failed_run_error_truncation():
+    history = {"ok": True, "runs": [{"id": 1, "status": "failed", "run_type": "test", "error_text": "x" * 200}], "summary": {"last_run": {"id": 1}}}
+    text, _ = build_repost_campaign_history_view(rule_id=3, history=history)
+    assert "Ошибка:" in text
+    assert ("x" * 121) not in text
+
+
+def test_details_sent_message():
+    details = {
+        "ok": True,
+        "run_id": 1,
+        "run": {"id": 1, "run_type": "test", "status": "sent", "saved_post_id": 13, "show_seconds": 0},
+        "messages": [{"send_status": "sent", "target_title": "chan", "target_id": "-100", "sent_message_id": 1023, "delete_status": None, "sent_at": "2026-05-05T13:05:19+00:00"}],
+        "summary": {"total": 1, "sent": 1, "failed": 0, "pending": 0},
+    }
+    text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "📄 Запуск #1" in text
+    assert "Message ID: 1023" in text
+    assert "Удаление: не запланировано" in text
+
+
+def test_details_failed_message():
+    details = {
+        "ok": True,
+        "run_id": 1,
+        "run": {"id": 1},
+        "messages": [{"send_status": "failed", "target_title": "chan", "target_id": "-100", "error_text": "oops"}],
+        "summary": {},
+    }
+    text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "❌ Основной канал" in text
+    assert "Ошибка:" in text

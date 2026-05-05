@@ -18,6 +18,9 @@ class _FakeRepo:
         self.mark_campaign_run_message_failed_calls = []
         self.next_run_id = 101
         self.next_run_message_id = 1001
+        self._runs = []
+        self._run = None
+        self._messages = []
 
     def get_rule(self, rule_id):
         return self._rule
@@ -51,6 +54,15 @@ class _FakeRepo:
     def mark_campaign_run_message_failed(self, message_id, **kwargs):
         self.mark_campaign_run_message_failed_calls.append((message_id, kwargs))
         return True
+
+    def list_campaign_runs_for_rule(self, rule_id, limit=10):
+        return self._runs[:limit]
+
+    def get_campaign_run(self, run_id):
+        return self._run
+
+    def list_campaign_run_messages(self, run_id):
+        return self._messages
 
 
 class _FakeRenderer:
@@ -177,3 +189,52 @@ def test_readiness_warning_status():
     assert "Срок показа не задан" in result["warnings"]
     assert "Активных каналов кампании пока нет" in result["warnings"]
     assert "Есть каналы, которые требуют проверки: 2" in result["warnings"]
+
+
+def test_get_campaign_history_no_rule():
+    repo = _FakeRepo(rule=None)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    history = runtime.get_campaign_history(rule_id=11)
+    assert history["ok"] is False
+    assert history["error_text"] == "Правило не найдено"
+
+
+def test_get_campaign_history_summary_counts():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._runs = [{"status": "sent"}, {"status": "failed"}, {"status": "partial"}, {"status": "sending"}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    history = runtime.get_campaign_history(rule_id=11)
+    assert history["summary"]["total"] == 4
+    assert history["summary"]["sent"] == 1
+    assert history["summary"]["failed"] == 1
+    assert history["summary"]["partial"] == 1
+    assert history["summary"]["sending"] == 1
+
+
+def test_get_campaign_run_details_wrong_rule():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 10, "rule_id": 2}
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    details = runtime.get_campaign_run_details(rule_id=1, run_id=10)
+    assert details["ok"] is False
+    assert details["error_text"] == "Запуск не относится к этому правилу"
+
+
+def test_get_campaign_run_details_success():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 10, "rule_id": 1}
+    repo._messages = [
+        {"send_status": "sent", "delete_status": "pending"},
+        {"send_status": "failed", "delete_status": "deleted"},
+        {"send_status": "sending", "delete_status": "failed"},
+    ]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    details = runtime.get_campaign_run_details(rule_id=1, run_id=10)
+    assert details["ok"] is True
+    assert details["summary"]["total"] == 3
+    assert details["summary"]["sent"] == 1
+    assert details["summary"]["failed"] == 1
+    assert details["summary"]["pending"] == 1
+    assert details["summary"]["delete_pending"] == 1
+    assert details["summary"]["deleted"] == 1
+    assert details["summary"]["delete_failed"] == 1

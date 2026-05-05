@@ -91,9 +91,11 @@ from app.repost_campaign_service import (
     normalize_campaign_show_seconds,
 )
 from app.repost_campaign_ui import (
+    build_repost_campaign_history_view,
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
     build_repost_campaign_preview_view,
+    build_repost_campaign_run_details_view,
     build_repost_campaign_show_menu_view,
     build_repost_campaign_targets_list_view,
     build_repost_campaign_targets_menu_view,
@@ -6980,15 +6982,50 @@ async def handle_rule_repost_campaign_history(callback: CallbackQuery):
         return
     try:
         rule_id = int(callback.data.split(":")[1])
+        logger.info("REPOST_CAMPAIGN_HISTORY_UI_OPENED | rule_id=%s", rule_id)
+        renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger)
+        runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
+        history = await run_db(lambda: runtime.get_campaign_history(rule_id=rule_id, limit=10))
+        text, keyboard = build_repost_campaign_history_view(rule_id=rule_id, history=history)
+        await answer_callback_safe_once(callback)
+        if _should_answer_new_message_for_callback(callback):
+            await send_message_safe(chat_id=callback.from_user.id, text=text, reply_markup=keyboard)
+        else:
+            await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
     except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        logger.exception("REPOST_CAMPAIGN_HISTORY_UI_FAILED | rule_id=%s | error=%s", callback.data, callback.data)
+        await answer_callback_safe(callback, "Не удалось открыть историю кампаний", show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_history_detail:"))
+async def handle_rule_repost_campaign_history_detail(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
         return
-    await edit_message_text_safe(
-        message=callback.message,
-        text="📊 История кампаний\n\nИстория запусков будет добавлена после подключения каналов кампании.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]]),
-    )
-    await answer_callback_safe_once(callback)
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
+        rule_id = int(rule_id_raw)
+        run_id = int(run_id_raw)
+        logger.info("REPOST_CAMPAIGN_RUN_DETAILS_UI_OPENED | rule_id=%s | run_id=%s", rule_id, run_id)
+        renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger)
+        runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
+        details = await run_db(lambda: runtime.get_campaign_run_details(rule_id=rule_id, run_id=run_id))
+        text, keyboard = build_repost_campaign_run_details_view(rule_id=rule_id, details=details)
+        await answer_callback_safe_once(callback)
+        if _should_answer_new_message_for_callback(callback):
+            await send_message_safe(chat_id=callback.from_user.id, text=text, reply_markup=keyboard)
+        else:
+            await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    except Exception:
+        logger.exception(
+            "REPOST_CAMPAIGN_RUN_DETAILS_UI_FAILED | rule_id=%s | run_id=%s | error=%s",
+            callback.data,
+            callback.data,
+            callback.data,
+        )
+        await answer_callback_safe(callback, "Не удалось открыть детали запуска", show_alert=True)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_video_clip_duration:"))
 async def handle_rule_video_clip_duration(callback: CallbackQuery):
