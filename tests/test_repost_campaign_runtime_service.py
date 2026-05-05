@@ -451,3 +451,38 @@ def test_launch_no_show_seconds():
     assert result.ok is False
     assert result.error_text == "Срок показа не задан"
     assert len(renderer.calls) == 0
+
+def test_get_campaign_control_center_no_history():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=None, repost_campaign_show_seconds=0)
+    repo = _FakeRepo(rule=rule, summary={"targets_active": 0, "targets_with_errors": 0})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.get_campaign_control_center(rule_id=42)
+    assert result["ok"] is True
+    assert result["last_run"] is None
+    assert "Рекламный пост не выбран" in result["issues"]
+
+
+def test_get_campaign_control_center_with_last_run_details():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost", repost_campaign_saved_post_id=11, repost_campaign_show_seconds=60), summary={"targets_active": 2, "targets_with_errors": 0})
+    repo._runs = [{"id": 4, "status": "sent", "rule_id": 1}]
+    repo._run = {"id": 4, "rule_id": 1}
+    repo._messages = [
+        {"send_status": "sent", "delete_status": "failed"},
+        {"send_status": "sent", "delete_status": "pending"},
+        {"send_status": "sent", "delete_status": "pending"},
+    ]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.get_campaign_control_center(rule_id=1)
+    assert "Ошибок удаления в последнем запуске: 1" in result["issues"]
+    assert "Ожидают автоудаления: 2" in result["issues"]
+
+
+def test_get_campaign_control_center_handles_exception():
+    class _FailRepo(_FakeRepo):
+        def get_rule(self, rule_id):
+            raise RuntimeError("boom")
+
+    runtime = RepostCampaignRuntimeService(repo=_FailRepo(), renderer=_FakeRenderer(None))
+    result = runtime.get_campaign_control_center(rule_id=9)
+    assert result["ok"] is False
+    assert "Не удалось загрузить центр управления кампанией" in result["error_text"]

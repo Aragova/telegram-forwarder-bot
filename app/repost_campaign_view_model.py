@@ -156,3 +156,87 @@ def build_campaign_run_message_view(message: dict, *, index: int | None = None) 
         "can_delete_now": can_delete_now,
         "delete_action_text": delete_action_text,
     }
+
+
+def build_campaign_control_center_view_model(
+    *,
+    summary: dict,
+    saved_post_line: str,
+    control_center: dict | None,
+) -> dict:
+    readiness = (control_center or {}).get("readiness") or {}
+    has_data = bool(control_center and control_center.get("ok"))
+    if not has_data:
+        status_title = "❌ Данные кампании временно недоступны"
+    elif readiness.get("ready") is True:
+        status_title = "✅ Кампания готова к запуску"
+    else:
+        status_title = "⚠️ Кампания требует настройки"
+
+    post_text = str(saved_post_line or "").strip()
+    if post_text.startswith("📝 Рекламный пост:"):
+        post_value = post_text.replace("📝 Рекламный пост:", "", 1).strip()
+    elif post_text.startswith("📝 Креатив:"):
+        post_value = post_text.replace("📝 Креатив:", "", 1).strip()
+    else:
+        post_value = post_text
+    post_line = f"📝 Креатив: {post_value or 'не выбран'}"
+
+    targets_active = int((summary or {}).get("targets_active") or 0)
+    targets_line = f"📣 Площадки: {targets_active} активных" if targets_active > 0 else "📣 Площадки: не подключены"
+
+    show_seconds_value = (summary or {}).get("show_seconds")
+    if not show_seconds_value:
+        show_seconds_value = readiness.get("show_seconds")
+    show_seconds_text = format_campaign_show_seconds_text(show_seconds_value)
+    show_seconds_line = f"⏳ Срок показа: {show_seconds_text}"
+    delete_line = "🧹 Auto-delete: включён после срока показа" if show_seconds_text != "не задан" else "🧹 Auto-delete: ожидает настройки срока"
+
+    last_run = (control_center or {}).get("last_run")
+    last_details = (control_center or {}).get("last_run_details") or {}
+    if not last_run:
+        last_run_block = "📊 Последний запуск\n\nПока запусков не было."
+    else:
+        run_view = build_campaign_run_item_view(last_run)
+        lines = [
+            "📊 Последний запуск",
+            "",
+            run_view["title"],
+            run_view["saved_post_text"],
+            run_view["targets_text"],
+            run_view["method_text"],
+            run_view["time_text"],
+        ]
+        if last_details.get("ok"):
+            delete_summary = (last_details.get("summary") or {})
+            lines.append(
+                f"🧹 Удаление: {int(delete_summary.get('deleted') or 0)} удалено · "
+                f"{int(delete_summary.get('delete_failed') or 0)} ошибок · "
+                f"{int(delete_summary.get('delete_pending') or 0)} ожидает"
+            )
+        last_run_block = "\n".join(lines)
+
+    issues = list((control_center or {}).get("issues") or [])
+    if not issues:
+        issues_block = "⚠️ Требует внимания\n\n✅ Критичных проблем нет"
+    else:
+        issues_lines = issues[:5]
+        block_lines = ["⚠️ Требует внимания", ""] + [f"• {line}" for line in issues_lines]
+        if len(issues) > 5:
+            block_lines.append(f"• ...и ещё {len(issues) - 5}")
+        issues_block = "\n".join(block_lines)
+
+    can_check_publication = bool((summary or {}).get("saved_post_id"))
+    can_launch = bool(readiness and readiness.get("ready"))
+    return {
+        "status_title": status_title,
+        "post_line": post_line,
+        "targets_line": targets_line,
+        "show_seconds_line": show_seconds_line,
+        "delete_line": delete_line,
+        "last_run_block": last_run_block,
+        "issues_block": issues_block,
+        "can_launch": can_launch,
+        "can_check_publication": can_check_publication,
+        "last_run_id": (last_run or {}).get("id") if last_run else None,
+    }
