@@ -1,0 +1,202 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class RepostCampaignActionResult:
+    ok: bool
+    action: str
+    rule_id: int
+    saved_post_id: int | None = None
+    target_id: str | None = None
+    message_id: int | None = None
+    method: str | None = None
+    kind: str | None = None
+    error_text: str | None = None
+    premium_required: bool = False
+    extra: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "ok": self.ok,
+            "action": self.action,
+            "rule_id": self.rule_id,
+            "saved_post_id": self.saved_post_id,
+            "target_id": self.target_id,
+            "message_id": self.message_id,
+            "method": self.method,
+            "kind": self.kind,
+            "error_text": self.error_text,
+            "premium_required": self.premium_required,
+            "extra": self.extra or {},
+        }
+
+
+class RepostCampaignRuntimeService:
+    def __init__(self, *, repo, renderer, logger_=None):
+        self.repo = repo
+        self.renderer = renderer
+        self.logger = logger_ or logging.getLogger("forwarder")
+
+    def _get_repost_rule_and_saved_post(self, *, rule_id: int, action: str):
+        rule = self.repo.get_rule(rule_id)
+        if not rule:
+            return RepostCampaignActionResult(ok=False, action=action, rule_id=rule_id, error_text="Правило не найдено")
+        if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "repost":
+            return RepostCampaignActionResult(
+                ok=False,
+                action=action,
+                rule_id=rule_id,
+                error_text="Рекламная кампания доступна только для режима репоста",
+            )
+
+        saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None)
+        if not saved_post_id:
+            return RepostCampaignActionResult(ok=False, action=action, rule_id=rule_id, error_text="Рекламный пост не выбран")
+
+        saved_post_id_int = int(saved_post_id)
+        saved_post = self.repo.get_saved_post(saved_post_id_int)
+        if not saved_post:
+            return RepostCampaignActionResult(
+                ok=False,
+                action=action,
+                rule_id=rule_id,
+                saved_post_id=saved_post_id_int,
+                error_text="Рекламный пост не найден",
+            )
+
+        return rule, saved_post
+
+    async def preview_saved_post(self, *, rule_id: int, admin_chat_id: int | str, reply_markup=None) -> RepostCampaignActionResult:
+        loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="preview_saved_post")
+        if isinstance(loaded, RepostCampaignActionResult):
+            return loaded
+
+        rule, saved_post = loaded
+        saved_post_id = int(getattr(rule, "repost_campaign_saved_post_id"))
+        content = saved_post.get("content_json") or saved_post.get("content") or {}
+        render_result = await self.renderer.send(chat_id=admin_chat_id, content=content, reply_markup=reply_markup)
+
+        if not render_result.ok:
+            return RepostCampaignActionResult(
+                ok=False,
+                action="preview_saved_post",
+                rule_id=rule_id,
+                saved_post_id=saved_post_id,
+                method=render_result.method,
+                kind=render_result.kind,
+                error_text=render_result.error_text,
+                premium_required=render_result.premium_required,
+            )
+
+        self.logger.info(
+            "REPOST_CAMPAIGN_SAVED_POST_PREVIEW_SENT | rule_id=%s | saved_post_id=%s | kind=%s | method=%s",
+            rule_id,
+            saved_post_id,
+            render_result.kind,
+            render_result.method,
+        )
+        return RepostCampaignActionResult(
+            ok=True,
+            action="preview_saved_post",
+            rule_id=rule_id,
+            saved_post_id=saved_post_id,
+            target_id=str(admin_chat_id),
+            message_id=render_result.message_id,
+            method=render_result.method,
+            kind=render_result.kind,
+            premium_required=render_result.premium_required,
+        )
+
+    async def test_send_saved_post_to_main_target(self, *, rule_id: int, admin_id: int | None = None) -> RepostCampaignActionResult:
+        loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="test_send_saved_post")
+        if isinstance(loaded, RepostCampaignActionResult):
+            return loaded
+
+        rule, saved_post = loaded
+        saved_post_id = int(getattr(rule, "repost_campaign_saved_post_id"))
+        target_id = getattr(rule, "target_id", None)
+        if not target_id:
+            return RepostCampaignActionResult(
+                ok=False,
+                action="test_send_saved_post",
+                rule_id=rule_id,
+                saved_post_id=saved_post_id,
+                error_text="У правила не задан основной канал получателя",
+            )
+
+        content = saved_post.get("content_json") or saved_post.get("content") or {}
+        render_result = await self.renderer.send(chat_id=target_id, content=content)
+        if not render_result.ok:
+            self.logger.warning(
+                "REPOST_CAMPAIGN_TEST_SEND_FAILED | rule_id=%s | saved_post_id=%s | target_id=%s | error=%s | method=%s",
+                rule_id,
+                saved_post_id,
+                target_id,
+                render_result.error_text,
+                render_result.method,
+            )
+            return RepostCampaignActionResult(
+                ok=False,
+                action="test_send_saved_post",
+                rule_id=rule_id,
+                saved_post_id=saved_post_id,
+                target_id=str(target_id),
+                method=render_result.method,
+                kind=render_result.kind,
+                error_text=render_result.error_text,
+                premium_required=render_result.premium_required,
+            )
+
+        self.logger.info(
+            "REPOST_CAMPAIGN_TEST_SEND_DONE | rule_id=%s | saved_post_id=%s | target_id=%s | message_id=%s | method=%s",
+            rule_id,
+            saved_post_id,
+            target_id,
+            render_result.message_id,
+            render_result.method,
+        )
+        return RepostCampaignActionResult(
+            ok=True,
+            action="test_send_saved_post",
+            rule_id=rule_id,
+            saved_post_id=saved_post_id,
+            target_id=str(target_id),
+            message_id=render_result.message_id,
+            method=render_result.method,
+            kind=render_result.kind,
+            premium_required=render_result.premium_required,
+        )
+
+    def get_campaign_readiness(self, *, rule_id: int) -> dict:
+        rule = self.repo.get_rule(rule_id)
+        summary = self.repo.get_rule_repost_campaign_summary(rule_id)
+        saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None) if rule else None
+        show_seconds = int(getattr(rule, "repost_campaign_show_seconds", 0) or 0) if rule else 0
+        targets_active = int(summary.get("targets_active", 0) or 0)
+        targets_with_errors = int(summary.get("targets_with_errors", 0) or 0)
+
+        warnings: list[str] = []
+        if not saved_post_id:
+            warnings.append("Рекламный пост не выбран")
+        if show_seconds <= 0:
+            warnings.append("Срок показа не задан")
+        if targets_active <= 0:
+            warnings.append("Активных каналов кампании пока нет")
+        if targets_with_errors > 0:
+            warnings.append(f"Есть каналы, которые требуют проверки: {targets_with_errors}")
+
+        return {
+            "rule_id": rule_id,
+            "post_selected": bool(saved_post_id),
+            "saved_post_id": saved_post_id,
+            "show_seconds_ok": show_seconds > 0,
+            "show_seconds": show_seconds,
+            "targets_active": targets_active,
+            "targets_with_errors": targets_with_errors,
+            "ready": bool(saved_post_id) and show_seconds > 0 and targets_active > 0,
+            "warnings": warnings,
+        }
