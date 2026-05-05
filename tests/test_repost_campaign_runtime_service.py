@@ -21,6 +21,7 @@ class _FakeRepo:
         self._runs = []
         self._run = None
         self._messages = []
+        self._targets = []
 
     def get_rule(self, rule_id):
         return self._rule
@@ -64,6 +65,9 @@ class _FakeRepo:
     def list_campaign_run_messages(self, run_id):
         return self._messages
 
+    def list_rule_repost_campaign_targets(self, rule_id, active_only=True):
+        return list(self._targets)
+
 
 class _FakeRenderer:
     def __init__(self, result):
@@ -72,6 +76,8 @@ class _FakeRenderer:
 
     async def send(self, **kwargs):
         self.calls.append(kwargs)
+        if isinstance(self.result, list):
+            return self.result[len(self.calls) - 1]
         return self.result
 
 
@@ -238,3 +244,86 @@ def test_get_campaign_run_details_success():
     assert details["summary"]["delete_pending"] == 1
     assert details["summary"]["deleted"] == 1
     assert details["summary"]["delete_failed"] == 1
+
+
+def test_launch_main_only_success():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=43200, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", chat_id="-1001", message_id=1))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1, admin_id=1))
+    assert result.ok is True
+    assert result.extra["targets_total"] == 1
+    assert result.extra["targets_success"] == 1
+    assert result.extra["final_status"] == "sent"
+    assert repo.create_campaign_run_message_calls[0]["target_kind"] == "main"
+
+
+def test_launch_main_plus_extras_success():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=43200, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})
+    repo._targets = [{"target_id": "-1002", "title": "A"}, {"target_id": "-1003", "title": "B"}]
+    renderer = _FakeRenderer([
+        SavedPostRenderResult(ok=True, method="bot_api", kind="text", chat_id="-1001", message_id=1),
+        SavedPostRenderResult(ok=True, method="bot_api", kind="text", chat_id="-1002", message_id=2),
+        SavedPostRenderResult(ok=True, method="bot_api", kind="text", chat_id="-1003", message_id=3),
+    ])
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+    assert result.extra["targets_total"] == 3
+    assert result.extra["targets_success"] == 3
+    assert len(repo.create_campaign_run_message_calls) == 3
+
+
+def test_launch_partial():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=43200, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})
+    repo._targets = [{"target_id": "-1002", "title": "A"}]
+    renderer = _FakeRenderer([
+        SavedPostRenderResult(ok=True, method="bot_api", kind="text", chat_id="-1001", message_id=1),
+        SavedPostRenderResult(ok=False, method="telethon_builder", kind="text", error_text="x"),
+    ])
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+    assert result.extra["final_status"] == "partial"
+    assert result.extra["targets_success"] == 1
+    assert result.extra["targets_failed"] == 1
+    assert result.ok is True
+
+
+def test_launch_all_failed():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=43200, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})
+    repo._targets = [{"target_id": "-1002", "title": "A"}]
+    renderer = _FakeRenderer([
+        SavedPostRenderResult(ok=False, method="bot_api", kind="text", error_text="e1"),
+        SavedPostRenderResult(ok=False, method="telethon_builder", kind="text", error_text="e2"),
+    ])
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+    assert result.extra["final_status"] == "failed"
+    assert result.ok is False
+    assert result.extra["targets_success"] == 0
+    assert result.extra["targets_failed"] == 2
+
+
+def test_launch_dedupe_main_and_extra():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=43200, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})
+    repo._targets = [{"target_id": "-1001", "title": "dup"}]
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", chat_id="-1001", message_id=1))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+    assert result.extra["targets_total"] == 1
+    assert len(repo.create_campaign_run_message_calls) == 1
+
+
+def test_launch_no_show_seconds():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=0, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", chat_id="-1001", message_id=1))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+    assert result.ok is False
+    assert result.error_text == "Срок показа не задан"
+    assert len(renderer.calls) == 0

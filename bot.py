@@ -92,6 +92,7 @@ from app.repost_campaign_service import (
 )
 from app.repost_campaign_ui import (
     build_repost_campaign_history_view,
+    build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
     build_repost_campaign_preview_view,
@@ -6677,6 +6678,43 @@ async def handle_rule_repost_campaign_test_send(callback: CallbackQuery):
         f"Message ID: {result.message_id}\n"
         f"Метод: {result.method}"
     )
+    await answer_callback_safe_once(callback)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch:"))
+async def handle_rule_repost_campaign_launch(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    try:
+        renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir)
+        runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
+        result = await runtime.launch_campaign_now(
+            rule_id=rule_id,
+            admin_id=callback.from_user.id if callback.from_user else None,
+        )
+        text, keyboard = build_repost_campaign_launch_result_view(rule_id=rule_id, result=result)
+        if _should_answer_new_message_for_callback(callback):
+            await callback.message.answer(text, reply_markup=keyboard)
+        else:
+            await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        logger.info(
+            "REPOST_CAMPAIGN_LAUNCH_UI_DONE | rule_id=%s | ok=%s | run_id=%s",
+            rule_id,
+            result.ok,
+            (result.extra or {}).get("campaign_run_id"),
+        )
+    except Exception as exc:
+        logger.warning("REPOST_CAMPAIGN_LAUNCH_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+        await answer_callback_safe(callback, "Не удалось запустить кампанию", show_alert=True)
+        return
     await answer_callback_safe_once(callback)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_edit_stub:"))
