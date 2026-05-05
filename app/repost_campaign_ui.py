@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from app.repost_campaign_service import format_campaign_show_seconds_ru
 
 
 def format_repost_campaign_readiness_block(readiness: dict | None) -> str:
@@ -183,3 +187,177 @@ def build_repost_campaign_targets_list_view(*, rule_id: int, targets: list[dict]
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
     ])
     return text, keyboard
+
+
+def format_campaign_run_status_ru(status: str | None) -> str:
+    mapping = {
+        "created": "⏳ В процессе",
+        "sending": "⏳ В процессе",
+        "sent": "✅ Отправлено",
+        "partial": "🟡 Частично",
+        "failed": "❌ Ошибка",
+        "cancelled": "⛔ Отменено",
+    }
+    return mapping.get((status or "").strip().lower(), "⚪ Неизвестно")
+
+
+def format_campaign_run_type_ru(run_type: str | None) -> str:
+    mapping = {
+        "test": "🧪 Тестовый запуск",
+        "manual": "🚀 Ручной запуск",
+        "scheduled": "🕒 Запланированный запуск",
+        "retry": "🔁 Повторный запуск",
+    }
+    return mapping.get((run_type or "").strip().lower(), "⚪ Неизвестный тип")
+
+
+def format_campaign_render_mode_ru(render_mode: str | None) -> str:
+    mapping = {
+        "telethon_builder": "Premium-отправка через аккаунт",
+        "bot_api": "Обычная отправка через бота",
+        "copy_message": "Копирование сообщения",
+        "telethon_origin": "Оригинал через аккаунт",
+    }
+    if render_mode is None:
+        return "не указан"
+    return mapping.get(str(render_mode).strip().lower(), str(render_mode))
+
+
+def format_campaign_datetime_ru(value) -> str:
+    if not value:
+        return "не указано"
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value)
+        except Exception:
+            return "не указано"
+    else:
+        return "не указано"
+    return dt.strftime("%d.%m %H:%M")
+
+
+def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[str, InlineKeyboardMarkup]:
+    if not history.get("ok"):
+        text = (
+            "📊 История кампаний\n\n"
+            "❌ Не удалось загрузить историю\n\n"
+            f"{history.get('error_text') or 'Неизвестная ошибка'}"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад к кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        ])
+        return text, kb
+    runs = list((history.get("runs") or [])[:10])
+    if not runs:
+        text = (
+            "📊 История кампаний\n\n"
+            "Пока запусков нет.\n\n"
+            "Когда вы сделаете тестовый или полноценный запуск кампании, здесь появится история:\n"
+            "• какой рекламный пост отправлялся\n"
+            "• в какие каналы\n"
+            "• каким методом\n"
+            "• какие публикации были успешны\n"
+            "• где были ошибки\n\n"
+            "Начните с “🚀 Тестовый запуск” в меню рекламной кампании."
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 К рекламной кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        ])
+        return text, kb
+    summary = history.get("summary") or {}
+    lines = [
+        "📊 История кампаний",
+        "",
+        "Сводка:",
+        f"Всего запусков: {int(summary.get('total') or 0)}",
+        f"✅ Успешных: {int(summary.get('sent') or 0)}",
+        f"🟡 Частичных: {int(summary.get('partial') or 0)}",
+        f"❌ Ошибок: {int(summary.get('failed') or 0)}",
+        f"⏳ В процессе: {int(summary.get('sending') or 0)}",
+        "",
+        "Последние запуски:",
+    ]
+    for idx, run in enumerate(runs, 1):
+        err = str(run.get("error_text") or "").strip()
+        if len(err) > 120:
+            err = err[:120] + "..."
+        lines.extend([
+            f"#{idx} · {format_campaign_run_type_ru(run.get('run_type'))} · {format_campaign_run_status_ru(run.get('status'))}",
+            f"Пост: #{run.get('saved_post_id') or '—'}",
+            f"Метод: {format_campaign_render_mode_ru(run.get('render_mode'))}",
+            f"Каналы: {int(run.get('targets_success') or 0)}/{int(run.get('targets_total') or 0)}",
+        ])
+        if err:
+            lines.append(f"Ошибка: {err}")
+        lines.append(f"Время: {format_campaign_datetime_ru(run.get('started_at'))}")
+        lines.append("")
+    buttons = []
+    for idx, run in enumerate(runs[:3], 1):
+        buttons.append([InlineKeyboardButton(text=f"📄 #{idx}", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{int(run.get('id') or 0)}")])
+    buttons.extend([
+        [InlineKeyboardButton(text=f"📄 Детали #{int((summary.get('last_run') or {}).get('id') or runs[0].get('id') or 0)}", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{int((summary.get('last_run') or runs[0]).get('id') or 0)}")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return "\n".join(lines).rstrip(), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tuple[str, InlineKeyboardMarkup]:
+    run_id = int(details.get("run_id") or 0)
+    if not details.get("ok"):
+        text = f"📄 Детали запуска\n\n❌ Не удалось загрузить запуск\n\n{details.get('error_text') or 'Неизвестная ошибка'}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📊 К истории", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+            [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        ])
+        return text, kb
+    run = details.get("run") or {}
+    summary = details.get("summary") or {}
+    lines = [
+        f"📄 Запуск #{run.get('id') or run_id}",
+        "",
+        f"Тип: {format_campaign_run_type_ru(run.get('run_type'))}",
+        f"Статус: {format_campaign_run_status_ru(run.get('status'))}",
+        f"Пост: #{run.get('saved_post_id') or '—'}",
+        f"Метод: {format_campaign_render_mode_ru(run.get('render_mode'))}",
+        f"Срок показа: {format_campaign_show_seconds_ru(int(run.get('show_seconds') or 0))}",
+        "",
+        "📣 Публикации:",
+        f"Всего: {int(summary.get('total') or 0)}",
+        f"✅ Отправлено: {int(summary.get('sent') or 0)}",
+        f"❌ Ошибок: {int(summary.get('failed') or 0)}",
+        f"⏳ В процессе: {int(summary.get('pending') or 0)}",
+        "",
+    ]
+    for idx, msg in enumerate(details.get("messages") or [], 1):
+        sent_ok = msg.get("send_status") == "sent"
+        lines.append(f"{idx}. {'✅' if sent_ok else '❌'} Основной канал")
+        lines.append(f"   Канал: {msg.get('target_title') or 'не указано'}")
+        lines.append(f"   Target: {msg.get('target_id') or 'не указано'}")
+        if sent_ok:
+            if msg.get("sent_message_id") is not None:
+                lines.append(f"   Message ID: {msg.get('sent_message_id')}")
+            lines.append(f"   Отправлено: {format_campaign_datetime_ru(msg.get('sent_at'))}")
+        else:
+            lines.append(f"   Ошибка: {msg.get('error_text') or 'не указано'}")
+        delete_status = msg.get("delete_status")
+        if delete_status == "pending":
+            lines.append(f"   Удаление: запланировано на {format_campaign_datetime_ru(msg.get('delete_after_at'))}")
+        elif delete_status == "deleted":
+            lines.append(f"   Удаление: ✅ удалено {format_campaign_datetime_ru(msg.get('deleted_at'))}")
+        elif delete_status == "failed":
+            lines.append("   Удаление: ❌ ошибка удаления")
+        else:
+            lines.append("   Удаление: не запланировано")
+        lines.append("")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить детали", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run.get('id') or run_id}")],
+        [InlineKeyboardButton(text="📊 К истории", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return "\n".join(lines).rstrip(), kb
