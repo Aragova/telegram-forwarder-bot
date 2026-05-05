@@ -106,6 +106,7 @@ from app.saved_posts_service import (
     summarize_saved_post_entities,
 )
 from app.saved_post_renderer import SavedPostRenderer
+from app.repost_campaign_runtime_service import RepostCampaignRuntimeService
 from app import product_ui
 from app import access_control, user_ui
 from app.user_handlers import (
@@ -6527,80 +6528,26 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
 
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-
-    saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None)
-    if not saved_post_id:
-        await answer_callback_safe(callback, "Рекламный пост не выбран", show_alert=True)
-        return
-
-    saved_post = await run_db(db.get_saved_post, int(saved_post_id))
-    if not saved_post:
-        await answer_callback_safe(callback, "Рекламный пост не найден", show_alert=True)
-        return
-
-    content = saved_post.get("content_json") or saved_post.get("content") or {}
-    kind = str(content.get("kind") or "text")
     preview_keyboard = _build_repost_campaign_post_preview_keyboard(rule_id)
     renderer = SavedPostRenderer(
         bot=bot,
         telethon_client=telethon_client,
         temp_dir=settings.temp_dir,
     )
-    method = renderer.detect_render_method(content)
-    needs_premium = method == "telethon_builder"
-    custom_emoji_count = sum(
-        1
-        for item in [*(content.get("entities") or []), *(content.get("caption_entities") or [])]
-        if isinstance(item, dict) and (str(item.get("type")) == "custom_emoji" or item.get("custom_emoji_id"))
+    runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
+    result = await runtime.preview_saved_post(
+        rule_id=rule_id,
+        admin_chat_id=callback.message.chat.id,
+        reply_markup=preview_keyboard,
     )
-    if needs_premium:
-        logger.info(
-            "SAVED_POST_PREMIUM_SEND_REQUIRED | saved_post_id=%s | kind=%s | custom_emoji_count=%s",
-            saved_post_id,
-            kind,
-            custom_emoji_count,
-        )
-
-    try:
-        result = await renderer.send(
-            chat_id=callback.message.chat.id,
-            content=content,
-            reply_markup=preview_keyboard,
-        )
-        method = result.method
-        if not result.ok:
-            error_text = (
-                "❌ Не удалось показать рекламный пост\n\n"
-                f"{result.error_text or 'Неизвестная ошибка'}"
-            )
-            if result.premium_required:
-                error_text += "\n\nPremium-оформление требует Telethon-отправки. Проверьте, что аккаунт-парсер активен."
-            await callback.message.answer(error_text)
-            await answer_callback_safe_once(callback)
-            return
-        logger.info(
-            "REPOST_CAMPAIGN_SAVED_POST_PREVIEW_SENT | rule_id=%s | saved_post_id=%s | kind=%s | method=%s",
-            rule_id,
-            saved_post_id,
-            kind,
-            method,
-        )
-    except Exception as exc:
-        logger.warning(
-            "REPOST_CAMPAIGN_SAVED_POST_PREVIEW_FAILED | rule_id=%s | saved_post_id=%s | error=%s",
-            rule_id,
-            saved_post_id,
-            exc,
-        )
-        await callback.message.answer(
+    if not result.ok:
+        error_text = (
             "❌ Не удалось показать рекламный пост\n\n"
-            f"{exc}"
+            f"{result.error_text or 'Неизвестная ошибка'}"
         )
-
+        if result.premium_required:
+            error_text += "\n\nPremium-оформление требует Telethon-отправки. Проверьте, что аккаунт-парсер активен."
+        await callback.message.answer(error_text)
     await answer_callback_safe_once(callback)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_unlink:"))
@@ -6648,107 +6595,17 @@ async def handle_rule_repost_campaign_test_send(callback: CallbackQuery):
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
 
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "repost":
-        await answer_callback_safe(callback, "Рекламная кампания доступна только для режима репоста", show_alert=True)
-        return
-
-    saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None)
-    if not saved_post_id:
-        await answer_callback_safe(callback, "Рекламный пост не выбран", show_alert=True)
-        return
-
-    saved_post = await run_db(db.get_saved_post, int(saved_post_id))
-    if not saved_post:
-        await answer_callback_safe(callback, "Рекламный пост не найден", show_alert=True)
-        return
-
-    target_id = getattr(rule, "target_id", None)
-    content = saved_post.get("content_json") or saved_post.get("content") or {}
     renderer = SavedPostRenderer(
         bot=bot,
         telethon_client=telethon_client,
         temp_dir=settings.temp_dir,
     )
-    method = renderer.detect_render_method(content)
-    needs_premium = method == "telethon_builder"
-    kind = str(content.get("kind") or "text")
-    custom_emoji_count = sum(
-        1
-        for item in [*(content.get("entities") or []), *(content.get("caption_entities") or [])]
-        if isinstance(item, dict) and (str(item.get("type")) == "custom_emoji" or item.get("custom_emoji_id"))
+    runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
+    result = await runtime.test_send_saved_post_to_main_target(
+        rule_id=rule_id,
+        admin_id=callback.from_user.id if callback.from_user else None,
     )
-    if needs_premium:
-        logger.info(
-            "SAVED_POST_PREMIUM_SEND_REQUIRED | saved_post_id=%s | kind=%s | custom_emoji_count=%s",
-            saved_post_id,
-            kind,
-            custom_emoji_count,
-        )
-
-    try:
-        result = await renderer.send(
-            chat_id=target_id,
-            content=content,
-        )
-        method = result.method
-        if not result.ok:
-            logger.warning(
-                "REPOST_CAMPAIGN_TEST_SEND_FAILED | rule_id=%s | saved_post_id=%s | target_id=%s | error=%s | method=%s",
-                rule_id,
-                saved_post_id,
-                target_id,
-                result.error_text,
-                method,
-                exc_info=True,
-            )
-            error_text = (
-                "❌ Не удалось отправить рекламный пост\n\n"
-                f"{result.error_text or 'Неизвестная ошибка'}"
-            )
-            if result.premium_required:
-                error_text += "\n\nPremium-оформление требует Telethon-отправки. Проверьте права аккаунта-парсера в канале."
-            await callback.message.answer(error_text)
-            await answer_callback_safe_once(callback)
-            return
-        logger.info(
-            "REPOST_CAMPAIGN_TEST_SEND_DONE | rule_id=%s | saved_post_id=%s | target_id=%s | message_id=%s | method=%s",
-            rule_id,
-            saved_post_id,
-            target_id,
-            result.message_id,
-            method,
-        )
-        try:
-            await run_db(
-                db.log_rule_change,
-                event_type="repost_campaign_test_send_done",
-                rule_id=rule_id,
-                admin_id=callback.from_user.id if callback.from_user else settings.admin_id,
-                old_value=None,
-                new_value={"saved_post_id": int(saved_post_id), "target_id": str(target_id), "message_id": result.message_id},
-                extra={"source": "admin_ui"},
-            )
-        except Exception as audit_exc:
-            logger.warning("Не удалось записать аудит тестового запуска rule_id=%s: %s", rule_id, audit_exc, exc_info=True)
-
-        await callback.message.answer(
-            "✅ Тестовый запуск выполнен\n\nРекламный пост отправлен в основной канал правила.\n"
-            f"Message ID: {result.message_id}\n"
-            f"Метод: {result.method}"
-        )
-    except Exception as exc:
-        logger.warning(
-            "REPOST_CAMPAIGN_TEST_SEND_FAILED | rule_id=%s | saved_post_id=%s | target_id=%s | error=%s",
-            rule_id,
-            saved_post_id,
-            target_id,
-            exc,
-            exc_info=True,
-        )
+    if not result.ok:
         try:
             await run_db(
                 db.log_rule_change,
@@ -6757,24 +6614,48 @@ async def handle_rule_repost_campaign_test_send(callback: CallbackQuery):
                 admin_id=callback.from_user.id if callback.from_user else settings.admin_id,
                 old_value=None,
                 new_value=None,
-                extra={"source": "admin_ui", "saved_post_id": int(saved_post_id), "target_id": str(target_id), "error": str(exc)},
+                extra={
+                    "source": "admin_ui",
+                    "saved_post_id": result.saved_post_id,
+                    "target_id": result.target_id,
+                    "error": str(result.error_text),
+                },
             )
         except Exception as audit_exc:
             logger.warning("Не удалось записать аудит ошибки тестового запуска rule_id=%s: %s", rule_id, audit_exc, exc_info=True)
+        error_text = (
+            "❌ Не удалось отправить рекламный пост\n\n"
+            f"{result.error_text or 'Неизвестная ошибка'}"
+        )
+        if result.premium_required:
+            error_text += "\n\nPremium-оформление требует Telethon-отправки. Проверьте права аккаунта-парсера в канале."
+        await callback.message.answer(error_text)
+        await answer_callback_safe_once(callback)
+        return
 
-        if needs_premium:
-            await callback.message.answer(
-                "❌ Не удалось отправить рекламный пост с premium-форматированием.\n\n"
-                "Проверьте, что аккаунт-парсер активен. Обычная отправка через Bot API может исказить premium emoji."
-            )
-        else:
-            await callback.message.answer(
-                "❌ Не удалось отправить рекламный пост\n\n"
-                "Проверьте, что бот добавлен в основной канал и имеет право публиковать сообщения."
-            )
+    try:
+        await run_db(
+            db.log_rule_change,
+            event_type="repost_campaign_test_send_done",
+            rule_id=rule_id,
+            admin_id=callback.from_user.id if callback.from_user else settings.admin_id,
+            old_value=None,
+            new_value={
+                "saved_post_id": result.saved_post_id,
+                "target_id": result.target_id,
+                "message_id": result.message_id,
+            },
+            extra={"source": "admin_ui"},
+        )
+    except Exception as audit_exc:
+        logger.warning("Не удалось записать аудит тестового запуска rule_id=%s: %s", rule_id, audit_exc, exc_info=True)
 
+    await callback.message.answer(
+        "✅ Тестовый запуск выполнен\n\nРекламный пост отправлен в основной канал правила.\n"
+        f"Message ID: {result.message_id}\n"
+        f"Метод: {result.method}"
+    )
     await answer_callback_safe_once(callback)
-
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_edit_stub:"))
 async def handle_rule_repost_campaign_post_edit_stub(callback: CallbackQuery):
