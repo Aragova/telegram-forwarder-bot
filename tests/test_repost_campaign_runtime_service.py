@@ -21,6 +21,7 @@ class _FakeRepo:
         self._runs = []
         self._run = None
         self._messages = []
+        self._message = None
         self._targets = []
         self._due_delete_rows = []
         self.claim_due_campaign_run_messages_for_delete_calls = []
@@ -69,6 +70,8 @@ class _FakeRepo:
 
     def list_campaign_run_messages(self, run_id):
         return self._messages
+    def get_campaign_run_message(self, message_id):
+        return self._message
 
     def list_rule_repost_campaign_targets(self, rule_id, active_only=True):
         return list(self._targets)
@@ -320,6 +323,64 @@ def test_process_due_deletions_failed():
     result = asyncio.run(runtime.process_due_deletions())
     assert repo.mark_campaign_run_message_delete_failed_calls[0][0] == 4
     assert result["failed"] == 1
+
+
+def test_manual_delete_success():
+    repo = _FakeRepo()
+    repo._run = {"id": 10, "rule_id": 3}
+    repo._message = {"id": 33, "run_id": 10, "rule_id": 3, "send_status": "sent", "target_id": "-1001", "sent_message_id": 777, "render_mode": "telethon_builder", "delete_status": "failed"}
+    async def _ok(**kwargs):
+        return SimpleNamespace(ok=True, method="telethon", error_text=None)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=_ok))
+    result = asyncio.run(runtime.delete_campaign_run_message_now(rule_id=3, run_id=10, run_message_id=33))
+    assert result.ok is True
+    assert repo.mark_campaign_run_message_deleted_calls == [33]
+    assert result.extra["campaign_run_message_id"] == 33
+
+
+def test_manual_delete_already_deleted():
+    repo = _FakeRepo()
+    repo._run = {"id": 10, "rule_id": 3}
+    repo._message = {"id": 33, "run_id": 10, "rule_id": 3, "send_status": "sent", "target_id": "-1001", "sent_message_id": 777, "delete_status": "deleted"}
+    deleter = SimpleNamespace(delete_message=None)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=deleter)
+    result = asyncio.run(runtime.delete_campaign_run_message_now(rule_id=3, run_id=10, run_message_id=33))
+    assert result.ok is True
+    assert result.method == "already_deleted"
+    assert result.extra["already_deleted"] is True
+
+
+def test_manual_delete_send_status_not_sent():
+    repo = _FakeRepo()
+    repo._run = {"id": 10, "rule_id": 3}
+    repo._message = {"id": 33, "run_id": 10, "rule_id": 3, "send_status": "failed", "target_id": "-1001", "sent_message_id": 777, "delete_status": "failed"}
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=lambda **kwargs: None))
+    result = asyncio.run(runtime.delete_campaign_run_message_now(rule_id=3, run_id=10, run_message_id=33))
+    assert result.ok is False
+    assert result.error_text == "Публикация ещё не была успешно отправлена"
+
+
+def test_manual_delete_failed():
+    repo = _FakeRepo()
+    repo._run = {"id": 10, "rule_id": 3}
+    repo._message = {"id": 33, "run_id": 10, "rule_id": 3, "send_status": "sent", "target_id": "-1001", "sent_message_id": 777, "delete_status": "failed"}
+    async def _fail(**kwargs):
+        return SimpleNamespace(ok=False, method="failed", error_text="no rights")
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=_fail))
+    result = asyncio.run(runtime.delete_campaign_run_message_now(rule_id=3, run_id=10, run_message_id=33))
+    assert result.ok is False
+    assert result.error_text == "no rights"
+    assert repo.mark_campaign_run_message_delete_failed_calls[0][0] == 33
+
+
+def test_manual_delete_wrong_message_ownership():
+    repo = _FakeRepo()
+    repo._run = {"id": 10, "rule_id": 3}
+    repo._message = {"id": 33, "run_id": 11, "rule_id": 3}
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=lambda **kwargs: None))
+    result = asyncio.run(runtime.delete_campaign_run_message_now(rule_id=3, run_id=10, run_message_id=33))
+    assert result.ok is False
+    assert result.error_text == "Публикация не относится к этому запуску"
 
 
 def test_launch_main_plus_extras_success():

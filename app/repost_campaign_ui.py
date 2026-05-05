@@ -350,6 +350,7 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
         f"⏳ В процессе: {int(summary.get('pending') or 0)}",
         "",
     ]
+    delete_action_buttons: list[list[InlineKeyboardButton]] = []
     for idx, msg in enumerate(details.get("messages") or [], 1):
         view = build_campaign_run_message_view(msg, index=idx)
         lines.append(view["title"])
@@ -364,10 +365,59 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
             lines.append(f"   {view['send_error_text']}")
         for delete_line in str(view["delete_text"]).splitlines():
             lines.append(f"   {delete_line}")
+        if view.get("can_delete_now") and len(delete_action_buttons) < 10:
+            delete_action_buttons.append([
+                InlineKeyboardButton(
+                    text=f"{view.get('delete_action_text')} #{idx}",
+                    callback_data=f"rule_repost_campaign_delete_message:{rule_id}:{run.get('id') or run_id}:{int(msg.get('id') or 0)}",
+                )
+            ])
         lines.append("")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+    total_actionable = sum(1 for msg in (details.get("messages") or []) if build_campaign_run_message_view(msg).get("can_delete_now"))
+    if total_actionable > 10:
+        lines.extend([
+            "Показаны первые 10 действий удаления. Остальные доступны после обновления или через будущий массовый режим.",
+            "",
+        ])
+    kb_rows = delete_action_buttons + [
         [InlineKeyboardButton(text="🔄 Обновить детали", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run.get('id') or run_id}")],
         [InlineKeyboardButton(text="📊 К истории", callback_data=f"rule_repost_campaign_history:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-    ])
+    ]
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     return "\n".join(lines).rstrip(), kb
+
+
+def build_repost_campaign_delete_result_view(*, rule_id: int, result) -> tuple[str, InlineKeyboardMarkup]:
+    payload = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})
+    extra = payload.get("extra") or {}
+    run_id = extra.get("campaign_run_id")
+    if payload.get("ok"):
+        if extra.get("already_deleted"):
+            text = (
+                "✅ Публикация уже была удалена\n\n"
+                "Повторное удаление не требуется."
+            )
+        else:
+            text = (
+                "🧹 Публикация удалена\n\n"
+                "Сообщение рекламной кампании удалено из канала.\n\n"
+                f"Target: {payload.get('target_id')}\n"
+                f"Message ID: {payload.get('message_id')}\n"
+                f"Метод удаления: {payload.get('method') or 'не указан'}\n\n"
+                "История запуска обновлена."
+            )
+    else:
+        text = (
+            "❌ Не удалось удалить публикацию\n\n"
+            f"{payload.get('error_text') or 'Неизвестная ошибка'}\n\n"
+            "Статус и ошибка сохранены в истории запуска."
+        )
+    rows = []
+    if run_id:
+        rows.append([InlineKeyboardButton(text="📄 К деталям запуска", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run_id}")])
+    rows.extend([
+        [InlineKeyboardButton(text="📊 К истории", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)

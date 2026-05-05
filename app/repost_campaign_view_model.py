@@ -135,6 +135,15 @@ def build_campaign_run_message_view(message: dict, *, index: int | None = None) 
     send_error = format_campaign_error_text(message.get("send_error_text"))
     sent_id = message.get("sent_message_id")
     sent_at = message.get("sent_at")
+    delete_status = (message.get("delete_status") or "").strip().lower()
+    can_delete_now = (
+        (message.get("send_status") or "").strip().lower() == "sent"
+        and sent_id is not None
+        and delete_status in {"pending", "failed", "processing"}
+    )
+    delete_action_text = None
+    if can_delete_now:
+        delete_action_text = "🔁 Повторить удаление" if delete_status == "failed" else "🧹 Удалить сейчас"
     return {
         "title": f"{index or 1}. {'✅' if message.get('send_status') == 'sent' else '❌'} {kind_text}",
         "channel_text": f"Канал: {message.get('target_title') or 'не указано'}",
@@ -144,4 +153,6 @@ def build_campaign_run_message_view(message: dict, *, index: int | None = None) 
         "sent_at_text": f"Отправлено: {format_campaign_datetime_text(sent_at)}" if sent_at else None,
         "send_error_text": f"Ошибка отправки: {send_error}" if send_error else None,
         "delete_text": format_campaign_delete_status_text(message),
+        "can_delete_now": can_delete_now,
+        "delete_action_text": delete_action_text,
     }

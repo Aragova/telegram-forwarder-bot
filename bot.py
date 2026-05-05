@@ -91,6 +91,7 @@ from app.repost_campaign_service import (
     normalize_campaign_show_seconds,
 )
 from app.repost_campaign_ui import (
+    build_repost_campaign_delete_result_view,
     build_repost_campaign_history_view,
     build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
@@ -7072,6 +7073,54 @@ async def handle_rule_repost_campaign_history_detail(callback: CallbackQuery):
             callback.data,
         )
         await answer_callback_safe(callback, "Не удалось открыть детали запуска", show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_delete_message:"))
+async def handle_rule_repost_campaign_delete_message(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        _, rule_id_raw, run_id_raw, run_message_id_raw = callback.data.split(":", 3)
+        rule_id = int(rule_id_raw)
+        run_id = int(run_id_raw)
+        run_message_id = int(run_message_id_raw)
+        delete_service = RepostCampaignDeleteService(bot=bot, telethon_client=telethon_client)
+        runtime = RepostCampaignRuntimeService(
+            repo=db,
+            renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger),
+            deleter=delete_service,
+        )
+        result = await runtime.delete_campaign_run_message_now(
+            rule_id=rule_id,
+            run_id=run_id,
+            run_message_id=run_message_id,
+            admin_id=callback.from_user.id if callback.from_user else None,
+        )
+        text, keyboard = build_repost_campaign_delete_result_view(rule_id=rule_id, result=result)
+        await answer_callback_safe_once(callback)
+        if _should_answer_new_message_for_callback(callback):
+            await send_message_safe(chat_id=callback.from_user.id, text=text, reply_markup=keyboard)
+        else:
+            await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        logger.info(
+            "REPOST_CAMPAIGN_MANUAL_DELETE_UI_DONE | rule_id=%s | run_id=%s | run_message_id=%s | ok=%s",
+            rule_id,
+            run_id,
+            run_message_id,
+            result.ok,
+        )
+    except Exception as exc:
+        logger.exception(
+            "REPOST_CAMPAIGN_MANUAL_DELETE_UI_FAILED | rule_id=%s | run_id=%s | run_message_id=%s | error=%s",
+            callback.data,
+            callback.data,
+            callback.data,
+            exc,
+        )
+        await answer_callback_safe(callback, "Не удалось выполнить удаление публикации", show_alert=True)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_video_clip_duration:"))
 async def handle_rule_video_clip_duration(callback: CallbackQuery):

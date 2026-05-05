@@ -581,6 +581,67 @@ class RepostCampaignRuntimeService:
                 "error_text": "Не удалось загрузить детали запуска",
             }
 
+    async def delete_campaign_run_message_now(
+        self,
+        *,
+        rule_id: int,
+        run_id: int,
+        run_message_id: int,
+        admin_id: int | None = None,
+    ) -> RepostCampaignActionResult:
+        _ = admin_id
+        if self.deleter is None:
+            return RepostCampaignActionResult(
+                ok=False,
+                action="delete_campaign_run_message_now",
+                rule_id=rule_id,
+                error_text="Delete service недоступен",
+                extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id},
+            )
+        self.logger.info(
+            "REPOST_CAMPAIGN_MANUAL_DELETE_STARTED | rule_id=%s | run_id=%s | run_message_id=%s",
+            rule_id,
+            run_id,
+            run_message_id,
+        )
+        run = self.repo.get_campaign_run(run_id)
+        if not run:
+            return RepostCampaignActionResult(ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, error_text="Запуск кампании не найден")
+        if int(run.get("rule_id") or 0) != int(rule_id):
+            return RepostCampaignActionResult(ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, error_text="Запуск не относится к этому правилу")
+
+        message = self.repo.get_campaign_run_message(run_message_id)
+        if not message:
+            return RepostCampaignActionResult(ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, error_text="Публикация кампании не найдена")
+        if int(message.get("run_id") or 0) != int(run_id) or int(message.get("rule_id") or 0) != int(rule_id):
+            return RepostCampaignActionResult(ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, error_text="Публикация не относится к этому запуску")
+        if (message.get("send_status") or "").strip().lower() != "sent":
+            self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_SKIPPED | rule_id=%s | run_id=%s | run_message_id=%s | reason=%s", rule_id, run_id, run_message_id, "send_status_not_sent")
+            return RepostCampaignActionResult(ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, error_text="Публикация ещё не была успешно отправлена")
+        if not message.get("sent_message_id"):
+            self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_SKIPPED | rule_id=%s | run_id=%s | run_message_id=%s | reason=%s", rule_id, run_id, run_message_id, "missing_sent_message_id")
+            return RepostCampaignActionResult(ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, error_text="У публикации нет Telegram message_id для удаления")
+        if (message.get("delete_status") or "").strip().lower() == "deleted":
+            self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_SKIPPED | rule_id=%s | run_id=%s | run_message_id=%s | reason=%s", rule_id, run_id, run_message_id, "already_deleted")
+            return RepostCampaignActionResult(
+                ok=True, action="delete_campaign_run_message_now", rule_id=rule_id, target_id=str(message.get("target_id")), message_id=int(message.get("sent_message_id")), method="already_deleted",
+                extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id, "delete_status": "deleted", "already_deleted": True},
+            )
+        result = await self.deleter.delete_message(target_id=message["target_id"], message_id=int(message["sent_message_id"]), render_mode=message.get("render_mode"))
+        if result.ok:
+            self.repo.mark_campaign_run_message_deleted(run_message_id)
+            self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_DONE | rule_id=%s | run_id=%s | run_message_id=%s | target_id=%s | message_id=%s | method=%s", rule_id, run_id, run_message_id, message["target_id"], int(message["sent_message_id"]), result.method)
+            return RepostCampaignActionResult(
+                ok=True, action="delete_campaign_run_message_now", rule_id=rule_id, target_id=str(message["target_id"]), message_id=int(message["sent_message_id"]), method=result.method,
+                extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id, "delete_status": "deleted"},
+            )
+        self.repo.mark_campaign_run_message_delete_failed(run_message_id, error_text=result.error_text or "unknown delete error")
+        self.logger.warning("REPOST_CAMPAIGN_MANUAL_DELETE_FAILED | rule_id=%s | run_id=%s | run_message_id=%s | error=%s", rule_id, run_id, run_message_id, result.error_text)
+        return RepostCampaignActionResult(
+            ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, target_id=str(message["target_id"]), message_id=int(message["sent_message_id"]), method=result.method, error_text=result.error_text,
+            extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id, "delete_status": "failed"},
+        )
+
     async def process_due_deletions(self, *, limit: int = 50) -> dict[str, Any]:
         if self.deleter is None:
             return {"ok": False, "claimed": 0, "deleted": 0, "failed": 0, "error_text": "Delete service недоступен"}

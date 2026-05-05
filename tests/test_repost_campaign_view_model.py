@@ -39,3 +39,25 @@ def test_delete_failed_text_contains_reason_and_attempts():
 def test_run_item_uses_real_run_id_in_title():
     view = build_campaign_run_item_view({"id": 25, "run_type": "manual", "status": "sent"}, index=2)
     assert view["title"].startswith("#25 ·")
+
+
+def test_can_delete_pending():
+    view = build_campaign_run_message_view({"send_status": "sent", "sent_message_id": 777, "delete_status": "pending"})
+    assert view["can_delete_now"] is True
+    assert view["delete_action_text"] == "🧹 Удалить сейчас"
+
+
+def test_can_retry_failed_delete():
+    view = build_campaign_run_message_view({"send_status": "sent", "sent_message_id": 777, "delete_status": "failed"})
+    assert view["can_delete_now"] is True
+    assert view["delete_action_text"] == "🔁 Повторить удаление"
+
+
+def test_cannot_delete_deleted():
+    view = build_campaign_run_message_view({"send_status": "sent", "sent_message_id": 777, "delete_status": "deleted"})
+    assert view["can_delete_now"] is False
+
+
+def test_cannot_delete_none():
+    view = build_campaign_run_message_view({"send_status": "sent", "sent_message_id": 777, "delete_status": "none"})
+    assert view["can_delete_now"] is False
