@@ -123,3 +123,47 @@ def test_send_saved_post_content_album_bot_api():
 def test_send_saved_post_content_album_without_items_fails():
     with pytest.raises(ValueError):
         asyncio.run(send_saved_post_content(bot=_FakeBot(), chat_id=1, content={"kind":"album","media_items":[]}))
+
+
+class _FailingBot:
+    async def get_file(self, file_id):
+        raise RuntimeError("file is too big")
+
+
+class _FakeTelethon:
+    pass
+
+
+def test_renderer_returns_failed_result_when_telethon_album_download_fails():
+    renderer = SavedPostRenderer(
+        bot=_FailingBot(),
+        telethon_client=_FakeTelethon(),
+        temp_dir="media/temp",
+    )
+    content = {
+        "kind": "album",
+        "caption": "test",
+        "caption_entities": [
+            {
+                "type": "custom_emoji",
+                "offset": 0,
+                "length": 2,
+                "custom_emoji_id": "5470177992950946662",
+            }
+        ],
+        "media_items": [
+            {
+                "kind": "photo",
+                "file_id": "big-file-id",
+                "file_unique_id": "u1",
+            }
+        ],
+    }
+
+    result = asyncio.run(renderer.send(chat_id=123, content=content))
+
+    assert result.ok is False
+    assert result.method == "telethon_builder"
+    assert result.kind == "album"
+    assert "file is too big" in (result.error_text or "")
+    assert result.message_ids is None
