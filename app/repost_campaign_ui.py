@@ -49,9 +49,65 @@ def build_repost_campaign_menu_view(
         if readiness and readiness.get("ready") is False:
             test_button_text = "🧪 Тестовый запуск"
         rows.append([InlineKeyboardButton(text=test_button_text, callback_data=f"rule_repost_campaign_test_send:{rule_id}")])
+    if saved_post_id and readiness and readiness.get("ready") is True:
+        rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
     rows.extend([
         [InlineKeyboardButton(text="❌ Отключить кампанию", callback_data=f"rule_repost_campaign_disable:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")],
+    ])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[str, InlineKeyboardMarkup]:
+    payload = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})
+    extra = payload.get("extra") or {}
+    run_id = extra.get("campaign_run_id")
+    success = int(extra.get("targets_success") or 0)
+    failed = int(extra.get("targets_failed") or 0)
+    total = int(extra.get("targets_total") or 0)
+    saved_post_id = payload.get("saved_post_id")
+    status = str(extra.get("final_status") or "")
+    if payload.get("ok"):
+        title = "🚀 Кампания запущена"
+        if success <= 0:
+            title = "❌ Кампания не отправлена"
+        elif failed > 0 or status == "partial":
+            title = "🟡 Кампания запущена частично"
+        text = (
+            f"{title}\n\n"
+            "Рекламный пост отправлен в каналы кампании.\n\n"
+            "📊 Итог:\n"
+            f"✅ Успешно: {success}\n"
+            f"❌ Ошибок: {failed}\n"
+            f"📣 Всего каналов: {total}\n\n"
+            f"📝 Пост: #{saved_post_id}\n"
+            f"🧾 Запуск: #{run_id}\n"
+            "⏳ Срок показа: 12 часов\n\n"
+            "История уже обновлена. Детальный отчёт доступен в разделе “📊 История кампаний”."
+        )
+    else:
+        text = (
+            "❌ Не удалось запустить кампанию\n\n"
+            f"{payload.get('error_text') or 'Неизвестная ошибка'}\n\n"
+            "Проверьте готовность кампании:\n"
+            "• рекламный пост\n"
+            "• срок показа\n"
+            "• активные каналы\n"
+            "• права аккаунта-парсера"
+        )
+        if payload.get("premium_required"):
+            text += (
+                "\n\nPremium-оформление требует отправки через аккаунт-парсер.\n"
+                "Проверьте, что аккаунт-парсер добавлен в каналы и имеет право публикации."
+            )
+    rows = [
+        [InlineKeyboardButton(text="📊 История кампаний", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+    ]
+    if run_id:
+        rows.append([InlineKeyboardButton(text="📄 Детали запуска", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run_id}")])
+    rows.extend([
+        [InlineKeyboardButton(text="🔄 Обновить кампанию", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 

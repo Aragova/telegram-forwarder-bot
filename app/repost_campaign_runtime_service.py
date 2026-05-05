@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from app.repost_campaign_service import format_campaign_show_seconds_ru
+from app.repost_campaign_service import build_campaign_delete_after_iso, format_campaign_show_seconds_ru
 
 
 @dataclass(frozen=True)
@@ -263,6 +263,178 @@ class RepostCampaignRuntimeService:
             kind=render_result.kind,
             premium_required=render_result.premium_required,
             extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id},
+        )
+
+    async def launch_campaign_now(self, *, rule_id: int, admin_id: int | None = None) -> RepostCampaignActionResult:
+        loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="launch_campaign")
+        if isinstance(loaded, RepostCampaignActionResult):
+            return loaded
+        rule, saved_post = loaded
+        saved_post_id = int(getattr(rule, "repost_campaign_saved_post_id"))
+        show_seconds = int(getattr(rule, "repost_campaign_show_seconds", 0) or 0)
+        if show_seconds <= 0:
+            return RepostCampaignActionResult(
+                ok=False,
+                action="launch_campaign",
+                rule_id=rule_id,
+                saved_post_id=saved_post_id,
+                error_text="Срок показа не задан",
+            )
+
+        main_key = (str(getattr(rule, "target_id", "")), getattr(rule, "target_thread_id", None))
+        targets: list[dict[str, Any]] = [{
+            "target_kind": "main",
+            "target_id": main_key[0],
+            "target_thread_id": main_key[1],
+            "target_title": getattr(rule, "target_title", None) or "Основной канал",
+        }]
+        seen = {main_key}
+        extra_targets = self.repo.list_rule_repost_campaign_targets(rule_id, active_only=True) or []
+        for row in extra_targets:
+            key = (str(row.get("target_id") or ""), row.get("target_thread_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append({
+                "target_kind": "extra",
+                "target_id": key[0],
+                "target_thread_id": key[1],
+                "target_title": row.get("title") or row.get("target_id"),
+            })
+
+        run_id = self.repo.create_campaign_run(
+            rule_id=rule_id,
+            saved_post_id=saved_post_id,
+            run_type="manual",
+            status="sending",
+            show_seconds=show_seconds,
+            started_by=admin_id,
+            targets_total=len(targets),
+        )
+        if run_id is None:
+            return RepostCampaignActionResult(
+                ok=False,
+                action="launch_campaign",
+                rule_id=rule_id,
+                saved_post_id=saved_post_id,
+                error_text="Не удалось создать запись запуска рекламной кампании",
+            )
+
+        self.logger.info(
+            "REPOST_CAMPAIGN_LAUNCH_STARTED | rule_id=%s | saved_post_id=%s | targets=%s | run_id=%s",
+            rule_id, saved_post_id, len(targets), run_id
+        )
+        content = saved_post.get("content_json") or saved_post.get("content") or {}
+        methods: set[str] = set()
+        success_count = 0
+        failed_count = 0
+        first_error_text = None
+        any_premium_required = False
+        for target in targets:
+            delete_after_at = build_campaign_delete_after_iso(show_seconds) if show_seconds > 0 else None
+            run_message_id = self.repo.create_campaign_run_message(
+                run_id=run_id,
+                rule_id=rule_id,
+                saved_post_id=saved_post_id,
+                target_kind=target["target_kind"],
+                target_id=target["target_id"],
+                target_thread_id=target["target_thread_id"],
+                target_title=target["target_title"],
+                show_seconds=show_seconds,
+                delete_after_at=delete_after_at,
+            )
+            if run_message_id is None:
+                failed_count += 1
+                if first_error_text is None:
+                    first_error_text = "Не удалось создать запись публикации рекламной кампании"
+                continue
+            self.repo.mark_campaign_run_message_sending(run_message_id, render_mode=None)
+            self.logger.info(
+                "REPOST_CAMPAIGN_LAUNCH_TARGET_SENDING | run_id=%s | target_kind=%s | target_id=%s",
+                run_id, target["target_kind"], target["target_id"]
+            )
+            render_result = await self.renderer.send(chat_id=target["target_id"], content=content)
+            any_premium_required = any_premium_required or bool(getattr(render_result, "premium_required", False))
+            if render_result.ok:
+                self.repo.mark_campaign_run_message_sent(
+                    run_message_id,
+                    sent_message_id=render_result.message_id,
+                    sent_message_ids=None,
+                    render_mode=render_result.method,
+                )
+                success_count += 1
+                if render_result.method:
+                    methods.add(render_result.method)
+                self.logger.info(
+                    "REPOST_CAMPAIGN_LAUNCH_TARGET_SENT | run_id=%s | target_id=%s | message_id=%s | method=%s",
+                    run_id, target["target_id"], render_result.message_id, render_result.method
+                )
+            else:
+                self.repo.mark_campaign_run_message_failed(
+                    run_message_id,
+                    error_text=render_result.error_text or "unknown error",
+                    render_mode=render_result.method,
+                )
+                failed_count += 1
+                if first_error_text is None:
+                    first_error_text = render_result.error_text or "unknown error"
+                if render_result.method:
+                    methods.add(render_result.method)
+                self.logger.warning(
+                    "REPOST_CAMPAIGN_LAUNCH_TARGET_FAILED | run_id=%s | target_id=%s | error=%s | method=%s",
+                    run_id, target["target_id"], render_result.error_text, render_result.method
+                )
+
+        total = len(targets)
+        final_status = "failed"
+        if success_count == total:
+            final_status = "sent"
+        elif success_count > 0:
+            final_status = "partial"
+        render_mode = None
+        if len(methods) == 1:
+            render_mode = next(iter(methods))
+        elif len(methods) > 1:
+            render_mode = "mixed"
+        report = {
+            "targets_total": total,
+            "targets_success": success_count,
+            "targets_failed": failed_count,
+            "methods": sorted(list(methods)),
+            "main_target_id": str(getattr(rule, "target_id", "")),
+            "extra_targets": len(targets) - 1,
+        }
+        self.repo.update_campaign_run_status(
+            run_id,
+            status=final_status,
+            render_mode=render_mode,
+            targets_success=success_count,
+            targets_failed=failed_count,
+            error_text=first_error_text,
+            report=report,
+            finish=True,
+        )
+        self.logger.info(
+            "REPOST_CAMPAIGN_LAUNCH_FINISHED | run_id=%s | status=%s | success=%s | failed=%s",
+            run_id, final_status, success_count, failed_count
+        )
+        return RepostCampaignActionResult(
+            ok=success_count > 0,
+            action="launch_campaign",
+            rule_id=rule_id,
+            saved_post_id=saved_post_id,
+            method=render_mode,
+            premium_required=any_premium_required,
+            error_text=first_error_text if success_count == 0 else None,
+            extra={
+                "campaign_run_id": run_id,
+                "targets_total": total,
+                "targets_success": success_count,
+                "targets_failed": failed_count,
+                "final_status": final_status,
+                "show_seconds": show_seconds,
+                "extra_targets": len(targets) - 1,
+            },
         )
 
     def get_campaign_readiness(self, *, rule_id: int) -> dict:

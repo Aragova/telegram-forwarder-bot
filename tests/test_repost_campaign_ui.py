@@ -1,5 +1,6 @@
 from app.repost_campaign_ui import (
     build_repost_campaign_history_view,
+    build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
     build_repost_campaign_preview_view,
@@ -101,6 +102,53 @@ def test_menu_includes_readiness_block():
         },
     )
     assert "🚦 Готовность кампании" in text
+
+
+def test_menu_shows_launch_button_when_ready():
+    _, keyboard = build_repost_campaign_menu_view(
+        rule_id=7,
+        summary={"saved_post_id": 10},
+        saved_post_line="📝 Рекламный пост: #10",
+        readiness={"ready": True},
+    )
+    texts = _texts_from_keyboard(keyboard)
+    assert "🚀 Запустить кампанию" in texts
+
+
+def test_menu_hides_launch_button_when_not_ready():
+    _, keyboard = build_repost_campaign_menu_view(
+        rule_id=7,
+        summary={"saved_post_id": 10},
+        saved_post_line="📝 Рекламный пост: #10",
+        readiness={"ready": False},
+    )
+    texts = _texts_from_keyboard(keyboard)
+    assert "🚀 Запустить кампанию" not in texts
+
+
+def test_launch_result_sent():
+    result = {
+        "ok": True,
+        "saved_post_id": 7,
+        "extra": {"campaign_run_id": 10, "targets_total": 3, "targets_success": 3, "targets_failed": 0, "final_status": "sent", "show_seconds": 43200},
+    }
+    text, keyboard = build_repost_campaign_launch_result_view(rule_id=3, result=result)
+    assert "🚀 Кампания запущена" in text
+    assert "✅ Успешно: 3" in text
+    assert "📣 Всего каналов: 3" in text
+    assert "📄 Детали запуска" in _texts_from_keyboard(keyboard)
+
+
+def test_launch_result_partial():
+    result = {"ok": True, "saved_post_id": 7, "extra": {"campaign_run_id": 10, "targets_total": 3, "targets_success": 2, "targets_failed": 1, "final_status": "partial"}}
+    text, _ = build_repost_campaign_launch_result_view(rule_id=3, result=result)
+    assert "🟡 Кампания запущена частично" in text
+
+
+def test_launch_result_failed():
+    result = {"ok": False, "error_text": "oops", "premium_required": False, "extra": {}}
+    text, _ = build_repost_campaign_launch_result_view(rule_id=3, result=result)
+    assert "❌ Не удалось запустить кампанию" in text
 
 
 def test_history_empty_state():
