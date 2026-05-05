@@ -67,7 +67,7 @@ def test_format_readiness_block_ready():
     block = format_repost_campaign_readiness_block(readiness)
     assert "🚦 Готовность кампании" in block
     assert "📝 Пост: ✅ выбран" in block
-    assert "⏳ Срок: ✅ 12 часов" in block
+    assert "⏳ Время показа: ✅ 12 часов" in block
     assert "📣 Каналы: ✅ 3 активных" in block
     assert "🔐 Проверка: ✅ ошибок нет" in block
     assert "✅ Кампания готова к тестовому запуску" in block
@@ -84,7 +84,7 @@ def test_format_readiness_block_warning():
     }
     block = format_repost_campaign_readiness_block(readiness)
     assert "📝 Пост: ❌ не выбран" in block
-    assert "⏳ Срок: ❌ не задан" in block
+    assert "⏳ Время показа: ❌ не задан" in block
     assert "📣 Каналы: ❌ нет активных каналов" in block
     assert "🔐 Проверка: ⚠️ требуют проверки: 2" in block
     assert "⚠️ Кампания не готова: исправьте пункты выше" in block
@@ -144,13 +144,13 @@ def test_launch_result_sent():
     assert "✅ Успешно: 3" in text
     assert "📣 Всего каналов: 3" in text
     assert "📄 Детали запуска" in _texts_from_keyboard(keyboard)
-    assert "⏳ Срок показа: 12 часов" in text
+    assert "⏳ Время показа: 12 часов" in text
 
 
 def test_launch_result_uses_show_seconds_from_extra():
     result = {"ok": True, "saved_post_id": 7, "extra": {"campaign_run_id": 10, "targets_total": 3, "targets_success": 3, "targets_failed": 0, "show_seconds": 60}}
     text, _ = build_repost_campaign_launch_result_view(rule_id=3, result=result)
-    assert "⏳ Срок показа: 1 минута" in text
+    assert "⏳ Время показа: 1 минута" in text
     assert "12 часов" not in text
 
 
@@ -374,6 +374,32 @@ def test_show_menu_has_no_test_emoji():
     assert "1 минута 🧪" not in texts
 
 
+def test_show_menu_terminology():
+    text, _ = build_repost_campaign_show_menu_view(rule_id=5, current_show_seconds_text="1 час")
+    assert "⏳ Время показа рекламы" in text
+    assert "Текущее время показа:" in text
+    assert "Текущий срок" not in text
+    assert "Срок показа" not in text
+
+
+def test_preview_terminology():
+    text, _ = build_repost_campaign_preview_view(
+        rule_id=3,
+        saved_post_id=55,
+        saved_post_description="текст",
+        show_seconds_text="1 час",
+        targets_active=2,
+        targets_ready=1,
+        targets_with_errors=1,
+        targets_preview_text="1. 🟢 @a",
+        warnings=[],
+    )
+    assert "⏳ Время показа" in text
+    assert "📣 Каналы/Группы" in text
+    assert "Срок показа" not in text
+    assert "Каналы кампании" not in text
+
+
 def test_menu_renders_control_center_title():
     text, _ = build_repost_campaign_menu_view(rule_id=3, summary={}, saved_post_line="📝 Рекламный пост: не выбран", readiness={"ready": False}, control_center={"ok": True, "readiness": {"ready": False}, "issues": []})
     assert "🧭 Центр управления" not in text
@@ -403,9 +429,9 @@ def test_menu_button_grouping():
     )
     texts = _texts_from_keyboard(keyboard)
     assert "🚀 Запустить кампанию" in texts
-    assert "📝 Креатив" in texts
-    assert "⏳ Срок" in texts
-    assert "📣 Площадки" in texts
+    assert "📝 Рекламный пост" in texts
+    assert "⏳ Время показа" in texts
+    assert "📣 Каналы/Группы" in texts
     assert "📊 История" in texts
     assert "👁 Предпросмотр" in texts
     assert "⚙️ Ещё" in texts
@@ -421,3 +447,24 @@ def test_menu_opens_without_control_center():
     )
     assert text
     assert keyboard is not None
+
+
+def test_main_menu_terminology_cleanup():
+    text, keyboard = build_repost_campaign_menu_view(
+        rule_id=3,
+        summary={"saved_post_id": 13, "targets_active": 1, "show_seconds": 0},
+        saved_post_line="📝 Рекламный пост: #13 · фото",
+        readiness={"ready": False},
+    )
+    assert "📝 Рекламный пост" in text
+    assert "📣 Каналы/Группы" in text
+    assert "⏳ Время показа" in text
+    assert "🧹 Автоудаление" in text
+    assert "📝 Креатив" not in text
+    assert "📣 Площадки" not in text
+    assert "⏳ Срок" not in text
+    assert "Auto-delete" not in text
+    texts = _texts_from_keyboard(keyboard)
+    assert "📝 Рекламный пост" in texts
+    assert "⏳ Время показа" in texts
+    assert "📣 Каналы/Группы" in texts

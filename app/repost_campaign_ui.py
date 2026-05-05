@@ -21,7 +21,7 @@ def format_repost_campaign_readiness_block(readiness: dict | None) -> str:
     return (
         "🚦 Готовность кампании\n\n"
         f"📝 Пост: {readiness.get('post_status_text') or '⚠️ недоступно'}\n"
-        f"⏳ Срок: {readiness.get('show_seconds_status_text') or '⚠️ недоступно'}\n"
+        f"⏳ Время показа: {readiness.get('show_seconds_status_text') or '⚠️ недоступно'}\n"
         f"📣 Каналы: {readiness.get('targets_status_text') or '⚠️ недоступно'}\n"
         f"🔐 Проверка: {readiness.get('checks_status_text') or '⚠️ недоступно'}\n\n"
         f"{readiness.get('summary_text') or '⚠️ Кампания не готова: исправьте пункты выше'}"
@@ -46,19 +46,20 @@ def build_repost_campaign_menu_view(
         f"{vm['creative_line']}\n"
         f"{vm['targets_line']}\n"
         f"{vm['show_seconds_line']}\n"
+        f"{(vm.get('auto_delete_line') or '🧹 Автоудаление: не задано')}\n"
         "\n"
         f"{vm['last_run_line']}\n"
-        f"{vm['delete_line']}\n\n"
+        f"{(vm.get('last_run_delete_line') or vm.get('delete_line'))}\n\n"
         f"{vm['next_step_line']}"
     )
     rows = []
     primary_action = vm.get("primary_action")
     if primary_action == "show_seconds":
-        rows.append([InlineKeyboardButton(text="⏳ Задать срок", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")])
+        rows.append([InlineKeyboardButton(text="⏳ Задать время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")])
     elif primary_action == "creative":
-        rows.append([InlineKeyboardButton(text="📝 Выбрать креатив", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")])
+        rows.append([InlineKeyboardButton(text="📝 Выбрать рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")])
     elif primary_action == "targets":
-        rows.append([InlineKeyboardButton(text="📣 Добавить площадки", callback_data=f"rule_repost_campaign_targets:{rule_id}")])
+        rows.append([InlineKeyboardButton(text="📣 Добавить каналы/группы", callback_data=f"rule_repost_campaign_targets:{rule_id}")])
     elif primary_action == "launch":
         rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
     elif primary_action == "open_last_run" and vm["last_run_id"]:
@@ -66,11 +67,11 @@ def build_repost_campaign_menu_view(
 
     rows.extend([
         [
-            InlineKeyboardButton(text="📝 Креатив", callback_data=f"rule_repost_campaign_post_menu:{rule_id}"),
-            InlineKeyboardButton(text="⏳ Срок", callback_data=f"rule_repost_campaign_show_menu:{rule_id}"),
+            InlineKeyboardButton(text="📝 Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}"),
+            InlineKeyboardButton(text="⏳ Время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}"),
         ],
         [
-            InlineKeyboardButton(text="📣 Площадки", callback_data=f"rule_repost_campaign_targets:{rule_id}"),
+            InlineKeyboardButton(text="📣 Каналы/Группы", callback_data=f"rule_repost_campaign_targets:{rule_id}"),
             InlineKeyboardButton(text="📊 История", callback_data=f"rule_repost_campaign_history:{rule_id}"),
         ],
         [
@@ -125,7 +126,7 @@ def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[s
             f"📣 Всего каналов: {total}\n\n"
             f"📝 Пост: #{saved_post_id}\n"
             f"🧾 Запуск: #{run_id}\n"
-            f"⏳ Срок показа: {format_campaign_show_seconds_text(extra.get('show_seconds'))}\n\n"
+            f"⏳ Время показа: {format_campaign_show_seconds_text(extra.get('show_seconds'))}\n\n"
             "История уже обновлена. Детальный отчёт доступен в разделе “📊 История кампаний”."
         )
     else:
@@ -134,7 +135,7 @@ def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[s
             f"{payload.get('error_text') or 'Неизвестная ошибка'}\n\n"
             "Проверьте готовность кампании:\n"
             "• рекламный пост\n"
-            "• срок показа\n"
+            "• время показа\n"
             "• активные каналы\n"
             "• права аккаунта-парсера"
         )
@@ -203,22 +204,22 @@ def build_repost_campaign_preview_view(
         "Режим: репост\n\n"
         f"📝 Рекламный пост: #{saved_post_id}\n"
         f"Тип: {saved_post_description or 'пост'}\n\n"
-        f"⏳ Срок показа: {show_seconds_text}\n"
-        f"📣 Каналы кампании: {targets_active} активных\n"
+        f"⏳ Время показа: {show_seconds_text}\n"
+        f"📣 Каналы/Группы: {targets_active} активных\n"
         f"{readiness_block}"
         f"{warnings_block}\n\n"
         "Что произойдёт при запуске:\n"
         "1. Рекламный пост будет опубликован в основной канал правила.\n"
         "2. Затем бот создаст копии для активных каналов кампании.\n"
-        f"3. Каждая копия будет удалена через {show_seconds_text}.\n\n"
-        "Каналы кампании:\n"
+        f"3. Каждая публикация будет удалена через {show_seconds_text}.\n\n"
+        "Каналы/Группы:\n"
         f"{targets_preview_text}\n\n"
         "Это только предпросмотр. Публикация не запускается."
     )
     return text, InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-        [InlineKeyboardButton(text="⏳ Срок показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
-        [InlineKeyboardButton(text="📣 Каналы кампании", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
+        [InlineKeyboardButton(text="⏳ Время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
+        [InlineKeyboardButton(text="📣 Каналы/Группы", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
         [InlineKeyboardButton(text="🔄 Обновить предпросмотр", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
@@ -237,10 +238,10 @@ def build_repost_campaign_show_menu_view(*, rule_id: int, current_show_seconds_t
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     text = (
-        "⏳ Срок показа рекламы\n\n"
-        "Выберите, сколько рекламный пост должен оставаться в каналах кампании.\n"
-        "После этого бот автоматически удалит опубликованные копии.\n\n"
-        f"Текущий срок: {current_show_seconds_text}"
+        "⏳ Время показа рекламы\n\n"
+        "Выберите, сколько рекламный пост будет находиться в каналах и группах.\n"
+        "После этого бот автоматически удалит рекламные публикации.\n\n"
+        f"Текущее время показа: {current_show_seconds_text}"
     )
     return text, kb
 
@@ -250,16 +251,16 @@ def build_repost_campaign_targets_menu_view(*, rule_id: int, summary: dict) -> t
     ready = int((summary or {}).get("targets_ready") or 0)
     with_errors = int((summary or {}).get("targets_with_errors") or 0)
     text = (
-        "📣 Каналы кампании\n\n"
-        "Каналы, куда рекламный пост будет дополнительно отправляться после публикации в основной канал.\n\n"
+        "📣 Каналы/Группы\n\n"
+        "Каналы и группы, куда рекламный пост будет дополнительно отправляться после публикации в основной канал.\n\n"
         f"Активных: {active}\n"
         f"Готовы к работе: {ready}\n"
         f"Требуют проверки: {with_errors}\n\n"
-        "Срок показа задаётся в меню рекламной кампании."
+        "Время показа задаётся в меню рекламной кампании."
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📥 Добавить списком", callback_data=f"rule_repost_campaign_add_list:{rule_id}")],
-        [InlineKeyboardButton(text="📋 Список каналов", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")],
+        [InlineKeyboardButton(text="📋 Список каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")],
         [InlineKeyboardButton(text="🧪 Проверить права", callback_data=f"rule_repost_campaign_check:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
@@ -268,9 +269,9 @@ def build_repost_campaign_targets_menu_view(*, rule_id: int, summary: dict) -> t
 
 def build_repost_campaign_targets_list_view(*, rule_id: int, targets: list[dict]) -> tuple[str, InlineKeyboardMarkup]:
     if not targets:
-        text = "📋 Список каналов кампании\n\nПока не добавлено ни одного канала."
+        text = "📋 Список каналов/групп\n\nПока не добавлено ни одного канала или группы."
     else:
-        lines: list[str] = ["📋 Список каналов кампании", ""]
+        lines: list[str] = ["📋 Список каналов/групп", ""]
         for idx, row in enumerate(targets[:30], 1):
             has_error = bool(row.get("last_check_error"))
             is_active = bool(row.get("is_active"))
@@ -386,7 +387,7 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
         f"Статус: {format_campaign_run_status_text(run.get('status'))}",
         f"Пост: #{run.get('saved_post_id') or '—'}",
         f"Метод: {format_campaign_render_mode_text(run.get('render_mode'))}",
-        f"Срок показа: {format_campaign_show_seconds_text(run.get('show_seconds'))}",
+        f"Время показа: {format_campaign_show_seconds_text(run.get('show_seconds'))}",
         "",
         "📣 Публикации:",
         f"Всего: {int(summary.get('total') or 0)}",
