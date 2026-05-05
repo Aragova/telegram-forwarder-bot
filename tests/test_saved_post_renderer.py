@@ -100,3 +100,26 @@ def test_normalize_telethon_target_int_passthrough():
 
 def test_normalize_telethon_target_username_passthrough():
     assert normalize_telethon_target("@channel") == "@channel"
+
+class _FakeMediaMsg:
+    def __init__(self, message_id):
+        self.message_id = message_id
+
+
+def test_send_saved_post_content_album_bot_api():
+    class Bot(_FakeBot):
+        async def send_media_group(self, **kwargs):
+            self.last_call = ("album", kwargs)
+            return [_FakeMediaMsg(101), _FakeMediaMsg(102)]
+        async def send_message(self, **kwargs):
+            self.service = kwargs
+            return _FakeSentMessage(999)
+    bot = Bot()
+    result = asyncio.run(send_saved_post_content(bot=bot, chat_id=1, content={"kind":"album","caption":"c","caption_entities":[],"media_items":[{"kind":"photo","file_id":"a"},{"kind":"video","file_id":"b"}]}))
+    assert result["message_ids"] == [101, 102]
+    assert result["message_id"] == 101
+
+
+def test_send_saved_post_content_album_without_items_fails():
+    with pytest.raises(ValueError):
+        asyncio.run(send_saved_post_content(bot=_FakeBot(), chat_id=1, content={"kind":"album","media_items":[]}))

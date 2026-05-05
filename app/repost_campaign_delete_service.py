@@ -14,6 +14,7 @@ class RepostCampaignDeleteResult:
     target_id: str
     message_id: int
     error_text: str | None = None
+    message_ids: list[int] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -22,6 +23,7 @@ class RepostCampaignDeleteResult:
             "target_id": self.target_id,
             "message_id": self.message_id,
             "error_text": self.error_text,
+            "message_ids": self.message_ids,
         }
 
 
@@ -34,7 +36,7 @@ class RepostCampaignDeleteService:
     async def _delete_with_bot_api(self, *, target_id: int | str, message_id: int) -> RepostCampaignDeleteResult:
         self.logger.info("REPOST_CAMPAIGN_DELETE_TRY_BOT_API | target_id=%s | message_id=%s", target_id, message_id)
         await self.bot.delete_message(chat_id=target_id, message_id=message_id)
-        return RepostCampaignDeleteResult(ok=True, method="bot_api", target_id=str(target_id), message_id=message_id)
+        return RepostCampaignDeleteResult(ok=True, method="bot_api", target_id=str(target_id), message_id=message_id, message_ids=[message_id])
 
     async def _delete_with_telethon(self, *, target_id: int | str, message_id: int) -> RepostCampaignDeleteResult:
         if self.telethon_client is None:
@@ -42,7 +44,7 @@ class RepostCampaignDeleteService:
         self.logger.info("REPOST_CAMPAIGN_DELETE_TRY_TELETHON | target_id=%s | message_id=%s", target_id, message_id)
         entity = normalize_telethon_target(target_id)
         await self.telethon_client.delete_messages(entity, [int(message_id)])
-        return RepostCampaignDeleteResult(ok=True, method="telethon", target_id=str(target_id), message_id=message_id)
+        return RepostCampaignDeleteResult(ok=True, method="telethon", target_id=str(target_id), message_id=message_id, message_ids=[message_id])
 
     async def delete_message(self, *, target_id: int | str, message_id: int, render_mode: str | None = None) -> RepostCampaignDeleteResult:
         prefer_telethon = (render_mode or "").strip().lower() == "telethon_builder"
@@ -70,6 +72,32 @@ class RepostCampaignDeleteService:
             message_id=int(message_id),
             error_text=error_text,
         )
+
+
+    async def delete_messages(self, *, target_id: int | str, message_ids: list[int], render_mode: str | None = None) -> RepostCampaignDeleteResult:
+        ids = [int(x) for x in (message_ids or [])]
+        if not ids:
+            return RepostCampaignDeleteResult(ok=False, method="failed", target_id=str(target_id), message_id=0, message_ids=[], error_text="Нет сообщений для удаления")
+        if len(ids) == 1:
+            return await self.delete_message(target_id=target_id, message_id=ids[0], render_mode=render_mode)
+        prefer_telethon = (render_mode or "").strip().lower() == "telethon_builder"
+        try:
+            if prefer_telethon:
+                entity = normalize_telethon_target(target_id)
+                await self.telethon_client.delete_messages(entity, ids)
+                return RepostCampaignDeleteResult(ok=True, method="telethon", target_id=str(target_id), message_id=ids[0], message_ids=ids)
+            for mid in ids:
+                await self.bot.delete_message(chat_id=target_id, message_id=mid)
+            return RepostCampaignDeleteResult(ok=True, method="bot_api", target_id=str(target_id), message_id=ids[0], message_ids=ids)
+        except Exception as exc:
+            if not prefer_telethon:
+                try:
+                    entity = normalize_telethon_target(target_id)
+                    await self.telethon_client.delete_messages(entity, ids)
+                    return RepostCampaignDeleteResult(ok=True, method="telethon", target_id=str(target_id), message_id=ids[0], message_ids=ids)
+                except Exception as tele_exc:
+                    return RepostCampaignDeleteResult(ok=False, method="failed", target_id=str(target_id), message_id=ids[0], message_ids=ids, error_text=f"Bot API: {exc}; Telethon: {tele_exc}")
+            return RepostCampaignDeleteResult(ok=False, method="failed", target_id=str(target_id), message_id=ids[0], message_ids=ids, error_text=str(exc))
 
 
 async def run_repost_campaign_delete_loop(*, runtime, interval_seconds: int = 10, batch_limit: int = 50):

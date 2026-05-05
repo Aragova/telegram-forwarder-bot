@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from aiogram.types import InputMediaDocument, InputMediaPhoto, InputMediaVideo
+
 from app.saved_post_entities import deserialize_message_entities, saved_post_entities_to_telethon
 from app.saved_post_entities import saved_post_requires_premium_send
 
@@ -21,6 +23,7 @@ class SavedPostRenderResult:
     message_id: int | None = None
     error_text: str | None = None
     premium_required: bool = False
+    message_ids: list[int] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -31,6 +34,7 @@ class SavedPostRenderResult:
             "message_id": self.message_id,
             "error_text": self.error_text,
             "premium_required": self.premium_required,
+            "message_ids": self.message_ids,
         }
 
 
@@ -112,6 +116,7 @@ class SavedPostRenderer:
                 chat_id=str(raw.get("chat_id") or chat_id),
                 message_id=raw.get("message_id"),
                 premium_required=premium_required,
+                message_ids=raw.get("message_ids") or ([raw.get("message_id")] if raw.get("message_id") else None),
             )
             self.logger.info(
                 "SAVED_POST_RENDER_SEND_DONE | chat_id=%s | kind=%s | method=%s | message_id=%s | premium_required=%s",
@@ -139,6 +144,7 @@ class SavedPostRenderer:
                 chat_id=str(chat_id),
                 error_text=str(exc),
                 premium_required=premium_required,
+                message_ids=raw.get("message_ids") or ([raw.get("message_id")] if raw.get("message_id") else None),
             )
 
 
@@ -183,6 +189,19 @@ async def download_saved_post_media_for_telethon(*, bot, content: dict[str, Any]
     return local_path
 
 
+
+
+async def download_saved_post_media_item_for_telethon(*, bot, item: dict[str, Any], temp_dir: str | Path) -> Path:
+    file_id = str(item.get("file_id") or "")
+    if not file_id:
+        raise ValueError("В элементе альбома отсутствует file_id")
+    ext = _guess_media_extension(str(item.get("kind") or "document"), item)
+    temp_dir_path = Path(temp_dir)
+    temp_dir_path.mkdir(parents=True, exist_ok=True)
+    file_info = await bot.get_file(file_id)
+    local_path = temp_dir_path / f"saved_post_album_{file_id}{ext}"
+    await bot.download_file(file_info.file_path, destination=local_path)
+    return local_path
 async def send_saved_post_content_via_telethon(
     *,
     bot,
@@ -200,10 +219,22 @@ async def send_saved_post_content_via_telethon(
         kind,
     )
     local_path: Path | None = None
+    local_paths: list[Path] = []
     try:
         if kind == "text":
             entities = saved_post_entities_to_telethon(content.get("entities"))
             sent = await telethon_client.send_message(entity=target_entity, message=content.get("text") or "", formatting_entities=entities)
+        elif kind == "album":
+            media_items = content.get("media_items") or []
+            if not media_items:
+                raise ValueError("В альбоме нет media_items")
+            caption_entities = saved_post_entities_to_telethon(content.get("caption_entities"))
+            local_paths = [await download_saved_post_media_item_for_telethon(bot=bot, item=item, temp_dir=temp_dir) for item in media_items]
+            sent = await telethon_client.send_file(entity=target_entity, file=[str(x) for x in local_paths], caption=content.get("caption") or "", formatting_entities=caption_entities)
+            sent_messages = sent if isinstance(sent, list) else [sent]
+            ids = [m.id for m in sent_messages]
+            logger.info("SAVED_POST_TELETHON_BUILDER_SEND_DONE | target_id=%s | message_id=%s | method=telethon_builder", chat_id, ids[0])
+            return {"ok": True, "message_id": ids[0], "message_ids": ids, "chat_id": str(chat_id), "kind": kind, "method": "telethon_builder"}
         else:
             local_path = await download_saved_post_media_for_telethon(bot=bot, content=content, temp_dir=temp_dir)
             caption_entities = saved_post_entities_to_telethon(content.get("caption_entities"))
@@ -214,7 +245,7 @@ async def send_saved_post_content_via_telethon(
                 formatting_entities=caption_entities,
             )
         logger.info("SAVED_POST_TELETHON_BUILDER_SEND_DONE | target_id=%s | message_id=%s | method=telethon_builder", chat_id, sent.id)
-        return {"ok": True, "message_id": sent.id, "chat_id": str(chat_id), "kind": kind, "method": "telethon_builder"}
+        return {"ok": True, "message_id": sent.id, "message_ids": [sent.id], "chat_id": str(chat_id), "kind": kind, "method": "telethon_builder"}
     except Exception as exc:
         logger.warning("SAVED_POST_TELETHON_BUILDER_SEND_FAILED | target_id=%s | error=%s", chat_id, exc)
         raise
@@ -222,6 +253,11 @@ async def send_saved_post_content_via_telethon(
         if local_path:
             try:
                 local_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        for path in local_paths:
+            try:
+                path.unlink(missing_ok=True)
             except Exception:
                 pass
 
@@ -269,6 +305,31 @@ async def send_saved_post_content(
             caption_entities=deserialize_message_entities(content.get("caption_entities")),
             reply_markup=reply_markup,
         )
+    elif kind == "album":
+        media_items = content.get("media_items") or []
+        if not media_items:
+            raise ValueError("В альбоме нет media_items")
+        caption_entities = deserialize_message_entities(content.get("caption_entities"))
+        media_group = []
+        for idx, item in enumerate(media_items):
+            item_kind = str(item.get("kind") or "")
+            kwargs = {"media": item["file_id"]}
+            if idx == 0:
+                kwargs["caption"] = content.get("caption")
+                kwargs["caption_entities"] = caption_entities
+            if item_kind == "photo":
+                media_group.append(InputMediaPhoto(**kwargs))
+            elif item_kind == "video":
+                media_group.append(InputMediaVideo(**kwargs))
+            elif item_kind == "document":
+                media_group.append(InputMediaDocument(**kwargs))
+            else:
+                raise ValueError(f"Unsupported album item kind: {item_kind}")
+        messages = await bot.send_media_group(chat_id=chat_id, media=media_group)
+        if reply_markup is not None:
+            await bot.send_message(chat_id=chat_id, text="⬆️ Предпросмотр рекламного альбома", reply_markup=reply_markup)
+        ids = [m.message_id for m in messages]
+        return {"ok": True, "message_id": ids[0], "message_ids": ids, "chat_id": str(chat_id), "kind": kind, "method": "bot_api"}
     elif kind == "document":
         media = content.get("media") or {}
         msg = await bot.send_document(
@@ -284,6 +345,8 @@ async def send_saved_post_content(
     return {
         "ok": True,
         "message_id": msg.message_id,
+        "message_ids": [msg.message_id],
         "chat_id": str(chat_id),
         "kind": kind,
+        "method": "bot_api",
     }

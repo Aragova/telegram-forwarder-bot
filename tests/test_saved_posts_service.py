@@ -100,3 +100,28 @@ def test_summarize_message_and_entities_for_media():
 
 def test_get_saved_post_preview_caption():
     assert get_saved_post_preview_caption({"kind": "text", "text": "hello"}) == "hello"
+
+
+def test_build_album_content():
+    m1 = SimpleNamespace(message_id=1, media_group_id="g", photo=[SimpleNamespace(file_id="p1", file_unique_id="u1", width=1, height=1)], video=None, document=None, caption="", caption_entities=None, chat=SimpleNamespace(id=-100))
+    m2 = SimpleNamespace(message_id=2, media_group_id="g", photo=[SimpleNamespace(file_id="p2", file_unique_id="u2", width=2, height=2)], video=None, document=None, caption="cap", caption_entities=[SimpleNamespace(type="bold", offset=0, length=3)], chat=SimpleNamespace(id=-100))
+    m3 = SimpleNamespace(message_id=3, media_group_id="g", photo=None, video=SimpleNamespace(file_id="v", file_unique_id="u3", width=3, height=3, duration=5, mime_type="video/mp4", file_name=None), document=None, caption="", caption_entities=None, chat=SimpleNamespace(id=-100))
+    from app.saved_posts_service import build_saved_post_album_content_from_aiogram_messages
+    c = build_saved_post_album_content_from_aiogram_messages([m3, m1, m2])
+    assert c["kind"] == "album"
+    assert len(c["media_items"]) == 3
+    assert c["caption"] == "cap"
+    assert c["caption_entities"][0]["type"] == "bold"
+
+
+def test_build_album_content_different_media_group_fails():
+    from app.saved_posts_service import build_saved_post_album_content_from_aiogram_messages
+    m1 = SimpleNamespace(message_id=1, media_group_id="g1", photo=[SimpleNamespace(file_id="p1")], video=None, document=None, caption="", caption_entities=None, chat=SimpleNamespace(id=-100))
+    m2 = SimpleNamespace(message_id=2, media_group_id="g2", photo=[SimpleNamespace(file_id="p2")], video=None, document=None, caption="", caption_entities=None, chat=SimpleNamespace(id=-100))
+    import pytest
+    with pytest.raises(ValueError):
+        build_saved_post_album_content_from_aiogram_messages([m1, m2])
+
+
+def test_short_description_album():
+    assert get_saved_post_short_description({"kind": "album", "media_items": [1, 2, 3]}) == "альбом · 3 медиа"

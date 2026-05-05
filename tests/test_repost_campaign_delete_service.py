@@ -49,3 +49,25 @@ def test_delete_both_failed():
     assert result.method == "failed"
     assert "Bot API" in (result.error_text or "")
     assert "Telethon" in (result.error_text or "")
+
+
+def test_delete_messages_bot_api_all_ids():
+    calls = []
+    class B(_Bot):
+        async def delete_message(self, **kwargs):
+            calls.append(kwargs["message_id"])
+    service = RepostCampaignDeleteService(bot=B(), telethon_client=_Telethon())
+    result = asyncio.run(service.delete_messages(target_id="-1001", message_ids=[1,2,3]))
+    assert result.ok is True
+    assert calls == [1,2,3]
+
+
+def test_delete_messages_telethon_for_builder():
+    calls = []
+    class T(_Telethon):
+        async def delete_messages(self, entity, ids):
+            calls.append(ids)
+    service = RepostCampaignDeleteService(bot=_Bot(), telethon_client=T())
+    result = asyncio.run(service.delete_messages(target_id="-1001", message_ids=[4,5], render_mode="telethon_builder"))
+    assert result.ok is True
+    assert calls == [[4,5]]
