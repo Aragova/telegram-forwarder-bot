@@ -1,10 +1,17 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.repost_campaign_service import format_campaign_show_seconds_ru
+from app.repost_campaign_view_model import (
+    build_campaign_run_item_view,
+    build_campaign_run_message_view,
+    format_campaign_datetime_text,
+    format_campaign_error_text,
+    format_campaign_render_mode_text,
+    format_campaign_run_status_text,
+    format_campaign_run_type_text,
+    format_campaign_show_seconds_text,
+)
 
 
 def format_repost_campaign_readiness_block(readiness: dict | None) -> str:
@@ -82,7 +89,7 @@ def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[s
             f"📣 Всего каналов: {total}\n\n"
             f"📝 Пост: #{saved_post_id}\n"
             f"🧾 Запуск: #{run_id}\n"
-            "⏳ Срок показа: 12 часов\n\n"
+            f"⏳ Срок показа: {format_campaign_show_seconds_text(extra.get('show_seconds'))}\n\n"
             "История уже обновлена. Детальный отчёт доступен в разделе “📊 История кампаний”."
         )
     else:
@@ -148,8 +155,12 @@ def build_repost_campaign_preview_view(
     targets_with_errors: int,
     targets_preview_text: str,
     warnings: list[str],
+    readiness: dict | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    warnings_block = ("\n" + "\n".join(warnings) + "\n") if warnings else ""
+    readiness_block = format_repost_campaign_readiness_block(readiness) if readiness else f"🧪 Готовность: {targets_ready} / {targets_active}"
+    warnings_block = ("\n" + "\n".join(warnings)) if warnings else ""
+    if warnings_block:
+        warnings_block = f"\n{warnings_block}"
     text = (
         "👁 Предпросмотр кампании\n\n"
         f"Правило #{rule_id}\n"
@@ -158,8 +169,8 @@ def build_repost_campaign_preview_view(
         f"Тип: {saved_post_description or 'пост'}\n\n"
         f"⏳ Срок показа: {show_seconds_text}\n"
         f"📣 Каналы кампании: {targets_active} активных\n"
-        f"🧪 Готовность: {targets_ready} / {targets_active}"
-        f"{warnings_block}\n"
+        f"{readiness_block}"
+        f"{warnings_block}\n\n"
         "Что произойдёт при запуске:\n"
         "1. Рекламный пост будет опубликован в основной канал правила.\n"
         "2. Затем бот создаст копии для активных каналов кампании.\n"
@@ -245,55 +256,6 @@ def build_repost_campaign_targets_list_view(*, rule_id: int, targets: list[dict]
     return text, keyboard
 
 
-def format_campaign_run_status_ru(status: str | None) -> str:
-    mapping = {
-        "created": "⏳ В процессе",
-        "sending": "⏳ В процессе",
-        "sent": "✅ Отправлено",
-        "partial": "🟡 Частично",
-        "failed": "❌ Ошибка",
-        "cancelled": "⛔ Отменено",
-    }
-    return mapping.get((status or "").strip().lower(), "⚪ Неизвестно")
-
-
-def format_campaign_run_type_ru(run_type: str | None) -> str:
-    mapping = {
-        "test": "🧪 Тестовый запуск",
-        "manual": "🚀 Ручной запуск",
-        "scheduled": "🕒 Запланированный запуск",
-        "retry": "🔁 Повторный запуск",
-    }
-    return mapping.get((run_type or "").strip().lower(), "⚪ Неизвестный тип")
-
-
-def format_campaign_render_mode_ru(render_mode: str | None) -> str:
-    mapping = {
-        "telethon_builder": "Premium-отправка через аккаунт",
-        "bot_api": "Обычная отправка через бота",
-        "copy_message": "Копирование сообщения",
-        "telethon_origin": "Оригинал через аккаунт",
-    }
-    if render_mode is None:
-        return "не указан"
-    return mapping.get(str(render_mode).strip().lower(), str(render_mode))
-
-
-def format_campaign_datetime_ru(value) -> str:
-    if not value:
-        return "не указано"
-    if isinstance(value, datetime):
-        dt = value
-    elif isinstance(value, str):
-        try:
-            dt = datetime.fromisoformat(value)
-        except Exception:
-            return "не указано"
-    else:
-        return "не указано"
-    return dt.strftime("%d.%m %H:%M")
-
-
 def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[str, InlineKeyboardMarkup]:
     if not history.get("ok"):
         text = (
@@ -339,18 +301,16 @@ def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[
         "Последние запуски:",
     ]
     for idx, run in enumerate(runs, 1):
-        err = str(run.get("error_text") or "").strip()
-        if len(err) > 120:
-            err = err[:120] + "..."
+        view = build_campaign_run_item_view(run, index=idx)
         lines.extend([
-            f"#{idx} · {format_campaign_run_type_ru(run.get('run_type'))} · {format_campaign_run_status_ru(run.get('status'))}",
-            f"Пост: #{run.get('saved_post_id') or '—'}",
-            f"Метод: {format_campaign_render_mode_ru(run.get('render_mode'))}",
-            f"Каналы: {int(run.get('targets_success') or 0)}/{int(run.get('targets_total') or 0)}",
+            view["title"],
+            view["saved_post_text"],
+            view["method_text"],
+            view["targets_text"],
         ])
-        if err:
-            lines.append(f"Ошибка: {err}")
-        lines.append(f"Время: {format_campaign_datetime_ru(run.get('started_at'))}")
+        if view["error_text"]:
+            lines.append(view["error_text"])
+        lines.append(view["time_text"])
         lines.append("")
     buttons = []
     for idx, run in enumerate(runs[:3], 1):
@@ -377,11 +337,11 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
     lines = [
         f"📄 Запуск #{run.get('id') or run_id}",
         "",
-        f"Тип: {format_campaign_run_type_ru(run.get('run_type'))}",
-        f"Статус: {format_campaign_run_status_ru(run.get('status'))}",
+        f"Тип: {format_campaign_run_type_text(run.get('run_type'))}",
+        f"Статус: {format_campaign_run_status_text(run.get('status'))}",
         f"Пост: #{run.get('saved_post_id') or '—'}",
-        f"Метод: {format_campaign_render_mode_ru(run.get('render_mode'))}",
-        f"Срок показа: {format_campaign_show_seconds_ru(int(run.get('show_seconds') or 0))}",
+        f"Метод: {format_campaign_render_mode_text(run.get('render_mode'))}",
+        f"Срок показа: {format_campaign_show_seconds_text(run.get('show_seconds'))}",
         "",
         "📣 Публикации:",
         f"Всего: {int(summary.get('total') or 0)}",
@@ -391,25 +351,19 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
         "",
     ]
     for idx, msg in enumerate(details.get("messages") or [], 1):
-        sent_ok = msg.get("send_status") == "sent"
-        lines.append(f"{idx}. {'✅' if sent_ok else '❌'} Основной канал")
-        lines.append(f"   Канал: {msg.get('target_title') or 'не указано'}")
-        lines.append(f"   Target: {msg.get('target_id') or 'не указано'}")
-        if sent_ok:
-            if msg.get("sent_message_id") is not None:
-                lines.append(f"   Message ID: {msg.get('sent_message_id')}")
-            lines.append(f"   Отправлено: {format_campaign_datetime_ru(msg.get('sent_at'))}")
-        else:
-            lines.append(f"   Ошибка: {msg.get('error_text') or 'не указано'}")
-        delete_status = msg.get("delete_status")
-        if delete_status == "pending":
-            lines.append(f"   Удаление: запланировано на {format_campaign_datetime_ru(msg.get('delete_after_at'))}")
-        elif delete_status == "deleted":
-            lines.append(f"   Удаление: ✅ удалено {format_campaign_datetime_ru(msg.get('deleted_at'))}")
-        elif delete_status == "failed":
-            lines.append("   Удаление: ❌ ошибка удаления")
-        else:
-            lines.append("   Удаление: не запланировано")
+        view = build_campaign_run_message_view(msg, index=idx)
+        lines.append(view["title"])
+        lines.append(f"   {view['channel_text']}")
+        lines.append(f"   {view['target_text']}")
+        lines.append(f"   {view['send_status_text']}")
+        if view["message_id_text"]:
+            lines.append(f"   {view['message_id_text']}")
+        if view["sent_at_text"]:
+            lines.append(f"   {view['sent_at_text']}")
+        if view["send_error_text"]:
+            lines.append(f"   {view['send_error_text']}")
+        for delete_line in str(view["delete_text"]).splitlines():
+            lines.append(f"   {delete_line}")
         lines.append("")
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Обновить детали", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run.get('id') or run_id}")],
