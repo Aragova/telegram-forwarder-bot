@@ -6330,10 +6330,30 @@ async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int) ->
             saved_post_line = "📝 Рекламный пост: не найден\n"
     else:
         saved_post_line = "📝 Рекламный пост: не выбран\n"
+    renderer = SavedPostRenderer(
+        bot=bot,
+        telethon_client=telethon_client,
+        temp_dir=settings.temp_dir,
+    )
+    runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
+    readiness = None
+    try:
+        readiness = await run_db(lambda: runtime.get_campaign_readiness(rule_id=rule_id))
+        logger.info(
+            "REPOST_CAMPAIGN_READINESS_BUILT | rule_id=%s | ready=%s | warnings=%s",
+            rule_id,
+            readiness.get("ready"),
+            len(readiness.get("warnings") or []),
+        )
+    except Exception as exc:
+        readiness = None
+        logger.warning("REPOST_CAMPAIGN_READINESS_FAILED | rule_id=%s | error=%s", rule_id, exc)
+
     text, keyboard = build_repost_campaign_menu_view(
         rule_id=rule_id,
         summary={"show_seconds_text": show_seconds_ru, "targets_active": targets_active, "targets_ready": targets_ready, "saved_post_id": saved_post_id},
         saved_post_line=saved_post_line,
+        readiness=readiness,
     )
     await edit_message_text_safe(
         message=callback.message,

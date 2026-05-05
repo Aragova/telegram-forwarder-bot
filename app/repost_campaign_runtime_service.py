@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from app.repost_campaign_service import format_campaign_show_seconds_ru
+
 
 @dataclass(frozen=True)
 class RepostCampaignActionResult:
@@ -189,6 +191,7 @@ class RepostCampaignRuntimeService:
         if targets_with_errors > 0:
             warnings.append(f"Есть каналы, которые требуют проверки: {targets_with_errors}")
 
+        ready = bool(saved_post_id) and show_seconds > 0 and targets_active > 0
         return {
             "rule_id": rule_id,
             "post_selected": bool(saved_post_id),
@@ -197,6 +200,20 @@ class RepostCampaignRuntimeService:
             "show_seconds": show_seconds,
             "targets_active": targets_active,
             "targets_with_errors": targets_with_errors,
-            "ready": bool(saved_post_id) and show_seconds > 0 and targets_active > 0,
+            "ready": ready,
             "warnings": warnings,
+            "status": "ready" if ready else "warning",
+            "post_status_text": "✅ выбран" if saved_post_id else "❌ не выбран",
+            "show_seconds_status_text": f"✅ {format_campaign_show_seconds_ru(show_seconds)}" if show_seconds > 0 else "❌ не задан",
+            "targets_status_text": (
+                f"✅ {targets_active} активных" if targets_active > 0 else "❌ нет активных каналов"
+            ),
+            "checks_status_text": (
+                "✅ ошибок нет" if targets_with_errors <= 0 else f"⚠️ требуют проверки: {targets_with_errors}"
+            ),
+            "summary_text": (
+                "✅ Кампания готова к тестовому запуску"
+                if ready
+                else "⚠️ Кампания не готова: исправьте пункты выше"
+            ),
         }

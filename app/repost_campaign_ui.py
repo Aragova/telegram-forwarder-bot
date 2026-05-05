@@ -3,11 +3,26 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def build_repost_campaign_menu_view(*, rule_id: int, summary: dict, saved_post_line: str) -> tuple[str, InlineKeyboardMarkup]:
+def format_repost_campaign_readiness_block(readiness: dict | None) -> str:
+    if not readiness:
+        return "🚦 Готовность кампании\n\n⚠️ Данные готовности временно недоступны"
+    return (
+        "🚦 Готовность кампании\n\n"
+        f"📝 Пост: {readiness.get('post_status_text') or '⚠️ недоступно'}\n"
+        f"⏳ Срок: {readiness.get('show_seconds_status_text') or '⚠️ недоступно'}\n"
+        f"📣 Каналы: {readiness.get('targets_status_text') or '⚠️ недоступно'}\n"
+        f"🔐 Проверка: {readiness.get('checks_status_text') or '⚠️ недоступно'}\n\n"
+        f"{readiness.get('summary_text') or '⚠️ Кампания не готова: исправьте пункты выше'}"
+    )
+
+
+def build_repost_campaign_menu_view(
+    *, rule_id: int, summary: dict, saved_post_line: str, readiness: dict | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
     show_seconds_text = str((summary or {}).get("show_seconds_text") or "не задан")
     targets_active = int((summary or {}).get("targets_active") or 0)
-    targets_ready = int((summary or {}).get("targets_ready") or 0)
     saved_post_id = (summary or {}).get("saved_post_id")
+    readiness_block = format_repost_campaign_readiness_block(readiness)
     text = (
         "💰 Рекламная кампания\n\n"
         "Тестовый режим для админа.\n\n"
@@ -15,8 +30,8 @@ def build_repost_campaign_menu_view(*, rule_id: int, summary: dict, saved_post_l
         "После окончания срока показа бот автоматически удалит рекламные публикации.\n\n"
         f"⏳ Срок показа: {show_seconds_text}\n"
         f"📣 Каналы кампании: {targets_active}\n"
-        f"🧪 Готовность: {targets_ready} / {targets_active}\n"
-        f"{saved_post_line}"
+        f"{saved_post_line}\n\n"
+        f"{readiness_block}"
     )
     rows = [
         [InlineKeyboardButton(text="⏳ Срок показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
@@ -26,7 +41,10 @@ def build_repost_campaign_menu_view(*, rule_id: int, summary: dict, saved_post_l
         [InlineKeyboardButton(text="📊 История кампаний", callback_data=f"rule_repost_campaign_history:{rule_id}")],
     ]
     if saved_post_id:
-        rows.append([InlineKeyboardButton(text="🚀 Тестовый запуск", callback_data=f"rule_repost_campaign_test_send:{rule_id}")])
+        test_button_text = "🚀 Тестовый запуск"
+        if readiness and readiness.get("ready") is False:
+            test_button_text = "🧪 Тестовый запуск"
+        rows.append([InlineKeyboardButton(text=test_button_text, callback_data=f"rule_repost_campaign_test_send:{rule_id}")])
     rows.extend([
         [InlineKeyboardButton(text="❌ Отключить кампанию", callback_data=f"rule_repost_campaign_disable:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")],

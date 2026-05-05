@@ -1,7 +1,9 @@
 from app.repost_campaign_ui import (
+    build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
     build_repost_campaign_preview_view,
     build_repost_campaign_show_menu_view,
+    format_repost_campaign_readiness_block,
 )
 
 
@@ -45,3 +47,55 @@ def test_preview_view_contains_saved_post_id_and_warnings():
     )
     assert "📝 Рекламный пост: #55" in text
     assert "⚠️ Проверка 1" in text
+
+
+def test_format_readiness_block_ready():
+    readiness = {
+        "post_status_text": "✅ выбран",
+        "show_seconds_status_text": "✅ 12 часов",
+        "targets_status_text": "✅ 3 активных",
+        "checks_status_text": "✅ ошибок нет",
+        "summary_text": "✅ Кампания готова к тестовому запуску",
+        "warnings": [],
+    }
+    block = format_repost_campaign_readiness_block(readiness)
+    assert "🚦 Готовность кампании" in block
+    assert "📝 Пост: ✅ выбран" in block
+    assert "⏳ Срок: ✅ 12 часов" in block
+    assert "📣 Каналы: ✅ 3 активных" in block
+    assert "🔐 Проверка: ✅ ошибок нет" in block
+    assert "✅ Кампания готова к тестовому запуску" in block
+
+
+def test_format_readiness_block_warning():
+    readiness = {
+        "post_status_text": "❌ не выбран",
+        "show_seconds_status_text": "❌ не задан",
+        "targets_status_text": "❌ нет активных каналов",
+        "checks_status_text": "⚠️ требуют проверки: 2",
+        "summary_text": "⚠️ Кампания не готова: исправьте пункты выше",
+        "warnings": ["a"],
+    }
+    block = format_repost_campaign_readiness_block(readiness)
+    assert "📝 Пост: ❌ не выбран" in block
+    assert "⏳ Срок: ❌ не задан" in block
+    assert "📣 Каналы: ❌ нет активных каналов" in block
+    assert "🔐 Проверка: ⚠️ требуют проверки: 2" in block
+    assert "⚠️ Кампания не готова: исправьте пункты выше" in block
+
+
+def test_menu_includes_readiness_block():
+    text, _ = build_repost_campaign_menu_view(
+        rule_id=3,
+        summary={"show_seconds_text": "12 часов", "targets_active": 1, "saved_post_id": 13},
+        saved_post_line="📝 Рекламный пост: #13 · фото",
+        readiness={
+            "ready": True,
+            "post_status_text": "✅ выбран",
+            "show_seconds_status_text": "✅ 12 часов",
+            "targets_status_text": "✅ 1 активный",
+            "checks_status_text": "✅ ошибок нет",
+            "summary_text": "✅ Кампания готова к тестовому запуску",
+        },
+    )
+    assert "🚦 Готовность кампании" in text
