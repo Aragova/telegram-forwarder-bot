@@ -6,6 +6,7 @@ from app.saved_posts_service import (
     get_saved_post_short_description,
     saved_post_entities_to_telethon,
     saved_post_requires_premium_send,
+    normalize_saved_post_entities,
     serialize_message_entities,
     send_saved_post_content,
     summarize_aiogram_message_for_saved_post,
@@ -200,3 +201,17 @@ def test_saved_post_entities_to_telethon_custom_emoji():
     assert len(entities) == 1
     assert isinstance(entities[0], tl_types.MessageEntityCustomEmoji)
     assert entities[0].document_id == 777
+
+
+def test_normalize_saved_post_entities_keeps_custom_emoji_id():
+    normalized = normalize_saved_post_entities([{"type": "custom_emoji", "offset": "1", "length": "2", "custom_emoji_id": 12345}])
+    assert len(normalized) == 1
+    assert normalized[0]["custom_emoji_id"] == "12345"
+    assert normalized[0]["offset"] == 1
+    assert normalized[0]["length"] == 2
+
+
+def test_normalize_saved_post_entities_supports_json_string():
+    normalized = normalize_saved_post_entities('[{"type":"bold","offset":"0","length":"5"}]')
+    assert len(normalized) == 1
+    assert normalized[0]["type"] == "bold"

@@ -96,6 +96,7 @@ from app.saved_posts_service import (
     get_saved_post_preview_caption,
     get_saved_post_short_description,
     saved_post_requires_premium_send,
+    send_saved_post_content_via_telethon,
     send_saved_post_content,
     summarize_aiogram_message_for_saved_post,
     summarize_saved_post_entities,
@@ -6592,18 +6593,30 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
     preview_keyboard = _build_repost_campaign_post_preview_keyboard(rule_id)
     method = "bot_api"
     needs_premium = saved_post_requires_premium_send(content)
-    source_chat_id = saved_post.get("source_chat_id")
-    source_message_id = saved_post.get("source_message_id")
+    custom_emoji_count = sum(
+        1
+        for item in [*(content.get("entities") or []), *(content.get("caption_entities") or [])]
+        if isinstance(item, dict) and (str(item.get("type")) == "custom_emoji" or item.get("custom_emoji_id"))
+    )
+    if needs_premium:
+        logger.info(
+            "SAVED_POST_PREMIUM_SEND_REQUIRED | saved_post_id=%s | kind=%s | custom_emoji_count=%s",
+            saved_post_id,
+            kind,
+            custom_emoji_count,
+        )
 
     try:
-        if needs_premium and source_chat_id and source_message_id:
-            sent = await bot.copy_message(
+        if needs_premium:
+            result = await send_saved_post_content_via_telethon(
+                bot=bot,
+                telethon_client=telethon_client,
                 chat_id=callback.message.chat.id,
-                from_chat_id=source_chat_id,
-                message_id=source_message_id,
-                reply_markup=preview_keyboard,
+                content=content,
+                temp_dir="/tmp",
             )
-            method = "copy_message"
+            method = "telethon_builder"
+            await callback.message.answer("✅ Предпросмотр premium-поста отправлен через Telethon builder.", reply_markup=preview_keyboard)
         elif kind == "photo":
             media = content.get("media") or {}
             sent = await callback.message.answer_photo(
@@ -6642,11 +6655,6 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
                 entities=deserialize_message_entities(content.get("entities")),
                 reply_markup=preview_keyboard,
             )
-        if needs_premium and (not source_chat_id or not source_message_id):
-            await callback.message.answer(
-                "⚠️ У поста есть premium emoji, но нет исходного сообщения для copy_message.\n\n"
-                "Замените рекламный пост заново через “🔁 Заменить пост”."
-            )
         logger.info(
             "REPOST_CAMPAIGN_SAVED_POST_PREVIEW_SENT | rule_id=%s | saved_post_id=%s | kind=%s | method=%s",
             rule_id,
@@ -6661,9 +6669,15 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
             saved_post_id,
             exc,
         )
-        await callback.message.answer(
-            "⚠️ Не удалось показать рекламный пост.\n\nПопробуйте заменить пост через “➕ Добавить / заменить пост”."
-        )
+        if needs_premium:
+            await callback.message.answer(
+                "❌ Не удалось показать рекламный пост с premium-форматированием.\n\n"
+                "Проверьте, что аккаунт-парсер активен. Обычный предпросмотр через Bot API может исказить premium emoji."
+            )
+        else:
+            await callback.message.answer(
+                "⚠️ Не удалось показать рекламный пост.\n\nПопробуйте заменить пост через “➕ Добавить / заменить пост”."
+            )
 
     await answer_callback_safe_once(callback)
 
@@ -6734,21 +6748,32 @@ async def handle_rule_repost_campaign_test_send(callback: CallbackQuery):
     content = saved_post.get("content_json") or saved_post.get("content") or {}
     method = "bot_api"
     needs_premium = saved_post_requires_premium_send(content)
-    source_chat_id = saved_post.get("source_chat_id")
-    source_message_id = saved_post.get("source_message_id")
+    kind = str(content.get("kind") or "text")
+    custom_emoji_count = sum(
+        1
+        for item in [*(content.get("entities") or []), *(content.get("caption_entities") or [])]
+        if isinstance(item, dict) and (str(item.get("type")) == "custom_emoji" or item.get("custom_emoji_id"))
+    )
+    if needs_premium:
+        logger.info(
+            "SAVED_POST_PREMIUM_SEND_REQUIRED | saved_post_id=%s | kind=%s | custom_emoji_count=%s",
+            saved_post_id,
+            kind,
+            custom_emoji_count,
+        )
 
     try:
-        if needs_premium and source_chat_id and source_message_id:
-            sent = await bot.copy_message(chat_id=target_id, from_chat_id=source_chat_id, message_id=source_message_id)
-            result = {"ok": True, "message_id": sent.message_id, "chat_id": str(target_id), "kind": str(content.get("kind") or "text")}
-            method = "copy_message"
+        if needs_premium:
+            result = await send_saved_post_content_via_telethon(
+                bot=bot,
+                telethon_client=telethon_client,
+                chat_id=target_id,
+                content=content,
+                temp_dir="/tmp",
+            )
+            method = "telethon_builder"
         else:
             result = await send_saved_post_content(bot=bot, chat_id=target_id, content=content)
-            if needs_premium and (not source_chat_id or not source_message_id):
-                await callback.message.answer(
-                    "⚠️ У поста есть premium emoji, но нет исходного сообщения для copy_message.\n\n"
-                    "Замените рекламный пост заново через “🔁 Заменить пост”."
-                )
         logger.info(
             "REPOST_CAMPAIGN_TEST_SEND_DONE | rule_id=%s | saved_post_id=%s | target_id=%s | message_id=%s | method=%s",
             rule_id,
@@ -6796,10 +6821,16 @@ async def handle_rule_repost_campaign_test_send(callback: CallbackQuery):
         except Exception as audit_exc:
             logger.warning("Не удалось записать аудит ошибки тестового запуска rule_id=%s: %s", rule_id, audit_exc, exc_info=True)
 
-        await callback.message.answer(
-            "❌ Не удалось отправить рекламный пост\n\n"
-            "Проверьте, что бот добавлен в основной канал и имеет право публиковать сообщения."
-        )
+        if needs_premium:
+            await callback.message.answer(
+                "❌ Не удалось отправить рекламный пост с premium-форматированием.\n\n"
+                "Проверьте, что аккаунт-парсер активен. Обычная отправка через Bot API может исказить premium emoji."
+            )
+        else:
+            await callback.message.answer(
+                "❌ Не удалось отправить рекламный пост\n\n"
+                "Проверьте, что бот добавлен в основной канал и имеет право публиковать сообщения."
+            )
 
     await answer_callback_safe_once(callback)
 
