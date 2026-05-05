@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.saved_post_renderer import SavedPostRenderer, send_saved_post_content
+from app.saved_post_renderer import SavedPostRenderer, normalize_telethon_target, send_saved_post_content
 
 
 class _FakeSentMessage:
@@ -88,3 +88,15 @@ def test_saved_post_renderer_send_premium_without_telethon_returns_structured_er
     assert result.method == "telethon_builder"
     assert result.premium_required is True
     assert "Telethon" in (result.error_text or "")
+
+
+def test_normalize_telethon_target_numeric_string():
+    assert normalize_telethon_target("-1002451047809") == -1002451047809
+
+
+def test_normalize_telethon_target_int_passthrough():
+    assert normalize_telethon_target(-1002451047809) == -1002451047809
+
+
+def test_normalize_telethon_target_username_passthrough():
+    assert normalize_telethon_target("@channel") == "@channel"
