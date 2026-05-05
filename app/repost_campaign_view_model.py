@@ -29,9 +29,9 @@ def format_campaign_run_status_text(status: str | None) -> str:
 
 def format_campaign_run_type_text(run_type: str | None) -> str:
     mapping = {
-        "test": "🧪 Тестовый запуск",
-        "manual": "🚀 Ручной запуск",
-        "scheduled": "🕒 Запланированный запуск",
+        "test": "📤 Проверочная публикация",
+        "manual": "🚀 Кампания",
+        "scheduled": "🕒 Запланированная кампания",
         "retry": "🔁 Повторный запуск",
     }
     return mapping.get((run_type or "").strip().lower(), "⚪ Неизвестный тип")
@@ -39,7 +39,7 @@ def format_campaign_run_type_text(run_type: str | None) -> str:
 
 def format_campaign_render_mode_text(render_mode: str | None) -> str:
     mapping = {
-        "telethon_builder": "Premium-отправка через аккаунт",
+        "telethon_builder": "Premium-отправка",
         "bot_api": "Обычная отправка через бота",
         "copy_message": "Копирование сообщения",
         "telethon_origin": "Оригинал через аккаунт",
@@ -117,7 +117,7 @@ def build_campaign_run_item_view(run: dict, *, index: int | None = None) -> dict
     return {
         "id": run_id,
         "title": f"{order} · {format_campaign_run_type_text(run.get('run_type'))} · {format_campaign_run_status_text(run.get('status'))}",
-        "saved_post_text": f"Пост: #{run.get('saved_post_id') or '—'}",
+        "saved_post_text": f"Публикация: #{run.get('saved_post_id') or '—'}",
         "method_text": f"Метод: {format_campaign_render_mode_text(run.get('render_mode'))}",
         "targets_text": f"Каналы: {int(run.get('targets_success') or 0)}/{int(run.get('targets_total') or 0)}",
         "time_text": f"Время: {format_campaign_datetime_text(run.get('started_at'))}",

@@ -36,8 +36,7 @@ def build_repost_campaign_menu_view(
     readiness_block = format_repost_campaign_readiness_block(readiness)
     text = (
         "💰 Рекламная кампания\n\n"
-        "Тестовый режим для админа.\n\n"
-        "Новый репост из этого правила будет опубликован в основной канал и каналы кампании.\n"
+        "Рекламная кампания публикует выбранный пост в основной канал и подключённые площадки.\n"
         "После окончания срока показа бот автоматически удалит рекламные публикации.\n\n"
         f"⏳ Срок показа: {show_seconds_text}\n"
         f"📣 Каналы кампании: {targets_active}\n"
@@ -52,9 +51,7 @@ def build_repost_campaign_menu_view(
         [InlineKeyboardButton(text="📊 История кампаний", callback_data=f"rule_repost_campaign_history:{rule_id}")],
     ]
     if saved_post_id:
-        test_button_text = "🚀 Тестовый запуск"
-        if readiness and readiness.get("ready") is False:
-            test_button_text = "🧪 Тестовый запуск"
+        test_button_text = "📤 Проверить публикацию"
         rows.append([InlineKeyboardButton(text=test_button_text, callback_data=f"rule_repost_campaign_test_send:{rule_id}")])
     if saved_post_id and readiness and readiness.get("ready") is True:
         rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
@@ -190,7 +187,7 @@ def build_repost_campaign_preview_view(
 
 def build_repost_campaign_show_menu_view(*, rule_id: int, current_show_seconds_text: str) -> tuple[str, InlineKeyboardMarkup]:
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 минута 🧪", callback_data=f"rule_repost_campaign_show_set:{rule_id}:60")],
+        [InlineKeyboardButton(text="1 минута", callback_data=f"rule_repost_campaign_show_set:{rule_id}:60")],
         [InlineKeyboardButton(text="15 минут", callback_data=f"rule_repost_campaign_show_set:{rule_id}:900")],
         [InlineKeyboardButton(text="1 час", callback_data=f"rule_repost_campaign_show_set:{rule_id}:3600")],
         [InlineKeyboardButton(text="2 часа", callback_data=f"rule_repost_campaign_show_set:{rule_id}:7200")],
@@ -268,18 +265,19 @@ def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[
             [InlineKeyboardButton(text="⬅️ Назад к кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
         ])
         return text, kb
-    runs = list((history.get("runs") or [])[:10])
+    runs_raw = list((history.get("runs") or [])[:10])
+    runs = list(reversed(runs_raw))
     if not runs:
         text = (
             "📊 История кампаний\n\n"
             "Пока запусков нет.\n\n"
-            "Когда вы сделаете тестовый или полноценный запуск кампании, здесь появится история:\n"
+            "Когда вы выполните проверочную публикацию или запустите кампанию, здесь появится история:\n"
             "• какой рекламный пост отправлялся\n"
             "• в какие каналы\n"
             "• каким методом\n"
             "• какие публикации были успешны\n"
             "• где были ошибки\n\n"
-            "Начните с “🚀 Тестовый запуск” в меню рекламной кампании."
+            "Начните с проверки публикации или запуска кампании в меню рекламной кампании."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🚀 К рекламной кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
@@ -291,14 +289,14 @@ def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[
     lines = [
         "📊 История кампаний",
         "",
-        "Сводка:",
-        f"Всего запусков: {int(summary.get('total') or 0)}",
-        f"✅ Успешных: {int(summary.get('sent') or 0)}",
-        f"🟡 Частичных: {int(summary.get('partial') or 0)}",
-        f"❌ Ошибок: {int(summary.get('failed') or 0)}",
+        "Обзор:",
+        f"📦 Всего запусков: {int(summary.get('total') or 0)}",
+        f"✅ Успешно: {int(summary.get('sent') or 0)}",
+        f"🟡 Частично: {int(summary.get('partial') or 0)}",
+        f"❌ Ошибки: {int(summary.get('failed') or 0)}",
         f"⏳ В процессе: {int(summary.get('sending') or 0)}",
         "",
-        "Последние запуски:",
+        "Хронология запусков:",
     ]
     for idx, run in enumerate(runs, 1):
         view = build_campaign_run_item_view(run, index=idx)
@@ -313,10 +311,18 @@ def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[
         lines.append(view["time_text"])
         lines.append("")
     buttons = []
-    for idx, run in enumerate(runs[:3], 1):
-        buttons.append([InlineKeyboardButton(text=f"📄 #{idx}", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{int(run.get('id') or 0)}")])
+    last_run = summary.get("last_run") or {}
+    last_run_id = int(last_run.get("id") or runs_raw[0].get("id") or 0)
+    if last_run_id:
+        buttons.append([InlineKeyboardButton(text="📄 Детали последнего запуска", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{last_run_id}")])
+    recent_desc = list(runs_raw)
+    for run in recent_desc:
+        run_id = int(run.get("id") or 0)
+        if run_id and run_id != last_run_id:
+            buttons.append([InlineKeyboardButton(text=f"📄 Детали #{run_id}", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run_id}")])
+        if len(buttons) >= (4 if last_run_id else 3):
+            break
     buttons.extend([
-        [InlineKeyboardButton(text=f"📄 Детали #{int((summary.get('last_run') or {}).get('id') or runs[0].get('id') or 0)}", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{int((summary.get('last_run') or runs[0]).get('id') or 0)}")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_history:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад к кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])

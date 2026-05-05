@@ -4,6 +4,7 @@ from app.repost_campaign_view_model import (
     format_campaign_delete_status_text,
     format_campaign_show_seconds_text,
     format_campaign_target_kind_text,
+    format_campaign_run_type_text,
 )
 
 
@@ -61,3 +62,11 @@ def test_cannot_delete_deleted():
 def test_cannot_delete_none():
     view = build_campaign_run_message_view({"send_status": "sent", "sent_message_id": 777, "delete_status": "none"})
     assert view["can_delete_now"] is False
+
+
+def test_run_type_test_uses_product_copy():
+    assert format_campaign_run_type_text("test") == "📤 Проверочная публикация"
+
+
+def test_run_type_manual_uses_campaign_copy():
+    assert format_campaign_run_type_text("manual") == "🚀 Кампания"
