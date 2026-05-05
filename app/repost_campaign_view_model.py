@@ -111,6 +111,14 @@ def format_campaign_delete_status_text(message: dict) -> str:
     return "Удаление: не запланировано"
 
 
+def _format_active_channels_count(value: int) -> str:
+    if value <= 0:
+        return "не подключены"
+    if value == 1:
+        return "1 активный"
+    return f"{value} активных"
+
+
 def build_campaign_run_item_view(run: dict, *, index: int | None = None) -> dict:
     run_id = run.get("id")
     order = f"#{run_id}" if run_id is not None else (f"#{index}" if index is not None else "#—")
@@ -174,16 +182,16 @@ def build_campaign_control_center_view_model(
         post_value = post_text.replace("📝 Креатив:", "", 1).strip()
     else:
         post_value = post_text
-    creative_line = f"📝 Креатив: {post_value or 'не выбран'}"
+    creative_line = f"📝 Рекламный пост: {post_value or 'не выбран'}"
 
     targets_active = int((summary or {}).get("targets_active") or 0)
-    targets_line = f"📣 Площадки: {targets_active} активных" if targets_active > 0 else "📣 Площадки: не подключены"
+    targets_line = f"📣 Каналы/Группы: {_format_active_channels_count(targets_active)}"
 
     show_seconds_value = (summary or {}).get("show_seconds")
     if not show_seconds_value:
         show_seconds_value = readiness.get("show_seconds")
     show_seconds_text = format_campaign_show_seconds_text(show_seconds_value)
-    show_seconds_line = f"⏳ Срок: {show_seconds_text}"
+    show_seconds_line = f"⏳ Время показа: {show_seconds_text}"
 
     last_run = (control_center or {}).get("last_run")
     last_details = (control_center or {}).get("last_run_details") or {}
@@ -197,14 +205,15 @@ def build_campaign_control_center_view_model(
     delete_pending = int(delete_summary.get("delete_pending") or 0)
     delete_failed = int(delete_summary.get("delete_failed") or 0)
     deleted = int(delete_summary.get("deleted") or 0)
+    auto_delete_line = "🧹 Автоудаление: включено" if show_seconds_text != "не задан" else "🧹 Автоудаление: не задано"
     if delete_failed > 0:
-        delete_line = f"🧹 Удаление: {delete_failed} ошибка"
+        last_run_delete_line = f"🧹 Удаление последнего запуска: {delete_failed} ошибка"
     elif delete_pending > 0:
-        delete_line = f"🧹 Удаление: ожидает {delete_pending}"
+        last_run_delete_line = f"🧹 Удаление последнего запуска: ожидает {delete_pending}"
     elif deleted > 0:
-        delete_line = "🧹 Удаление: всё чисто"
+        last_run_delete_line = "🧹 Удаление последнего запуска: всё удалено"
     else:
-        delete_line = "🧹 Удаление: не запланировано"
+        last_run_delete_line = "🧹 Удаление последнего запуска: не применялось"
 
     has_post = bool((summary or {}).get("saved_post_id"))
     has_show_seconds = show_seconds_text != "не задан"
@@ -222,8 +231,8 @@ def build_campaign_control_center_view_model(
         next_step_line = "Следующий шаг: выберите рекламный пост."
         primary_action = "creative"
     elif not has_show_seconds:
-        title_status = "⚠️ Нужно настроить срок показа"
-        next_step_line = "Следующий шаг: задайте срок показа."
+        title_status = "⚠️ Нужно настроить время показа"
+        next_step_line = "Следующий шаг: задайте время показа."
         primary_action = "show_seconds"
     elif not has_targets:
         title_status = "⚠️ Нужно добавить площадки"
@@ -241,8 +250,10 @@ def build_campaign_control_center_view_model(
         "creative_line": creative_line,
         "targets_line": targets_line,
         "show_seconds_line": show_seconds_line,
+        "auto_delete_line": auto_delete_line,
         "last_run_line": last_run_line,
-        "delete_line": delete_line,
+        "last_run_delete_line": last_run_delete_line,
+        "delete_line": last_run_delete_line,
         "next_step_line": next_step_line,
         "primary_action": primary_action,
         "can_launch": can_launch,

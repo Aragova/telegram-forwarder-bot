@@ -81,9 +81,9 @@ def test_control_center_view_model_ready():
         control_center={"ok": True, "readiness": {"ready": True, "show_seconds": 60}, "issues": []},
     )
     assert vm["title_status"] == "✅ Готова к запуску"
-    assert "📝 Креатив:" in vm["creative_line"]
-    assert "📣 Площадки:" in vm["targets_line"]
-    assert "🧹 Удаление:" in vm["delete_line"]
+    assert "📝 Рекламный пост:" in vm["creative_line"]
+    assert "📣 Каналы/Группы:" in vm["targets_line"]
+    assert "⏳ Время показа:" in vm["show_seconds_line"]
     assert vm["can_launch"] is True
 
 
@@ -94,7 +94,7 @@ def test_control_center_view_model_not_ready_no_show_seconds():
         control_center={"ok": True, "readiness": {"ready": False}, "issues": []},
     )
     assert vm["can_launch"] is False
-    assert vm["title_status"] == "⚠️ Нужно настроить срок показа"
+    assert vm["title_status"] == "⚠️ Нужно настроить время показа"
 
 
 def test_control_center_view_model_last_run_line_compact():
@@ -144,6 +144,21 @@ def test_delete_line_variants():
         saved_post_line="📝 Рекламный пост: не выбран",
         control_center={**base, "last_run_details": {"ok": True, "summary": {"deleted": 3}}},
     )
-    assert pending["delete_line"] == "🧹 Удаление: ожидает 2"
-    assert failed["delete_line"] == "🧹 Удаление: 1 ошибка"
-    assert deleted["delete_line"] == "🧹 Удаление: всё чисто"
+    assert pending["last_run_delete_line"] == "🧹 Удаление последнего запуска: ожидает 2"
+    assert failed["last_run_delete_line"] == "🧹 Удаление последнего запуска: 1 ошибка"
+    assert deleted["last_run_delete_line"] == "🧹 Удаление последнего запуска: всё удалено"
+
+
+def test_auto_delete_lines():
+    enabled = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 13, "show_seconds": 60},
+        saved_post_line="📝 Рекламный пост: #13 · фото",
+        control_center={"ok": True, "readiness": {"ready": False}, "issues": []},
+    )
+    not_set = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 13, "show_seconds": 0},
+        saved_post_line="📝 Рекламный пост: #13 · фото",
+        control_center={"ok": True, "readiness": {"ready": False}, "issues": []},
+    )
+    assert enabled["auto_delete_line"] == "🧹 Автоудаление: включено"
+    assert not_set["auto_delete_line"] == "🧹 Автоудаление: не задано"
