@@ -77,10 +77,25 @@ def test_test_send_premium_failure_propagated():
     assert result.error_text == "Telethon error"
 
 
-def test_readiness_warnings():
-    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=99, repost_campaign_show_seconds=60)
-    repo = _FakeRepo(rule=rule, summary={"targets_active": 0, "targets_with_errors": 2})
+def test_readiness_ready_status():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=11, repost_campaign_show_seconds=43200)
+    repo = _FakeRepo(rule=rule, summary={"targets_active": 2, "targets_with_errors": 0})
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
     result = runtime.get_campaign_readiness(rule_id=5)
+    assert result["ready"] is True
+    assert result["status"] == "ready"
+    assert "✅ выбран" in result["post_status_text"]
+    assert "✅ 12 часов" in result["show_seconds_status_text"]
+
+
+def test_readiness_warning_status():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=None, repost_campaign_show_seconds=0)
+    repo = _FakeRepo(rule=rule, summary={"targets_active": 0, "targets_with_errors": 2})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.get_campaign_readiness(rule_id=6)
+    assert result["ready"] is False
+    assert result["status"] == "warning"
+    assert "Рекламный пост не выбран" in result["warnings"]
+    assert "Срок показа не задан" in result["warnings"]
     assert "Активных каналов кампании пока нет" in result["warnings"]
     assert "Есть каналы, которые требуют проверки: 2" in result["warnings"]
