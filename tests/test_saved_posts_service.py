@@ -112,6 +112,8 @@ def test_build_album_content():
     assert len(c["media_items"]) == 3
     assert c["caption"] == "cap"
     assert c["caption_entities"][0]["type"] == "bold"
+    assert c["source_message_ids"] == [1, 2, 3]
+    assert c["forward_origin"]["message_ids"] == [1, 2, 3]
 
 
 def test_build_album_content_different_media_group_fails():
