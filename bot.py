@@ -165,6 +165,7 @@ scheduler_runtime_task: asyncio.Task | None = None
 job_watchdog_task: asyncio.Task | None = None
 workers_runtime_enabled = True
 user_states: dict[int, dict[str, Any]] = {}
+saved_post_album_buffer = SavedPostAlbumCaptureBuffer(delay_seconds=1.2)
 dashboard_tasks: dict[int, asyncio.Task] = {}
 ui_policy: UIErrorPolicy | None = None
 last_notifications: dict[str, datetime] = {}
