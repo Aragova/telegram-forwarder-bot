@@ -142,6 +142,13 @@ class SavedPostRenderer:
             )
 
 
+def normalize_telethon_target(chat_id: int | str) -> int | str:
+    value = str(chat_id).strip()
+    if value.lstrip("-").isdigit():
+        return int(value)
+    return chat_id
+
+
 def _guess_media_extension(kind: str, media: dict[str, Any]) -> str:
     if kind == "photo":
         return ".jpg"
@@ -185,17 +192,23 @@ async def send_saved_post_content_via_telethon(
     temp_dir: str | Path,
 ) -> dict[str, Any]:
     kind = str(content.get("kind") or "text")
-    logger.info("SAVED_POST_TELETHON_BUILDER_SEND_START | target_id=%s | kind=%s", chat_id, kind)
+    target_entity = normalize_telethon_target(chat_id)
+    logger.info(
+        "SAVED_POST_TELETHON_BUILDER_SEND_START | target_id=%s | target_entity=%s | kind=%s",
+        chat_id,
+        target_entity,
+        kind,
+    )
     local_path: Path | None = None
     try:
         if kind == "text":
             entities = saved_post_entities_to_telethon(content.get("entities"))
-            sent = await telethon_client.send_message(entity=chat_id, message=content.get("text") or "", formatting_entities=entities)
+            sent = await telethon_client.send_message(entity=target_entity, message=content.get("text") or "", formatting_entities=entities)
         else:
             local_path = await download_saved_post_media_for_telethon(bot=bot, content=content, temp_dir=temp_dir)
             caption_entities = saved_post_entities_to_telethon(content.get("caption_entities"))
             sent = await telethon_client.send_file(
-                entity=chat_id,
+                entity=target_entity,
                 file=str(local_path),
                 caption=content.get("caption") or "",
                 formatting_entities=caption_entities,
