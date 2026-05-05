@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
+import tempfile
 from typing import Any
+from pathlib import Path
 
 from aiogram.types import MessageEntity
 from telethon.tl import types as tl_types
@@ -145,18 +148,16 @@ def saved_post_requires_premium_send(content: dict[str, Any]) -> bool:
 
 
 def saved_post_entities_to_telethon(raw_entities: list[dict[str, Any]] | None) -> list:
-    if not raw_entities:
+    normalized = normalize_saved_post_entities(raw_entities)
+    if not normalized:
         return []
 
     items: list = []
-    for raw in raw_entities:
-        if not isinstance(raw, dict):
-            continue
+    custom_emoji_count = 0
+    for raw in normalized:
         entity_type = str(raw.get("type") or "")
-        offset = raw.get("offset")
-        length = raw.get("length")
-        if not isinstance(offset, int) or not isinstance(length, int):
-            continue
+        offset = int(raw.get("offset"))
+        length = int(raw.get("length"))
         try:
             if entity_type == "bold":
                 items.append(tl_types.MessageEntityBold(offset=offset, length=length))
@@ -184,9 +185,125 @@ def saved_post_entities_to_telethon(raw_entities: list[dict[str, Any]] | None) -
                 if custom_emoji_id is None:
                     raise ValueError("missing custom_emoji_id")
                 items.append(tl_types.MessageEntityCustomEmoji(offset=offset, length=length, document_id=int(custom_emoji_id)))
+                custom_emoji_count += 1
         except Exception:
             continue
+    logger.info("SAVED_POST_TELETHON_ENTITIES_BUILT | total=%s | custom_emoji_count=%s", len(items), custom_emoji_count)
     return items
+
+
+def normalize_saved_post_entities(raw_entities: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    if not raw_entities:
+        return []
+
+    entities_payload = raw_entities
+    if isinstance(raw_entities, str):
+        import json
+
+        try:
+            parsed = json.loads(raw_entities)
+            entities_payload = parsed
+        except Exception as exc:
+            logger.warning("Некорректный JSON entities в saved_post: %s", exc)
+            return []
+    if isinstance(entities_payload, dict):
+        entities_payload = [entities_payload]
+    if not isinstance(entities_payload, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for raw in entities_payload:
+        if not isinstance(raw, dict):
+            logger.warning("Битая entity в saved_post пропущена: %s", raw)
+            continue
+        try:
+            entity_type = str(raw.get("type") or "")
+            offset = int(raw.get("offset"))
+            length = int(raw.get("length"))
+        except Exception:
+            logger.warning("Битая entity в saved_post пропущена: %s", raw)
+            continue
+
+        item: dict[str, Any] = {"type": entity_type, "offset": offset, "length": length}
+        if raw.get("url") is not None:
+            item["url"] = str(raw.get("url"))
+        if raw.get("language") is not None:
+            item["language"] = str(raw.get("language"))
+        if raw.get("custom_emoji_id") is not None:
+            item["custom_emoji_id"] = str(raw.get("custom_emoji_id"))
+        normalized.append(item)
+    return normalized
+
+
+def _guess_media_extension(kind: str, media: dict[str, Any]) -> str:
+    if kind == "photo":
+        return ".jpg"
+    if kind == "video":
+        return ".mp4"
+    if kind == "animation":
+        mime_type = str(media.get("mime_type") or "").lower()
+        return ".gif" if "gif" in mime_type else ".mp4"
+    if kind == "document":
+        file_name = str(media.get("file_name") or "")
+        suffix = Path(file_name).suffix
+        if suffix:
+            return suffix
+        mime_type = str(media.get("mime_type") or "")
+        guessed = mimetypes.guess_extension(mime_type)
+        return guessed or ".bin"
+    return ".bin"
+
+
+async def download_saved_post_media_for_telethon(*, bot, content: dict[str, Any], temp_dir: str | Path) -> Path:
+    media = content.get("media") or {}
+    file_id = str(media.get("file_id") or "")
+    if not file_id:
+        raise ValueError("В saved post отсутствует media.file_id")
+    kind = str(content.get("kind") or "document")
+    ext = _guess_media_extension(kind, media)
+    temp_dir_path = Path(temp_dir)
+    temp_dir_path.mkdir(parents=True, exist_ok=True)
+    file_info = await bot.get_file(file_id)
+    local_path = temp_dir_path / f"saved_post_{file_id}{ext}"
+    await bot.download_file(file_info.file_path, destination=local_path)
+    return local_path
+
+
+async def send_saved_post_content_via_telethon(
+    *,
+    bot,
+    telethon_client,
+    chat_id: int | str,
+    content: dict[str, Any],
+    temp_dir: str | Path,
+) -> dict[str, Any]:
+    kind = str(content.get("kind") or "text")
+    logger.info("SAVED_POST_TELETHON_BUILDER_SEND_START | target_id=%s | kind=%s", chat_id, kind)
+    local_path: Path | None = None
+    try:
+        if kind == "text":
+            entities = saved_post_entities_to_telethon(content.get("entities"))
+            sent = await telethon_client.send_message(entity=chat_id, message=content.get("text") or "", formatting_entities=entities)
+        else:
+            local_path = await download_saved_post_media_for_telethon(bot=bot, content=content, temp_dir=temp_dir)
+            caption_entities = saved_post_entities_to_telethon(content.get("caption_entities"))
+            sent = await telethon_client.send_file(
+                entity=chat_id,
+                file=str(local_path),
+                caption=content.get("caption") or "",
+                formatting_entities=caption_entities,
+            )
+        logger.info("SAVED_POST_TELETHON_BUILDER_SEND_DONE | target_id=%s | message_id=%s | method=telethon_builder", chat_id, sent.id)
+        return {"ok": True, "message_id": sent.id, "chat_id": str(chat_id), "kind": kind, "method": "telethon_builder"}
+    except Exception as exc:
+        logger.warning("SAVED_POST_TELETHON_BUILDER_SEND_FAILED | target_id=%s | error=%s", chat_id, exc)
+        raise
+    finally:
+        if local_path:
+            try:
+                local_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def get_saved_post_preview_caption(content: dict[str, Any]) -> str:
