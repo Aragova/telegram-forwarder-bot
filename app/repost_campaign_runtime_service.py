@@ -38,9 +38,10 @@ class RepostCampaignActionResult:
 
 
 class RepostCampaignRuntimeService:
-    def __init__(self, *, repo, renderer, logger_=None):
+    def __init__(self, *, repo, renderer, deleter=None, logger_=None):
         self.repo = repo
         self.renderer = renderer
+        self.deleter = deleter
         self.logger = logger_ or logging.getLogger("forwarder")
 
     def _get_repost_rule_and_saved_post(self, *, rule_id: int, action: str):
@@ -579,3 +580,33 @@ class RepostCampaignRuntimeService:
                 "run_id": run_id,
                 "error_text": "Не удалось загрузить детали запуска",
             }
+
+    async def process_due_deletions(self, *, limit: int = 50) -> dict[str, Any]:
+        if self.deleter is None:
+            return {"ok": False, "claimed": 0, "deleted": 0, "failed": 0, "error_text": "Delete service недоступен"}
+        reset_count = self.repo.reset_stuck_campaign_delete_processing(stuck_seconds=300)
+        rows = self.repo.claim_due_campaign_run_messages_for_delete(limit=limit)
+        if not rows:
+            return {"ok": True, "claimed": 0, "deleted": 0, "failed": 0, "reset_stuck": reset_count}
+        self.logger.info("REPOST_CAMPAIGN_DELETE_BATCH_START | claimed=%s | reset_stuck=%s", len(rows), reset_count)
+        deleted_count = 0
+        failed_count = 0
+        for row in rows:
+            row_id = int(row["id"])
+            target_id = row["target_id"]
+            sent_message_id = int(row["sent_message_id"])
+            result = await self.deleter.delete_message(
+                target_id=target_id,
+                message_id=sent_message_id,
+                render_mode=row.get("render_mode"),
+            )
+            if result.ok:
+                self.repo.mark_campaign_run_message_deleted(row_id)
+                deleted_count += 1
+                self.logger.info("REPOST_CAMPAIGN_DELETE_MESSAGE_DONE | row_id=%s | target_id=%s | sent_message_id=%s | method=%s", row_id, target_id, sent_message_id, result.method)
+            else:
+                self.repo.mark_campaign_run_message_delete_failed(row_id, error_text=result.error_text or "unknown delete error")
+                failed_count += 1
+                self.logger.warning("REPOST_CAMPAIGN_DELETE_MESSAGE_FAILED | row_id=%s | target_id=%s | sent_message_id=%s | error=%s", row_id, target_id, sent_message_id, result.error_text)
+        self.logger.info("REPOST_CAMPAIGN_DELETE_BATCH_DONE | claimed=%s | deleted=%s | failed=%s | reset_stuck=%s", len(rows), deleted_count, failed_count, reset_count)
+        return {"ok": True, "claimed": len(rows), "deleted": deleted_count, "failed": failed_count, "reset_stuck": reset_count}

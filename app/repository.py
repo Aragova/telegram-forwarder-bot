@@ -400,6 +400,23 @@ class RepositoryProtocol(Protocol):
         self,
         run_id: int,
     ) -> list[dict[str, Any]]: ...
+    def claim_due_campaign_run_messages_for_delete(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]: ...
+    def mark_campaign_run_message_deleted(self, message_id: int) -> bool: ...
+    def mark_campaign_run_message_delete_failed(
+        self,
+        message_id: int,
+        *,
+        error_text: str,
+    ) -> bool: ...
+    def reset_stuck_campaign_delete_processing(
+        self,
+        *,
+        stuck_seconds: int = 300,
+    ) -> int: ...
 
     # =========================================================
     # INTROS
