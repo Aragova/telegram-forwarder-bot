@@ -10,6 +10,19 @@ def test_repost_campaign_repository_methods_exist():
     assert hasattr(repo, "list_rule_repost_campaign_targets")
     assert hasattr(repo, "remove_rule_repost_campaign_target")
     assert hasattr(repo, "set_rule_repost_campaign_target_active")
+    required = [
+        "create_campaign_run",
+        "update_campaign_run_status",
+        "create_campaign_run_message",
+        "mark_campaign_run_message_sending",
+        "mark_campaign_run_message_sent",
+        "mark_campaign_run_message_failed",
+        "get_campaign_run",
+        "list_campaign_runs_for_rule",
+        "list_campaign_run_messages",
+    ]
+    for name in required:
+        assert hasattr(repo, name)
 
 
 def test_row_to_rule_maps_repost_campaign_fields():

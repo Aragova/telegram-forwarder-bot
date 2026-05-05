@@ -331,6 +331,75 @@ class RepositoryProtocol(Protocol):
     def update_saved_post_content(self, saved_post_id: int, *, title: str | None, content: dict[str, Any]) -> bool: ...
     def archive_saved_post(self, saved_post_id: int) -> bool: ...
     def set_rule_repost_campaign_saved_post(self, rule_id: int, saved_post_id: int | None) -> bool: ...
+    def create_campaign_run(
+        self,
+        *,
+        rule_id: int,
+        saved_post_id: int,
+        run_type: str,
+        status: str,
+        show_seconds: int,
+        started_by: int | None,
+        render_mode: str | None = None,
+        targets_total: int = 0,
+    ) -> int | None: ...
+    def update_campaign_run_status(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        render_mode: str | None = None,
+        targets_success: int | None = None,
+        targets_failed: int | None = None,
+        error_text: str | None = None,
+        report: dict[str, Any] | None = None,
+        finish: bool = False,
+    ) -> bool: ...
+    def create_campaign_run_message(
+        self,
+        *,
+        run_id: int,
+        rule_id: int,
+        saved_post_id: int,
+        target_kind: str,
+        target_id: str,
+        target_thread_id: int | None = None,
+        target_title: str | None = None,
+        show_seconds: int = 0,
+        delete_after_at: str | None = None,
+    ) -> int | None: ...
+    def mark_campaign_run_message_sending(
+        self,
+        message_id: int,
+        *,
+        render_mode: str | None = None,
+    ) -> bool: ...
+    def mark_campaign_run_message_sent(
+        self,
+        message_id: int,
+        *,
+        sent_message_id: int | None,
+        sent_message_ids: list[int] | None = None,
+        render_mode: str | None = None,
+    ) -> bool: ...
+    def mark_campaign_run_message_failed(
+        self,
+        message_id: int,
+        *,
+        error_text: str,
+        render_mode: str | None = None,
+    ) -> bool: ...
+    def get_campaign_run(self, run_id: int) -> dict[str, Any] | None: ...
+    def list_campaign_runs_for_rule(
+        self,
+        rule_id: int,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]: ...
+    def list_campaign_run_messages(
+        self,
+        run_id: int,
+    ) -> list[dict[str, Any]]: ...
 
     # =========================================================
     # INTROS

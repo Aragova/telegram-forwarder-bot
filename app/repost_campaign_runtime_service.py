@@ -121,6 +121,7 @@ class RepostCampaignRuntimeService:
         rule, saved_post = loaded
         saved_post_id = int(getattr(rule, "repost_campaign_saved_post_id"))
         target_id = getattr(rule, "target_id", None)
+        show_seconds = int(getattr(rule, "repost_campaign_show_seconds", 0) or 0)
         if not target_id:
             return RepostCampaignActionResult(
                 ok=False,
@@ -130,9 +131,76 @@ class RepostCampaignRuntimeService:
                 error_text="У правила не задан основной канал получателя",
             )
 
+        run_id = self.repo.create_campaign_run(
+            rule_id=rule_id,
+            saved_post_id=saved_post_id,
+            run_type="test",
+            status="sending",
+            show_seconds=show_seconds,
+            started_by=admin_id,
+            targets_total=1,
+        )
+        if run_id is None:
+            return RepostCampaignActionResult(
+                ok=False,
+                action="test_send_saved_post",
+                rule_id=rule_id,
+                saved_post_id=saved_post_id,
+                error_text="Не удалось создать запись запуска рекламной кампании",
+            )
+        self.logger.info(
+            "REPOST_CAMPAIGN_RUN_CREATED | rule_id=%s | saved_post_id=%s | run_id=%s | run_type=test",
+            rule_id,
+            saved_post_id,
+            run_id,
+        )
+        run_message_id = self.repo.create_campaign_run_message(
+            run_id=run_id,
+            rule_id=rule_id,
+            saved_post_id=saved_post_id,
+            target_kind="main",
+            target_id=str(target_id),
+            target_thread_id=getattr(rule, "target_thread_id", None),
+            target_title=getattr(rule, "target_title", None),
+            show_seconds=show_seconds,
+            delete_after_at=None,
+        )
+        if run_message_id is None:
+            self.repo.update_campaign_run_status(run_id, status="failed", targets_success=0, targets_failed=1, error_text="Не удалось создать запись публикации рекламной кампании", finish=True)
+            return RepostCampaignActionResult(
+                ok=False,
+                action="test_send_saved_post",
+                rule_id=rule_id,
+                saved_post_id=saved_post_id,
+                error_text="Не удалось создать запись публикации рекламной кампании",
+                extra={"campaign_run_id": run_id},
+            )
+        self.logger.info(
+            "REPOST_CAMPAIGN_RUN_MESSAGE_CREATED | run_id=%s | message_id=%s | target_id=%s | target_kind=main",
+            run_id,
+            run_message_id,
+            target_id,
+        )
+        self.repo.mark_campaign_run_message_sending(run_message_id, render_mode=None)
+
         content = saved_post.get("content_json") or saved_post.get("content") or {}
         render_result = await self.renderer.send(chat_id=target_id, content=content)
         if not render_result.ok:
+            self.repo.mark_campaign_run_message_failed(
+                run_message_id,
+                error_text=render_result.error_text or "unknown error",
+                render_mode=render_result.method,
+            )
+            self.repo.update_campaign_run_status(
+                run_id,
+                status="failed",
+                render_mode=render_result.method,
+                targets_success=0,
+                targets_failed=1,
+                error_text=render_result.error_text,
+                finish=True,
+            )
+            self.logger.warning("REPOST_CAMPAIGN_RUN_FAILED | run_id=%s | error=%s", run_id, render_result.error_text)
             self.logger.warning(
                 "REPOST_CAMPAIGN_TEST_SEND_FAILED | rule_id=%s | saved_post_id=%s | target_id=%s | error=%s | method=%s",
                 rule_id,
@@ -151,8 +219,31 @@ class RepostCampaignRuntimeService:
                 kind=render_result.kind,
                 error_text=render_result.error_text,
                 premium_required=render_result.premium_required,
+                extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id},
             )
 
+        self.repo.mark_campaign_run_message_sent(
+            run_message_id,
+            sent_message_id=render_result.message_id,
+            sent_message_ids=None,
+            render_mode=render_result.method,
+        )
+        self.repo.update_campaign_run_status(
+            run_id,
+            status="sent",
+            render_mode=render_result.method,
+            targets_success=1,
+            targets_failed=0,
+            finish=True,
+            report={"target_id": str(target_id), "message_id": render_result.message_id, "method": render_result.method},
+        )
+        self.logger.info(
+            "REPOST_CAMPAIGN_RUN_FINISHED | run_id=%s | status=%s | method=%s | sent_message_id=%s",
+            run_id,
+            "sent",
+            render_result.method,
+            render_result.message_id,
+        )
         self.logger.info(
             "REPOST_CAMPAIGN_TEST_SEND_DONE | rule_id=%s | saved_post_id=%s | target_id=%s | message_id=%s | method=%s",
             rule_id,
@@ -171,6 +262,7 @@ class RepostCampaignRuntimeService:
             method=render_result.method,
             kind=render_result.kind,
             premium_required=render_result.premium_required,
+            extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id},
         )
 
     def get_campaign_readiness(self, *, rule_id: int) -> dict:
