@@ -575,3 +575,25 @@ def test_batch_check_summary():
     assert result["checked"] == 2
     assert result["passed"] == 1
     assert result["failed"] == 1
+
+
+def test_test_send_saves_sent_message_ids():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, target_id="-1001")
+    saved_post = {"content_json": {"kind": "album", "media_items": [{"kind": "photo", "file_id": "x"}]}}
+    repo = _FakeRepo(rule=rule, saved_post=saved_post)
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="album", chat_id="-1001", message_id=101, message_ids=[101, 102, 103]))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    asyncio.run(runtime.test_send_saved_post_to_main_target(rule_id=1))
+    assert repo.mark_campaign_run_message_sent_calls[-1][1]["sent_message_ids"] == [101, 102, 103]
+
+
+def test_process_due_deletions_uses_sent_message_ids_json():
+    repo = _FakeRepo()
+    repo._due_delete_rows = [{"id": 1, "target_id": "-100", "sent_message_id": 101, "sent_message_ids_json": "[101,102]", "render_mode": "bot_api"}]
+    seen = {}
+    async def _del_many(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(ok=True, method="bot_api", error_text=None)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_messages=_del_many, delete_message=None))
+    asyncio.run(runtime.process_due_deletions())
+    assert seen["message_ids"] == [101, 102]

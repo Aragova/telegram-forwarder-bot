@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -74,6 +75,24 @@ class RepostCampaignRuntimeService:
 
         return rule, saved_post
 
+
+
+    def _extract_sent_message_ids(self, message: dict) -> list[int]:
+        ids = message.get("sent_message_ids")
+        if isinstance(ids, list) and ids:
+            return [int(x) for x in ids]
+        ids_json = message.get("sent_message_ids_json")
+        if isinstance(ids_json, str) and ids_json.strip():
+            try:
+                parsed = json.loads(ids_json)
+                if isinstance(parsed, list) and parsed:
+                    return [int(x) for x in parsed]
+            except Exception:
+                pass
+        if isinstance(ids_json, list) and ids_json:
+            return [int(x) for x in ids_json]
+        mid = message.get("sent_message_id")
+        return [int(mid)] if mid else []
     def get_campaign_target(self, *, rule_id: int, target_row_id: int) -> dict | None:
         targets = self.repo.list_rule_repost_campaign_targets(rule_id, active_only=False) or []
         return next((t for t in targets if int(t.get("id") or 0) == int(target_row_id)), None)
@@ -325,7 +344,7 @@ class RepostCampaignRuntimeService:
         self.repo.mark_campaign_run_message_sent(
             run_message_id,
             sent_message_id=render_result.message_id,
-            sent_message_ids=None,
+            sent_message_ids=getattr(render_result, "message_ids", None),
             render_mode=render_result.method,
         )
         self.repo.update_campaign_run_status(
@@ -335,7 +354,7 @@ class RepostCampaignRuntimeService:
             targets_success=1,
             targets_failed=0,
             finish=True,
-            report={"target_id": str(target_id), "message_id": render_result.message_id, "method": render_result.method},
+            report={"target_id": str(target_id), "message_id": render_result.message_id, "message_ids": getattr(render_result, "message_ids", None), "method": render_result.method},
         )
         self.logger.info(
             "REPOST_CAMPAIGN_RUN_FINISHED | run_id=%s | status=%s | method=%s | sent_message_id=%s",
@@ -459,7 +478,7 @@ class RepostCampaignRuntimeService:
                 self.repo.mark_campaign_run_message_sent(
                     run_message_id,
                     sent_message_id=render_result.message_id,
-                    sent_message_ids=None,
+                    sent_message_ids=getattr(render_result, "message_ids", None),
                     render_mode=render_result.method,
                 )
                 success_count += 1
@@ -769,7 +788,8 @@ class RepostCampaignRuntimeService:
         if (message.get("send_status") or "").strip().lower() != "sent":
             self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_SKIPPED | rule_id=%s | run_id=%s | run_message_id=%s | reason=%s", rule_id, run_id, run_message_id, "send_status_not_sent")
             return RepostCampaignActionResult(ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, error_text="Публикация ещё не была успешно отправлена")
-        if not message.get("sent_message_id"):
+        message_ids = self._extract_sent_message_ids(message)
+        if not message_ids:
             self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_SKIPPED | rule_id=%s | run_id=%s | run_message_id=%s | reason=%s", rule_id, run_id, run_message_id, "missing_sent_message_id")
             return RepostCampaignActionResult(ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, error_text="У публикации нет Telegram message_id для удаления")
         if (message.get("delete_status") or "").strip().lower() == "deleted":
@@ -778,7 +798,10 @@ class RepostCampaignRuntimeService:
                 ok=True, action="delete_campaign_run_message_now", rule_id=rule_id, target_id=str(message.get("target_id")), message_id=int(message.get("sent_message_id")), method="already_deleted",
                 extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id, "delete_status": "deleted", "already_deleted": True},
             )
-        result = await self.deleter.delete_message(target_id=message["target_id"], message_id=int(message["sent_message_id"]), render_mode=message.get("render_mode"))
+        if len(message_ids) > 1 and hasattr(self.deleter, "delete_messages"):
+            result = await self.deleter.delete_messages(target_id=message["target_id"], message_ids=message_ids, render_mode=message.get("render_mode"))
+        else:
+            result = await self.deleter.delete_message(target_id=message["target_id"], message_id=message_ids[0], render_mode=message.get("render_mode"))
         if result.ok:
             self.repo.mark_campaign_run_message_deleted(run_message_id)
             self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_DONE | rule_id=%s | run_id=%s | run_message_id=%s | target_id=%s | message_id=%s | method=%s", rule_id, run_id, run_message_id, message["target_id"], int(message["sent_message_id"]), result.method)
@@ -806,12 +829,16 @@ class RepostCampaignRuntimeService:
         for row in rows:
             row_id = int(row["id"])
             target_id = row["target_id"]
-            sent_message_id = int(row["sent_message_id"])
-            result = await self.deleter.delete_message(
-                target_id=target_id,
-                message_id=sent_message_id,
-                render_mode=row.get("render_mode"),
-            )
+            message_ids = self._extract_sent_message_ids(row)
+            if not message_ids:
+                self.repo.mark_campaign_run_message_delete_failed(row_id, error_text="missing sent_message_id")
+                failed_count += 1
+                continue
+            if len(message_ids) > 1 and hasattr(self.deleter, "delete_messages"):
+                result = await self.deleter.delete_messages(target_id=target_id, message_ids=message_ids, render_mode=row.get("render_mode"))
+            else:
+                result = await self.deleter.delete_message(target_id=target_id, message_id=message_ids[0], render_mode=row.get("render_mode"))
+            sent_message_id = message_ids[0]
             if result.ok:
                 self.repo.mark_campaign_run_message_deleted(row_id)
                 deleted_count += 1

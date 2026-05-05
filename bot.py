@@ -109,6 +109,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_targets_check_result_view,
 )
 from app.saved_posts_service import (
+    build_saved_post_album_content_from_aiogram_messages,
     build_saved_post_content_from_aiogram_message,
     get_saved_post_preview_caption,
     get_saved_post_short_description,
@@ -116,6 +117,7 @@ from app.saved_posts_service import (
     summarize_saved_post_entities,
 )
 from app.saved_post_renderer import SavedPostRenderer
+from app.saved_post_album_service import SavedPostAlbumCaptureBuffer
 from app.repost_campaign_runtime_service import RepostCampaignRuntimeService
 from app.repost_campaign_target_check_service import RepostCampaignTargetCheckService
 from app.repost_campaign_delete_service import RepostCampaignDeleteService, run_repost_campaign_delete_loop
@@ -3144,6 +3146,47 @@ async def handle_live_status(message: Message):
     dashboard_tasks[message.from_user.id] = task
 
 
+
+
+async def _finalize_repost_campaign_saved_post_album(*, admin_id: int, messages: list[Message]):
+    state = user_states.get(admin_id) or {}
+    if state.get("state") != "awaiting_repost_campaign_saved_post":
+        logger.info("SAVED_POST_ALBUM_FINALIZE_SKIPPED | admin_id=%s | reason=state_changed", admin_id)
+        return
+    rule_id = int(state.get("rule_id") or 0)
+    if rule_id <= 0 or not messages:
+        return
+    content_json = build_saved_post_album_content_from_aiogram_messages(messages)
+    first = sorted(messages, key=lambda m: int(getattr(m, "message_id", 0) or 0))[0]
+    saved_post_id = await run_db(
+        db.create_saved_post,
+        rule_id=rule_id,
+        title=None,
+        content=content_json,
+        source_chat_id=str(first.chat.id) if first.chat else None,
+        source_message_id=first.message_id,
+        source_media_group_id=getattr(first, "media_group_id", None),
+        created_by=admin_id,
+    )
+    if not saved_post_id:
+        await bot.send_message(chat_id=admin_id, text="❌ Не удалось сохранить рекламный альбом")
+        return
+    await run_db(db.set_rule_repost_campaign_saved_post, rule_id, int(saved_post_id))
+    reset_user_state(admin_id)
+    invalidate_rule_card_cache(rule_id)
+    await bot.send_message(
+        chat_id=admin_id,
+        text=(
+            "✅ Альбом сохранён как рекламный пост\n\n"
+            f"Медиа: {len(content_json.get('media_items') or [])}\n"
+            "Форматирование подписи сохранено."
+        ),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👁 Предпросмотр поста", callback_data=f"rule_repost_campaign_post_preview:{rule_id}")],
+            [InlineKeyboardButton(text="💰 К рекламной кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+            [InlineKeyboardButton(text="⬅️ К рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
+        ]),
+    )
 @dp.message(
     lambda m: (
         m.chat.type == "private"
@@ -8259,6 +8302,14 @@ async def handle_stateful_private_inputs(message: Message):
             rule_id,
             message_summary,
         )
+        if getattr(message, "media_group_id", None):
+            await saved_post_album_buffer.add_message(
+                admin_id=message.from_user.id,
+                message=message,
+                on_album_ready=_finalize_repost_campaign_saved_post_album,
+            )
+            return
+
         content_json = build_saved_post_content_from_aiogram_message(message)
         entity_summary = summarize_saved_post_entities(content_json)
         logger.info(

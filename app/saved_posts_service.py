@@ -88,6 +88,54 @@ def build_saved_post_content_from_aiogram_message(message) -> dict[str, Any]:
     }
 
 
+
+def build_saved_post_media_item_from_aiogram_message(message) -> dict[str, Any]:
+    if getattr(message, "photo", None):
+        ph = message.photo[-1]
+        return {"kind": "photo", "file_id": ph.file_id, "file_unique_id": getattr(ph, "file_unique_id", None), "width": getattr(ph, "width", 0), "height": getattr(ph, "height", 0), "duration": 0, "mime_type": None, "file_name": None}
+    if getattr(message, "video", None):
+        v = message.video
+        return {"kind": "video", "file_id": v.file_id, "file_unique_id": getattr(v, "file_unique_id", None), "width": getattr(v, "width", 0), "height": getattr(v, "height", 0), "duration": getattr(v, "duration", 0), "mime_type": getattr(v, "mime_type", None), "file_name": getattr(v, "file_name", None)}
+    if getattr(message, "document", None):
+        d = message.document
+        return {"kind": "document", "file_id": d.file_id, "file_unique_id": getattr(d, "file_unique_id", None), "width": 0, "height": 0, "duration": 0, "mime_type": getattr(d, "mime_type", None), "file_name": getattr(d, "file_name", None)}
+    raise ValueError("Неподдерживаемый элемент альбома")
+
+
+def build_saved_post_album_content_from_aiogram_messages(messages: list[Any]) -> dict[str, Any]:
+    if not messages:
+        raise ValueError("Список сообщений альбома пуст")
+    ordered = sorted(messages, key=lambda m: int(getattr(m, "message_id", 0) or 0))
+    media_group_id = getattr(ordered[0], "media_group_id", None)
+    if not media_group_id:
+        raise ValueError("У альбома отсутствует media_group_id")
+    if any(getattr(m, "media_group_id", None) != media_group_id for m in ordered):
+        raise ValueError("Сообщения из разных media_group_id")
+    media_items = [build_saved_post_media_item_from_aiogram_message(m) for m in ordered]
+
+    caption = ""
+    caption_entities: list[dict[str, Any]] = []
+    for msg in ordered:
+        current_caption = str(getattr(msg, "caption", "") or "").strip()
+        if current_caption:
+            caption = getattr(msg, "caption", "") or ""
+            caption_entities = serialize_message_entities(getattr(msg, "caption_entities", None))
+            break
+
+    first = ordered[0]
+    return {
+        "schema_version": 2,
+        "kind": "album",
+        "text": "",
+        "caption": caption,
+        "entities": [],
+        "caption_entities": caption_entities,
+        "media": None,
+        "media_items": media_items,
+        "forward_origin": {"chat_id": str(first.chat.id) if getattr(first, "chat", None) else None, "message_id": getattr(first, "message_id", None)},
+        "media_group_id": str(media_group_id),
+    }
+
 def get_saved_post_preview_caption(content: dict[str, Any]) -> str:
     kind = str(content.get("kind") or "text")
     text = str(content.get("text") or "").strip()
@@ -97,6 +145,12 @@ def get_saved_post_preview_caption(content: dict[str, Any]) -> str:
         if text:
             return text
         return "Рекламный текст пустой."
+
+    if kind == "album":
+        count = len(content.get('media_items') or [])
+        if caption:
+            return f"Альбом · {count} медиа: {caption}"
+        return f"Альбом · {count} медиа без подписи."
 
     label_map = {
         "photo": "Фото",
@@ -112,5 +166,7 @@ def get_saved_post_preview_caption(content: dict[str, Any]) -> str:
 
 def get_saved_post_short_description(content: dict[str, Any]) -> str:
     kind = str(content.get("kind") or "text")
+    if kind == "album":
+        return f"альбом · {len(content.get('media_items') or [])} медиа"
     mapping = {"text": "текст", "photo": "фото", "video": "видео", "animation": "анимация", "document": "документ"}
     return mapping.get(kind, kind)
