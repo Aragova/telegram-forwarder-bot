@@ -112,6 +112,11 @@ def build_saved_post_album_content_from_aiogram_messages(messages: list[Any]) ->
     if any(getattr(m, "media_group_id", None) != media_group_id for m in ordered):
         raise ValueError("Сообщения из разных media_group_id")
     media_items = [build_saved_post_media_item_from_aiogram_message(m) for m in ordered]
+    source_message_ids = [
+        int(getattr(m, "message_id", 0) or 0)
+        for m in ordered
+        if getattr(m, "message_id", None)
+    ]
 
     caption = ""
     caption_entities: list[dict[str, Any]] = []
@@ -132,7 +137,12 @@ def build_saved_post_album_content_from_aiogram_messages(messages: list[Any]) ->
         "caption_entities": caption_entities,
         "media": None,
         "media_items": media_items,
-        "forward_origin": {"chat_id": str(first.chat.id) if getattr(first, "chat", None) else None, "message_id": getattr(first, "message_id", None)},
+        "forward_origin": {
+            "chat_id": str(first.chat.id) if getattr(first, "chat", None) else None,
+            "message_id": getattr(first, "message_id", None),
+            "message_ids": source_message_ids,
+        },
+        "source_message_ids": source_message_ids,
         "media_group_id": str(media_group_id),
     }
 

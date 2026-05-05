@@ -148,7 +148,7 @@ class SavedPostRenderer:
                 method=method,
                 kind=kind,
                 chat_id=str(chat_id),
-                error_text=str(exc),
+                error_text=normalize_saved_post_render_error(exc, kind=kind, premium_required=premium_required),
                 premium_required=premium_required,
                 message_ids=message_ids,
             )
@@ -159,6 +159,44 @@ def normalize_telethon_target(chat_id: int | str) -> int | str:
     if value.lstrip("-").isdigit():
         return int(value)
     return chat_id
+
+
+def get_album_source_message_ids(content: dict[str, Any]) -> list[int]:
+    ids = content.get("source_message_ids")
+    if not ids:
+        ids = (content.get("forward_origin") or {}).get("message_ids")
+    if not ids:
+        first_id = (content.get("forward_origin") or {}).get("message_id")
+        ids = [first_id] if first_id else []
+    result: list[int] = []
+    for item in ids or []:
+        try:
+            value = int(item)
+            if value > 0:
+                result.append(value)
+        except Exception:
+            continue
+    return result
+
+
+def get_album_source_chat_id(content: dict[str, Any]) -> int | str | None:
+    value = (content.get("forward_origin") or {}).get("chat_id")
+    if value is None:
+        return None
+    value_str = str(value).strip()
+    if value_str.lstrip("-").isdigit():
+        return int(value_str)
+    return value_str
+
+
+def normalize_saved_post_render_error(exc: Exception, *, kind: str, premium_required: bool) -> str:
+    text = str(exc)
+    if "file is too big" in text.lower() and kind == "album" and premium_required:
+        return (
+            "Не удалось отправить premium-альбом: один из файлов слишком большой для скачивания через Bot API. "
+            "Замените рекламный пост альбомом заново, чтобы бот сохранил source_message_ids для отправки через аккаунт."
+        )
+    return text
 
 
 def _guess_media_extension(kind: str, media: dict[str, Any]) -> str:
@@ -208,6 +246,77 @@ async def download_saved_post_media_item_for_telethon(*, bot, item: dict[str, An
     local_path = temp_dir_path / f"saved_post_album_{file_id}{ext}"
     await bot.download_file(file_info.file_path, destination=local_path)
     return local_path
+
+
+async def send_saved_post_album_via_telethon_source(
+    *,
+    telethon_client,
+    chat_id: int | str,
+    content: dict[str, Any],
+) -> dict[str, Any]:
+    source_chat_id = get_album_source_chat_id(content)
+    source_message_ids = get_album_source_message_ids(content)
+    media_items_count = len(content.get("media_items") or [])
+    if media_items_count > 1 and len(source_message_ids) < media_items_count:
+        raise ValueError(
+            "Для premium-альбома сохранены не все source_message_ids. Замените рекламный пост альбомом заново."
+        )
+    if source_chat_id is None or not source_message_ids:
+        raise ValueError("Для premium-альбома нет source_message_ids")
+
+    target_entity = normalize_telethon_target(chat_id)
+    source_entity = normalize_telethon_target(source_chat_id)
+    logger.info(
+        "SAVED_POST_TELETHON_SOURCE_ALBUM_SEND_START | target_id=%s | source_chat_id=%s | source_message_ids=%s",
+        chat_id,
+        source_chat_id,
+        source_message_ids,
+    )
+    try:
+        messages = await telethon_client.get_messages(source_entity, ids=source_message_ids)
+        if not isinstance(messages, list):
+            messages = [messages]
+        messages = [m for m in messages if m]
+        if not messages:
+            raise ValueError("Не удалось получить исходные сообщения альбома")
+        medias = [m.media for m in messages if getattr(m, "media", None)]
+        try:
+            sent = await telethon_client.send_file(
+                entity=target_entity,
+                file=medias,
+                caption=content.get("caption") or "",
+                formatting_entities=saved_post_entities_to_telethon(content.get("caption_entities")),
+            )
+        except Exception as send_exc:
+            logger.warning(
+                "SAVED_POST_TELETHON_SOURCE_ALBUM_SEND_FALLBACK_FORWARD | target_id=%s | error=%s",
+                chat_id,
+                send_exc,
+            )
+            sent = await telethon_client.forward_messages(
+                entity=target_entity,
+                messages=messages,
+                from_peer=source_entity,
+                drop_author=True,
+            )
+        sent_messages = sent if isinstance(sent, list) else [sent]
+        ids = [int(m.id) for m in sent_messages if getattr(m, "id", None)]
+        logger.info(
+            "SAVED_POST_TELETHON_SOURCE_ALBUM_SEND_DONE | target_id=%s | message_ids=%s | method=telethon_source",
+            chat_id,
+            ids,
+        )
+        return {
+            "ok": True,
+            "message_id": ids[0],
+            "message_ids": ids,
+            "chat_id": str(chat_id),
+            "kind": "album",
+            "method": "telethon_source",
+        }
+    except Exception as exc:
+        logger.warning("SAVED_POST_TELETHON_SOURCE_ALBUM_SEND_FAILED | target_id=%s | error=%s", chat_id, exc)
+        raise
 async def send_saved_post_content_via_telethon(
     *,
     bot,
@@ -234,6 +343,18 @@ async def send_saved_post_content_via_telethon(
             media_items = content.get("media_items") or []
             if not media_items:
                 raise ValueError("В альбоме нет media_items")
+            try:
+                return await send_saved_post_album_via_telethon_source(
+                    telethon_client=telethon_client,
+                    chat_id=chat_id,
+                    content=content,
+                )
+            except Exception as source_exc:
+                logger.warning(
+                    "SAVED_POST_TELETHON_SOURCE_ALBUM_UNAVAILABLE | target_id=%s | error=%s",
+                    chat_id,
+                    source_exc,
+                )
             caption_entities = saved_post_entities_to_telethon(content.get("caption_entities"))
             local_paths = [await download_saved_post_media_item_for_telethon(bot=bot, item=item, temp_dir=temp_dir) for item in media_items]
             sent = await telethon_client.send_file(entity=target_entity, file=[str(x) for x in local_paths], caption=content.get("caption") or "", formatting_entities=caption_entities)

@@ -2,7 +2,13 @@ import asyncio
 
 import pytest
 
-from app.saved_post_renderer import SavedPostRenderer, normalize_telethon_target, send_saved_post_content
+from app.saved_post_renderer import (
+    SavedPostRenderer,
+    get_album_source_message_ids,
+    normalize_telethon_target,
+    send_saved_post_album_via_telethon_source,
+    send_saved_post_content,
+)
 
 
 class _FakeSentMessage:
@@ -165,5 +171,72 @@ def test_renderer_returns_failed_result_when_telethon_album_download_fails():
     assert result.ok is False
     assert result.method == "telethon_builder"
     assert result.kind == "album"
-    assert "file is too big" in (result.error_text or "")
+    assert "слишком большой" in (result.error_text or "")
     assert result.message_ids is None
+
+
+def test_get_album_source_message_ids_from_root():
+    assert get_album_source_message_ids({"source_message_ids": ["101", 102]}) == [101, 102]
+
+
+def test_get_album_source_message_ids_from_forward_origin():
+    assert get_album_source_message_ids({"forward_origin": {"message_ids": [101, 102]}}) == [101, 102]
+
+
+def test_send_saved_post_album_via_telethon_source_legacy_album_insufficient_ids():
+    with pytest.raises(ValueError, match="Замените рекламный пост альбомом заново"):
+        asyncio.run(send_saved_post_album_via_telethon_source(
+            telethon_client=_FakeTelethon(),
+            chat_id=1,
+            content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_id": 101}},
+        ))
+
+
+class FakeSourceMessage:
+    def __init__(self, id):
+        self.id = id
+        self.media = f"media-{id}"
+
+
+class FakeSentMessage:
+    def __init__(self, id):
+        self.id = id
+
+
+class FakeTelethonSource:
+    def __init__(self):
+        self.get_messages_calls = []
+        self.send_file_calls = []
+
+    async def get_messages(self, entity, ids):
+        self.get_messages_calls.append((entity, ids))
+        return [FakeSourceMessage(i) for i in ids]
+
+    async def send_file(self, entity, file, caption="", formatting_entities=None):
+        self.send_file_calls.append((entity, file, caption, formatting_entities))
+        return [FakeSentMessage(900 + i) for i, _ in enumerate(file)]
+
+
+def test_send_saved_post_album_via_telethon_source_success():
+    telethon = FakeTelethonSource()
+    raw = asyncio.run(send_saved_post_album_via_telethon_source(
+        telethon_client=telethon,
+        chat_id=123,
+        content={"kind": "album", "caption": "cap", "caption_entities": [], "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
+    ))
+    assert raw["method"] == "telethon_source"
+    assert raw["message_ids"] == [900, 901]
+
+
+def test_renderer_premium_album_uses_source_and_skips_bot_download():
+    class Bot:
+        async def get_file(self, file_id):
+            raise AssertionError("bot.get_file should not be called")
+
+    renderer = SavedPostRenderer(bot=Bot(), telethon_client=FakeTelethonSource(), temp_dir="media/temp")
+    result = asyncio.run(renderer.send(
+        chat_id=123,
+        content={"kind": "album", "caption_entities": [{"type": "custom_emoji", "offset": 0, "length": 1, "custom_emoji_id": "1"}], "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
+    ))
+    assert result.ok is True
+    assert result.method == "telethon_source"
