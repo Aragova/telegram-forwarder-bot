@@ -3,6 +3,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.repost_campaign_view_model import (
+    build_campaign_target_item_view,
     build_campaign_control_center_view_model,
     build_campaign_run_item_view,
     build_campaign_run_message_view,
@@ -269,28 +270,109 @@ def build_repost_campaign_targets_menu_view(*, rule_id: int, summary: dict) -> t
 
 def build_repost_campaign_targets_list_view(*, rule_id: int, targets: list[dict]) -> tuple[str, InlineKeyboardMarkup]:
     if not targets:
-        text = "📋 Список каналов/групп\n\nПока не добавлено ни одного канала или группы."
+        text = (
+            "📋 Каналы/Группы\n\n"
+            "Пока не добавлено ни одного канала или группы.\n\n"
+            "Добавьте список каналов/групп, куда рекламный пост будет отправляться после основного канала."
+        )
     else:
-        lines: list[str] = ["📋 Список каналов/групп", ""]
-        for idx, row in enumerate(targets[:30], 1):
-            has_error = bool(row.get("last_check_error"))
-            is_active = bool(row.get("is_active"))
-            icon = "⚠️" if has_error else ("🟢" if is_active else "⏸")
-            title = str(row.get("title") or row.get("target_id") or "")
-            if has_error:
-                lines.append(f"{idx}. {icon} {title} — {row.get('last_check_error')}")
-            else:
-                lines.append(f"{idx}. {icon} {title}")
-        if len(targets) > 30:
-            lines.extend(["", f"Показаны первые 30 из {len(targets)}."])
+        total = len(targets)
+        active = sum(1 for t in targets if bool(t.get("is_active")) and not t.get("last_check_error"))
+        errors = sum(1 for t in targets if t.get("last_check_error"))
+        paused = total - active - errors
+        lines = [
+            "📋 Каналы/Группы",
+            "",
+            f"Подключено: {total}",
+            f"🟢 Активных: {active}",
+            f"⏸ На паузе: {paused}",
+            f"⚠️ Требуют проверки: {errors}",
+            "",
+        ]
+        for idx, row in enumerate(targets[:10], 1):
+            view = build_campaign_target_item_view(row, index=idx)
+            lines.append(view["title"])
+            lines.append(f"   {view['status_line']}")
+            lines.append(f"   {view['target_line']}")
+            lines.append(f"   {view['check_line']}")
+            if view.get("error_line"):
+                lines.append(f"   {view['error_line']}")
+            lines.append("")
+        if total > 10:
+            lines.append(f"Показаны первые 10 из {total}.")
         text = "\n".join(lines)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⏸ Выключить по ID", callback_data=f"rule_repost_campaign_target_disable_prompt:{rule_id}")],
-        [InlineKeyboardButton(text="▶️ Включить по ID", callback_data=f"rule_repost_campaign_target_enable_prompt:{rule_id}")],
-        [InlineKeyboardButton(text="🗑 Удалить по ID", callback_data=f"rule_repost_campaign_target_remove_prompt:{rule_id}")],
+    keyboard_rows: list[list[InlineKeyboardButton]] = []
+    for idx, row in enumerate(targets[:10], 1):
+        row_id = int(row.get("id") or 0)
+        if row.get("is_active"):
+            keyboard_rows.append([InlineKeyboardButton(text=f"⏸ Пауза #{idx}", callback_data=f"rule_repost_campaign_target_pause:{rule_id}:{row_id}")])
+        else:
+            keyboard_rows.append([InlineKeyboardButton(text=f"▶️ Включить #{idx}", callback_data=f"rule_repost_campaign_target_resume:{rule_id}:{row_id}")])
+        keyboard_rows.append([InlineKeyboardButton(text=f"🗑 Удалить #{idx}", callback_data=f"rule_repost_campaign_target_delete_confirm:{rule_id}:{row_id}")])
+    keyboard_rows.extend([
+        [InlineKeyboardButton(text="📥 Добавить списком", callback_data=f"rule_repost_campaign_add_list:{rule_id}")],
+        [InlineKeyboardButton(text="🔎 Проверить права", callback_data=f"rule_repost_campaign_check:{rule_id}")],
+        [InlineKeyboardButton(text="⚙️ Действия по ID", callback_data=f"rule_repost_campaign_targets_id_actions:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
     ])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
     return text, keyboard
+
+
+def build_repost_campaign_targets_id_actions_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "⚙️ Действия по ID\n\n"
+        "Этот раздел нужен для редких случаев, когда канал/группа не отображается в списке или нужно быстро выполнить действие вручную.\n\n"
+        "Обычно удобнее управлять каналами через кнопки в списке."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏸ Поставить на паузу по ID", callback_data=f"rule_repost_campaign_target_disable_prompt:{rule_id}")],
+        [InlineKeyboardButton(text="▶️ Включить по ID", callback_data=f"rule_repost_campaign_target_enable_prompt:{rule_id}")],
+        [InlineKeyboardButton(text="🗑 Удалить по ID", callback_data=f"rule_repost_campaign_target_remove_prompt:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ К списку каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")],
+    ])
+    return text, kb
+
+
+def build_repost_campaign_target_action_result_view(*, rule_id: int, result: dict, action: str) -> tuple[str, InlineKeyboardMarkup]:
+    if result.get("ok"):
+        title = str(result.get("target_title") or "Канал/группа")
+        if action == "pause":
+            text = f"⏸ Канал/группа поставлены на паузу\n\n{title} больше не участвует в новых запусках кампании."
+        elif action == "resume":
+            text = f"▶️ Канал/группа включены\n\n{title} снова участвует в новых запусках кампании."
+        else:
+            text = f"🗑 Канал/группа удалены\n\n{title} больше не подключены к этой рекламной кампании."
+    else:
+        text = f"❌ Не удалось выполнить действие\n\n{result.get('error_text') or 'Неизвестная ошибка'}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 К списку каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")],
+        [InlineKeyboardButton(text="📣 К каналам/группам", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return text, kb
+
+
+def build_repost_campaign_target_delete_confirm_view(*, rule_id: int, target: dict | None) -> tuple[str, InlineKeyboardMarkup]:
+    if not target:
+        text = "❌ Канал/группа не найдены в кампании."
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К списку каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")]
+        ])
+        return text, kb
+    row_id = int(target.get("id") or 0)
+    title = str(target.get("title") or target.get("target_id") or "Канал/группа")
+    text = (
+        "🗑 Удалить канал/группу?\n\n"
+        f"{title}\n\n"
+        "Канал/группа больше не будут участвовать в новых запусках кампании.\n"
+        "История уже выполненных запусков сохранится."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"rule_repost_campaign_target_delete:{rule_id}:{row_id}")],
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")],
+    ])
+    return text, kb
 
 
 def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[str, InlineKeyboardMarkup]:

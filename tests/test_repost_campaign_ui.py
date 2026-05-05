@@ -8,12 +8,19 @@ from app.repost_campaign_ui import (
     build_repost_campaign_preview_view,
     build_repost_campaign_run_details_view,
     build_repost_campaign_show_menu_view,
+    build_repost_campaign_target_delete_confirm_view,
+    build_repost_campaign_targets_id_actions_view,
+    build_repost_campaign_targets_list_view,
     format_repost_campaign_readiness_block,
 )
 
 
 def _texts_from_keyboard(keyboard):
     return [button.text for row in keyboard.inline_keyboard for button in row]
+
+
+def _callbacks_from_keyboard(keyboard):
+    return [button.callback_data for row in keyboard.inline_keyboard for button in row]
 
 
 def test_post_menu_view_without_saved_post_has_add_button():
@@ -258,10 +265,50 @@ def test_preview_uses_readiness_block():
 def test_details_shows_retry_button_for_failed_delete():
     details = {"ok": True, "run_id": 10, "run": {"id": 10}, "messages": [{"id": 33, "send_status": "sent", "sent_message_id": 777, "delete_status": "failed"}], "summary": {}}
     _, keyboard = build_repost_campaign_run_details_view(rule_id=3, details=details)
+
+
+def test_target_list_cards_text():
+    text, _ = build_repost_campaign_targets_list_view(rule_id=3, targets=[{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}])
+    assert "📋 Каналы/Группы" in text
+    assert "Подключено:" in text
+    assert "🟢 Активных:" in text
+    assert "⏸ На паузе:" in text
+    assert "⚠️ Требуют проверки:" in text
+
+
+def test_target_list_inline_buttons():
+    _, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[
+        {"id": 1, "target_id": "-1001", "title": "A", "is_active": True},
+        {"id": 2, "target_id": "-1002", "title": "B", "is_active": False},
+    ])
     texts = _texts_from_keyboard(keyboard)
-    callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
-    assert "🔁 Повторить удаление #1" in texts
-    assert "rule_repost_campaign_delete_message:3:10:33" in callbacks
+    assert "⏸ Пауза #1" in texts
+    assert "🗑 Удалить #1" in texts
+    assert "▶️ Включить #2" in texts
+    assert "🗑 Удалить #2" in texts
+
+
+def test_target_list_no_old_id_buttons():
+    _, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[])
+    texts = _texts_from_keyboard(keyboard)
+    assert "Выключить по ID" not in " ".join(texts)
+    assert "Включить по ID" not in " ".join(texts)
+    assert "Удалить по ID" not in " ".join(texts)
+    assert "⚙️ Действия по ID" in texts
+
+
+def test_id_actions_view_contains_old_callbacks():
+    _, keyboard = build_repost_campaign_targets_id_actions_view(rule_id=3)
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_target_disable_prompt:3" in callbacks
+    assert "rule_repost_campaign_target_enable_prompt:3" in callbacks
+    assert "rule_repost_campaign_target_remove_prompt:3" in callbacks
+
+
+def test_delete_confirm_view():
+    _, keyboard = build_repost_campaign_target_delete_confirm_view(rule_id=3, target={"id": 12, "title": "Chan", "target_id": "-100"})
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_target_delete:3:12" in callbacks
 
 
 def test_details_shows_delete_now_for_pending():

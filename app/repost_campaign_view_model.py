@@ -92,6 +92,47 @@ def format_campaign_error_text(value, *, limit: int = 120) -> str | None:
     return text
 
 
+def build_campaign_target_item_view(target: dict, *, index: int | None = None) -> dict:
+    row_id = int(target.get("id") or 0)
+    target_id = str(target.get("target_id") or "")
+    title_raw = str(target.get("title") or "").strip() or target_id
+    is_active = bool(target.get("is_active"))
+    check_error = format_campaign_error_text(target.get("last_check_error"))
+    if check_error:
+        status_icon = "⚠️"
+        status_line = "Статус: требует проверки"
+        check_line = "Проверка: ⚠️ ошибка"
+        can_pause = False
+        can_enable = True
+    elif is_active:
+        status_icon = "🟢"
+        status_line = "Статус: активен"
+        check_line = "Проверка: ✅ готово"
+        can_pause = True
+        can_enable = False
+    else:
+        status_icon = "⏸"
+        status_line = "Статус: на паузе"
+        check_line = "Проверка: ✅ готово"
+        can_pause = False
+        can_enable = True
+    order = f"{index}. " if index is not None else ""
+    thread_id = target.get("target_thread_id")
+    return {
+        "row_id": row_id,
+        "title": f"{order}{status_icon} {title_raw}",
+        "status_line": status_line,
+        "target_line": f"ID: {target_id}",
+        "thread_line": f"Тема: {thread_id}" if thread_id is not None else "Тема: не задана",
+        "check_line": check_line,
+        "error_line": f"Ошибка: {check_error}" if check_error else None,
+        "can_pause": can_pause,
+        "can_enable": can_enable,
+        "can_remove": True,
+        "status_icon": status_icon,
+    }
+
+
 def format_campaign_delete_status_text(message: dict) -> str:
     status = (message.get("delete_status") or "").strip().lower()
     if status == "pending":
