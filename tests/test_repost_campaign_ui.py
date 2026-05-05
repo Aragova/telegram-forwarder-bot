@@ -137,6 +137,14 @@ def test_launch_result_sent():
     assert "✅ Успешно: 3" in text
     assert "📣 Всего каналов: 3" in text
     assert "📄 Детали запуска" in _texts_from_keyboard(keyboard)
+    assert "⏳ Срок показа: 12 часов" in text
+
+
+def test_launch_result_uses_show_seconds_from_extra():
+    result = {"ok": True, "saved_post_id": 7, "extra": {"campaign_run_id": 10, "targets_total": 3, "targets_success": 3, "targets_failed": 0, "show_seconds": 60}}
+    text, _ = build_repost_campaign_launch_result_view(rule_id=3, result=result)
+    assert "⏳ Срок показа: 1 минута" in text
+    assert "12 часов" not in text
 
 
 def test_launch_result_partial():
@@ -203,9 +211,38 @@ def test_details_failed_message():
         "ok": True,
         "run_id": 1,
         "run": {"id": 1},
-        "messages": [{"send_status": "failed", "target_title": "chan", "target_id": "-100", "error_text": "oops"}],
+        "messages": [{"target_kind": "extra", "send_status": "failed", "target_title": "chan", "target_id": "-100", "send_error_text": "Cannot send"}],
         "summary": {},
     }
     text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
-    assert "❌ Основной канал" in text
-    assert "Ошибка:" in text
+    assert "❌ Дополнительный канал" in text
+    assert "Ошибка отправки: Cannot send" in text
+
+
+def test_details_failed_delete_shows_reason_and_attempts():
+    details = {
+        "ok": True,
+        "run_id": 1,
+        "run": {"id": 1},
+        "messages": [{"send_status": "sent", "delete_status": "failed", "delete_error_text": "not enough rights", "delete_attempt_count": 2}],
+        "summary": {},
+    }
+    text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "Причина удаления: not enough rights" in text
+    assert "Попыток удаления: 2" in text
+
+
+def test_preview_uses_readiness_block():
+    text, _ = build_repost_campaign_preview_view(
+        rule_id=3,
+        saved_post_id=55,
+        saved_post_description="текст",
+        show_seconds_text="1 час",
+        targets_active=2,
+        targets_ready=1,
+        targets_with_errors=1,
+        targets_preview_text="1. 🟢 @a",
+        warnings=[],
+        readiness={"post_status_text": "✅ выбран", "show_seconds_status_text": "✅ 1 час", "targets_status_text": "✅ 2", "checks_status_text": "✅ ок", "summary_text": "✅ готово"},
+    )
+    assert "🚦 Готовность кампании" in text

@@ -6899,6 +6899,12 @@ async def handle_rule_repost_campaign_preview(callback: CallbackQuery):
 
         content = saved_post.get("content_json") or saved_post.get("content") or {}
         saved_post_description = get_saved_post_short_description(content)
+        readiness = None
+        try:
+            runtime = RepostCampaignRuntimeService(db)
+            readiness = await run_db(lambda: runtime.get_campaign_readiness(rule_id=rule_id))
+        except Exception:
+            readiness = None
         text, keyboard = build_repost_campaign_preview_view(
             rule_id=rule_id,
             saved_post_id=int(saved_post_id) if saved_post_id else None,
@@ -6909,6 +6915,7 @@ async def handle_rule_repost_campaign_preview(callback: CallbackQuery):
             targets_with_errors=targets_with_errors,
             targets_preview_text=targets_preview,
             warnings=warning_lines,
+            readiness=readiness,
         )
         logger.info(
             "REPOST_CAMPAIGN_PREVIEW_OPENED | rule_id=%s | saved_post_id=%s | active_targets=%s | show_seconds=%s",
