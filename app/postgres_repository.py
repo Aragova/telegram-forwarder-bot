@@ -7439,6 +7439,28 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return cur.rowcount > 0
 
+    def update_rule_repost_campaign_target_check_result(
+        self,
+        row_id: int,
+        *,
+        title: str | None = None,
+        last_check_error: str | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE rule_repost_campaign_targets
+                    SET title = COALESCE(%s, title),
+                        last_check_error = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (title, last_check_error, int(row_id)),
+                )
+            conn.commit()
+            return cur.rowcount > 0
+
     def create_delivery_campaign_copy(self, *, delivery_id: int, rule_id: int, target_id: str, target_thread_id: int | None, target_title: str | None) -> int | None:
         with self.connect() as conn:
             with conn.cursor() as cur:

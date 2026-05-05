@@ -105,6 +105,8 @@ from app.repost_campaign_ui import (
     build_repost_campaign_targets_id_actions_view,
     build_repost_campaign_targets_list_view,
     build_repost_campaign_targets_menu_view,
+    build_repost_campaign_target_check_result_view,
+    build_repost_campaign_targets_check_result_view,
 )
 from app.saved_posts_service import (
     build_saved_post_content_from_aiogram_message,
@@ -115,6 +117,7 @@ from app.saved_posts_service import (
 )
 from app.saved_post_renderer import SavedPostRenderer
 from app.repost_campaign_runtime_service import RepostCampaignRuntimeService
+from app.repost_campaign_target_check_service import RepostCampaignTargetCheckService
 from app.repost_campaign_delete_service import RepostCampaignDeleteService, run_repost_campaign_delete_loop
 from app import product_ui
 from app import access_control, user_ui

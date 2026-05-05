@@ -515,3 +515,31 @@ def test_main_menu_terminology_cleanup():
     assert "📝 Рекламный пост" in texts
     assert "⏳ Время показа" in texts
     assert "📣 Каналы/Группы" in texts
+
+
+def test_target_list_has_check_button_per_target():
+    _, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}])
+    texts = _texts_from_keyboard(keyboard)
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "🔎 Проверить #1" in texts
+    assert "rule_repost_campaign_target_check:3:1" in callbacks
+
+
+def test_single_check_result_success():
+    from app.repost_campaign_ui import build_repost_campaign_target_check_result_view
+    text, _ = build_repost_campaign_target_check_result_view(rule_id=3, result={"ok": True, "target_row_id": 1, "target_id": "-1001", "target_title": "A", "can_delete": True})
+    assert "✅ Проверка пройдена" in text
+
+
+def test_single_check_result_failed():
+    from app.repost_campaign_ui import build_repost_campaign_target_check_result_view
+    text, _ = build_repost_campaign_target_check_result_view(rule_id=3, result={"ok": False, "target_row_id": 1, "target_id": "-1001", "target_title": "A", "error_text": "err"})
+    assert "⚠️ Проверка не пройдена" in text
+
+
+def test_batch_result_summary():
+    from app.repost_campaign_ui import build_repost_campaign_targets_check_result_view
+    text, _ = build_repost_campaign_targets_check_result_view(rule_id=3, result={"checked": 2, "passed": 1, "failed": 1, "items": []})
+    assert "Проверено:" in text
+    assert "✅ Готово:" in text
+    assert "⚠️ Требуют внимания:" in text

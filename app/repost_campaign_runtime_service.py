@@ -38,10 +38,11 @@ class RepostCampaignActionResult:
 
 
 class RepostCampaignRuntimeService:
-    def __init__(self, *, repo, renderer, deleter=None, logger_=None):
+    def __init__(self, *, repo, renderer, deleter=None, target_checker=None, logger_=None):
         self.repo = repo
         self.renderer = renderer
         self.deleter = deleter
+        self.target_checker = target_checker
         self.logger = logger_ or logging.getLogger("forwarder")
 
     def _get_repost_rule_and_saved_post(self, *, rule_id: int, action: str):
@@ -134,6 +135,42 @@ class RepostCampaignRuntimeService:
         except Exception as exc:
             self.logger.warning("REPOST_CAMPAIGN_TARGET_REMOVE_FAILED | rule_id=%s | target_row_id=%s | error=%s", rule_id, target_row_id, exc)
             return {"ok": False, "error_text": "Не удалось удалить канал/группу"}
+
+
+    async def check_campaign_target(self, *, rule_id: int, target_row_id: int, admin_id: int | None = None) -> dict:
+        _ = admin_id
+        if not self.target_checker:
+            return {"ok": False, "rule_id": rule_id, "target_row_id": target_row_id, "error_text": "Сервис проверки прав недоступен"}
+        rule = self.repo.get_rule(rule_id)
+        if not rule:
+            return {"ok": False, "rule_id": rule_id, "target_row_id": target_row_id, "error_text": "Правило не найдено"}
+        target = self.get_campaign_target(rule_id=rule_id, target_row_id=target_row_id)
+        if not target:
+            return {"ok": False, "rule_id": rule_id, "target_row_id": target_row_id, "error_text": "Канал/группа не найдены в кампании"}
+        check = await self.target_checker.check_target(target_id=target["target_id"], target_thread_id=target.get("target_thread_id"))
+        saved = bool(self.repo.update_rule_repost_campaign_target_check_result(target_row_id, title=check.title, last_check_error=None if check.ok else check.error_text))
+        if not saved:
+            self.logger.warning("REPOST_CAMPAIGN_TARGET_CHECK_SAVE_FAILED | rule_id=%s | target_row_id=%s", rule_id, target_row_id)
+        self.logger.info("REPOST_CAMPAIGN_TARGET_CHECKED | rule_id=%s | target_row_id=%s | ok=%s | error=%s", rule_id, target_row_id, check.ok, check.error_text)
+        return {"ok": check.ok, "rule_id": rule_id, "target_row_id": target_row_id, "target_id": check.target_id, "target_title": check.title or target.get("title") or target.get("target_id"), "error_text": check.error_text, "can_view": check.can_view, "can_publish": check.can_publish, "can_delete": check.can_delete}
+
+    async def check_campaign_targets(self, *, rule_id: int, active_only: bool = False, admin_id: int | None = None, limit: int = 50) -> dict:
+        _ = admin_id
+        if not self.target_checker:
+            return {"ok": False, "rule_id": rule_id, "error_text": "Сервис проверки прав недоступен", "checked": 0, "passed": 0, "failed": 0, "items": []}
+        rule = self.repo.get_rule(rule_id)
+        if not rule:
+            return {"ok": False, "rule_id": rule_id, "error_text": "Правило не найдено", "checked": 0, "passed": 0, "failed": 0, "items": []}
+        targets = self.repo.list_rule_repost_campaign_targets(rule_id, active_only=active_only) or []
+        targets = targets[: max(0, int(limit or 0))]
+        self.logger.info("REPOST_CAMPAIGN_TARGET_CHECK_BATCH_STARTED | rule_id=%s | count=%s", rule_id, len(targets))
+        items=[]
+        for t in targets:
+            items.append(await self.check_campaign_target(rule_id=rule_id, target_row_id=int(t.get("id") or 0), admin_id=admin_id))
+        passed=sum(1 for i in items if i.get("ok"))
+        failed=len(items)-passed
+        self.logger.info("REPOST_CAMPAIGN_TARGET_CHECK_BATCH_DONE | rule_id=%s | checked=%s | passed=%s | failed=%s", rule_id, len(items), passed, failed)
+        return {"ok": True, "rule_id": rule_id, "checked": len(items), "passed": passed, "failed": failed, "items": items}
 
     async def preview_saved_post(self, *, rule_id: int, admin_chat_id: int | str, reply_markup=None) -> RepostCampaignActionResult:
         loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="preview_saved_post")
