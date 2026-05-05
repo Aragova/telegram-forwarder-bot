@@ -80,24 +80,24 @@ def test_control_center_view_model_ready():
         saved_post_line="📝 Рекламный пост: #13 · фото",
         control_center={"ok": True, "readiness": {"ready": True, "show_seconds": 60}, "issues": []},
     )
-    assert vm["status_title"] == "✅ Кампания готова к запуску"
-    assert "📝 Креатив:" in vm["post_line"]
+    assert vm["title_status"] == "✅ Готова к запуску"
+    assert "📝 Креатив:" in vm["creative_line"]
     assert "📣 Площадки:" in vm["targets_line"]
-    assert "🧹 Auto-delete:" in vm["delete_line"]
+    assert "🧹 Удаление:" in vm["delete_line"]
     assert vm["can_launch"] is True
 
 
-def test_control_center_view_model_not_ready():
+def test_control_center_view_model_not_ready_no_show_seconds():
     vm = build_campaign_control_center_view_model(
         summary={"saved_post_id": 13},
         saved_post_line="📝 Рекламный пост: #13 · фото",
         control_center={"ok": True, "readiness": {"ready": False}, "issues": []},
     )
     assert vm["can_launch"] is False
-    assert vm["status_title"] == "⚠️ Кампания требует настройки"
+    assert vm["title_status"] == "⚠️ Нужно настроить срок показа"
 
 
-def test_control_center_view_model_last_run_block():
+def test_control_center_view_model_last_run_line_compact():
     vm = build_campaign_control_center_view_model(
         summary={"saved_post_id": 13},
         saved_post_line="📝 Рекламный пост: #13 · фото",
@@ -109,16 +109,41 @@ def test_control_center_view_model_last_run_block():
             "issues": [],
         },
     )
-    assert "📊 Последний запуск" in vm["last_run_block"]
-    assert "#4" in vm["last_run_block"]
+    assert "📊 Последний запуск:" in vm["last_run_line"]
+    assert "#4" in vm["last_run_line"]
 
 
-def test_control_center_view_model_issues_capped():
+def test_delete_failed_has_priority_over_ready():
     vm = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 13, "show_seconds": 60, "targets_active": 1},
+        saved_post_line="📝 Рекламный пост: #13 · фото",
+        control_center={
+            "ok": True,
+            "readiness": {"ready": True},
+            "last_run": {"id": 5, "status": "sent", "targets_success": 1, "targets_total": 1},
+            "last_run_details": {"ok": True, "summary": {"delete_failed": 1}},
+        },
+    )
+    assert vm["title_status"] == "⚠️ Есть проблемы удаления"
+
+
+def test_delete_line_variants():
+    base = {"ok": True, "readiness": {"ready": False}, "last_run": {"id": 5, "status": "sent", "targets_success": 1, "targets_total": 1}}
+    pending = build_campaign_control_center_view_model(
         summary={},
         saved_post_line="📝 Рекламный пост: не выбран",
-        control_center={"ok": True, "readiness": {"ready": False}, "issues": [str(i) for i in range(7)]},
+        control_center={**base, "last_run_details": {"ok": True, "summary": {"delete_pending": 2}}},
     )
-    assert "• 0" in vm["issues_block"]
-    assert "• 4" in vm["issues_block"]
-    assert "...и ещё 2" in vm["issues_block"]
+    failed = build_campaign_control_center_view_model(
+        summary={},
+        saved_post_line="📝 Рекламный пост: не выбран",
+        control_center={**base, "last_run_details": {"ok": True, "summary": {"delete_failed": 1}}},
+    )
+    deleted = build_campaign_control_center_view_model(
+        summary={},
+        saved_post_line="📝 Рекламный пост: не выбран",
+        control_center={**base, "last_run_details": {"ok": True, "summary": {"deleted": 3}}},
+    )
+    assert pending["delete_line"] == "🧹 Удаление: ожидает 2"
+    assert failed["delete_line"] == "🧹 Удаление: 1 ошибка"
+    assert deleted["delete_line"] == "🧹 Удаление: всё чисто"

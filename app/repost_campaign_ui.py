@@ -40,39 +40,64 @@ def build_repost_campaign_menu_view(
     if cc_payload is None:
         cc_payload = {"ok": bool(readiness), "readiness": readiness, "last_run": None, "last_run_details": None, "issues": []}
     vm = build_campaign_control_center_view_model(summary=summary, saved_post_line=saved_post_line, control_center=cc_payload)
-    readiness_block = format_repost_campaign_readiness_block(readiness)
     text = (
         "💰 Рекламная кампания\n\n"
-        "🧭 Центр управления\n"
-        f"Правило #{rule_id}\n\n"
-        f"{vm['status_title']}\n\n"
-        f"{vm['post_line']}\n"
+        f"{vm['title_status']}\n\n"
+        f"{vm['creative_line']}\n"
         f"{vm['targets_line']}\n"
         f"{vm['show_seconds_line']}\n"
+        "\n"
+        f"{vm['last_run_line']}\n"
         f"{vm['delete_line']}\n\n"
-        f"{readiness_block}\n\n"
-        f"{vm['last_run_block']}\n\n"
-        f"{vm['issues_block']}"
+        f"{vm['next_step_line']}"
     )
     rows = []
-    if vm["can_launch"]:
+    primary_action = vm.get("primary_action")
+    if primary_action == "show_seconds":
+        rows.append([InlineKeyboardButton(text="⏳ Задать срок", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")])
+    elif primary_action == "creative":
+        rows.append([InlineKeyboardButton(text="📝 Выбрать креатив", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")])
+    elif primary_action == "targets":
+        rows.append([InlineKeyboardButton(text="📣 Добавить площадки", callback_data=f"rule_repost_campaign_targets:{rule_id}")])
+    elif primary_action == "launch":
         rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
-    if vm["can_check_publication"]:
-        rows.append([InlineKeyboardButton(text="📤 Проверить публикацию", callback_data=f"rule_repost_campaign_test_send:{rule_id}")])
+    elif primary_action == "open_last_run" and vm["last_run_id"]:
+        rows.append([InlineKeyboardButton(text="📄 Открыть последний запуск", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{vm['last_run_id']}")])
+
     rows.extend([
-        [InlineKeyboardButton(text="📝 Креатив", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-        [InlineKeyboardButton(text="⏳ Срок", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
-        [InlineKeyboardButton(text="📣 Площадки", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
-        [InlineKeyboardButton(text="📊 История", callback_data=f"rule_repost_campaign_history:{rule_id}")],
-        [InlineKeyboardButton(text="👁 Предпросмотр", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
+        [
+            InlineKeyboardButton(text="📝 Креатив", callback_data=f"rule_repost_campaign_post_menu:{rule_id}"),
+            InlineKeyboardButton(text="⏳ Срок", callback_data=f"rule_repost_campaign_show_menu:{rule_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="📣 Площадки", callback_data=f"rule_repost_campaign_targets:{rule_id}"),
+            InlineKeyboardButton(text="📊 История", callback_data=f"rule_repost_campaign_history:{rule_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="👁 Предпросмотр", callback_data=f"rule_repost_campaign_preview:{rule_id}"),
+            InlineKeyboardButton(text="⚙️ Ещё", callback_data=f"rule_repost_campaign_more:{rule_id}"),
+        ],
     ])
-    if vm["last_run_id"]:
-        rows.append([InlineKeyboardButton(text="📄 Последний запуск", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{vm['last_run_id']}")])
+    if vm["can_launch"] and primary_action != "launch":
+        rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
     rows.extend([
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-        [InlineKeyboardButton(text="❌ Отключить кампанию", callback_data=f"rule_repost_campaign_disable:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")],
     ])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_more_view(*, rule_id: int, saved_post_id: int | None, last_run_id: int | None) -> tuple[str, InlineKeyboardMarkup]:
+    rows = []
+    if saved_post_id:
+        rows.append([InlineKeyboardButton(text="📤 Проверить публикацию", callback_data=f"rule_repost_campaign_test_send:{rule_id}")])
+    if last_run_id:
+        rows.append([InlineKeyboardButton(text="📄 Последний запуск", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{last_run_id}")])
+    rows.extend([
+        [InlineKeyboardButton(text="🔄 Обновить кампанию", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        [InlineKeyboardButton(text="❌ Отключить кампанию", callback_data=f"rule_repost_campaign_disable:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    text = "⚙️ Дополнительно\n\nСлужебные действия рекламной кампании."
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 

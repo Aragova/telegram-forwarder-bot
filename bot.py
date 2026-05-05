@@ -91,6 +91,7 @@ from app.repost_campaign_service import (
     normalize_campaign_show_seconds,
 )
 from app.repost_campaign_ui import (
+    build_repost_campaign_more_view,
     build_repost_campaign_delete_result_view,
     build_repost_campaign_history_view,
     build_repost_campaign_launch_result_view,
@@ -6479,6 +6480,40 @@ async def handle_rule_repost_campaign_disable(callback: CallbackQuery):
     invalidate_rule_card_cache(rule_id)
     await _render_repost_campaign_menu(callback, rule_id)
     await answer_callback_safe_once(callback, "Рекламная кампания выключена")
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_more:"))
+async def handle_rule_repost_campaign_more(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return
+    try:
+        control_center = await run_db(lambda: RepostCampaignRuntimeService(repo=db, renderer=SavedPostRenderer(
+            bot=bot,
+            telethon_client=telethon_client,
+            temp_dir=settings.temp_dir,
+        )).get_campaign_control_center(rule_id=rule_id))
+    except Exception:
+        control_center = None
+    last_run = (control_center or {}).get("last_run") or {}
+    text, keyboard = build_repost_campaign_more_view(
+        rule_id=rule_id,
+        saved_post_id=getattr(rule, "repost_campaign_saved_post_id", None),
+        last_run_id=last_run.get("id"),
+    )
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    await answer_callback_safe_once(callback)
 
 
 def _should_answer_new_message_for_callback(callback: CallbackQuery) -> bool:
