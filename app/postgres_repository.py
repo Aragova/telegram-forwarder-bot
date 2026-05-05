@@ -7231,6 +7231,89 @@ class PostgresRepository(RepositoryProtocol):
                 cur.execute("SELECT * FROM campaign_run_messages WHERE run_id=%s ORDER BY id ASC", (int(run_id),))
                 return [dict(row) for row in (cur.fetchall() or [])]
 
+    def claim_due_campaign_run_messages_for_delete(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH due AS (
+                        SELECT id
+                        FROM campaign_run_messages
+                        WHERE send_status = 'sent'
+                          AND delete_status = 'pending'
+                          AND delete_after_at IS NOT NULL
+                          AND delete_after_at <= NOW()
+                          AND sent_message_id IS NOT NULL
+                        ORDER BY delete_after_at ASC, id ASC
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE campaign_run_messages m
+                    SET delete_status = 'processing',
+                        delete_attempt_count = COALESCE(delete_attempt_count, 0) + 1,
+                        updated_at = NOW()
+                    FROM due
+                    WHERE m.id = due.id
+                    RETURNING m.*
+                    """,
+                    (int(limit),),
+                )
+                rows = [dict(row) for row in (cur.fetchall() or [])]
+            conn.commit()
+            return rows
+
+    def mark_campaign_run_message_deleted(self, message_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET delete_status = 'deleted',
+                        deleted_at = NOW(),
+                        delete_error_text = NULL,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (int(message_id),),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def mark_campaign_run_message_delete_failed(self, message_id: int, *, error_text: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET delete_status = 'failed',
+                        delete_error_text = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (error_text, int(message_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def reset_stuck_campaign_delete_processing(self, *, stuck_seconds: int = 300) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET delete_status = 'pending',
+                        updated_at = NOW()
+                    WHERE delete_status = 'processing'
+                      AND updated_at <= NOW() - (%s * INTERVAL '1 second')
+                    """,
+                    (int(stuck_seconds),),
+                )
+                count = int(cur.rowcount)
+            conn.commit()
+            return count
+
     def update_rule_repost_campaign_settings(self, rule_id: int, *, enabled: bool, show_seconds: int) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:

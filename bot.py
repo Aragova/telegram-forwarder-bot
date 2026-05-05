@@ -110,6 +110,7 @@ from app.saved_posts_service import (
 )
 from app.saved_post_renderer import SavedPostRenderer
 from app.repost_campaign_runtime_service import RepostCampaignRuntimeService
+from app.repost_campaign_delete_service import RepostCampaignDeleteService, run_repost_campaign_delete_loop
 from app import product_ui
 from app import access_control, user_ui
 from app.user_handlers import (
@@ -9876,6 +9877,15 @@ async def _start_bot_role() -> None:
     await _init_sender_runtime(create_ui_policy=True)
     asyncio.create_task(heartbeat_loop("bot", db))
     asyncio.create_task(watchdog_loop(db))
+    if settings.repost_campaign_admin_test_enabled:
+        delete_service = RepostCampaignDeleteService(bot=bot, telethon_client=telethon_client)
+        delete_runtime = RepostCampaignRuntimeService(
+            repo=db,
+            renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir),
+            deleter=delete_service,
+        )
+        asyncio.create_task(run_repost_campaign_delete_loop(runtime=delete_runtime, interval_seconds=10, batch_limit=50))
+        logger.info("REPOST_CAMPAIGN_DELETE_LOOP_STARTED | interval_seconds=10 | batch_limit=50")
     logger.info("STARTUP | Роль UI (bot) запущена")
     await dp.start_polling(
         bot,
@@ -9923,6 +9933,15 @@ async def _start_all_role() -> None:
     asyncio.create_task(heartbeat_loop("scheduler", db))
     asyncio.create_task(heartbeat_loop("worker", db))
     asyncio.create_task(watchdog_loop(db))
+    if settings.repost_campaign_admin_test_enabled:
+        delete_service = RepostCampaignDeleteService(bot=bot, telethon_client=telethon_client)
+        delete_runtime = RepostCampaignRuntimeService(
+            repo=db,
+            renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir),
+            deleter=delete_service,
+        )
+        asyncio.create_task(run_repost_campaign_delete_loop(runtime=delete_runtime, interval_seconds=10, batch_limit=50))
+        logger.info("REPOST_CAMPAIGN_DELETE_LOOP_STARTED | interval_seconds=10 | batch_limit=50")
     if scheduler_runtime_task is None or scheduler_runtime_task.done():
         scheduler_runtime_task = asyncio.create_task(
             run_scheduler_loop(

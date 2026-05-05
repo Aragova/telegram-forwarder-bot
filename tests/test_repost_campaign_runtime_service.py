@@ -22,6 +22,11 @@ class _FakeRepo:
         self._run = None
         self._messages = []
         self._targets = []
+        self._due_delete_rows = []
+        self.claim_due_campaign_run_messages_for_delete_calls = []
+        self.mark_campaign_run_message_deleted_calls = []
+        self.mark_campaign_run_message_delete_failed_calls = []
+        self.reset_stuck_campaign_delete_processing_calls = []
 
     def get_rule(self, rule_id):
         return self._rule
@@ -67,6 +72,22 @@ class _FakeRepo:
 
     def list_rule_repost_campaign_targets(self, rule_id, active_only=True):
         return list(self._targets)
+
+    def claim_due_campaign_run_messages_for_delete(self, *, limit=50):
+        self.claim_due_campaign_run_messages_for_delete_calls.append(limit)
+        return list(self._due_delete_rows)
+
+    def mark_campaign_run_message_deleted(self, message_id):
+        self.mark_campaign_run_message_deleted_calls.append(message_id)
+        return True
+
+    def mark_campaign_run_message_delete_failed(self, message_id, *, error_text):
+        self.mark_campaign_run_message_delete_failed_calls.append((message_id, error_text))
+        return True
+
+    def reset_stuck_campaign_delete_processing(self, *, stuck_seconds=300):
+        self.reset_stuck_campaign_delete_processing_calls.append(stuck_seconds)
+        return 0
 
 
 class _FakeRenderer:
@@ -257,6 +278,48 @@ def test_launch_main_only_success():
     assert result.extra["targets_success"] == 1
     assert result.extra["final_status"] == "sent"
     assert repo.create_campaign_run_message_calls[0]["target_kind"] == "main"
+
+
+def test_process_due_deletions_no_deleter():
+    runtime = RepostCampaignRuntimeService(repo=_FakeRepo(), renderer=_FakeRenderer(None), deleter=None)
+    result = asyncio.run(runtime.process_due_deletions())
+    assert result["ok"] is False
+    assert result["error_text"] == "Delete service недоступен"
+
+
+def test_process_due_deletions_no_due_rows():
+    repo = _FakeRepo()
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=None))
+    async def _noop(**kwargs):  # pragma: no cover
+        return None
+    runtime.deleter.delete_message = _noop
+    result = asyncio.run(runtime.process_due_deletions())
+    assert result["claimed"] == 0
+    assert result["deleted"] == 0
+    assert result["failed"] == 0
+
+
+def test_process_due_deletions_success():
+    repo = _FakeRepo()
+    repo._due_delete_rows = [{"id": 3, "target_id": "-1002741117827", "sent_message_id": 2466, "render_mode": "telethon_builder"}]
+    async def _ok(**kwargs):
+        return SimpleNamespace(ok=True, method="telethon", error_text=None)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=_ok))
+    result = asyncio.run(runtime.process_due_deletions())
+    assert repo.mark_campaign_run_message_deleted_calls == [3]
+    assert result["deleted"] == 1
+    assert result["failed"] == 0
+
+
+def test_process_due_deletions_failed():
+    repo = _FakeRepo()
+    repo._due_delete_rows = [{"id": 4, "target_id": "-1002741117827", "sent_message_id": 2467, "render_mode": None}]
+    async def _fail(**kwargs):
+        return SimpleNamespace(ok=False, method="failed", error_text="no rights")
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=_fail))
+    result = asyncio.run(runtime.process_due_deletions())
+    assert repo.mark_campaign_run_message_delete_failed_calls[0][0] == 4
+    assert result["failed"] == 1
 
 
 def test_launch_main_plus_extras_success():
