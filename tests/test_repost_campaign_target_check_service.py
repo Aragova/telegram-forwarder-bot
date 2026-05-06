@@ -50,6 +50,16 @@ def test_broadcast_admin_without_post_messages_fails():
     assert result.ok is False and result.can_publish is False
 
 
+def test_broadcast_admin_without_admin_rights_is_allowed():
+    perms = SimpleNamespace(is_admin=True, is_creator=False, admin_rights=None, banned_rights=None)
+    entity = SimpleNamespace(title="Channel A", broadcast=True, megagroup=False)
+    result = asyncio.run(RepostCampaignTargetCheckService(telethon_client=_FakeTelethon(entity=entity, permissions=perms)).check_target(target_id="-1001"))
+    assert result.ok is True
+    assert result.can_publish is True
+    assert result.can_delete is None
+    assert result.error_text is None
+
+
 def test_megagroup_admin_without_post_messages_is_ok():
     perms = SimpleNamespace(is_admin=True, is_creator=False, admin_rights=SimpleNamespace(delete_messages=True), banned_rights=None)
     entity = SimpleNamespace(title="Group A", broadcast=False, megagroup=True)
