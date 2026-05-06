@@ -138,16 +138,28 @@ class _FakeDeleter:
 
 
 class _FakeTelethonClient:
-    def __init__(self, views_map=None, fail_ids=None):
+    def __init__(self, views_map=None, fail_ids=None, fail_entities=None):
         self.views_map = views_map or {}
         self.fail_ids = set(fail_ids or [])
+        self.fail_entities = set(fail_entities or [])
+        self.get_messages_calls = []
+        self.get_entity_calls = []
 
     async def get_messages(self, *, entity, ids):
+        self.get_messages_calls.append({"entity": entity, "ids": ids})
+        if entity in self.fail_entities:
+            raise ValueError(f'Cannot find any entity corresponding to "{entity}"')
         if ids in self.fail_ids:
             raise RuntimeError("boom")
         if ids not in self.views_map:
             return None
         return SimpleNamespace(views=self.views_map[ids])
+
+    async def get_entity(self, entity):
+        self.get_entity_calls.append(entity)
+        if entity in self.fail_entities:
+            raise ValueError(f'Cannot find any entity corresponding to "{entity}"')
+        return entity
 
 
 def test_preview_fail_no_rule():
@@ -306,6 +318,19 @@ def test_build_views_report_all_available():
     assert report["views_total"] == 200 and report["views_available"] == 2 and report["views_unavailable"] == 0
 
 
+def test_build_views_report_normalizes_negative_channel_id():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 8, "rule_id": 3}
+    repo._messages = [{"send_status": "sent", "target_id": "-1002451047809", "target_title": "A", "sent_message_id": 1062}]
+    telethon = _FakeTelethonClient({1062: 77})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=telethon)
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["status"] == "ready"
+    assert report["views_total"] > 0
+    assert report["views_available"] == 1 and report["views_unavailable"] == 0
+    assert telethon.get_messages_calls[0]["entity"] == -1002451047809
+
+
 def test_build_views_report_album_counts_first_message_only():
     repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
     repo._run = {"id": 8, "rule_id": 3}
@@ -336,6 +361,18 @@ def test_build_views_report_after_deleted_unavailable():
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=_FakeTelethonClient({}))
     report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
     assert report["items"][0]["views_status"] == "unavailable"
+    assert "Публикация уже удалена" in report["items"][0]["error_text"]
+
+
+def test_build_views_report_entity_failure_uses_human_error():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 8, "rule_id": 3}
+    repo._messages = [{"send_status": "sent", "target_id": "-1002451047809", "target_title": "A", "sent_message_id": 1062}]
+    telethon = _FakeTelethonClient({1062: 77}, fail_entities={-1002451047809})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=telethon)
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["status"] in {"unavailable", "partial"}
+    assert "Cannot find any entity" not in report["items"][0]["error_text"]
     assert "Telegram не вернул просмотры" in report["items"][0]["error_text"]
 
 
