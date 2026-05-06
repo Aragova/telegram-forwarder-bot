@@ -107,6 +107,8 @@ from app.repost_campaign_ui import (
     build_repost_campaign_targets_menu_view,
     build_repost_campaign_target_check_result_view,
     build_repost_campaign_targets_check_result_view,
+    build_repost_campaign_target_preview_result_view,
+    build_repost_campaign_preview_delete_result_view,
 )
 from app.saved_posts_service import (
     build_saved_post_album_content_from_aiogram_messages,
@@ -6655,26 +6657,80 @@ async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
 
-    preview_keyboard = _build_repost_campaign_post_preview_keyboard(rule_id)
     renderer = SavedPostRenderer(
         bot=bot,
         telethon_client=telethon_client,
         temp_dir=settings.temp_dir,
     )
-    runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
-    result = await runtime.preview_saved_post(
+    deleter = RepostCampaignDeleteService(bot=bot, telethon_client=telethon_client)
+    runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer, deleter=deleter)
+    result = await runtime.preview_saved_post_in_main_target(
         rule_id=rule_id,
-        admin_chat_id=callback.message.chat.id,
-        reply_markup=preview_keyboard,
+        admin_chat_id=callback.from_user.id,
     )
-    if not result.ok:
+    if result.ok:
+        user_states.setdefault(callback.from_user.id, {})["last_repost_campaign_preview"] = {
+            "rule_id": rule_id,
+            "target_id": result.extra.get("target_id") if result.extra else None,
+            "message_id": result.extra.get("message_id") if result.extra else None,
+            "message_ids": result.extra.get("message_ids") if result.extra else None,
+            "render_mode": result.extra.get("method") if result.extra else None,
+        }
+        text, keyboard = build_repost_campaign_target_preview_result_view(rule_id=rule_id, result=result.to_dict())
+        logger.info(
+            "REPOST_CAMPAIGN_TARGET_PREVIEW_UI_DONE | rule_id=%s | target_id=%s | message_ids=%s | method=%s",
+            rule_id,
+            result.extra.get("target_id") if result.extra else None,
+            result.extra.get("message_ids") if result.extra else None,
+            result.extra.get("method") if result.extra else None,
+        )
+        await callback.message.answer(text, reply_markup=keyboard)
+    else:
+        logger.warning("REPOST_CAMPAIGN_TARGET_PREVIEW_UI_FAILED | rule_id=%s | error=%s", rule_id, result.error_text)
         error_text = (
             "❌ Не удалось показать рекламный пост\n\n"
             f"{result.error_text or 'Неизвестная ошибка'}"
         )
-        if result.premium_required:
-            error_text += "\n\nPremium-оформление требует Telethon-отправки. Проверьте, что аккаунт-парсер активен."
         await callback.message.answer(error_text)
+    await answer_callback_safe_once(callback)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_preview_delete:"))
+async def handle_rule_repost_campaign_preview_delete(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    preview = user_states.get(callback.from_user.id, {}).get("last_repost_campaign_preview")
+    if not preview or int(preview.get("rule_id") or 0) != rule_id:
+        await callback.message.answer("Предпросмотр уже не найден. Отправьте его заново.")
+        await answer_callback_safe_once(callback)
+        return
+    renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir)
+    deleter = RepostCampaignDeleteService(bot=bot, telethon_client=telethon_client)
+    runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer, deleter=deleter)
+    result = await runtime.delete_preview_messages(
+        target_id=preview.get("target_id"),
+        message_id=preview.get("message_id"),
+        message_ids=preview.get("message_ids"),
+        render_mode=preview.get("render_mode"),
+    )
+    if result.ok:
+        user_states.get(callback.from_user.id, {}).pop("last_repost_campaign_preview", None)
+        logger.info(
+            "REPOST_CAMPAIGN_TARGET_PREVIEW_DELETE_UI_DONE | rule_id=%s | target_id=%s | message_ids=%s",
+            rule_id, preview.get("target_id"), preview.get("message_ids")
+        )
+    else:
+        logger.warning("REPOST_CAMPAIGN_TARGET_PREVIEW_DELETE_UI_FAILED | rule_id=%s | error=%s", rule_id, result.error_text)
+    text, keyboard = build_repost_campaign_preview_delete_result_view(rule_id=rule_id, result=result.to_dict())
+    await callback.message.answer(text, reply_markup=keyboard)
     await answer_callback_safe_once(callback)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_unlink:"))
