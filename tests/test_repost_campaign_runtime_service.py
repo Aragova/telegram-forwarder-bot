@@ -153,7 +153,12 @@ class _FakeTelethonClient:
             raise RuntimeError("boom")
         if ids not in self.views_map:
             return None
-        return SimpleNamespace(views=self.views_map[ids])
+        value = self.views_map[ids]
+        if hasattr(value, "views") or hasattr(value, "id"):
+            return value
+        if isinstance(value, dict):
+            return SimpleNamespace(**value)
+        return SimpleNamespace(id=ids, views=value)
 
     async def get_entity(self, entity):
         self.get_entity_calls.append(entity)
@@ -843,3 +848,60 @@ def test_launch_campaign_missing_show_seconds_blocked():
     result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
     assert result.ok is False
     assert not repo.create_campaign_run_calls
+
+
+def test_build_views_report_counts_only_matching_message_id():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 8, "rule_id": 3}
+    repo._messages = [{"send_status": "sent", "target_id": "-1002741117827", "target_title": "A", "sent_message_id": 2484}]
+    telethon = _FakeTelethonClient({2484: {"id": 9999, "views": 9023, "peer_id": SimpleNamespace(channel_id=2741117827)}})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=telethon)
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["views_total"] == 0
+    assert report["views_available"] == 0
+    assert report["views_unavailable"] == 1
+    assert report["items"][0]["views_status"] == "failed"
+    assert "не подтвердил нужное сообщение" in report["items"][0]["error_text"]
+
+
+def test_build_views_report_counts_only_matching_peer():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 8, "rule_id": 3}
+    repo._messages = [{"send_status": "sent", "target_id": "-1002741117827", "target_title": "A", "sent_message_id": 2484}]
+    telethon = _FakeTelethonClient({2484: {"id": 2484, "views": 9023, "peer_id": SimpleNamespace(channel_id=2535740454)}})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=telethon)
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["views_total"] == 0
+    assert report["items"][0]["views_status"] == "failed"
+    assert "другого канала" in report["items"][0]["error_text"]
+
+
+def test_build_views_report_counts_matching_peer_and_id():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 8, "rule_id": 3}
+    repo._messages = [{"send_status": "sent", "target_id": "-1002741117827", "target_title": "A", "sent_message_id": 2484}]
+    telethon = _FakeTelethonClient({2484: {"id": 2484, "views": 129, "peer_id": SimpleNamespace(channel_id=2741117827)}})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=telethon)
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["views_total"] == 129
+    assert report["views_available"] == 1
+    assert report["items"][0]["views_status"] == "ok"
+
+
+def test_normalize_telegram_channel_id_for_compare():
+    runtime = RepostCampaignRuntimeService(repo=_FakeRepo(rule=SimpleNamespace(mode="repost")), renderer=_FakeRenderer(None))
+    assert runtime._normalize_telegram_channel_id_for_compare("-1002741117827") == "2741117827"
+    assert runtime._normalize_telegram_channel_id_for_compare(-1002741117827) == "2741117827"
+    assert runtime._normalize_telegram_channel_id_for_compare("2741117827") == "2741117827"
+
+
+def test_album_first_message_peer_validated():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 8, "rule_id": 3}
+    repo._messages = [{"send_status": "sent", "target_id": "-1002741117827", "target_title": "A", "sent_message_ids": [2484, 2485, 2486]}]
+    telethon = _FakeTelethonClient({2484: {"id": 2484, "views": 129, "peer_id": SimpleNamespace(channel_id=2741117827)}})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=telethon)
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["views_total"] == 129
+    assert report["views_available"] == 1
+    assert report["items"][0]["is_album"] is True

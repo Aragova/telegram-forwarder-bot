@@ -113,6 +113,36 @@ class RepostCampaignRuntimeService:
             return [int(x) for x in ids_json]
         mid = message.get("sent_message_id")
         return [int(mid)] if mid else []
+
+    def _normalize_telegram_channel_id_for_compare(self, value) -> str | None:
+        if value is None:
+            return None
+        raw = str(value).strip()
+        if not raw:
+            return None
+        if raw.startswith('-100'):
+            normalized = raw[4:]
+        elif raw.startswith('-'):
+            normalized = raw[1:]
+        else:
+            normalized = raw
+        return normalized if normalized.isdigit() else None
+
+    def _extract_telethon_message_peer_id(self, message) -> str | None:
+        if message is None:
+            return None
+        candidates = [
+            getattr(message, 'chat_id', None),
+            getattr(getattr(message, 'peer_id', None), 'channel_id', None),
+            getattr(getattr(message, 'to_id', None), 'channel_id', None),
+            getattr(getattr(message, 'peer_id', None), 'chat_id', None),
+            getattr(getattr(message, 'to_id', None), 'chat_id', None),
+        ]
+        for candidate in candidates:
+            normalized = self._normalize_telegram_channel_id_for_compare(candidate)
+            if normalized is not None:
+                return normalized
+        return None
     def get_campaign_target(self, *, rule_id: int, target_row_id: int) -> dict | None:
         targets = self.repo.list_rule_repost_campaign_targets(rule_id, active_only=False) or []
         return next((t for t in targets if int(t.get("id") or 0) == int(target_row_id)), None)
@@ -1172,17 +1202,67 @@ class RepostCampaignRuntimeService:
                 except Exception:
                     entity = await self.telethon_client.get_entity(normalized_entity)
                     telethon_message = await self.telethon_client.get_messages(entity=entity, ids=report_message_id)
-                views = getattr(telethon_message, "views", None) if telethon_message is not None else None
-                if views is None:
+                if telethon_message is None:
                     item["views_status"] = "unavailable"
                     item["error_text"] = "Публикация уже удалена или Telegram не вернул данные."
                     views_unavailable += 1
+                elif int(getattr(telethon_message, "id", 0) or 0) != report_message_id:
+                    item["views_status"] = "failed"
+                    item["error_text"] = "Telegram не подтвердил нужное сообщение. Просмотры не засчитаны."
+                    views_unavailable += 1
+                    self.logger.warning(
+                        "REPOST_CAMPAIGN_VIEWS_MESSAGE_MISMATCH | rule_id=%s | run_id=%s | target_id=%s | expected_message_id=%s | actual_message_id=%s",
+                        rule_id,
+                        run_id,
+                        target_id,
+                        report_message_id,
+                        getattr(telethon_message, "id", None),
+                    )
                 else:
-                    item["views_status"] = "ok"
-                    item["views"] = int(views or 0)
-                    views_total += int(views or 0)
-                    views_available += 1
-                    top_items.append(item)
+                    expected_peer = self._normalize_telegram_channel_id_for_compare(target_id)
+                    actual_peer = self._extract_telethon_message_peer_id(telethon_message)
+                    if expected_peer and actual_peer and expected_peer != actual_peer:
+                        item["views_status"] = "failed"
+                        item["error_text"] = "Telegram вернул данные другого канала. Просмотры не засчитаны."
+                        views_unavailable += 1
+                        self.logger.warning(
+                            "REPOST_CAMPAIGN_VIEWS_PEER_MISMATCH | rule_id=%s | run_id=%s | target_id=%s | expected_peer=%s | actual_peer=%s | message_id=%s",
+                            rule_id,
+                            run_id,
+                            target_id,
+                            expected_peer,
+                            actual_peer,
+                            report_message_id,
+                        )
+                    else:
+                        if actual_peer is None:
+                            self.logger.info(
+                                "REPOST_CAMPAIGN_VIEWS_PEER_UNKNOWN | rule_id=%s | run_id=%s | target_id=%s | message_id=%s",
+                                rule_id,
+                                run_id,
+                                target_id,
+                                report_message_id,
+                            )
+                        views = getattr(telethon_message, "views", None)
+                        if views is None:
+                            item["views_status"] = "unavailable"
+                            item["error_text"] = "Публикация уже удалена или Telegram не вернул данные."
+                            views_unavailable += 1
+                        else:
+                            item["views_status"] = "ok"
+                            item["views"] = int(views or 0)
+                            views_total += int(views or 0)
+                            views_available += 1
+                            top_items.append(item)
+                            self.logger.info(
+                                "REPOST_CAMPAIGN_VIEWS_TARGET_COLLECTED | rule_id=%s | run_id=%s | target_id=%s | message_id=%s | views=%s | peer_id=%s",
+                                rule_id,
+                                run_id,
+                                target_id,
+                                report_message_id,
+                                item["views"],
+                                actual_peer,
+                            )
             except Exception as exc:
                 item["views_status"] = "failed"
                 item["error_text"] = "Telegram не вернул просмотры по этому каналу."
