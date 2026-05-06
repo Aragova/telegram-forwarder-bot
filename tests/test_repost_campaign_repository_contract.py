@@ -1,4 +1,30 @@
 from app.postgres_repository import PostgresRepository
+from contextlib import contextmanager
+
+
+class _FakeCursor:
+    def __init__(self, rowcount: int):
+        self.rowcount = rowcount
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, *_args, **_kwargs):
+        return None
+
+
+class _FakeConn:
+    def __init__(self, rowcount: int):
+        self._cursor = _FakeCursor(rowcount)
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self):
+        return None
 
 
 def test_repost_campaign_repository_methods_exist():
@@ -80,3 +106,25 @@ def test_saved_posts_repository_methods_exist():
     assert hasattr(repo, "update_saved_post_content")
     assert hasattr(repo, "archive_saved_post")
     assert hasattr(repo, "set_rule_repost_campaign_saved_post")
+
+
+def test_campaign_target_update_methods_return_rowcount_based_bool():
+    repo = PostgresRepository()
+
+    @contextmanager
+    def _connect_ok():
+        yield _FakeConn(1)
+
+    @contextmanager
+    def _connect_miss():
+        yield _FakeConn(0)
+
+    repo.connect = _connect_ok
+    assert repo.set_rule_repost_campaign_target_active(1, False) is True
+    assert repo.remove_rule_repost_campaign_target(1) is True
+    assert repo.update_rule_repost_campaign_target_check_result(1, title="A", last_check_error=None) is True
+
+    repo.connect = _connect_miss
+    assert repo.set_rule_repost_campaign_target_active(999999999, False) is False
+    assert repo.remove_rule_repost_campaign_target(999999999) is False
+    assert repo.update_rule_repost_campaign_target_check_result(999999999, title="A", last_check_error=None) is False

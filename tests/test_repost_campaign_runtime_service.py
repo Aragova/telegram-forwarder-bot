@@ -32,6 +32,7 @@ class _FakeRepo:
         self.remove_target_calls = []
         self.update_target_check_calls = []
         self.update_target_check_result = True
+        self.set_target_active_result = True
 
     def get_rule(self, rule_id):
         return self._rule
@@ -98,7 +99,7 @@ class _FakeRepo:
 
     def set_rule_repost_campaign_target_active(self, target_row_id, is_active):
         self.set_target_active_calls.append((target_row_id, is_active))
-        return True
+        return self.set_target_active_result
 
     def remove_rule_repost_campaign_target(self, target_row_id):
         self.remove_target_calls.append(target_row_id)
@@ -355,7 +356,18 @@ def test_set_campaign_target_active_success():
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
     result = runtime.set_campaign_target_active(rule_id=3, target_row_id=1, is_active=False)
     assert result["ok"] is True
+    assert result["is_active"] is False
     assert repo.set_target_active_calls[-1] == (1, False)
+
+
+def test_set_campaign_target_active_repo_returns_false():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._targets = [{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}]
+    repo.set_target_active_result = False
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.set_campaign_target_active(rule_id=3, target_row_id=1, is_active=False)
+    assert result["ok"] is False
+    assert result["error_text"]
 
 
 def test_set_campaign_target_active_not_found():

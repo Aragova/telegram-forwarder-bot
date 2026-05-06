@@ -7422,7 +7422,7 @@ class PostgresRepository(RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM rule_repost_campaign_targets WHERE id=%s", (int(row_id),))
             conn.commit()
-            return True
+            return cur.rowcount > 0
 
     def set_rule_repost_campaign_target_active(self, row_id: int, is_active: bool) -> bool:
         with self.connect() as conn:
