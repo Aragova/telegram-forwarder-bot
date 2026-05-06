@@ -7176,6 +7176,15 @@ async def _handle_target_action(callback: CallbackQuery, *, action: str, is_acti
     logger.info("REPOST_CAMPAIGN_TARGET_ACTION_UI_DONE | rule_id=%s | row_id=%s | action=%s | ok=%s", rule_id, row_id, action, result.get("ok"))
     await answer_callback_safe_once(callback)
 
+def _build_repost_campaign_runtime() -> RepostCampaignRuntimeService:
+    return RepostCampaignRuntimeService(
+        repo=db,
+        renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger),
+        deleter=RepostCampaignDeleteService(bot=bot, telethon_client=telethon_client, logger_=logger),
+        target_checker=RepostCampaignTargetCheckService(telethon_client=telethon_client, logger_=logger),
+        logger_=logger,
+    )
+
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_pause:"))
 async def handle_repost_campaign_target_pause(callback: CallbackQuery):
@@ -7256,16 +7265,44 @@ async def handle_rule_repost_campaign_check(callback: CallbackQuery):
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            "🧪 Проверка прав каналов\n\n"
-            "Полная проверка прав публикации и удаления будет добавлена отдельным шагом.\n\n"
-            "Сейчас список каналов сохраняется, а ошибки отправки/удаления будут фиксироваться при первой реальной кампании."
-        ),
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_targets:{rule_id}")]]),
-    )
-    await answer_callback_safe_once(callback)
+    try:
+        runtime = _build_repost_campaign_runtime()
+        result = await run_db(lambda: runtime.check_campaign_targets(
+            rule_id=rule_id,
+            active_only=False,
+            admin_id=callback.from_user.id if callback.from_user else None,
+        ))
+        text, keyboard = build_repost_campaign_targets_check_result_view(rule_id=rule_id, result=result)
+        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await answer_callback_safe_once(callback)
+    except Exception as exc:
+        logger.exception("REPOST_CAMPAIGN_TARGET_CHECK_BATCH_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+        await answer_callback_safe(callback, "Не удалось выполнить проверку прав каналов/групп", show_alert=True)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_check:"))
+async def handle_rule_repost_campaign_target_check(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    try:
+        _, rule_id_raw, row_id_raw = callback.data.split(":", 2)
+        rule_id = int(rule_id_raw)
+        row_id = int(row_id_raw)
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    try:
+        runtime = _build_repost_campaign_runtime()
+        result = await run_db(lambda: runtime.check_campaign_target(
+            rule_id=rule_id,
+            target_row_id=row_id,
+            admin_id=callback.from_user.id if callback.from_user else None,
+        ))
+        text, keyboard = build_repost_campaign_target_check_result_view(rule_id=rule_id, result=result)
+        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await answer_callback_safe_once(callback)
+    except Exception as exc:
+        logger.exception("REPOST_CAMPAIGN_TARGET_CHECK_UI_FAILED | rule_id=%s | row_id=%s | error=%s", rule_id, row_id, exc)
+        await answer_callback_safe(callback, "Не удалось выполнить проверку канала/группы", show_alert=True)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_history:"))
 async def handle_rule_repost_campaign_history(callback: CallbackQuery):
@@ -8654,14 +8691,29 @@ async def handle_stateful_private_inputs(message: Message):
             logger.warning("Не удалось записать аудит добавления каналов кампании rule_id=%s", rule_id)
         reset_user_state(user_id)
         invalidate_rule_card_cache(rule_id)
-        await message.answer(
+        result_text = (
             "📥 Каналы обработаны\n\n"
             f"✅ Добавлено: {added}\n"
             f"⚠️ Уже были или пропущены: {skipped}\n"
             f"❌ Ошибки формата: {invalid}\n\n"
-            f"Всего строк: {total}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 К списку каналов", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")]]),
+            f"Всего строк: {total}"
         )
+        if added > 0:
+            try:
+                runtime = _build_repost_campaign_runtime()
+                check_result = await run_db(lambda: runtime.check_campaign_targets(
+                    rule_id=rule_id,
+                    active_only=False,
+                    admin_id=message.from_user.id if message.from_user else None,
+                    limit=50,
+                ))
+                check_text, check_keyboard = build_repost_campaign_targets_check_result_view(rule_id=rule_id, result=check_result)
+                await message.answer(f"{result_text}\n\n{check_text}", reply_markup=check_keyboard)
+                return
+            except Exception as exc:
+                logger.warning("REPOST_CAMPAIGN_TARGETS_AUTO_CHECK_FAILED | rule_id=%s | error=%s", rule_id, exc)
+                result_text += "\n\nℹ️ Нажмите 🔎 Проверить права, чтобы подтянуть названия и готовность."
+        await message.answer(result_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 К списку каналов", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")]]))
         return
 
     if action in {"awaiting_repost_campaign_target_disable_id", "awaiting_repost_campaign_target_enable_id", "awaiting_repost_campaign_target_remove_id"}:
