@@ -94,6 +94,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_more_view,
     build_repost_campaign_delete_result_view,
     build_repost_campaign_history_view,
+    build_repost_campaign_launch_readiness_view,
     build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
@@ -6856,6 +6857,16 @@ async def handle_rule_repost_campaign_launch(callback: CallbackQuery):
     try:
         renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir)
         runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
+        readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
+        if not readiness.get("can_launch"):
+            logger.info("REPOST_CAMPAIGN_LAUNCH_BLOCKED_UI | rule_id=%s | reasons=%s", rule_id, readiness.get("block_reasons") or [])
+            text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
+            if _should_answer_new_message_for_callback(callback):
+                await callback.message.answer(text, reply_markup=keyboard)
+            else:
+                await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+            await answer_callback_safe_once(callback)
+            return
         result = await runtime.launch_campaign_now(
             rule_id=rule_id,
             admin_id=callback.from_user.id if callback.from_user else None,

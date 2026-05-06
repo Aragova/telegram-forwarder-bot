@@ -5,6 +5,7 @@ from app.repost_campaign_view_model import (
     build_campaign_run_item_view,
     build_campaign_run_message_view,
     build_campaign_scenario_preview_view_model,
+    build_campaign_launch_readiness_view_model,
     format_campaign_delete_status_text,
     format_campaign_show_seconds_text,
     format_campaign_target_kind_text,
@@ -295,3 +296,27 @@ def test_target_item_view_title_equal_to_id_is_treated_as_missing():
     view = build_campaign_target_item_view({"id": 1, "target_id": "-1002741117827", "title": "-1002741117827", "is_active": True}, index=1)
     assert "Канал/Группа #1" in view["title"]
     assert "-1002741117827" not in view["title"]
+
+
+def test_launch_readiness_vm_ready():
+    vm = build_campaign_launch_readiness_view_model(readiness={"can_launch": True, "saved_post_exists": True, "show_seconds": 3600, "main_target_ready": True, "will_send_total": 3, "will_skip_total": 0, "extra_paused": 0, "extra_problem": 0, "extra_ready": 2}, now=datetime(2026,1,1,10,0,0))
+    assert vm["status_line"] == "✅ Кампания готова к запуску"
+    assert "Будет опубликовано" in vm["will_send_line"]
+    assert "10:" in vm["expected_delete_line"] or "11:" in vm["expected_delete_line"]
+    assert vm["can_launch"] is True
+
+def test_launch_readiness_vm_problem_targets():
+    vm = build_campaign_launch_readiness_view_model(readiness={"can_launch": False, "saved_post_exists": True, "show_seconds": 300, "main_target_ready": True, "extra_active_problem": 1, "extra_problem": 1, "will_send_total": 1, "will_skip_total": 1})
+    assert vm["status_line"] == "⚠️ Нужно проверить каналы/группы"
+    assert vm["can_check_rights"] is True
+    assert "Проверьте права" in vm["next_step_line"]
+
+def test_launch_readiness_vm_missing_post():
+    vm = build_campaign_launch_readiness_view_model(readiness={"can_launch": False, "saved_post_exists": False, "show_seconds": 300, "main_target_ready": True})
+    assert vm["status_line"] == "⚠️ Нужно выбрать рекламный пост"
+
+def test_launch_readiness_vm_no_banned_terms():
+    vm = build_campaign_launch_readiness_view_model(readiness={"can_launch": False, "saved_post_exists": False, "show_seconds": 0, "main_target_ready": True})
+    dump = "\n".join(str(v) for v in vm.values())
+    for bad in ["креатив", "площадк", "аккаунт-парсер", "тестовый", "Режим: репост"]:
+        assert bad.lower() not in dump.lower()

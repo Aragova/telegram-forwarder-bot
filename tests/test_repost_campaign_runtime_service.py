@@ -573,7 +573,7 @@ def test_launch_no_show_seconds():
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
     result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
     assert result.ok is False
-    assert result.error_text == "Срок показа не задан"
+    assert result.error_text == "Кампания не готова к запуску"
     assert len(renderer.calls) == 0
 
 def test_get_campaign_control_center_no_history():
@@ -691,3 +691,53 @@ def test_process_due_deletions_uses_sent_message_ids_json():
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_messages=_del_many, delete_message=None))
     asyncio.run(runtime.process_due_deletions())
     assert seen["message_ids"] == [101, 102]
+
+
+def test_build_launch_readiness_ready():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=300, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"id":55})
+    repo._targets = [{"id":1,"target_id":"-1002","is_active":True,"last_check_error":None},{"id":2,"target_id":"-1003","is_active":False,"last_check_error":None}]
+    readiness = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None)).build_campaign_launch_readiness(rule_id=1)
+    assert readiness["can_launch"] is True
+    assert readiness["will_send_total"] == 2
+    assert readiness["extra_ready"] == 1
+    assert readiness["extra_paused"] == 1
+    assert readiness["extra_problem"] == 0
+
+def test_build_launch_readiness_blocks_active_problem():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=300, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"id":55})
+    repo._targets = [{"id":1,"target_id":"-1002","is_active":True,"last_check_error":"err"}]
+    readiness = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None)).build_campaign_launch_readiness(rule_id=1)
+    assert readiness["can_launch"] is False
+    assert readiness["extra_active_problem"] == 1
+    assert any("требуют настройки" in x for x in readiness["block_reasons"])
+
+def test_launch_campaign_now_does_not_create_run_when_blocked():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=300, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind":"text"}})
+    repo._targets = [{"id":1,"target_id":"-1002","is_active":True,"last_check_error":"err"}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", chat_id="-1001", message_id=1)))
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+    assert result.ok is False
+    assert result.extra.get("launch_readiness")
+    assert not repo.create_campaign_run_calls
+
+def test_launch_campaign_now_uses_only_ready_targets():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=300, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind":"text"}})
+    repo._targets = [{"id":1,"target_id":"-1002","is_active":True,"last_check_error":None},{"id":2,"target_id":"-1003","is_active":False,"last_check_error":None},{"id":3,"target_id":"-1004","is_active":False,"last_check_error":"err"}]
+    renderer = _FakeRenderer([SavedPostRenderResult(ok=True, method="bot_api", kind="text", chat_id="-1001", message_id=1), SavedPostRenderResult(ok=True, method="bot_api", kind="text", chat_id="-1002", message_id=2)])
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+    assert result.ok is True
+    assert repo.create_campaign_run_calls[0]["targets_total"] == 2
+    assert len(repo.create_campaign_run_message_calls) == 2
+
+def test_launch_campaign_missing_show_seconds_blocked():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=0, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind":"text"}})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+    assert result.ok is False
+    assert not repo.create_campaign_run_calls

@@ -10,6 +10,7 @@ from app.repost_campaign_view_model import (
     build_campaign_run_item_view,
     build_campaign_run_message_view,
     build_campaign_scenario_preview_view_model,
+    build_campaign_launch_readiness_view_model,
     normalize_campaign_target_error_text,
     format_campaign_datetime_text,
     format_campaign_error_text,
@@ -135,6 +136,27 @@ def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[s
             "История обновлена. Детали доступны в отчёте запуска."
         )
     else:
+        launch_readiness = extra.get("launch_readiness")
+        if launch_readiness:
+            vm = build_campaign_launch_readiness_view_model(readiness=launch_readiness)
+            reasons = "\n".join([f"• {x}" for x in vm["block_reason_lines"]]) or "• Проверьте параметры кампании"
+            text = (
+                "🚦 Кампания не готова к запуску\n\n"
+                f"Причины:\n{reasons}\n\n"
+                f"{vm['will_send_line']}\n"
+                f"{vm['will_skip_line']}\n\n"
+                f"Следующий шаг:\n{vm['next_step_line']}"
+            )
+            rows = []
+            if vm["can_check_rights"]:
+                rows.append([InlineKeyboardButton(text="🔎 Проверить права", callback_data=f"rule_repost_campaign_check:{rule_id}")])
+            rows.extend([
+                [InlineKeyboardButton(text="📣 Каналы/Группы", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
+                [InlineKeyboardButton(text="📝 Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
+                [InlineKeyboardButton(text="⏳ Время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
+                [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+            ])
+            return text, InlineKeyboardMarkup(inline_keyboard=rows)
         text = (
             "❌ Кампания не запущена\n\n"
             f"{payload.get('error_text') or 'Неизвестная ошибка'}\n\n"
@@ -157,6 +179,43 @@ def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[s
     rows.extend([
         [InlineKeyboardButton(text="🔄 Обновить кампанию", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_launch_readiness_view(*, rule_id: int, readiness: dict, now: datetime | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    vm = build_campaign_launch_readiness_view_model(readiness=readiness, now=now)
+    saved_post_id = readiness.get("saved_post_id")
+    reasons_block = ""
+    if vm["block_reason_lines"]:
+        reasons_block = "\n\nПричины:\n" + "\n".join([f"• {line}" for line in vm["block_reason_lines"]])
+    text = (
+        "🚦 Проверка перед запуском\n\n"
+        f"{vm['status_line']}\n\n"
+        f"📝 Рекламный пост: {'#' + str(saved_post_id) if saved_post_id else 'не выбран'}\n"
+        f"{vm['will_send_line']}\n"
+        f"{vm['will_skip_line']}\n"
+        f"{vm['show_seconds_line']}\n"
+        f"{vm['auto_delete_line']}\n"
+        f"{vm['expected_delete_line']}{reasons_block}\n\n"
+        "После запуска бот:\n"
+        "• опубликует рекламный пост только в готовые каналы/группы;\n"
+        "• сохранит результат по каждому получателю;\n"
+        "• автоматически удалит публикации после времени показа;\n"
+        "• оставит историю размещения.\n\n"
+        f"{vm['next_step_line']}"
+    )
+    rows = []
+    if vm["can_launch"]:
+        rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
+    if vm["can_check_rights"]:
+        rows.append([InlineKeyboardButton(text="🔎 Проверить права", callback_data=f"rule_repost_campaign_check:{rule_id}")])
+    rows.extend([
+        [InlineKeyboardButton(text="📣 Каналы/Группы", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
+        [InlineKeyboardButton(text="📝 Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
+        [InlineKeyboardButton(text="⏳ Время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
+        [InlineKeyboardButton(text="👁 Предпросмотр сценария", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
