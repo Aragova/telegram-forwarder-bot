@@ -61,18 +61,29 @@ class RepostCampaignTargetCheckService:
             is_broadcast_channel = bool(getattr(entity, "broadcast", False))
             is_megagroup = bool(getattr(entity, "megagroup", False))
             entity_type = type(entity).__name__
+            if not (is_admin or is_creator):
+                permission_detail_status = "no_admin"
+            elif admin_rights is None:
+                permission_detail_status = "admin_rights_unavailable"
+            else:
+                permission_detail_status = "detailed"
             if is_creator:
                 can_publish = True
             elif is_broadcast_channel:
-                can_publish = bool(is_admin and can_post_messages)
+                if is_admin and admin_rights is None:
+                    can_publish = True
+                elif is_admin:
+                    can_publish = can_post_messages
+                else:
+                    can_publish = False
             elif is_megagroup or not is_broadcast_channel:
                 can_publish = bool((is_admin or is_creator) and not banned_send_messages)
             else:
                 can_publish = bool(is_creator or is_admin or can_post_messages)
             can_delete = True if is_creator else can_delete_messages
             self.logger.info(
-                "REPOST_CAMPAIGN_TARGET_PERMISSIONS | target_id=%s | title=%s | entity_type=%s | broadcast=%s | megagroup=%s | is_admin=%s | is_creator=%s | can_post_messages=%s | can_delete_messages=%s | banned_send_messages=%s | can_publish=%s | can_delete=%s",
-                target_id_str, title, entity_type, is_broadcast_channel, is_megagroup, is_admin, is_creator, can_post_messages, can_delete_messages, banned_send_messages, can_publish, can_delete,
+                "REPOST_CAMPAIGN_TARGET_PERMISSIONS | target_id=%s | title=%s | entity_type=%s | broadcast=%s | megagroup=%s | is_admin=%s | is_creator=%s | admin_rights_available=%s | permission_detail_status=%s | can_post_messages=%s | can_delete_messages=%s | banned_send_messages=%s | can_publish=%s | can_delete=%s",
+                target_id_str, title, entity_type, is_broadcast_channel, is_megagroup, is_admin, is_creator, admin_rights is not None, permission_detail_status, can_post_messages, can_delete_messages, banned_send_messages, can_publish, can_delete,
             )
             if not can_publish:
                 error_text = "ViMi пока не видит право публикации в этом канале/группе. Проверьте роль администратора и разрешение на отправку сообщений."
