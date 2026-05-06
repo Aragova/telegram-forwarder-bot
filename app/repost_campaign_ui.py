@@ -198,6 +198,8 @@ def build_repost_campaign_launch_readiness_view(*, rule_id: int, readiness: dict
         f"{vm['show_seconds_line']}\n"
         f"{vm['auto_delete_line']}\n"
         f"{vm['expected_delete_line']}{reasons_block}\n\n"
+        "Это финальная проверка перед публикацией.\n"
+        "После подтверждения рекламный пост будет сразу отправлен в готовые каналы/группы.\n\n"
         "После запуска бот:\n"
         "• опубликует рекламный пост только в готовые каналы/группы;\n"
         "• сохранит результат по каждому получателю;\n"
@@ -207,7 +209,7 @@ def build_repost_campaign_launch_readiness_view(*, rule_id: int, readiness: dict
     )
     rows = []
     if vm["can_launch"]:
-        rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
+        rows.append([InlineKeyboardButton(text="🚀 Подтвердить запуск", callback_data=f"rule_repost_campaign_launch_confirm:{rule_id}")])
     if vm["can_check_rights"]:
         rows.append([InlineKeyboardButton(text="🔎 Проверить права", callback_data=f"rule_repost_campaign_check:{rule_id}")])
     rows.extend([

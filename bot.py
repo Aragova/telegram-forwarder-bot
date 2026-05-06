@@ -6858,8 +6858,43 @@ async def handle_rule_repost_campaign_launch(callback: CallbackQuery):
         renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir)
         runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
         readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
+        text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
+        if _should_answer_new_message_for_callback(callback):
+            await callback.message.answer(text, reply_markup=keyboard)
+        else:
+            await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        logger.info(
+            "REPOST_CAMPAIGN_LAUNCH_PREFLIGHT_UI | rule_id=%s | can_launch=%s | will_send_total=%s",
+            rule_id,
+            bool(readiness.get("can_launch")),
+            int(readiness.get("will_send_total") or 0),
+        )
+    except Exception as exc:
+        logger.warning("REPOST_CAMPAIGN_LAUNCH_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+        await answer_callback_safe(callback, "Не удалось запустить кампанию", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_confirm:"))
+async def handle_rule_repost_campaign_launch_confirm(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    try:
+        logger.info("REPOST_CAMPAIGN_LAUNCH_CONFIRM_STARTED | rule_id=%s", rule_id)
+        renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir)
+        runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
+        readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
         if not readiness.get("can_launch"):
-            logger.info("REPOST_CAMPAIGN_LAUNCH_BLOCKED_UI | rule_id=%s | reasons=%s", rule_id, readiness.get("block_reasons") or [])
+            logger.info("REPOST_CAMPAIGN_LAUNCH_CONFIRM_BLOCKED | rule_id=%s", rule_id)
             text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
             if _should_answer_new_message_for_callback(callback):
                 await callback.message.answer(text, reply_markup=keyboard)
