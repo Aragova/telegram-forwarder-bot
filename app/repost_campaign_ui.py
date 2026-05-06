@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.repost_campaign_view_model import (
@@ -7,6 +9,7 @@ from app.repost_campaign_view_model import (
     build_campaign_control_center_view_model,
     build_campaign_run_item_view,
     build_campaign_run_message_view,
+    build_campaign_scenario_preview_view_model,
     format_campaign_datetime_text,
     format_campaign_error_text,
     format_campaign_render_mode_text,
@@ -23,7 +26,7 @@ def format_repost_campaign_readiness_block(readiness: dict | None) -> str:
         "🚦 Готовность кампании\n\n"
         f"📝 Пост: {readiness.get('post_status_text') or '⚠️ недоступно'}\n"
         f"⏳ Время показа: {readiness.get('show_seconds_status_text') or '⚠️ недоступно'}\n"
-        f"📣 Каналы: {readiness.get('targets_status_text') or '⚠️ недоступно'}\n"
+        f"📣 Каналы/Группы: {readiness.get('targets_status_text') or '⚠️ недоступно'}\n"
         f"🔐 Проверка: {readiness.get('checks_status_text') or '⚠️ недоступно'}\n\n"
         f"{readiness.get('summary_text') or '⚠️ Кампания не готова: исправьте пункты выше'}"
     )
@@ -194,37 +197,60 @@ def build_repost_campaign_preview_view(
     targets_preview_text: str,
     warnings: list[str],
     readiness: dict | None = None,
+    summary: dict | None = None,
+    control_center: dict | None = None,
+    saved_post_line: str | None = None,
+    now: datetime | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    readiness_block = format_repost_campaign_readiness_block(readiness) if readiness else f"🧪 Готовность: {targets_ready} / {targets_active}"
-    warnings_block = ("\n" + "\n".join(warnings)) if warnings else ""
-    if warnings_block:
-        warnings_block = f"\n{warnings_block}"
-    text = (
-        "👁 Предпросмотр сценария\n\n"
-        f"📝 Рекламный пост: #{saved_post_id}\n"
-        f"Тип: {saved_post_description or 'пост'}\n\n"
-        f"📣 Каналы/Группы: {targets_active} активных\n"
-        f"{readiness_block}"
-        f"\n⏳ Время показа: {show_seconds_text}\n"
-        f"🧹 Автоудаление: {'включено' if show_seconds_text != 'не задан' else 'не задано'}"
-        f"{warnings_block}\n\n"
-        "После запуска:\n"
-        "• бот опубликует рекламный пост в основной канал правила;\n"
-        "• отправит копии в выбранные каналы/группы;\n"
-        "• сохранит результат по каждому получателю;\n"
-        "• автоматически удалит публикации после времени показа;\n"
-        "• история размещения останется в отчёте.\n\n"
-        "Каналы/Группы:\n"
-        f"{targets_preview_text}\n\n"
-        "Это только предпросмотр сценария. Публикация не запускается."
+    vm = build_campaign_scenario_preview_view_model(
+        rule_id=rule_id,
+        summary=summary or {
+            "saved_post_id": saved_post_id,
+            "show_seconds": 0 if show_seconds_text == "не задан" else None,
+            "targets_active": targets_active,
+            "targets_ready": targets_ready,
+            "targets_with_errors": targets_with_errors,
+        },
+        saved_post_id=saved_post_id,
+        saved_post_description=saved_post_description,
+        saved_post_line=saved_post_line,
+        readiness=readiness,
+        control_center=control_center,
+        targets_preview_text=targets_preview_text,
+        warnings=warnings,
+        now=now,
     )
-    return text, InlineKeyboardMarkup(inline_keyboard=[
+    issues_block = "\n" + "\n".join(vm["issues_lines"]) if vm["issues_lines"] else ""
+    text = (
+        f"{vm['title']}\n\n"
+        f"{vm['status_line']}\n\n"
+        f"{vm['creative_line']}\n"
+        f"{vm['targets_line']}\n"
+        f"{vm['show_seconds_line']}\n"
+        f"{vm['auto_delete_line']}\n"
+        f"{vm['expected_delete_line']}\n"
+        f"{issues_block}\n\n"
+        "После запуска:\n"
+        + "\n".join(vm["scenario_steps"])
+        + "\n\nКаналы/Группы:\n"
+        + vm["targets_preview_text"]
+        + "\n\n"
+        + vm["next_step_line"]
+        + "\n\nЭто только предпросмотр сценария. Публикация не запускается."
+    )
+    rows = []
+    if vm["can_launch"]:
+        rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
+    if vm["can_check_rights"]:
+        rows.append([InlineKeyboardButton(text="🧪 Проверить права", callback_data=f"rule_repost_campaign_check:{rule_id}")])
+    rows.extend([
         [InlineKeyboardButton(text="📝 Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
         [InlineKeyboardButton(text="⏳ Время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
         [InlineKeyboardButton(text="📣 Каналы/Группы", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
         [InlineKeyboardButton(text="🔄 Обновить предпросмотр", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_repost_campaign_show_menu_view(*, rule_id: int, current_show_seconds_text: str) -> tuple[str, InlineKeyboardMarkup]:

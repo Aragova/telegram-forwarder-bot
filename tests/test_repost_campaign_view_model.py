@@ -1,7 +1,10 @@
+from datetime import datetime
+
 from app.repost_campaign_view_model import (
     build_campaign_target_item_view,
     build_campaign_run_item_view,
     build_campaign_run_message_view,
+    build_campaign_scenario_preview_view_model,
     format_campaign_delete_status_text,
     format_campaign_show_seconds_text,
     format_campaign_target_kind_text,
@@ -210,3 +213,55 @@ def test_targets_line_shows_ready_and_errors_counts():
         control_center={"ok": True, "readiness": {"ready": False}, "issues": []},
     )
     assert vm["targets_line"] == "📣 Каналы/Группы: 5 активных · 3 готовы · 2 требуют проверки"
+
+
+def test_scenario_preview_ready():
+    vm = build_campaign_scenario_preview_view_model(
+        rule_id=1,
+        summary={"saved_post_id": 20, "show_seconds": 7200, "targets_active": 42, "targets_ready": 42, "targets_with_errors": 0},
+        saved_post_id=20,
+        saved_post_description="альбом · 5 медиа",
+        readiness={"ready": True},
+        now=datetime(2026, 5, 6, 20, 0),
+    )
+    assert vm["status_line"] == "✅ Готова к запуску"
+    assert vm["can_launch"] is True
+    assert "42 активных" in vm["targets_line"]
+    assert "22:00" in vm["expected_delete_line"]
+    assert any("автоматически удалит" in step for step in vm["scenario_steps"])
+    assert any("история размещения" in step for step in vm["scenario_steps"])
+
+
+def test_scenario_preview_with_target_errors():
+    vm = build_campaign_scenario_preview_view_model(
+        rule_id=1,
+        summary={"saved_post_id": 20, "show_seconds": 7200, "targets_active": 5, "targets_ready": 3, "targets_with_errors": 2},
+        saved_post_id=20,
+        saved_post_description="пост",
+        readiness={"ready": False, "checks_status_text": "⚠️ требуют проверки"},
+    )
+    assert vm["can_launch"] is False
+    assert vm["can_check_rights"] is True
+    assert "5 активных · 3 готовы · 2 требуют проверки" in vm["targets_line"]
+    assert vm["next_step_line"] == "Следующий шаг: проверьте права каналов/групп."
+
+
+def test_scenario_preview_missing_post():
+    vm = build_campaign_scenario_preview_view_model(rule_id=1, summary={"show_seconds": 60, "targets_active": 1}, saved_post_id=None, saved_post_description=None, readiness={"ready": False})
+    assert vm["can_launch"] is False
+    assert vm["next_step_line"] == "Следующий шаг: выберите рекламный пост."
+
+
+def test_scenario_preview_missing_show_seconds():
+    vm = build_campaign_scenario_preview_view_model(rule_id=1, summary={"saved_post_id": 1, "show_seconds": 0, "targets_active": 1}, saved_post_id=1, saved_post_description="пост", readiness={"ready": False})
+    assert vm["expected_delete_line"] == "🕒 Ожидаемое удаление: не рассчитано"
+    assert vm["next_step_line"] == "Следующий шаг: задайте время показа."
+
+
+def test_scenario_preview_no_banned_terms():
+    vm = build_campaign_scenario_preview_view_model(rule_id=1, summary={}, saved_post_id=None, saved_post_description=None, readiness={"ready": False})
+    joined = " ".join(str(v) for v in vm.values())
+    assert "креатив" not in joined.lower()
+    assert "площадк" not in joined.lower()
+    assert "режим: репост" not in joined.lower()
+    assert "тестовый" not in joined.lower()
