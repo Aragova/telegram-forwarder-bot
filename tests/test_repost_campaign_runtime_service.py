@@ -31,6 +31,7 @@ class _FakeRepo:
         self.set_target_active_calls = []
         self.remove_target_calls = []
         self.update_target_check_calls = []
+        self.update_target_check_result = True
 
     def get_rule(self, rule_id):
         return self._rule
@@ -105,7 +106,7 @@ class _FakeRepo:
 
     def update_rule_repost_campaign_target_check_result(self, row_id, *, title=None, last_check_error=None):
         self.update_target_check_calls.append((row_id, title, last_check_error))
-        return True
+        return self.update_target_check_result
 
 
 class _FakeRenderer:
@@ -613,6 +614,7 @@ def test_check_one_success_saves_result():
     rt=RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), target_checker=checker)
     result=asyncio.run(rt.check_campaign_target(rule_id=1,target_row_id=1))
     assert result["ok"] is True
+    assert result["saved"] is True
     assert repo.update_target_check_calls[0] == (1, "A", None)
 
 
@@ -622,7 +624,20 @@ def test_check_one_failed_saves_error():
     rt=RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), target_checker=checker)
     result=asyncio.run(rt.check_campaign_target(rule_id=1,target_row_id=1))
     assert result["ok"] is False
+    assert result["check_ok"] is False
     assert repo.update_target_check_calls[0] == (1, "A", "err")
+
+
+def test_check_one_ok_but_save_failed():
+    repo=_FakeRepo(rule=SimpleNamespace(mode="repost")); repo._targets=[{"id":1,"target_id":"-1001","title":"A"}]
+    repo.update_target_check_result = False
+    checker=_FakeChecker(SimpleNamespace(ok=True,target_id="-1001",title="A",error_text=None,can_view=True,can_publish=True,can_delete=True))
+    rt=RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), target_checker=checker)
+    result=asyncio.run(rt.check_campaign_target(rule_id=1,target_row_id=1))
+    assert result["ok"] is False
+    assert result["check_ok"] is True
+    assert result["saved"] is False
+    assert "не удалось сохранить результат" in result["error_text"]
 
 
 def test_checker_unavailable():
