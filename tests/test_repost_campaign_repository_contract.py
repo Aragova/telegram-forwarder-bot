@@ -3,8 +3,11 @@ from contextlib import contextmanager
 
 
 class _FakeCursor:
-    def __init__(self, rowcount: int):
+    def __init__(self, rowcount: int, row: dict | None = None):
         self.rowcount = rowcount
+        self._row = row
+        self.last_sql = ""
+        self.last_params = None
 
     def __enter__(self):
         return self
@@ -13,12 +16,18 @@ class _FakeCursor:
         return False
 
     def execute(self, *_args, **_kwargs):
+        if _args:
+            self.last_sql = _args[0]
+            self.last_params = _args[1] if len(_args) > 1 else None
         return None
+
+    def fetchone(self):
+        return self._row
 
 
 class _FakeConn:
-    def __init__(self, rowcount: int):
-        self._cursor = _FakeCursor(rowcount)
+    def __init__(self, rowcount: int, row: dict | None = None):
+        self._cursor = _FakeCursor(rowcount, row=row)
 
     def cursor(self):
         return self._cursor
@@ -108,23 +117,24 @@ def test_saved_posts_repository_methods_exist():
     assert hasattr(repo, "set_rule_repost_campaign_saved_post")
 
 
-def test_campaign_target_update_methods_return_rowcount_based_bool():
+def test_campaign_target_update_methods_use_returning_row_presence_as_bool():
     repo = PostgresRepository()
 
     @contextmanager
     def _connect_ok():
-        yield _FakeConn(1)
+        yield _FakeConn(0, row={"id": 1, "is_active": False})
 
     @contextmanager
     def _connect_miss():
-        yield _FakeConn(0)
+        yield _FakeConn(1, row=None)
 
     repo.connect = _connect_ok
     assert repo.set_rule_repost_campaign_target_active(1, False) is True
+    assert repo.set_rule_repost_campaign_target_active(1, True) is True
     assert repo.remove_rule_repost_campaign_target(1) is True
-    assert repo.update_rule_repost_campaign_target_check_result(1, title="A", last_check_error=None) is True
+    assert repo.update_rule_repost_campaign_target_check_result(1, title="Updated", last_check_error=None) is True
 
     repo.connect = _connect_miss
     assert repo.set_rule_repost_campaign_target_active(999999999, False) is False
     assert repo.remove_rule_repost_campaign_target(999999999) is False
-    assert repo.update_rule_repost_campaign_target_check_result(999999999, title="A", last_check_error=None) is False
+    assert repo.update_rule_repost_campaign_target_check_result(999999999, title="Missing", last_check_error=None) is False
