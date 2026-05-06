@@ -114,6 +114,7 @@ def test_build_album_content():
     assert c["caption_entities"][0]["type"] == "bold"
     assert c["source_message_ids"] == [1, 2, 3]
     assert c["forward_origin"]["message_ids"] == [1, 2, 3]
+    assert c["forward_origin"]["local_message_ids"] == [1, 2, 3]
 
 
 def test_build_album_content_different_media_group_fails():
@@ -127,3 +128,45 @@ def test_build_album_content_different_media_group_fails():
 
 def test_short_description_album():
     assert get_saved_post_short_description({"kind": "album", "media_items": [1, 2, 3]}) == "альбом · 3 медиа"
+
+
+def test_build_album_content_forwarded_channel_uses_origin_ids():
+    from app.saved_posts_service import build_saved_post_album_content_from_aiogram_messages
+    m1 = SimpleNamespace(
+        message_id=19214,
+        media_group_id="g",
+        photo=[SimpleNamespace(file_id="p1", file_unique_id="u1", width=1, height=1)],
+        video=None,
+        document=None,
+        caption="",
+        caption_entities=None,
+        chat=SimpleNamespace(id=7940875697),
+        forward_origin=SimpleNamespace(chat=SimpleNamespace(id=-1001234567890), message_id=777),
+    )
+    m2 = SimpleNamespace(
+        message_id=19215,
+        media_group_id="g",
+        photo=[SimpleNamespace(file_id="p2", file_unique_id="u2", width=2, height=2)],
+        video=None,
+        document=None,
+        caption="",
+        caption_entities=None,
+        chat=SimpleNamespace(id=7940875697),
+        forward_origin=SimpleNamespace(chat=SimpleNamespace(id=-1001234567890), message_id=778),
+    )
+    c = build_saved_post_album_content_from_aiogram_messages([m2, m1])
+    assert c["forward_origin"]["chat_id"] == "-1001234567890"
+    assert c["forward_origin"]["message_id"] == 777
+    assert c["source_message_ids"] == [777, 778]
+    assert c["forward_origin"]["local_chat_id"] == "7940875697"
+    assert c["forward_origin"]["local_message_ids"] == [19214, 19215]
+
+
+def test_build_album_content_without_forward_origin_backward_compatible():
+    from app.saved_posts_service import build_saved_post_album_content_from_aiogram_messages
+    m1 = SimpleNamespace(message_id=10, media_group_id="g", photo=[SimpleNamespace(file_id="p1")], video=None, document=None, caption="", caption_entities=None, chat=SimpleNamespace(id=-100))
+    m2 = SimpleNamespace(message_id=11, media_group_id="g", photo=[SimpleNamespace(file_id="p2")], video=None, document=None, caption="", caption_entities=None, chat=SimpleNamespace(id=-100))
+    c = build_saved_post_album_content_from_aiogram_messages([m2, m1])
+    assert c["forward_origin"]["chat_id"] == "-100"
+    assert c["forward_origin"]["message_id"] == 10
+    assert c["source_message_ids"] == [10, 11]

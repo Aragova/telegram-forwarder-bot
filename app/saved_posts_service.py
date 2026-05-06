@@ -5,6 +5,17 @@ from typing import Any
 from app.saved_post_entities import serialize_message_entities
 
 
+def extract_aiogram_forward_origin(message) -> dict[str, Any]:
+    origin = getattr(message, "forward_origin", None)
+    origin_chat = getattr(origin, "chat", None)
+    origin_chat_id = getattr(origin_chat, "id", None)
+    return {
+        "type": type(origin).__name__ if origin else None,
+        "chat_id": str(origin_chat_id) if origin_chat_id is not None else None,
+        "message_id": getattr(origin, "message_id", None),
+    }
+
+
 def summarize_aiogram_message_for_saved_post(message) -> dict[str, Any]:
     return {
         "message_id": getattr(message, "message_id", None),
@@ -76,6 +87,9 @@ def build_saved_post_content_from_aiogram_message(message) -> dict[str, Any]:
     else:
         raise ValueError("Неподдерживаемый тип рекламного поста")
 
+    origin_data = extract_aiogram_forward_origin(message)
+    local_chat_id = str(message.chat.id) if getattr(message, "chat", None) else None
+    local_message_id = getattr(message, "message_id", None)
     return {
         "schema_version": 1,
         "kind": kind,
@@ -84,7 +98,13 @@ def build_saved_post_content_from_aiogram_message(message) -> dict[str, Any]:
         "entities": entities,
         "caption_entities": caption_entities,
         "media": media,
-        "forward_origin": {"chat_id": str(message.chat.id) if getattr(message, "chat", None) else None, "message_id": getattr(message, "message_id", None)},
+        "forward_origin": {
+            "type": origin_data["type"],
+            "chat_id": origin_data["chat_id"] or local_chat_id,
+            "message_id": origin_data["message_id"] or local_message_id,
+            "local_chat_id": local_chat_id,
+            "local_message_id": local_message_id,
+        },
     }
 
 
@@ -112,10 +132,14 @@ def build_saved_post_album_content_from_aiogram_messages(messages: list[Any]) ->
     if any(getattr(m, "media_group_id", None) != media_group_id for m in ordered):
         raise ValueError("Сообщения из разных media_group_id")
     media_items = [build_saved_post_media_item_from_aiogram_message(m) for m in ordered]
+    local_message_ids = [int(getattr(m, "message_id", 0) or 0) for m in ordered if getattr(m, "message_id", None)]
+    origin_data_list = [extract_aiogram_forward_origin(m) for m in ordered]
+    source_chat_ids = {item["chat_id"] for item in origin_data_list if item.get("chat_id")}
+    use_origin_ids = len(source_chat_ids) <= 1 and any(item.get("message_id") for item in origin_data_list)
     source_message_ids = [
-        int(getattr(m, "message_id", 0) or 0)
-        for m in ordered
-        if getattr(m, "message_id", None)
+        int((origin_data_list[idx].get("message_id") if use_origin_ids and origin_data_list[idx].get("message_id") else getattr(m, "message_id", 0)) or 0)
+        for idx, m in enumerate(ordered)
+        if (origin_data_list[idx].get("message_id") if use_origin_ids else getattr(m, "message_id", None))
     ]
 
     caption = ""
@@ -128,6 +152,9 @@ def build_saved_post_album_content_from_aiogram_messages(messages: list[Any]) ->
             break
 
     first = ordered[0]
+    first_origin = origin_data_list[0]
+    local_chat_id = str(first.chat.id) if getattr(first, "chat", None) else None
+    local_message_id = getattr(first, "message_id", None)
     return {
         "schema_version": 2,
         "kind": "album",
@@ -138,9 +165,13 @@ def build_saved_post_album_content_from_aiogram_messages(messages: list[Any]) ->
         "media": None,
         "media_items": media_items,
         "forward_origin": {
-            "chat_id": str(first.chat.id) if getattr(first, "chat", None) else None,
-            "message_id": getattr(first, "message_id", None),
+            "type": first_origin["type"],
+            "chat_id": first_origin["chat_id"] if use_origin_ids and len(source_chat_ids) == 1 else local_chat_id,
+            "message_id": first_origin["message_id"] if use_origin_ids and first_origin["message_id"] else local_message_id,
             "message_ids": source_message_ids,
+            "local_chat_id": local_chat_id,
+            "local_message_id": local_message_id,
+            "local_message_ids": local_message_ids,
         },
         "source_message_ids": source_message_ids,
         "media_group_id": str(media_group_id),
