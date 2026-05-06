@@ -92,27 +92,44 @@ def format_campaign_error_text(value, *, limit: int = 120) -> str | None:
     return text
 
 
+
+
+def format_campaign_target_display_title(target: dict, *, index: int | None = None) -> str:
+    target_id = str(target.get("target_id") or "")
+    title = str(target.get("title") or "").strip()
+    username = str(target.get("username") or "").strip().lstrip("@")
+
+    if title and title != target_id:
+        display_title = title
+    elif username:
+        display_title = f"@{username}"
+    elif index is not None:
+        display_title = f"Канал/Группа #{index}"
+    else:
+        display_title = "Канал/Группа"
+    return display_title
+
 def build_campaign_target_item_view(target: dict, *, index: int | None = None) -> dict:
     row_id = int(target.get("id") or 0)
     target_id = str(target.get("target_id") or "")
-    title_raw = str(target.get("title") or "").strip() or target_id
+    title_raw = format_campaign_target_display_title(target, index=index)
     is_active = bool(target.get("is_active"))
     check_error = format_campaign_error_text(target.get("last_check_error"))
     if check_error:
         status_icon = "⚠️"
-        status_line = "Статус: требует проверки"
-        check_line = "Проверка: ⚠️ ошибка"
+        status_line = "Статус: ⚠️ требует внимания"
+        check_line = "Проверка: ⚠️ нужна проверка"
         can_pause = False
         can_enable = True
     elif is_active:
         status_icon = "🟢"
-        status_line = "Статус: активен"
+        status_line = "Статус: 🟢 активен"
         check_line = "Проверка: ✅ готово"
         can_pause = True
         can_enable = False
     else:
         status_icon = "⏸"
-        status_line = "Статус: на паузе"
+        status_line = "Статус: ⏸ на паузе"
         check_line = "Проверка: ✅ готово"
         can_pause = False
         can_enable = True
@@ -122,7 +139,8 @@ def build_campaign_target_item_view(target: dict, *, index: int | None = None) -
         "row_id": row_id,
         "title": f"{order}{status_icon} {title_raw}",
         "status_line": status_line,
-        "target_line": f"ID: {target_id}",
+        "target_line": None,
+        "technical_line": f"Технический ID: {target_id}",
         "thread_line": f"Тема: {thread_id}" if thread_id is not None else "Тема: не задана",
         "check_line": check_line,
         "error_line": f"Ошибка: {check_error}" if check_error else None,
