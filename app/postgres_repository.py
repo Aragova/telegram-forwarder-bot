@@ -7420,9 +7420,17 @@ class PostgresRepository(RepositoryProtocol):
     def remove_rule_repost_campaign_target(self, row_id: int) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM rule_repost_campaign_targets WHERE id=%s", (int(row_id),))
+                cur.execute(
+                    """
+                    DELETE FROM rule_repost_campaign_targets
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (int(row_id),),
+                )
+                row = cur.fetchone()
             conn.commit()
-            return cur.rowcount > 0
+            return row is not None
 
     def set_rule_repost_campaign_target_active(self, row_id: int, is_active: bool) -> bool:
         with self.connect() as conn:
@@ -7433,11 +7441,13 @@ class PostgresRepository(RepositoryProtocol):
                     SET is_active = %s,
                         updated_at = NOW()
                     WHERE id = %s
+                    RETURNING id
                     """,
                     (bool(is_active), int(row_id)),
                 )
+                row = cur.fetchone()
             conn.commit()
-            return cur.rowcount > 0
+            return row is not None
 
     def update_rule_repost_campaign_target_check_result(
         self,
@@ -7455,11 +7465,13 @@ class PostgresRepository(RepositoryProtocol):
                         last_check_error = %s,
                         updated_at = NOW()
                     WHERE id = %s
+                    RETURNING id
                     """,
                     (title, last_check_error, int(row_id)),
                 )
+                row = cur.fetchone()
             conn.commit()
-            return cur.rowcount > 0
+            return row is not None
 
     def create_delivery_campaign_copy(self, *, delivery_id: int, rule_id: int, target_id: str, target_thread_id: int | None, target_title: str | None) -> int | None:
         with self.connect() as conn:
