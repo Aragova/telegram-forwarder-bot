@@ -7060,6 +7060,7 @@ async def handle_rule_repost_campaign_preview(callback: CallbackQuery):
         saved_post_description = get_saved_post_short_description(content)
         readiness = None
         control_center = None
+
         runtime = RepostCampaignRuntimeService(
             repo=db,
             renderer=SavedPostRenderer(
@@ -7078,6 +7079,7 @@ async def handle_rule_repost_campaign_preview(callback: CallbackQuery):
             ),
             logger_=logger,
         )
+
         try:
             readiness = await run_db(lambda: runtime.get_campaign_readiness(rule_id=rule_id))
         except Exception:

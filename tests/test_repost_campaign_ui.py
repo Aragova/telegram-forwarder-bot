@@ -645,3 +645,4 @@ def test_bot_preview_runtime_constructor_uses_keyword_args():
     source = Path("bot.py").read_text(encoding="utf-8")
     assert "RepostCampaignRuntimeService(db)" not in source
     assert "RepostCampaignRuntimeService(\n            db" not in source
+
