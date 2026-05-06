@@ -1,12 +1,13 @@
-name: Codex G.4.6 Hotfix Patcher
+name: Codex Hotfix G.4.6 Patch
 
 on:
-  push:
-    branches:
-      - codex/hotfix-g-4-6-target-active-contract
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   patch:
@@ -18,89 +19,355 @@ jobs:
           ref: codex/hotfix-g-4-6-target-active-contract
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Apply hotfix
-        shell: python
+      - name: Apply checked patch
         run: |
+          python - <<'PY'
           from pathlib import Path
+          from textwrap import dedent
 
           def replace_once(path, old, new):
               p = Path(path)
-              text = p.read_text(encoding='utf-8')
+              text = p.read_text(encoding="utf-8")
               if old not in text:
-                  raise SystemExit(f'pattern not found in {path}: {old[:80]!r}')
-              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+                  raise SystemExit(f"pattern not found in {path}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1), encoding="utf-8")
 
           replace_once(
-              'app/postgres_repository.py',
-              '''    def remove_rule_repost_campaign_target(self, row_id: int) -> bool:\n        with self.connect() as conn:\n            with conn.cursor() as cur:\n                cur.execute("DELETE FROM rule_repost_campaign_targets WHERE id=%s", (int(row_id),))\n            conn.commit()\n            return True\n''',
-              '''    def remove_rule_repost_campaign_target(self, row_id: int) -> bool:\n        with self.connect() as conn:\n            with conn.cursor() as cur:\n                cur.execute("DELETE FROM rule_repost_campaign_targets WHERE id=%s", (int(row_id),))\n                deleted = cur.rowcount > 0\n            conn.commit()\n            return deleted\n''',
+              "app/postgres_repository.py",
+              """                cur.execute("DELETE FROM rule_repost_campaign_targets WHERE id=%s", (int(row_id),))
+            conn.commit()
+            return True
+""",
+              """                cur.execute("DELETE FROM rule_repost_campaign_targets WHERE id=%s", (int(row_id),))
+                deleted = cur.rowcount > 0
+            conn.commit()
+            return deleted
+""",
           )
           replace_once(
-              'app/postgres_repository.py',
-              '''                )\n            conn.commit()\n            return cur.rowcount > 0\n\n    def update_rule_repost_campaign_target_check_result(\n''',
-              '''                )\n                updated = cur.rowcount > 0\n            conn.commit()\n            return updated\n\n    def update_rule_repost_campaign_target_check_result(\n''',
+              "app/postgres_repository.py",
+              """                )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def update_rule_repost_campaign_target_check_result(
+""",
+              """                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def update_rule_repost_campaign_target_check_result(
+""",
           )
           replace_once(
-              'app/postgres_repository.py',
-              '''                )\n            conn.commit()\n            return cur.rowcount > 0\n\n    def create_delivery_campaign_copy(\n''',
-              '''                )\n                updated = cur.rowcount > 0\n            conn.commit()\n            return updated\n\n    def create_delivery_campaign_copy(\n''',
+              "app/postgres_repository.py",
+              """                )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def create_campaign_run(
+""",
+              """                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def create_campaign_run(
+""",
           )
 
           replace_once(
-              'app/repost_campaign_runtime_service.py',
-              '''            ok = bool(self.repo.set_rule_repost_campaign_target_active(target_row_id, is_active))\n            if ok:\n                self.logger.info("REPOST_CAMPAIGN_TARGET_STATUS_UPDATED | rule_id=%s | target_row_id=%s | is_active=%s", rule_id, target_row_id, is_active)\n            else:\n                self.logger.warning("REPOST_CAMPAIGN_TARGET_ACTION_SAVE_FAILED | action=%s | rule_id=%s | target_row_id=%s | target_id=%s | current_is_active=%s | last_check_error=%s", "resume" if is_active else "pause", rule_id, target_row_id, target.get("target_id"), target.get("is_active"), target.get("last_check_error"))\n''',
-              '''            raw_update_result = self.repo.set_rule_repost_campaign_target_active(target_row_id, is_active)\n            ok = bool(raw_update_result)\n            if ok:\n                self.logger.info("REPOST_CAMPAIGN_TARGET_STATUS_UPDATED | rule_id=%s | target_row_id=%s | is_active=%s | raw_update_result=%s", rule_id, target_row_id, is_active, raw_update_result)\n            else:\n                self.logger.warning("REPOST_CAMPAIGN_TARGET_ACTION_SAVE_FAILED | action=%s | rule_id=%s | target_row_id=%s | target_id=%s | current_is_active=%s | last_check_error=%s | raw_update_result=%s", "resume" if is_active else "pause", rule_id, target_row_id, target.get("target_id"), target.get("is_active"), target.get("last_check_error"), raw_update_result)\n''',
+              "app/repost_campaign_runtime_service.py",
+              """            ok = bool(self.repo.set_rule_repost_campaign_target_active(target_row_id, is_active))
+""",
+              """            raw_update_result = self.repo.set_rule_repost_campaign_target_active(target_row_id, is_active)
+            ok = bool(raw_update_result)
+""",
           )
           replace_once(
-              'app/repost_campaign_runtime_service.py',
-              '''                "extra": {"target_id": target.get("target_id"), "current_is_active": target.get("is_active"), "last_check_error": target.get("last_check_error")},\n''',
-              '''                "extra": {"target_id": target.get("target_id"), "current_is_active": target.get("is_active"), "last_check_error": target.get("last_check_error"), "raw_update_result": raw_update_result},\n''',
+              "app/repost_campaign_runtime_service.py",
+              """                self.logger.info("REPOST_CAMPAIGN_TARGET_STATUS_UPDATED | rule_id=%s | target_row_id=%s | is_active=%s", rule_id, target_row_id, is_active)
+""",
+              """                self.logger.info("REPOST_CAMPAIGN_TARGET_STATUS_UPDATED | rule_id=%s | target_row_id=%s | is_active=%s | raw_update_result=%s", rule_id, target_row_id, is_active, raw_update_result)
+""",
+          )
+          replace_once(
+              "app/repost_campaign_runtime_service.py",
+              """                self.logger.warning("REPOST_CAMPAIGN_TARGET_ACTION_SAVE_FAILED | action=%s | rule_id=%s | target_row_id=%s | target_id=%s | current_is_active=%s | last_check_error=%s", "resume" if is_active else "pause", rule_id, target_row_id, target.get("target_id"), target.get("is_active"), target.get("last_check_error"))
+""",
+              """                self.logger.warning("REPOST_CAMPAIGN_TARGET_ACTION_SAVE_FAILED | action=%s | rule_id=%s | target_row_id=%s | target_id=%s | current_is_active=%s | last_check_error=%s | raw_update_result=%s", "resume" if is_active else "pause", rule_id, target_row_id, target.get("target_id"), target.get("is_active"), target.get("last_check_error"), raw_update_result)
+""",
+          )
+          replace_once(
+              "app/repost_campaign_runtime_service.py",
+              """                "extra": {"target_id": target.get("target_id"), "current_is_active": target.get("is_active"), "last_check_error": target.get("last_check_error")},
+""",
+              """                "extra": {"target_id": target.get("target_id"), "current_is_active": target.get("is_active"), "last_check_error": target.get("last_check_error"), "raw_update_result": raw_update_result},
+""",
           )
 
-          replace_once(
-              'tests/test_repost_campaign_runtime_service.py',
-              '''        self.update_target_check_calls = []\n        self.update_target_check_result = True\n''',
-              '''        self.update_target_check_calls = []\n        self.set_target_active_result = True\n        self.remove_target_result = True\n        self.update_target_check_result = True\n''',
-          )
-          replace_once(
-              'tests/test_repost_campaign_runtime_service.py',
-              '''    def set_rule_repost_campaign_target_active(self, target_row_id, is_active):\n        self.set_target_active_calls.append((target_row_id, is_active))\n        return True\n\n    def remove_rule_repost_campaign_target(self, target_row_id):\n        self.remove_target_calls.append(target_row_id)\n        return True\n''',
-              '''    def set_rule_repost_campaign_target_active(self, target_row_id, is_active):\n        self.set_target_active_calls.append((target_row_id, is_active))\n        return self.set_target_active_result\n\n    def remove_rule_repost_campaign_target(self, target_row_id):\n        self.remove_target_calls.append(target_row_id)\n        return self.remove_target_result\n''',
-          )
-          replace_once(
-              'tests/test_repost_campaign_runtime_service.py',
-              '''    assert result["ok"] is True\n    assert repo.set_target_active_calls[-1] == (1, False)\n\n\ndef test_set_campaign_target_active_not_found():\n''',
-              '''    assert result["ok"] is True\n    assert result["is_active"] is False\n    assert result["error_text"] is None\n    assert result["extra"]["raw_update_result"] is True\n    assert repo.set_target_active_calls[-1] == (1, False)\n\n\ndef test_set_campaign_target_active_repo_false_fails():\n    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))\n    repo.set_target_active_result = False\n    repo._targets = [{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}]\n    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))\n    result = runtime.set_campaign_target_active(rule_id=3, target_row_id=1, is_active=False)\n    assert result["ok"] is False\n    assert result["is_active"] is False\n    assert "Не удалось обновить канал/группу" in result["error_text"]\n    assert result["extra"]["raw_update_result"] is False\n\n\ndef test_set_campaign_target_active_not_found():\n''',
-          )
-          replace_once(
-              'tests/test_repost_campaign_runtime_service.py',
-              '''    assert result["ok"] is True\n    assert repo.remove_target_calls == [1]\n\n\ndef test_remove_campaign_target_not_found():\n''',
-              '''    assert result["ok"] is True\n    assert repo.remove_target_calls == [1]\n\n\ndef test_remove_campaign_target_repo_false_fails():\n    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))\n    repo.remove_target_result = False\n    repo._targets = [{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}]\n    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))\n    result = runtime.remove_campaign_target(rule_id=3, target_row_id=1)\n    assert result["ok"] is False\n    assert "Не удалось обновить канал/группу" in result["error_text"]\n    assert repo.remove_target_calls == [1]\n\n\ndef test_remove_campaign_target_not_found():\n''',
-          )
+          repo_contract = Path("tests/test_repost_campaign_repository_contract.py")
+          repo_contract.write_text(dedent('''\
+          from contextlib import contextmanager
 
-          repository_contract = Path('tests/test_repost_campaign_repository_contract.py')
-          repository_contract.write_text('''from contextlib import contextmanager\n\nfrom app.postgres_repository import PostgresRepository\n\n\nclass _FakeCursor:\n    def __init__(self, rowcounts):\n        self._rowcounts = list(rowcounts)\n        self.execute_calls = []\n        self.rowcount = 0\n\n    def __enter__(self):\n        return self\n\n    def __exit__(self, exc_type, exc, tb):\n        return False\n\n    def execute(self, query, params=None):\n        self.execute_calls.append((query, params))\n        self.rowcount = int(self._rowcounts.pop(0)) if self._rowcounts else 0\n\n\nclass _FakeConn:\n    def __init__(self, rowcounts):\n        self.cursor_obj = _FakeCursor(rowcounts)\n        self.commit_count = 0\n\n    def cursor(self):\n        return self.cursor_obj\n\n    def commit(self):\n        self.commit_count += 1\n\n\nclass _RepoWithFakeConn(PostgresRepository):\n    def __init__(self, rowcounts):\n        self.fake_conn = _FakeConn(rowcounts)\n\n    @contextmanager\n    def connect(self):\n        yield self.fake_conn\n\n\ndef test_repost_campaign_repository_methods_exist():\n    repo = PostgresRepository()\n\n    assert hasattr(repo, "get_rule_repost_campaign_summary")\n    assert hasattr(repo, "update_rule_repost_campaign_settings")\n    assert hasattr(repo, "add_rule_repost_campaign_target")\n    assert hasattr(repo, "list_rule_repost_campaign_targets")\n    assert hasattr(repo, "remove_rule_repost_campaign_target")\n    assert hasattr(repo, "set_rule_repost_campaign_target_active")\n    assert hasattr(repo, "update_rule_repost_campaign_target_check_result")\n    required = [\n        "create_campaign_run",\n        "update_campaign_run_status",\n        "create_campaign_run_message",\n        "mark_campaign_run_message_sending",\n        "mark_campaign_run_message_sent",\n        "mark_campaign_run_message_failed",\n        "claim_due_campaign_run_messages_for_delete",\n        "mark_campaign_run_message_deleted",\n        "mark_campaign_run_message_delete_failed",\n        "reset_stuck_campaign_delete_processing",\n        "get_campaign_run",\n        "get_campaign_run_message",\n        "list_campaign_runs_for_rule",\n        "list_campaign_run_messages",\n    ]\n    for name in required:\n        assert hasattr(repo, name)\n\n\ndef test_row_to_rule_maps_repost_campaign_fields():\n    repo = PostgresRepository()\n    row = {\n        "id": 1,\n        "source_id": "-1001",\n        "source_thread_id": None,\n        "target_id": "-1002",\n        "target_thread_id": None,\n        "interval": 3600,\n        "schedule_mode": "interval",\n        "fixed_times_json": None,\n        "is_active": True,\n        "created_date": "2026-05-04T00:00:00+00:00",\n        "next_run_at": None,\n        "last_sent_at": None,\n        "source_title": "Source",\n        "target_title": "Target",\n        "mode": "repost",\n        "video_trim_seconds": 120,\n        "video_clip_duration_seconds": 118,\n        "video_add_intro": False,\n        "video_intro_horizontal": None,\n        "video_intro_vertical": None,\n        "video_intro_horizontal_id": None,\n        "video_intro_vertical_id": None,\n        "video_caption": None,\n        "video_caption_entities_json": None,\n        "caption_delivery_mode": "auto",\n        "video_caption_delivery_mode": "auto",\n        "repost_campaign_enabled": True,\n        "repost_campaign_show_seconds": 86400,\n    }\n\n    rule = repo._row_to_rule(row)\n\n    assert rule.repost_campaign_enabled is True\n    assert rule.repost_campaign_show_seconds == 86400\n\n\ndef test_saved_posts_repository_methods_exist():\n    repo = PostgresRepository()\n\n    assert hasattr(repo, "create_saved_post")\n    assert hasattr(repo, "get_saved_post")\n    assert hasattr(repo, "list_saved_posts")\n    assert hasattr(repo, "update_saved_post_content")\n    assert hasattr(repo, "archive_saved_post")\n    assert hasattr(repo, "set_rule_repost_campaign_saved_post")\n\n\ndef test_repost_campaign_target_active_update_returns_rowcount_contract():\n    repo = _RepoWithFakeConn([1, 1, 0])\n\n    assert repo.set_rule_repost_campaign_target_active(10, False) is True\n    assert repo.set_rule_repost_campaign_target_active(10, True) is True\n    assert repo.set_rule_repost_campaign_target_active(999999999, False) is False\n\n    assert repo.fake_conn.commit_count == 3\n    first_query, first_params = repo.fake_conn.cursor_obj.execute_calls[0]\n    assert "UPDATE rule_repost_campaign_targets" in first_query\n    assert "SET is_active = %s" in first_query\n    assert "WHERE id = %s" in first_query\n    assert first_params == (False, 10)\n\n\ndef test_remove_repost_campaign_target_returns_rowcount_contract():\n    repo = _RepoWithFakeConn([1, 0])\n\n    assert repo.remove_rule_repost_campaign_target(10) is True\n    assert repo.remove_rule_repost_campaign_target(999999999) is False\n\n    assert repo.fake_conn.commit_count == 2\n    first_query, first_params = repo.fake_conn.cursor_obj.execute_calls[0]\n    assert "DELETE FROM rule_repost_campaign_targets WHERE id=%s" in first_query\n    assert first_params == (10,)\n\n\ndef test_update_repost_campaign_target_check_result_returns_rowcount_contract():\n    repo = _RepoWithFakeConn([1, 0])\n\n    assert repo.update_rule_repost_campaign_target_check_result(10, title="Chan", last_check_error=None) is True\n    assert repo.update_rule_repost_campaign_target_check_result(999999999, title="Missing", last_check_error="err") is False\n\n    assert repo.fake_conn.commit_count == 2\n    first_query, first_params = repo.fake_conn.cursor_obj.execute_calls[0]\n    assert "UPDATE rule_repost_campaign_targets" in first_query\n    assert "last_check_error = %s" in first_query\n    assert "WHERE id = %s" in first_query\n    assert first_params == ("Chan", None, 10)\n''', encoding='utf-8')
+          from app.postgres_repository import PostgresRepository
 
-          Path('.github/workflows/codex-hotfix-g46-patch.yml').unlink()
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          class _FakeCursor:
+              def __init__(self, rowcounts):
+                  self._rowcounts = list(rowcounts)
+                  self.execute_calls = []
+                  self.rowcount = 0
+
+              def __enter__(self):
+                  return self
+
+              def __exit__(self, exc_type, exc, tb):
+                  return False
+
+              def execute(self, query, params=None):
+                  self.execute_calls.append((query, params))
+                  self.rowcount = int(self._rowcounts.pop(0)) if self._rowcounts else 0
+
+
+          class _FakeConn:
+              def __init__(self, rowcounts):
+                  self.cursor_obj = _FakeCursor(rowcounts)
+                  self.commit_count = 0
+
+              def cursor(self):
+                  return self.cursor_obj
+
+              def commit(self):
+                  self.commit_count += 1
+
+
+          class _RepoWithFakeConn(PostgresRepository):
+              def __init__(self, rowcounts):
+                  self.fake_conn = _FakeConn(rowcounts)
+
+              @contextmanager
+              def connect(self):
+                  yield self.fake_conn
+
+
+          def test_repost_campaign_repository_methods_exist():
+              repo = PostgresRepository()
+
+              assert hasattr(repo, "get_rule_repost_campaign_summary")
+              assert hasattr(repo, "update_rule_repost_campaign_settings")
+              assert hasattr(repo, "add_rule_repost_campaign_target")
+              assert hasattr(repo, "list_rule_repost_campaign_targets")
+              assert hasattr(repo, "remove_rule_repost_campaign_target")
+              assert hasattr(repo, "set_rule_repost_campaign_target_active")
+              assert hasattr(repo, "update_rule_repost_campaign_target_check_result")
+              required = [
+                  "create_campaign_run",
+                  "update_campaign_run_status",
+                  "create_campaign_run_message",
+                  "mark_campaign_run_message_sending",
+                  "mark_campaign_run_message_sent",
+                  "mark_campaign_run_message_failed",
+                  "claim_due_campaign_run_messages_for_delete",
+                  "mark_campaign_run_message_deleted",
+                  "mark_campaign_run_message_delete_failed",
+                  "reset_stuck_campaign_delete_processing",
+                  "get_campaign_run",
+                  "get_campaign_run_message",
+                  "list_campaign_runs_for_rule",
+                  "list_campaign_run_messages",
+              ]
+              for name in required:
+                  assert hasattr(repo, name)
+
+
+          def test_row_to_rule_maps_repost_campaign_fields():
+              repo = PostgresRepository()
+              row = {
+                  "id": 1,
+                  "source_id": "-1001",
+                  "source_thread_id": None,
+                  "target_id": "-1002",
+                  "target_thread_id": None,
+                  "interval": 3600,
+                  "schedule_mode": "interval",
+                  "fixed_times_json": None,
+                  "is_active": True,
+                  "created_date": "2026-05-04T00:00:00+00:00",
+                  "next_run_at": None,
+                  "last_sent_at": None,
+                  "source_title": "Source",
+                  "target_title": "Target",
+                  "mode": "repost",
+                  "video_trim_seconds": 120,
+                  "video_clip_duration_seconds": 118,
+                  "video_add_intro": False,
+                  "video_intro_horizontal": None,
+                  "video_intro_vertical": None,
+                  "video_intro_horizontal_id": None,
+                  "video_intro_vertical_id": None,
+                  "video_caption": None,
+                  "video_caption_entities_json": None,
+                  "caption_delivery_mode": "auto",
+                  "video_caption_delivery_mode": "auto",
+                  "repost_campaign_enabled": True,
+                  "repost_campaign_show_seconds": 86400,
+              }
+
+              rule = repo._row_to_rule(row)
+
+              assert rule.repost_campaign_enabled is True
+              assert rule.repost_campaign_show_seconds == 86400
+
+
+
+          def test_saved_posts_repository_methods_exist():
+              repo = PostgresRepository()
+
+              assert hasattr(repo, "create_saved_post")
+              assert hasattr(repo, "get_saved_post")
+              assert hasattr(repo, "list_saved_posts")
+              assert hasattr(repo, "update_saved_post_content")
+              assert hasattr(repo, "archive_saved_post")
+              assert hasattr(repo, "set_rule_repost_campaign_saved_post")
+
+
+          def test_repost_campaign_target_active_update_returns_rowcount_contract():
+              repo = _RepoWithFakeConn([1, 1, 0])
+
+              assert repo.set_rule_repost_campaign_target_active(10, False) is True
+              assert repo.set_rule_repost_campaign_target_active(10, True) is True
+              assert repo.set_rule_repost_campaign_target_active(999999999, False) is False
+
+              assert repo.fake_conn.commit_count == 3
+              first_query, first_params = repo.fake_conn.cursor_obj.execute_calls[0]
+              assert "UPDATE rule_repost_campaign_targets" in first_query
+              assert "SET is_active = %s" in first_query
+              assert "WHERE id = %s" in first_query
+              assert first_params == (False, 10)
+
+
+          def test_remove_repost_campaign_target_returns_rowcount_contract():
+              repo = _RepoWithFakeConn([1, 0])
+
+              assert repo.remove_rule_repost_campaign_target(10) is True
+              assert repo.remove_rule_repost_campaign_target(999999999) is False
+
+              assert repo.fake_conn.commit_count == 2
+              first_query, first_params = repo.fake_conn.cursor_obj.execute_calls[0]
+              assert "DELETE FROM rule_repost_campaign_targets WHERE id=%s" in first_query
+              assert first_params == (10,)
+
+
+          def test_update_repost_campaign_target_check_result_returns_rowcount_contract():
+              repo = _RepoWithFakeConn([1, 0])
+
+              assert repo.update_rule_repost_campaign_target_check_result(10, title="Chan", last_check_error=None) is True
+              assert repo.update_rule_repost_campaign_target_check_result(999999999, title="Missing", last_check_error="err") is False
+
+              assert repo.fake_conn.commit_count == 2
+              first_query, first_params = repo.fake_conn.cursor_obj.execute_calls[0]
+              assert "UPDATE rule_repost_campaign_targets" in first_query
+              assert "last_check_error = %s" in first_query
+              assert "WHERE id = %s" in first_query
+              assert first_params == ("Chan", None, 10)
+          '''), encoding="utf-8")
+
+          replace_once(
+              "tests/test_repost_campaign_runtime_service.py",
+              """        self.update_target_check_result = True
+""",
+              """        self.update_target_check_result = True
+        self.set_target_active_result = True
+        self.remove_target_result = True
+""",
+          )
+          replace_once(
+              "tests/test_repost_campaign_runtime_service.py",
+              """    def set_rule_repost_campaign_target_active(self, target_row_id, is_active):
+        self.set_target_active_calls.append((target_row_id, is_active))
+        return True
+
+    def remove_rule_repost_campaign_target(self, target_row_id):
+        self.remove_target_calls.append(target_row_id)
+        return True
+""",
+              """    def set_rule_repost_campaign_target_active(self, target_row_id, is_active):
+        self.set_target_active_calls.append((target_row_id, is_active))
+        return self.set_target_active_result
+
+    def remove_rule_repost_campaign_target(self, target_row_id):
+        self.remove_target_calls.append(target_row_id)
+        return self.remove_target_result
+""",
+          )
+          replace_once(
+              "tests/test_repost_campaign_runtime_service.py",
+              """    assert result["ok"] is True
+    assert repo.set_target_active_calls[-1] == (1, False)
+
+
+""",
+              """    assert result["ok"] is True
+    assert result["is_active"] is False
+    assert result["error_text"] is None
+    assert result["extra"]["raw_update_result"] is True
+    assert repo.set_target_active_calls[-1] == (1, False)
+
+
+def test_set_campaign_target_active_repo_false_fails():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo.set_target_active_result = False
+    repo._targets = [{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.set_campaign_target_active(rule_id=3, target_row_id=1, is_active=False)
+    assert result["ok"] is False
+    assert result["is_active"] is False
+    assert result["error_text"]
+    assert result["extra"]["raw_update_result"] is False
+
+
+""",
+          )
+          replace_once(
+              "tests/test_repost_campaign_runtime_service.py",
+              """    assert result["ok"] is True
+    assert repo.remove_target_calls == [1]
+
+
+""",
+              """    assert result["ok"] is True
+    assert repo.remove_target_calls == [1]
+
+
+def test_remove_campaign_target_repo_false_fails():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo.remove_target_result = False
+    repo._targets = [{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.remove_campaign_target(rule_id=3, target_row_id=1)
+    assert result["ok"] is False
+    assert result["error_text"]
+    assert repo.remove_target_calls == [1]
+
+
+""",
+          )
+          PY
 
       - name: Validate
         run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
           python -m py_compile bot.py app/*.py
           pytest -q tests/test_repost_campaign_runtime_service.py tests/test_repost_campaign_repository_contract.py tests/test_repost_campaign_ui.py
 
-      - name: Commit patch
+      - name: Commit patch and remove workflow
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/postgres_repository.py app/repost_campaign_runtime_service.py tests/test_repost_campaign_repository_contract.py tests/test_repost_campaign_runtime_service.py .github/workflows/codex-hotfix-g46-patch.yml
-          git commit -m "HOTFIX G.4.6 fix campaign target update contract"
+          git add app/postgres_repository.py app/repost_campaign_runtime_service.py tests/test_repost_campaign_repository_contract.py tests/test_repost_campaign_runtime_service.py
+          git rm .github/workflows/codex-hotfix-g46-patch.yml
+          git commit -m "HOTFIX G.4.6 target active contract"
           git push origin HEAD:codex/hotfix-g-4-6-target-active-contract
