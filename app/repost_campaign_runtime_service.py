@@ -329,10 +329,30 @@ class RepostCampaignRuntimeService:
             return RepostCampaignActionResult(ok=False, action="delete_preview_messages", rule_id=0, error_text="Нет сообщений предпросмотра для удаления")
         try:
             self.logger.info("REPOST_CAMPAIGN_PREVIEW_DELETE_STARTED | target_id=%s | message_ids=%s", target_id, ids)
+            delete_result = None
             if len(ids) > 1 and hasattr(self.deleter, "delete_messages"):
-                await self.deleter.delete_messages(target_id=target_id, message_ids=ids, render_mode=render_mode)
+                delete_result = await self.deleter.delete_messages(target_id=target_id, message_ids=ids, render_mode=render_mode)
             else:
-                await self.deleter.delete_message(target_id=target_id, message_id=ids[0], render_mode=render_mode)
+                delete_result = await self.deleter.delete_message(target_id=target_id, message_id=ids[0], render_mode=render_mode)
+            if not getattr(delete_result, "ok", False):
+                error_text = getattr(delete_result, "error_text", None) or "Не удалось удалить предпросмотр"
+                self.logger.warning("REPOST_CAMPAIGN_PREVIEW_DELETE_FAILED | target_id=%s | message_ids=%s | error=%s", target_id, ids, error_text)
+                return RepostCampaignActionResult(
+                    ok=False,
+                    action="delete_preview_messages",
+                    rule_id=0,
+                    target_id=str(target_id),
+                    message_id=ids[0] if ids else None,
+                    method=render_mode,
+                    error_text=error_text,
+                    extra={
+                        "target_id": str(target_id),
+                        "message_id": message_id,
+                        "message_ids": ids,
+                        "render_mode": render_mode,
+                        "delete_result": delete_result.to_dict() if hasattr(delete_result, "to_dict") else None,
+                    },
+                )
             self.logger.info("REPOST_CAMPAIGN_PREVIEW_DELETE_DONE | target_id=%s | message_ids=%s", target_id, ids)
             return RepostCampaignActionResult(
                 ok=True,
@@ -341,7 +361,13 @@ class RepostCampaignRuntimeService:
                 target_id=str(target_id),
                 message_id=ids[0],
                 method=render_mode,
-                extra={"target_id": str(target_id), "message_id": message_id, "message_ids": ids, "render_mode": render_mode},
+                extra={
+                    "target_id": str(target_id),
+                    "message_id": message_id,
+                    "message_ids": ids,
+                    "render_mode": render_mode,
+                    "delete_result": delete_result.to_dict() if hasattr(delete_result, "to_dict") else None,
+                },
             )
         except Exception as exc:
             self.logger.warning("REPOST_CAMPAIGN_PREVIEW_DELETE_FAILED | target_id=%s | message_ids=%s | error=%s", target_id, ids, exc)

@@ -113,6 +113,7 @@ def test_preview_delete_result_success():
 def test_preview_delete_result_failed():
     text, _ = build_repost_campaign_preview_delete_result_view(rule_id=3, result={"ok": False, "error_text": "no rights"})
     assert "❌ Не удалось удалить предпросмотр" in text
+    assert "no rights" in text
 
 
 def test_format_readiness_block_warning():

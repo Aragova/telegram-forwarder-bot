@@ -121,17 +121,18 @@ class _FakeRenderer:
 
 
 class _FakeDeleter:
-    def __init__(self):
+    def __init__(self, *, result=None):
         self.delete_messages_calls = []
         self.delete_message_calls = []
+        self.result = result if result is not None else SimpleNamespace(ok=True, error_text=None, to_dict=lambda: {"ok": True})
 
     async def delete_messages(self, **kwargs):
         self.delete_messages_calls.append(kwargs)
-        return True
+        return self.result
 
     async def delete_message(self, **kwargs):
         self.delete_message_calls.append(kwargs)
-        return True
+        return self.result
 
 
 def test_preview_fail_no_rule():
@@ -267,6 +268,15 @@ def test_delete_preview_single_message():
     assert result.ok is True
     assert len(deleter.delete_message_calls) == 1
     assert deleter.delete_message_calls[0]["message_id"] == 10
+
+
+def test_delete_preview_returns_fail_when_deleter_result_not_ok():
+    deleter = _FakeDeleter(result=SimpleNamespace(ok=False, error_text="no rights", to_dict=lambda: {"ok": False, "error_text": "no rights"}))
+    runtime = RepostCampaignRuntimeService(repo=_FakeRepo(rule=SimpleNamespace(mode="repost"), saved_post={}), renderer=_FakeRenderer(None), deleter=deleter)
+    result = asyncio.run(runtime.delete_preview_messages(target_id="-1001", message_id=10, render_mode="bot_api"))
+    assert result.ok is False
+    assert result.error_text == "no rights"
+    assert result.extra["delete_result"]["ok"] is False
 
 
 def test_readiness_ready_status():
