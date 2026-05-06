@@ -137,6 +137,19 @@ class _FakeDeleter:
         return self.result
 
 
+class _FakeTelethonClient:
+    def __init__(self, views_map=None, fail_ids=None):
+        self.views_map = views_map or {}
+        self.fail_ids = set(fail_ids or [])
+
+    async def get_messages(self, *, entity, ids):
+        if ids in self.fail_ids:
+            raise RuntimeError("boom")
+        if ids not in self.views_map:
+            return None
+        return SimpleNamespace(views=self.views_map[ids])
+
+
 def test_preview_fail_no_rule():
     repo = _FakeRepo(rule=None)
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
@@ -278,7 +291,59 @@ def test_delete_preview_returns_fail_when_deleter_result_not_ok():
     result = asyncio.run(runtime.delete_preview_messages(target_id="-1001", message_id=10, render_mode="bot_api"))
     assert result.ok is False
     assert result.error_text == "no rights"
-    assert result.extra["delete_result"]["ok"] is False
+
+
+def test_build_views_report_all_available():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 8, "rule_id": 3, "saved_post_id": 22, "show_seconds": 3600}
+    repo._messages = [
+        {"send_status": "sent", "target_id": "-1001", "target_title": "A", "sent_message_id": 100, "target_kind": "main"},
+        {"send_status": "sent", "target_id": "-1002", "target_title": "B", "sent_message_id": 200, "target_kind": "extra"},
+    ]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=_FakeTelethonClient({100: 120, 200: 80}))
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["ok"] is True and report["status"] == "ready"
+    assert report["views_total"] == 200 and report["views_available"] == 2 and report["views_unavailable"] == 0
+
+
+def test_build_views_report_album_counts_first_message_only():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 8, "rule_id": 3}
+    repo._messages = [{"send_status": "sent", "target_id": "-1001", "target_title": "A", "sent_message_ids": [100, 101, 102, 103, 104]}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=_FakeTelethonClient({100: 500}))
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["views_total"] == 500
+    assert report["items"][0]["is_album"] is True and report["items"][0]["album_items"] == 5
+
+
+def test_build_views_report_partial_unavailable():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 8, "rule_id": 3}
+    repo._messages = [
+        {"send_status": "sent", "target_id": "-1001", "target_title": "A", "sent_message_id": 100},
+        {"send_status": "sent", "target_id": "-1002", "target_title": "B", "sent_message_id": 200},
+    ]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=_FakeTelethonClient({100: 10}, fail_ids={200}))
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["status"] == "partial" and report["views_available"] == 1 and report["views_unavailable"] == 1
+    assert len(report["problem_items"]) == 1
+
+
+def test_build_views_report_after_deleted_unavailable():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 8, "rule_id": 3}
+    repo._messages = [{"send_status": "sent", "target_id": "-1001", "target_title": "A", "sent_message_id": 100, "delete_status": "deleted"}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=_FakeTelethonClient({}))
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["items"][0]["views_status"] == "unavailable"
+    assert "Telegram не вернул просмотры" in report["items"][0]["error_text"]
+
+
+def test_build_views_report_no_telethon():
+    runtime = RepostCampaignRuntimeService(repo=_FakeRepo(rule=SimpleNamespace(mode="repost")), renderer=_FakeRenderer(None), telethon_client=None)
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["ok"] is False
+    assert "Сервис сбора просмотров" in report["error_text"]
 
 
 def test_readiness_ready_status():

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.repost_campaign_service import build_campaign_delete_after_iso, format_campaign_show_seconds_ru
+from app.repost_campaign_view_model import format_campaign_error_text
 
 
 def build_telegram_message_url(*, target_id: int | str, message_id: int | None, username: str | None = None) -> str | None:
@@ -56,11 +57,12 @@ class RepostCampaignActionResult:
 
 
 class RepostCampaignRuntimeService:
-    def __init__(self, *, repo, renderer, deleter=None, target_checker=None, logger_=None):
+    def __init__(self, *, repo, renderer, deleter=None, target_checker=None, telethon_client=None, logger_=None):
         self.repo = repo
         self.renderer = renderer
         self.deleter = deleter
         self.target_checker = target_checker
+        self.telethon_client = telethon_client
         self.logger = logger_ or logging.getLogger("forwarder")
 
     def _get_repost_rule_and_saved_post(self, *, rule_id: int, action: str):
@@ -1114,4 +1116,108 @@ class RepostCampaignRuntimeService:
                 failed_count += 1
                 self.logger.warning("REPOST_CAMPAIGN_DELETE_MESSAGE_FAILED | row_id=%s | target_id=%s | sent_message_id=%s | error=%s", row_id, target_id, sent_message_id, result.error_text)
         self.logger.info("REPOST_CAMPAIGN_DELETE_BATCH_DONE | claimed=%s | deleted=%s | failed=%s | reset_stuck=%s", len(rows), deleted_count, failed_count, reset_count)
+        run_ids = {int(row.get("run_id") or 0) for row in rows if int(row.get("run_id") or 0) > 0}
+        for run_id in sorted(run_ids):
+            self.logger.info("REPOST_CAMPAIGN_VIEWS_REPORT_AVAILABLE | rule_id=%s | run_id=%s", int((rows[0] or {}).get("rule_id") or 0), run_id)
         return {"ok": True, "claimed": len(rows), "deleted": deleted_count, "failed": failed_count, "reset_stuck": reset_count}
+
+    async def build_campaign_views_report(self, *, rule_id: int, run_id: int) -> dict:
+        if self.telethon_client is None:
+            return {"ok": False, "rule_id": rule_id, "run_id": run_id, "status": "unavailable", "error_text": "Сервис сбора просмотров временно недоступен."}
+        details = self.get_campaign_run_details(rule_id=rule_id, run_id=run_id)
+        if not details.get("ok"):
+            return {
+                "ok": False,
+                "rule_id": rule_id,
+                "run_id": run_id,
+                "run": None,
+                "messages": [],
+                "status": "not_found",
+                "summary_text": "Запуск кампании не найден.",
+                "error_text": details.get("error_text") or "Запуск кампании не найден.",
+            }
+        run = details.get("run") or {}
+        messages = details.get("messages") or []
+        items, top_items, problem_items = [], [], []
+        views_total = views_available = views_unavailable = sent_total = 0
+        for msg in messages:
+            send_status = str(msg.get("send_status") or "")
+            message_ids = self._extract_sent_message_ids(msg)
+            item = {
+                "target_kind": msg.get("target_kind") or "extra",
+                "target_id": str(msg.get("target_id") or ""),
+                "target_title": msg.get("target_title") or str(msg.get("target_id") or "Канал/группа"),
+                "message_id": message_ids[0] if message_ids else None,
+                "message_ids": message_ids,
+                "is_album": len(message_ids) > 1,
+                "album_items": len(message_ids),
+                "send_status": send_status,
+                "delete_status": msg.get("delete_status"),
+                "deleted_at": msg.get("deleted_at"),
+                "views": None,
+                "views_status": "not_sent",
+                "error_text": None,
+            }
+            if send_status.strip().lower() != "sent" or not message_ids:
+                items.append(item)
+                continue
+            sent_total += 1
+            try:
+                telethon_message = await self.telethon_client.get_messages(entity=str(msg.get("target_id")), ids=int(message_ids[0]))
+                views = getattr(telethon_message, "views", None) if telethon_message is not None else None
+                if views is None:
+                    item["views_status"] = "unavailable"
+                    item["error_text"] = "Telegram не вернул просмотры для этого сообщения"
+                    views_unavailable += 1
+                else:
+                    item["views_status"] = "ok"
+                    item["views"] = int(views or 0)
+                    views_total += int(views or 0)
+                    views_available += 1
+                    top_items.append(item)
+            except Exception as exc:
+                item["views_status"] = "failed"
+                item["error_text"] = format_campaign_error_text(exc, limit=160) or "Ошибка получения просмотров"
+                views_unavailable += 1
+            if item["views_status"] in {"failed", "unavailable"}:
+                problem_items.append(item)
+            items.append(item)
+        if sent_total <= 0:
+            status = "unavailable"
+            summary_text = "Просмотры не удалось получить. Возможно, публикации уже удалены или Telegram не вернул данные."
+        elif views_available == sent_total:
+            status = "ready"
+            summary_text = "Просмотры получены по всем размещениям."
+        elif views_available > 0 and views_unavailable > 0:
+            status = "partial"
+            summary_text = "Часть просмотров недоступна. Проверьте проблемные каналы."
+        else:
+            status = "unavailable"
+            summary_text = "Просмотры не удалось получить. Возможно, публикации уже удалены или Telegram не вернул данные."
+        top_items_sorted = sorted(top_items, key=lambda x: int(x.get("views") or 0), reverse=True)[:5]
+        self.logger.info(
+            "REPOST_CAMPAIGN_VIEWS_REPORT_BUILT | rule_id=%s | run_id=%s | status=%s | views_total=%s | views_available=%s | views_unavailable=%s | sent_total=%s",
+            rule_id, run_id, status, views_total, views_available, views_unavailable, sent_total,
+        )
+        return {
+            "ok": True,
+            "rule_id": rule_id,
+            "run_id": run_id,
+            "run": run,
+            "messages": messages,
+            "status": status,
+            "saved_post_id": run.get("saved_post_id"),
+            "started_at": run.get("started_at"),
+            "finished_at": run.get("finished_at"),
+            "show_seconds": int(run.get("show_seconds") or 0),
+            "targets_total": len(messages),
+            "sent_total": sent_total,
+            "views_total": views_total,
+            "views_available": views_available,
+            "views_unavailable": views_unavailable,
+            "items": items,
+            "top_items": top_items_sorted,
+            "problem_items": problem_items,
+            "summary_text": summary_text,
+            "error_text": None,
+        }

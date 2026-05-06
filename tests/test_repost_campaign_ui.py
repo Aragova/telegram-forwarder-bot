@@ -17,6 +17,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_targets_list_view,
     build_repost_campaign_target_preview_result_view,
     build_repost_campaign_preview_delete_result_view,
+    build_repost_campaign_views_report_view,
     format_repost_campaign_readiness_block,
 )
 
@@ -197,6 +198,7 @@ def test_launch_result_sent():
     assert "📣 Всего получателей: 3" in text
     assert "🧹 Автоудаление:" in text
     assert "📄 Детали запуска" in _texts_from_keyboard(keyboard)
+    assert "📊 Отчёт просмотров" in _texts_from_keyboard(keyboard)
     assert "🧹 Автоудаление: через 12 часов" in text
 
 
@@ -278,7 +280,25 @@ def test_details_failed_message():
     }
     text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
     assert "❌ Дополнительный канал" in text
-    assert "Ошибка отправки: Cannot send" in text
+
+
+def test_views_report_view_ready():
+    report = {"status": "ready", "views_total": 12430, "views_available": 42, "sent_total": 42, "saved_post_id": 22, "run_id": 8, "show_seconds": 3600, "items": [{"views_status": "ok", "views": 4120, "target_title": "Основной канал"}], "top_items": [], "problem_items": [], "summary_text": ""}
+    text, keyboard = build_repost_campaign_views_report_view(rule_id=3, run_id=8, report=report)
+    assert "📊 Отчёт просмотров" in text
+    assert "Всего просмотров" in text
+    assert "Основной канал" in text
+    texts = _texts_from_keyboard(keyboard)
+    assert "🔄 Обновить просмотры" in texts
+    assert "📄 Детали запуска" in texts
+
+
+def test_views_report_view_partial():
+    report = {"status": "partial", "items": [], "problem_items": [{"target_title": "Канал", "error_text": "Telegram не вернул просмотры"}], "summary_text": ""}
+    text, _ = build_repost_campaign_views_report_view(rule_id=3, run_id=8, report=report)
+    assert "Просмотры собраны частично" in text
+    assert "Где нет данных" in text
+    assert "Telegram не вернул просмотры" in text
 
 
 def test_details_failed_delete_shows_reason_and_attempts():

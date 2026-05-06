@@ -100,6 +100,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_post_menu_view,
     build_repost_campaign_preview_view,
     build_repost_campaign_run_details_view,
+    build_repost_campaign_views_report_view,
     build_repost_campaign_show_menu_view,
     build_repost_campaign_target_action_result_view,
     build_repost_campaign_target_delete_confirm_view,
@@ -7228,6 +7229,7 @@ def _build_repost_campaign_runtime() -> RepostCampaignRuntimeService:
         renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger),
         deleter=RepostCampaignDeleteService(bot=bot, telethon_client=telethon_client, logger_=logger),
         target_checker=RepostCampaignTargetCheckService(telethon_client=telethon_client, logger_=logger),
+        telethon_client=telethon_client,
         logger_=logger,
     )
 
@@ -7408,6 +7410,31 @@ async def handle_rule_repost_campaign_history_detail(callback: CallbackQuery):
             callback.data,
         )
         await answer_callback_safe(callback, "Не удалось открыть детали запуска", show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_report:"))
+async def handle_rule_repost_campaign_views_report(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
+        rule_id = int(rule_id_raw)
+        run_id = int(run_id_raw)
+        logger.info("REPOST_CAMPAIGN_VIEWS_REPORT_UI_OPENED | rule_id=%s | run_id=%s", rule_id, run_id)
+        runtime = _build_repost_campaign_runtime()
+        report = await runtime.build_campaign_views_report(rule_id=rule_id, run_id=run_id)
+        text, keyboard = build_repost_campaign_views_report_view(rule_id=rule_id, run_id=run_id, report=report)
+        await answer_callback_safe_once(callback)
+        if _should_answer_new_message_for_callback(callback):
+            await send_message_safe(chat_id=callback.from_user.id, text=text, reply_markup=keyboard)
+        else:
+            await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    except Exception as exc:
+        logger.exception("REPOST_CAMPAIGN_VIEWS_REPORT_UI_FAILED | callback=%s | error=%s", callback.data, exc)
+        await answer_callback_safe(callback, "Не удалось открыть отчёт просмотров", show_alert=True)
 
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_delete_message:"))
