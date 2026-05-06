@@ -347,10 +347,13 @@ def test_target_list_inline_buttons():
         {"id": 2, "target_id": "-1002", "title": "B", "is_active": False},
     ])
     texts = _texts_from_keyboard(keyboard)
-    assert "⏸ Пауза #1" in texts
-    assert "🗑 Удалить #1" in texts
-    assert "▶️ Включить #2" in texts
-    assert "🗑 Удалить #2" in texts
+    assert "⏸ Пауза" in texts
+    assert "🔎 Проверить" in texts
+    assert "▶️ Включить" in texts
+    assert "🗑 Удалить" in texts
+    assert "⏸ Пауза #1" not in texts
+    assert "🔎 Проверить #1" not in texts
+    assert "🗑 Удалить #1" not in texts
 
 
 def test_target_list_no_old_id_buttons():
@@ -359,7 +362,8 @@ def test_target_list_no_old_id_buttons():
     assert "Выключить по ID" not in " ".join(texts)
     assert "Включить по ID" not in " ".join(texts)
     assert "Удалить по ID" not in " ".join(texts)
-    assert "⚙️ Действия по ID" in texts
+    assert "⚙️ Управление вручную" in texts
+    assert "⚙️ Действия по ID" not in texts
 
 
 def test_id_actions_view_contains_old_callbacks():
@@ -586,7 +590,8 @@ def test_target_list_has_check_button_per_target():
     _, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}])
     texts = _texts_from_keyboard(keyboard)
     callbacks = _callbacks_from_keyboard(keyboard)
-    assert "🔎 Проверить #1" in texts
+    assert "🔎 Проверить" in texts
+    assert "🔎 Проверить #1" not in texts
     assert "rule_repost_campaign_target_check:3:1" in callbacks
 
 
@@ -646,3 +651,39 @@ def test_bot_preview_runtime_constructor_uses_keyword_args():
     assert "RepostCampaignRuntimeService(db)" not in source
     assert "RepostCampaignRuntimeService(\n            db" not in source
 
+
+
+def test_targets_list_view_does_not_show_raw_id_as_main_title():
+    text, _ = build_repost_campaign_targets_list_view(rule_id=3, targets=[{"id": 1, "target_id": "-1002741117827", "title": None, "is_active": True}])
+    assert "Канал/Группа #1" in text
+    assert "ID: -1002741117827" not in text
+    assert "1. 🟢 -1002741117827" not in text
+
+
+def test_targets_list_view_manual_actions_copy():
+    _, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[])
+    texts = _texts_from_keyboard(keyboard)
+    assert "⚙️ Управление вручную" in texts
+    assert "⚙️ Действия по ID" not in texts
+
+
+def test_targets_id_actions_view_uses_manual_wording():
+    text, keyboard = build_repost_campaign_targets_id_actions_view(rule_id=3)
+    texts = _texts_from_keyboard(keyboard)
+    assert "⚙️ Управление вручную" in text
+    assert "⏸ Поставить на паузу вручную" in texts
+    assert "▶️ Включить вручную" in texts
+    assert "🗑 Удалить вручную" in texts
+    assert "по ID" not in text
+    assert all("по ID" not in t for t in texts)
+
+
+def test_targets_list_buttons_without_number_suffix():
+    _, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}])
+    texts = _texts_from_keyboard(keyboard)
+    assert "⏸ Пауза" in texts
+    assert "🔎 Проверить" in texts
+    assert "🗑 Удалить" in texts
+    assert "Пауза #1" not in texts
+    assert "Проверить #1" not in texts
+    assert "Удалить #1" not in texts

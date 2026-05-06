@@ -265,3 +265,22 @@ def test_scenario_preview_no_banned_terms():
     assert "площадк" not in joined.lower()
     assert "режим: репост" not in joined.lower()
     assert "тестовый" not in joined.lower()
+
+
+def test_target_item_view_hides_raw_id_as_title():
+    view = build_campaign_target_item_view({"id": 1, "target_id": "-1002741117827", "title": None, "is_active": True, "last_check_error": None}, index=1)
+    assert "Канал/Группа #1" in view["title"]
+    assert "-1002741117827" not in view["title"]
+    assert view["target_line"] is None
+    assert "-1002741117827" in view["technical_line"]
+
+
+def test_target_item_view_uses_real_title():
+    view = build_campaign_target_item_view({"id": 1, "target_id": "-1002741117827", "title": "Mickey Twink 🍭", "is_active": True}, index=1)
+    assert "Mickey Twink 🍭" in view["title"]
+
+
+def test_target_item_view_title_equal_to_id_is_treated_as_missing():
+    view = build_campaign_target_item_view({"id": 1, "target_id": "-1002741117827", "title": "-1002741117827", "is_active": True}, index=1)
+    assert "Канал/Группа #1" in view["title"]
+    assert "-1002741117827" not in view["title"]
