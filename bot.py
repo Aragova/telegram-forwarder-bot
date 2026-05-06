@@ -7267,11 +7267,13 @@ async def handle_rule_repost_campaign_check(callback: CallbackQuery):
         return
     try:
         runtime = _build_repost_campaign_runtime()
+
         result = await runtime.check_campaign_targets(
             rule_id=rule_id,
             active_only=False,
             admin_id=callback.from_user.id if callback.from_user else None,
         )
+
         text, keyboard = build_repost_campaign_targets_check_result_view(rule_id=rule_id, result=result)
         await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await answer_callback_safe_once(callback)
@@ -7292,11 +7294,14 @@ async def handle_rule_repost_campaign_target_check(callback: CallbackQuery):
         return
     try:
         runtime = _build_repost_campaign_runtime()
+
         result = await runtime.check_campaign_target(
             rule_id=rule_id,
             target_row_id=row_id,
             admin_id=callback.from_user.id if callback.from_user else None,
         )
+
+
         text, keyboard = build_repost_campaign_target_check_result_view(rule_id=rule_id, result=result)
         await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await answer_callback_safe_once(callback)
@@ -8701,12 +8706,16 @@ async def handle_stateful_private_inputs(message: Message):
         if added > 0:
             try:
                 runtime = _build_repost_campaign_runtime()
+
                 check_result = await runtime.check_campaign_targets(
+
                     rule_id=rule_id,
                     active_only=False,
                     admin_id=message.from_user.id if message.from_user else None,
                     limit=50,
+
                 )
+
                 check_text, check_keyboard = build_repost_campaign_targets_check_result_view(rule_id=rule_id, result=check_result)
                 await message.answer(f"{result_text}\n\n{check_text}", reply_markup=check_keyboard)
                 return

@@ -671,9 +671,11 @@ def test_bot_no_legacy_target_check_stub():
     source = Path("bot.py").read_text(encoding="utf-8")
     assert "Полная проверка прав публикации и удаления будет добавлена отдельным шагом" not in source
     assert "rule_repost_campaign_check:" in source
+
     assert "result = runtime.check_campaign_targets(" not in source
     assert "auto_check_result = runtime.check_campaign_targets(" not in source
     assert "result = runtime.check_campaign_target(" not in source
+
 
 
 
