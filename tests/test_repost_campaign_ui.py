@@ -741,17 +741,28 @@ def test_targets_list_buttons_without_number_suffix():
 def _kb_texts(kb):
     return [b.text for row in kb.inline_keyboard for b in row]
 
-def test_launch_readiness_view_ready_has_launch_button():
+def test_launch_readiness_view_ready_has_confirm_button():
     text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=3, readiness={"can_launch": True, "saved_post_id": 7, "saved_post_exists": True, "show_seconds": 3600, "main_target_ready": True, "will_send_total": 3, "will_skip_total": 0, "extra_paused": 0, "extra_problem": 0})
     assert "🚦 Проверка перед запуском" in text
     assert "Кампания готова к запуску" in text
     assert "Будет опубликовано" in text
-    assert "🚀 Запустить кампанию" in _kb_texts(keyboard)
+    labels = _kb_texts(keyboard)
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "🚀 Подтвердить запуск" in labels
+    assert "rule_repost_campaign_launch_confirm:3" in callbacks
+    assert "rule_repost_campaign_launch:3" not in callbacks
 
-def test_launch_readiness_view_blocked_has_fix_buttons():
+
+def test_launch_readiness_view_ready_mentions_final_confirmation():
+    text, _ = build_repost_campaign_launch_readiness_view(rule_id=3, readiness={"can_launch": True, "saved_post_id": 7, "saved_post_exists": True, "show_seconds": 3600, "main_target_ready": True, "will_send_total": 3, "will_skip_total": 0, "extra_paused": 0, "extra_problem": 0})
+    assert "финальная проверка" in text
+    assert "После подтверждения" in text
+
+def test_launch_readiness_view_blocked_has_no_confirm_button():
     text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=3, readiness={"can_launch": False, "saved_post_exists": True, "show_seconds": 300, "main_target_ready": True, "extra_active_problem": 1, "extra_problem": 1, "will_send_total": 1, "will_skip_total": 1, "extra_paused": 0, "block_reasons": ["Есть активные каналы/группы, которые требуют настройки."]})
     assert "Нужно проверить каналы/группы" in text
     labels = _kb_texts(keyboard)
+    assert "🚀 Подтвердить запуск" not in labels
     assert "🔎 Проверить права" in labels
     assert "📣 Каналы/Группы" in labels
 
@@ -766,3 +777,10 @@ def test_launch_readiness_view_no_banned_terms():
     text, _ = build_repost_campaign_launch_readiness_view(rule_id=3, readiness={"can_launch": False, "saved_post_exists": False, "show_seconds": 0, "main_target_ready": True, "will_send_total": 0, "will_skip_total": 0, "extra_paused": 0, "extra_problem": 0})
     for bad in ["креатив", "площадк", "аккаунт-парсер", "тестовый", "Режим: репост"]:
         assert bad.lower() not in text.lower()
+
+
+def test_bot_has_launch_confirm_callback_and_logs():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "rule_repost_campaign_launch_confirm:" in source
+    assert "REPOST_CAMPAIGN_LAUNCH_PREFLIGHT_UI" in source
+    assert "REPOST_CAMPAIGN_LAUNCH_CONFIRM_STARTED" in source
