@@ -99,7 +99,7 @@ def build_repost_campaign_more_view(*, rule_id: int, saved_post_id: int | None, 
         [InlineKeyboardButton(text="❌ Отключить кампанию", callback_data=f"rule_repost_campaign_disable:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад к кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
-    text = "⚙️ Дополнительно\n\nСлужебные действия рекламной кампании."
+    text = "⚙️ Ещё\n\nДополнительные действия для проверки и обслуживания рекламной кампании."
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -120,19 +120,19 @@ def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[s
             title = "🟡 Кампания запущена частично"
         text = (
             f"{title}\n\n"
-            "Рекламный пост отправлен в каналы кампании.\n\n"
-            "📊 Итог:\n"
-            f"✅ Успешно: {success}\n"
-            f"❌ Ошибок: {failed}\n"
-            f"📣 Всего каналов: {total}\n\n"
+            "Рекламный пост опубликован в выбранные каналы/группы.\n\n"
+            "📊 Размещение:\n"
+            f"✅ Опубликовано: {success}\n"
+            f"⚠️ Ошибки: {failed}\n"
+            f"📣 Всего получателей: {total}\n\n"
             f"📝 Пост: #{saved_post_id}\n"
             f"🧾 Запуск: #{run_id}\n"
-            f"⏳ Время показа: {format_campaign_show_seconds_text(extra.get('show_seconds'))}\n\n"
-            "История уже обновлена. Детальный отчёт доступен в разделе “📊 История кампаний”."
+            f"🧹 Автоудаление: через {format_campaign_show_seconds_text(extra.get('show_seconds'))}\n\n"
+            "История обновлена. Детали доступны в отчёте запуска."
         )
     else:
         text = (
-            "❌ Не удалось запустить кампанию\n\n"
+            "❌ Кампания не запущена\n\n"
             f"{payload.get('error_text') or 'Неизвестная ошибка'}\n\n"
             "Проверьте готовность кампании:\n"
             "• рекламный пост\n"
@@ -146,7 +146,7 @@ def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[s
                 "Проверьте, что аккаунт-парсер добавлен в каналы и имеет право публикации."
             )
     rows = [
-        [InlineKeyboardButton(text="📊 История кампаний", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+        [InlineKeyboardButton(text="📊 История размещений", callback_data=f"rule_repost_campaign_history:{rule_id}")],
     ]
     if run_id:
         rows.append([InlineKeyboardButton(text="📄 Детали запуска", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run_id}")])
@@ -200,22 +200,23 @@ def build_repost_campaign_preview_view(
     if warnings_block:
         warnings_block = f"\n{warnings_block}"
     text = (
-        "👁 Предпросмотр кампании\n\n"
-        f"Правило #{rule_id}\n"
-        "Режим: репост\n\n"
+        "👁 Предпросмотр сценария\n\n"
         f"📝 Рекламный пост: #{saved_post_id}\n"
         f"Тип: {saved_post_description or 'пост'}\n\n"
-        f"⏳ Время показа: {show_seconds_text}\n"
         f"📣 Каналы/Группы: {targets_active} активных\n"
         f"{readiness_block}"
+        f"\n⏳ Время показа: {show_seconds_text}\n"
+        f"🧹 Автоудаление: {'включено' if show_seconds_text != 'не задан' else 'не задано'}"
         f"{warnings_block}\n\n"
-        "Что произойдёт при запуске:\n"
-        "1. Рекламный пост будет опубликован в основной канал правила.\n"
-        "2. Затем бот создаст копии для активных каналов кампании.\n"
-        f"3. Каждая публикация будет удалена через {show_seconds_text}.\n\n"
+        "После запуска:\n"
+        "• бот опубликует рекламный пост в основной канал правила;\n"
+        "• отправит копии в выбранные каналы/группы;\n"
+        "• сохранит результат по каждому получателю;\n"
+        "• автоматически удалит публикации после времени показа;\n"
+        "• история размещения останется в отчёте.\n\n"
         "Каналы/Группы:\n"
         f"{targets_preview_text}\n\n"
-        "Это только предпросмотр. Публикация не запускается."
+        "Это только предпросмотр сценария. Публикация не запускается."
     )
     return text, InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
@@ -378,7 +379,7 @@ def build_repost_campaign_target_delete_confirm_view(*, rule_id: int, target: di
 def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[str, InlineKeyboardMarkup]:
     if not history.get("ok"):
         text = (
-            "📊 История кампаний\n\n"
+            "📊 История размещений\n\n"
             "❌ Не удалось загрузить историю\n\n"
             f"{history.get('error_text') or 'Неизвестная ошибка'}"
         )
@@ -391,15 +392,14 @@ def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[
     runs = list(reversed(runs_raw))
     if not runs:
         text = (
-            "📊 История кампаний\n\n"
-            "Пока запусков нет.\n\n"
-            "Когда вы выполните проверочную публикацию или запустите кампанию, здесь появится история:\n"
-            "• какой рекламный пост отправлялся\n"
-            "• в какие каналы\n"
-            "• каким методом\n"
-            "• какие публикации были успешны\n"
-            "• где были ошибки\n\n"
-            "Начните с проверки публикации или запуска кампании в меню рекламной кампании."
+            "📊 История размещений\n\n"
+            "Пока размещений нет.\n\n"
+            "После запуска кампании здесь появятся:\n"
+            "• дата и время публикации;\n"
+            "• список каналов/групп;\n"
+            "• статус публикации;\n"
+            "• статус автоудаления;\n"
+            "• ошибки по каждому получателю."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🚀 К рекламной кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
@@ -409,7 +409,7 @@ def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[
         return text, kb
     summary = history.get("summary") or {}
     lines = [
-        "📊 История кампаний",
+        "📊 История размещений",
         "",
         "Обзор:",
         f"📦 Всего запусков: {int(summary.get('total') or 0)}",

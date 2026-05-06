@@ -227,7 +227,15 @@ def build_campaign_control_center_view_model(
     creative_line = f"📝 Рекламный пост: {post_value or 'не выбран'}"
 
     targets_active = int((summary or {}).get("targets_active") or 0)
+    targets_ready = (summary or {}).get("targets_ready")
+    targets_with_errors = (summary or {}).get("targets_with_errors")
     targets_line = f"📣 Каналы/Группы: {_format_active_channels_count(targets_active)}"
+    if targets_ready is not None and targets_with_errors is not None and targets_active > 0:
+        ready_count = int(targets_ready or 0)
+        errors_count = int(targets_with_errors or 0)
+        targets_line = f"📣 Каналы/Группы: {_format_active_channels_count(targets_active)} · {ready_count} готовы"
+        if errors_count > 0:
+            targets_line += f" · {errors_count} требуют проверки"
 
     show_seconds_value = (summary or {}).get("show_seconds")
     if not show_seconds_value:
@@ -269,7 +277,7 @@ def build_campaign_control_center_view_model(
         next_step_line = "Можно запускать кампанию."
         primary_action = "launch"
     elif not has_post:
-        title_status = "⚠️ Нужно выбрать креатив"
+        title_status = "⚠️ Нужно выбрать рекламный пост"
         next_step_line = "Следующий шаг: выберите рекламный пост."
         primary_action = "creative"
     elif not has_show_seconds:
@@ -277,8 +285,8 @@ def build_campaign_control_center_view_model(
         next_step_line = "Следующий шаг: задайте время показа."
         primary_action = "show_seconds"
     elif not has_targets:
-        title_status = "⚠️ Нужно добавить площадки"
-        next_step_line = "Следующий шаг: добавьте площадки."
+        title_status = "⚠️ Нужно добавить каналы/группы"
+        next_step_line = "Следующий шаг: добавьте каналы/группы."
         primary_action = "targets"
     else:
         title_status = "⚠️ Кампания требует настройки"
