@@ -1,4 +1,6 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,6 +10,7 @@ from app.saved_post_renderer import (
     normalize_telethon_target,
     send_saved_post_album_via_telethon_source,
     send_saved_post_content,
+    send_saved_post_content_via_telethon,
 )
 
 
@@ -216,6 +219,9 @@ class FakeTelethonSource:
         self.send_file_calls.append((entity, file, caption, formatting_entities))
         return [FakeSentMessage(900 + i) for i, _ in enumerate(file)]
 
+    async def forward_messages(self, entity, messages, from_peer, drop_author=True):
+        return [FakeSentMessage(900 + i) for i, _ in enumerate(messages)]
+
 
 def test_send_saved_post_album_via_telethon_source_success():
     telethon = FakeTelethonSource()
@@ -240,3 +246,83 @@ def test_renderer_premium_album_uses_source_and_skips_bot_download():
     ))
     assert result.ok is True
     assert result.method == "telethon_source"
+
+
+class _FakePeer:
+    def __init__(self, channel_id):
+        self.channel_id = channel_id
+
+
+class _TelethonVerifyOk(FakeTelethonSource):
+    async def get_messages(self, entity, ids):
+        if entity == 1:
+            return [FakeSourceMessage(i) for i in ids]
+        return [SimpleNamespace(id=i, date=datetime.now(timezone.utc), peer_id=_FakePeer(2451047809)) for i in ids]
+
+
+def test_telethon_album_send_verifies_fresh_target_message_ids():
+    telethon = _TelethonVerifyOk()
+    raw = asyncio.run(send_saved_post_album_via_telethon_source(
+        telethon_client=telethon,
+        chat_id="-1002451047809",
+        content={"kind": "album", "media_items": [{}, {}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12, 13]}},
+    ))
+    assert raw["message_ids"] == [900, 901, 902]
+
+
+class _TelethonOldIds(FakeTelethonSource):
+    async def get_messages(self, entity, ids):
+        if entity == 1:
+            return [FakeSourceMessage(i) for i in ids]
+        return [SimpleNamespace(id=i, date=datetime.now(timezone.utc) - timedelta(days=365), peer_id=_FakePeer(2451047809)) for i in ids]
+
+
+def test_telethon_album_send_rejects_old_message_ids():
+    with pytest.raises(ValueError, match="Не удалось подтвердить ID"):
+        asyncio.run(send_saved_post_album_via_telethon_source(
+            telethon_client=_TelethonOldIds(),
+            chat_id="-1002451047809",
+            content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
+        ))
+
+
+class _TelethonWrongPeer(FakeTelethonSource):
+    async def get_messages(self, entity, ids):
+        if entity == 1:
+            return [FakeSourceMessage(i) for i in ids]
+        return [SimpleNamespace(id=i, date=datetime.now(timezone.utc), peer_id=_FakePeer(999999)) for i in ids]
+
+
+def test_telethon_album_send_rejects_wrong_peer():
+    with pytest.raises(ValueError, match="Не удалось подтвердить ID"):
+        asyncio.run(send_saved_post_album_via_telethon_source(
+            telethon_client=_TelethonWrongPeer(),
+            chat_id="-1002451047809",
+            content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
+        ))
+
+
+class _FailSourceThenBuilder(_TelethonVerifyOk):
+    async def get_messages(self, entity, ids):
+        if entity == 1:
+            raise RuntimeError("no source")
+        return [SimpleNamespace(id=i, date=datetime.now(timezone.utc), peer_id=_FakePeer(2451047809)) for i in ids]
+
+    async def send_file(self, entity, file, caption="", formatting_entities=None):
+        return [FakeSentMessage(200 + i) for i, _ in enumerate(file)]
+
+
+def test_telethon_album_builder_fallback_verifies_ids(tmp_path):
+    class _Bot:
+        async def get_file(self, file_id):
+            return SimpleNamespace(file_path="x")
+        async def download_file(self, file_path, destination):
+            destination.write_bytes(b"x")
+    raw = asyncio.run(send_saved_post_content_via_telethon(
+        bot=_Bot(),
+        telethon_client=_FailSourceThenBuilder(),
+        chat_id="-1002451047809",
+        content={"kind": "album", "media_items": [{"kind": "photo", "file_id": "1"}, {"kind": "photo", "file_id": "2"}]},
+        temp_dir=tmp_path,
+    ))
+    assert raw["message_ids"] == [200, 201]

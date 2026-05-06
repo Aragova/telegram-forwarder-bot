@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +162,93 @@ def normalize_telethon_target(chat_id: int | str) -> int | str:
     return chat_id
 
 
+def _normalize_telegram_channel_id_for_compare(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    if raw.startswith("-100"):
+        normalized = raw[4:]
+    elif raw.startswith("-"):
+        normalized = raw[1:]
+    else:
+        normalized = raw
+    return normalized if normalized.isdigit() else None
+
+
+def _extract_telethon_message_peer_id(message: Any) -> str | None:
+    if message is None:
+        return None
+    candidates = [
+        getattr(message, "chat_id", None),
+        getattr(getattr(message, "peer_id", None), "channel_id", None),
+        getattr(getattr(message, "to_id", None), "channel_id", None),
+        getattr(getattr(message, "peer_id", None), "chat_id", None),
+        getattr(getattr(message, "to_id", None), "chat_id", None),
+    ]
+    for candidate in candidates:
+        normalized = _normalize_telegram_channel_id_for_compare(candidate)
+        if normalized is not None:
+            return normalized
+    return None
+
+
+async def verify_telethon_sent_messages(
+    *,
+    telethon_client,
+    target_id: int | str,
+    message_ids: list[int],
+    min_date=None,
+) -> list[int]:
+    if not message_ids:
+        return []
+    entity = normalize_telethon_target(target_id)
+    messages = await telethon_client.get_messages(entity, ids=message_ids)
+    if not isinstance(messages, list):
+        messages = [messages]
+    expected = [int(x) for x in message_ids if x]
+    expected_set = set(expected)
+    target_peer = _normalize_telegram_channel_id_for_compare(target_id)
+    min_dt = None
+    if min_date is not None:
+        min_dt = min_date
+        if getattr(min_dt, "tzinfo", None) is None:
+            min_dt = min_dt.replace(tzinfo=timezone.utc)
+        min_dt = min_dt - timedelta(seconds=60)
+    valid: set[int] = set()
+    for msg in messages:
+        msg_id = int(getattr(msg, "id", 0) or 0)
+        if msg_id <= 0 or msg_id not in expected_set:
+            continue
+        peer_id = _extract_telethon_message_peer_id(msg)
+        if target_peer is not None and peer_id is not None and peer_id != target_peer:
+            continue
+        msg_date = getattr(msg, "date", None)
+        if min_dt is not None and msg_date is not None:
+            check_dt = msg_date
+            if getattr(check_dt, "tzinfo", None) is None:
+                check_dt = check_dt.replace(tzinfo=timezone.utc)
+            if check_dt < min_dt:
+                continue
+        valid.add(msg_id)
+    verified = [x for x in expected if x in valid]
+    if len(verified) < len(expected):
+        logger.warning(
+            "SAVED_POST_TELETHON_SENT_IDS_VERIFY_FAILED | target_id=%s | expected_ids=%s | verified_ids=%s",
+            target_id,
+            expected,
+            verified,
+        )
+    else:
+        logger.info(
+            "SAVED_POST_TELETHON_SENT_IDS_VERIFIED | target_id=%s | message_ids=%s",
+            target_id,
+            verified,
+        )
+    return verified
+
+
 def get_album_source_message_ids(content: dict[str, Any]) -> list[int]:
     ids = content.get("source_message_ids")
     if not ids:
@@ -273,6 +361,7 @@ async def send_saved_post_album_via_telethon_source(
         source_message_ids,
     )
     try:
+        started_at = datetime.now(timezone.utc)
         messages = await telethon_client.get_messages(source_entity, ids=source_message_ids)
         if not isinstance(messages, list):
             messages = [messages]
@@ -287,6 +376,16 @@ async def send_saved_post_album_via_telethon_source(
                 caption=content.get("caption") or "",
                 formatting_entities=saved_post_entities_to_telethon(content.get("caption_entities")),
             )
+            sent_messages = sent if isinstance(sent, list) else [sent]
+            raw_ids = [int(m.id) for m in sent_messages if getattr(m, "id", None)]
+            ids = await verify_telethon_sent_messages(
+                telethon_client=telethon_client,
+                target_id=chat_id,
+                message_ids=raw_ids,
+                min_date=started_at,
+            )
+            if len(ids) < media_items_count:
+                raise ValueError("Не удалось подтвердить ID отправленного альбома в целевом канале.")
         except Exception as send_exc:
             logger.warning(
                 "SAVED_POST_TELETHON_SOURCE_ALBUM_SEND_FALLBACK_FORWARD | target_id=%s | error=%s",
@@ -299,8 +398,16 @@ async def send_saved_post_album_via_telethon_source(
                 from_peer=source_entity,
                 drop_author=True,
             )
-        sent_messages = sent if isinstance(sent, list) else [sent]
-        ids = [int(m.id) for m in sent_messages if getattr(m, "id", None)]
+            sent_messages = sent if isinstance(sent, list) else [sent]
+            raw_ids = [int(m.id) for m in sent_messages if getattr(m, "id", None)]
+            ids = await verify_telethon_sent_messages(
+                telethon_client=telethon_client,
+                target_id=chat_id,
+                message_ids=raw_ids,
+                min_date=started_at,
+            )
+            if len(ids) < media_items_count:
+                raise ValueError("Не удалось подтвердить ID отправленного альбома в целевом канале.")
         logger.info(
             "SAVED_POST_TELETHON_SOURCE_ALBUM_SEND_DONE | target_id=%s | message_ids=%s | method=telethon_source",
             chat_id,
@@ -356,10 +463,19 @@ async def send_saved_post_content_via_telethon(
                     source_exc,
                 )
             caption_entities = saved_post_entities_to_telethon(content.get("caption_entities"))
+            started_at = datetime.now(timezone.utc)
             local_paths = [await download_saved_post_media_item_for_telethon(bot=bot, item=item, temp_dir=temp_dir) for item in media_items]
             sent = await telethon_client.send_file(entity=target_entity, file=[str(x) for x in local_paths], caption=content.get("caption") or "", formatting_entities=caption_entities)
             sent_messages = sent if isinstance(sent, list) else [sent]
-            ids = [m.id for m in sent_messages]
+            raw_ids = [int(m.id) for m in sent_messages if getattr(m, "id", None)]
+            ids = await verify_telethon_sent_messages(
+                telethon_client=telethon_client,
+                target_id=chat_id,
+                message_ids=raw_ids,
+                min_date=started_at,
+            )
+            if len(ids) < len(media_items):
+                raise ValueError("Не удалось подтвердить ID отправленного альбома в целевом канале.")
             logger.info("SAVED_POST_TELETHON_BUILDER_SEND_DONE | target_id=%s | message_id=%s | method=telethon_builder", chat_id, ids[0])
             return {"ok": True, "message_id": ids[0], "message_ids": ids, "chat_id": str(chat_id), "kind": kind, "method": "telethon_builder"}
         else:
