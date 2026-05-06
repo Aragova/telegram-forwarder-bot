@@ -134,14 +134,17 @@ class RepostCampaignRuntimeService:
             if ok:
                 self.logger.info("REPOST_CAMPAIGN_TARGET_STATUS_UPDATED | rule_id=%s | target_row_id=%s | is_active=%s", rule_id, target_row_id, is_active)
             else:
-                self.logger.warning("REPOST_CAMPAIGN_TARGET_STATUS_FAILED | rule_id=%s | target_row_id=%s | error=%s", rule_id, target_row_id, "update_failed")
+                self.logger.warning("REPOST_CAMPAIGN_TARGET_ACTION_SAVE_FAILED | action=%s | rule_id=%s | target_row_id=%s | target_id=%s | current_is_active=%s | last_check_error=%s", "resume" if is_active else "pause", rule_id, target_row_id, target.get("target_id"), target.get("is_active"), target.get("last_check_error"))
             return {
                 "ok": ok,
+                "action": "resume" if is_active else "pause",
                 "rule_id": rule_id,
                 "target_row_id": target_row_id,
+                "target_id": target.get("target_id"),
                 "target_title": target.get("title") or target.get("target_id"),
                 "is_active": is_active,
-                "error_text": None if ok else "Не удалось обновить статус канала/группы",
+                "error_text": None if ok else "Не удалось обновить канал/группу. Обновите список и повторите действие.",
+                "extra": {"target_id": target.get("target_id"), "current_is_active": target.get("is_active"), "last_check_error": target.get("last_check_error")},
             }
         except Exception as exc:
             self.logger.warning("REPOST_CAMPAIGN_TARGET_STATUS_FAILED | rule_id=%s | target_row_id=%s | error=%s", rule_id, target_row_id, exc)
@@ -160,13 +163,16 @@ class RepostCampaignRuntimeService:
             if ok:
                 self.logger.info("REPOST_CAMPAIGN_TARGET_REMOVED | rule_id=%s | target_row_id=%s", rule_id, target_row_id)
             else:
-                self.logger.warning("REPOST_CAMPAIGN_TARGET_REMOVE_FAILED | rule_id=%s | target_row_id=%s | error=%s", rule_id, target_row_id, "remove_failed")
+                self.logger.warning("REPOST_CAMPAIGN_TARGET_ACTION_SAVE_FAILED | action=%s | rule_id=%s | target_row_id=%s | target_id=%s | current_is_active=%s | last_check_error=%s", "remove", rule_id, target_row_id, target.get("target_id"), target.get("is_active"), target.get("last_check_error"))
             return {
                 "ok": ok,
+                "action": "remove",
                 "rule_id": rule_id,
                 "target_row_id": target_row_id,
+                "target_id": target.get("target_id"),
                 "target_title": target.get("title") or target.get("target_id"),
-                "error_text": None if ok else "Не удалось удалить канал/группу",
+                "error_text": None if ok else "Не удалось обновить канал/группу. Обновите список и повторите действие.",
+                "extra": {"target_id": target.get("target_id"), "current_is_active": target.get("is_active"), "last_check_error": target.get("last_check_error")},
             }
         except Exception as exc:
             self.logger.warning("REPOST_CAMPAIGN_TARGET_REMOVE_FAILED | rule_id=%s | target_row_id=%s | error=%s", rule_id, target_row_id, exc)

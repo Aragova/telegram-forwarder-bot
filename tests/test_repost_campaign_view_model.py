@@ -9,6 +9,7 @@ from app.repost_campaign_view_model import (
     format_campaign_show_seconds_text,
     format_campaign_target_kind_text,
     format_campaign_run_type_text,
+    normalize_campaign_target_error_text,
 )
 
 
@@ -80,19 +81,29 @@ def test_build_campaign_target_item_view_active():
     view = build_campaign_target_item_view({"id": 1, "target_id": "-1001", "title": "Channel", "is_active": True}, index=1)
     assert "🟢" in view["title"]
     assert view["can_pause"] is True
-    assert view["can_enable"] is False
+    assert view["can_resume"] is False
 
 
 def test_build_campaign_target_item_view_paused():
     view = build_campaign_target_item_view({"id": 1, "target_id": "-1001", "title": "Channel", "is_active": False}, index=1)
     assert "⏸" in view["title"]
-    assert view["can_enable"] is True
+    assert view["can_resume"] is True
 
 
 def test_build_campaign_target_item_view_error():
     view = build_campaign_target_item_view({"id": 1, "target_id": "-1001", "title": "Channel", "is_active": True, "last_check_error": "not enough rights"}, index=1)
     assert "⚠️" in view["title"]
     assert view["error_line"]
+    assert view["requires_attention"] is True
+    assert view["can_pause"] is False
+    assert view["can_resume"] is False
+    assert view["can_check"] is True
+    assert view["can_delete"] is True
+
+
+def test_legacy_error_normalization():
+    text = normalize_campaign_target_error_text("Аккаунт-парсер не имеет права публиковать в канал/группу")
+    assert "ViMi пока не видит право публикации" in text
 
 from app.repost_campaign_view_model import build_campaign_control_center_view_model
 

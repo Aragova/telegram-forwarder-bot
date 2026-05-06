@@ -91,6 +91,17 @@ def format_campaign_error_text(value, *, limit: int = 120) -> str | None:
         return text[:limit] + "..."
     return text
 
+def normalize_campaign_target_error_text(error_text: str | None) -> str:
+    text = str(error_text or "").strip()
+    if not text:
+        return ""
+    if "Аккаунт-парсер не имеет права публиковать" in text:
+        return "ViMi пока не видит право публикации в этом канале/группе. Проверьте роль администратора и разрешение на отправку сообщений."
+    if "Аккаунт-парсер не видит" in text:
+        return "ViMi пока не видит этот канал/группу. Проверьте, что канал добавлен правильно и доступен для аккаунта ViMi."
+    if "Не удалось подтвердить право публикации" in text:
+        return "Не удалось проверить доступ к публикации. Проверьте, что аккаунт ViMi добавлен в администраторы канала/группы."
+    return format_campaign_error_text(text) or ""
 
 
 
@@ -114,13 +125,14 @@ def build_campaign_target_item_view(target: dict, *, index: int | None = None) -
     target_id = str(target.get("target_id") or "")
     title_raw = format_campaign_target_display_title(target, index=index)
     is_active = bool(target.get("is_active"))
-    check_error = format_campaign_error_text(target.get("last_check_error"))
-    if check_error:
+    check_error = normalize_campaign_target_error_text(target.get("last_check_error"))
+    requires_attention = bool(check_error)
+    if requires_attention:
         status_icon = "⚠️"
         status_line = "Статус: ⚠️ требует внимания"
         check_line = "Проверка: ⚠️ нужна проверка"
         can_pause = False
-        can_enable = True
+        can_enable = False
     elif is_active:
         status_icon = "🟢"
         status_line = "Статус: 🟢 активен"
@@ -144,8 +156,12 @@ def build_campaign_target_item_view(target: dict, *, index: int | None = None) -
         "thread_line": f"Тема: {thread_id}" if thread_id is not None else "Тема: не задана",
         "check_line": check_line,
         "error_line": f"Ошибка: {check_error}" if check_error else None,
+        "requires_attention": requires_attention,
         "can_pause": can_pause,
         "can_enable": can_enable,
+        "can_resume": can_enable,
+        "can_check": True,
+        "can_delete": True,
         "can_remove": True,
         "status_icon": status_icon,
         "check_action_text": "🔎 Проверить",

@@ -10,6 +10,7 @@ from app.repost_campaign_view_model import (
     build_campaign_run_item_view,
     build_campaign_run_message_view,
     build_campaign_scenario_preview_view_model,
+    normalize_campaign_target_error_text,
     format_campaign_datetime_text,
     format_campaign_error_text,
     format_campaign_render_mode_text,
@@ -332,7 +333,10 @@ def build_repost_campaign_targets_list_view(*, rule_id: int, targets: list[dict]
     keyboard_rows: list[list[InlineKeyboardButton]] = []
     for idx, row in enumerate(targets[:10], 1):
         row_id = int(row.get("id") or 0)
-        if row.get("is_active"):
+        view = build_campaign_target_item_view(row, index=idx)
+        if view.get("requires_attention"):
+            keyboard_rows.append([InlineKeyboardButton(text="🔎 Проверить", callback_data=f"rule_repost_campaign_target_check:{rule_id}:{row_id}")])
+        elif row.get("is_active"):
             keyboard_rows.append([InlineKeyboardButton(text="⏸ Пауза", callback_data=f"rule_repost_campaign_target_pause:{rule_id}:{row_id}"), InlineKeyboardButton(text="🔎 Проверить", callback_data=f"rule_repost_campaign_target_check:{rule_id}:{row_id}")])
         else:
             keyboard_rows.append([InlineKeyboardButton(text="▶️ Включить", callback_data=f"rule_repost_campaign_target_resume:{rule_id}:{row_id}"), InlineKeyboardButton(text="🔎 Проверить", callback_data=f"rule_repost_campaign_target_check:{rule_id}:{row_id}")])
@@ -372,7 +376,12 @@ def build_repost_campaign_target_action_result_view(*, rule_id: int, result: dic
         else:
             text = f"🗑 Канал/группа удалены\n\n{title} больше не подключены к этой рекламной кампании."
     else:
-        text = f"❌ Не удалось выполнить действие\n\n{result.get('error_text') or 'Неизвестная ошибка'}"
+        reason = result.get("error_text") or "Неизвестная ошибка"
+        text = f"❌ Не удалось обновить канал/группу\n\nПричина: {reason}"
+        last_check_error = normalize_campaign_target_error_text(((result.get("extra") or {}).get("last_check_error")))
+        if last_check_error:
+            text += f"\n\nТекущая проблема: {last_check_error}"
+        text += "\n\nОбновите список и повторите действие. Если канал требует внимания, сначала нажмите “🔎 Проверить”."
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 К списку каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")],
         [InlineKeyboardButton(text="📣 К каналам/группам", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
@@ -663,13 +672,14 @@ def build_repost_campaign_target_check_result_view(*, rule_id: int, result: dict
             "Теперь канал готов к размещению."
         )
     else:
-        reason = (result or {}).get("error_text") or "Неизвестная ошибка"
+        reason = normalize_campaign_target_error_text((result or {}).get("error_text")) or "Неизвестная ошибка"
         text = (
             "⚠️ Канал/группа требует внимания\n\n"
             f"Название: {title}\n"
             f"ID: {target_id}\n"
-            f"Причина: {reason}\n\n"
-            f"{publish_line}\n{delete_line}"
+            f"Что нужно сделать: {reason}\n\n"
+            "Публикация: ❌ недоступна\n"
+            f"{delete_line}"
         )
     row_id = int((result or {}).get("target_row_id") or 0)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -696,7 +706,7 @@ def build_repost_campaign_targets_check_result_view(*, rule_id: int, result: dic
         mark = "✅" if item.get("ok") else "⚠️"
         line = f"{idx}. {mark} {item.get('target_title') or item.get('target_id') or '—'}"
         if not item.get("ok") and item.get("error_text"):
-            line += f" — {item.get('error_text')}"
+            line += f" — {normalize_campaign_target_error_text(item.get('error_text'))}"
         if item.get("ok"):
             lines.append(line)
         else:
