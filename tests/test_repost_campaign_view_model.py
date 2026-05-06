@@ -182,3 +182,31 @@ def test_auto_delete_lines():
     )
     assert enabled["auto_delete_line"] == "🧹 Автоудаление: включено"
     assert not_set["auto_delete_line"] == "🧹 Автоудаление: не задано"
+
+
+def test_control_center_copy_uses_ad_post_and_channels_groups():
+    vm = build_campaign_control_center_view_model(
+        summary={"saved_post_id": None, "targets_active": 0},
+        saved_post_line="📝 Рекламный пост: не выбран",
+        control_center={"ok": True, "readiness": {"ready": False}, "issues": []},
+    )
+    assert "креатив" not in vm["title_status"].lower()
+    assert "площ" not in vm["next_step_line"].lower()
+
+
+def test_targets_line_shows_ready_count():
+    vm = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 1, "targets_active": 2, "targets_ready": 2, "targets_with_errors": 0},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": False}, "issues": []},
+    )
+    assert vm["targets_line"] == "📣 Каналы/Группы: 2 активных · 2 готовы"
+
+
+def test_targets_line_shows_ready_and_errors_counts():
+    vm = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 1, "targets_active": 5, "targets_ready": 3, "targets_with_errors": 2},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": False}, "issues": []},
+    )
+    assert vm["targets_line"] == "📣 Каналы/Группы: 5 активных · 3 готовы · 2 требуют проверки"

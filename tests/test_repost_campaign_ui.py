@@ -151,6 +151,10 @@ def test_menu_compact_main_view():
     assert "⚠️ Требует внимания" not in text
     assert "📊 Последний запуск\n\n" not in text
     assert "Можно запускать кампанию." in text
+    assert "креатив" not in text.lower()
+    assert "площадки" not in text.lower()
+    assert "режим: репост" not in text.lower()
+    assert "тестовый" not in text.lower()
 
 
 def test_menu_shows_launch_button_when_ready():
@@ -184,16 +188,18 @@ def test_launch_result_sent():
     }
     text, keyboard = build_repost_campaign_launch_result_view(rule_id=3, result=result)
     assert "🚀 Кампания запущена" in text
-    assert "✅ Успешно: 3" in text
-    assert "📣 Всего каналов: 3" in text
+    assert "📊 Размещение" in text
+    assert "✅ Опубликовано: 3" in text
+    assert "📣 Всего получателей: 3" in text
+    assert "🧹 Автоудаление:" in text
     assert "📄 Детали запуска" in _texts_from_keyboard(keyboard)
-    assert "⏳ Время показа: 12 часов" in text
+    assert "🧹 Автоудаление: через 12 часов" in text
 
 
 def test_launch_result_uses_show_seconds_from_extra():
     result = {"ok": True, "saved_post_id": 7, "extra": {"campaign_run_id": 10, "targets_total": 3, "targets_success": 3, "targets_failed": 0, "show_seconds": 60}}
     text, _ = build_repost_campaign_launch_result_view(rule_id=3, result=result)
-    assert "⏳ Время показа: 1 минута" in text
+    assert "🧹 Автоудаление: через 1 минута" in text
     assert "12 часов" not in text
 
 
@@ -206,13 +212,15 @@ def test_launch_result_partial():
 def test_launch_result_failed():
     result = {"ok": False, "error_text": "oops", "premium_required": False, "extra": {}}
     text, _ = build_repost_campaign_launch_result_view(rule_id=3, result=result)
-    assert "❌ Не удалось запустить кампанию" in text
+    assert "❌ Кампания не запущена" in text
 
 
 def test_history_empty_state():
     text, keyboard = build_repost_campaign_history_view(rule_id=3, history={"ok": True, "runs": [], "summary": {}})
     texts = _texts_from_keyboard(keyboard)
-    assert "Пока запусков нет" in text
+    assert "📊 История размещений" in text
+    assert "Пока размещений нет" in text
+    assert "статус автоудаления" in text
     assert "🚀 К рекламной кампании" in texts
     assert "🔄 Обновить" in texts
 
@@ -227,7 +235,7 @@ def test_history_with_sent_run():
         "summary": {"total": 1, "sent": 1, "partial": 0, "failed": 0, "sending": 0, "last_run": {"id": 1}},
     }
     text, _ = build_repost_campaign_history_view(rule_id=3, history=history)
-    assert "📊 История кампаний" in text
+    assert "📊 История размещений" in text
     assert "#1" in text
     assert "📤 Проверочная публикация" in text
     assert "✅ Отправлено" in text
@@ -296,6 +304,25 @@ def test_preview_uses_readiness_block():
         readiness={"post_status_text": "✅ выбран", "show_seconds_status_text": "✅ 1 час", "targets_status_text": "✅ 2", "checks_status_text": "✅ ок", "summary_text": "✅ готово"},
     )
     assert "🚦 Готовность кампании" in text
+
+
+def test_preview_copy_is_premium_scenario():
+    text, _ = build_repost_campaign_preview_view(
+        rule_id=3,
+        saved_post_id=55,
+        saved_post_description="текст",
+        show_seconds_text="1 час",
+        targets_active=2,
+        targets_ready=1,
+        targets_with_errors=1,
+        targets_preview_text="1. 🟢 @a",
+        warnings=[],
+    )
+    assert "👁 Предпросмотр сценария" in text
+    assert "После запуска:" in text
+    assert "история размещения" in text
+    assert "Публикация не запускается" in text
+    assert "Режим: репост" not in text
 
 
 def test_details_shows_retry_button_for_failed_delete():
