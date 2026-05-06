@@ -7060,7 +7060,26 @@ async def handle_rule_repost_campaign_preview(callback: CallbackQuery):
         saved_post_description = get_saved_post_short_description(content)
         readiness = None
         control_center = None
-        runtime = RepostCampaignRuntimeService(db)
+
+        runtime = RepostCampaignRuntimeService(
+            repo=db,
+            renderer=SavedPostRenderer(
+                bot=bot,
+                telethon_client=telethon_client,
+                logger_=logger,
+            ),
+            deleter=RepostCampaignDeleteService(
+                bot=bot,
+                telethon_client=telethon_client,
+                logger_=logger,
+            ),
+            target_checker=RepostCampaignTargetCheckService(
+                telethon_client=telethon_client,
+                logger_=logger,
+            ),
+            logger_=logger,
+        )
+
         try:
             readiness = await run_db(lambda: runtime.get_campaign_readiness(rule_id=rule_id))
         except Exception:

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from app.repost_campaign_ui import (
     build_repost_campaign_more_view,
     build_repost_campaign_delete_result_view,
@@ -637,3 +639,10 @@ def test_readiness_block_uses_channels_groups():
     block = format_repost_campaign_readiness_block({"targets_status_text": "ok"})
     assert "Каналы/Группы" in block
     assert "📣 Каналы:" not in block
+
+
+def test_bot_preview_runtime_constructor_uses_keyword_args():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "RepostCampaignRuntimeService(db)" not in source
+    assert "RepostCampaignRuntimeService(\n            db" not in source
+
