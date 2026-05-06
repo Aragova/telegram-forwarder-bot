@@ -683,6 +683,30 @@ def test_launch_no_show_seconds():
     assert result.error_text == "Кампания не готова к запуску"
     assert len(renderer.calls) == 0
 
+
+def test_launch_campaign_album_not_marked_sent_without_message_ids():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=43200, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "album"}})
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="telethon_source", kind="album", chat_id="-1001", message_id=1, message_ids=[]))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+    assert len(repo.mark_campaign_run_message_sent_calls) == 0
+    assert len(repo.mark_campaign_run_message_failed_calls) == 1
+    assert result.ok is False
+    assert result.extra["targets_failed"] == 1
+
+
+def test_launch_campaign_album_marked_sent_with_verified_ids():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=43200, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "album"}})
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="telethon_source", kind="album", chat_id="-1001", message_id=200, message_ids=[200, 201]))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+    assert len(repo.mark_campaign_run_message_sent_calls) == 1
+    sent_kwargs = repo.mark_campaign_run_message_sent_calls[0][1]
+    assert sent_kwargs["sent_message_ids"] == [200, 201]
+    assert result.ok is True
+
 def test_get_campaign_control_center_no_history():
     rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=None, repost_campaign_show_seconds=0)
     repo = _FakeRepo(rule=rule, summary={"targets_active": 0, "targets_with_errors": 0})

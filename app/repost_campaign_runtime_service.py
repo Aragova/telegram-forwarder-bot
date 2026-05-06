@@ -699,34 +699,36 @@ class RepostCampaignRuntimeService:
             )
             render_result = await self.renderer.send(chat_id=target["target_id"], content=content)
             any_premium_required = any_premium_required or bool(getattr(render_result, "premium_required", False))
-            if render_result.ok:
+            album_ids = list(getattr(render_result, "message_ids", None) or [])
+            is_album_without_ids = bool(render_result.ok and render_result.kind == "album" and not album_ids)
+            if render_result.ok and not is_album_without_ids:
                 self.repo.mark_campaign_run_message_sent(
                     run_message_id,
                     sent_message_id=render_result.message_id,
-                    sent_message_ids=getattr(render_result, "message_ids", None),
+                    sent_message_ids=album_ids or getattr(render_result, "message_ids", None),
                     render_mode=render_result.method,
                 )
                 success_count += 1
                 if render_result.method:
                     methods.add(render_result.method)
                 self.logger.info(
-                    "REPOST_CAMPAIGN_LAUNCH_TARGET_SENT | run_id=%s | target_id=%s | message_id=%s | method=%s",
-                    run_id, target["target_id"], render_result.message_id, render_result.method
+                    "REPOST_CAMPAIGN_LAUNCH_TARGET_SENT | run_id=%s | target_id=%s | message_id=%s | message_ids=%s | method=%s",
+                    run_id, target["target_id"], render_result.message_id, album_ids, render_result.method
                 )
             else:
                 self.repo.mark_campaign_run_message_failed(
                     run_message_id,
-                    error_text=render_result.error_text or "unknown error",
-                    render_mode=render_result.method,
+                    error_text="Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error"),
+                    render_mode=getattr(render_result, "method", None),
                 )
                 failed_count += 1
                 if first_error_text is None:
-                    first_error_text = render_result.error_text or "unknown error"
-                if render_result.method:
-                    methods.add(render_result.method)
+                    first_error_text = "Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error")
+                if getattr(render_result, "method", None):
+                    methods.add(getattr(render_result, "method"))
                 self.logger.warning(
                     "REPOST_CAMPAIGN_LAUNCH_TARGET_FAILED | run_id=%s | target_id=%s | error=%s | method=%s",
-                    run_id, target["target_id"], render_result.error_text, render_result.method
+                    run_id, target["target_id"], getattr(render_result, "error_text", None), getattr(render_result, "method", None)
                 )
 
         total = len(targets)
