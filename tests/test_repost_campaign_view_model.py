@@ -11,6 +11,7 @@ from app.repost_campaign_view_model import (
     format_campaign_target_kind_text,
     format_campaign_run_type_text,
     normalize_campaign_target_error_text,
+    build_campaign_views_report_view_model,
 )
 
 
@@ -256,6 +257,25 @@ def test_scenario_preview_with_target_errors():
     assert vm["can_check_rights"] is True
     assert "5 активных · 3 готовы · 2 требуют проверки" in vm["targets_line"]
     assert vm["next_step_line"] == "Следующий шаг: проверьте права каналов/групп."
+
+
+def test_views_report_vm_ready():
+    vm = build_campaign_views_report_view_model(report={"status": "ready", "views_total": 12430, "views_available": 2, "sent_total": 2, "items": [{"views_status": "ok", "views": 1240, "target_title": "Канал A"}]})
+    assert vm["status_line"] == "✅ Просмотры собраны"
+    assert "12 430" in vm["total_views_line"]
+    assert "2 / 2" in vm["coverage_line"]
+    assert any("Канал A" in x for x in vm["channel_lines"])
+
+
+def test_views_report_vm_partial():
+    vm = build_campaign_views_report_view_model(report={"status": "partial", "items": [], "problem_items": [{"target_title": "Канал B", "error_text": "err"}]})
+    assert "частично" in vm["status_line"]
+    assert vm["problem_lines"]
+
+
+def test_views_report_vm_album_line():
+    vm = build_campaign_views_report_view_model(report={"status": "ready", "items": [{"views_status": "ok", "views": 10, "target_title": "Канал", "is_album": True, "album_items": 5}]})
+    assert "альбом 5 медиа" in vm["channel_lines"][0]
 
 
 def test_scenario_preview_missing_post():

@@ -242,6 +242,55 @@ def build_campaign_run_message_view(message: dict, *, index: int | None = None) 
     }
 
 
+def build_campaign_views_report_view_model(*, report: dict) -> dict:
+    status = str(report.get("status") or "unavailable")
+    status_map = {
+        "ready": "✅ Просмотры собраны",
+        "partial": "🟡 Просмотры собраны частично",
+        "unavailable": "⚠️ Просмотры недоступны",
+        "not_found": "❌ Запуск не найден",
+    }
+    items = report.get("items") or []
+    channel_lines = []
+    for item in items:
+        title = str(item.get("target_title") or item.get("target_id") or "Канал/группа")
+        if item.get("views_status") == "ok":
+            line = f"👁 {int(item.get('views') or 0):,}".replace(",", " ") + f" — {title}"
+            if item.get("is_album"):
+                line += f" · альбом {int(item.get('album_items') or 0)} медиа"
+        else:
+            line = f"⚠️ нет данных — {title}"
+        channel_lines.append(line)
+    top_lines = []
+    for idx, item in enumerate(report.get("top_items") or [], 1):
+        top_lines.append(f"🏆 {idx}. {item.get('target_title') or item.get('target_id')} — {int(item.get('views') or 0):,}".replace(",", " "))
+    problem_lines = []
+    for item in report.get("problem_items") or []:
+        reason = format_campaign_error_text(item.get("error_text"), limit=160) or "не удалось получить просмотры"
+        problem_lines.append(f"⚠️ {item.get('target_title') or item.get('target_id')} — {reason}")
+    delete_statuses = {str((x or {}).get("delete_status") or "").strip().lower() for x in items}
+    if delete_statuses and delete_statuses.issubset({"deleted"}):
+        delete_note = "🧹 Публикации уже удалены. Просмотры показаны по данным, доступным Telegram на момент отчёта."
+    else:
+        delete_note = "⏳ Часть публикаций ещё ожидает автоудаления. Просмотры могут увеличиться."
+    return {
+        "title": "📊 Отчёт просмотров",
+        "status_line": status_map.get(status, status_map["unavailable"]),
+        "total_views_line": f"👁 Всего просмотров: {int(report.get('views_total') or 0):,}".replace(",", " "),
+        "coverage_line": f"📣 Каналов с данными: {int(report.get('views_available') or 0)} / {int(report.get('sent_total') or 0)}",
+        "post_line": f"📝 Пост: #{report.get('saved_post_id') or '—'}",
+        "run_line": f"🧾 Запуск: #{report.get('run_id') or '—'}",
+        "show_seconds_line": f"⏳ Время показа: {format_campaign_show_seconds_text(report.get('show_seconds'))}",
+        "delete_note_line": delete_note,
+        "summary_line": report.get("summary_text") or "",
+        "channel_lines": channel_lines,
+        "problem_lines": problem_lines,
+        "top_lines": top_lines,
+        "can_refresh": True,
+        "can_open_details": bool(report.get("run_id")),
+    }
+
+
 def build_campaign_control_center_view_model(
     *,
     summary: dict,

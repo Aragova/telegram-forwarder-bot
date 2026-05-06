@@ -11,6 +11,7 @@ from app.repost_campaign_view_model import (
     build_campaign_run_message_view,
     build_campaign_scenario_preview_view_model,
     build_campaign_launch_readiness_view_model,
+    build_campaign_views_report_view_model,
     normalize_campaign_target_error_text,
     format_campaign_datetime_text,
     format_campaign_error_text,
@@ -176,6 +177,7 @@ def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[s
     ]
     if run_id:
         rows.append([InlineKeyboardButton(text="📄 Детали запуска", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run_id}")])
+        rows.append([InlineKeyboardButton(text="📊 Отчёт просмотров", callback_data=f"rule_repost_campaign_views_report:{rule_id}:{run_id}")])
     rows.extend([
         [InlineKeyboardButton(text="🔄 Обновить кампанию", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
@@ -534,6 +536,7 @@ def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[
     last_run_id = int(last_run.get("id") or runs_raw[0].get("id") or 0)
     if last_run_id:
         buttons.append([InlineKeyboardButton(text="📄 Детали последнего запуска", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{last_run_id}")])
+        buttons.append([InlineKeyboardButton(text="📊 Отчёт просмотров последнего запуска", callback_data=f"rule_repost_campaign_views_report:{rule_id}:{last_run_id}")])
     recent_desc = list(runs_raw)
     for run in recent_desc:
         run_id = int(run.get("id") or 0)
@@ -605,12 +608,44 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
             "",
         ])
     kb_rows = delete_action_buttons + [
+        [InlineKeyboardButton(text="📊 Отчёт просмотров", callback_data=f"rule_repost_campaign_views_report:{rule_id}:{run.get('id') or run_id}")],
         [InlineKeyboardButton(text="🔄 Обновить детали", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run.get('id') or run_id}")],
         [InlineKeyboardButton(text="📊 К истории", callback_data=f"rule_repost_campaign_history:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ]
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     return "\n".join(lines).rstrip(), kb
+
+
+def build_repost_campaign_views_report_view(*, rule_id: int, run_id: int, report: dict) -> tuple[str, InlineKeyboardMarkup]:
+    vm = build_campaign_views_report_view_model(report=report or {})
+    lines = [
+        vm["title"],
+        "",
+        vm["status_line"],
+        "",
+        vm["total_views_line"],
+        vm["coverage_line"],
+        "",
+        vm["post_line"],
+        vm["run_line"],
+        vm["show_seconds_line"],
+        "",
+        "Каналы/Группы:",
+    ]
+    lines.extend(vm.get("channel_lines") or ["—"])
+    if vm.get("top_lines"):
+        lines.extend(["", "Топ размещений:"] + vm["top_lines"])
+    if vm.get("problem_lines"):
+        lines.extend(["", "Где нет данных:"] + vm["problem_lines"])
+    lines.extend(["", vm.get("delete_note_line") or "", vm.get("summary_line") or ""])
+    rows = [
+        [InlineKeyboardButton(text="🔄 Обновить просмотры", callback_data=f"rule_repost_campaign_views_report:{rule_id}:{run_id}")],
+        [InlineKeyboardButton(text="📄 Детали запуска", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run_id}")],
+        [InlineKeyboardButton(text="📊 История размещений", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return "\n".join([x for x in lines if x is not None]).strip(), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_repost_campaign_delete_result_view(*, rule_id: int, result) -> tuple[str, InlineKeyboardMarkup]:
