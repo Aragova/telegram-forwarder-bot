@@ -7,6 +7,7 @@ from typing import Any
 
 from app.repost_campaign_service import build_campaign_delete_after_iso, format_campaign_show_seconds_ru
 from app.repost_campaign_view_model import format_campaign_error_text
+from app.saved_post_renderer import normalize_telethon_target
 
 
 def build_telegram_message_url(*, target_id: int | str, message_id: int | None, username: str | None = None) -> str | None:
@@ -1163,11 +1164,18 @@ class RepostCampaignRuntimeService:
                 continue
             sent_total += 1
             try:
-                telethon_message = await self.telethon_client.get_messages(entity=str(msg.get("target_id")), ids=int(message_ids[0]))
+                target_id = msg.get("target_id")
+                normalized_entity = normalize_telethon_target(target_id)
+                report_message_id = int(message_ids[0])
+                try:
+                    telethon_message = await self.telethon_client.get_messages(entity=normalized_entity, ids=report_message_id)
+                except Exception:
+                    entity = await self.telethon_client.get_entity(normalized_entity)
+                    telethon_message = await self.telethon_client.get_messages(entity=entity, ids=report_message_id)
                 views = getattr(telethon_message, "views", None) if telethon_message is not None else None
                 if views is None:
                     item["views_status"] = "unavailable"
-                    item["error_text"] = "Telegram не вернул просмотры для этого сообщения"
+                    item["error_text"] = "Публикация уже удалена или Telegram не вернул данные."
                     views_unavailable += 1
                 else:
                     item["views_status"] = "ok"
@@ -1177,7 +1185,15 @@ class RepostCampaignRuntimeService:
                     top_items.append(item)
             except Exception as exc:
                 item["views_status"] = "failed"
-                item["error_text"] = format_campaign_error_text(exc, limit=160) or "Ошибка получения просмотров"
+                item["error_text"] = "Telegram не вернул просмотры по этому каналу."
+                self.logger.warning(
+                    "REPOST_CAMPAIGN_VIEWS_TARGET_FAILED | rule_id=%s | run_id=%s | target_id=%s | message_id=%s | error=%s",
+                    rule_id,
+                    run_id,
+                    msg.get("target_id"),
+                    message_ids[0] if message_ids else None,
+                    format_campaign_error_text(exc, limit=160) or str(exc),
+                )
                 views_unavailable += 1
             if item["views_status"] in {"failed", "unavailable"}:
                 problem_items.append(item)
