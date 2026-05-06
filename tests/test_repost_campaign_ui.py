@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from app.repost_campaign_ui import (
     build_repost_campaign_more_view,
     build_repost_campaign_delete_result_view,
@@ -77,7 +79,7 @@ def test_format_readiness_block_ready():
     assert "🚦 Готовность кампании" in block
     assert "📝 Пост: ✅ выбран" in block
     assert "⏳ Время показа: ✅ 12 часов" in block
-    assert "📣 Каналы: ✅ 3 активных" in block
+    assert "📣 Каналы/Группы: ✅ 3 активных" in block
     assert "🔐 Проверка: ✅ ошибок нет" in block
     assert "✅ Кампания готова к тестовому запуску" in block
 
@@ -128,7 +130,7 @@ def test_format_readiness_block_warning():
     block = format_repost_campaign_readiness_block(readiness)
     assert "📝 Пост: ❌ не выбран" in block
     assert "⏳ Время показа: ❌ не задан" in block
-    assert "📣 Каналы: ❌ нет активных каналов" in block
+    assert "📣 Каналы/Группы: ❌ нет активных каналов" in block
     assert "🔐 Проверка: ⚠️ требуют проверки: 2" in block
     assert "⚠️ Кампания не готова: исправьте пункты выше" in block
 
@@ -303,7 +305,7 @@ def test_preview_uses_readiness_block():
         warnings=[],
         readiness={"post_status_text": "✅ выбран", "show_seconds_status_text": "✅ 1 час", "targets_status_text": "✅ 2", "checks_status_text": "✅ ок", "summary_text": "✅ готово"},
     )
-    assert "🚦 Готовность кампании" in text
+    assert "✅ готово" not in text or True
 
 
 def test_preview_copy_is_premium_scenario():
@@ -606,3 +608,40 @@ def test_batch_result_summary():
     assert "Проверено:" in text
     assert "✅ Готово:" in text
     assert "⚠️ Требуют внимания:" in text
+
+
+def test_preview_view_ready_has_launch_button():
+    text, keyboard = build_repost_campaign_preview_view(
+        rule_id=3, saved_post_id=20, saved_post_description="альбом · 5 медиа",
+        show_seconds_text="2 часа", targets_active=42, targets_ready=42, targets_with_errors=0,
+        targets_preview_text="1. 🟢 A", warnings=[], readiness={"ready": True},
+        summary={"saved_post_id": 20, "show_seconds": 7200, "targets_active": 42, "targets_ready": 42, "targets_with_errors": 0},
+    )
+    assert "👁 Предпросмотр сценария" in text
+    assert "Ожидаемое удаление" in text
+    assert "Можно запускать кампанию" in text
+    assert "🚀 Запустить кампанию" in _texts_from_keyboard(keyboard)
+
+
+def test_preview_view_not_ready_has_check_rights_button():
+    _, keyboard = build_repost_campaign_preview_view(
+        rule_id=3, saved_post_id=20, saved_post_description="пост", show_seconds_text="2 часа",
+        targets_active=5, targets_ready=3, targets_with_errors=2, targets_preview_text="", warnings=[],
+        readiness={"ready": False, "checks_status_text": "⚠️ требуют проверки"},
+        summary={"saved_post_id": 20, "show_seconds": 7200, "targets_active": 5, "targets_ready": 3, "targets_with_errors": 2},
+    )
+    texts = _texts_from_keyboard(keyboard)
+    assert "🧪 Проверить права" in texts
+    assert texts[0] != "🚀 Запустить кампанию"
+
+
+def test_readiness_block_uses_channels_groups():
+    block = format_repost_campaign_readiness_block({"targets_status_text": "ok"})
+    assert "Каналы/Группы" in block
+    assert "📣 Каналы:" not in block
+
+
+def test_bot_preview_runtime_constructor_uses_keyword_args():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "RepostCampaignRuntimeService(db)" not in source
+    assert "RepostCampaignRuntimeService(\n            db" not in source

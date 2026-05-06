@@ -7059,11 +7059,35 @@ async def handle_rule_repost_campaign_preview(callback: CallbackQuery):
         content = saved_post.get("content_json") or saved_post.get("content") or {}
         saved_post_description = get_saved_post_short_description(content)
         readiness = None
+        control_center = None
+        runtime = RepostCampaignRuntimeService(
+            repo=db,
+            renderer=SavedPostRenderer(
+                bot=bot,
+                telethon_client=telethon_client,
+                logger_=logger,
+            ),
+            deleter=RepostCampaignDeleteService(
+                bot=bot,
+                telethon_client=telethon_client,
+                logger_=logger,
+            ),
+            target_checker=RepostCampaignTargetCheckService(
+                telethon_client=telethon_client,
+                logger_=logger,
+            ),
+            logger_=logger,
+        )
         try:
-            runtime = RepostCampaignRuntimeService(db)
             readiness = await run_db(lambda: runtime.get_campaign_readiness(rule_id=rule_id))
         except Exception:
             readiness = None
+        try:
+            control_center = await run_db(lambda: runtime.get_campaign_control_center(rule_id=rule_id))
+        except Exception as exc:
+            logger.warning("REPOST_CAMPAIGN_PREVIEW_CONTROL_CENTER_UNAVAILABLE | rule_id=%s | error=%s", rule_id, exc)
+            control_center = None
+        saved_post_line = f"📝 Рекламный пост: #{saved_post_id} · {saved_post_description or 'пост'}" if saved_post_id else "📝 Рекламный пост: не выбран"
         text, keyboard = build_repost_campaign_preview_view(
             rule_id=rule_id,
             saved_post_id=int(saved_post_id) if saved_post_id else None,
@@ -7075,6 +7099,10 @@ async def handle_rule_repost_campaign_preview(callback: CallbackQuery):
             targets_preview_text=targets_preview,
             warnings=warning_lines,
             readiness=readiness,
+            summary=summary,
+            control_center=control_center,
+            saved_post_line=saved_post_line,
+            now=datetime.now(USER_TZ),
         )
         logger.info(
             "REPOST_CAMPAIGN_PREVIEW_OPENED | rule_id=%s | saved_post_id=%s | active_targets=%s | show_seconds=%s",
