@@ -551,6 +551,54 @@ def build_repost_campaign_delete_result_view(*, rule_id: int, result) -> tuple[s
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def build_repost_campaign_target_preview_result_view(*, rule_id: int, result: dict) -> tuple[str, InlineKeyboardMarkup]:
+    payload = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})
+    extra = payload.get("extra") or {}
+    target_title = extra.get("target_title") or extra.get("target_id") or "—"
+    kind = extra.get("kind") or payload.get("kind") or "post"
+    method = extra.get("method") or payload.get("method") or "unknown"
+    message_ids = extra.get("message_ids") or []
+    preview_url = extra.get("preview_url")
+    text = (
+        "✅ Предпросмотр отправлен\n\n"
+        "Рекламный пост опубликован в основном канале правила.\n"
+        "Проверьте внешний вид, подпись, premium emoji и альбом.\n\n"
+        f"Канал/Группа: {target_title}\n"
+        f"Тип: {kind}\n"
+        f"Метод: {method}\n"
+    )
+    if isinstance(message_ids, list) and len(message_ids) > 1:
+        text += f"\nМедиа: {len(message_ids)}\n"
+    if not preview_url:
+        text += "\nОткройте основной канал правила и проверьте последний опубликованный рекламный пост."
+    rows = []
+    if preview_url:
+        rows.append([InlineKeyboardButton(text="👁 Открыть предпросмотр", url=preview_url)])
+    rows.extend([
+        [InlineKeyboardButton(text="🗑 Удалить предпросмотр", callback_data=f"rule_repost_campaign_preview_delete:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ К рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
+    ])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_preview_delete_result_view(*, rule_id: int, result: dict) -> tuple[str, InlineKeyboardMarkup]:
+    payload = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})
+    extra = payload.get("extra") or {}
+    if payload.get("ok"):
+        text = "🗑 Предпросмотр удалён\n\nСообщения предпросмотра удалены из основного канала."
+        ids = extra.get("message_ids") or []
+        if isinstance(ids, list) and len(ids) > 1:
+            text += f"\n\nУдалено сообщений: {len(ids)}"
+    else:
+        text = f"❌ Не удалось удалить предпросмотр\n\n{payload.get('error_text') or 'Неизвестная ошибка'}"
+    rows = [
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        [InlineKeyboardButton(text="📝 К рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def build_repost_campaign_target_check_result_view(*, rule_id: int, result: dict) -> tuple[str, InlineKeyboardMarkup]:
     ok = bool((result or {}).get("ok"))
     title = (result or {}).get("target_title") or (result or {}).get("target_id") or "—"

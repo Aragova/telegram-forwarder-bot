@@ -11,6 +11,8 @@ from app.repost_campaign_ui import (
     build_repost_campaign_target_delete_confirm_view,
     build_repost_campaign_targets_id_actions_view,
     build_repost_campaign_targets_list_view,
+    build_repost_campaign_target_preview_result_view,
+    build_repost_campaign_preview_delete_result_view,
     format_repost_campaign_readiness_block,
 )
 
@@ -78,6 +80,39 @@ def test_format_readiness_block_ready():
     assert "📣 Каналы: ✅ 3 активных" in block
     assert "🔐 Проверка: ✅ ошибок нет" in block
     assert "✅ Кампания готова к тестовому запуску" in block
+
+
+def test_target_preview_result_success_with_open_button():
+    text, keyboard = build_repost_campaign_target_preview_result_view(
+        rule_id=3,
+        result={"ok": True, "extra": {"preview_url": "https://t.me/c/2451047809/1025", "target_title": "Mickey Twink 🍭", "kind": "album", "message_ids": [1025, 1026], "method": "telethon_builder"}},
+    )
+    assert "✅ Предпросмотр отправлен" in text
+    assert "Канал/Группа:" in text
+    assert "Медиа: 2" in text
+    texts = _texts_from_keyboard(keyboard)
+    assert "👁 Открыть предпросмотр" in texts
+    assert "🗑 Удалить предпросмотр" in texts
+
+
+def test_target_preview_result_without_url_hides_open_button():
+    text, keyboard = build_repost_campaign_target_preview_result_view(
+        rule_id=3,
+        result={"ok": True, "extra": {"preview_url": None, "target_title": "A", "kind": "post", "method": "bot_api"}},
+    )
+    assert "Откройте основной канал правила" in text
+    texts = _texts_from_keyboard(keyboard)
+    assert "👁 Открыть предпросмотр" not in texts
+
+
+def test_preview_delete_result_success():
+    text, _ = build_repost_campaign_preview_delete_result_view(rule_id=3, result={"ok": True, "extra": {"message_ids": [1, 2]}})
+    assert "🗑 Предпросмотр удалён" in text
+
+
+def test_preview_delete_result_failed():
+    text, _ = build_repost_campaign_preview_delete_result_view(rule_id=3, result={"ok": False, "error_text": "no rights"})
+    assert "❌ Не удалось удалить предпросмотр" in text
 
 
 def test_format_readiness_block_warning():

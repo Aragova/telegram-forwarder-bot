@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from app.repost_campaign_runtime_service import RepostCampaignRuntimeService
+from app.repost_campaign_runtime_service import RepostCampaignRuntimeService, build_telegram_message_url
 from app.saved_post_renderer import SavedPostRenderResult
 
 
@@ -120,6 +120,20 @@ class _FakeRenderer:
         return self.result
 
 
+class _FakeDeleter:
+    def __init__(self):
+        self.delete_messages_calls = []
+        self.delete_message_calls = []
+
+    async def delete_messages(self, **kwargs):
+        self.delete_messages_calls.append(kwargs)
+        return True
+
+    async def delete_message(self, **kwargs):
+        self.delete_message_calls.append(kwargs)
+        return True
+
+
 def test_preview_fail_no_rule():
     repo = _FakeRepo(rule=None)
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
@@ -210,6 +224,49 @@ def test_test_send_premium_failure_propagated():
     assert result.ok is False
     assert result.premium_required is True
     assert result.error_text == "Telethon error"
+
+
+def test_preview_saved_post_in_main_target_uses_rule_target():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, target_id="-1002451047809")
+    saved_post = {"id": 55, "content_json": {"kind": "photo"}}
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="photo", chat_id="-1002451047809", message_id=1025))
+    runtime = RepostCampaignRuntimeService(repo=_FakeRepo(rule=rule, saved_post=saved_post), renderer=renderer)
+    result = asyncio.run(runtime.preview_saved_post_in_main_target(rule_id=3, admin_chat_id=123))
+    assert renderer.calls[0]["chat_id"] == "-1002451047809"
+    assert result.ok is True
+    assert result.extra["target_id"] == "-1002451047809"
+
+
+def test_preview_saved_post_in_main_target_album_ids_and_url():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, target_id="-1002451047809")
+    saved_post = {"id": 55, "content_json": {"kind": "album"}}
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="telethon_builder", kind="album", chat_id="-1002451047809", message_id=1025, message_ids=[1025, 1026, 1027]))
+    runtime = RepostCampaignRuntimeService(repo=_FakeRepo(rule=rule, saved_post=saved_post), renderer=renderer)
+    result = asyncio.run(runtime.preview_saved_post_in_main_target(rule_id=3, admin_chat_id=123))
+    assert result.extra["message_ids"] == [1025, 1026, 1027]
+    assert result.extra["preview_url"] == "https://t.me/c/2451047809/1025"
+
+
+def test_build_telegram_message_url_private_channel():
+    assert build_telegram_message_url(target_id="-1002451047809", message_id=1025) == "https://t.me/c/2451047809/1025"
+
+
+def test_delete_preview_uses_delete_messages_for_album():
+    deleter = _FakeDeleter()
+    runtime = RepostCampaignRuntimeService(repo=_FakeRepo(rule=SimpleNamespace(mode="repost"), saved_post={}), renderer=_FakeRenderer(None), deleter=deleter)
+    result = asyncio.run(runtime.delete_preview_messages(target_id="-1001", message_ids=[1, 2, 3], render_mode="telethon_builder"))
+    assert result.ok is True
+    assert len(deleter.delete_messages_calls) == 1
+    assert deleter.delete_messages_calls[0]["message_ids"] == [1, 2, 3]
+
+
+def test_delete_preview_single_message():
+    deleter = _FakeDeleter()
+    runtime = RepostCampaignRuntimeService(repo=_FakeRepo(rule=SimpleNamespace(mode="repost"), saved_post={}), renderer=_FakeRenderer(None), deleter=deleter)
+    result = asyncio.run(runtime.delete_preview_messages(target_id="-1001", message_id=10, render_mode="bot_api"))
+    assert result.ok is True
+    assert len(deleter.delete_message_calls) == 1
+    assert deleter.delete_message_calls[0]["message_id"] == 10
 
 
 def test_readiness_ready_status():

@@ -8,6 +8,23 @@ from typing import Any
 from app.repost_campaign_service import build_campaign_delete_after_iso, format_campaign_show_seconds_ru
 
 
+def build_telegram_message_url(*, target_id: int | str, message_id: int | None, username: str | None = None) -> str | None:
+    if not message_id:
+        return None
+    if username:
+        uname = str(username).strip().lstrip("@")
+        if uname:
+            return f"https://t.me/{uname}/{int(message_id)}"
+    target = str(target_id or "").strip()
+    if target.startswith("-100"):
+        return f"https://t.me/c/{target[4:]}/{int(message_id)}"
+    if target.startswith("-"):
+        return f"https://t.me/c/{target.lstrip('-')}/{int(message_id)}"
+    if target:
+        return f"https://t.me/{target}/{int(message_id)}"
+    return None
+
+
 @dataclass(frozen=True)
 class RepostCampaignActionResult:
     ok: bool
@@ -231,6 +248,113 @@ class RepostCampaignRuntimeService:
             kind=render_result.kind,
             premium_required=render_result.premium_required,
         )
+
+    async def preview_saved_post_in_main_target(
+        self,
+        *,
+        rule_id: int,
+        admin_chat_id: int | str,
+        reply_markup: Any | None = None,
+    ) -> RepostCampaignActionResult:
+        _ = admin_chat_id, reply_markup
+        loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="preview_saved_post_in_main_target")
+        if isinstance(loaded, RepostCampaignActionResult):
+            return loaded
+
+        rule, saved_post = loaded
+        saved_post_id = int(getattr(rule, "repost_campaign_saved_post_id"))
+        target_id = getattr(rule, "target_id", None)
+        if not target_id:
+            return RepostCampaignActionResult(
+                ok=False,
+                action="preview_saved_post_in_main_target",
+                rule_id=rule_id,
+                saved_post_id=saved_post_id,
+                error_text="У правила не задан основной канал получателя",
+            )
+        content = saved_post.get("content_json") or saved_post.get("content") or {}
+        render_result = await self.renderer.send(chat_id=target_id, content=content, reply_markup=None)
+        if not render_result.ok:
+            return RepostCampaignActionResult(
+                ok=False,
+                action="preview_saved_post_in_main_target",
+                rule_id=rule_id,
+                saved_post_id=saved_post_id,
+                target_id=str(target_id),
+                method=render_result.method,
+                kind=render_result.kind,
+                error_text=render_result.error_text,
+                premium_required=render_result.premium_required,
+            )
+        message_ids = getattr(render_result, "message_ids", None)
+        preview_url = build_telegram_message_url(target_id=target_id, message_id=render_result.message_id, username=getattr(rule, "target_username", None))
+        return RepostCampaignActionResult(
+            ok=True,
+            action="preview_saved_post_in_main_target",
+            rule_id=rule_id,
+            saved_post_id=saved_post_id,
+            target_id=str(target_id),
+            message_id=render_result.message_id,
+            method=render_result.method,
+            kind=render_result.kind,
+            premium_required=render_result.premium_required,
+            extra={
+                "rule_id": rule_id,
+                "saved_post_id": saved_post.get("id"),
+                "target_id": str(target_id),
+                "target_title": getattr(rule, "target_title", None) or str(target_id),
+                "kind": content.get("kind"),
+                "method": render_result.method,
+                "message_id": render_result.message_id,
+                "message_ids": message_ids,
+                "preview_url": preview_url,
+                "render_result": render_result.to_dict(),
+            },
+        )
+
+    async def delete_preview_messages(
+        self,
+        *,
+        target_id: int | str,
+        message_id: int | None = None,
+        message_ids: list[int] | None = None,
+        render_mode: str | None = None,
+    ) -> RepostCampaignActionResult:
+        ids = [int(x) for x in (message_ids or []) if x]
+        if not ids and message_id:
+            ids = [int(message_id)]
+        if not self.deleter:
+            return RepostCampaignActionResult(ok=False, action="delete_preview_messages", rule_id=0, error_text="Сервис удаления недоступен")
+        if not ids:
+            return RepostCampaignActionResult(ok=False, action="delete_preview_messages", rule_id=0, error_text="Нет сообщений предпросмотра для удаления")
+        try:
+            self.logger.info("REPOST_CAMPAIGN_PREVIEW_DELETE_STARTED | target_id=%s | message_ids=%s", target_id, ids)
+            if len(ids) > 1 and hasattr(self.deleter, "delete_messages"):
+                await self.deleter.delete_messages(target_id=target_id, message_ids=ids, render_mode=render_mode)
+            else:
+                await self.deleter.delete_message(target_id=target_id, message_id=ids[0], render_mode=render_mode)
+            self.logger.info("REPOST_CAMPAIGN_PREVIEW_DELETE_DONE | target_id=%s | message_ids=%s", target_id, ids)
+            return RepostCampaignActionResult(
+                ok=True,
+                action="delete_preview_messages",
+                rule_id=0,
+                target_id=str(target_id),
+                message_id=ids[0],
+                method=render_mode,
+                extra={"target_id": str(target_id), "message_id": message_id, "message_ids": ids, "render_mode": render_mode},
+            )
+        except Exception as exc:
+            self.logger.warning("REPOST_CAMPAIGN_PREVIEW_DELETE_FAILED | target_id=%s | message_ids=%s | error=%s", target_id, ids, exc)
+            return RepostCampaignActionResult(
+                ok=False,
+                action="delete_preview_messages",
+                rule_id=0,
+                target_id=str(target_id),
+                message_id=ids[0] if ids else None,
+                method=render_mode,
+                error_text="Не удалось удалить предпросмотр",
+                extra={"target_id": str(target_id), "message_id": message_id, "message_ids": ids, "render_mode": render_mode},
+            )
 
     async def test_send_saved_post_to_main_target(self, *, rule_id: int, admin_id: int | None = None) -> RepostCampaignActionResult:
         loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="test_send_saved_post")
