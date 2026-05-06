@@ -597,22 +597,37 @@ def test_target_list_has_check_button_per_target():
 
 def test_single_check_result_success():
     from app.repost_campaign_ui import build_repost_campaign_target_check_result_view
-    text, _ = build_repost_campaign_target_check_result_view(rule_id=3, result={"ok": True, "target_row_id": 1, "target_id": "-1001", "target_title": "A", "can_delete": True})
-    assert "✅ Проверка пройдена" in text
+    text, _ = build_repost_campaign_target_check_result_view(rule_id=3, result={"ok": True, "check_ok": True, "saved": True, "target_row_id": 1, "target_id": "-1001", "target_title": "A", "can_publish": True, "can_delete": True})
+    assert "✅ Канал/группа проверены" in text
+    assert "Публикация: ✅ разрешена" in text
 
 
 def test_single_check_result_failed():
     from app.repost_campaign_ui import build_repost_campaign_target_check_result_view
     text, _ = build_repost_campaign_target_check_result_view(rule_id=3, result={"ok": False, "target_row_id": 1, "target_id": "-1001", "target_title": "A", "error_text": "err"})
-    assert "⚠️ Проверка не пройдена" in text
+    assert "⚠️ Канал/группа требует внимания" in text
+
+
+def test_single_check_result_save_failed():
+    from app.repost_campaign_ui import build_repost_campaign_target_check_result_view
+    text, _ = build_repost_campaign_target_check_result_view(rule_id=3, result={"ok": False, "check_ok": True, "saved": False, "target_row_id": 1, "target_id": "-1001", "target_title": "A", "can_publish": True, "can_delete": True})
+    assert "результат не сохранён" in text
 
 
 def test_batch_result_summary():
     from app.repost_campaign_ui import build_repost_campaign_targets_check_result_view
-    text, _ = build_repost_campaign_targets_check_result_view(rule_id=3, result={"checked": 2, "passed": 1, "failed": 1, "items": []})
-    assert "Проверено:" in text
-    assert "✅ Готово:" in text
+    text, _ = build_repost_campaign_targets_check_result_view(rule_id=3, result={"checked": 2, "passed": 2, "failed": 0, "items": []})
+    assert "Проверка прав завершена" in text
+    assert "Готово к размещению: 2" in text
+    assert "Проверено: 2" in text
+
+
+def test_batch_result_with_failed_items():
+    from app.repost_campaign_ui import build_repost_campaign_targets_check_result_view
+    text, _ = build_repost_campaign_targets_check_result_view(rule_id=3, result={"checked": 2, "passed": 1, "failed": 1, "items": [{"ok": False, "target_title": "A", "error_text": "нет прав"}]})
     assert "⚠️ Требуют внимания:" in text
+    assert "Проблемные каналы/группы" in text
+    assert "нет прав" in text
 
 
 def test_preview_view_ready_has_launch_button():
@@ -650,6 +665,15 @@ def test_bot_preview_runtime_constructor_uses_keyword_args():
     source = Path("bot.py").read_text(encoding="utf-8")
     assert "RepostCampaignRuntimeService(db)" not in source
     assert "RepostCampaignRuntimeService(\n            db" not in source
+
+
+def test_bot_no_legacy_target_check_stub():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "Полная проверка прав публикации и удаления будет добавлена отдельным шагом" not in source
+    assert "rule_repost_campaign_check:" in source
+    assert "result = runtime.check_campaign_targets(" not in source
+    assert "auto_check_result = runtime.check_campaign_targets(" not in source
+    assert "result = runtime.check_campaign_target(" not in source
 
 
 

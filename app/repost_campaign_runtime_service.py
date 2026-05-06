@@ -186,9 +186,30 @@ class RepostCampaignRuntimeService:
         check = await self.target_checker.check_target(target_id=target["target_id"], target_thread_id=target.get("target_thread_id"))
         saved = bool(self.repo.update_rule_repost_campaign_target_check_result(target_row_id, title=check.title, last_check_error=None if check.ok else check.error_text))
         if not saved:
-            self.logger.warning("REPOST_CAMPAIGN_TARGET_CHECK_SAVE_FAILED | rule_id=%s | target_row_id=%s", rule_id, target_row_id)
+            self.logger.warning(
+                "REPOST_CAMPAIGN_TARGET_CHECK_SAVE_FAILED | rule_id=%s | target_row_id=%s | title=%s | ok=%s",
+                rule_id,
+                target_row_id,
+                check.title,
+                check.ok,
+            )
         self.logger.info("REPOST_CAMPAIGN_TARGET_CHECKED | rule_id=%s | target_row_id=%s | ok=%s | error=%s", rule_id, target_row_id, check.ok, check.error_text)
-        return {"ok": check.ok, "rule_id": rule_id, "target_row_id": target_row_id, "target_id": check.target_id, "target_title": check.title or target.get("title") or target.get("target_id"), "error_text": check.error_text, "can_view": check.can_view, "can_publish": check.can_publish, "can_delete": check.can_delete}
+        save_error_text = "Проверка выполнена, но не удалось сохранить результат. Обновите список и повторите."
+        error_text = check.error_text if not check.ok else (save_error_text if not saved else None)
+        return {
+            "ok": bool(check.ok and saved),
+            "check_ok": bool(check.ok),
+            "saved": saved,
+            "save_error": (not saved),
+            "rule_id": rule_id,
+            "target_row_id": target_row_id,
+            "target_id": check.target_id,
+            "target_title": check.title or target.get("title") or target.get("target_id"),
+            "error_text": error_text,
+            "can_view": check.can_view,
+            "can_publish": check.can_publish,
+            "can_delete": check.can_delete,
+        }
 
     async def check_campaign_targets(self, *, rule_id: int, active_only: bool = False, admin_id: int | None = None, limit: int = 50) -> dict:
         _ = admin_id
