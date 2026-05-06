@@ -1,4 +1,44 @@
+from contextlib import contextmanager
+
 from app.postgres_repository import PostgresRepository
+
+
+class _FakeCursor:
+    def __init__(self, rowcounts):
+        self._rowcounts = list(rowcounts)
+        self.execute_calls = []
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, query, params=None):
+        self.execute_calls.append((query, params))
+        self.rowcount = int(self._rowcounts.pop(0)) if self._rowcounts else 0
+
+
+class _FakeConn:
+    def __init__(self, rowcounts):
+        self.cursor_obj = _FakeCursor(rowcounts)
+        self.commit_count = 0
+
+    def cursor(self):
+        return self.cursor_obj
+
+    def commit(self):
+        self.commit_count += 1
+
+
+class _RepoWithFakeConn(PostgresRepository):
+    def __init__(self, rowcounts):
+        self.fake_conn = _FakeConn(rowcounts)
+
+    @contextmanager
+    def connect(self):
+        yield self.fake_conn
 
 
 def test_repost_campaign_repository_methods_exist():
@@ -80,3 +120,44 @@ def test_saved_posts_repository_methods_exist():
     assert hasattr(repo, "update_saved_post_content")
     assert hasattr(repo, "archive_saved_post")
     assert hasattr(repo, "set_rule_repost_campaign_saved_post")
+
+
+def test_repost_campaign_target_active_update_returns_rowcount_contract():
+    repo = _RepoWithFakeConn([1, 1, 0])
+
+    assert repo.set_rule_repost_campaign_target_active(10, False) is True
+    assert repo.set_rule_repost_campaign_target_active(10, True) is True
+    assert repo.set_rule_repost_campaign_target_active(999999999, False) is False
+
+    assert repo.fake_conn.commit_count == 3
+    first_query, first_params = repo.fake_conn.cursor_obj.execute_calls[0]
+    assert "UPDATE rule_repost_campaign_targets" in first_query
+    assert "SET is_active = %s" in first_query
+    assert "WHERE id = %s" in first_query
+    assert first_params == (False, 10)
+
+
+def test_remove_repost_campaign_target_returns_rowcount_contract():
+    repo = _RepoWithFakeConn([1, 0])
+
+    assert repo.remove_rule_repost_campaign_target(10) is True
+    assert repo.remove_rule_repost_campaign_target(999999999) is False
+
+    assert repo.fake_conn.commit_count == 2
+    first_query, first_params = repo.fake_conn.cursor_obj.execute_calls[0]
+    assert "DELETE FROM rule_repost_campaign_targets WHERE id=%s" in first_query
+    assert first_params == (10,)
+
+
+def test_update_repost_campaign_target_check_result_returns_rowcount_contract():
+    repo = _RepoWithFakeConn([1, 0])
+
+    assert repo.update_rule_repost_campaign_target_check_result(10, title="Chan", last_check_error=None) is True
+    assert repo.update_rule_repost_campaign_target_check_result(999999999, title="Missing", last_check_error="err") is False
+
+    assert repo.fake_conn.commit_count == 2
+    first_query, first_params = repo.fake_conn.cursor_obj.execute_calls[0]
+    assert "UPDATE rule_repost_campaign_targets" in first_query
+    assert "last_check_error = %s" in first_query
+    assert "WHERE id = %s" in first_query
+    assert first_params == ("Chan", None, 10)

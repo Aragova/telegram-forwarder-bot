@@ -31,6 +31,8 @@ class _FakeRepo:
         self.set_target_active_calls = []
         self.remove_target_calls = []
         self.update_target_check_calls = []
+        self.set_target_active_result = True
+        self.remove_target_result = True
         self.update_target_check_result = True
 
     def get_rule(self, rule_id):
@@ -98,11 +100,11 @@ class _FakeRepo:
 
     def set_rule_repost_campaign_target_active(self, target_row_id, is_active):
         self.set_target_active_calls.append((target_row_id, is_active))
-        return True
+        return self.set_target_active_result
 
     def remove_rule_repost_campaign_target(self, target_row_id):
         self.remove_target_calls.append(target_row_id)
-        return True
+        return self.remove_target_result
 
     def update_rule_repost_campaign_target_check_result(self, row_id, *, title=None, last_check_error=None):
         self.update_target_check_calls.append((row_id, title, last_check_error))
@@ -355,7 +357,22 @@ def test_set_campaign_target_active_success():
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
     result = runtime.set_campaign_target_active(rule_id=3, target_row_id=1, is_active=False)
     assert result["ok"] is True
+    assert result["is_active"] is False
+    assert result["error_text"] is None
+    assert result["extra"]["raw_update_result"] is True
     assert repo.set_target_active_calls[-1] == (1, False)
+
+
+def test_set_campaign_target_active_repo_false_fails():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo.set_target_active_result = False
+    repo._targets = [{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.set_campaign_target_active(rule_id=3, target_row_id=1, is_active=False)
+    assert result["ok"] is False
+    assert result["is_active"] is False
+    assert "Не удалось обновить канал/группу" in result["error_text"]
+    assert result["extra"]["raw_update_result"] is False
 
 
 def test_set_campaign_target_active_not_found():
@@ -372,6 +389,17 @@ def test_remove_campaign_target_success():
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
     result = runtime.remove_campaign_target(rule_id=3, target_row_id=1)
     assert result["ok"] is True
+    assert repo.remove_target_calls == [1]
+
+
+def test_remove_campaign_target_repo_false_fails():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo.remove_target_result = False
+    repo._targets = [{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.remove_campaign_target(rule_id=3, target_row_id=1)
+    assert result["ok"] is False
+    assert "Не удалось обновить канал/группу" in result["error_text"]
     assert repo.remove_target_calls == [1]
 
 

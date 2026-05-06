@@ -7421,8 +7421,9 @@ class PostgresRepository(RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM rule_repost_campaign_targets WHERE id=%s", (int(row_id),))
+                deleted = cur.rowcount > 0
             conn.commit()
-            return True
+            return deleted
 
     def set_rule_repost_campaign_target_active(self, row_id: int, is_active: bool) -> bool:
         with self.connect() as conn:
@@ -7436,8 +7437,9 @@ class PostgresRepository(RepositoryProtocol):
                     """,
                     (bool(is_active), int(row_id)),
                 )
+                updated = cur.rowcount > 0
             conn.commit()
-            return cur.rowcount > 0
+            return updated
 
     def update_rule_repost_campaign_target_check_result(
         self,
@@ -7458,8 +7460,9 @@ class PostgresRepository(RepositoryProtocol):
                     """,
                     (title, last_check_error, int(row_id)),
                 )
+                updated = cur.rowcount > 0
             conn.commit()
-            return cur.rowcount > 0
+            return updated
 
     def create_delivery_campaign_copy(self, *, delivery_id: int, rule_id: int, target_id: str, target_thread_id: int | None, target_title: str | None) -> int | None:
         with self.connect() as conn:

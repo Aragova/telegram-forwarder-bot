@@ -130,11 +130,12 @@ class RepostCampaignRuntimeService:
         if not target:
             return {"ok": False, "error_text": "Канал/группа не найдены в кампании"}
         try:
-            ok = bool(self.repo.set_rule_repost_campaign_target_active(target_row_id, is_active))
+            raw_update_result = self.repo.set_rule_repost_campaign_target_active(target_row_id, is_active)
+            ok = bool(raw_update_result)
             if ok:
-                self.logger.info("REPOST_CAMPAIGN_TARGET_STATUS_UPDATED | rule_id=%s | target_row_id=%s | is_active=%s", rule_id, target_row_id, is_active)
+                self.logger.info("REPOST_CAMPAIGN_TARGET_STATUS_UPDATED | rule_id=%s | target_row_id=%s | is_active=%s | raw_update_result=%s", rule_id, target_row_id, is_active, raw_update_result)
             else:
-                self.logger.warning("REPOST_CAMPAIGN_TARGET_ACTION_SAVE_FAILED | action=%s | rule_id=%s | target_row_id=%s | target_id=%s | current_is_active=%s | last_check_error=%s", "resume" if is_active else "pause", rule_id, target_row_id, target.get("target_id"), target.get("is_active"), target.get("last_check_error"))
+                self.logger.warning("REPOST_CAMPAIGN_TARGET_ACTION_SAVE_FAILED | action=%s | rule_id=%s | target_row_id=%s | target_id=%s | current_is_active=%s | last_check_error=%s | raw_update_result=%s", "resume" if is_active else "pause", rule_id, target_row_id, target.get("target_id"), target.get("is_active"), target.get("last_check_error"), raw_update_result)
             return {
                 "ok": ok,
                 "action": "resume" if is_active else "pause",
@@ -144,7 +145,7 @@ class RepostCampaignRuntimeService:
                 "target_title": target.get("title") or target.get("target_id"),
                 "is_active": is_active,
                 "error_text": None if ok else "Не удалось обновить канал/группу. Обновите список и повторите действие.",
-                "extra": {"target_id": target.get("target_id"), "current_is_active": target.get("is_active"), "last_check_error": target.get("last_check_error")},
+                "extra": {"target_id": target.get("target_id"), "current_is_active": target.get("is_active"), "last_check_error": target.get("last_check_error"), "raw_update_result": raw_update_result},
             }
         except Exception as exc:
             self.logger.warning("REPOST_CAMPAIGN_TARGET_STATUS_FAILED | rule_id=%s | target_row_id=%s | error=%s", rule_id, target_row_id, exc)
