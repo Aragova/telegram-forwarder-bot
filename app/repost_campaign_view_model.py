@@ -456,3 +456,55 @@ def build_campaign_scenario_preview_view_model(
         "targets_ready": int((summary or {}).get("targets_ready") or 0),
         "targets_with_errors": targets_with_errors,
     }
+
+
+def build_campaign_launch_readiness_view_model(*, readiness: dict, now: datetime | None = None) -> dict:
+    readiness = dict(readiness or {})
+    can_launch = bool(readiness.get("can_launch"))
+    saved_post_exists = bool(readiness.get("saved_post_exists"))
+    show_seconds = int(readiness.get("show_seconds") or 0)
+    main_target_ready = bool(readiness.get("main_target_ready"))
+    extra_active_problem = int(readiness.get("extra_active_problem") or 0)
+    if can_launch:
+        status_line = "✅ Кампания готова к запуску"
+        next_step_line = "Можно запускать кампанию."
+    elif not main_target_ready:
+        status_line = "❌ Не задан основной канал"
+        next_step_line = "Вернитесь к карточке правила и проверьте основной канал."
+    elif not saved_post_exists:
+        status_line = "⚠️ Нужно выбрать рекламный пост"
+        next_step_line = "Выберите рекламный пост перед запуском."
+    elif show_seconds <= 0:
+        status_line = "⚠️ Нужно задать время показа"
+        next_step_line = "Задайте время показа перед запуском."
+    elif extra_active_problem > 0:
+        status_line = "⚠️ Нужно проверить каналы/группы"
+        next_step_line = "Проверьте права или поставьте проблемные каналы на паузу."
+    else:
+        status_line = "⚠️ Кампания требует настройки"
+        next_step_line = "Проверьте параметры кампании перед запуском."
+    expected_delete_line = "🕒 Ожидаемое удаление: не рассчитано"
+    if show_seconds > 0:
+        now_dt = now or datetime.now()
+        delete_at = now_dt + timedelta(seconds=show_seconds)
+        expected_delete_line = f"🕒 Ожидаемое удаление: сегодня в {delete_at.strftime('%H:%M')}" if delete_at.date() == now_dt.date() else f"🕒 Ожидаемое удаление: {delete_at.strftime('%d.%m в %H:%M')}"
+    return {
+        "title": "🚦 Проверка перед запуском",
+        "status_line": status_line,
+        "will_send_line": f"📣 Будет опубликовано: {int(readiness.get('will_send_total') or 0)} получателей",
+        "will_skip_line": (f"⏸ Будет пропущено: {int(readiness.get('will_skip_total') or 0)} (на паузе: {int(readiness.get('extra_paused') or 0)} · требуют настройки: {int(readiness.get('extra_problem') or 0)})" if int(readiness.get("will_skip_total") or 0) > 0 else "⏸ Будет пропущено: 0"),
+        "show_seconds_line": f"⏳ Время показа: {format_campaign_show_seconds_text(show_seconds)}",
+        "auto_delete_line": "🧹 Автоудаление: включено" if show_seconds > 0 else "🧹 Автоудаление: не задано",
+        "expected_delete_line": expected_delete_line,
+        "block_reason_lines": list(readiness.get("block_reasons") or []),
+        "warning_lines": list(readiness.get("warnings") or []),
+        "ready_targets_line": f"✅ Готовы: {int(readiness.get('extra_ready') or 0)}",
+        "problem_targets_line": f"⚠️ Требуют настройки: {int(readiness.get('extra_problem') or 0)}",
+        "paused_targets_line": f"⏸ На паузе: {int(readiness.get('extra_paused') or 0)}",
+        "next_step_line": next_step_line,
+        "can_launch": can_launch,
+        "can_check_rights": int(readiness.get("extra_problem") or 0) > 0 or extra_active_problem > 0,
+        "can_open_targets": True,
+        "can_edit_post": True,
+        "can_edit_show_seconds": True,
+    }

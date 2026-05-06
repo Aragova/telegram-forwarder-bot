@@ -563,6 +563,20 @@ class RepostCampaignRuntimeService:
         )
 
     async def launch_campaign_now(self, *, rule_id: int, admin_id: int | None = None) -> RepostCampaignActionResult:
+        readiness = self.build_campaign_launch_readiness(rule_id=rule_id)
+        if not readiness.get("can_launch"):
+            return RepostCampaignActionResult(
+                ok=False,
+                action="launch_campaign",
+                rule_id=rule_id,
+                saved_post_id=readiness.get("saved_post_id"),
+                error_text="Кампания не готова к запуску",
+                extra={
+                    "launch_readiness": readiness,
+                    "block_reasons": readiness.get("block_reasons") or [],
+                    "warnings": readiness.get("warnings") or [],
+                },
+            )
         loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="launch_campaign")
         if isinstance(loaded, RepostCampaignActionResult):
             return loaded
@@ -586,7 +600,7 @@ class RepostCampaignRuntimeService:
             "target_title": getattr(rule, "target_title", None) or "Основной канал",
         }]
         seen = {main_key}
-        extra_targets = self.repo.list_rule_repost_campaign_targets(rule_id, active_only=True) or []
+        extra_targets = readiness.get("ready_extra_targets") or []
         for row in extra_targets:
             key = (str(row.get("target_id") or ""), row.get("target_thread_id"))
             if key in seen:
@@ -731,8 +745,82 @@ class RepostCampaignRuntimeService:
                 "final_status": final_status,
                 "show_seconds": show_seconds,
                 "extra_targets": len(targets) - 1,
+                "launch_readiness": readiness,
+                "will_send_total": readiness.get("will_send_total"),
+                "will_skip_total": readiness.get("will_skip_total"),
+                "extra_ready": readiness.get("extra_ready"),
+                "extra_paused": readiness.get("extra_paused"),
+                "extra_problem": readiness.get("extra_problem"),
             },
         )
+
+    def build_campaign_launch_readiness(self, *, rule_id: int) -> dict:
+        rule = self.repo.get_rule(rule_id)
+        if not rule:
+            return {"ok": False, "rule_id": rule_id, "ready": False, "can_launch": False, "can_launch_ready_only": False, "block_reasons": ["Правило не найдено"], "warnings": []}
+        saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None)
+        saved_post_exists = bool(saved_post_id and self.repo.get_saved_post(int(saved_post_id)))
+        show_seconds = int(getattr(rule, "repost_campaign_show_seconds", 0) or 0)
+        main_target_id = getattr(rule, "target_id", None)
+        main_target_ready = bool(main_target_id)
+        targets = self.repo.list_rule_repost_campaign_targets(rule_id, active_only=False) or []
+        ready_extra_targets = []
+        paused_targets = []
+        problem_targets = []
+        for row in targets:
+            has_problem = bool(str(row.get("last_check_error") or "").strip())
+            is_active = True if row.get("is_active") is None else bool(row.get("is_active"))
+            if has_problem:
+                problem_targets.append(row)
+            elif is_active:
+                ready_extra_targets.append(row)
+            else:
+                paused_targets.append(row)
+        extra_active_problem = sum(1 for row in problem_targets if bool(row.get("is_active")))
+        main_targets_count = 1 if main_target_ready else 0
+        will_send_total = main_targets_count + len(ready_extra_targets)
+        will_skip_total = len(paused_targets) + len(problem_targets)
+        block_reasons = []
+        if not saved_post_exists:
+            block_reasons.append("Не выбран рекламный пост.")
+        if show_seconds <= 0:
+            block_reasons.append("Не задано время показа.")
+        if not main_target_ready:
+            block_reasons.append("У правила не задан основной канал.")
+        if extra_active_problem > 0:
+            block_reasons.append("Есть активные каналы/группы, которые требуют настройки.")
+        if will_send_total <= 0:
+            block_reasons.append("Нет получателей для запуска кампании.")
+        has_skipped = will_skip_total > 0
+        can_launch = saved_post_exists and show_seconds > 0 and main_target_ready and extra_active_problem == 0 and will_send_total > 0
+        can_launch_ready_only = saved_post_exists and show_seconds > 0 and main_target_ready and will_send_total > 0 and has_skipped
+        result = {
+            "ok": True,
+            "rule_id": rule_id,
+            "ready": can_launch,
+            "can_launch": can_launch,
+            "can_launch_ready_only": can_launch_ready_only,
+            "block_reasons": block_reasons,
+            "warnings": [],
+            "saved_post_id": int(saved_post_id) if saved_post_id else None,
+            "saved_post_exists": saved_post_exists,
+            "show_seconds": show_seconds,
+            "main_target_id": str(main_target_id) if main_target_id else None,
+            "main_target_ready": main_target_ready,
+            "main_targets_count": main_targets_count,
+            "extra_total": len(targets),
+            "extra_ready": len(ready_extra_targets),
+            "extra_paused": len(paused_targets),
+            "extra_problem": len(problem_targets),
+            "extra_active_problem": extra_active_problem,
+            "will_send_total": will_send_total,
+            "will_skip_total": will_skip_total,
+            "ready_extra_targets": ready_extra_targets,
+            "paused_targets": paused_targets,
+            "problem_targets": problem_targets,
+        }
+        self.logger.info("REPOST_CAMPAIGN_LAUNCH_READINESS | rule_id=%s can_launch=%s will_send_total=%s extra_ready=%s extra_paused=%s extra_problem=%s extra_active_problem=%s", rule_id, can_launch, will_send_total, len(ready_extra_targets), len(paused_targets), len(problem_targets), extra_active_problem)
+        return result
 
     def get_campaign_readiness(self, *, rule_id: int) -> dict:
         rule = self.repo.get_rule(rule_id)

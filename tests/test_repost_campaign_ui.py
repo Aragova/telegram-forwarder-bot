@@ -6,6 +6,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_delete_result_view,
     build_repost_campaign_history_view,
     build_repost_campaign_launch_result_view,
+    build_repost_campaign_launch_readiness_view,
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
     build_repost_campaign_preview_view,
@@ -735,3 +736,33 @@ def test_targets_list_buttons_without_number_suffix():
     assert "Пауза #1" not in texts
     assert "Проверить #1" not in texts
     assert "Удалить #1" not in texts
+
+
+def _kb_texts(kb):
+    return [b.text for row in kb.inline_keyboard for b in row]
+
+def test_launch_readiness_view_ready_has_launch_button():
+    text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=3, readiness={"can_launch": True, "saved_post_id": 7, "saved_post_exists": True, "show_seconds": 3600, "main_target_ready": True, "will_send_total": 3, "will_skip_total": 0, "extra_paused": 0, "extra_problem": 0})
+    assert "🚦 Проверка перед запуском" in text
+    assert "Кампания готова к запуску" in text
+    assert "Будет опубликовано" in text
+    assert "🚀 Запустить кампанию" in _kb_texts(keyboard)
+
+def test_launch_readiness_view_blocked_has_fix_buttons():
+    text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=3, readiness={"can_launch": False, "saved_post_exists": True, "show_seconds": 300, "main_target_ready": True, "extra_active_problem": 1, "extra_problem": 1, "will_send_total": 1, "will_skip_total": 1, "extra_paused": 0, "block_reasons": ["Есть активные каналы/группы, которые требуют настройки."]})
+    assert "Нужно проверить каналы/группы" in text
+    labels = _kb_texts(keyboard)
+    assert "🔎 Проверить права" in labels
+    assert "📣 Каналы/Группы" in labels
+
+def test_launch_result_blocked_uses_readiness_vm():
+    result = {"ok": False, "error_text": "Кампания не готова к запуску", "extra": {"launch_readiness": {"can_launch": False, "saved_post_exists": True, "show_seconds": 300, "main_target_ready": True, "extra_active_problem": 1, "extra_problem": 1, "will_send_total": 1, "will_skip_total": 1, "extra_paused": 0, "block_reasons": ["Есть активные каналы/группы, которые требуют настройки."]}}}
+    text, _ = build_repost_campaign_launch_result_view(rule_id=3, result=result)
+    assert "Кампания не готова к запуску" in text
+    assert "Будет опубликовано" in text
+    assert "Будет пропущено" in text
+
+def test_launch_readiness_view_no_banned_terms():
+    text, _ = build_repost_campaign_launch_readiness_view(rule_id=3, readiness={"can_launch": False, "saved_post_exists": False, "show_seconds": 0, "main_target_ready": True, "will_send_total": 0, "will_skip_total": 0, "extra_paused": 0, "extra_problem": 0})
+    for bad in ["креатив", "площадк", "аккаунт-парсер", "тестовый", "Режим: репост"]:
+        assert bad.lower() not in text.lower()
