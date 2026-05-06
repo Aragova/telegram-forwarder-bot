@@ -40,4 +40,39 @@ def test_no_publish_rights():
     svc = RepostCampaignTargetCheckService(telethon_client=_FakeTelethon(entity=SimpleNamespace(title="Channel A"), permissions=perms))
     result = asyncio.run(svc.check_target(target_id="-1001"))
     assert result.ok is False
-    assert "не имеет права публиковать" in (result.error_text or "")
+    assert "ViMi" in (result.error_text or "")
+
+
+def test_broadcast_admin_without_post_messages_fails():
+    perms = SimpleNamespace(is_admin=True, is_creator=False, admin_rights=SimpleNamespace(post_messages=False))
+    entity = SimpleNamespace(title="Channel A", broadcast=True, megagroup=False)
+    result = asyncio.run(RepostCampaignTargetCheckService(telethon_client=_FakeTelethon(entity=entity, permissions=perms)).check_target(target_id="-1001"))
+    assert result.ok is False and result.can_publish is False
+
+
+def test_megagroup_admin_without_post_messages_is_ok():
+    perms = SimpleNamespace(is_admin=True, is_creator=False, admin_rights=SimpleNamespace(delete_messages=True), banned_rights=None)
+    entity = SimpleNamespace(title="Group A", broadcast=False, megagroup=True)
+    result = asyncio.run(RepostCampaignTargetCheckService(telethon_client=_FakeTelethon(entity=entity, permissions=perms)).check_target(target_id="-1001"))
+    assert result.ok is True and result.can_publish is True
+
+
+def test_creator_always_ok():
+    perms = SimpleNamespace(is_admin=False, is_creator=True, admin_rights=None)
+    entity = SimpleNamespace(title="A", broadcast=True)
+    result = asyncio.run(RepostCampaignTargetCheckService(telethon_client=_FakeTelethon(entity=entity, permissions=perms)).check_target(target_id="-1001"))
+    assert result.ok is True
+
+
+def test_group_admin_without_admin_rights_is_ok():
+    perms = SimpleNamespace(is_admin=True, is_creator=False, admin_rights=None, banned_rights=None)
+    entity = SimpleNamespace(title="Group B", broadcast=False, megagroup=False)
+    result = asyncio.run(RepostCampaignTargetCheckService(telethon_client=_FakeTelethon(entity=entity, permissions=perms)).check_target(target_id="-1001"))
+    assert result.ok is True
+
+
+def test_banned_send_messages_fails():
+    perms = SimpleNamespace(is_admin=True, is_creator=False, admin_rights=None, banned_rights=SimpleNamespace(send_messages=True))
+    entity = SimpleNamespace(title="Group C", broadcast=False, megagroup=True)
+    result = asyncio.run(RepostCampaignTargetCheckService(telethon_client=_FakeTelethon(entity=entity, permissions=perms)).check_target(target_id="-1001"))
+    assert result.ok is False and result.can_publish is False

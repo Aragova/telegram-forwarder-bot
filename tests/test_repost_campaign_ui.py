@@ -1,4 +1,5 @@
 from pathlib import Path
+import ast
 
 from app.repost_campaign_ui import (
     build_repost_campaign_more_view,
@@ -606,6 +607,7 @@ def test_single_check_result_failed():
     from app.repost_campaign_ui import build_repost_campaign_target_check_result_view
     text, _ = build_repost_campaign_target_check_result_view(rule_id=3, result={"ok": False, "target_row_id": 1, "target_id": "-1001", "target_title": "A", "error_text": "err"})
     assert "⚠️ Канал/группа требует внимания" in text
+    assert "Что нужно сделать:" in text
 
 
 def test_single_check_result_save_failed():
@@ -675,6 +677,26 @@ def test_bot_no_legacy_target_check_stub():
     assert "result = runtime.check_campaign_targets(" not in source
     assert "auto_check_result = runtime.check_campaign_targets(" not in source
     assert "result = runtime.check_campaign_target(" not in source
+
+
+def test_bot_campaign_check_calls_are_awaited_ast():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            child.parent = parent
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in {"check_campaign_targets", "check_campaign_target"}:
+            parent = getattr(node, "parent", None)
+            assert isinstance(parent, ast.Await), f"{node.func.attr} must be awaited"
+
+
+def test_problematic_target_buttons_and_copy():
+    text, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[{"id": 1, "target_id": "-1001", "title": "A", "is_active": True, "last_check_error": "Аккаунт-парсер не имеет права публиковать"}])
+    texts = _texts_from_keyboard(keyboard)
+    assert "🔎 Проверить" in texts and "🗑 Удалить" in texts
+    assert "⏸ Пауза" not in texts and "▶️ Включить" not in texts
+    assert "Аккаунт-парсер" not in text
 
 
 
