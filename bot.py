@@ -7335,7 +7335,7 @@ async def handle_rule_repost_campaign_post_use(callback: CallbackQuery):
         )
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🚀 Проверить и запустить", callback_data=f"rule_repost_campaign_launch:{rule_id}")],
-                        [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+            [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
             [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
         ])
     else:
