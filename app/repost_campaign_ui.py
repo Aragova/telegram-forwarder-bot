@@ -69,6 +69,13 @@ def build_repost_campaign_menu_view(
         cc_payload = {"ok": bool(readiness), "readiness": readiness, "last_run": None, "last_run_details": None, "issues": []}
     vm = build_campaign_control_center_view_model(summary=summary, saved_post_line=saved_post_line, control_center=cc_payload)
     next_step_line = vm.get("next_step_line")
+    last_run_lines = [
+        vm.get("last_run_title_line"),
+        vm.get("last_run_status_line"),
+        vm.get("last_run_time_line"),
+        vm.get("last_run_delete_line"),
+    ]
+    rendered_last_run_block = "\n".join([line for line in last_run_lines if line])
     text = (
         "💰 Рекламная кампания\n\n"
         f"{vm['title_status']}\n\n"
@@ -76,12 +83,9 @@ def build_repost_campaign_menu_view(
         f"{vm['creative_value_line']}\n"
         f"{vm['targets_line']}\n"
         f"{vm['show_seconds_line']}\n"
-        "\n"
-        f"{vm['last_run_title_line']}\n"
-        f"{vm['last_run_status_line']}\n"
-        f"{(vm.get('last_run_time_line') or '')}\n"
-        f"{(vm.get('last_run_delete_line') or '')}"
     )
+    if rendered_last_run_block:
+        text += f"\n\n{rendered_last_run_block}"
     if next_step_line:
         text += f"\n\n{next_step_line}"
     rows = []
@@ -116,7 +120,8 @@ def build_repost_campaign_menu_view(
             InlineKeyboardButton(text="⚙️ Ещё", callback_data=f"rule_repost_campaign_more:{rule_id}"),
         ],
     ])
-    if vm["can_launch"] and primary_action != "launch":
+    blocked_launch_states = {"active_placement", "delete_problem"}
+    if vm["can_launch"] and primary_action != "launch" and vm.get("screen_state") not in blocked_launch_states:
         rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
     rows.extend([
         [InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")],

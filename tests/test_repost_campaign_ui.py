@@ -256,6 +256,52 @@ def test_campaign_menu_active_copy_no_next_step():
     assert "дождитесь автоудаления" not in text
 
 
+def test_campaign_menu_active_has_no_launch_button():
+    _, keyboard = build_repost_campaign_menu_view(
+        rule_id=3,
+        summary={"saved_post_id": 1, "targets_active": 43, "show_seconds": 86400},
+        saved_post_line="📝 Рекламный пост: Альбом · 6 медиа",
+        control_center={
+            "ok": True,
+            "readiness": {"ready": True},
+            "last_run": {"id": 77, "targets_success": 43, "targets_total": 43},
+            "last_run_details": {"ok": True, "summary": {"delete_pending": 43}, "messages": [{"delete_after_at": "2026-05-07T20:44:00+00:00"}]},
+        },
+    )
+    assert "🚀 Запустить кампанию" not in _texts_from_keyboard(keyboard)
+
+
+def test_campaign_menu_active_published_count_once():
+    text, _ = build_repost_campaign_menu_view(
+        rule_id=3,
+        summary={"saved_post_id": 1, "targets_active": 43, "show_seconds": 86400},
+        saved_post_line="📝 Рекламный пост: Альбом · 6 медиа",
+        control_center={
+            "ok": True,
+            "readiness": {"ready": True},
+            "last_run": {"id": 77, "targets_success": 43, "targets_total": 43},
+            "last_run_details": {"ok": True, "summary": {"delete_pending": 43}, "messages": [{"delete_after_at": "2026-05-07T20:44:00+00:00"}]},
+        },
+    )
+    assert text.count("Опубликовано: 43 из 43") == 1
+
+
+def test_campaign_menu_active_no_last_run_duplicate_block():
+    text, _ = build_repost_campaign_menu_view(
+        rule_id=3,
+        summary={"saved_post_id": 1, "targets_active": 43, "show_seconds": 86400},
+        saved_post_line="📝 Рекламный пост: Альбом · 6 медиа",
+        control_center={
+            "ok": True,
+            "readiness": {"ready": True},
+            "last_run": {"id": 77, "targets_success": 43, "targets_total": 43},
+            "last_run_details": {"ok": True, "summary": {"delete_pending": 43}, "messages": [{"delete_after_at": "2026-05-07T20:44:00+00:00"}]},
+        },
+    )
+    assert "📊 Активное размещение" not in text
+    assert "Следующий шаг" not in text
+
+
 def test_history_empty_state():
     text, keyboard = build_repost_campaign_history_view(rule_id=3, history={"ok": True, "runs": [], "summary": {}})
     texts = _texts_from_keyboard(keyboard)
@@ -395,7 +441,7 @@ def test_campaign_menu_active_placement_uses_run_targets_not_current_targets():
         control_center={"ok": True, "readiness": {"ready": False}, "last_run": {"id": 8, "targets_success": 43, "targets_total": 43}, "last_run_details": {"ok": True, "summary": {"delete_pending": 43}}},
     )
     assert "📣 Опубликовано: 43 из 43" in text
-    assert "✅ Опубликовано: 43 из 43" in text
+    assert "✅ Опубликовано: 43 из 43" not in text
     assert "42 активных" not in text
 
 
