@@ -482,6 +482,7 @@ def test_set_campaign_target_active_success():
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
     result = runtime.set_campaign_target_active(rule_id=3, target_row_id=1, is_active=False)
     assert result["ok"] is True
+    assert result["target_row_id"] == 1
     assert result["is_active"] is False
     assert repo.set_target_active_calls[-1] == (1, False)
 
@@ -510,6 +511,7 @@ def test_remove_campaign_target_success():
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
     result = runtime.remove_campaign_target(rule_id=3, target_row_id=1)
     assert result["ok"] is True
+    assert result["target_row_id"] == 1
     assert repo.remove_target_calls == [1]
 
 
@@ -834,8 +836,34 @@ def test_check_one_success_saves_result():
     rt=RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), target_checker=checker)
     result=asyncio.run(rt.check_campaign_target(rule_id=1,target_row_id=1))
     assert result["ok"] is True
+    assert result["target_row_id"] == 1
     assert result["saved"] is True
     assert repo.update_target_check_calls[0] == (1, "A", None)
+
+
+def test_set_campaign_target_active_result_contains_target_row_id():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._targets = [{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.set_campaign_target_active(rule_id=3, target_row_id=1, is_active=False)
+    assert result["target_row_id"] == 1
+
+
+def test_check_campaign_target_result_contains_target_row_id():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._targets = [{"id": 1, "target_id": "-1001", "title": "A"}]
+    checker = _FakeChecker(SimpleNamespace(ok=True, target_id="-1001", title="A", error_text=None, can_view=True, can_publish=True, can_delete=True))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), target_checker=checker)
+    result = asyncio.run(runtime.check_campaign_target(rule_id=1, target_row_id=1))
+    assert result["target_row_id"] == 1
+
+
+def test_remove_campaign_target_result_contains_target_row_id():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._targets = [{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    result = runtime.remove_campaign_target(rule_id=3, target_row_id=1)
+    assert result["target_row_id"] == 1
 
 
 def test_check_one_failed_saves_error():

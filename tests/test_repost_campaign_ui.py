@@ -16,6 +16,8 @@ from app.repost_campaign_ui import (
     build_repost_campaign_run_delete_result_view,
     build_repost_campaign_show_menu_view,
     build_repost_campaign_target_delete_confirm_view,
+    build_repost_campaign_target_card_view,
+    build_repost_campaign_target_action_result_view,
     build_repost_campaign_targets_id_actions_view,
     build_repost_campaign_targets_list_view,
     build_repost_campaign_target_preview_result_view,
@@ -58,8 +60,8 @@ def test_bot_campaign_check_calls_are_awaited_ast():
 def test_problematic_target_buttons_and_copy():
     text, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[{"id": 1, "target_id": "-1001", "title": "A", "is_active": True, "last_check_error": "Аккаунт-парсер не имеет права публиковать"}])
     texts = _texts_from_keyboard(keyboard)
-    assert "🔎 Проверить" in texts and "🗑 Удалить" in texts
-    assert "⏸ Пауза" not in texts and "▶️ Включить" not in texts
+    assert "🔎 Проверить права" in texts
+    assert "⏸ Пауза" not in texts and "▶️ Включить" not in texts and "🗑 Удалить" not in texts
     assert "Аккаунт-парсер" not in text
 
 
@@ -67,7 +69,7 @@ def test_problematic_target_buttons_and_copy():
 
 def test_targets_list_view_does_not_show_raw_id_as_main_title():
     text, _ = build_repost_campaign_targets_list_view(rule_id=3, targets=[{"id": 1, "target_id": "-1002741117827", "title": None, "is_active": True}])
-    assert "Канал/Группа #1" in text
+    assert "Подключено: 1" in text
     assert "ID: -1002741117827" not in text
     assert "1. 🟢 -1002741117827" not in text
 
@@ -93,9 +95,9 @@ def test_targets_id_actions_view_uses_manual_wording():
 def test_targets_list_buttons_without_number_suffix():
     _, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}])
     texts = _texts_from_keyboard(keyboard)
-    assert "⏸ Пауза" in texts
-    assert "🔎 Проверить" in texts
-    assert "🗑 Удалить" in texts
+    assert "⏸ Пауза" not in texts
+    assert "🔎 Проверить" not in texts
+    assert "🗑 Удалить" not in texts
     assert "Пауза #1" not in texts
     assert "Проверить #1" not in texts
     assert "Удалить #1" not in texts
@@ -351,3 +353,111 @@ def test_post_channels_stats_view_unavailable_status_renders_warning():
     )
     assert "⚠️ нет данных — Название" in text
     assert "👁 0 — Название" not in text
+
+def _mk_targets(n=43):
+    items=[]
+    for i in range(n):
+        items.append({"id": i+1, "target_id": f"-100{i+1}", "title": f"Канал {i+1}", "is_active": True, "last_check_error": None})
+    return items
+
+
+def test_targets_list_view_has_pagination_for_many_targets():
+    text, _ = build_repost_campaign_targets_list_view(rule_id=1, targets=_mk_targets(43))
+    assert "Страница 1 из 5" in text
+
+
+def test_targets_list_view_first_page_has_next_only():
+    _, kb = build_repost_campaign_targets_list_view(rule_id=1, targets=_mk_targets(43), page=0)
+    cbs = _callbacks_from_keyboard(kb)
+    assert "rule_repost_campaign_targets_list:1:1" in cbs
+    assert "rule_repost_campaign_targets_list:1:-1" not in cbs
+
+
+def test_targets_list_view_middle_page_has_prev_and_next():
+    _, kb = build_repost_campaign_targets_list_view(rule_id=1, targets=_mk_targets(43), page=1)
+    cbs = _callbacks_from_keyboard(kb)
+    assert "rule_repost_campaign_targets_list:1:0" in cbs
+    assert "rule_repost_campaign_targets_list:1:2" in cbs
+
+
+def test_targets_list_view_last_page_has_prev_only():
+    _, kb = build_repost_campaign_targets_list_view(rule_id=1, targets=_mk_targets(43), page=4)
+    cbs = _callbacks_from_keyboard(kb)
+    assert "rule_repost_campaign_targets_list:1:3" in cbs
+    assert "rule_repost_campaign_targets_list:1:5" not in cbs
+
+
+def test_targets_list_view_does_not_render_action_buttons_per_target():
+    _, kb = build_repost_campaign_targets_list_view(rule_id=1, targets=_mk_targets(12))
+    texts = _texts_from_keyboard(kb)
+    assert "⏸ Пауза" not in texts and "▶️ Включить" not in texts and "🗑 Удалить" not in texts
+
+
+def test_targets_list_view_has_target_card_buttons():
+    _, kb = build_repost_campaign_targets_list_view(rule_id=1, targets=_mk_targets(12), page=1)
+    cbs = _callbacks_from_keyboard(kb)
+    assert "rule_repost_campaign_target_card:1:11:1" in cbs
+
+
+def test_target_card_active_has_pause_check_delete():
+    _, kb = build_repost_campaign_target_card_view(rule_id=1, target={"id":1,"target_id":"-1001","title":"A","is_active":True}, page=2)
+    texts=_texts_from_keyboard(kb)
+    assert "⏸ Пауза" in texts and "🔎 Проверить" in texts and "🗑 Удалить" in texts
+
+
+def test_target_card_paused_has_resume_check_delete():
+    _, kb = build_repost_campaign_target_card_view(rule_id=1, target={"id":1,"target_id":"-1001","title":"A","is_active":False}, page=2)
+    texts=_texts_from_keyboard(kb)
+    assert "▶️ Включить" in texts and "🔎 Проверить" in texts and "🗑 Удалить" in texts
+
+
+def test_target_card_problem_has_check_delete():
+    text, kb = build_repost_campaign_target_card_view(rule_id=1, target={"id":1,"target_id":"-1001","title":"A","is_active":True,"last_check_error":"err"}, page=2)
+    texts=_texts_from_keyboard(kb)
+    assert "⚠️ требует внимания" in text
+    assert "🔎 Проверить" in texts and "🗑 Удалить" in texts
+
+
+def test_target_card_text_has_no_double_status_or_check_prefix():
+    text, _ = build_repost_campaign_target_card_view(rule_id=1, target={"id": 1, "target_id": "-1001", "title": "A", "is_active": True}, page=0)
+    assert "Статус: Статус:" not in text
+    assert "Проверка: Проверка:" not in text
+
+
+def test_target_delete_confirm_returns_to_card():
+    _, kb = build_repost_campaign_target_delete_confirm_view(rule_id=1, target={"id":9,"title":"A"}, page=3)
+    assert "rule_repost_campaign_target_card:1:9:3" in _callbacks_from_keyboard(kb)
+
+
+def test_target_action_result_after_delete_returns_to_list():
+    _, kb = build_repost_campaign_target_action_result_view(rule_id=1, result={"ok":True,"target_row_id":5}, action="remove", page=4)
+    cbs = _callbacks_from_keyboard(kb)
+    assert "rule_repost_campaign_targets_list:1:4" in cbs
+    assert not any(x.startswith("rule_repost_campaign_target_card:") for x in cbs)
+
+
+def test_target_action_result_after_pause_has_card_button_when_row_id_present():
+    _, kb = build_repost_campaign_target_action_result_view(rule_id=1, result={"ok": True, "target_row_id": 7, "target_title": "A"}, action="pause", page=2)
+    cbs = _callbacks_from_keyboard(kb)
+    assert "rule_repost_campaign_target_card:1:7:2" in cbs
+
+
+def test_target_delete_confirm_not_found_keeps_page_in_callback():
+    _, kb = build_repost_campaign_target_delete_confirm_view(rule_id=1, target=None, page=3)
+    cbs = _callbacks_from_keyboard(kb)
+    assert "rule_repost_campaign_targets_list:1:3" in cbs
+
+
+def test_bot_has_campaign_target_callbacks_and_card_import():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    for cb in [
+        "rule_repost_campaign_target_card:",
+        "rule_repost_campaign_targets_list:",
+        "rule_repost_campaign_target_pause:",
+        "rule_repost_campaign_target_resume:",
+        "rule_repost_campaign_target_check:",
+        "rule_repost_campaign_target_delete_confirm:",
+        "rule_repost_campaign_target_delete:",
+    ]:
+        assert cb in source
+    assert "build_repost_campaign_target_card_view" in source
