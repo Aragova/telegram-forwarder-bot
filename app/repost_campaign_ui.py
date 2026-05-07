@@ -384,7 +384,17 @@ def build_repost_campaign_target_card_view(*, rule_id: int, target: dict | None,
         return text, kb
     view = build_campaign_target_item_view(target)
     row_id = int(view.get("row_id") or target.get("id") or 0)
-    lines = ["📣 Канал/Группа", "", view.get("title") or "Канал/группа", "", f"Статус: {view.get('status_line')}", f"Проверка: {view.get('check_line')}", f"Технический ID: {target.get('target_id') or '—'}", view.get("thread_line") or "Тема: не задана", ""]
+    lines = [
+        "📣 Канал/Группа",
+        "",
+        view.get("title") or "Канал/группа",
+        "",
+        view.get("status_line") or "Статус: —",
+        view.get("check_line") or "Проверка: —",
+        f"Технический ID: {target.get('target_id') or '—'}",
+        view.get("thread_line") or "Тема: не задана",
+        "",
+    ]
     if view.get("error_line"):
         lines.extend(["Ошибка:", str(view.get("error_line")).replace("⚠️ ", "")])
     else:
@@ -445,10 +455,11 @@ def build_repost_campaign_target_action_result_view(*, rule_id: int, result: dic
 
 
 def build_repost_campaign_target_delete_confirm_view(*, rule_id: int, target: dict | None, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+    safe_page = max(0, int(page or 0))
     if not target:
         text = "❌ Канал/группа не найдены в кампании."
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ К списку каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")]
+            [InlineKeyboardButton(text="⬅️ К списку каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}:{safe_page}")]
         ])
         return text, kb
     row_id = int(target.get("id") or 0)
@@ -460,8 +471,8 @@ def build_repost_campaign_target_delete_confirm_view(*, rule_id: int, target: di
         "История уже выполненных запусков сохранится."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"rule_repost_campaign_target_delete:{rule_id}:{row_id}:{max(0, int(page or 0))}")],
-        [InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"rule_repost_campaign_target_card:{rule_id}:{row_id}:{max(0, int(page or 0))}")],
+        [InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"rule_repost_campaign_target_delete:{rule_id}:{row_id}:{safe_page}")],
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"rule_repost_campaign_target_card:{rule_id}:{row_id}:{safe_page}")],
     ])
     return text, kb
 

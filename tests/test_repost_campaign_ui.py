@@ -418,6 +418,12 @@ def test_target_card_problem_has_check_delete():
     assert "🔎 Проверить" in texts and "🗑 Удалить" in texts
 
 
+def test_target_card_text_has_no_double_status_or_check_prefix():
+    text, _ = build_repost_campaign_target_card_view(rule_id=1, target={"id": 1, "target_id": "-1001", "title": "A", "is_active": True}, page=0)
+    assert "Статус: Статус:" not in text
+    assert "Проверка: Проверка:" not in text
+
+
 def test_target_delete_confirm_returns_to_card():
     _, kb = build_repost_campaign_target_delete_confirm_view(rule_id=1, target={"id":9,"title":"A"}, page=3)
     assert "rule_repost_campaign_target_card:1:9:3" in _callbacks_from_keyboard(kb)
@@ -428,6 +434,18 @@ def test_target_action_result_after_delete_returns_to_list():
     cbs = _callbacks_from_keyboard(kb)
     assert "rule_repost_campaign_targets_list:1:4" in cbs
     assert not any(x.startswith("rule_repost_campaign_target_card:") for x in cbs)
+
+
+def test_target_action_result_after_pause_has_card_button_when_row_id_present():
+    _, kb = build_repost_campaign_target_action_result_view(rule_id=1, result={"ok": True, "target_row_id": 7, "target_title": "A"}, action="pause", page=2)
+    cbs = _callbacks_from_keyboard(kb)
+    assert "rule_repost_campaign_target_card:1:7:2" in cbs
+
+
+def test_target_delete_confirm_not_found_keeps_page_in_callback():
+    _, kb = build_repost_campaign_target_delete_confirm_view(rule_id=1, target=None, page=3)
+    cbs = _callbacks_from_keyboard(kb)
+    assert "rule_repost_campaign_targets_list:1:3" in cbs
 
 
 def test_bot_has_campaign_target_callbacks_and_card_import():
