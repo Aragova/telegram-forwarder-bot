@@ -409,19 +409,6 @@ def build_repost_campaign_target_card_view(*, rule_id: int, target: dict | None,
     rows.extend([[InlineKeyboardButton(text="📋 К списку", callback_data=f"rule_repost_campaign_targets_list:{rule_id}:{safe_page}")],[InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")]])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
-def build_repost_campaign_targets_id_actions_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    text = (
-        "⚙️ Управление вручную\n\n"
-        "Этот раздел больше не используется.\n\n"
-        "Управляйте каналами через карточки в списке каналов/групп."
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 К списку каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")],
-        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-    ])
-    return text, kb
-
-
 def build_repost_campaign_targets_check_loading_view(
     *,
     rule_id: int,

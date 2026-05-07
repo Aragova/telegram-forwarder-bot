@@ -18,7 +18,6 @@ from app.repost_campaign_ui import (
     build_repost_campaign_target_delete_confirm_view,
     build_repost_campaign_target_card_view,
     build_repost_campaign_target_action_result_view,
-    build_repost_campaign_targets_id_actions_view,
     build_repost_campaign_targets_menu_view,
     build_repost_campaign_targets_list_view,
     build_repost_campaign_targets_check_loading_view,
@@ -81,19 +80,6 @@ def test_targets_list_view_manual_actions_copy():
     texts = _texts_from_keyboard(keyboard)
     assert "⚙️ Управление вручную" not in texts
 
-
-def test_targets_id_actions_view_uses_manual_wording():
-    text, keyboard = build_repost_campaign_targets_id_actions_view(rule_id=3)
-    texts = _texts_from_keyboard(keyboard)
-    assert "⚙️ Управление вручную" in text
-    assert "Этот раздел больше не используется." in text
-    assert "📋 К списку каналов/групп" in texts
-    assert "💰 К кампании" in texts
-    assert "⏸ Поставить на паузу вручную" not in texts
-    assert "по ID" not in text
-    assert all("по ID" not in t for t in texts)
-
-
 def test_targets_list_buttons_without_number_suffix():
     _, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}])
     texts = _texts_from_keyboard(keyboard)
@@ -128,15 +114,6 @@ def test_targets_list_has_no_manual_management_button():
     _, keyboard = build_repost_campaign_targets_list_view(rule_id=7, targets=[])
     texts = _texts_from_keyboard(keyboard)
     assert "⚙️ Управление вручную" not in texts
-
-
-def test_targets_manual_management_view_is_legacy_fallback():
-    text, keyboard = build_repost_campaign_targets_id_actions_view(rule_id=7)
-    texts = _texts_from_keyboard(keyboard)
-    assert "Этот раздел больше не используется." in text
-    assert "Управляйте каналами через карточки" in text
-    assert texts == ["📋 К списку каналов/групп", "💰 К кампании"]
-
 
 def test_targets_check_loading_view_text_and_keyboard():
     text, keyboard = build_repost_campaign_targets_check_loading_view(rule_id=1, targets_count=42)
@@ -212,7 +189,6 @@ def test_bot_contains_campaign_check_loading_and_optional_page_parse():
     assert "page = int(parts[3]) if len(parts) > 3 else 0" in source
 
 from app.repost_campaign_ui import build_repost_campaign_posts_library_view, build_repost_campaign_post_stats_view, build_repost_campaign_post_stats_loading_view, build_repost_campaign_post_channels_stats_view
-
 
 def _library_payload(count=3):
     items = []
