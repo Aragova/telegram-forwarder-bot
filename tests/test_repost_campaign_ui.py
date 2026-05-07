@@ -13,6 +13,9 @@ from app.repost_campaign_ui import (
     build_repost_campaign_views_report_error_view,
     build_repost_campaign_preview_view,
     build_repost_campaign_run_details_view,
+    build_repost_campaign_run_delete_confirm_view,
+    build_repost_campaign_run_delete_loading_view,
+    build_repost_campaign_run_delete_result_view,
     build_repost_campaign_show_menu_view,
     build_repost_campaign_target_delete_confirm_view,
     build_repost_campaign_targets_id_actions_view,
@@ -488,7 +491,7 @@ def test_run_details_view_is_trimmed_under_telegram_limit():
     }
     text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
     assert len(text) <= 3800
-    assert "Показаны первые" in text
+    assert "Показаны первые" not in text
 
 
 def test_run_details_view_no_technical_ids():
@@ -542,8 +545,9 @@ def test_preview_copy_is_premium_scenario():
 
 
 def test_details_shows_retry_button_for_failed_delete():
-    details = {"ok": True, "run_id": 10, "run": {"id": 10}, "messages": [{"id": 33, "send_status": "sent", "sent_message_id": 777, "delete_status": "failed"}], "summary": {}}
+    details = {"ok": True, "run_id": 10, "run": {"id": 10}, "messages": [{"id": 33, "send_status": "sent", "sent_message_id": 777, "delete_status": "failed"}], "summary": {"delete_failed": 1}}
     _, keyboard = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "🔁 Повторить удаление" in _texts_from_keyboard(keyboard)
 
 
 def test_target_list_cards_text():
@@ -595,10 +599,57 @@ def test_delete_confirm_view():
 
 
 def test_details_shows_delete_now_for_pending():
-    details = {"ok": True, "run_id": 10, "run": {"id": 10}, "messages": [{"id": 33, "send_status": "sent", "sent_message_id": 777, "delete_status": "pending"}], "summary": {}}
+    details = {"ok": True, "run_id": 10, "run": {"id": 10}, "messages": [{"id": 33, "send_status": "sent", "sent_message_id": 777, "delete_status": "pending"}], "summary": {"delete_pending": 1}}
     _, keyboard = build_repost_campaign_run_details_view(rule_id=3, details=details)
     texts = _texts_from_keyboard(keyboard)
     assert "🧹 Удалить сейчас #1" not in texts
+
+
+def test_active_details_compact_without_channels_list():
+    details = {"ok": True, "run_id": 10, "run": {"id": 10}, "messages": [{"target_title": "A"}], "summary": {"sent": 2, "total": 3, "failed": 1, "delete_pending": 1, "delete_processing": 1, "delete_failed": 1}}
+    text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "Показаны первые" not in text
+    assert "— ✅ опубликовано" not in text
+    assert "🧹 Ожидают удаления: 2" in text
+    assert "⚠️ Ошибки удаления: 1" in text
+
+
+def test_active_details_falls_back_to_message_delete_statuses_when_summary_empty():
+    details = {
+        "ok": True,
+        "run_id": 10,
+        "run": {"id": 10},
+        "messages": [
+            {"delete_status": "pending"},
+            {"delete_status": "processing"},
+            {"delete_status": "failed"},
+        ],
+        "summary": {},
+    }
+    text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "🧹 Ожидают удаления: 2" in text
+    assert "⚠️ Ошибки удаления: 1" in text
+
+
+def test_completed_details_no_delete_button():
+    details = {"ok": True, "run_id": 10, "run": {"id": 10}, "summary": {"sent": 2, "total": 2, "delete_pending": 0, "delete_processing": 0, "delete_failed": 0}}
+    _, keyboard = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "🧹 Удалить сейчас" not in _texts_from_keyboard(keyboard)
+
+
+def test_run_delete_confirm_contains_counts_and_warning():
+    text, _ = build_repost_campaign_run_delete_confirm_view(rule_id=3, run_id=10, details={"summary": {"sent": 2, "total": 3, "delete_pending": 1, "delete_processing": 2, "delete_failed": 1}})
+    assert "Это действие нельзя отменить" in text
+    assert "🧹 Ожидают удаления: 3" in text
+
+
+def test_run_delete_loading_and_result_builders():
+    loading_text, _ = build_repost_campaign_run_delete_loading_view(rule_id=3, run_id=10)
+    ok_text, _ = build_repost_campaign_run_delete_result_view(rule_id=3, run_id=10, result={"ok": True, "extra": {"deleted": 2, "skipped": 1}})
+    fail_text, _ = build_repost_campaign_run_delete_result_view(rule_id=3, run_id=10, result={"ok": False, "extra": {"deleted": 1, "failed": 2, "skipped": 0}})
+    assert "Удаляю активное размещение" in loading_text
+    assert "✅ Удаление размещения завершено" in ok_text
+    assert "⚠️ Удаление завершено с ошибками" in fail_text
 
 
 def test_delete_result_success_view():
