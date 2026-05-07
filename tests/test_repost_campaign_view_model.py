@@ -119,7 +119,7 @@ def test_control_center_view_model_ready():
     assert vm["screen_state"] == "ready_to_launch"
     assert vm["creative_line"] == "📝 Рекламный пост"
     assert "📣 Каналы/Группы:" in vm["targets_line"]
-    assert vm["show_seconds_line"] == "⏳ Время показа"
+    assert vm["show_seconds_line"] == "⏳ Время показа: 1 минута"
     assert vm["can_launch"] is True
 
 
@@ -277,6 +277,48 @@ def test_views_report_vm_partial():
 def test_views_report_vm_album_line():
     vm = build_campaign_views_report_view_model(report={"status": "ready", "items": [{"views_status": "ok", "views": 10, "target_title": "Канал", "is_album": True, "album_items": 5}]})
     assert "альбом 5 медиа" in vm["channel_lines"][0]
+
+
+def test_control_center_active_targets_line_uses_run_summary():
+    vm = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 1, "targets_active": 42, "show_seconds": 86400},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": False}, "last_run": {"id": 3, "targets_success": 43, "targets_total": 43}, "last_run_details": {"ok": True, "summary": {"delete_pending": 43}}},
+    )
+    assert vm["screen_state"] == "active_placement"
+    assert vm["targets_line"] == "📣 Активное размещение"
+    assert "42 активных" not in vm["targets_line"]
+
+
+def test_control_center_show_seconds_single_line():
+    vm = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 1, "targets_active": 1, "show_seconds": 86400},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": False}},
+    )
+    assert vm["show_seconds_line"] == "⏳ Время показа: 24 часа"
+    assert vm["show_seconds_value_line"] is None
+
+
+def test_control_center_primary_action_labels_by_state():
+    active = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 1, "targets_active": 1, "show_seconds": 60},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": False}, "last_run": {"id": 2}, "last_run_details": {"ok": True, "summary": {"delete_pending": 1}}},
+    )
+    problem = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 1, "targets_active": 1, "show_seconds": 60},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": False}, "last_run": {"id": 2}, "last_run_details": {"ok": True, "summary": {"delete_failed": 1}}},
+    )
+    completed = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 1, "targets_active": 1, "show_seconds": 60},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": False}, "last_run": {"id": 2}, "last_run_details": {"ok": True, "summary": {"deleted": 1}}},
+    )
+    assert active["primary_action"] == "open_active_run"
+    assert problem["primary_action"] == "open_problem_run"
+    assert completed["primary_action"] == "open_last_run"
 
 
 def test_scenario_preview_missing_post():
