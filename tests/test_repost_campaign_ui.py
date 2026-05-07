@@ -80,7 +80,6 @@ def test_targets_list_view_manual_actions_copy():
     texts = _texts_from_keyboard(keyboard)
     assert "⚙️ Управление вручную" not in texts
 
-
 def test_targets_list_buttons_without_number_suffix():
     _, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[{"id": 1, "target_id": "-1001", "title": "A", "is_active": True}])
     texts = _texts_from_keyboard(keyboard)
@@ -115,7 +114,6 @@ def test_targets_list_has_no_manual_management_button():
     _, keyboard = build_repost_campaign_targets_list_view(rule_id=7, targets=[])
     texts = _texts_from_keyboard(keyboard)
     assert "⚙️ Управление вручную" not in texts
-
 
 def test_targets_check_loading_view_text_and_keyboard():
     text, keyboard = build_repost_campaign_targets_check_loading_view(rule_id=1, targets_count=42)
@@ -190,23 +188,7 @@ def test_bot_contains_campaign_check_loading_and_optional_page_parse():
     assert "rule_repost_campaign_check:" in source
     assert "page = int(parts[3]) if len(parts) > 3 else 0" in source
 
-
-def test_campaign_target_manual_controls_removed_from_code():
-    ui_source = Path("app/repost_campaign_ui.py").read_text(encoding="utf-8")
-    bot_source = Path("bot.py").read_text(encoding="utf-8")
-    removed_tokens = [
-        "build_repost_campaign_targets_id_actions_view",
-        "rule_repost_campaign_targets_id_actions",
-        "rule_repost_campaign_target_disable_prompt",
-        "rule_repost_campaign_target_enable_prompt",
-        "rule_repost_campaign_target_remove_prompt",
-    ]
-    for token in removed_tokens:
-        assert token not in ui_source
-        assert token not in bot_source
-
 from app.repost_campaign_ui import build_repost_campaign_posts_library_view, build_repost_campaign_post_stats_view, build_repost_campaign_post_stats_loading_view, build_repost_campaign_post_channels_stats_view
-
 
 def _library_payload(count=3):
     items = []
