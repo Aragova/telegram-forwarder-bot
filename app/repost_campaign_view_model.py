@@ -496,8 +496,9 @@ def build_campaign_control_center_view_model(
         started_at = format_campaign_datetime_text(last_run.get("started_at"))
         if screen_state == "active_placement":
             targets_line = f"📣 Опубликовано: {int((last_run or {}).get('targets_success') or 0)} из {int((last_run or {}).get('targets_total') or 0)}"
-            last_run_title_line = "📊 Активное размещение"
-            last_run_status_line = f"✅ Опубликовано: {int((last_run or {}).get('targets_success') or 0)} из {int((last_run or {}).get('targets_total') or 0)}"
+            last_run_title_line = None
+            last_run_status_line = None
+            last_run_time_line = None
             last_run_delete_line = f"🧹 Удаление ожидается: {format_campaign_datetime_text((last_details.get('messages') or [{}])[0].get('delete_after_at'))}" if (last_details.get("messages") or []) else f"🧹 Ожидает удаления: {delete_pending}"
         elif screen_state == "delete_problem":
             last_run_title_line = "⚠️ Проблемы удаления"
@@ -510,6 +511,8 @@ def build_campaign_control_center_view_model(
 
     can_check_publication = bool((summary or {}).get("saved_post_id"))
     can_launch = bool(readiness and readiness.get("ready"))
+    if screen_state in {"active_placement", "delete_problem"}:
+        can_launch = False
     return {
         "screen_state": screen_state,
         "title_status": title_status,
