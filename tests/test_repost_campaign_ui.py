@@ -18,8 +18,9 @@ from app.repost_campaign_ui import (
     build_repost_campaign_target_delete_confirm_view,
     build_repost_campaign_target_card_view,
     build_repost_campaign_target_action_result_view,
-    build_repost_campaign_targets_id_actions_view,
+    build_repost_campaign_targets_menu_view,
     build_repost_campaign_targets_list_view,
+    build_repost_campaign_targets_check_loading_view,
     build_repost_campaign_target_preview_result_view,
     build_repost_campaign_preview_delete_result_view,
     build_repost_campaign_views_report_view,
@@ -60,7 +61,7 @@ def test_bot_campaign_check_calls_are_awaited_ast():
 def test_problematic_target_buttons_and_copy():
     text, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[{"id": 1, "target_id": "-1001", "title": "A", "is_active": True, "last_check_error": "Аккаунт-парсер не имеет права публиковать"}])
     texts = _texts_from_keyboard(keyboard)
-    assert "🔎 Проверить права" in texts
+    assert "🔎 Проверить все права" in texts
     assert "⏸ Пауза" not in texts and "▶️ Включить" not in texts and "🗑 Удалить" not in texts
     assert "Аккаунт-парсер" not in text
 
@@ -77,19 +78,7 @@ def test_targets_list_view_does_not_show_raw_id_as_main_title():
 def test_targets_list_view_manual_actions_copy():
     _, keyboard = build_repost_campaign_targets_list_view(rule_id=3, targets=[])
     texts = _texts_from_keyboard(keyboard)
-    assert "⚙️ Управление вручную" in texts
-    assert "⚙️ Действия по ID" not in texts
-
-
-def test_targets_id_actions_view_uses_manual_wording():
-    text, keyboard = build_repost_campaign_targets_id_actions_view(rule_id=3)
-    texts = _texts_from_keyboard(keyboard)
-    assert "⚙️ Управление вручную" in text
-    assert "⏸ Поставить на паузу вручную" in texts
-    assert "▶️ Включить вручную" in texts
-    assert "🗑 Удалить вручную" in texts
-    assert "по ID" not in text
-    assert all("по ID" not in t for t in texts)
+    assert "⚙️ Управление вручную" not in texts
 
 
 def test_targets_list_buttons_without_number_suffix():
@@ -101,6 +90,49 @@ def test_targets_list_buttons_without_number_suffix():
     assert "Пауза #1" not in texts
     assert "Проверить #1" not in texts
     assert "Удалить #1" not in texts
+
+
+def test_targets_menu_has_no_check_rights_button():
+    _, keyboard = build_repost_campaign_targets_menu_view(rule_id=7, summary={})
+    texts = _texts_from_keyboard(keyboard)
+    assert "🔎 Проверить права" not in texts
+
+
+def test_targets_list_has_check_all_rights_button():
+    _, keyboard = build_repost_campaign_targets_list_view(rule_id=7, targets=[])
+    texts = _texts_from_keyboard(keyboard)
+    assert "🔎 Проверить все права" in texts
+    assert "🔎 Проверить права" not in texts
+
+
+def test_targets_list_has_no_add_list_button():
+    _, keyboard = build_repost_campaign_targets_list_view(rule_id=7, targets=[])
+    texts = _texts_from_keyboard(keyboard)
+    assert "📥 Добавить списком" not in texts
+
+
+def test_targets_list_has_no_manual_management_button():
+    _, keyboard = build_repost_campaign_targets_list_view(rule_id=7, targets=[])
+    texts = _texts_from_keyboard(keyboard)
+    assert "⚙️ Управление вручную" not in texts
+
+
+def test_targets_check_loading_view_text_and_keyboard():
+    text, keyboard = build_repost_campaign_targets_check_loading_view(rule_id=1, targets_count=42)
+    texts = _texts_from_keyboard(keyboard)
+    assert "🔎 Проверяем все права" in text
+    assert "Каналов/групп: 42" in text
+    assert "💰 К кампании" in texts
+
+
+def test_target_card_check_callback_keeps_page():
+    _, keyboard = build_repost_campaign_target_card_view(
+        rule_id=3,
+        target={"id": 15, "target_id": "-1001", "title": "A", "is_active": True},
+        page=3,
+    )
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_target_check:3:15:3" in callbacks
 
 
 def _kb_texts(kb):
@@ -149,6 +181,29 @@ def test_bot_has_launch_confirm_callback_and_logs():
     assert "rule_repost_campaign_launch_confirm:" in source
     assert "REPOST_CAMPAIGN_LAUNCH_PREFLIGHT_UI" in source
     assert "REPOST_CAMPAIGN_LAUNCH_CONFIRM_STARTED" in source
+
+
+def test_bot_contains_campaign_check_loading_and_optional_page_parse():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "build_repost_campaign_targets_check_loading_view" in source
+    assert "rule_repost_campaign_target_check:" in source
+    assert "rule_repost_campaign_check:" in source
+    assert "page = int(parts[3]) if len(parts) > 3 else 0" in source
+
+
+def test_campaign_target_manual_controls_removed_from_code():
+    ui_source = Path("app/repost_campaign_ui.py").read_text(encoding="utf-8")
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    removed_tokens = [
+        "build_repost_campaign_targets_id_actions_view",
+        "rule_repost_campaign_targets_id_actions",
+        "rule_repost_campaign_target_disable_prompt",
+        "rule_repost_campaign_target_enable_prompt",
+        "rule_repost_campaign_target_remove_prompt",
+    ]
+    for token in removed_tokens:
+        assert token not in ui_source
+        assert token not in bot_source
 
 from app.repost_campaign_ui import build_repost_campaign_posts_library_view, build_repost_campaign_post_stats_view, build_repost_campaign_post_stats_loading_view, build_repost_campaign_post_channels_stats_view
 
