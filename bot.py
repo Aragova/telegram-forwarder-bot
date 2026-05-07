@@ -7321,10 +7321,14 @@ async def handle_rule_repost_campaign_post_stats(callback: CallbackQuery):
 async def handle_rule_repost_campaign_post_channels_stats(callback: CallbackQuery):
     if not await is_admin_callback(callback):
         return
-    _, rule_id_raw, saved_post_id_raw, offset_raw = callback.data.split(":", 3)
-    rule_id = int(rule_id_raw)
-    saved_post_id = int(saved_post_id_raw)
-    offset = int(offset_raw)
+    try:
+        _, rule_id_raw, saved_post_id_raw, offset_raw = callback.data.split(":", 3)
+        rule_id = int(rule_id_raw)
+        saved_post_id = int(saved_post_id_raw)
+        offset = int(offset_raw)
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
     await answer_callback_safe_once(callback)
     try:
         runtime = _build_repost_campaign_runtime()

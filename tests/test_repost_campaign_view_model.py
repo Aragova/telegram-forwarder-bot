@@ -140,3 +140,14 @@ def test_post_stats_vm_keeps_total_views_and_placements():
     vm = build_campaign_post_stats_view_model(stats={"kind": "photo", "views_total": 10830, "placements_sent": 43})
     assert vm["views_line"] == "👁 Всего просмотров: 10 830"
     assert vm["placements_line"] == "📣 Размещений: 43"
+
+
+def test_post_stats_vm_prefers_full_channels_stats_over_top_channels():
+    vm = build_campaign_post_stats_view_model(stats={
+        "kind": "photo",
+        "channels_stats": [{"target_title": "Полный 1", "views_total": 10, "views_status": "ok"}],
+        "top_channels": [{"target_title": "Только топ", "views_total": 99}],
+        "problem_channels": [{"target_title": "Только проблема"}],
+    })
+    assert len(vm["channels_items"]) == 1
+    assert vm["channels_items"][0]["title"] == "Полный 1"

@@ -266,6 +266,18 @@ def _stats_payload(channels_count=12):
     top = [{"target_title": f"Канал {i+1}", "views_total": 1000 - i * 10} for i in range(channels_count)]
     return {"kind": "photo", "views_total": 10830, "runs_count": 1, "placements_sent": 43, "top_channels": top, "problem_channels": []}
 
+def _stats_payload_full(channels_count=43):
+    items = []
+    for i in range(channels_count):
+        items.append({
+            "target_title": f"Канал {i+1}",
+            "target_id": f"-100{i+1}",
+            "views_total": 1200 - i,
+            "views_status": "ok",
+            "runs_count": 1,
+        })
+    return {"kind": "photo", "views_total": 10830, "runs_count": 1, "placements_sent": 43, "channels_stats": items, "top_channels": [{"target_title": "ТОП", "views_total": 9999}]}
+
 
 def test_post_stats_view_does_not_render_channels_sheet():
     text, _ = build_repost_campaign_post_stats_view(rule_id=1, saved_post_id=24, stats=_stats_payload(3))
@@ -279,23 +291,26 @@ def test_post_stats_view_has_channels_stats_button():
 
 
 def test_post_channels_stats_view_first_page():
-    text, kb = build_repost_campaign_post_channels_stats_view(rule_id=39, saved_post_id=24, stats=_stats_payload(43), offset=0, page_size=10)
+    text, kb = build_repost_campaign_post_channels_stats_view(rule_id=39, saved_post_id=24, stats=_stats_payload_full(43), offset=0, page_size=10)
     assert "Страница 1 из 5" in text
-    assert text.count("👁 ") >= 10
+    assert text.count("👁 ") == 11
     labels = _texts_from_keyboard(kb)
     assert "➡️ Вперёд" in labels
     assert "⬅️ Назад" not in labels
 
 
 def test_post_channels_stats_view_middle_page_has_prev_and_next():
-    _, kb = build_repost_campaign_post_channels_stats_view(rule_id=39, saved_post_id=24, stats=_stats_payload(43), offset=10, page_size=10)
+    text, kb = build_repost_campaign_post_channels_stats_view(rule_id=39, saved_post_id=24, stats=_stats_payload_full(43), offset=10, page_size=10)
+    assert "Канал 11" in text
+    assert "Канал 20" in text
+    assert "Канал 10" not in text
     labels = _texts_from_keyboard(kb)
     assert "⬅️ Назад" in labels
     assert "➡️ Вперёд" in labels
 
 
 def test_post_channels_stats_view_last_page_has_only_prev():
-    text, kb = build_repost_campaign_post_channels_stats_view(rule_id=39, saved_post_id=24, stats=_stats_payload(43), offset=40, page_size=10)
+    text, kb = build_repost_campaign_post_channels_stats_view(rule_id=39, saved_post_id=24, stats=_stats_payload_full(43), offset=40, page_size=10)
     assert "Страница 5 из 5" in text
     labels = _texts_from_keyboard(kb)
     assert "⬅️ Назад" in labels
@@ -308,3 +323,16 @@ def test_post_channels_stats_view_empty_state():
     assert "📣 Каналов/групп: 0" in text
     assert "⬅️ Назад" not in _texts_from_keyboard(kb)
     assert "➡️ Вперёд" not in _texts_from_keyboard(kb)
+
+
+def test_post_channels_stats_view_fallback_legacy_top_and_problem():
+    text, _ = build_repost_campaign_post_channels_stats_view(
+        rule_id=39,
+        saved_post_id=24,
+        stats={"kind": "photo", "top_channels": [{"target_title": "A", "views_total": 1}], "problem_channels": [{"target_title": "B"}]},
+        offset=0,
+        page_size=10,
+    )
+    assert "📣 Каналов/групп: 2" in text
+    assert "👁 1 — A" in text
+    assert "⚠️ нет данных — B" in text
