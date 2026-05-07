@@ -92,7 +92,6 @@ from app.repost_campaign_service import (
 )
 from app.repost_campaign_ui import (
     build_repost_campaign_delete_result_view,
-    build_repost_campaign_history_view,
     build_repost_campaign_posts_library_view,
     build_repost_campaign_post_stats_view,
     build_repost_campaign_post_stats_loading_view,
@@ -102,7 +101,6 @@ from app.repost_campaign_ui import (
     build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
-    build_repost_campaign_preview_view,
     build_repost_campaign_vip_features_view,
     build_repost_campaign_run_details_view,
     build_repost_campaign_run_delete_confirm_view,
@@ -6983,169 +6981,6 @@ async def handle_rule_repost_campaign_add_list(callback: CallbackQuery):
     )
     await answer_callback_safe_once(callback)
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_preview:"))
-async def handle_rule_repost_campaign_preview(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    if not settings.repost_campaign_admin_test_enabled:
-        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
-        return
-    try:
-        rule_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "repost":
-        await answer_callback_safe(callback, "Рекламная кампания доступна только для режима репоста", show_alert=True)
-        return
-
-    saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None)
-    try:
-        summary = await run_db(db.get_rule_repost_campaign_summary, rule_id)
-        summary = summary or {}
-        enabled = bool(summary.get("enabled"))
-        show_seconds = int(summary.get("show_seconds") or 0)
-        targets_active = int(summary.get("targets_active") or 0)
-        targets_ready = int(summary.get("targets_ready") or 0)
-        targets_with_errors = int(summary.get("targets_with_errors") or 0)
-        show_seconds_ru = format_campaign_show_seconds_ru(show_seconds)
-
-        if not saved_post_id:
-            await edit_message_text_safe(
-                message=callback.message,
-                text=(
-                    "👁 Предпросмотр кампании\n\n"
-                    "⚠️ Рекламный пост не выбран.\n\n"
-                    "Чтобы запустить кампанию:\n"
-                    "1. добавьте рекламный пост\n"
-                    "2. задайте срок показа\n"
-                    "3. добавьте каналы кампании\n\n"
-                    "Публикация не запускается."
-                ),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📝 Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-                    [InlineKeyboardButton(text="⏳ Срок показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
-                    [InlineKeyboardButton(text="📣 Каналы кампании", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-                ]),
-            )
-            await answer_callback_safe_once(callback)
-            return
-
-        saved_post = await run_db(db.get_saved_post, int(saved_post_id))
-        if not saved_post:
-            await edit_message_text_safe(
-                message=callback.message,
-                text=(
-                    "👁 Предпросмотр кампании\n\n"
-                    "⚠️ Выбранный рекламный пост не найден или был архивирован.\n\n"
-                    "Добавьте или выберите другой рекламный пост."
-                ),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📝 Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-                ]),
-            )
-            await answer_callback_safe_once(callback)
-            return
-
-        targets = await run_db(db.list_rule_repost_campaign_targets, rule_id, active_only=True)
-        targets = targets or []
-        target_lines: list[str] = []
-        for idx, row in enumerate(targets[:10], 1):
-            has_error = bool(row.get("last_check_error"))
-            icon = "⚠️" if has_error else "🟢"
-            title = str(row.get("title") or row.get("target_id") or "")
-            target_lines.append(f"{idx}. {icon} {title}")
-        if len(targets) > 10:
-            target_lines.append(f"…и ещё {len(targets) - 10} каналов")
-        targets_preview = "\n".join(target_lines) if target_lines else "пока нет активных каналов"
-
-        warning_lines: list[str] = []
-        if (not enabled) or show_seconds <= 0:
-            warning_lines.append("⚠️ Срок показа не задан.")
-        if targets_active == 0:
-            warning_lines.append("⚠️ Активных каналов кампании пока нет.")
-        if targets_with_errors > 0:
-            warning_lines.append(f"⚠️ Есть каналы, которые требуют проверки: {targets_with_errors}")
-        warnings_block = ("\n" + "\n".join(warning_lines) + "\n") if warning_lines else ""
-
-        content = saved_post.get("content_json") or saved_post.get("content") or {}
-        saved_post_description = get_saved_post_short_description(content)
-        readiness = None
-        control_center = None
-
-        runtime = RepostCampaignRuntimeService(
-            repo=db,
-            renderer=SavedPostRenderer(
-                bot=bot,
-                telethon_client=telethon_client,
-                logger_=logger,
-            ),
-            deleter=RepostCampaignDeleteService(
-                bot=bot,
-                telethon_client=telethon_client,
-                logger_=logger,
-            ),
-            target_checker=RepostCampaignTargetCheckService(
-                telethon_client=telethon_client,
-                logger_=logger,
-            ),
-            logger_=logger,
-        )
-
-        try:
-            readiness = await run_db(lambda: runtime.get_campaign_readiness(rule_id=rule_id))
-        except Exception:
-            readiness = None
-        try:
-            control_center = await run_db(lambda: runtime.get_campaign_control_center(rule_id=rule_id))
-        except Exception as exc:
-            logger.warning("REPOST_CAMPAIGN_PREVIEW_CONTROL_CENTER_UNAVAILABLE | rule_id=%s | error=%s", rule_id, exc)
-            control_center = None
-        saved_post_line = f"📝 Рекламный пост: #{saved_post_id} · {saved_post_description or 'пост'}" if saved_post_id else "📝 Рекламный пост: не выбран"
-        text, keyboard = build_repost_campaign_preview_view(
-            rule_id=rule_id,
-            saved_post_id=int(saved_post_id) if saved_post_id else None,
-            saved_post_description=saved_post_description,
-            show_seconds_text=show_seconds_ru,
-            targets_active=targets_active,
-            targets_ready=targets_ready,
-            targets_with_errors=targets_with_errors,
-            targets_preview_text=targets_preview,
-            warnings=warning_lines,
-            readiness=readiness,
-            summary=summary,
-            control_center=control_center,
-            saved_post_line=saved_post_line,
-            now=datetime.now(USER_TZ),
-        )
-        logger.info(
-            "REPOST_CAMPAIGN_PREVIEW_OPENED | rule_id=%s | saved_post_id=%s | active_targets=%s | show_seconds=%s",
-            rule_id,
-            saved_post_id,
-            targets_active,
-            show_seconds,
-        )
-        await edit_message_text_safe(
-            message=callback.message,
-            text=text,
-            reply_markup=keyboard,
-        )
-        await answer_callback_safe_once(callback)
-    except Exception as exc:
-        logger.exception(
-            "REPOST_CAMPAIGN_PREVIEW_FAILED | rule_id=%s | saved_post_id=%s | error=%s",
-            rule_id,
-            saved_post_id,
-            exc,
-        )
-        await answer_callback_safe(callback, "Не удалось открыть предпросмотр кампании", show_alert=True)
-
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_targets_list:"))
 async def handle_rule_repost_campaign_targets_list(callback: CallbackQuery):
     if not await is_admin_callback(callback):
@@ -7351,22 +7186,6 @@ async def handle_rule_repost_campaign_history(callback: CallbackQuery):
         await answer_callback_safe(callback, "Не удалось открыть библиотеку постов", show_alert=True)
 
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_runs_history:"))
-async def handle_rule_repost_campaign_runs_history(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    try:
-        rule_id = int(callback.data.split(":")[1])
-        logger.info("REPOST_CAMPAIGN_RUNS_HISTORY_UI_OPENED | rule_id=%s", rule_id)
-        renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger)
-        runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
-        history = await run_db(lambda: runtime.get_campaign_history(rule_id=rule_id, limit=10))
-        text, keyboard = build_repost_campaign_history_view(rule_id=rule_id, history=history)
-        await answer_callback_safe_once(callback)
-        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-    except Exception:
-        await answer_callback_safe(callback, "Не удалось открыть журнал запусков", show_alert=True)
-
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_history_detail:"))
 async def handle_rule_repost_campaign_history_detail(callback: CallbackQuery):
@@ -7516,8 +7335,7 @@ async def handle_rule_repost_campaign_post_use(callback: CallbackQuery):
         )
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🚀 Проверить и запустить", callback_data=f"rule_repost_campaign_launch:{rule_id}")],
-            [InlineKeyboardButton(text="👁 Предпросмотр сценария", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
-            [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+                        [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
             [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
         ])
     else:
