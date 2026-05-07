@@ -76,6 +76,9 @@ class _FakeRepo:
     def list_campaign_run_messages(self, run_id):
         return self._messages
     def get_campaign_run_message(self, message_id):
+        for row in self._messages:
+            if int(row.get("id") or 0) == int(message_id):
+                return row
         return self._message
 
     def list_rule_repost_campaign_targets(self, rule_id, active_only=True):

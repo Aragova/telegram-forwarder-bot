@@ -491,7 +491,7 @@ def test_run_details_view_is_trimmed_under_telegram_limit():
     }
     text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
     assert len(text) <= 3800
-    assert "Показаны первые" in text
+    assert "Показаны первые" not in text
 
 
 def test_run_details_view_no_technical_ids():
@@ -610,6 +610,23 @@ def test_active_details_compact_without_channels_list():
     text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
     assert "Показаны первые" not in text
     assert "— ✅ опубликовано" not in text
+    assert "🧹 Ожидают удаления: 2" in text
+    assert "⚠️ Ошибки удаления: 1" in text
+
+
+def test_active_details_falls_back_to_message_delete_statuses_when_summary_empty():
+    details = {
+        "ok": True,
+        "run_id": 10,
+        "run": {"id": 10},
+        "messages": [
+            {"delete_status": "pending"},
+            {"delete_status": "processing"},
+            {"delete_status": "failed"},
+        ],
+        "summary": {},
+    }
+    text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
     assert "🧹 Ожидают удаления: 2" in text
     assert "⚠️ Ошибки удаления: 1" in text
 

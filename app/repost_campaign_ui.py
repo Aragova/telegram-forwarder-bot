@@ -695,6 +695,16 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
     summary_delete_processing = int(summary.get("delete_processing") or 0)
     summary_delete_failed = int(summary.get("delete_failed") or 0)
     messages = details.get("messages") or []
+    has_delete_aggregates = any(key in summary for key in ("delete_pending", "delete_processing", "delete_failed"))
+    if not has_delete_aggregates:
+        for msg in messages:
+            status = (msg.get("delete_status") or "").strip().lower()
+            if status == "pending":
+                summary_delete_pending += 1
+            elif status == "processing":
+                summary_delete_processing += 1
+            elif status == "failed":
+                summary_delete_failed += 1
     delete_after_at = extract_campaign_run_delete_after_at(messages)
     is_active_placement = summary_delete_pending > 0 or summary_delete_processing > 0
     lines = [
@@ -716,8 +726,39 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
             f"⚠️ Ошибки удаления: {summary_delete_failed}",
         ])
     else:
+        def _sort_key(msg: dict) -> tuple[int, str]:
+            send_status = (msg.get("send_status") or "").strip().lower()
+            delete_status = (msg.get("delete_status") or "").strip().lower()
+            if send_status == "failed":
+                return (0, "")
+            if delete_status == "failed":
+                return (1, "")
+            if delete_status == "processing":
+                return (2, "")
+            if delete_status == "pending":
+                return (3, "")
+            return (4, "")
         lines.append("")
-        lines.append(f"⚠️ Ошибки удаления: {summary_delete_failed}")
+        visible_messages = sorted(messages, key=_sort_key)[:RUN_DETAILS_VISIBLE_MESSAGES_LIMIT]
+        for idx, msg in enumerate(visible_messages, 1):
+            view = build_campaign_run_message_view(msg, index=idx)
+            channel = str(msg.get("target_title") or "Канал/Группа")
+            send_status = (msg.get("send_status") or "").strip().lower()
+            send_line = "✅ опубликовано" if send_status == "sent" else "⚠️ ошибка отправки"
+            lines.append(f"{send_line.split()[0]} {channel} — {send_line.split(' ', 1)[1]}")
+            if view["send_error_text"]:
+                lines.append(f"Причина: {view['send_error_text'].replace('Ошибка отправки: ', '')}")
+            delete_status = (msg.get("delete_status") or "").strip().lower()
+            if delete_status == "failed":
+                lines.append("⚠️ ошибка удаления")
+                lines.append(f"Причина: {format_campaign_error_text(msg.get('delete_error_text')) or 'не указано'}")
+            elif delete_status == "pending":
+                lines.append("🧹 ожидает удаления")
+            elif delete_status == "processing":
+                lines.append("🧹 удаление выполняется")
+            lines.append("")
+        if len(messages) > RUN_DETAILS_VISIBLE_MESSAGES_LIMIT:
+            lines.extend([f"Показаны первые {RUN_DETAILS_VISIBLE_MESSAGES_LIMIT} из {len(messages)}.", ""])
     kb_rows = []
     if is_active_placement:
         kb_rows.append([InlineKeyboardButton(text="🧹 Удалить сейчас", callback_data=f"rule_repost_campaign_run_delete_confirm:{rule_id}:{run.get('id') or run_id}")])
