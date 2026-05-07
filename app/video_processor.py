@@ -1621,11 +1621,14 @@ class VideoProcessor:
             intro_duration = config.intro_duration
             requested_clip = max(10, min(600, int(clip_duration_seconds or 118)))
             source_duration = float(video_info["duration"])
+            main_cut_duration = source_duration
+            trim_applied = False
             clip_window = calculate_center_clip_window(source_duration, requested_clip)
 
             # CUT
             if clip_window.should_cut:
                 main_cut_duration = float(clip_window.duration)
+                trim_applied = True
                 start_time = float(clip_window.start_time)
                 logger.info("VIDEO_CLIP_PLAN | source_duration=%s | requested_clip=%s | start=%s | end=%s | intro_unchanged=true", source_duration, requested_clip, start_time, start_time + main_cut_duration)
                 logger.info(f"✂️ [3/8] Обрезка ({start_time:.1f}с -> {main_cut_duration}с)")
@@ -2011,7 +2014,7 @@ class VideoProcessor:
                 "width": final_info["width"],
                 "height": final_info["height"],
                 "has_intro": bool(intro_created),
-                "trim_applied": bool(video_info["duration"] > main_cut_duration),
+                "trim_applied": bool(trim_applied),
                 "processing_summary": {
                     "target_width": profile["target_width"],
                     "target_height": profile["target_height"],
