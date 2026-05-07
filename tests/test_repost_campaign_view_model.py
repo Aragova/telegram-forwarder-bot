@@ -91,10 +91,10 @@ def test_posts_library_vm_current_post_first():
     assert vm["items"][0]["saved_post_id"] == 2
 
 
-def test_posts_library_vm_limits_to_five_items():
-    items = [_library_item(i, is_current=(i == 7)) for i in range(1, 8)]
-    vm = build_campaign_posts_library_view_model(library={"items": items, "summary": {"posts_total": 7}})
-    assert len(vm["items"]) == 5
+def test_posts_library_vm_limits_to_ten_items():
+    items = [_library_item(i, is_current=(i == 12)) for i in range(1, 13)]
+    vm = build_campaign_posts_library_view_model(library={"items": items, "summary": {"posts_total": 12}})
+    assert len(vm["items"]) == 10
     assert vm.get("limit_note") is None
 
 

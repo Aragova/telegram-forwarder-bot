@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -443,13 +444,19 @@ def build_repost_campaign_posts_library_view(*, rule_id: int, library: dict) -> 
     vm = build_campaign_posts_library_view_model(library=library or {})
     lines = [vm["title"], "", vm["intro_line"], "", vm["posts_line"], vm["runs_line"], vm["placements_line"]]
     rows = []
-    for item in vm.get("items") or []:
+    for item in (vm.get("items") or [])[:10]:
         sid = int(item.get("saved_post_id") or 0)
         if sid <= 0:
             continue
-        rows.append([InlineKeyboardButton(text="📄 Открыть пост", callback_data=f"rule_repost_campaign_post_stats:{rule_id}:{sid}")])
-        rows.append([InlineKeyboardButton(text="✅ Использовать этот пост", callback_data=f"rule_repost_campaign_post_use:{rule_id}:{sid}")])
-        break
+        title_line = str(item.get("title_line") or "").strip()
+        button_text = "📄 Открыть пост"
+        if title_line.startswith("✅"):
+            button_text = "📄 Открыть текущий пост"
+        else:
+            dt_match = re.search(r"\d{2}\.\d{2}\s+\d{2}:\d{2}", title_line)
+            if dt_match:
+                button_text = f"📄 Открыть пост от {dt_match.group(0)}"
+        rows.append([InlineKeyboardButton(text=button_text, callback_data=f"rule_repost_campaign_post_stats:{rule_id}:{sid}")])
     rows.extend([
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
