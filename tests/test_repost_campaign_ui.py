@@ -804,3 +804,69 @@ def test_bot_has_launch_confirm_callback_and_logs():
     assert "rule_repost_campaign_launch_confirm:" in source
     assert "REPOST_CAMPAIGN_LAUNCH_PREFLIGHT_UI" in source
     assert "REPOST_CAMPAIGN_LAUNCH_CONFIRM_STARTED" in source
+
+from app.repost_campaign_ui import build_repost_campaign_posts_library_view, build_repost_campaign_post_stats_view
+
+
+def _library_payload(count=3):
+    items = []
+    for i in range(count):
+        items.append({
+            "saved_post_id": 24 - i,
+            "kind": None,
+            "is_album": i == 0,
+            "media_count": 6 if i == 0 else 0,
+            "is_current": i == 0,
+            "views_total": 8218 if i == 0 else None,
+            "runs_count": 1,
+            "placements_sent": 43,
+            "top_channels": [{"target_title": "WikiBoy’s 😎", "views_total": 1111}] if i == 0 else [],
+            "last_started_at": "2026-05-07T12:04:00+00:00",
+        })
+    return {"summary": {"posts_total": count, "runs_total": 13, "views_total": 8218}, "items": items}
+
+
+def test_posts_library_view_premium_layout():
+    text, _ = build_repost_campaign_posts_library_view(rule_id=1, library=_library_payload())
+    assert "📚 Библиотека постов" in text
+    assert "Текущий рекламный пост" in text
+    assert "unknown" not in text.lower()
+    assert "#24" not in text
+
+
+def test_posts_library_view_keyboard_has_single_open_button_per_post():
+    _, kb = build_repost_campaign_posts_library_view(rule_id=1, library=_library_payload(3))
+    texts = _texts_from_keyboard(kb)
+    assert len([x for x in texts if x.startswith("Открыть")]) == 3
+    assert not any("Статистика #" in x for x in texts)
+    assert not any("Использовать #" in x for x in texts)
+
+
+def test_posts_library_view_common_actions():
+    _, kb = build_repost_campaign_posts_library_view(rule_id=1, library=_library_payload())
+    texts = _texts_from_keyboard(kb)
+    assert "➕ Добавить новый пост" in texts
+    assert "🧾 Журнал запусков" in texts
+    assert "💰 К кампании" in texts
+
+
+def test_post_stats_view_premium_actions_current():
+    _, kb = build_repost_campaign_post_stats_view(rule_id=1, saved_post_id=1, stats={"is_current": True, "kind": "photo"})
+    texts = _texts_from_keyboard(kb)
+    assert "🚀 Запустить кампанию" in texts
+    assert "👁 Предпросмотр" in texts
+
+
+def test_post_stats_view_premium_actions_not_current():
+    _, kb = build_repost_campaign_post_stats_view(rule_id=1, saved_post_id=1, stats={"is_current": False, "kind": "photo"})
+    texts = _texts_from_keyboard(kb)
+    assert "🚀 Использовать снова" in texts
+    assert "🚀 Запустить кампанию" not in texts
+
+
+def test_library_visible_text_has_no_banned_terms():
+    text, kb = build_repost_campaign_posts_library_view(rule_id=1, library=_library_payload())
+    blob = text + "\n" + "\n".join(_texts_from_keyboard(kb))
+    banned = ["unknown", "saved_post", "campaign_run", "message_id", "target_id", "delete_status", "send_status", "Технический ID"]
+    for term in banned:
+        assert term.lower() not in blob.lower()

@@ -7479,9 +7479,17 @@ async def handle_rule_repost_campaign_post_use(callback: CallbackQuery):
     runtime = _build_repost_campaign_runtime()
     result = await run_db(lambda: runtime.select_campaign_saved_post_from_library(rule_id=rule_id, saved_post_id=saved_post_id, admin_id=callback.from_user.id if callback.from_user else None))
     if result.get("ok"):
-        text = "✅ Пост выбран для кампании.\n\nПеред запуском проверьте сценарий и нажмите “🚀 Запустить кампанию”."
+        text = (
+            "✅ Пост выбран\n\n"
+            "Этот рекламный пост теперь используется в кампании.\n\n"
+            "Перед запуском ViMi ещё раз проверит:\n"
+            "• каналы/группы;\n"
+            "• время показа;\n"
+            "• права публикации.\n\n"
+            "Запуск не выполнен автоматически."
+        )
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")],
+            [InlineKeyboardButton(text="🚀 Проверить и запустить", callback_data=f"rule_repost_campaign_launch:{rule_id}")],
             [InlineKeyboardButton(text="👁 Предпросмотр сценария", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
             [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
             [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
