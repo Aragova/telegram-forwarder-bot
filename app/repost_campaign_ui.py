@@ -53,12 +53,15 @@ def build_repost_campaign_menu_view(
         "💰 Рекламная кампания\n\n"
         f"{vm['title_status']}\n\n"
         f"{vm['creative_line']}\n"
+        f"{vm['creative_value_line']}\n"
         f"{vm['targets_line']}\n"
         f"{vm['show_seconds_line']}\n"
-        f"{(vm.get('auto_delete_line') or '🧹 Автоудаление: не задано')}\n"
+        f"{vm['show_seconds_value_line']}\n"
         "\n"
-        f"{vm['last_run_line']}\n"
-        f"{(vm.get('last_run_delete_line') or vm.get('delete_line'))}\n\n"
+        f"{vm['last_run_title_line']}\n"
+        f"{vm['last_run_status_line']}\n"
+        f"{(vm.get('last_run_time_line') or '')}\n"
+        f"{(vm.get('last_run_delete_line') or '')}\n\n"
         f"{vm['next_step_line']}"
     )
     rows = []
@@ -71,7 +74,7 @@ def build_repost_campaign_menu_view(
         rows.append([InlineKeyboardButton(text="📣 Добавить каналы/группы", callback_data=f"rule_repost_campaign_targets:{rule_id}")])
     elif primary_action == "launch":
         rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
-    elif primary_action == "open_last_run" and vm["last_run_id"]:
+    elif primary_action in {"open_last_run", "open_active_run", "open_problem_run"} and vm["last_run_id"]:
         rows.append([InlineKeyboardButton(text="📄 Открыть последний запуск", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{vm['last_run_id']}")])
 
     rows.extend([
@@ -133,9 +136,9 @@ def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[s
             f"✅ Опубликовано: {success}\n"
             f"⚠️ Ошибки: {failed}\n"
             f"📣 Всего получателей: {total}\n\n"
-            f"📝 Пост: #{saved_post_id}\n"
-            f"🧾 Запуск: #{run_id}\n"
-            f"🧹 Автоудаление: через {format_campaign_show_seconds_text(extra.get('show_seconds'))}\n\n"
+            "📝 Рекламный пост опубликован\n"
+            "🧾 Размещение создано\n"
+            f"🧹 Удаление: автоматически через {format_campaign_show_seconds_text(extra.get('show_seconds'))}\n\n"
             "История обновлена. Детали доступны в отчёте запуска."
         )
     else:
@@ -196,7 +199,7 @@ def build_repost_campaign_launch_readiness_view(*, rule_id: int, readiness: dict
     text = (
         "🚦 Проверка перед запуском\n\n"
         f"{vm['status_line']}\n\n"
-        f"📝 Рекламный пост: {'#' + str(saved_post_id) if saved_post_id else 'не выбран'}\n"
+        f"📝 Рекламный пост\n{'Готов к публикации' if saved_post_id else 'Не выбран'}\n"
         f"{vm['will_send_line']}\n"
         f"{vm['will_skip_line']}\n"
         f"{vm['show_seconds_line']}\n"
