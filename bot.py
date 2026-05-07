@@ -96,6 +96,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_history_view,
     build_repost_campaign_posts_library_view,
     build_repost_campaign_post_stats_view,
+    build_repost_campaign_post_stats_loading_view,
     build_repost_campaign_launch_readiness_view,
     build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
@@ -7368,7 +7369,7 @@ async def handle_rule_repost_campaign_history(callback: CallbackQuery):
         return
     try:
         rule_id = int(callback.data.split(":")[1])
-        logger.info("REPOST_CAMPAIGN_POST_LIBRARY_UI_OPENED | rule_id=%s", rule_id)
+        logger.info("REPOST_CAMPAIGN_POST_LIBRARY_UI_OPENED_FAST | rule_id=%s", rule_id)
         runtime = _build_repost_campaign_runtime()
         library = await runtime.build_campaign_posts_library(rule_id=rule_id)
         text, keyboard = build_repost_campaign_posts_library_view(rule_id=rule_id, library=library)
@@ -7462,11 +7463,32 @@ async def handle_rule_repost_campaign_post_stats(callback: CallbackQuery):
     _, rule_id_raw, saved_post_id_raw = callback.data.split(":", 2)
     rule_id = int(rule_id_raw)
     saved_post_id = int(saved_post_id_raw)
-    runtime = _build_repost_campaign_runtime()
-    stats = await runtime.build_campaign_post_stats(rule_id=rule_id, saved_post_id=saved_post_id)
-    text, keyboard = build_repost_campaign_post_stats_view(rule_id=rule_id, saved_post_id=saved_post_id, stats=stats)
+    started = asyncio.get_event_loop().time()
     await answer_callback_safe_once(callback)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    loading_text, loading_kb = build_repost_campaign_post_stats_loading_view(rule_id=rule_id, saved_post_id=saved_post_id)
+    await edit_message_text_safe(message=callback.message, text=loading_text, reply_markup=loading_kb)
+    logger.info("REPOST_CAMPAIGN_POST_STATS_LOADING_SHOWN | rule_id=%s | saved_post_id=%s", rule_id, saved_post_id)
+    try:
+        runtime = _build_repost_campaign_runtime()
+        stats = await runtime.build_campaign_post_stats(rule_id=rule_id, saved_post_id=saved_post_id, include_live_views=True)
+        text, keyboard = build_repost_campaign_post_stats_view(rule_id=rule_id, saved_post_id=saved_post_id, stats=stats)
+        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        duration_ms = int((asyncio.get_event_loop().time() - started) * 1000)
+        logger.info("REPOST_CAMPAIGN_POST_STATS_UI_BUILT | rule_id=%s | saved_post_id=%s | duration_ms=%s", rule_id, saved_post_id, duration_ms)
+    except Exception as exc:
+        logger.exception("REPOST_CAMPAIGN_POST_STATS_UI_FAILED | rule_id=%s | saved_post_id=%s | error=%s", rule_id, saved_post_id, exc)
+        text = (
+            "📄 Рекламный пост\n\n"
+            "⚠️ Статистику просмотров сейчас получить не удалось.\n\n"
+            "Пост и история размещений доступны.\n"
+            "Попробуйте обновить статистику позже."
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить статистику", callback_data=f"rule_repost_campaign_post_stats:{rule_id}:{saved_post_id}")],
+            [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+            [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        ])
+        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
 
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_use:"))

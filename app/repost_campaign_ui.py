@@ -555,9 +555,7 @@ def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[
 
 def build_repost_campaign_posts_library_view(*, rule_id: int, library: dict) -> tuple[str, InlineKeyboardMarkup]:
     vm = build_campaign_posts_library_view_model(library=library or {})
-    lines = [vm["title"], "", vm["intro_line"], "", vm["posts_line"], vm["runs_line"], vm["views_line"]]
-    if vm.get("partial_line"):
-        lines.append(vm["partial_line"])
+    lines = [vm["title"], "", vm["intro_line"], "", vm["posts_line"], vm["runs_line"], vm["placements_line"]]
     lines.extend(["", "━━━━━━━━━━━━", ""])
     for item in vm.get("items") or []:
         lines.extend([
@@ -575,7 +573,7 @@ def build_repost_campaign_posts_library_view(*, rule_id: int, library: dict) -> 
     rows = []
     for item in vm.get("items") or []:
         sid = int(item.get("saved_post_id") or 0)
-        open_text = "Открыть текущий пост" if str(item.get("title_line") or "").startswith("✅") else "Открыть пост"
+        open_text = "Открыть текущий пост" if str(item.get("title_line") or "").startswith("✅") else f"Открыть пост от {str(item.get('title_line') or '').replace('🕘 Пост от ', '')}"
         rows.append([InlineKeyboardButton(text=open_text, callback_data=f"rule_repost_campaign_post_stats:{rule_id}:{sid}")])
     rows.extend([
         [InlineKeyboardButton(text="➕ Добавить новый пост", callback_data=f"rule_repost_campaign_post_add:{rule_id}")],
@@ -609,6 +607,26 @@ def build_repost_campaign_post_stats_view(*, rule_id: int, saved_post_id: int, s
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_post_stats_loading_view(*, rule_id: int, saved_post_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    _ = saved_post_id
+    text = (
+        "📄 Рекламный пост\n\n"
+        "⏳ Собираю статистику просмотров…\n\n"
+        "ViMi проверяет размещения этого поста в каналах/группах.\n"
+        "Обычно это занимает несколько секунд.\n\n"
+        "Что сейчас происходит:\n"
+        "• проверяем опубликованные сообщения;\n"
+        "• получаем просмотры из Telegram;\n"
+        "• собираем топ каналов.\n\n"
+        "Экран обновится автоматически."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return text, kb
 
 
 def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tuple[str, InlineKeyboardMarkup]:

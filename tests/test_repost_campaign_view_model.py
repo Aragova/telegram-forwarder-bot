@@ -384,11 +384,11 @@ def test_posts_library_vm_limits_to_five_items():
 
 
 def test_posts_library_vm_summary_is_clean():
-    vm = build_campaign_posts_library_view_model(library={"items": [_library_item(1)], "summary": {"views_total": 8218, "views_available": 4, "views_unavailable": 142}})
-    summary_text = "\n".join([vm["views_line"], vm.get("partial_line") or ""])
-    assert "Данные просмотров: 4 / 142" not in summary_text
-    assert "Просмотры: 8 218" in summary_text
-    assert "Статистика собрана частично" in summary_text
+    vm = build_campaign_posts_library_view_model(library={"items": [_library_item(1)], "summary": {"posts_total": 1, "runs_total": 2, "placements_total": 43, "views_mode": "lazy"}})
+    summary_text = "\n".join([vm["intro_line"], vm["placements_line"], vm["items"][0]["views_line"]])
+    assert "Данные просмотров" not in summary_text
+    assert "Просмотры открываются внутри карточки поста" in summary_text
+    assert "Просмотры: открыть карточку" in summary_text
 
 
 def test_post_stats_vm_no_internal_ids():
