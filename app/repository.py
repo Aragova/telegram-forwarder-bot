@@ -413,6 +413,28 @@ class RepositoryProtocol(Protocol):
         *,
         limit: int = 50,
     ) -> list[dict[str, Any]]: ...
+    def mark_campaign_run_message_views_processing(self, message_id: int) -> bool: ...
+    def mark_campaign_run_message_views_collected(
+        self,
+        message_id: int,
+        *,
+        views_count: int,
+        collected_at: str,
+    ) -> bool: ...
+    def mark_campaign_run_message_views_unavailable(
+        self,
+        message_id: int,
+        *,
+        error_text: str | None,
+        collected_at: str,
+    ) -> bool: ...
+    def mark_campaign_run_message_views_failed(
+        self,
+        message_id: int,
+        *,
+        error_text: str,
+        next_retry_at: str,
+    ) -> bool: ...
     def mark_campaign_run_message_deleted(self, message_id: int) -> bool: ...
     def mark_campaign_run_message_delete_failed(
         self,

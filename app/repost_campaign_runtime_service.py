@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.repost_campaign_service import build_campaign_delete_after_iso, format_campaign_show_seconds_ru
@@ -59,6 +60,9 @@ class RepostCampaignActionResult:
 
 
 class RepostCampaignRuntimeService:
+    FINAL_VIEWS_MAX_ATTEMPTS = 3
+    FINAL_VIEWS_RETRY_DELAY_SECONDS = 60
+
     def __init__(self, *, repo, renderer, deleter=None, target_checker=None, telethon_client=None, logger_=None):
         self.repo = repo
         self.renderer = renderer
@@ -1129,6 +1133,14 @@ class RepostCampaignRuntimeService:
                 ok=True, action="delete_campaign_run_message_now", rule_id=rule_id, target_id=str(message.get("target_id")), message_id=int(message.get("sent_message_id")), method="already_deleted",
                 extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id, "delete_status": "deleted", "already_deleted": True},
             )
+        snapshot_result = await self.collect_final_views_for_campaign_run_message(message)
+        if snapshot_result.get("retry"):
+            return RepostCampaignActionResult(
+                ok=False,
+                action="delete_campaign_run_message_now",
+                rule_id=rule_id,
+                error_text="Не удалось зафиксировать просмотры перед удалением. Повторите позже.",
+            )
         if len(message_ids) > 1 and hasattr(self.deleter, "delete_messages"):
             result = await self.deleter.delete_messages(target_id=message["target_id"], message_ids=message_ids, render_mode=message.get("render_mode"))
         else:
@@ -1187,9 +1199,24 @@ class RepostCampaignRuntimeService:
         self.logger.info("REPOST_CAMPAIGN_DELETE_BATCH_START | claimed=%s | reset_stuck=%s", len(rows), reset_count)
         deleted_count = 0
         failed_count = 0
+        views_collected = 0
+        views_unavailable = 0
+        views_failed = 0
         for row in rows:
             row_id = int(row["id"])
             target_id = row["target_id"]
+            views_status = str(row.get("views_final_status") or "pending").strip().lower()
+            if views_status not in {"collected", "unavailable"}:
+                self.logger.info("REPOST_CAMPAIGN_DELETE_WAIT_FINAL_VIEWS | rule_id=%s | run_id=%s | campaign_run_message_id=%s", row.get("rule_id"), row.get("run_id"), row_id)
+                snapshot_result = await self.collect_final_views_for_campaign_run_message(row)
+                if snapshot_result.get("retry"):
+                    views_failed += 1
+                    continue
+                if snapshot_result.get("status") == "collected":
+                    views_collected += 1
+                elif snapshot_result.get("status") == "unavailable":
+                    views_unavailable += 1
+                self.logger.info("REPOST_CAMPAIGN_DELETE_AFTER_FINAL_VIEWS | rule_id=%s | run_id=%s | campaign_run_message_id=%s | views_final_status=%s", row.get("rule_id"), row.get("run_id"), row_id, snapshot_result.get("status"))
             message_ids = self._extract_sent_message_ids(row)
             if not message_ids:
                 self.repo.mark_campaign_run_message_delete_failed(row_id, error_text="missing sent_message_id")
@@ -1212,7 +1239,40 @@ class RepostCampaignRuntimeService:
         run_ids = {int(row.get("run_id") or 0) for row in rows if int(row.get("run_id") or 0) > 0}
         for run_id in sorted(run_ids):
             self.logger.info("REPOST_CAMPAIGN_VIEWS_REPORT_AVAILABLE | rule_id=%s | run_id=%s", int((rows[0] or {}).get("rule_id") or 0), run_id)
-        return {"ok": True, "claimed": len(rows), "deleted": deleted_count, "failed": failed_count, "reset_stuck": reset_count}
+        return {"ok": True, "claimed": len(rows), "views_collected": views_collected, "views_unavailable": views_unavailable, "views_failed": views_failed, "deleted": deleted_count, "failed": failed_count, "reset_stuck": reset_count}
+
+    async def collect_final_views_for_campaign_run_message(self, message: dict) -> dict:
+        row_id = int(message.get("id") or 0)
+        views_status = str(message.get("views_final_status") or "pending").strip().lower()
+        if views_status in {"collected", "unavailable"}:
+            return {"ok": True, "skipped": True, "status": views_status}
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if self.telethon_client is None:
+            self.repo.mark_campaign_run_message_views_unavailable(row_id, error_text="Сервис сбора просмотров недоступен", collected_at=now_iso)
+            return {"ok": True, "status": "unavailable"}
+        self.repo.mark_campaign_run_message_views_processing(row_id)
+        message_ids = self._extract_sent_message_ids(message)
+        if not message_ids:
+            self.repo.mark_campaign_run_message_views_unavailable(row_id, error_text="Нет message_id для сбора просмотров", collected_at=now_iso)
+            return {"ok": True, "status": "unavailable"}
+        message_id = int(message_ids[0])
+        try:
+            entity = normalize_telethon_target(message.get("target_id"))
+            msg = await self.telethon_client.get_messages(entity=entity, ids=message_id)
+            if msg is not None and getattr(msg, "views", None) is not None:
+                views_count = int(getattr(msg, "views", 0) or 0)
+                self.repo.mark_campaign_run_message_views_collected(row_id, views_count=views_count, collected_at=now_iso)
+                return {"ok": True, "status": "collected", "views_count": views_count}
+            self.repo.mark_campaign_run_message_views_unavailable(row_id, error_text="Telegram не вернул просмотры перед удалением", collected_at=now_iso)
+            return {"ok": True, "status": "unavailable"}
+        except Exception as exc:
+            attempt_count = int(message.get("views_final_attempt_count") or 0) + 1
+            if attempt_count < self.FINAL_VIEWS_MAX_ATTEMPTS:
+                next_retry = (datetime.now(timezone.utc) + timedelta(seconds=self.FINAL_VIEWS_RETRY_DELAY_SECONDS)).isoformat()
+                self.repo.mark_campaign_run_message_views_failed(row_id, error_text=str(exc), next_retry_at=next_retry)
+                return {"ok": False, "retry": True, "status": "failed"}
+            self.repo.mark_campaign_run_message_views_unavailable(row_id, error_text=str(exc), collected_at=now_iso)
+            return {"ok": True, "status": "unavailable"}
 
     async def build_campaign_posts_library(self, *, rule_id: int) -> dict:
         try:
@@ -1373,6 +1433,25 @@ class RepostCampaignRuntimeService:
                 items.append(item)
                 continue
             sent_total += 1
+            final_status = str(msg.get("views_final_status") or "").strip().lower()
+            if final_status == "collected":
+                item["views"] = int(msg.get("views_final_count") or 0)
+                item["views_status"] = "ok"
+                item["views_source"] = "final_snapshot"
+                views_total += int(item["views"])
+                views_available += 1
+                top_items.append(item)
+                items.append(item)
+                continue
+            if final_status == "unavailable":
+                item["views"] = 0
+                item["views_status"] = "unavailable"
+                item["views_source"] = "final_snapshot"
+                item["error_text"] = msg.get("views_final_error_text") or "Telegram не вернул просмотры перед удалением."
+                views_unavailable += 1
+                problem_items.append(item)
+                items.append(item)
+                continue
             try:
                 target_id = msg.get("target_id")
                 normalized_entity = normalize_telethon_target(target_id)
@@ -1430,6 +1509,7 @@ class RepostCampaignRuntimeService:
                             views_unavailable += 1
                         else:
                             item["views_status"] = "ok"
+                            item["views_source"] = "live"
                             item["views"] = int(views or 0)
                             views_total += int(views or 0)
                             views_available += 1
@@ -1445,6 +1525,7 @@ class RepostCampaignRuntimeService:
                             )
             except Exception as exc:
                 item["views_status"] = "failed"
+                item["views_source"] = "unavailable"
                 item["error_text"] = "Telegram не вернул просмотры по этому каналу."
                 self.logger.warning(
                     "REPOST_CAMPAIGN_VIEWS_TARGET_FAILED | rule_id=%s | run_id=%s | target_id=%s | message_id=%s | error=%s",

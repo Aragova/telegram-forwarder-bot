@@ -834,6 +834,12 @@ class PostgresRepository(RepositoryProtocol):
             deleted_at TIMESTAMPTZ NULL,
             delete_error_text TEXT NULL,
             delete_attempt_count BIGINT NOT NULL DEFAULT 0,
+            views_final_count BIGINT NULL,
+            views_final_status TEXT NULL,
+            views_final_collected_at TIMESTAMPTZ NULL,
+            views_final_error_text TEXT NULL,
+            views_final_attempt_count BIGINT NOT NULL DEFAULT 0,
+            views_final_next_retry_at TIMESTAMPTZ NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
@@ -852,6 +858,36 @@ class PostgresRepository(RepositoryProtocol):
 
         with self.connect() as conn:
             with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS views_final_count BIGINT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS views_final_status TEXT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS views_final_collected_at TIMESTAMPTZ NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS views_final_error_text TEXT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS views_final_attempt_count BIGINT NOT NULL DEFAULT 0
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS views_final_next_retry_at TIMESTAMPTZ NULL
+                    """
+                )
                 cur.execute(
                     """
                     UPDATE routing
@@ -7259,6 +7295,11 @@ class PostgresRepository(RepositoryProtocol):
                           AND delete_after_at IS NOT NULL
                           AND delete_after_at <= NOW()
                           AND sent_message_id IS NOT NULL
+                          AND NOT (
+                            views_final_status = 'failed'
+                            AND views_final_next_retry_at IS NOT NULL
+                            AND views_final_next_retry_at > NOW()
+                          )
                         ORDER BY delete_after_at ASC, id ASC
                         LIMIT %s
                         FOR UPDATE SKIP LOCKED
@@ -7276,6 +7317,81 @@ class PostgresRepository(RepositoryProtocol):
                 rows = [dict(row) for row in (cur.fetchall() or [])]
             conn.commit()
             return rows
+
+    def mark_campaign_run_message_views_processing(self, message_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET views_final_status = 'processing',
+                        views_final_attempt_count = COALESCE(views_final_attempt_count, 0) + 1,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (int(message_id),),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def mark_campaign_run_message_views_collected(self, message_id: int, *, views_count: int, collected_at: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET views_final_count = %s,
+                        views_final_status = 'collected',
+                        views_final_collected_at = %s,
+                        views_final_error_text = NULL,
+                        views_final_next_retry_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (int(views_count), collected_at, int(message_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def mark_campaign_run_message_views_unavailable(self, message_id: int, *, error_text: str | None, collected_at: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET views_final_count = 0,
+                        views_final_status = 'unavailable',
+                        views_final_collected_at = %s,
+                        views_final_error_text = %s,
+                        views_final_next_retry_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (collected_at, error_text, int(message_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def mark_campaign_run_message_views_failed(self, message_id: int, *, error_text: str, next_retry_at: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET views_final_status = 'failed',
+                        views_final_error_text = %s,
+                        views_final_next_retry_at = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (error_text, next_retry_at, int(message_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
 
     def mark_campaign_run_message_deleted(self, message_id: int) -> bool:
         with self.connect() as conn:

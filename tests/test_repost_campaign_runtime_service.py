@@ -28,6 +28,10 @@ class _FakeRepo:
         self.mark_campaign_run_message_deleted_calls = []
         self.mark_campaign_run_message_delete_failed_calls = []
         self.reset_stuck_campaign_delete_processing_calls = []
+        self.mark_campaign_run_message_views_processing_calls = []
+        self.mark_campaign_run_message_views_collected_calls = []
+        self.mark_campaign_run_message_views_unavailable_calls = []
+        self.mark_campaign_run_message_views_failed_calls = []
         self.set_target_active_calls = []
         self.remove_target_calls = []
         self.update_target_check_calls = []
@@ -99,6 +103,18 @@ class _FakeRepo:
     def reset_stuck_campaign_delete_processing(self, *, stuck_seconds=300):
         self.reset_stuck_campaign_delete_processing_calls.append(stuck_seconds)
         return 0
+    def mark_campaign_run_message_views_processing(self, message_id):
+        self.mark_campaign_run_message_views_processing_calls.append(message_id)
+        return True
+    def mark_campaign_run_message_views_collected(self, message_id, *, views_count, collected_at):
+        self.mark_campaign_run_message_views_collected_calls.append((message_id, views_count, collected_at))
+        return True
+    def mark_campaign_run_message_views_unavailable(self, message_id, *, error_text, collected_at):
+        self.mark_campaign_run_message_views_unavailable_calls.append((message_id, error_text, collected_at))
+        return True
+    def mark_campaign_run_message_views_failed(self, message_id, *, error_text, next_retry_at):
+        self.mark_campaign_run_message_views_failed_calls.append((message_id, error_text, next_retry_at))
+        return True
 
     def set_rule_repost_campaign_target_active(self, target_row_id, is_active):
         self.set_target_active_calls.append((target_row_id, is_active))
