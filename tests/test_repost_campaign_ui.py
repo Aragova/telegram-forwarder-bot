@@ -12,6 +12,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_views_report_loading_view,
     build_repost_campaign_views_report_error_view,
     build_repost_campaign_preview_view,
+    build_repost_campaign_run_delete_confirm_view,
     build_repost_campaign_run_details_view,
     build_repost_campaign_show_menu_view,
     build_repost_campaign_target_delete_confirm_view,
@@ -598,7 +599,39 @@ def test_details_shows_delete_now_for_pending():
     details = {"ok": True, "run_id": 10, "run": {"id": 10}, "messages": [{"id": 33, "send_status": "sent", "sent_message_id": 777, "delete_status": "pending"}], "summary": {}}
     _, keyboard = build_repost_campaign_run_details_view(rule_id=3, details=details)
     texts = _texts_from_keyboard(keyboard)
-    assert "🧹 Удалить сейчас #1" not in texts
+    assert "🧹 Удалить сейчас" in texts
+
+
+def test_completed_details_has_no_delete_button():
+    details = {
+        "ok": True,
+        "run_id": 10,
+        "run": {"id": 10},
+        "messages": [{"id": 33, "send_status": "sent", "sent_message_id": 777, "delete_status": "deleted"}],
+        "summary": {"delete_pending": 0, "delete_processing": 0, "delete_failed": 0},
+    }
+    _, keyboard = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "🧹 Удалить сейчас" not in _texts_from_keyboard(keyboard)
+
+
+def test_delete_problem_contains_retry_label():
+    details = {"ok": True, "run_id": 10, "run": {"id": 10}, "messages": [], "summary": {"delete_failed": 1}}
+    _, keyboard = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "🧹 Удалить сейчас" in _texts_from_keyboard(keyboard)
+
+
+def test_confirm_counts_delete_failed():
+    details = {"run_id": 10, "run": {"id": 10}, "summary": {"delete_pending": 0, "delete_processing": 0, "delete_failed": 2}}
+    text, _ = build_repost_campaign_run_delete_confirm_view(rule_id=3, details=details)
+    assert "Ошибки удаления: 2" in text
+    assert "Удалять нечего" not in text
+
+
+def test_confirm_without_deletable_hides_confirm_button():
+    details = {"run_id": 10, "run": {"id": 10}, "summary": {"delete_pending": 0, "delete_processing": 0, "delete_failed": 0}}
+    _, keyboard = build_repost_campaign_run_delete_confirm_view(rule_id=3, details=details)
+    texts = _texts_from_keyboard(keyboard)
+    assert "✅ Да, удалить сейчас" not in texts
 
 
 def test_delete_result_success_view():

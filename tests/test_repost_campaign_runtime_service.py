@@ -614,6 +614,46 @@ def test_manual_delete_wrong_message_ownership():
     assert result.error_text == "Публикация не относится к этому запуску"
 
 
+def test_delete_campaign_run_now_status_handling():
+    repo = _FakeRepo()
+    repo._messages = [
+        {"id": 1, "delete_status": "pending"},
+        {"id": 2, "delete_status": "failed"},
+        {"id": 3, "delete_status": "deleted"},
+    ]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=lambda **kwargs: None))
+
+    async def _stub_delete(**kwargs):
+        return SimpleNamespace(ok=True)
+
+    runtime.delete_campaign_run_message_now = _stub_delete
+    result = asyncio.run(runtime.delete_campaign_run_now(rule_id=3, run_id=10))
+    assert result["attempted"] == 2
+    assert result["pending_deleted"] == 1
+    assert result["failed_retried"] == 1
+    assert result["skipped_deleted"] == 1
+    assert result["failed"] == 0
+    assert result["ok"] is True
+
+
+def test_delete_campaign_run_now_partial_failure():
+    repo = _FakeRepo()
+    repo._messages = [{"id": 1, "delete_status": "pending"}, {"id": 2, "delete_status": "failed"}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=lambda **kwargs: None))
+
+    async def _stub_delete(**kwargs):
+        if kwargs["run_message_id"] == 2:
+            return SimpleNamespace(ok=False)
+        return SimpleNamespace(ok=True)
+
+    runtime.delete_campaign_run_message_now = _stub_delete
+    result = asyncio.run(runtime.delete_campaign_run_now(rule_id=3, run_id=10))
+    assert result["attempted"] == 2
+    assert result["failed"] == 1
+    assert result["partial"] is True
+    assert result["ok"] is False
+
+
 def test_launch_main_plus_extras_success():
     rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=43200, target_id="-1001")
     repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})

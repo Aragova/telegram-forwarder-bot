@@ -693,11 +693,23 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
     summary_sent = int(summary.get("sent") or run.get("targets_success") or 0)
     summary_total = int(summary.get("total") or run.get("targets_total") or 0)
     summary_failed = int(summary.get("failed") or run.get("targets_failed") or 0)
-    summary_delete_pending = int(summary.get("delete_pending") or 0)
     messages = details.get("messages") or []
+    summary_delete_pending = int(summary.get("delete_pending") or 0)
+    summary_delete_processing = int(summary.get("delete_processing") or 0)
+    summary_delete_failed = int(summary.get("delete_failed") or 0)
+    if summary_delete_pending == 0 and summary_delete_processing == 0 and summary_delete_failed == 0 and messages:
+        for msg in messages:
+            status = (msg.get("delete_status") or "").strip().lower()
+            if status == "pending":
+                summary_delete_pending += 1
+            elif status == "processing":
+                summary_delete_processing += 1
+            elif status == "failed":
+                summary_delete_failed += 1
+    active_placement = summary_delete_pending > 0 or summary_delete_processing > 0
     delete_after_at = extract_campaign_run_delete_after_at(messages)
     lines = [
-        "📄 Активное размещение" if summary_delete_pending > 0 else f"📄 Запуск #{run.get('id') or run_id}",
+        "📄 Активное размещение" if active_placement else f"📄 Запуск #{run.get('id') or run_id}",
         "",
         f"✅ Опубликовано: {summary_sent} из {summary_total}",
         f"⚠️ Ошибки отправки: {summary_failed}",
@@ -746,10 +758,40 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
     kb_rows = [
         [InlineKeyboardButton(text="📊 Отчёт просмотров", callback_data=f"rule_repost_campaign_views_report:{rule_id}:{run.get('id') or run_id}")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run.get('id') or run_id}")],
-        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ]
+    if active_placement or summary_delete_failed > 0:
+        kb_rows.append([InlineKeyboardButton(text="🧹 Удалить сейчас", callback_data=f"rule_repost_campaign_run_delete_confirm:{rule_id}:{run.get('id') or run_id}")])
+    kb_rows.extend([
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     return trim_campaign_text_for_telegram("\n".join(lines).rstrip()), kb
+
+
+def build_repost_campaign_run_delete_confirm_view(*, rule_id: int, details: dict) -> tuple[str, InlineKeyboardMarkup]:
+    run = (details or {}).get("run") or {}
+    summary = (details or {}).get("summary") or {}
+    run_id = int(run.get("id") or details.get("run_id") or 0)
+    delete_pending = int(summary.get("delete_pending") or 0)
+    delete_processing = int(summary.get("delete_processing") or 0)
+    delete_failed = int(summary.get("delete_failed") or 0)
+    deletable = delete_pending + delete_processing + delete_failed
+    text = (
+        f"🧹 Удаление размещения #{run_id}\n\n"
+        f"Ожидают удаления: {delete_pending}\n"
+        f"Удаляются сейчас: {delete_processing}\n"
+        f"Ошибки удаления: {delete_failed}\n"
+    )
+    if deletable <= 0:
+        text += "\nУдалять нечего."
+    rows = []
+    if deletable > 0:
+        rows.append([InlineKeyboardButton(text="✅ Да, удалить сейчас", callback_data=f"rule_repost_campaign_run_delete_now:{rule_id}:{run_id}")])
+    rows.extend([
+        [InlineKeyboardButton(text="⬅️ Назад к размещению", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_repost_campaign_views_report_view(*, rule_id: int, run_id: int, report: dict) -> tuple[str, InlineKeyboardMarkup]:

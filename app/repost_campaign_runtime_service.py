@@ -1147,6 +1147,42 @@ class RepostCampaignRuntimeService:
             extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id, "delete_status": "failed"},
         )
 
+    async def delete_campaign_run_now(self, *, rule_id: int, run_id: int) -> dict[str, Any]:
+        rows = self.repo.list_campaign_run_messages(run_id)
+        pending_or_processing = 0
+        failed_retry = 0
+        deleted = 0
+        failed = 0
+        for row in rows or []:
+            delete_status = (row.get("delete_status") or "").strip().lower()
+            if delete_status == "deleted":
+                deleted += 1
+                continue
+            if delete_status in {"pending", "processing"}:
+                pending_or_processing += 1
+            elif delete_status == "failed":
+                failed_retry += 1
+            else:
+                continue
+            result = await self.delete_campaign_run_message_now(
+                rule_id=rule_id,
+                run_id=run_id,
+                run_message_id=int(row.get("id") or 0),
+            )
+            if not result.ok:
+                failed += 1
+        attempted = pending_or_processing + failed_retry
+        return {
+            "ok": failed == 0,
+            "run_id": run_id,
+            "attempted": attempted,
+            "pending_deleted": pending_or_processing,
+            "failed_retried": failed_retry,
+            "skipped_deleted": deleted,
+            "failed": failed,
+            "partial": failed > 0 and attempted > 0,
+        }
+
     async def process_due_deletions(self, *, limit: int = 50) -> dict[str, Any]:
         if self.deleter is None:
             return {"ok": False, "claimed": 0, "deleted": 0, "failed": 0, "error_text": "Delete service недоступен"}
