@@ -2,7 +2,6 @@ from pathlib import Path
 import ast
 
 from app.repost_campaign_ui import (
-    build_repost_campaign_more_view,
     build_repost_campaign_delete_result_view,
     build_repost_campaign_history_view,
     build_repost_campaign_launch_result_view,
@@ -12,6 +11,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_views_report_loading_view,
     build_repost_campaign_views_report_error_view,
     build_repost_campaign_preview_view,
+    build_repost_campaign_vip_features_view,
     build_repost_campaign_run_details_view,
     build_repost_campaign_run_delete_confirm_view,
     build_repost_campaign_run_delete_loading_view,
@@ -176,7 +176,7 @@ def test_menu_shows_launch_button_when_ready():
     )
     texts = _texts_from_keyboard(keyboard)
     assert "🚀 Запустить кампанию" in texts
-    assert "⚙️ Ещё" in texts
+    assert "💎 VIP функции" in texts
 
 
 def test_menu_hides_launch_button_when_not_ready():
@@ -686,8 +686,8 @@ def test_check_publication_button_and_callback():
     )
     texts = _texts_from_keyboard(keyboard)
     callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
-    assert "⚙️ Ещё" in texts
-    assert "rule_repost_campaign_more:9" in callbacks
+    assert "💎 VIP функции" in texts
+    assert "rule_repost_campaign_vip_features:9" in callbacks
 
 
 def test_menu_button_count_is_reasonable():
@@ -701,20 +701,6 @@ def test_menu_button_count_is_reasonable():
     assert count <= 9
 
 
-def test_more_view_contains_service_actions():
-    _, keyboard = build_repost_campaign_more_view(rule_id=3, saved_post_id=10, last_run_id=5)
-    texts = _texts_from_keyboard(keyboard)
-    assert "📤 Проверить публикацию" in texts
-    assert "📄 Последний запуск" in texts
-    assert "🔄 Обновить кампанию" in texts
-    assert "❌ Отключить кампанию" in texts
-
-
-def test_more_view_hides_optional_buttons():
-    _, keyboard = build_repost_campaign_more_view(rule_id=3, saved_post_id=None, last_run_id=None)
-    texts = _texts_from_keyboard(keyboard)
-    assert "📤 Проверить публикацию" not in texts
-    assert "📄 Последний запуск" not in texts
 
 
 def test_history_order_old_to_new():
@@ -796,7 +782,7 @@ def test_menu_shows_last_run_button():
     )
     texts = _texts_from_keyboard(keyboard)
     callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
-    assert "⚙️ Ещё" in texts
+    assert "💎 VIP функции" in texts
     assert "rule_repost_campaign_history_detail:3:4" not in callbacks
 
 
@@ -814,8 +800,8 @@ def test_menu_button_grouping():
     assert "⏳ Время показа" in texts
     assert "📣 Каналы/Группы" in texts
     assert "📚 Библиотека" in texts
-    assert "👁 Предпросмотр" in texts
-    assert "⚙️ Ещё" in texts
+    assert "👁 Предпросмотр" not in texts
+    assert "💎 VIP функции" in texts
 
 
 def test_menu_opens_without_control_center():
@@ -1090,8 +1076,8 @@ def test_posts_library_view_keyboard_has_single_open_button_per_post():
 def test_posts_library_view_common_actions():
     _, kb = build_repost_campaign_posts_library_view(rule_id=1, library=_library_payload())
     texts = _texts_from_keyboard(kb)
-    assert "➕ Добавить новый пост" in texts
-    assert "🧾 Журнал запусков" in texts
+    assert "➕ Добавить новый пост" not in texts
+    assert "🧾 Журнал запусков" not in texts
     assert "💰 К кампании" in texts
 
 
@@ -1099,7 +1085,7 @@ def test_post_stats_view_premium_actions_current():
     _, kb = build_repost_campaign_post_stats_view(rule_id=1, saved_post_id=1, stats={"is_current": True, "kind": "photo"})
     texts = _texts_from_keyboard(kb)
     assert "🚀 Запустить кампанию" in texts
-    assert "👁 Предпросмотр" in texts
+    assert "👁 Предпросмотр" not in texts
 
 
 def test_post_stats_view_premium_actions_not_current():
@@ -1124,3 +1110,10 @@ def test_post_stats_loading_view():
     texts = _texts_from_keyboard(kb)
     assert "📚 К библиотеке" in texts
     assert "💰 К кампании" in texts
+
+
+def test_vip_features_view_contains_placeholder_text():
+    text, keyboard = build_repost_campaign_vip_features_view(rule_id=5)
+    assert "💎 VIP функции" in text
+    assert "A/B-тесты" in text
+    assert "💰 К кампании" in _texts_from_keyboard(keyboard)

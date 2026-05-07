@@ -114,8 +114,7 @@ def build_repost_campaign_menu_view(
             InlineKeyboardButton(text="📚 Библиотека", callback_data=f"rule_repost_campaign_history:{rule_id}"),
         ],
         [
-            InlineKeyboardButton(text="👁 Предпросмотр", callback_data=f"rule_repost_campaign_preview:{rule_id}"),
-            InlineKeyboardButton(text="⚙️ Ещё", callback_data=f"rule_repost_campaign_more:{rule_id}"),
+            InlineKeyboardButton(text="💎 VIP функции", callback_data=f"rule_repost_campaign_vip_features:{rule_id}"),
         ],
     ])
     blocked_launch_states = {"active_placement", "delete_problem"}
@@ -127,19 +126,22 @@ def build_repost_campaign_menu_view(
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_repost_campaign_more_view(*, rule_id: int, saved_post_id: int | None, last_run_id: int | None) -> tuple[str, InlineKeyboardMarkup]:
-    rows = []
-    if saved_post_id:
-        rows.append([InlineKeyboardButton(text="📤 Проверить публикацию", callback_data=f"rule_repost_campaign_test_send:{rule_id}")])
-    if last_run_id:
-        rows.append([InlineKeyboardButton(text="📄 Последний запуск", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{last_run_id}")])
-    rows.extend([
-        [InlineKeyboardButton(text="🔄 Обновить кампанию", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-        [InlineKeyboardButton(text="❌ Отключить кампанию", callback_data=f"rule_repost_campaign_disable:{rule_id}")],
-        [InlineKeyboardButton(text="⬅️ Назад к кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+
+def build_repost_campaign_vip_features_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "💎 VIP функции\n\n"
+        "Скоро здесь появятся расширенные инструменты для рекламных размещений:\n\n"
+        "✨ A/B-тесты рекламных постов\n"
+        "📊 Расширенная аналитика\n"
+        "🎯 Сегменты каналов\n"
+        "🕒 Запуск по расписанию\n"
+        "🧠 Умные рекомендации\n\n"
+        "Эти функции будут доступны в премиум-тарифах."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
-    text = "⚙️ Ещё\n\nДополнительные действия для проверки и обслуживания рекламной кампании."
-    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+    return text, kb
 
 
 def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[str, InlineKeyboardMarkup]:
@@ -607,8 +609,6 @@ def build_repost_campaign_posts_library_view(*, rule_id: int, library: dict) -> 
         open_text = "Открыть текущий пост" if str(item.get("title_line") or "").startswith("✅") else f"Открыть пост от {str(item.get('title_line') or '').replace('🕘 Пост от ', '')}"
         rows.append([InlineKeyboardButton(text=open_text, callback_data=f"rule_repost_campaign_post_stats:{rule_id}:{sid}")])
     rows.extend([
-        [InlineKeyboardButton(text="➕ Добавить новый пост", callback_data=f"rule_repost_campaign_post_add:{rule_id}")],
-        [InlineKeyboardButton(text="🧾 Журнал запусков", callback_data=f"rule_repost_campaign_runs_history:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return "\n".join(lines).strip(), InlineKeyboardMarkup(inline_keyboard=rows)
@@ -628,13 +628,11 @@ def build_repost_campaign_post_stats_view(*, rule_id: int, saved_post_id: int, s
     if vm.get("current_line"):
         rows.extend([
             [InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")],
-            [InlineKeyboardButton(text="👁 Предпросмотр", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
-        ])
+                    ])
     else:
         rows.append([InlineKeyboardButton(text="🚀 Использовать снова", callback_data=f"rule_repost_campaign_post_use:{rule_id}:{saved_post_id}")])
     rows.extend([
         [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
-        [InlineKeyboardButton(text="🧾 Журнал запусков", callback_data=f"rule_repost_campaign_runs_history:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)

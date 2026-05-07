@@ -91,7 +91,6 @@ from app.repost_campaign_service import (
     normalize_campaign_show_seconds,
 )
 from app.repost_campaign_ui import (
-    build_repost_campaign_more_view,
     build_repost_campaign_delete_result_view,
     build_repost_campaign_history_view,
     build_repost_campaign_posts_library_view,
@@ -104,6 +103,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
     build_repost_campaign_preview_view,
+    build_repost_campaign_vip_features_view,
     build_repost_campaign_run_details_view,
     build_repost_campaign_run_delete_confirm_view,
     build_repost_campaign_run_delete_loading_view,
@@ -3573,9 +3573,7 @@ def build_rule_card_text(row) -> str:
         and mode == "repost"
     ):
         enabled = bool(row["repost_campaign_enabled"]) if "repost_campaign_enabled" in row.keys() else False
-        if not enabled:
-            repost_campaign_line = "\n💰 Рекламная кампания: выключена"
-        else:
+        if enabled:
             try:
                 summary = db.get_rule_repost_campaign_summary(rule_id)
                 show_seconds = int(row["repost_campaign_show_seconds"] or 0) if "repost_campaign_show_seconds" in row.keys() else 0
@@ -3589,7 +3587,7 @@ def build_rule_card_text(row) -> str:
                 )
             except Exception:
                 logger.exception("Не удалось собрать сводку рекламной кампании, rule_id=%s", rule_id)
-                repost_campaign_line = "\n💰 Рекламная кампания: данные временно недоступны"
+                repost_campaign_line = "\n💰 Рекламная кампания"
 
     return (
         f"<b>Правило #{row['id']}</b>\n"
@@ -6463,6 +6461,22 @@ async def handle_rule_repost_campaign_menu(callback: CallbackQuery):
         return
     await answer_callback_safe_once(callback)
 
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_vip_features:"))
+async def handle_rule_repost_campaign_vip_features(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    text, kb = build_repost_campaign_vip_features_view(rule_id=rule_id)
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+    await answer_callback_safe_once(callback)
+
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_show_menu:"))
 async def handle_rule_repost_campaign_show_menu(callback: CallbackQuery):
     if not await is_admin_callback(callback):
@@ -6525,57 +6539,6 @@ async def handle_rule_repost_campaign_show_set(callback: CallbackQuery):
         )
     await _render_repost_campaign_menu(callback, rule_id)
     await answer_callback_safe_once(callback, "Срок показа обновлён")
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_disable:"))
-async def handle_rule_repost_campaign_disable(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    if not settings.repost_campaign_admin_test_enabled:
-        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
-        return
-    try:
-        rule_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    await run_db(db.update_rule_repost_campaign_settings, rule_id, enabled=False, show_seconds=0)
-    invalidate_rule_card_cache(rule_id)
-    await _render_repost_campaign_menu(callback, rule_id)
-    await answer_callback_safe_once(callback, "Рекламная кампания выключена")
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_more:"))
-async def handle_rule_repost_campaign_more(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    if not settings.repost_campaign_admin_test_enabled:
-        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
-        return
-    try:
-        rule_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-    try:
-        control_center = await run_db(lambda: RepostCampaignRuntimeService(repo=db, renderer=SavedPostRenderer(
-            bot=bot,
-            telethon_client=telethon_client,
-            temp_dir=settings.temp_dir,
-        )).get_campaign_control_center(rule_id=rule_id))
-    except Exception:
-        control_center = None
-    last_run = (control_center or {}).get("last_run") or {}
-    text, keyboard = build_repost_campaign_more_view(
-        rule_id=rule_id,
-        saved_post_id=getattr(rule, "repost_campaign_saved_post_id", None),
-        last_run_id=last_run.get("id"),
-    )
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-    await answer_callback_safe_once(callback)
 
 
 def _should_answer_new_message_for_callback(callback: CallbackQuery) -> bool:

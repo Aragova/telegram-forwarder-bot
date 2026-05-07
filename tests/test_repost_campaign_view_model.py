@@ -503,14 +503,14 @@ def test_posts_library_vm_limits_to_five_items():
     items = [_library_item(i, is_current=(i == 7)) for i in range(1, 8)]
     vm = build_campaign_posts_library_view_model(library={"items": items, "summary": {"posts_total": 7}})
     assert len(vm["items"]) == 5
-    assert "Показаны последние 5 постов" in (vm.get("limit_note") or "")
+    assert vm.get("limit_note") is None
 
 
 def test_posts_library_vm_summary_is_clean():
     vm = build_campaign_posts_library_view_model(library={"items": [_library_item(1)], "summary": {"posts_total": 1, "runs_total": 2, "placements_total": 43, "views_mode": "lazy"}})
     summary_text = "\n".join([vm["intro_line"], vm["placements_line"], vm["items"][0]["views_line"]])
     assert "Данные просмотров" not in summary_text
-    assert "Просмотры открываются внутри карточки поста" in summary_text
+    assert "Коллекция рекламных постов этой кампании." in summary_text
     assert "Просмотры: открыть карточку" in summary_text
 
 

@@ -377,14 +377,14 @@ def build_campaign_posts_library_view_model(*, library: dict) -> dict:
         })
     return {
         "title": "📚 Библиотека постов",
-        "intro_line": "Быстрый список рекламных постов этой кампании.\nПросмотры открываются внутри карточки поста.",
-        "posts_line": f"Всего постов: {int(summary.get('posts_total') or 0)}",
-        "runs_line": f"Запусков: {int(summary.get('runs_total') or 0)}",
+        "intro_line": "Коллекция рекламных постов этой кампании.",
+        "posts_line": f"📝 Постов: {int(summary.get('posts_total') or 0)}",
+        "runs_line": f"🔁 Запусков: {int(summary.get('runs_total') or 0)}",
         "placements_line": f"📣 Размещений: {int(summary.get('placements_total') or 0)}",
         "views_line": None,
         "partial_line": None,
         "items": items_vm,
-        "limit_note": "Показаны последние 5 постов. Остальное — в журнале запусков." if len(ordered) > 5 else None,
+        "limit_note": None,
         "empty_text": None if items_vm else "Пока в библиотеке нет постов.",
     }
 
