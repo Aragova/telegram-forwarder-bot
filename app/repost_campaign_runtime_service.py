@@ -1159,29 +1159,15 @@ class RepostCampaignRuntimeService:
         messages = self.repo.list_campaign_run_messages(run_id)
         deleted = failed = skipped = 0
         for message in messages:
-            status = (message.get("delete_status") or "").strip().lower()
-            if status == "deleted":
-                skipped += 1
-                continue
-            if status not in {"pending", "processing", "failed"}:
-                skipped += 1
-                continue
             row_id = int(message.get("id") or 0)
-            message_ids = self._extract_sent_message_ids(message)
-            if not row_id or not message_ids:
-                failed += 1
-                if row_id:
-                    self.repo.mark_campaign_run_message_delete_failed(row_id, error_text="missing sent_message_id")
+            status = (message.get("delete_status") or "").strip().lower()
+            if not row_id or status == "deleted" or status not in {"pending", "processing", "failed"}:
+                skipped += 1
                 continue
-            if len(message_ids) > 1 and hasattr(self.deleter, "delete_messages"):
-                result = await self.deleter.delete_messages(target_id=message["target_id"], message_ids=message_ids, render_mode=message.get("render_mode"))
-            else:
-                result = await self.deleter.delete_message(target_id=message["target_id"], message_id=message_ids[0], render_mode=message.get("render_mode"))
+            result = await self.delete_campaign_run_message_now(rule_id=rule_id, run_id=run_id, run_message_id=row_id, admin_id=admin_id)
             if result.ok:
-                self.repo.mark_campaign_run_message_deleted(row_id)
                 deleted += 1
             else:
-                self.repo.mark_campaign_run_message_delete_failed(row_id, error_text=result.error_text or "unknown delete error")
                 failed += 1
         return RepostCampaignActionResult(
             ok=(failed == 0),

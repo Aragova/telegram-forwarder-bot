@@ -646,6 +646,31 @@ def test_delete_campaign_run_now_skips_deleted_and_handles_delete_error():
     assert repo.mark_campaign_run_message_delete_failed_calls[0][0] == 12
 
 
+def test_delete_campaign_run_now_calls_delete_campaign_run_message_now():
+    repo = _FakeRepo()
+    repo._run = {"id": 10, "rule_id": 3}
+    repo._messages = [
+        {"id": 21, "delete_status": "pending"},
+        {"id": 22, "delete_status": "processing"},
+        {"id": 23, "delete_status": "failed"},
+        {"id": 24, "delete_status": "deleted"},
+    ]
+
+    class _Runtime(RepostCampaignRuntimeService):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.calls = []
+
+        async def delete_campaign_run_message_now(self, *, rule_id: int, run_id: int, run_message_id: int, admin_id: int | None = None):
+            self.calls.append((rule_id, run_id, run_message_id, admin_id))
+            return SimpleNamespace(ok=True)
+
+    runtime = _Runtime(repo=repo, renderer=_FakeRenderer(None), deleter=_FakeDeleter())
+    result = asyncio.run(runtime.delete_campaign_run_now(rule_id=3, run_id=10, admin_id=999))
+    assert result.ok is True
+    assert runtime.calls == [(3, 10, 21, 999), (3, 10, 22, 999), (3, 10, 23, 999)]
+
+
 def test_launch_main_plus_extras_success():
     rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=43200, target_id="-1001")
     repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})

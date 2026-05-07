@@ -106,6 +106,8 @@ from app.repost_campaign_ui import (
     build_repost_campaign_preview_view,
     build_repost_campaign_run_details_view,
     build_repost_campaign_run_delete_confirm_view,
+    build_repost_campaign_run_delete_loading_view,
+    build_repost_campaign_run_delete_result_view,
     build_repost_campaign_views_report_view,
     build_repost_campaign_show_menu_view,
     build_repost_campaign_target_action_result_view,
@@ -7487,11 +7489,12 @@ async def handle_rule_repost_campaign_run_delete_now(callback: CallbackQuery):
     rule_id = int(rule_id_raw)
     run_id = int(run_id_raw)
     await answer_callback_safe_once(callback)
-    await edit_message_text_safe(message=callback.message, text="🧹 Удаляю размещение…")
+    loading_text, loading_kb = build_repost_campaign_run_delete_loading_view(rule_id=rule_id, run_id=run_id)
+    await edit_message_text_safe(message=callback.message, text=loading_text, reply_markup=loading_kb)
     runtime = _build_repost_campaign_runtime()
     result = await run_db(lambda: runtime.delete_campaign_run_now(rule_id=rule_id, run_id=run_id, admin_id=callback.from_user.id if callback.from_user else None))
-    text, keyboard = build_repost_campaign_delete_result_view(rule_id=rule_id, result=result)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    result_text, result_kb = build_repost_campaign_run_delete_result_view(rule_id=rule_id, run_id=run_id, result=result)
+    await edit_message_text_safe(message=callback.message, text=result_text, reply_markup=result_kb)
 
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_stats:"))
