@@ -120,3 +120,23 @@ def test_post_stats_vm_current_actions():
 def test_post_stats_vm_reuse_actions():
     vm = build_campaign_post_stats_view_model(stats={"is_current": False, "kind": "photo"})
     assert vm["current_line"] is None
+
+
+def test_post_stats_vm_builds_channels_items():
+    vm = build_campaign_post_stats_view_model(stats={
+        "kind": "photo",
+        "runs_count": 1,
+        "top_channels": [{"target_title": "WikiBoy's 😎", "views_total": 1240}],
+        "problem_channels": [{"target_title": "Czech Hunter official"}],
+    })
+    items = vm["channels_items"]
+    assert len(items) == 2
+    assert items[0]["views_status"] == "ok"
+    assert items[0]["views_total"] == 1240
+    assert items[1]["views_status"] == "problem"
+
+
+def test_post_stats_vm_keeps_total_views_and_placements():
+    vm = build_campaign_post_stats_view_model(stats={"kind": "photo", "views_total": 10830, "placements_sent": 43})
+    assert vm["views_line"] == "👁 Всего просмотров: 10 830"
+    assert vm["placements_line"] == "📣 Размещений: 43"

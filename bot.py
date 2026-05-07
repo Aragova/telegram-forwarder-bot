@@ -95,6 +95,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_posts_library_view,
     build_repost_campaign_post_stats_view,
     build_repost_campaign_post_stats_loading_view,
+    build_repost_campaign_post_channels_stats_view,
     build_repost_campaign_views_report_loading_view,
     build_repost_campaign_views_report_error_view,
     build_repost_campaign_launch_readiness_view,
@@ -7313,6 +7314,32 @@ async def handle_rule_repost_campaign_post_stats(callback: CallbackQuery):
         ])
         await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
 
+
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_channels_stats:"))
+async def handle_rule_repost_campaign_post_channels_stats(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    _, rule_id_raw, saved_post_id_raw, offset_raw = callback.data.split(":", 3)
+    rule_id = int(rule_id_raw)
+    saved_post_id = int(saved_post_id_raw)
+    offset = int(offset_raw)
+    await answer_callback_safe_once(callback)
+    try:
+        runtime = _build_repost_campaign_runtime()
+        stats = await runtime.build_campaign_post_stats(rule_id=rule_id, saved_post_id=saved_post_id, include_live_views=True)
+        text, keyboard = build_repost_campaign_post_channels_stats_view(
+            rule_id=rule_id,
+            saved_post_id=saved_post_id,
+            stats=stats,
+            offset=offset,
+            page_size=10,
+        )
+        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    except Exception as exc:
+        logger.exception("REPOST_CAMPAIGN_POST_CHANNELS_STATS_UI_FAILED | rule_id=%s | saved_post_id=%s | offset=%s | error=%s", rule_id, saved_post_id, offset, exc)
+        await answer_callback_safe(callback, "Не удалось открыть статистику по каналам", show_alert=True)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_use:"))
 async def handle_rule_repost_campaign_post_use(callback: CallbackQuery):
