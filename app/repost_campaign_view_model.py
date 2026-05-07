@@ -342,15 +342,8 @@ def build_campaign_posts_library_view_model(*, library: dict) -> dict:
     items_vm = []
     for idx, item in enumerate(limited):
         kind_label = format_campaign_post_kind_label(item.get("kind"), is_album=bool(item.get("is_album")), media_count=int(item.get("media_count") or 0))
-        if item.get("views_total") is None:
-            views_line = "👁 Пока нет просмотров"
-        else:
-            views_line = f"👁 {int(item.get('views_total') or 0):,} просмотров".replace(",", " ")
+        views_line = "👁 Просмотры: открыть карточку"
         runs_count = int(item.get("runs_count") or 0)
-        top = (item.get("top_channels") or [{}])[0]
-        top_line = None
-        if top and top.get("target_title"):
-            top_line = f"🏆 Лучший канал: {top.get('target_title')} · {int(top.get('views_total') or 0):,}".replace(",", " ")
         items_vm.append({
             "saved_post_id": int(item.get("saved_post_id") or 0),
             "title_line": build_campaign_library_post_display_title(item, index=idx),
@@ -358,16 +351,16 @@ def build_campaign_posts_library_view_model(*, library: dict) -> dict:
             "views_line": views_line,
             "runs_line": f"🔁 {runs_count} запуск" + ("" if runs_count == 1 else ("а" if runs_count < 5 else "ов")),
             "placements_line": f"📣 {int(item.get('placements_sent') or 0)} размещения",
-            "top_line": top_line,
+            "top_line": None,
         })
-    partial = int(summary.get('views_unavailable') or 0) > 0 and int(summary.get('views_available') or 0) > 0
     return {
         "title": "📚 Библиотека постов",
-        "intro_line": "Здесь собраны рекламные посты этой кампании: текущий пост, прошлые размещения и статистика по ним.",
+        "intro_line": "Быстрый список рекламных постов этой кампании.\nПросмотры открываются внутри карточки поста.",
         "posts_line": f"Всего постов: {int(summary.get('posts_total') or 0)}",
         "runs_line": f"Запусков: {int(summary.get('runs_total') or 0)}",
-        "views_line": ("👁 Просмотры: " + f"{int(summary.get('views_total') or 0):,}".replace(",", " ")) if summary.get("views_total") is not None else "👁 Просмотры: пока нет данных",
-        "partial_line": "📊 Статистика собрана частично" if partial else None,
+        "placements_line": f"📣 Размещений: {int(summary.get('placements_total') or 0)}",
+        "views_line": None,
+        "partial_line": None,
         "items": items_vm,
         "limit_note": "Показаны последние 5 постов. Остальное — в журнале запусков." if len(ordered) > 5 else None,
         "empty_text": None if items_vm else "Пока в библиотеке нет постов.",

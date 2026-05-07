@@ -805,7 +805,7 @@ def test_bot_has_launch_confirm_callback_and_logs():
     assert "REPOST_CAMPAIGN_LAUNCH_PREFLIGHT_UI" in source
     assert "REPOST_CAMPAIGN_LAUNCH_CONFIRM_STARTED" in source
 
-from app.repost_campaign_ui import build_repost_campaign_posts_library_view, build_repost_campaign_post_stats_view
+from app.repost_campaign_ui import build_repost_campaign_posts_library_view, build_repost_campaign_post_stats_view, build_repost_campaign_post_stats_loading_view
 
 
 def _library_payload(count=3):
@@ -823,7 +823,7 @@ def _library_payload(count=3):
             "top_channels": [{"target_title": "WikiBoy’s 😎", "views_total": 1111}] if i == 0 else [],
             "last_started_at": "2026-05-07T12:04:00+00:00",
         })
-    return {"summary": {"posts_total": count, "runs_total": 13, "views_total": 8218}, "items": items}
+    return {"summary": {"posts_total": count, "runs_total": 13, "placements_total": 142, "views_mode": "lazy"}, "items": items}
 
 
 def test_posts_library_view_premium_layout():
@@ -832,6 +832,8 @@ def test_posts_library_view_premium_layout():
     assert "Текущий рекламный пост" in text
     assert "unknown" not in text.lower()
     assert "#24" not in text
+    assert "Просмотры: открыть карточку" in text
+    assert "Всего просмотров" not in text
 
 
 def test_posts_library_view_keyboard_has_single_open_button_per_post():
@@ -870,3 +872,12 @@ def test_library_visible_text_has_no_banned_terms():
     banned = ["unknown", "saved_post", "campaign_run", "message_id", "target_id", "delete_status", "send_status", "Технический ID"]
     for term in banned:
         assert term.lower() not in blob.lower()
+
+
+def test_post_stats_loading_view():
+    text, kb = build_repost_campaign_post_stats_loading_view(rule_id=1, saved_post_id=24)
+    assert "Собираю статистику просмотров" in text
+    assert "Экран обновится автоматически" in text
+    texts = _texts_from_keyboard(kb)
+    assert "📚 К библиотеке" in texts
+    assert "💰 К кампании" in texts

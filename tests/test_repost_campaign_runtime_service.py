@@ -929,3 +929,36 @@ def test_album_first_message_peer_validated():
     assert report["views_total"] == 129
     assert report["views_available"] == 1
     assert report["items"][0]["is_album"] is True
+
+
+def test_build_posts_library_does_not_collect_live_views():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55)
+    repo = _FakeRepo(rule=rule, saved_post={"content": {"kind": "text"}})
+    repo._runs = [{"id": 8, "saved_post_id": 55, "started_at": "2026-05-07T12:04:00+00:00"}]
+    repo._run = {"id": 8, "rule_id": 1, "saved_post_id": 55}
+    repo._messages = [{"send_status": "sent", "target_id": "-1001", "sent_message_id": 101}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    runtime.build_campaign_views_report = lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not call"))
+    library = asyncio.run(runtime.build_campaign_posts_library(rule_id=1))
+    assert library["ok"] is True
+    assert library["summary"]["views_mode"] == "lazy"
+    assert library["summary"]["views_total"] is None
+
+
+def test_build_post_stats_collects_live_views_only_when_requested():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55)
+    repo = _FakeRepo(rule=rule, saved_post={"content": {"kind": "text"}})
+    repo._runs = [{"id": 8, "saved_post_id": 55, "started_at": "2026-05-07T12:04:00+00:00"}]
+    repo._run = {"id": 8, "rule_id": 1, "saved_post_id": 55}
+    repo._messages = [{"send_status": "sent", "target_id": "-1001", "sent_message_id": 101}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    calls = {"n": 0}
+
+    async def _fake_report(**kwargs):
+        calls["n"] += 1
+        return {"ok": True, "views_total": 10, "views_available": 1, "views_unavailable": 0, "top_items": [], "problem_items": []}
+    runtime.build_campaign_views_report = _fake_report
+    asyncio.run(runtime.build_campaign_post_stats(rule_id=1, saved_post_id=55, include_live_views=True))
+    assert calls["n"] == 1
+    asyncio.run(runtime.build_campaign_post_stats(rule_id=1, saved_post_id=55, include_live_views=False))
+    assert calls["n"] == 1

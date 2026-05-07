@@ -1174,11 +1174,7 @@ class RepostCampaignRuntimeService:
                 runs_by_post.setdefault(saved_post_id, []).append(run)
 
             items = []
-            total_views = 0
-            total_available = 0
-            total_unavailable = 0
             total_runs = 0
-            views_supported = self.telethon_client is not None
             for saved_post_id in sorted(all_saved_post_ids, key=lambda x: x, reverse=True):
                 post_runs = runs_by_post.get(saved_post_id, [])
                 total_runs += len(post_runs)
@@ -1190,13 +1186,6 @@ class RepostCampaignRuntimeService:
                 description = get_saved_post_short_description(content) if saved_post else "пост недоступен"
 
                 placements_total = placements_sent = placements_failed = 0
-                views_total = 0
-                views_available = 0
-                views_unavailable = 0
-                last_run_views_total = None
-                top_channels_map = {}
-                problem_channels_map = {}
-                run_views_map = {}
                 for run in post_runs:
                     run_id = int(run.get("id") or 0)
                     details = self.get_campaign_run_details(rule_id=rule_id, run_id=run_id)
@@ -1204,62 +1193,56 @@ class RepostCampaignRuntimeService:
                     placements_total += len(msgs)
                     placements_sent += sum(1 for m in msgs if (m.get("send_status") or "").lower() == "sent")
                     placements_failed += sum(1 for m in msgs if (m.get("send_status") or "").lower() == "failed")
-                    if not views_supported:
-                        views_unavailable += len([m for m in msgs if (m.get("send_status") or "").lower() == "sent"])
-                        continue
-                    report = await self.build_campaign_views_report(rule_id=rule_id, run_id=run_id)
-                    if not report.get("ok"):
-                        views_unavailable += int(report.get("sent_total") or 0)
-                        continue
-                    run_views_map[run_id] = report
-                    run_total = 0
-                    for item in report.get("items") or []:
-                        if item.get("views_status") == "ok":
-                            v = int(item.get("views") or 0)
-                            views_total += v
-                            run_total += v
-                            key = f"{item.get('target_id')}::{item.get('target_title')}"
-                            row = top_channels_map.setdefault(key, {"target_id": item.get("target_id"), "target_title": item.get("target_title"), "views_total": 0})
-                            row["views_total"] += v
-                        elif item.get("views_status") in {"failed", "unavailable"}:
-                            key = str(item.get("target_id") or "")
-                            problem_channels_map[key] = {"target_id": item.get("target_id"), "target_title": item.get("target_title"), "reason": item.get("error_text") or "нет данных"}
-                    views_available += int(report.get("views_available") or 0)
-                    views_unavailable += int(report.get("views_unavailable") or 0)
-                    if run_id == int(post_runs[0].get("id") or 0):
-                        last_run_views_total = run_total
-                if not views_supported:
-                    views_total_value = None
-                else:
-                    views_total_value = views_total
-                    total_views += views_total
-                total_available += views_available
-                total_unavailable += views_unavailable
-                top_channels = sorted(top_channels_map.values(), key=lambda x: int(x.get("views_total") or 0), reverse=True)[:5]
                 items.append({
                     "saved_post_id": saved_post_id, "saved_post": saved_post, "kind": kind, "description": description,
                     "is_album": is_album, "media_count": media_count, "is_current": int(saved_post_id) == int(current_saved_post_id or 0),
                     "runs_count": len(post_runs), "last_run_id": int(post_runs[0].get("id")) if post_runs else None,
                     "last_started_at": post_runs[0].get("started_at") if post_runs else None, "last_status": post_runs[0].get("status") if post_runs else None,
                     "placements_total": placements_total, "placements_sent": placements_sent, "placements_failed": placements_failed,
-                    "views_total": views_total_value, "views_available": views_available, "views_unavailable": views_unavailable,
-                    "last_run_views_total": last_run_views_total, "top_channels": top_channels, "problem_channels": list(problem_channels_map.values()),
+                    "views_total": None, "views_available": 0, "views_unavailable": 0, "views_lazy": True,
+                    "stats_hint": "Просмотры доступны внутри карточки поста",
+                    "last_run_views_total": None, "top_channels": [], "problem_channels": [],
                 })
-            summary = {"posts_total": len(items), "current_saved_post_id": int(current_saved_post_id) if current_saved_post_id else None, "runs_total": total_runs, "views_total": (total_views if views_supported else None), "views_available": total_available, "views_unavailable": total_unavailable}
-            self.logger.info("REPOST_CAMPAIGN_POST_LIBRARY_BUILT | rule_id=%s | posts=%s | runs=%s | views_total=%s | views_available=%s | views_unavailable=%s", rule_id, len(items), total_runs, summary.get("views_total"), total_available, total_unavailable)
+            summary = {
+                "posts_total": len(items),
+                "current_saved_post_id": int(current_saved_post_id) if current_saved_post_id else None,
+                "runs_total": total_runs,
+                "placements_total": sum(int(item.get("placements_total") or 0) for item in items),
+                "views_total": None,
+                "views_available": 0,
+                "views_unavailable": 0,
+                "views_mode": "lazy",
+            }
+            self.logger.info("REPOST_CAMPAIGN_POST_LIBRARY_BUILT_FAST | rule_id=%s | posts=%s | runs=%s | placements=%s | views_mode=lazy", rule_id, len(items), total_runs, summary.get("placements_total"))
             return {"ok": True, "rule_id": rule_id, "items": items, "summary": summary, "error_text": None}
         except Exception as exc:
             self.logger.exception("REPOST_CAMPAIGN_POST_LIBRARY_BUILD_FAILED | rule_id=%s | error=%s", rule_id, exc)
             return {"ok": False, "rule_id": rule_id, "items": [], "summary": {}, "error_text": "Не удалось собрать библиотеку постов"}
 
-    async def build_campaign_post_stats(self, *, rule_id: int, saved_post_id: int) -> dict:
+    async def build_campaign_post_stats(self, *, rule_id: int, saved_post_id: int, include_live_views: bool = True) -> dict:
+        self.logger.info("REPOST_CAMPAIGN_POST_STATS_BUILD_STARTED | rule_id=%s | saved_post_id=%s | include_live_views=%s", rule_id, saved_post_id, include_live_views)
         library = await self.build_campaign_posts_library(rule_id=rule_id)
         if not library.get("ok"):
             return {"ok": False, "rule_id": rule_id, "saved_post_id": saved_post_id, "error_text": library.get("error_text") or "Не удалось загрузить статистику"}
         item = next((x for x in library.get("items") or [] if int(x.get("saved_post_id") or 0) == int(saved_post_id)), None)
         if not item:
             return {"ok": False, "rule_id": rule_id, "saved_post_id": saved_post_id, "error_text": "Пост не найден в библиотеке кампании"}
-        return {"ok": True, "rule_id": rule_id, "saved_post_id": saved_post_id, "saved_post": item.get("saved_post"), "description": item.get("description"), "kind": item.get("kind"), "is_album": item.get("is_album"), "media_count": item.get("media_count"), "is_current": item.get("is_current"), "runs_count": item.get("runs_count"), "last_run_id": item.get("last_run_id"), "last_started_at": item.get("last_started_at"), "views_total": item.get("views_total"), "views_available": item.get("views_available"), "views_unavailable": item.get("views_unavailable"), "placements_total": item.get("placements_total"), "placements_sent": item.get("placements_sent"), "placements_failed": item.get("placements_failed"), "channels": item.get("top_channels") or [], "runs": [], "top_channels": item.get("top_channels") or [], "problem_channels": item.get("problem_channels") or [], "error_text": None}
+        views_total = None
+        views_available = 0
+        views_unavailable = 0
+        top_channels = []
+        problem_channels = []
+        if include_live_views and item.get("last_run_id"):
+            report = await self.build_campaign_views_report(rule_id=rule_id, run_id=int(item.get("last_run_id")))
+            if report.get("ok"):
+                views_total = report.get("views_total")
+                views_available = int(report.get("views_available") or 0)
+                views_unavailable = int(report.get("views_unavailable") or 0)
+                top_channels = report.get("top_items") or []
+                problem_channels = report.get("problem_items") or []
+        result = {"ok": True, "rule_id": rule_id, "saved_post_id": saved_post_id, "saved_post": item.get("saved_post"), "description": item.get("description"), "kind": item.get("kind"), "is_album": item.get("is_album"), "media_count": item.get("media_count"), "is_current": item.get("is_current"), "runs_count": item.get("runs_count"), "last_run_id": item.get("last_run_id"), "last_started_at": item.get("last_started_at"), "views_total": views_total, "views_available": views_available, "views_unavailable": views_unavailable, "views_mode": ("live" if include_live_views else "lazy"), "placements_total": item.get("placements_total"), "placements_sent": item.get("placements_sent"), "placements_failed": item.get("placements_failed"), "channels": top_channels, "runs": [], "top_channels": top_channels, "problem_channels": problem_channels, "error_text": None}
+        self.logger.info("REPOST_CAMPAIGN_POST_STATS_BUILT | rule_id=%s | saved_post_id=%s | views_mode=%s | views_total=%s", rule_id, saved_post_id, result.get("views_mode"), result.get("views_total"))
+        return result
 
     def select_campaign_saved_post_from_library(self, *, rule_id: int, saved_post_id: int, admin_id: int | None = None) -> dict:
         rule = self.repo.get_rule(rule_id)
