@@ -229,6 +229,49 @@ def test_targets_line_shows_ready_and_errors_counts():
     assert vm["targets_line"] == "📣 Каналы/Группы: 5 активных · 3 готовы · 2 требуют проверки"
 
 
+def test_control_center_active_targets_line_is_compact():
+    vm = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 1, "targets_active": 43, "show_seconds": 86400},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={
+            "ok": True,
+            "readiness": {"ready": True},
+            "last_run": {"id": 7, "targets_success": 43, "targets_total": 43},
+            "last_run_details": {"ok": True, "summary": {"delete_pending": 43}, "messages": [{"delete_after_at": "2026-05-07T20:44:00+00:00"}]},
+        },
+    )
+    assert vm["targets_line"] == "📣 Опубликовано: 43 из 43"
+
+
+def test_control_center_active_next_step_is_empty():
+    vm = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 1, "targets_active": 1, "show_seconds": 3600},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": True}, "last_run": {"id": 7}, "last_run_details": {"ok": True, "summary": {"delete_pending": 1}}},
+    )
+    assert vm["next_step_line"] in (None, "")
+
+
+def test_control_center_completed_no_forced_next_step():
+    vm = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 1, "targets_active": 1, "show_seconds": 3600},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": False}, "last_run": {"id": 7}, "last_run_details": {"ok": True, "summary": {"deleted": 1}}},
+    )
+    assert vm["screen_state"] == "completed"
+    assert vm["next_step_line"] in (None, "")
+
+
+def test_control_center_delete_problem_no_noisy_next_step():
+    vm = build_campaign_control_center_view_model(
+        summary={"saved_post_id": 1, "targets_active": 1, "show_seconds": 3600},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": True}, "last_run": {"id": 7}, "last_run_details": {"ok": True, "summary": {"delete_failed": 1}}},
+    )
+    assert vm["screen_state"] == "delete_problem"
+    assert vm["next_step_line"] in (None, "")
+
+
 def test_scenario_preview_ready():
     vm = build_campaign_scenario_preview_view_model(
         rule_id=1,
@@ -286,7 +329,7 @@ def test_control_center_active_targets_line_uses_run_summary():
         control_center={"ok": True, "readiness": {"ready": False}, "last_run": {"id": 3, "targets_success": 43, "targets_total": 43}, "last_run_details": {"ok": True, "summary": {"delete_pending": 43}}},
     )
     assert vm["screen_state"] == "active_placement"
-    assert vm["targets_line"] == "📣 Активное размещение"
+    assert vm["targets_line"] == "📣 Опубликовано: 43 из 43"
     assert "42 активных" not in vm["targets_line"]
 
 

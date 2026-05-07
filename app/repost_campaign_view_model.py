@@ -460,12 +460,12 @@ def build_campaign_control_center_view_model(
     if delete_failed > 0:
         screen_state = "delete_problem"
         title_status = "⚠️ Требуется внимание"
-        next_step_line = "Следующий шаг:\nоткройте проблемный запуск и повторите удаление."
+        next_step_line = None
         primary_action = "open_problem_run" if last_run else None
     elif delete_pending > 0:
         screen_state = "active_placement"
         title_status = "🟡 Кампания активна"
-        next_step_line = "Следующий шаг:\nдождитесь автоудаления или откройте активное размещение."
+        next_step_line = None
         primary_action = "open_active_run" if last_run else None
     elif not has_post or not has_show_seconds or not has_targets:
         screen_state = "not_configured"
@@ -475,12 +475,12 @@ def build_campaign_control_center_view_model(
     elif readiness.get("ready") is True:
         screen_state = "ready_to_launch"
         title_status = "✅ Кампания готова"
-        next_step_line = "Следующий шаг:\nпроверьте сценарий и запустите кампанию."
+        next_step_line = "Готова к запуску."
         primary_action = "launch"
     elif last_run and deleted > 0:
         screen_state = "completed"
         title_status = "✅ Размещение завершено"
-        next_step_line = "Следующий шаг:\nможно запустить новую кампанию."
+        next_step_line = None
         primary_action = "open_last_run"
     else:
         screen_state = "not_configured"
@@ -495,7 +495,7 @@ def build_campaign_control_center_view_model(
     if last_run:
         started_at = format_campaign_datetime_text(last_run.get("started_at"))
         if screen_state == "active_placement":
-            targets_line = "📣 Активное размещение"
+            targets_line = f"📣 Опубликовано: {int((last_run or {}).get('targets_success') or 0)} из {int((last_run or {}).get('targets_total') or 0)}"
             last_run_title_line = "📊 Активное размещение"
             last_run_status_line = f"✅ Опубликовано: {int((last_run or {}).get('targets_success') or 0)} из {int((last_run or {}).get('targets_total') or 0)}"
             last_run_delete_line = f"🧹 Удаление ожидается: {format_campaign_datetime_text((last_details.get('messages') or [{}])[0].get('delete_after_at'))}" if (last_details.get("messages") or []) else f"🧹 Ожидает удаления: {delete_pending}"
