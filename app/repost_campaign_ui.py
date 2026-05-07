@@ -319,7 +319,6 @@ def build_repost_campaign_targets_menu_view(*, rule_id: int, summary: dict) -> t
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📥 Добавить списком", callback_data=f"rule_repost_campaign_add_list:{rule_id}")],
         [InlineKeyboardButton(text="📋 Список каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")],
-        [InlineKeyboardButton(text="🔎 Проверить права", callback_data=f"rule_repost_campaign_check:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return text, keyboard
@@ -367,9 +366,7 @@ def build_repost_campaign_targets_list_view(*, rule_id: int, targets: list[dict]
             keyboard_rows.append(nav_row)
 
     keyboard_rows.extend([
-        [InlineKeyboardButton(text="📥 Добавить списком", callback_data=f"rule_repost_campaign_add_list:{rule_id}")],
-        [InlineKeyboardButton(text="🔎 Проверить права", callback_data=f"rule_repost_campaign_check:{rule_id}")],
-        [InlineKeyboardButton(text="⚙️ Управление вручную", callback_data=f"rule_repost_campaign_targets_id_actions:{rule_id}")],
+        [InlineKeyboardButton(text="🔎 Проверить все права", callback_data=f"rule_repost_campaign_check:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return text, InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
@@ -415,14 +412,29 @@ def build_repost_campaign_target_card_view(*, rule_id: int, target: dict | None,
 def build_repost_campaign_targets_id_actions_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
     text = (
         "⚙️ Управление вручную\n\n"
-        "Этот раздел нужен для редких случаев: например, если канал/группа не отображается в списке или нужно выполнить действие вручную.\n\n"
-        "Обычно удобнее управлять каналами через кнопки в списке."
+        "Этот раздел больше не используется.\n\n"
+        "Управляйте каналами через карточки в списке каналов/групп."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⏸ Поставить на паузу вручную", callback_data=f"rule_repost_campaign_target_disable_prompt:{rule_id}")],
-        [InlineKeyboardButton(text="▶️ Включить вручную", callback_data=f"rule_repost_campaign_target_enable_prompt:{rule_id}")],
-        [InlineKeyboardButton(text="🗑 Удалить вручную", callback_data=f"rule_repost_campaign_target_remove_prompt:{rule_id}")],
-        [InlineKeyboardButton(text="⬅️ К списку каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")],
+        [InlineKeyboardButton(text="📋 К списку каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return text, kb
+
+
+def build_repost_campaign_targets_check_loading_view(
+    *,
+    rule_id: int,
+    targets_count: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🔎 Проверяем все права\n\n"
+        "ViMi проверяет доступ к каналам и группам кампании.\n\n"
+        f"Каналов/групп: {max(0, int(targets_count or 0))}\n\n"
+        "Это может занять несколько секунд."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return text, kb
 

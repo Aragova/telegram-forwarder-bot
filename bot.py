@@ -116,6 +116,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_targets_list_view,
     build_repost_campaign_targets_menu_view,
     build_repost_campaign_target_check_result_view,
+    build_repost_campaign_targets_check_loading_view,
     build_repost_campaign_targets_check_result_view,
     build_repost_campaign_target_preview_result_view,
     build_repost_campaign_preview_delete_result_view,
@@ -7150,6 +7151,16 @@ async def handle_rule_repost_campaign_check(callback: CallbackQuery):
         return
     try:
         runtime = _build_repost_campaign_runtime()
+        targets = await run_db(db.list_rule_repost_campaign_targets, rule_id, active_only=False)
+        loading_text, loading_keyboard = build_repost_campaign_targets_check_loading_view(
+            rule_id=rule_id,
+            targets_count=len(targets or []),
+        )
+        await edit_message_text_safe(
+            message=callback.message,
+            text=loading_text,
+            reply_markup=loading_keyboard,
+        )
 
         result = await runtime.check_campaign_targets(
             rule_id=rule_id,
@@ -7169,9 +7180,10 @@ async def handle_rule_repost_campaign_target_check(callback: CallbackQuery):
     if not await is_admin_callback(callback):
         return
     try:
-        _, rule_id_raw, row_id_raw = callback.data.split(":", 2)
-        rule_id = int(rule_id_raw)
-        row_id = int(row_id_raw)
+        parts = callback.data.split(":")
+        rule_id = int(parts[1])
+        row_id = int(parts[2])
+        page = int(parts[3]) if len(parts) > 3 else 0
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
@@ -7185,7 +7197,7 @@ async def handle_rule_repost_campaign_target_check(callback: CallbackQuery):
         )
 
 
-        text, keyboard = build_repost_campaign_target_check_result_view(rule_id=rule_id, result=result)
+        text, keyboard = build_repost_campaign_target_check_result_view(rule_id=rule_id, result=result, page=page)
         await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await answer_callback_safe_once(callback)
     except Exception as exc:
