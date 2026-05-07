@@ -1291,6 +1291,7 @@ class RepostCampaignRuntimeService:
         views_unavailable = 0
         top_channels = []
         problem_channels = []
+        channels_stats = []
         if include_live_views and item.get("last_run_id"):
             report = await self.build_campaign_views_report(rule_id=rule_id, run_id=int(item.get("last_run_id")))
             if report.get("ok"):
@@ -1299,7 +1300,15 @@ class RepostCampaignRuntimeService:
                 views_unavailable = int(report.get("views_unavailable") or 0)
                 top_channels = report.get("top_items") or []
                 problem_channels = report.get("problem_items") or []
-        result = {"ok": True, "rule_id": rule_id, "saved_post_id": saved_post_id, "saved_post": item.get("saved_post"), "description": item.get("description"), "kind": item.get("kind"), "is_album": item.get("is_album"), "media_count": item.get("media_count"), "is_current": item.get("is_current"), "runs_count": item.get("runs_count"), "last_run_id": item.get("last_run_id"), "last_started_at": item.get("last_started_at"), "views_total": views_total, "views_available": views_available, "views_unavailable": views_unavailable, "views_mode": ("live" if include_live_views else "lazy"), "placements_total": item.get("placements_total"), "placements_sent": item.get("placements_sent"), "placements_failed": item.get("placements_failed"), "channels": top_channels, "runs": [], "top_channels": top_channels, "problem_channels": problem_channels, "error_text": None}
+                for report_item in report.get("items") or []:
+                    channels_stats.append({
+                        "target_title": report_item.get("target_title"),
+                        "target_id": report_item.get("target_id"),
+                        "views_total": int(report_item.get("views") or 0),
+                        "views_status": report_item.get("views_status") or "ok",
+                        "runs_count": int(item.get("runs_count") or 0),
+                    })
+        result = {"ok": True, "rule_id": rule_id, "saved_post_id": saved_post_id, "saved_post": item.get("saved_post"), "description": item.get("description"), "kind": item.get("kind"), "is_album": item.get("is_album"), "media_count": item.get("media_count"), "is_current": item.get("is_current"), "runs_count": item.get("runs_count"), "last_run_id": item.get("last_run_id"), "last_started_at": item.get("last_started_at"), "views_total": views_total, "views_available": views_available, "views_unavailable": views_unavailable, "views_mode": ("live" if include_live_views else "lazy"), "placements_total": item.get("placements_total"), "placements_sent": item.get("placements_sent"), "placements_failed": item.get("placements_failed"), "channels": top_channels, "runs": [], "top_channels": top_channels, "problem_channels": problem_channels, "channels_stats": channels_stats, "error_text": None}
         self.logger.info("REPOST_CAMPAIGN_POST_STATS_BUILT | rule_id=%s | saved_post_id=%s | views_mode=%s | views_total=%s", rule_id, saved_post_id, result.get("views_mode"), result.get("views_total"))
         return result
 

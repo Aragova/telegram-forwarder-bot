@@ -392,10 +392,27 @@ def build_campaign_posts_library_view_model(*, library: dict) -> dict:
 def build_campaign_post_stats_view_model(*, stats: dict) -> dict:
     kind_text = format_campaign_post_kind_label(stats.get("kind"), is_album=bool(stats.get("is_album")), media_count=int(stats.get("media_count") or 0))
     channels = []
-    for ch in stats.get("top_channels") or []:
-        channels.append(f"👁 {int(ch.get('views_total') or 0):,} — {ch.get('target_title') or ch.get('target_id')} · запусков: {int(stats.get('runs_count') or 0)}".replace(",", " "))
-    for ch in stats.get("problem_channels") or []:
-        channels.append(f"⚠️ нет данных — {ch.get('target_title') or ch.get('target_id')}")
+    channels_items = []
+    raw_channels = stats.get("channels_stats") or stats.get("channels_items_raw") or []
+    for ch in raw_channels:
+        title = ch.get('target_title') or ch.get('title') or ch.get('target_id')
+        views_total = int(ch.get('views_total') or ch.get('views') or 0)
+        views_status = str(ch.get("views_status") or "ok")
+        channels_items.append({"title": title, "views_total": views_total, "views_status": views_status, "runs_count": int(ch.get('runs_count') or stats.get('runs_count') or 0)})
+        if views_status in {"failed", "unavailable", "problem"}:
+            channels.append(f"⚠️ нет данных — {title}")
+        else:
+            channels.append(f"👁 {views_total:,} — {title} · запусков: {int(stats.get('runs_count') or 0)}".replace(",", " "))
+    if not raw_channels:
+        for ch in stats.get("top_channels") or []:
+            title = ch.get('target_title') or ch.get('target_id')
+            views_total = int(ch.get('views_total') or ch.get('views') or 0)
+            channels.append(f"👁 {views_total:,} — {title} · запусков: {int(stats.get('runs_count') or 0)}".replace(",", " "))
+            channels_items.append({"title": title, "views_total": views_total, "views_status": "ok", "runs_count": int(ch.get('runs_count') or stats.get('runs_count') or 0)})
+        for ch in stats.get("problem_channels") or []:
+            title = ch.get('target_title') or ch.get('target_id')
+            channels.append(f"⚠️ нет данных — {title}")
+            channels_items.append({"title": title, "views_total": 0, "views_status": "problem", "runs_count": int(ch.get('runs_count') or stats.get('runs_count') or 0)})
     runs = []
     return {
         "title": "📄 Рекламный пост",
@@ -406,6 +423,7 @@ def build_campaign_post_stats_view_model(*, stats: dict) -> dict:
         "placements_line": f"📣 Размещений: {int(stats.get('placements_sent') or 0)}",
         "coverage_line": "📊 Статистика собрана частично" if int(stats.get("views_unavailable") or 0) > 0 and int(stats.get("views_available") or 0) > 0 else None,
         "channels_lines": channels,
+        "channels_items": channels_items,
         "runs_lines": runs,
     }
 

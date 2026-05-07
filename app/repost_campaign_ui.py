@@ -471,14 +471,74 @@ def build_repost_campaign_post_stats_view(*, rule_id: int, saved_post_id: int, s
     lines.extend([vm["kind_line"], "", vm["views_line"], vm["runs_line"], vm["placements_line"]])
     if vm.get("coverage_line"):
         lines.append(vm["coverage_line"])
-    lines.extend(["", "Каналы/Группы:"])
-    lines.extend(vm.get("channels_lines") or ["—"])
-    rows = []
+    rows = [
+        [InlineKeyboardButton(text="📊 Статистика по каналам", callback_data=f"rule_repost_campaign_post_channels_stats:{rule_id}:{saved_post_id}:0")],
+    ]
     if vm.get("current_line"):
         rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
     else:
         rows.append([InlineKeyboardButton(text="🚀 Использовать снова", callback_data=f"rule_repost_campaign_post_use:{rule_id}:{saved_post_id}")])
     rows.extend([
+        [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_post_channels_stats_view(
+    *,
+    rule_id: int,
+    saved_post_id: int,
+    stats: dict,
+    offset: int = 0,
+    page_size: int = 10,
+) -> tuple[str, InlineKeyboardMarkup]:
+    vm = build_campaign_post_stats_view_model(stats=stats or {})
+    items = list(vm.get("channels_items") or [])
+    total_channels = len(items)
+    if page_size <= 0:
+        page_size = 10
+    safe_offset = max(0, int(offset or 0))
+    if total_channels > 0 and safe_offset >= total_channels:
+        safe_offset = ((total_channels - 1) // page_size) * page_size
+    page_items = items[safe_offset:safe_offset + page_size]
+    total_pages = max(1, (total_channels + page_size - 1) // page_size)
+    current_page = (safe_offset // page_size) + 1
+
+    lines = [
+        "📊 Статистика по каналам",
+        "",
+        "📄 Рекламный пост",
+        vm.get("views_line") or "👁 Всего просмотров: 0",
+        f"📣 Каналов/групп: {total_channels}",
+        "",
+        f"Страница {current_page} из {total_pages}",
+        "",
+    ]
+    if not page_items:
+        lines.append("—")
+    else:
+        for item in page_items:
+            title = str(item.get("title") or "Без названия")
+            status = str(item.get("views_status") or "ok")
+            if status != "ok":
+                lines.append(f"⚠️ нет данных — {title}")
+            else:
+                views_total = int(item.get("views_total") or 0)
+                lines.append(f"👁 {views_total:,} — {title}".replace(",", " "))
+
+    rows = []
+    nav = []
+    if safe_offset > 0:
+        prev_offset = max(0, safe_offset - page_size)
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_post_channels_stats:{rule_id}:{saved_post_id}:{prev_offset}"))
+    if safe_offset + page_size < total_channels:
+        next_offset = safe_offset + page_size
+        nav.append(InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"rule_repost_campaign_post_channels_stats:{rule_id}:{saved_post_id}:{next_offset}"))
+    if nav:
+        rows.append(nav)
+    rows.extend([
+        [InlineKeyboardButton(text="📄 К посту", callback_data=f"rule_repost_campaign_post_stats:{rule_id}:{saved_post_id}")],
         [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
