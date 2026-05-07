@@ -180,9 +180,40 @@ def test_posts_library_view_premium_layout():
 def test_posts_library_view_keyboard_has_single_open_button_per_post():
     _, kb = build_repost_campaign_posts_library_view(rule_id=1, library=_library_payload(3))
     texts = _texts_from_keyboard(kb)
-    assert "📄 Открыть пост" in texts
-    assert not any("Статистика #" in x for x in texts)
-    assert not any("Использовать #" in x for x in texts)
+    open_buttons = [x for x in texts if x.startswith("📄 Открыть")]
+    assert len(open_buttons) == 3
+    assert not any("Использовать" in x for x in texts)
+
+
+def test_posts_library_view_keyboard_has_open_button_for_each_item():
+    _, kb = build_repost_campaign_posts_library_view(rule_id=1, library=_library_payload(6))
+    texts = _texts_from_keyboard(kb)
+    open_buttons = [x for x in texts if x.startswith("📄 Открыть")]
+    assert len(open_buttons) == 6
+    assert "✅ Использовать этот пост" not in texts
+
+
+def test_posts_library_view_text_stays_short_without_posts_sheet():
+    text, _ = build_repost_campaign_posts_library_view(rule_id=1, library=_library_payload(6))
+    assert "📚 Библиотека постов" in text
+    assert "Коллекция рекламных постов этой кампании." in text
+    assert "📝 Постов: 6" in text
+    assert "🕘 Пост от" not in text
+
+
+def test_posts_library_view_current_post_button_text():
+    _, kb = build_repost_campaign_posts_library_view(rule_id=1, library=_library_payload(2))
+    texts = _texts_from_keyboard(kb)
+    assert "📄 Открыть текущий пост" in texts
+
+
+def test_posts_library_view_old_post_button_uses_date_from_title_line():
+    payload = _library_payload(2)
+    payload["items"][0]["is_current"] = False
+    payload["items"][0]["last_started_at"] = "2026-05-07T18:10:00+00:00"
+    _, kb = build_repost_campaign_posts_library_view(rule_id=1, library=payload)
+    texts = _texts_from_keyboard(kb)
+    assert any(x.startswith("📄 Открыть пост от ") for x in texts)
 
 
 def test_posts_library_view_common_actions():

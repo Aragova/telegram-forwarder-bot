@@ -360,7 +360,7 @@ def build_campaign_posts_library_view_model(*, library: dict) -> dict:
 
     other_items.sort(key=_sort_key, reverse=True)
     ordered = current_items[:1] + other_items
-    limited = ordered[:5]
+    limited = ordered[:10]
     items_vm = []
     for idx, item in enumerate(limited):
         kind_label = format_campaign_post_kind_label(item.get("kind"), is_album=bool(item.get("is_album")), media_count=int(item.get("media_count") or 0))
