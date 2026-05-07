@@ -521,7 +521,7 @@ def build_repost_campaign_post_channels_stats_view(
         for item in page_items:
             title = str(item.get("title") or "Без названия")
             status = str(item.get("views_status") or "ok")
-            if status == "problem":
+            if status != "ok":
                 lines.append(f"⚠️ нет данных — {title}")
             else:
                 views_total = int(item.get("views_total") or 0)

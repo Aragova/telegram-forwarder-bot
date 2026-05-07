@@ -336,3 +336,18 @@ def test_post_channels_stats_view_fallback_legacy_top_and_problem():
     assert "📣 Каналов/групп: 2" in text
     assert "👁 1 — A" in text
     assert "⚠️ нет данных — B" in text
+
+
+def test_post_channels_stats_view_unavailable_status_renders_warning():
+    text, _ = build_repost_campaign_post_channels_stats_view(
+        rule_id=39,
+        saved_post_id=24,
+        stats={
+            "kind": "photo",
+            "channels_stats": [{"target_title": "Название", "views_total": 0, "views_status": "unavailable"}],
+        },
+        offset=0,
+        page_size=10,
+    )
+    assert "⚠️ нет данных — Название" in text
+    assert "👁 0 — Название" not in text
