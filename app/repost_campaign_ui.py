@@ -920,8 +920,9 @@ def build_repost_campaign_preview_delete_result_view(*, rule_id: int, result: di
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_repost_campaign_target_check_result_view(*, rule_id: int, result: dict) -> tuple[str, InlineKeyboardMarkup]:
+def build_repost_campaign_target_check_result_view(*, rule_id: int, result: dict, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
     payload = result or {}
+    safe_page = max(0, int(page or 0))
     ok = bool(payload.get("ok"))
     check_ok = bool(payload.get("check_ok", ok))
     saved = bool(payload.get("saved", True))
@@ -967,12 +968,14 @@ def build_repost_campaign_target_check_result_view(*, rule_id: int, result: dict
             f"{delete_line}"
         )
     row_id = int((result or {}).get("target_row_id") or 0)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 К списку каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")],
-        [InlineKeyboardButton(text="🔄 Проверить ещё раз", callback_data=f"rule_repost_campaign_target_check:{rule_id}:{row_id}")],
-        [InlineKeyboardButton(text="📣 К каналам/группам", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
-        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-    ])
+    rows = [
+        [InlineKeyboardButton(text="📋 К списку каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}:{safe_page}")],
+        [InlineKeyboardButton(text="🔄 Проверить ещё раз", callback_data=f"rule_repost_campaign_target_check:{rule_id}:{row_id}:{safe_page}")],
+    ]
+    if row_id > 0:
+        rows.append([InlineKeyboardButton(text="📣 К каналу/группе", callback_data=f"rule_repost_campaign_target_card:{rule_id}:{row_id}:{safe_page}")])
+    rows.append([InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
     return text, kb
 
 

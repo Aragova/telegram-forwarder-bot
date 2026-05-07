@@ -22,6 +22,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_targets_list_view,
     build_repost_campaign_targets_check_loading_view,
     build_repost_campaign_target_preview_result_view,
+    build_repost_campaign_target_check_result_view,
     build_repost_campaign_preview_delete_result_view,
     build_repost_campaign_views_report_view,
     format_repost_campaign_readiness_block,
@@ -131,6 +132,17 @@ def test_target_card_check_callback_keeps_page():
     )
     callbacks = _callbacks_from_keyboard(keyboard)
     assert "rule_repost_campaign_target_check:3:15:3" in callbacks
+
+
+def test_target_check_result_view_keeps_page_and_target_card_callback():
+    _, keyboard = build_repost_campaign_target_check_result_view(
+        rule_id=3,
+        result={"ok": True, "target_row_id": 8, "target_title": "Канал", "target_id": "-1008"},
+        page=2,
+    )
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_target_card:3:8:2" in callbacks
+    assert "rule_repost_campaign_targets_list:3:2" in callbacks
 
 
 def _kb_texts(kb):
