@@ -340,3 +340,68 @@ def test_launch_readiness_vm_no_banned_terms():
     dump = "\n".join(str(v) for v in vm.values())
     for bad in ["креатив", "площадк", "аккаунт-парсер", "тестовый", "Режим: репост"]:
         assert bad.lower() not in dump.lower()
+
+from app.repost_campaign_view_model import build_campaign_posts_library_view_model, build_campaign_post_stats_view_model
+
+
+def _library_item(saved_post_id, **kw):
+    base = {
+        "saved_post_id": saved_post_id,
+        "kind": None,
+        "is_album": False,
+        "media_count": 0,
+        "views_total": 8218,
+        "runs_count": 1,
+        "placements_sent": 43,
+        "placements_failed": 0,
+        "views_available": 4,
+        "views_unavailable": 142,
+        "top_channels": [{"target_title": "WikiBoy’s 😎", "views_total": 1111}],
+        "last_started_at": "2026-05-07T12:04:00+00:00",
+    }
+    base.update(kw)
+    return base
+
+
+def test_posts_library_vm_premium_titles_no_ids():
+    vm = build_campaign_posts_library_view_model(library={"items": [_library_item(24, is_current=True, kind="unknown")], "summary": {}})
+    text = "\n".join([vm["items"][0]["title_line"], vm["items"][0]["kind_line"]])
+    assert "#24" not in text
+    assert "unknown" not in text.lower()
+    assert "Текущий рекламный пост" in text or "Пост от" in text
+
+
+def test_posts_library_vm_current_post_first():
+    vm = build_campaign_posts_library_view_model(library={"items": [_library_item(1), _library_item(2, is_current=True)], "summary": {}})
+    assert vm["items"][0]["saved_post_id"] == 2
+
+
+def test_posts_library_vm_limits_to_five_items():
+    items = [_library_item(i, is_current=(i == 7)) for i in range(1, 8)]
+    vm = build_campaign_posts_library_view_model(library={"items": items, "summary": {"posts_total": 7}})
+    assert len(vm["items"]) == 5
+    assert "Показаны последние 5 постов" in (vm.get("limit_note") or "")
+
+
+def test_posts_library_vm_summary_is_clean():
+    vm = build_campaign_posts_library_view_model(library={"items": [_library_item(1)], "summary": {"views_total": 8218, "views_available": 4, "views_unavailable": 142}})
+    summary_text = "\n".join([vm["views_line"], vm.get("partial_line") or ""])
+    assert "Данные просмотров: 4 / 142" not in summary_text
+    assert "Просмотры: 8 218" in summary_text
+    assert "Статистика собрана частично" in summary_text
+
+
+def test_post_stats_vm_no_internal_ids():
+    vm = build_campaign_post_stats_view_model(stats={"saved_post_id": 24, "kind": "unknown"})
+    assert "#24" not in vm["title"]
+    assert "unknown" not in (vm["kind_line"]).lower()
+
+
+def test_post_stats_vm_current_actions():
+    vm = build_campaign_post_stats_view_model(stats={"is_current": True, "kind": "photo"})
+    assert vm["current_line"] == "✅ Сейчас выбран"
+
+
+def test_post_stats_vm_reuse_actions():
+    vm = build_campaign_post_stats_view_model(stats={"is_current": False, "kind": "photo"})
+    assert vm["current_line"] is None
