@@ -1147,6 +1147,37 @@ class RepostCampaignRuntimeService:
             extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id, "delete_status": "failed"},
         )
 
+    async def delete_campaign_run_now(self, *, rule_id: int, run_id: int, admin_id: int | None = None) -> dict:
+        details = self.get_campaign_run_details(rule_id=rule_id, run_id=run_id)
+        if not details.get("ok"):
+            return {"ok": False, "run_id": run_id, "rule_id": rule_id, "deleted": 0, "failed": 0, "skipped": 0, "total": 0, "error_text": details.get("error_text")}
+        deleted = 0
+        failed = 0
+        skipped = 0
+        candidates = details.get("messages") or []
+        for message in candidates:
+            send_status = (message.get("send_status") or "").strip().lower()
+            delete_status = (message.get("delete_status") or "").strip().lower()
+            message_id = message.get("sent_message_id")
+            ids_json = message.get("sent_message_ids_json")
+            if send_status != "sent" or (message_id is None and not ids_json):
+                skipped += 1
+                continue
+            if delete_status not in {"pending", "failed", "processing"}:
+                skipped += 1
+                continue
+            result = await self.delete_campaign_run_message_now(
+                rule_id=rule_id,
+                run_id=run_id,
+                run_message_id=int(message.get("id") or 0),
+                admin_id=admin_id,
+            )
+            if result.ok:
+                deleted += 1
+            else:
+                failed += 1
+        return {"ok": failed == 0, "run_id": run_id, "rule_id": rule_id, "deleted": deleted, "failed": failed, "skipped": skipped, "total": len(candidates), "error_text": None if failed == 0 else "Часть сообщений удалить не удалось"}
+
     async def process_due_deletions(self, *, limit: int = 50) -> dict[str, Any]:
         if self.deleter is None:
             return {"ok": False, "claimed": 0, "deleted": 0, "failed": 0, "error_text": "Delete service недоступен"}

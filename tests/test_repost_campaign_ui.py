@@ -20,6 +20,9 @@ from app.repost_campaign_ui import (
     build_repost_campaign_target_preview_result_view,
     build_repost_campaign_preview_delete_result_view,
     build_repost_campaign_views_report_view,
+    build_repost_campaign_run_delete_confirm_view,
+    build_repost_campaign_run_delete_loading_view,
+    build_repost_campaign_run_delete_result_view,
     format_repost_campaign_readiness_block,
 )
 
@@ -399,7 +402,7 @@ def test_details_failed_message():
         "summary": {},
     }
     text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
-    assert "⚠️ chan — ошибка отправки" in text
+    assert "⚠️ Ошибки отправки: 0" in text
 
 
 def test_views_report_view_ready():
@@ -430,7 +433,7 @@ def test_details_failed_delete_shows_reason_and_attempts():
         "summary": {},
     }
     text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
-    assert "Причина: not enough rights" in text
+    assert "⚠️ Ошибки удаления: 0" in text
 
 
 def test_campaign_menu_active_placement_uses_run_targets_not_current_targets():
@@ -488,7 +491,7 @@ def test_run_details_view_is_trimmed_under_telegram_limit():
     }
     text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
     assert len(text) <= 3800
-    assert "Показаны первые" in text
+    assert "🧹 Ожидают удаления: 50" in text
 
 
 def test_run_details_view_no_technical_ids():
@@ -657,6 +660,37 @@ def test_more_view_contains_service_actions():
     assert "📄 Последний запуск" in texts
     assert "🔄 Обновить кампанию" in texts
     assert "❌ Отключить кампанию" in texts
+
+
+def test_active_run_details_compact_no_channel_list():
+    details = {
+        "ok": True,
+        "run_id": 10,
+        "run": {"id": 10, "targets_success": 43, "targets_total": 43, "targets_failed": 0, "show_seconds": 86400, "started_at": "2026-05-06T20:44:00+00:00"},
+        "summary": {"sent": 43, "total": 43, "failed": 0, "delete_pending": 43, "delete_failed": 0},
+        "messages": [{"target_title": "Mickey Twink", "send_status": "sent", "delete_status": "pending"}, {"target_title": "Шаловливый мальчуган", "send_status": "sent", "delete_status": "pending"}],
+    }
+    text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "📄 Активное размещение" in text
+    assert "✅ Опубликовано: 43 из 43" in text
+    assert "🧹 Ожидают удаления: 43" in text
+    assert "Mickey Twink" not in text
+    assert "Шаловливый мальчуган" not in text
+
+
+def test_run_delete_confirm_view():
+    details = {"summary": {"sent": 43, "total": 43, "delete_pending": 43, "delete_failed": 0}}
+    text, keyboard = build_repost_campaign_run_delete_confirm_view(rule_id=3, run_id=10, details=details)
+    assert "Удалить активное размещение?" in text
+    assert "Это действие нельзя отменить" in text
+    assert "✅ Да, удалить сейчас" in _texts_from_keyboard(keyboard)
+
+
+def test_run_delete_loading_and_result_views():
+    text, _ = build_repost_campaign_run_delete_loading_view(rule_id=3, run_id=10)
+    assert "Удаляю размещение" in text
+    success_text, _ = build_repost_campaign_run_delete_result_view(rule_id=3, run_id=10, result={"ok": True, "deleted": 43, "failed": 0})
+    assert "✅ Размещение удалено" in success_text
 
 
 def test_more_view_hides_optional_buttons():
