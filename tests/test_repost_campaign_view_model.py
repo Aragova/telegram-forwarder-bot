@@ -151,3 +151,34 @@ def test_post_stats_vm_prefers_full_channels_stats_over_top_channels():
     })
     assert len(vm["channels_items"]) == 1
     assert vm["channels_items"][0]["title"] == "Полный 1"
+
+
+def test_views_report_vm_uses_final_snapshot_deleted_note():
+    vm = build_campaign_views_report_view_model(report={
+        "status": "ready",
+        "views_total": 555,
+        "views_available": 1,
+        "sent_total": 1,
+        "items": [{
+            "target_title": "A",
+            "views": 555,
+            "views_status": "ok",
+            "views_source": "final_snapshot",
+            "delete_status": "deleted",
+        }],
+    })
+    assert "зафиксированы перед удалением" in vm["delete_note_line"]
+
+
+def test_views_report_vm_partial_final_snapshot_note():
+    vm = build_campaign_views_report_view_model(report={
+        "status": "partial",
+        "views_total": 555,
+        "views_available": 1,
+        "sent_total": 2,
+        "items": [
+            {"target_title": "A", "views": 555, "views_status": "ok", "views_source": "final_snapshot", "delete_status": "deleted"},
+            {"target_title": "B", "views": 0, "views_status": "unavailable", "views_source": "final_snapshot", "delete_status": "deleted"},
+        ],
+    })
+    assert "Финальные просмотры собраны частично" in vm["delete_note_line"]
