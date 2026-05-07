@@ -266,8 +266,7 @@ def test_details_sent_message():
     }
     text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
     assert "📄 Запуск #1" in text
-    assert "Message ID: 1023" in text
-    assert "Удаление: не запланировано" in text
+    assert "Message ID: 1023" not in text
 
 
 def test_details_failed_message():
@@ -279,7 +278,7 @@ def test_details_failed_message():
         "summary": {},
     }
     text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
-    assert "❌ Дополнительный канал" in text
+    assert "⚠️ chan — ошибка отправки" in text
 
 
 def test_views_report_view_ready():
@@ -310,8 +309,80 @@ def test_details_failed_delete_shows_reason_and_attempts():
         "summary": {},
     }
     text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
-    assert "Причина удаления: not enough rights" in text
-    assert "Попыток удаления: 2" in text
+    assert "Причина: not enough rights" in text
+
+
+def test_campaign_menu_active_placement_uses_run_targets_not_current_targets():
+    text, _ = build_repost_campaign_menu_view(
+        rule_id=3,
+        summary={"saved_post_id": 1, "targets_active": 42, "show_seconds": 86400},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": False}, "last_run": {"id": 8, "targets_success": 43, "targets_total": 43}, "last_run_details": {"ok": True, "summary": {"delete_pending": 43}}},
+    )
+    assert "📣 Активное размещение" in text
+    assert "✅ Опубликовано: 43 из 43" in text
+    assert "42 активных" not in text
+
+
+def test_campaign_menu_show_seconds_single_line():
+    text, _ = build_repost_campaign_menu_view(
+        rule_id=3,
+        summary={"saved_post_id": 1, "targets_active": 1, "show_seconds": 86400},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": False}},
+    )
+    assert "⏳ Время показа: 24 часа" in text
+    assert "⏳ Время показа\n24 часа" not in text
+
+
+def test_campaign_menu_active_button_label():
+    _, keyboard = build_repost_campaign_menu_view(
+        rule_id=3,
+        summary={"saved_post_id": 1, "targets_active": 1, "show_seconds": 60},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": False}, "last_run": {"id": 2}, "last_run_details": {"ok": True, "summary": {"delete_pending": 1}}},
+    )
+    texts = _texts_from_keyboard(keyboard)
+    assert "📄 Открыть активное размещение" in texts
+    assert "📄 Открыть последний запуск" not in texts
+
+
+def test_campaign_menu_delete_problem_button_label():
+    _, keyboard = build_repost_campaign_menu_view(
+        rule_id=3,
+        summary={"saved_post_id": 1, "targets_active": 1, "show_seconds": 60},
+        saved_post_line="📝 Рекламный пост: #1",
+        control_center={"ok": True, "readiness": {"ready": False}, "last_run": {"id": 2}, "last_run_details": {"ok": True, "summary": {"delete_failed": 1}}},
+    )
+    assert "📄 Открыть проблемный запуск" in _texts_from_keyboard(keyboard)
+
+
+def test_run_details_view_is_trimmed_under_telegram_limit():
+    details = {
+        "ok": True,
+        "run_id": 1,
+        "run": {"id": 1, "show_seconds": 86400},
+        "messages": [{"send_status": "sent", "target_title": f"Channel {i}", "delete_status": "pending"} for i in range(50)],
+        "summary": {"total": 50, "sent": 50, "failed": 0, "delete_pending": 50},
+    }
+    text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert len(text) <= 3800
+    assert "Показаны первые" in text
+
+
+def test_run_details_view_no_technical_ids():
+    details = {
+        "ok": True,
+        "run_id": 1,
+        "run": {"id": 1},
+        "messages": [{"send_status": "sent", "target_title": "A", "target_id": "x", "sent_message_id": 10}],
+        "summary": {"total": 1, "sent": 1},
+    }
+    text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "Message ID" not in text
+    assert "Target:" not in text
+    assert "target_id" not in text
+    assert "message_id" not in text
 
 
 def test_preview_uses_readiness_block():
@@ -406,7 +477,7 @@ def test_details_shows_delete_now_for_pending():
     details = {"ok": True, "run_id": 10, "run": {"id": 10}, "messages": [{"id": 33, "send_status": "sent", "sent_message_id": 777, "delete_status": "pending"}], "summary": {}}
     _, keyboard = build_repost_campaign_run_details_view(rule_id=3, details=details)
     texts = _texts_from_keyboard(keyboard)
-    assert "🧹 Удалить сейчас #1" in texts
+    assert "🧹 Удалить сейчас #1" not in texts
 
 
 def test_delete_result_success_view():

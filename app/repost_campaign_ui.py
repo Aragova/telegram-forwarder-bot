@@ -23,6 +23,25 @@ from app.repost_campaign_view_model import (
     format_campaign_show_seconds_text,
 )
 
+TG_TEXT_SAFE_LIMIT = 3800
+RUN_DETAILS_VISIBLE_MESSAGES_LIMIT = 10
+
+
+def trim_campaign_text_for_telegram(text: str, *, limit: int = TG_TEXT_SAFE_LIMIT) -> str:
+    if len(text) <= limit:
+        return text
+    suffix = "\n...\nТекст сокращён, чтобы Telegram принял сообщение.\nОткройте журнал запусков или отчёт просмотров для деталей."
+    allowed = max(0, limit - len(suffix))
+    lines: list[str] = []
+    total = 0
+    for line in text.splitlines():
+        add = len(line) + (1 if lines else 0)
+        if total + add > allowed:
+            break
+        lines.append(line)
+        total += add
+    return ("\n".join(lines)).rstrip() + suffix
+
 
 def format_repost_campaign_readiness_block(readiness: dict | None) -> str:
     if not readiness:
@@ -56,7 +75,6 @@ def build_repost_campaign_menu_view(
         f"{vm['creative_value_line']}\n"
         f"{vm['targets_line']}\n"
         f"{vm['show_seconds_line']}\n"
-        f"{vm['show_seconds_value_line']}\n"
         "\n"
         f"{vm['last_run_title_line']}\n"
         f"{vm['last_run_status_line']}\n"
@@ -75,7 +93,12 @@ def build_repost_campaign_menu_view(
     elif primary_action == "launch":
         rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
     elif primary_action in {"open_last_run", "open_active_run", "open_problem_run"} and vm["last_run_id"]:
-        rows.append([InlineKeyboardButton(text="📄 Открыть последний запуск", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{vm['last_run_id']}")])
+        button_text = "📄 Открыть последний запуск"
+        if vm.get("screen_state") == "active_placement":
+            button_text = "📄 Открыть активное размещение"
+        elif vm.get("screen_state") == "delete_problem":
+            button_text = "📄 Открыть проблемный запуск"
+        rows.append([InlineKeyboardButton(text=button_text, callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{vm['last_run_id']}")])
 
     rows.extend([
         [
@@ -643,59 +666,64 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
         return text, kb
     run = details.get("run") or {}
     summary = details.get("summary") or {}
+    summary_sent = int(summary.get("sent") or run.get("targets_success") or 0)
+    summary_total = int(summary.get("total") or run.get("targets_total") or 0)
+    summary_failed = int(summary.get("failed") or run.get("targets_failed") or 0)
+    summary_delete_pending = int(summary.get("delete_pending") or 0)
     lines = [
-        f"📄 Запуск #{run.get('id') or run_id}",
+        "📄 Активное размещение" if summary_delete_pending > 0 else f"📄 Запуск #{run.get('id') or run_id}",
         "",
-        f"Тип: {format_campaign_run_type_text(run.get('run_type'))}",
-        f"Статус: {format_campaign_run_status_text(run.get('status'))}",
-        f"Пост: #{run.get('saved_post_id') or '—'}",
-        f"Метод: {format_campaign_render_mode_text(run.get('render_mode'))}",
-        f"Время показа: {format_campaign_show_seconds_text(run.get('show_seconds'))}",
+        f"✅ Опубликовано: {summary_sent} из {summary_total}",
+        f"⚠️ Ошибки отправки: {summary_failed}",
         "",
-        "📣 Публикации:",
-        f"Всего: {int(summary.get('total') or 0)}",
-        f"✅ Отправлено: {int(summary.get('sent') or 0)}",
-        f"❌ Ошибок: {int(summary.get('failed') or 0)}",
-        f"⏳ В процессе: {int(summary.get('pending') or 0)}",
+        f"⏳ Время показа: {format_campaign_show_seconds_text(run.get('show_seconds'))}",
+        f"🕒 Запущено: {format_campaign_datetime_text(run.get('started_at'))}",
+        f"🧹 Удаление ожидается: {format_campaign_datetime_text(run.get('delete_after_at'))}",
+        "",
+        "Каналы/Группы:",
         "",
     ]
-    delete_action_buttons: list[list[InlineKeyboardButton]] = []
-    for idx, msg in enumerate(details.get("messages") or [], 1):
+    messages = details.get("messages") or []
+    def _sort_key(msg: dict) -> tuple[int, str]:
+        send_status = (msg.get("send_status") or "").strip().lower()
+        delete_status = (msg.get("delete_status") or "").strip().lower()
+        if send_status == "failed":
+            return (0, "")
+        if delete_status == "failed":
+            return (1, "")
+        if delete_status == "processing":
+            return (2, "")
+        if delete_status == "pending":
+            return (3, "")
+        return (4, "")
+
+    visible_messages = sorted(messages, key=_sort_key)[:RUN_DETAILS_VISIBLE_MESSAGES_LIMIT]
+    for idx, msg in enumerate(visible_messages, 1):
         view = build_campaign_run_message_view(msg, index=idx)
-        lines.append(view["title"])
-        lines.append(f"   {view['channel_text']}")
-        lines.append(f"   {view['target_text']}")
-        lines.append(f"   {view['send_status_text']}")
-        if view["message_id_text"]:
-            lines.append(f"   {view['message_id_text']}")
-        if view["sent_at_text"]:
-            lines.append(f"   {view['sent_at_text']}")
+        channel = str(msg.get("target_title") or "Канал/Группа")
+        send_status = (msg.get("send_status") or "").strip().lower()
+        send_line = "✅ опубликовано" if send_status == "sent" else "⚠️ ошибка отправки"
+        lines.append(f"{send_line.split()[0]} {channel} — {send_line.split(' ', 1)[1]}")
         if view["send_error_text"]:
-            lines.append(f"   {view['send_error_text']}")
-        for delete_line in str(view["delete_text"]).splitlines():
-            lines.append(f"   {delete_line}")
-        if view.get("can_delete_now") and len(delete_action_buttons) < 10:
-            delete_action_buttons.append([
-                InlineKeyboardButton(
-                    text=f"{view.get('delete_action_text')} #{idx}",
-                    callback_data=f"rule_repost_campaign_delete_message:{rule_id}:{run.get('id') or run_id}:{int(msg.get('id') or 0)}",
-                )
-            ])
+            lines.append(f"Причина: {view['send_error_text'].replace('Ошибка отправки: ', '')}")
+        delete_status = (msg.get("delete_status") or "").strip().lower()
+        if delete_status == "failed":
+            lines.append("⚠️ ошибка удаления")
+            lines.append(f"Причина: {format_campaign_error_text(msg.get('delete_error_text')) or 'не указано'}")
+        elif delete_status == "pending":
+            lines.append("🧹 ожидает удаления")
+        elif delete_status == "processing":
+            lines.append("🧹 удаление выполняется")
         lines.append("")
-    total_actionable = sum(1 for msg in (details.get("messages") or []) if build_campaign_run_message_view(msg).get("can_delete_now"))
-    if total_actionable > 10:
-        lines.extend([
-            "Показаны первые 10 действий удаления. Остальные доступны после обновления или через будущий массовый режим.",
-            "",
-        ])
-    kb_rows = delete_action_buttons + [
+    if len(messages) > RUN_DETAILS_VISIBLE_MESSAGES_LIMIT:
+        lines.extend([f"Показаны первые {RUN_DETAILS_VISIBLE_MESSAGES_LIMIT} из {len(messages)}.", ""])
+    kb_rows = [
         [InlineKeyboardButton(text="📊 Отчёт просмотров", callback_data=f"rule_repost_campaign_views_report:{rule_id}:{run.get('id') or run_id}")],
-        [InlineKeyboardButton(text="🔄 Обновить детали", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run.get('id') or run_id}")],
-        [InlineKeyboardButton(text="📊 К истории", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run.get('id') or run_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ]
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-    return "\n".join(lines).rstrip(), kb
+    return trim_campaign_text_for_telegram("\n".join(lines).rstrip()), kb
 
 
 def build_repost_campaign_views_report_view(*, rule_id: int, run_id: int, report: dict) -> tuple[str, InlineKeyboardMarkup]:

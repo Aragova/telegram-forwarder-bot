@@ -445,8 +445,8 @@ def build_campaign_control_center_view_model(
     if not show_seconds_value:
         show_seconds_value = readiness.get("show_seconds")
     show_seconds_text = format_campaign_show_seconds_text(show_seconds_value)
-    show_seconds_line = "⏳ Время показа"
-    show_seconds_value_line = show_seconds_text if show_seconds_text != "не задан" else "Не задано"
+    show_seconds_line = f"⏳ Время показа: {show_seconds_text if show_seconds_text != 'не задан' else 'Не задано'}"
+    show_seconds_value_line = None
 
     last_run = (control_center or {}).get("last_run")
     last_details = (control_center or {}).get("last_run_details") or {}
@@ -481,7 +481,7 @@ def build_campaign_control_center_view_model(
         screen_state = "completed"
         title_status = "✅ Размещение завершено"
         next_step_line = "Следующий шаг:\nможно запустить новую кампанию."
-        primary_action = "launch"
+        primary_action = "open_last_run"
     else:
         screen_state = "not_configured"
         title_status = "⚠️ Кампания требует настройки"
@@ -495,6 +495,7 @@ def build_campaign_control_center_view_model(
     if last_run:
         started_at = format_campaign_datetime_text(last_run.get("started_at"))
         if screen_state == "active_placement":
+            targets_line = "📣 Активное размещение"
             last_run_title_line = "📊 Активное размещение"
             last_run_status_line = f"✅ Опубликовано: {int((last_run or {}).get('targets_success') or 0)} из {int((last_run or {}).get('targets_total') or 0)}"
             last_run_delete_line = f"🧹 Удаление ожидается: {format_campaign_datetime_text((last_details.get('messages') or [{}])[0].get('delete_after_at'))}" if (last_details.get("messages") or []) else f"🧹 Ожидает удаления: {delete_pending}"
