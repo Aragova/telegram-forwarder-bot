@@ -562,6 +562,7 @@ def test_process_due_deletions_success():
     assert repo.mark_campaign_run_message_deleted_calls == [3]
     assert result["deleted"] == 1
     assert result["failed"] == 0
+    assert result["views_collected"] == 0
 
 
 def test_process_due_deletions_failed():
@@ -898,6 +899,107 @@ def test_process_due_deletions_uses_sent_message_ids_json():
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_messages=_del_many, delete_message=None))
     asyncio.run(runtime.process_due_deletions())
     assert seen["message_ids"] == [101, 102]
+
+
+def test_process_due_deletions_collects_final_views_before_delete():
+    repo = _FakeRepo()
+    repo._due_delete_rows = [{"id": 3, "run_id": 10, "rule_id": 1, "target_id": "-1001", "sent_message_id": 2466, "views_final_status": "pending", "views_final_attempt_count": 0}]
+    telethon = _FakeTelethonClient({2466: {"id": 2466, "views": 123, "peer_id": SimpleNamespace(channel_id=1)}})
+    async def _ok(**kwargs): return SimpleNamespace(ok=True, method="telethon", error_text=None)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=_ok), telethon_client=telethon)
+    result = asyncio.run(runtime.process_due_deletions())
+    assert repo.mark_campaign_run_message_views_processing_calls == [3]
+    assert repo.mark_campaign_run_message_views_collected_calls[0][0] == 3
+    assert repo.mark_campaign_run_message_views_collected_calls[0][1] == 123
+    assert repo.mark_campaign_run_message_deleted_calls == [3]
+    assert result["views_collected"] == 1
+    assert result["deleted"] == 1
+
+
+def test_process_due_deletions_unavailable_snapshot_still_deletes():
+    repo = _FakeRepo()
+    repo._due_delete_rows = [{"id": 4, "run_id": 10, "rule_id": 1, "target_id": "-1001", "sent_message_id": 2467, "views_final_status": "pending", "views_final_attempt_count": 0}]
+    telethon = _FakeTelethonClient({})
+    async def _ok(**kwargs): return SimpleNamespace(ok=True, method="telethon", error_text=None)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=_ok), telethon_client=telethon)
+    result = asyncio.run(runtime.process_due_deletions())
+    assert repo.mark_campaign_run_message_views_unavailable_calls
+    assert repo.mark_campaign_run_message_deleted_calls == [4]
+    assert result["views_unavailable"] == 1
+    assert result["deleted"] == 1
+
+
+def test_process_due_deletions_temporary_snapshot_failure_does_not_delete():
+    repo = _FakeRepo()
+    repo._due_delete_rows = [{"id": 5, "run_id": 10, "rule_id": 1, "target_id": "-1001", "sent_message_id": 2468, "views_final_status": "pending", "views_final_attempt_count": 0}]
+    telethon = _FakeTelethonClient(fail_ids=[2468])
+    async def _ok(**kwargs): return SimpleNamespace(ok=True, method="telethon", error_text=None)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=_ok), telethon_client=telethon)
+    result = asyncio.run(runtime.process_due_deletions())
+    assert repo.mark_campaign_run_message_views_failed_calls
+    assert repo.mark_campaign_run_message_deleted_calls == []
+    assert result["views_failed"] == 1
+    assert result["deleted"] == 0
+
+
+def test_process_due_deletions_max_attempts_converts_to_unavailable_and_deletes():
+    repo = _FakeRepo()
+    repo._due_delete_rows = [{"id": 6, "run_id": 10, "rule_id": 1, "target_id": "-1001", "sent_message_id": 2469, "views_final_status": "failed", "views_final_attempt_count": RepostCampaignRuntimeService.FINAL_VIEWS_MAX_ATTEMPTS - 1}]
+    telethon = _FakeTelethonClient(fail_ids=[2469])
+    async def _ok(**kwargs): return SimpleNamespace(ok=True, method="telethon", error_text=None)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=_ok), telethon_client=telethon)
+    result = asyncio.run(runtime.process_due_deletions())
+    assert repo.mark_campaign_run_message_views_unavailable_calls
+    assert repo.mark_campaign_run_message_deleted_calls == [6]
+    assert result["deleted"] == 1
+
+
+def test_process_due_deletions_already_collected_skips_snapshot_and_deletes():
+    repo = _FakeRepo()
+    repo._due_delete_rows = [{"id": 7, "run_id": 10, "rule_id": 1, "target_id": "-1001", "sent_message_id": 2470, "views_final_status": "collected", "views_final_attempt_count": 2}]
+    async def _ok(**kwargs): return SimpleNamespace(ok=True, method="telethon", error_text=None)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=_ok), telethon_client=_FakeTelethonClient({}))
+    result = asyncio.run(runtime.process_due_deletions())
+    assert repo.mark_campaign_run_message_views_processing_calls == []
+    assert repo.mark_campaign_run_message_views_collected_calls == []
+    assert repo.mark_campaign_run_message_deleted_calls == [7]
+    assert result["deleted"] == 1
+
+
+def test_manual_delete_collects_final_views_before_delete():
+    repo = _FakeRepo()
+    repo._run = {"id": 10, "rule_id": 3}
+    repo._message = {"id": 33, "run_id": 10, "rule_id": 3, "send_status": "sent", "target_id": "-1001", "sent_message_id": 777, "delete_status": "failed", "views_final_status": "pending", "views_final_attempt_count": 0}
+    telethon = _FakeTelethonClient({777: {"id": 777, "views": 123, "peer_id": SimpleNamespace(channel_id=1)}})
+    async def _ok(**kwargs): return SimpleNamespace(ok=True, method="telethon", error_text=None)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=_ok), telethon_client=telethon)
+    result = asyncio.run(runtime.delete_campaign_run_message_now(rule_id=3, run_id=10, run_message_id=33))
+    assert result.ok is True
+    assert repo.mark_campaign_run_message_views_processing_calls == [33]
+    assert repo.mark_campaign_run_message_views_collected_calls[0][1] == 123
+    assert repo.mark_campaign_run_message_deleted_calls == [33]
+
+
+def test_build_views_report_uses_final_snapshot_after_deleted():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 8, "rule_id": 3}
+    repo._messages = [{"send_status": "sent", "delete_status": "deleted", "target_id": "-1001", "target_title": "A", "sent_message_id": 2484, "views_final_status": "collected", "views_final_count": 555}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=_FakeTelethonClient({}))
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["items"][0]["views"] == 555
+    assert report["items"][0]["views_status"] == "ok"
+    assert report["items"][0]["views_source"] == "final_snapshot"
+
+
+def test_build_views_report_uses_unavailable_snapshot():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"))
+    repo._run = {"id": 8, "rule_id": 3}
+    repo._messages = [{"send_status": "sent", "target_id": "-1001", "target_title": "A", "sent_message_id": 2484, "views_final_status": "unavailable", "views_final_error_text": "snapshot error"}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=_FakeTelethonClient({}))
+    report = asyncio.run(runtime.build_campaign_views_report(rule_id=3, run_id=8))
+    assert report["items"][0]["views_status"] == "unavailable"
+    assert report["items"][0]["views_source"] == "final_snapshot"
+    assert report["items"][0]["error_text"] == "snapshot error"
 
 
 def test_build_launch_readiness_ready():

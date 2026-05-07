@@ -3,11 +3,13 @@ from contextlib import contextmanager
 
 
 class _FakeCursor:
-    def __init__(self, rowcount: int, row: dict | None = None):
+    def __init__(self, rowcount: int, row: dict | None = None, rows: list[dict] | None = None):
         self.rowcount = rowcount
         self._row = row
+        self._rows = rows or []
         self.last_sql = ""
         self.last_params = None
+        self.executed_sql: list[str] = []
 
     def __enter__(self):
         return self
@@ -19,15 +21,18 @@ class _FakeCursor:
         if _args:
             self.last_sql = _args[0]
             self.last_params = _args[1] if len(_args) > 1 else None
+            self.executed_sql.append(str(_args[0]))
         return None
 
     def fetchone(self):
         return self._row
+    def fetchall(self):
+        return self._rows
 
 
 class _FakeConn:
-    def __init__(self, rowcount: int, row: dict | None = None):
-        self._cursor = _FakeCursor(rowcount, row=row)
+    def __init__(self, rowcount: int, row: dict | None = None, rows: list[dict] | None = None):
+        self._cursor = _FakeCursor(rowcount, row=row, rows=rows)
 
     def cursor(self):
         return self._cursor
@@ -138,3 +143,82 @@ def test_campaign_target_update_methods_use_returning_row_presence_as_bool():
     assert repo.set_rule_repost_campaign_target_active(999999999, False) is False
     assert repo.remove_rule_repost_campaign_target(999999999) is False
     assert repo.update_rule_repost_campaign_target_check_result(999999999, title="Missing", last_check_error=None) is False
+
+
+def test_campaign_run_messages_schema_contains_views_final_columns():
+    with open("app/postgres_repository.py", "r", encoding="utf-8") as f:
+        sql = f.read()
+    assert "views_final_count" in sql
+    assert "views_final_status" in sql
+    assert "views_final_collected_at" in sql
+    assert "views_final_error_text" in sql
+    assert "views_final_attempt_count" in sql
+    assert "views_final_next_retry_at" in sql
+
+
+def test_mark_campaign_run_message_views_processing_sql_contract():
+    repo = PostgresRepository()
+    @contextmanager
+    def _connect():
+        yield _FakeConn(1, row=None)
+    repo.connect = _connect
+    assert repo.mark_campaign_run_message_views_processing(77) is True
+
+
+def test_mark_campaign_run_message_views_collected_sql_contract():
+    repo = PostgresRepository()
+    @contextmanager
+    def _connect():
+        yield _FakeConn(1, row=None)
+    repo.connect = _connect
+    assert repo.mark_campaign_run_message_views_collected(77, views_count=555, collected_at="2026-05-07T00:00:00+00:00") is True
+
+
+def test_mark_campaign_run_message_views_unavailable_sql_contract():
+    repo = PostgresRepository()
+    @contextmanager
+    def _connect():
+        yield _FakeConn(1, row=None)
+    repo.connect = _connect
+    assert repo.mark_campaign_run_message_views_unavailable(77, error_text="e", collected_at="2026-05-07T00:00:00+00:00") is True
+
+
+def test_mark_campaign_run_message_views_failed_sql_contract():
+    repo = PostgresRepository()
+    @contextmanager
+    def _connect():
+        yield _FakeConn(1, row=None)
+    repo.connect = _connect
+    assert repo.mark_campaign_run_message_views_failed(77, error_text="e", next_retry_at="2026-05-07T00:01:00+00:00") is True
+
+
+def test_claim_due_campaign_run_messages_for_delete_returns_views_final_fields():
+    repo = PostgresRepository()
+    rows = [{
+        "id": 1, "views_final_count": 10, "views_final_status": "collected",
+        "views_final_collected_at": "2026-05-07T00:00:00+00:00", "views_final_error_text": None,
+        "views_final_attempt_count": 1, "views_final_next_retry_at": None,
+    }]
+    @contextmanager
+    def _connect():
+        yield _FakeConn(1, row=None, rows=rows)
+    repo.connect = _connect
+    result = repo.claim_due_campaign_run_messages_for_delete(limit=5)
+    assert result[0]["views_final_count"] == 10
+    assert result[0]["views_final_status"] == "collected"
+    assert "views_final_next_retry_at" in result[0]
+
+
+def test_claim_due_campaign_run_messages_for_delete_skips_failed_with_future_retry_filter():
+    repo = PostgresRepository()
+    captured = {"conn": None}
+    @contextmanager
+    def _connect():
+        conn = _FakeConn(0, row=None, rows=[])
+        captured["conn"] = conn
+        yield conn
+    repo.connect = _connect
+    repo.claim_due_campaign_run_messages_for_delete(limit=5)
+    sql = captured["conn"]._cursor.last_sql
+    assert "views_final_status = 'failed'" in sql
+    assert "views_final_next_retry_at > NOW()" in sql
