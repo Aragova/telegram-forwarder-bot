@@ -111,6 +111,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_show_menu_view,
     build_repost_campaign_target_action_result_view,
     build_repost_campaign_target_delete_confirm_view,
+    build_repost_campaign_target_card_view,
     build_repost_campaign_targets_id_actions_view,
     build_repost_campaign_targets_list_view,
     build_repost_campaign_targets_menu_view,
@@ -6986,13 +6987,15 @@ async def handle_rule_repost_campaign_add_list(callback: CallbackQuery):
 async def handle_rule_repost_campaign_targets_list(callback: CallbackQuery):
     if not await is_admin_callback(callback):
         return
+    parts = callback.data.split(":")
     try:
-        rule_id = int(callback.data.split(":")[1])
+        rule_id = int(parts[1])
+        page = int(parts[2]) if len(parts) > 2 else 0
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
     targets = await run_db(db.list_rule_repost_campaign_targets, rule_id, active_only=False)
-    text, keyboard = build_repost_campaign_targets_list_view(rule_id=rule_id, targets=targets or [])
+    text, keyboard = build_repost_campaign_targets_list_view(rule_id=rule_id, targets=targets or [], page=page)
     await edit_message_text_safe(
         message=callback.message,
         text=text,
@@ -7017,7 +7020,9 @@ async def _handle_target_action(callback: CallbackQuery, *, action: str, is_acti
     if not settings.repost_campaign_admin_test_enabled:
         await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
         return
-    _, rule_id_raw, row_id_raw = callback.data.split(":", 2)
+    parts = callback.data.split(":")
+    _, rule_id_raw, row_id_raw = parts[:3]
+    page = int(parts[3]) if len(parts) > 3 else 0
     rule_id = int(rule_id_raw)
     row_id = int(row_id_raw)
     runtime = RepostCampaignRuntimeService(repo=db, renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger))
@@ -7025,7 +7030,7 @@ async def _handle_target_action(callback: CallbackQuery, *, action: str, is_acti
         result = await run_db(lambda: runtime.remove_campaign_target(rule_id=rule_id, target_row_id=row_id, admin_id=callback.from_user.id if callback.from_user else None))
     else:
         result = await run_db(lambda: runtime.set_campaign_target_active(rule_id=rule_id, target_row_id=row_id, is_active=bool(is_active), admin_id=callback.from_user.id if callback.from_user else None))
-    text, keyboard = build_repost_campaign_target_action_result_view(rule_id=rule_id, result=result, action=action)
+    text, keyboard = build_repost_campaign_target_action_result_view(rule_id=rule_id, result=result, action=action, page=page)
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
     logger.info("REPOST_CAMPAIGN_TARGET_ACTION_UI_DONE | rule_id=%s | row_id=%s | action=%s | ok=%s", rule_id, row_id, action, result.get("ok"))
     await answer_callback_safe_once(callback)
@@ -7055,15 +7060,38 @@ async def handle_repost_campaign_target_resume(callback: CallbackQuery):
 async def handle_repost_campaign_target_delete_confirm(callback: CallbackQuery):
     if not await is_admin_callback(callback):
         return
-    _, rule_id_raw, row_id_raw = callback.data.split(":", 2)
+    parts = callback.data.split(":")
+    _, rule_id_raw, row_id_raw = parts[:3]
+    page = int(parts[3]) if len(parts) > 3 else 0
     rule_id = int(rule_id_raw)
     row_id = int(row_id_raw)
     runtime = RepostCampaignRuntimeService(repo=db, renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger))
     target = await run_db(lambda: runtime.get_campaign_target(rule_id=rule_id, target_row_id=row_id))
-    text, keyboard = build_repost_campaign_target_delete_confirm_view(rule_id=rule_id, target=target)
+    text, keyboard = build_repost_campaign_target_delete_confirm_view(rule_id=rule_id, target=target, page=page)
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
     await answer_callback_safe_once(callback)
 
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_card:"))
+async def handle_rule_repost_campaign_target_card(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    try:
+        rule_id = int(parts[1])
+        target_row_id = int(parts[2])
+        page = int(parts[3]) if len(parts) > 3 else 0
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    runtime = _build_repost_campaign_runtime()
+    target = await run_db(runtime.get_campaign_target, rule_id=rule_id, target_row_id=target_row_id)
+    text, keyboard = build_repost_campaign_target_card_view(rule_id=rule_id, target=target, page=page)
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    await answer_callback_safe_once(callback)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_delete:"))
 async def handle_repost_campaign_target_delete(callback: CallbackQuery):
