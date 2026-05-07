@@ -68,6 +68,7 @@ def build_repost_campaign_menu_view(
     if cc_payload is None:
         cc_payload = {"ok": bool(readiness), "readiness": readiness, "last_run": None, "last_run_details": None, "issues": []}
     vm = build_campaign_control_center_view_model(summary=summary, saved_post_line=saved_post_line, control_center=cc_payload)
+    next_step_line = vm.get("next_step_line")
     text = (
         "💰 Рекламная кампания\n\n"
         f"{vm['title_status']}\n\n"
@@ -79,9 +80,10 @@ def build_repost_campaign_menu_view(
         f"{vm['last_run_title_line']}\n"
         f"{vm['last_run_status_line']}\n"
         f"{(vm.get('last_run_time_line') or '')}\n"
-        f"{(vm.get('last_run_delete_line') or '')}\n\n"
-        f"{vm['next_step_line']}"
+        f"{(vm.get('last_run_delete_line') or '')}"
     )
+    if next_step_line:
+        text += f"\n\n{next_step_line}"
     rows = []
     primary_action = vm.get("primary_action")
     if primary_action == "show_seconds":
@@ -654,6 +656,23 @@ def build_repost_campaign_post_stats_loading_view(*, rule_id: int, saved_post_id
     ])
     return text, kb
 
+def extract_campaign_run_delete_after_at(messages: list[dict]) -> str | None:
+    with_active_delete = []
+    all_delete_dates = []
+    for message in messages or []:
+        delete_after_at = message.get("delete_after_at")
+        if not delete_after_at:
+            continue
+        all_delete_dates.append(delete_after_at)
+        delete_status = (message.get("delete_status") or "").strip().lower()
+        if delete_status in {"pending", "processing", ""}:
+            with_active_delete.append(delete_after_at)
+    if with_active_delete:
+        return min(with_active_delete)
+    if all_delete_dates:
+        return min(all_delete_dates)
+    return None
+
 
 def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tuple[str, InlineKeyboardMarkup]:
     run_id = int(details.get("run_id") or 0)
@@ -670,6 +689,8 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
     summary_total = int(summary.get("total") or run.get("targets_total") or 0)
     summary_failed = int(summary.get("failed") or run.get("targets_failed") or 0)
     summary_delete_pending = int(summary.get("delete_pending") or 0)
+    messages = details.get("messages") or []
+    delete_after_at = extract_campaign_run_delete_after_at(messages)
     lines = [
         "📄 Активное размещение" if summary_delete_pending > 0 else f"📄 Запуск #{run.get('id') or run_id}",
         "",
@@ -678,12 +699,12 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
         "",
         f"⏳ Время показа: {format_campaign_show_seconds_text(run.get('show_seconds'))}",
         f"🕒 Запущено: {format_campaign_datetime_text(run.get('started_at'))}",
-        f"🧹 Удаление ожидается: {format_campaign_datetime_text(run.get('delete_after_at'))}",
         "",
         "Каналы/Группы:",
         "",
     ]
-    messages = details.get("messages") or []
+    if delete_after_at:
+        lines.insert(8, f"🧹 Удаление ожидается: {format_campaign_datetime_text(delete_after_at)}")
     def _sort_key(msg: dict) -> tuple[int, str]:
         send_status = (msg.get("send_status") or "").strip().lower()
         delete_status = (msg.get("delete_status") or "").strip().lower()
@@ -755,6 +776,40 @@ def build_repost_campaign_views_report_view(*, rule_id: int, run_id: int, report
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ]
     return "\n".join([x for x in lines if x is not None]).strip(), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_views_report_loading_view(*, rule_id: int, run_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "📊 Отчёт просмотров\n\n"
+        "⏳ Собираю просмотры…\n\n"
+        "ViMi проверяет опубликованные сообщения в каналах/группах.\n"
+        "Обычно это занимает несколько секунд.\n\n"
+        "Что сейчас происходит:\n"
+        "• находим публикации этого запуска;\n"
+        "• проверяем сообщения в Telegram;\n"
+        "• собираем просмотры по каналам.\n\n"
+        "Экран обновится автоматически."
+    )
+    rows = [
+        [InlineKeyboardButton(text="📄 К размещению", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_views_report_error_view(*, rule_id: int, run_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "📊 Отчёт просмотров\n\n"
+        "⚠️ Сейчас не удалось собрать просмотры.\n\n"
+        "Telegram временно не вернул данные по публикациям.\n"
+        "Попробуйте обновить отчёт через несколько секунд."
+    )
+    rows = [
+        [InlineKeyboardButton(text="🔄 Обновить отчёт", callback_data=f"rule_repost_campaign_views_report:{rule_id}:{run_id}")],
+        [InlineKeyboardButton(text="📄 К размещению", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_repost_campaign_delete_result_view(*, rule_id: int, result) -> tuple[str, InlineKeyboardMarkup]:

@@ -97,6 +97,8 @@ from app.repost_campaign_ui import (
     build_repost_campaign_posts_library_view,
     build_repost_campaign_post_stats_view,
     build_repost_campaign_post_stats_loading_view,
+    build_repost_campaign_views_report_loading_view,
+    build_repost_campaign_views_report_error_view,
     build_repost_campaign_launch_readiness_view,
     build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
@@ -7438,22 +7440,28 @@ async def handle_rule_repost_campaign_views_report(callback: CallbackQuery):
     if not settings.repost_campaign_admin_test_enabled:
         await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
         return
+    rule_id = 0
+    run_id = 0
     try:
         _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
         rule_id = int(rule_id_raw)
         run_id = int(run_id_raw)
+        started = asyncio.get_event_loop().time()
         logger.info("REPOST_CAMPAIGN_VIEWS_REPORT_UI_OPENED | rule_id=%s | run_id=%s", rule_id, run_id)
+        await answer_callback_safe_once(callback)
+        loading_text, loading_kb = build_repost_campaign_views_report_loading_view(rule_id=rule_id, run_id=run_id)
+        await edit_message_text_safe(message=callback.message, text=loading_text, reply_markup=loading_kb)
+        logger.info("REPOST_CAMPAIGN_VIEWS_REPORT_LOADING_SHOWN | rule_id=%s | run_id=%s", rule_id, run_id)
         runtime = _build_repost_campaign_runtime()
         report = await runtime.build_campaign_views_report(rule_id=rule_id, run_id=run_id)
         text, keyboard = build_repost_campaign_views_report_view(rule_id=rule_id, run_id=run_id, report=report)
-        await answer_callback_safe_once(callback)
-        if _should_answer_new_message_for_callback(callback):
-            await send_message_safe(chat_id=callback.from_user.id, text=text, reply_markup=keyboard)
-        else:
-            await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        duration_ms = int((asyncio.get_event_loop().time() - started) * 1000)
+        logger.info("REPOST_CAMPAIGN_VIEWS_REPORT_UI_BUILT | rule_id=%s | run_id=%s | duration_ms=%s", rule_id, run_id, duration_ms)
     except Exception as exc:
-        logger.exception("REPOST_CAMPAIGN_VIEWS_REPORT_UI_FAILED | callback=%s | error=%s", callback.data, exc)
-        await answer_callback_safe(callback, "Не удалось открыть отчёт просмотров", show_alert=True)
+        logger.exception("REPOST_CAMPAIGN_VIEWS_REPORT_UI_FAILED | rule_id=%s | run_id=%s | error=%s", rule_id, run_id, exc)
+        text, keyboard = build_repost_campaign_views_report_error_view(rule_id=rule_id, run_id=run_id)
+        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
 
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_stats:"))

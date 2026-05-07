@@ -9,6 +9,8 @@ from app.repost_campaign_ui import (
     build_repost_campaign_launch_readiness_view,
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
+    build_repost_campaign_views_report_loading_view,
+    build_repost_campaign_views_report_error_view,
     build_repost_campaign_preview_view,
     build_repost_campaign_run_details_view,
     build_repost_campaign_show_menu_view,
@@ -221,6 +223,39 @@ def test_launch_result_failed():
     assert "❌ Кампания не запущена" in text
 
 
+def test_campaign_menu_active_copy_no_duplicate_active_placement():
+    text, _ = build_repost_campaign_menu_view(
+        rule_id=3,
+        summary={"saved_post_id": 1, "targets_active": 43, "show_seconds": 86400},
+        saved_post_line="📝 Рекламный пост: Альбом · 6 медиа",
+        control_center={
+            "ok": True,
+            "readiness": {"ready": True},
+            "last_run": {"id": 77, "targets_success": 43, "targets_total": 43, "started_at": "2026-05-06T20:44:00+00:00"},
+            "last_run_details": {"ok": True, "summary": {"delete_pending": 43}, "messages": [{"delete_after_at": "2026-05-07T20:44:00+00:00"}]},
+        },
+    )
+    assert "🟡 Кампания активна" in text
+    assert "📣 Опубликовано: 43 из 43" in text
+    assert "📣 Активное размещение" not in text
+
+
+def test_campaign_menu_active_copy_no_next_step():
+    text, _ = build_repost_campaign_menu_view(
+        rule_id=3,
+        summary={"saved_post_id": 1, "targets_active": 43, "show_seconds": 86400},
+        saved_post_line="📝 Рекламный пост: Альбом · 6 медиа",
+        control_center={
+            "ok": True,
+            "readiness": {"ready": True},
+            "last_run": {"id": 77, "targets_success": 43, "targets_total": 43},
+            "last_run_details": {"ok": True, "summary": {"delete_pending": 43}, "messages": [{"delete_after_at": "2026-05-07T20:44:00+00:00"}]},
+        },
+    )
+    assert "Следующий шаг" not in text
+    assert "дождитесь автоудаления" not in text
+
+
 def test_history_empty_state():
     text, keyboard = build_repost_campaign_history_view(rule_id=3, history={"ok": True, "runs": [], "summary": {}})
     texts = _texts_from_keyboard(keyboard)
@@ -247,6 +282,46 @@ def test_history_with_sent_run():
     assert "✅ Отправлено" in text
     assert "Premium-отправка" in text
     assert "Каналы: 1/1" in text
+
+
+def test_campaign_run_details_delete_after_from_messages():
+    details = {
+        "ok": True,
+        "run_id": 10,
+        "run": {"id": 10, "targets_success": 43, "targets_total": 43, "targets_failed": 0, "show_seconds": 86400, "started_at": "2026-05-06T20:44:00+00:00"},
+        "summary": {"sent": 43, "total": 43, "failed": 0, "delete_pending": 43},
+        "messages": [{"target_title": "A", "send_status": "sent", "delete_status": "pending", "delete_after_at": "2026-05-07T20:44:00+00:00"}],
+    }
+    text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "🧹 Удаление ожидается: 07.05 23:44" in text
+    assert "Удаление ожидается: не указано" not in text
+
+
+def test_campaign_run_details_hides_missing_delete_after():
+    details = {
+        "ok": True,
+        "run_id": 10,
+        "run": {"id": 10, "targets_success": 1, "targets_total": 1, "targets_failed": 0, "show_seconds": 3600, "started_at": "2026-05-06T20:44:00+00:00"},
+        "summary": {"sent": 1, "total": 1, "failed": 0, "delete_pending": 1},
+        "messages": [{"target_title": "A", "send_status": "sent", "delete_status": "pending"}],
+    }
+    text, _ = build_repost_campaign_run_details_view(rule_id=3, details=details)
+    assert "Удаление ожидается: не указано" not in text
+
+
+def test_views_report_loading_view():
+    text, keyboard = build_repost_campaign_views_report_loading_view(rule_id=3, run_id=9)
+    assert "⏳ Собираю просмотры" in text
+    assert "Экран обновится автоматически" in text
+    texts = _texts_from_keyboard(keyboard)
+    assert "📄 К размещению" in texts
+    assert "💰 К кампании" in texts
+
+
+def test_views_report_error_view_or_fallback_keyboard():
+    text, keyboard = build_repost_campaign_views_report_error_view(rule_id=3, run_id=9)
+    assert "не удалось собрать просмотры" in text
+    assert "🔄 Обновить отчёт" in _texts_from_keyboard(keyboard)
 
 
 def test_history_failed_run_error_truncation():
@@ -319,7 +394,7 @@ def test_campaign_menu_active_placement_uses_run_targets_not_current_targets():
         saved_post_line="📝 Рекламный пост: #1",
         control_center={"ok": True, "readiness": {"ready": False}, "last_run": {"id": 8, "targets_success": 43, "targets_total": 43}, "last_run_details": {"ok": True, "summary": {"delete_pending": 43}}},
     )
-    assert "📣 Активное размещение" in text
+    assert "📣 Опубликовано: 43 из 43" in text
     assert "✅ Опубликовано: 43 из 43" in text
     assert "42 активных" not in text
 
