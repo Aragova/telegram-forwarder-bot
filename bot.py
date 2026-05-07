@@ -94,6 +94,8 @@ from app.repost_campaign_ui import (
     build_repost_campaign_more_view,
     build_repost_campaign_delete_result_view,
     build_repost_campaign_history_view,
+    build_repost_campaign_posts_library_view,
+    build_repost_campaign_post_stats_view,
     build_repost_campaign_launch_readiness_view,
     build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
@@ -7366,19 +7368,35 @@ async def handle_rule_repost_campaign_history(callback: CallbackQuery):
         return
     try:
         rule_id = int(callback.data.split(":")[1])
-        logger.info("REPOST_CAMPAIGN_HISTORY_UI_OPENED | rule_id=%s", rule_id)
-        renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger)
-        runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
-        history = await run_db(lambda: runtime.get_campaign_history(rule_id=rule_id, limit=10))
-        text, keyboard = build_repost_campaign_history_view(rule_id=rule_id, history=history)
+        logger.info("REPOST_CAMPAIGN_POST_LIBRARY_UI_OPENED | rule_id=%s", rule_id)
+        runtime = _build_repost_campaign_runtime()
+        library = await runtime.build_campaign_posts_library(rule_id=rule_id)
+        text, keyboard = build_repost_campaign_posts_library_view(rule_id=rule_id, library=library)
         await answer_callback_safe_once(callback)
         if _should_answer_new_message_for_callback(callback):
             await send_message_safe(chat_id=callback.from_user.id, text=text, reply_markup=keyboard)
         else:
             await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
     except Exception:
-        logger.exception("REPOST_CAMPAIGN_HISTORY_UI_FAILED | rule_id=%s | error=%s", callback.data, callback.data)
-        await answer_callback_safe(callback, "Не удалось открыть историю кампаний", show_alert=True)
+        logger.exception("REPOST_CAMPAIGN_POST_LIBRARY_UI_FAILED | rule_id=%s | error=%s", callback.data, callback.data)
+        await answer_callback_safe(callback, "Не удалось открыть библиотеку постов", show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_runs_history:"))
+async def handle_rule_repost_campaign_runs_history(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+        logger.info("REPOST_CAMPAIGN_RUNS_HISTORY_UI_OPENED | rule_id=%s", rule_id)
+        renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger)
+        runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
+        history = await run_db(lambda: runtime.get_campaign_history(rule_id=rule_id, limit=10))
+        text, keyboard = build_repost_campaign_history_view(rule_id=rule_id, history=history)
+        await answer_callback_safe_once(callback)
+        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    except Exception:
+        await answer_callback_safe(callback, "Не удалось открыть журнал запусков", show_alert=True)
 
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_history_detail:"))
@@ -7435,6 +7453,45 @@ async def handle_rule_repost_campaign_views_report(callback: CallbackQuery):
     except Exception as exc:
         logger.exception("REPOST_CAMPAIGN_VIEWS_REPORT_UI_FAILED | callback=%s | error=%s", callback.data, exc)
         await answer_callback_safe(callback, "Не удалось открыть отчёт просмотров", show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_stats:"))
+async def handle_rule_repost_campaign_post_stats(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    _, rule_id_raw, saved_post_id_raw = callback.data.split(":", 2)
+    rule_id = int(rule_id_raw)
+    saved_post_id = int(saved_post_id_raw)
+    runtime = _build_repost_campaign_runtime()
+    stats = await runtime.build_campaign_post_stats(rule_id=rule_id, saved_post_id=saved_post_id)
+    text, keyboard = build_repost_campaign_post_stats_view(rule_id=rule_id, saved_post_id=saved_post_id, stats=stats)
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_use:"))
+async def handle_rule_repost_campaign_post_use(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    _, rule_id_raw, saved_post_id_raw = callback.data.split(":", 2)
+    rule_id = int(rule_id_raw)
+    saved_post_id = int(saved_post_id_raw)
+    runtime = _build_repost_campaign_runtime()
+    result = await run_db(lambda: runtime.select_campaign_saved_post_from_library(rule_id=rule_id, saved_post_id=saved_post_id, admin_id=callback.from_user.id if callback.from_user else None))
+    if result.get("ok"):
+        text = "✅ Пост выбран для кампании.\n\nПеред запуском проверьте сценарий и нажмите “🚀 Запустить кампанию”."
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")],
+            [InlineKeyboardButton(text="👁 Предпросмотр сценария", callback_data=f"rule_repost_campaign_preview:{rule_id}")],
+            [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+            [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        ])
+    else:
+        text = f"❌ {result.get('error_text') or 'Не удалось выбрать пост'}"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")]])
+    logger.info("REPOST_CAMPAIGN_POST_USE_FROM_LIBRARY | rule_id=%s | saved_post_id=%s | ok=%s", rule_id, saved_post_id, bool(result.get("ok")))
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
 
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_delete_message:"))

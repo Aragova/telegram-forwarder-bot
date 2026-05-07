@@ -12,6 +12,8 @@ from app.repost_campaign_view_model import (
     build_campaign_scenario_preview_view_model,
     build_campaign_launch_readiness_view_model,
     build_campaign_views_report_view_model,
+    build_campaign_posts_library_view_model,
+    build_campaign_post_stats_view_model,
     normalize_campaign_target_error_text,
     format_campaign_datetime_text,
     format_campaign_error_text,
@@ -79,7 +81,7 @@ def build_repost_campaign_menu_view(
         ],
         [
             InlineKeyboardButton(text="📣 Каналы/Группы", callback_data=f"rule_repost_campaign_targets:{rule_id}"),
-            InlineKeyboardButton(text="📊 История", callback_data=f"rule_repost_campaign_history:{rule_id}"),
+            InlineKeyboardButton(text="📚 Библиотека", callback_data=f"rule_repost_campaign_history:{rule_id}"),
         ],
         [
             InlineKeyboardButton(text="👁 Предпросмотр", callback_data=f"rule_repost_campaign_preview:{rule_id}"),
@@ -549,6 +551,46 @@ def build_repost_campaign_history_view(*, rule_id: int, history: dict) -> tuple[
         [InlineKeyboardButton(text="⬅️ Назад к кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return "\n".join(lines).rstrip(), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def build_repost_campaign_posts_library_view(*, rule_id: int, library: dict) -> tuple[str, InlineKeyboardMarkup]:
+    vm = build_campaign_posts_library_view_model(library=library or {})
+    lines = [vm["title"], "", vm["intro_line"], "", vm["summary_line"], vm["views_line"], vm["coverage_line"], ""]
+    for idx, item in enumerate(vm.get("items") or [], 1):
+        lines.append(f"{idx}. {item.get('title_line')}")
+        if item.get("current_line"):
+            lines.append(item["current_line"])
+        lines.extend([item["stats_line"], item["channels_line"], item["coverage_line"]])
+        if item.get("top_line"):
+            lines.append(item["top_line"])
+        lines.append("")
+    rows = []
+    for item in vm.get("items") or []:
+        sid = int(item.get("saved_post_id") or 0)
+        rows.append([InlineKeyboardButton(text=f"📄 Статистика #{sid}", callback_data=f"rule_repost_campaign_post_stats:{rule_id}:{sid}")])
+        if not item.get("current_line"):
+            rows.append([InlineKeyboardButton(text=f"🚀 Использовать #{sid}", callback_data=f"rule_repost_campaign_post_use:{rule_id}:{sid}")])
+    rows.extend([
+        [InlineKeyboardButton(text="➕ Добавить новый пост", callback_data=f"rule_repost_campaign_post_add:{rule_id}")],
+        [InlineKeyboardButton(text="🧾 Журнал запусков", callback_data=f"rule_repost_campaign_runs_history:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return "\n".join(lines).strip(), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_post_stats_view(*, rule_id: int, saved_post_id: int, stats: dict) -> tuple[str, InlineKeyboardMarkup]:
+    vm = build_campaign_post_stats_view_model(stats=stats or {})
+    lines = [vm["title"], "", vm["kind_line"]]
+    if vm.get("current_line"):
+        lines.append(vm["current_line"])
+    lines.extend(["", vm["views_line"], vm["runs_line"], vm["placements_line"], vm["coverage_line"], "", "Каналы/Группы:"])
+    lines.extend(vm.get("channels_lines") or ["—"])
+    rows = [
+        [InlineKeyboardButton(text="🚀 Использовать пост", callback_data=f"rule_repost_campaign_post_use:{rule_id}:{saved_post_id}")],
+        [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tuple[str, InlineKeyboardMarkup]:

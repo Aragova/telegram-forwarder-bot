@@ -570,7 +570,7 @@ def test_menu_button_grouping():
     assert "📝 Рекламный пост" in texts
     assert "⏳ Время показа" in texts
     assert "📣 Каналы/Группы" in texts
-    assert "📊 История" in texts
+    assert "📚 Библиотека" in texts
     assert "👁 Предпросмотр" in texts
     assert "⚙️ Ещё" in texts
 

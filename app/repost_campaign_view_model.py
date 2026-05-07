@@ -291,6 +291,66 @@ def build_campaign_views_report_view_model(*, report: dict) -> dict:
     }
 
 
+def build_campaign_posts_library_view_model(*, library: dict) -> dict:
+    summary = library.get("summary") or {}
+    items_vm = []
+    for item in library.get("items") or []:
+        kind = item.get("kind") or "unknown"
+        kind_text = {"album": "альбом", "photo": "фото", "video": "видео", "text": "текст"}.get(kind, kind)
+        media_tail = f" · {int(item.get('media_count') or 0)} медиа" if item.get("is_album") else ""
+        if item.get("views_total") is None:
+            stats_line = f"👁 Просмотры: пока недоступны · {int(item.get('runs_count') or 0)} запуска"
+        else:
+            stats_line = f"👁 {int(item.get('views_total') or 0):,} просмотров · {int(item.get('runs_count') or 0)} запуска".replace(",", " ")
+        top = (item.get("top_channels") or [{}])[0]
+        top_line = None
+        if top and top.get("target_title"):
+            top_line = f"🏆 Лучший канал: {top.get('target_title')} · {int(top.get('views_total') or 0):,}".replace(",", " ")
+        items_vm.append({
+            "saved_post_id": int(item.get("saved_post_id") or 0),
+            "title_line": f"📝 #{int(item.get('saved_post_id') or 0)} · {kind_text}{media_tail}",
+            "current_line": "✅ Сейчас выбран" if item.get("is_current") else None,
+            "stats_line": stats_line,
+            "last_run_line": f"Последний запуск: {format_campaign_datetime_text(item.get('last_started_at'))}",
+            "channels_line": f"📣 Размещений: {int(item.get('placements_sent') or 0)} · ошибок: {int(item.get('placements_failed') or 0)}",
+            "coverage_line": f"Данные просмотров: {int(item.get('views_available') or 0)}/{int(item.get('views_available') or 0) + int(item.get('views_unavailable') or 0)}",
+            "top_line": top_line,
+            "has_views": item.get("views_total") is not None,
+            "has_stats": True,
+        })
+    return {
+        "title": "📚 Библиотека постов",
+        "intro_line": "Здесь хранятся рекламные посты этой кампании и статистика по ним.",
+        "summary_line": f"Постов: {int(summary.get('posts_total') or 0)} · запусков: {int(summary.get('runs_total') or 0)}",
+        "views_line": ("👁 Всего просмотров: " + f"{int(summary.get('views_total') or 0):,}".replace(",", " ")) if summary.get("views_total") is not None else "👁 Просмотры: пока недоступны",
+        "coverage_line": f"📊 Данные просмотров: {int(summary.get('views_available') or 0)} / {int(summary.get('views_available') or 0) + int(summary.get('views_unavailable') or 0)}",
+        "items": items_vm,
+        "empty_text": None if items_vm else "Пока в библиотеке нет постов.",
+    }
+
+
+def build_campaign_post_stats_view_model(*, stats: dict) -> dict:
+    kind = stats.get("kind") or "unknown"
+    kind_text = {"album": "Альбом", "photo": "Фото", "video": "Видео", "text": "Текст"}.get(kind, kind)
+    channels = []
+    for ch in stats.get("top_channels") or []:
+        channels.append(f"👁 {int(ch.get('views_total') or 0):,} — {ch.get('target_title') or ch.get('target_id')} · запусков: {int(stats.get('runs_count') or 0)}".replace(",", " "))
+    for ch in stats.get("problem_channels") or []:
+        channels.append(f"⚠️ нет данных — {ch.get('target_title') or ch.get('target_id')}")
+    runs = []
+    return {
+        "title": f"📄 Статистика поста #{int(stats.get('saved_post_id') or 0)}",
+        "kind_line": f"📝 {kind_text}" + (f" · {int(stats.get('media_count') or 0)} медиа" if stats.get("is_album") else ""),
+        "current_line": "✅ Сейчас выбран" if stats.get("is_current") else None,
+        "views_line": ("👁 Всего просмотров: " + f"{int(stats.get('views_total') or 0):,}".replace(",", " ")) if stats.get("views_total") is not None else "👁 Просмотры: пока недоступны",
+        "runs_line": f"🔁 Запусков: {int(stats.get('runs_count') or 0)}",
+        "placements_line": f"📣 Размещений: {int(stats.get('placements_sent') or 0)}",
+        "coverage_line": f"📊 Данные просмотров: {int(stats.get('views_available') or 0)} / {int(stats.get('views_available') or 0) + int(stats.get('views_unavailable') or 0)}",
+        "channels_lines": channels,
+        "runs_lines": runs,
+    }
+
+
 def build_campaign_control_center_view_model(
     *,
     summary: dict,
