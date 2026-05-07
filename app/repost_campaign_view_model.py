@@ -291,7 +291,23 @@ def build_campaign_views_report_view_model(*, report: dict) -> dict:
         reason = format_campaign_error_text(item.get("error_text"), limit=160) or "не удалось получить просмотры"
         problem_lines.append(f"⚠️ {item.get('target_title') or item.get('target_id')} — {reason}")
     delete_statuses = {str((x or {}).get("delete_status") or "").strip().lower() for x in items}
-    if delete_statuses and delete_statuses.issubset({"deleted"}):
+    has_final_snapshot = any(str((x or {}).get("views_source") or "").strip().lower() == "final_snapshot" for x in items)
+    has_snapshot_unavailable = any(
+        str((x or {}).get("views_source") or "").strip().lower() == "final_snapshot"
+        and str((x or {}).get("views_status") or "").strip().lower() in {"unavailable", "failed"}
+        for x in items
+    )
+    has_snapshot_ok = any(
+        str((x or {}).get("views_source") or "").strip().lower() == "final_snapshot"
+        and str((x or {}).get("views_status") or "").strip().lower() == "ok"
+        for x in items
+    )
+    if delete_statuses and delete_statuses.issubset({"deleted"}) and has_final_snapshot:
+        if has_snapshot_ok and has_snapshot_unavailable:
+            delete_note = "🟡 Финальные просмотры собраны частично."
+        else:
+            delete_note = "🧹 Публикации уже удалены. Просмотры зафиксированы перед удалением."
+    elif delete_statuses and delete_statuses.issubset({"deleted"}):
         delete_note = "🧹 Публикации уже удалены. Просмотры показаны по данным, доступным Telegram на момент отчёта."
     else:
         delete_note = "⏳ Часть публикаций ещё ожидает автоудаления. Просмотры могут увеличиться."

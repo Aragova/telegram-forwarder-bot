@@ -1243,17 +1243,34 @@ class RepostCampaignRuntimeService:
 
     async def collect_final_views_for_campaign_run_message(self, message: dict) -> dict:
         row_id = int(message.get("id") or 0)
+        rule_id = int(message.get("rule_id") or 0)
+        run_id = int(message.get("run_id") or 0)
+        target_id = str(message.get("target_id") or "")
+        sent_message_id = int((self._extract_sent_message_ids(message) or [0])[0] or 0)
         views_status = str(message.get("views_final_status") or "pending").strip().lower()
         if views_status in {"collected", "unavailable"}:
             return {"ok": True, "skipped": True, "status": views_status}
         now_iso = datetime.now(timezone.utc).isoformat()
+        attempt = int(message.get("views_final_attempt_count") or 0) + 1
+        self.logger.info(
+            "REPOST_CAMPAIGN_FINAL_VIEWS_COLLECT_STARTED | rule_id=%s | run_id=%s | campaign_run_message_id=%s | target_id=%s | sent_message_id=%s | views_count=%s | views_final_status=%s | attempt=%s",
+            rule_id, run_id, row_id, target_id, sent_message_id, None, "processing", attempt,
+        )
         if self.telethon_client is None:
             self.repo.mark_campaign_run_message_views_unavailable(row_id, error_text="Сервис сбора просмотров недоступен", collected_at=now_iso)
+            self.logger.info(
+                "REPOST_CAMPAIGN_FINAL_VIEWS_COLLECT_UNAVAILABLE | rule_id=%s | run_id=%s | campaign_run_message_id=%s | target_id=%s | sent_message_id=%s | views_count=%s | views_final_status=%s | attempt=%s",
+                rule_id, run_id, row_id, target_id, sent_message_id, 0, "unavailable", attempt,
+            )
             return {"ok": True, "status": "unavailable"}
         self.repo.mark_campaign_run_message_views_processing(row_id)
         message_ids = self._extract_sent_message_ids(message)
         if not message_ids:
             self.repo.mark_campaign_run_message_views_unavailable(row_id, error_text="Нет message_id для сбора просмотров", collected_at=now_iso)
+            self.logger.info(
+                "REPOST_CAMPAIGN_FINAL_VIEWS_COLLECT_UNAVAILABLE | rule_id=%s | run_id=%s | campaign_run_message_id=%s | target_id=%s | sent_message_id=%s | views_count=%s | views_final_status=%s | attempt=%s",
+                rule_id, run_id, row_id, target_id, sent_message_id, 0, "unavailable", attempt,
+            )
             return {"ok": True, "status": "unavailable"}
         message_id = int(message_ids[0])
         try:
@@ -1262,16 +1279,32 @@ class RepostCampaignRuntimeService:
             if msg is not None and getattr(msg, "views", None) is not None:
                 views_count = int(getattr(msg, "views", 0) or 0)
                 self.repo.mark_campaign_run_message_views_collected(row_id, views_count=views_count, collected_at=now_iso)
+                self.logger.info(
+                    "REPOST_CAMPAIGN_FINAL_VIEWS_COLLECT_DONE | rule_id=%s | run_id=%s | campaign_run_message_id=%s | target_id=%s | sent_message_id=%s | views_count=%s | views_final_status=%s | attempt=%s",
+                    rule_id, run_id, row_id, target_id, message_id, views_count, "collected", attempt,
+                )
                 return {"ok": True, "status": "collected", "views_count": views_count}
             self.repo.mark_campaign_run_message_views_unavailable(row_id, error_text="Telegram не вернул просмотры перед удалением", collected_at=now_iso)
+            self.logger.info(
+                "REPOST_CAMPAIGN_FINAL_VIEWS_COLLECT_UNAVAILABLE | rule_id=%s | run_id=%s | campaign_run_message_id=%s | target_id=%s | sent_message_id=%s | views_count=%s | views_final_status=%s | attempt=%s",
+                rule_id, run_id, row_id, target_id, message_id, 0, "unavailable", attempt,
+            )
             return {"ok": True, "status": "unavailable"}
         except Exception as exc:
-            attempt_count = int(message.get("views_final_attempt_count") or 0) + 1
+            attempt_count = attempt
             if attempt_count < self.FINAL_VIEWS_MAX_ATTEMPTS:
                 next_retry = (datetime.now(timezone.utc) + timedelta(seconds=self.FINAL_VIEWS_RETRY_DELAY_SECONDS)).isoformat()
                 self.repo.mark_campaign_run_message_views_failed(row_id, error_text=str(exc), next_retry_at=next_retry)
+                self.logger.warning(
+                    "REPOST_CAMPAIGN_FINAL_VIEWS_COLLECT_FAILED | rule_id=%s | run_id=%s | campaign_run_message_id=%s | target_id=%s | sent_message_id=%s | views_count=%s | views_final_status=%s | attempt=%s",
+                    rule_id, run_id, row_id, target_id, message_id, None, "failed", attempt,
+                )
                 return {"ok": False, "retry": True, "status": "failed"}
             self.repo.mark_campaign_run_message_views_unavailable(row_id, error_text=str(exc), collected_at=now_iso)
+            self.logger.info(
+                "REPOST_CAMPAIGN_FINAL_VIEWS_COLLECT_UNAVAILABLE | rule_id=%s | run_id=%s | campaign_run_message_id=%s | target_id=%s | sent_message_id=%s | views_count=%s | views_final_status=%s | attempt=%s",
+                rule_id, run_id, row_id, target_id, message_id, 0, "unavailable", attempt,
+            )
             return {"ok": True, "status": "unavailable"}
 
     async def build_campaign_posts_library(self, *, rule_id: int) -> dict:
