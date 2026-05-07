@@ -65,7 +65,7 @@ def test_preview_view_contains_saved_post_id_and_warnings():
         targets_preview_text="1. 🟢 @a",
         warnings=["⚠️ Проверка 1", "⚠️ Проверка 2"],
     )
-    assert "📝 Рекламный пост: #55" in text
+    assert "📝 Рекламный пост" in text
     assert "⚠️ Проверка 1" in text
 
 
@@ -155,7 +155,7 @@ def test_menu_compact_main_view():
     assert "🚦 Готовность кампании" not in text
     assert "⚠️ Требует внимания" not in text
     assert "📊 Последний запуск\n\n" not in text
-    assert "Можно запускать кампанию." in text
+    assert "Следующий шаг" in text
     assert "креатив" not in text.lower()
     assert "площадки" not in text.lower()
     assert "режим: репост" not in text.lower()
@@ -196,16 +196,16 @@ def test_launch_result_sent():
     assert "📊 Размещение" in text
     assert "✅ Опубликовано: 3" in text
     assert "📣 Всего получателей: 3" in text
-    assert "🧹 Автоудаление:" in text
+    assert "🧹 Удаление:" in text
     assert "📄 Детали запуска" in _texts_from_keyboard(keyboard)
     assert "📊 Отчёт просмотров" in _texts_from_keyboard(keyboard)
-    assert "🧹 Автоудаление: через 12 часов" in text
+    assert "🧹 Удаление: автоматически через 12 часов" in text
 
 
 def test_launch_result_uses_show_seconds_from_extra():
     result = {"ok": True, "saved_post_id": 7, "extra": {"campaign_run_id": 10, "targets_total": 3, "targets_success": 3, "targets_failed": 0, "show_seconds": 60}}
     text, _ = build_repost_campaign_launch_result_view(rule_id=3, result=result)
-    assert "🧹 Автоудаление: через 1 минута" in text
+    assert "🧹 Удаление: автоматически через 1 минута" in text
     assert "12 часов" not in text
 
 
@@ -597,7 +597,7 @@ def test_main_menu_terminology_cleanup():
     assert "📝 Рекламный пост" in text
     assert "📣 Каналы/Группы" in text
     assert "⏳ Время показа" in text
-    assert "🧹 Автоудаление" in text
+    assert "Автоудаление: включено" not in text
     assert "📝 Креатив" not in text
     assert "📣 Площадки" not in text
     assert "⏳ Срок" not in text

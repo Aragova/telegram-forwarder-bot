@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import re
 
 from app.repost_campaign_service import format_campaign_show_seconds_ru
 
@@ -68,19 +69,40 @@ def format_campaign_send_status_text(send_status: str | None) -> str:
     return mapping.get((send_status or "").strip().lower(), "⚪ Неизвестно")
 
 
-def format_campaign_datetime_text(value) -> str:
+def format_campaign_datetime_text(value, *, timezone_offset_hours: int = 3) -> str:
     if not value:
         return "не указано"
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, str):
         try:
-            dt = datetime.fromisoformat(value)
+            text = value.strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            dt = datetime.fromisoformat(text)
         except Exception:
             return "не указано"
     else:
         return "не указано"
-    return dt.strftime("%d.%m %H:%M")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    target_tz = timezone(timedelta(hours=int(timezone_offset_hours)))
+    return dt.astimezone(target_tz).strftime("%d.%m %H:%M")
+
+
+def format_campaign_saved_post_main_line(saved_post_line: str | None) -> str:
+    text = str(saved_post_line or "").strip()
+    if not text:
+        return "Не выбран"
+    for prefix in ("📝 Рекламный пост:", "📝 Креатив:"):
+        if text.startswith(prefix):
+            text = text.replace(prefix, "", 1).strip()
+    text = re.sub(r"#\d+\s*·\s*", "", text).strip()
+    if text.lower() in {"unknown", "saved_post", "не выбран"} or not text:
+        return "Не выбран"
+    return text[:1].upper() + text[1:]
 
 
 def format_campaign_error_text(value, *, limit: int = 120) -> str | None:
@@ -404,7 +426,9 @@ def build_campaign_control_center_view_model(
         post_value = post_text.replace("📝 Креатив:", "", 1).strip()
     else:
         post_value = post_text
-    creative_line = f"📝 Рекламный пост: {post_value or 'не выбран'}"
+    post_main_value = format_campaign_saved_post_main_line(post_value)
+    creative_line = "📝 Рекламный пост"
+    creative_value_line = post_main_value
 
     targets_active = int((summary or {}).get("targets_active") or 0)
     targets_ready = (summary or {}).get("targets_ready")
@@ -421,69 +445,84 @@ def build_campaign_control_center_view_model(
     if not show_seconds_value:
         show_seconds_value = readiness.get("show_seconds")
     show_seconds_text = format_campaign_show_seconds_text(show_seconds_value)
-    show_seconds_line = f"⏳ Время показа: {show_seconds_text}"
+    show_seconds_line = "⏳ Время показа"
+    show_seconds_value_line = show_seconds_text if show_seconds_text != "не задан" else "Не задано"
 
     last_run = (control_center or {}).get("last_run")
     last_details = (control_center or {}).get("last_run_details") or {}
-    if not last_run:
-        last_run_line = "📊 Последний запуск: ещё не было"
-    else:
-        run_view = build_campaign_run_item_view(last_run)
-        last_run_line = f"📊 Последний запуск: {run_view['title']} · {int((last_run or {}).get('targets_success') or 0)}/{int((last_run or {}).get('targets_total') or 0)}"
-
     delete_summary = (last_details.get("summary") or {}) if last_details.get("ok") else {}
     delete_pending = int(delete_summary.get("delete_pending") or 0)
     delete_failed = int(delete_summary.get("delete_failed") or 0)
     deleted = int(delete_summary.get("deleted") or 0)
-    auto_delete_line = "🧹 Автоудаление: включено" if show_seconds_text != "не задан" else "🧹 Автоудаление: не задано"
-    if delete_failed > 0:
-        last_run_delete_line = f"🧹 Удаление последнего запуска: {delete_failed} ошибка"
-    elif delete_pending > 0:
-        last_run_delete_line = f"🧹 Удаление последнего запуска: ожидает {delete_pending}"
-    elif deleted > 0:
-        last_run_delete_line = "🧹 Удаление последнего запуска: всё удалено"
-    else:
-        last_run_delete_line = "🧹 Удаление последнего запуска: не применялось"
-
     has_post = bool((summary or {}).get("saved_post_id"))
     has_show_seconds = show_seconds_text != "не задан"
     has_targets = targets_active > 0
     if delete_failed > 0:
-        title_status = "⚠️ Есть проблемы удаления"
-        next_step_line = "Следующий шаг: проверьте проблемы в последнем запуске."
-        primary_action = "open_last_run" if last_run else None
-    elif readiness.get("ready") is True:
-        title_status = "✅ Готова к запуску"
-        next_step_line = "Можно запускать кампанию."
-        primary_action = "launch"
-    elif not has_post:
-        title_status = "⚠️ Нужно выбрать рекламный пост"
-        next_step_line = "Следующий шаг: выберите рекламный пост."
-        primary_action = "creative"
-    elif not has_show_seconds:
-        title_status = "⚠️ Нужно настроить время показа"
-        next_step_line = "Следующий шаг: задайте время показа."
-        primary_action = "show_seconds"
-    elif not has_targets:
-        title_status = "⚠️ Нужно добавить каналы/группы"
-        next_step_line = "Следующий шаг: добавьте каналы/группы."
-        primary_action = "targets"
-    else:
+        screen_state = "delete_problem"
+        title_status = "⚠️ Требуется внимание"
+        next_step_line = "Следующий шаг:\nоткройте проблемный запуск и повторите удаление."
+        primary_action = "open_problem_run" if last_run else None
+    elif delete_pending > 0:
+        screen_state = "active_placement"
+        title_status = "🟡 Кампания активна"
+        next_step_line = "Следующий шаг:\nдождитесь автоудаления или откройте активное размещение."
+        primary_action = "open_active_run" if last_run else None
+    elif not has_post or not has_show_seconds or not has_targets:
+        screen_state = "not_configured"
         title_status = "⚠️ Кампания требует настройки"
-        next_step_line = "Следующий шаг: выберите рекламный пост."
+        primary_action = "creative" if not has_post else ("show_seconds" if not has_show_seconds else "targets")
+        next_step_line = "Следующий шаг:\nвыберите рекламный пост." if not has_post else ("Следующий шаг:\nзадайте время показа." if not has_show_seconds else "Следующий шаг:\nдобавьте каналы/группы.")
+    elif readiness.get("ready") is True:
+        screen_state = "ready_to_launch"
+        title_status = "✅ Кампания готова"
+        next_step_line = "Следующий шаг:\nпроверьте сценарий и запустите кампанию."
+        primary_action = "launch"
+    elif last_run and deleted > 0:
+        screen_state = "completed"
+        title_status = "✅ Размещение завершено"
+        next_step_line = "Следующий шаг:\nможно запустить новую кампанию."
+        primary_action = "launch"
+    else:
+        screen_state = "not_configured"
+        title_status = "⚠️ Кампания требует настройки"
+        next_step_line = "Следующий шаг:\nвыберите рекламный пост."
         primary_action = "creative"
+
+    last_run_title_line = "📊 Последний запуск"
+    last_run_status_line = "Размещение ещё не запускалось"
+    last_run_time_line = None
+    last_run_delete_line = None
+    if last_run:
+        started_at = format_campaign_datetime_text(last_run.get("started_at"))
+        if screen_state == "active_placement":
+            last_run_title_line = "📊 Активное размещение"
+            last_run_status_line = f"✅ Опубликовано: {int((last_run or {}).get('targets_success') or 0)} из {int((last_run or {}).get('targets_total') or 0)}"
+            last_run_delete_line = f"🧹 Удаление ожидается: {format_campaign_datetime_text((last_details.get('messages') or [{}])[0].get('delete_after_at'))}" if (last_details.get("messages") or []) else f"🧹 Ожидает удаления: {delete_pending}"
+        elif screen_state == "delete_problem":
+            last_run_title_line = "⚠️ Проблемы удаления"
+            last_run_status_line = f"✅ Удалено: {deleted}"
+            last_run_delete_line = f"⚠️ Ошибки удаления: {delete_failed}"
+        else:
+            last_run_status_line = "✅ Размещение завершено" if deleted > 0 else "✅ Опубликовано"
+            last_run_delete_line = f"📣 Опубликовано: {int((last_run or {}).get('targets_success') or 0)} из {int((last_run or {}).get('targets_total') or 0)}"
+            last_run_time_line = f"🕒 Запущено: {started_at}" if started_at != "не указано" else None
 
     can_check_publication = bool((summary or {}).get("saved_post_id"))
     can_launch = bool(readiness and readiness.get("ready"))
     return {
+        "screen_state": screen_state,
         "title_status": title_status,
         "creative_line": creative_line,
+        "creative_value_line": creative_value_line,
         "targets_line": targets_line,
         "show_seconds_line": show_seconds_line,
-        "auto_delete_line": auto_delete_line,
-        "last_run_line": last_run_line,
+        "show_seconds_value_line": show_seconds_value_line,
+        "auto_delete_line": f"🧹 Удаление\nавтоматически после {show_seconds_text}" if show_seconds_text != "не задан" else "🧹 Удаление\nне настроено",
+        "last_run_line": f"{last_run_title_line}: {last_run_status_line}",
+        "last_run_title_line": last_run_title_line,
+        "last_run_status_line": last_run_status_line,
+        "last_run_time_line": last_run_time_line,
         "last_run_delete_line": last_run_delete_line,
-        "delete_line": last_run_delete_line,
         "next_step_line": next_step_line,
         "primary_action": primary_action,
         "can_launch": can_launch,

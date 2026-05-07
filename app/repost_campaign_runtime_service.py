@@ -611,6 +611,19 @@ class RepostCampaignRuntimeService:
                     "warnings": readiness.get("warnings") or [],
                 },
             )
+        if readiness.get("active_placement") or int(readiness.get("delete_failed") or 0) > 0:
+            return RepostCampaignActionResult(
+                ok=False,
+                action="launch_campaign",
+                rule_id=rule_id,
+                saved_post_id=readiness.get("saved_post_id"),
+                error_text="Кампания уже активна" if readiness.get("active_placement") else "Есть проблемы удаления в предыдущем запуске.",
+                extra={
+                    "active_placement": bool(readiness.get("active_placement")),
+                    "last_run_id": readiness.get("active_run_id"),
+                    "launch_readiness": readiness,
+                },
+            )
         loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="launch_campaign")
         if isinstance(loaded, RepostCampaignActionResult):
             return loaded
@@ -828,7 +841,19 @@ class RepostCampaignRuntimeService:
         if will_send_total <= 0:
             block_reasons.append("Нет получателей для запуска кампании.")
         has_skipped = will_skip_total > 0
+        last_run = self.repo.list_campaign_runs_for_rule(rule_id, limit=1)[0] if self.repo.list_campaign_runs_for_rule(rule_id, limit=1) else None
+        last_run_details = self.get_campaign_run_details(rule_id=rule_id, run_id=int(last_run.get("id"))) if last_run else {}
+        summary = (last_run_details or {}).get("summary") or {}
+        delete_pending = int(summary.get("delete_pending") or 0)
+        delete_failed = int(summary.get("delete_failed") or 0)
+        active_placement = delete_pending > 0 or int(summary.get("delete_processing") or 0) > 0
         can_launch = saved_post_exists and show_seconds > 0 and main_target_ready and extra_active_problem == 0 and will_send_total > 0
+        if active_placement:
+            block_reasons.append("Предыдущая кампания ещё активна: публикации ожидают автоудаления.")
+            can_launch = False
+        if delete_failed > 0:
+            block_reasons.append("Есть проблемы удаления в предыдущем запуске.")
+            can_launch = False
         can_launch_ready_only = saved_post_exists and show_seconds > 0 and main_target_ready and will_send_total > 0 and has_skipped
         result = {
             "ok": True,
@@ -854,6 +879,10 @@ class RepostCampaignRuntimeService:
             "ready_extra_targets": ready_extra_targets,
             "paused_targets": paused_targets,
             "problem_targets": problem_targets,
+            "active_placement": active_placement,
+            "active_run_id": int(last_run.get("id")) if last_run else None,
+            "delete_pending": delete_pending,
+            "delete_failed": delete_failed,
         }
         self.logger.info("REPOST_CAMPAIGN_LAUNCH_READINESS | rule_id=%s can_launch=%s will_send_total=%s extra_ready=%s extra_paused=%s extra_problem=%s extra_active_problem=%s", rule_id, can_launch, will_send_total, len(ready_extra_targets), len(paused_targets), len(problem_targets), extra_active_problem)
         return result

@@ -116,10 +116,10 @@ def test_control_center_view_model_ready():
         saved_post_line="📝 Рекламный пост: #13 · фото",
         control_center={"ok": True, "readiness": {"ready": True, "show_seconds": 60}, "issues": []},
     )
-    assert vm["title_status"] == "✅ Готова к запуску"
-    assert "📝 Рекламный пост:" in vm["creative_line"]
+    assert vm["screen_state"] == "ready_to_launch"
+    assert vm["creative_line"] == "📝 Рекламный пост"
     assert "📣 Каналы/Группы:" in vm["targets_line"]
-    assert "⏳ Время показа:" in vm["show_seconds_line"]
+    assert vm["show_seconds_line"] == "⏳ Время показа"
     assert vm["can_launch"] is True
 
 
@@ -130,7 +130,7 @@ def test_control_center_view_model_not_ready_no_show_seconds():
         control_center={"ok": True, "readiness": {"ready": False}, "issues": []},
     )
     assert vm["can_launch"] is False
-    assert vm["title_status"] == "⚠️ Нужно настроить время показа"
+    assert vm["screen_state"] == "not_configured"
 
 
 def test_control_center_view_model_last_run_line_compact():
@@ -145,8 +145,8 @@ def test_control_center_view_model_last_run_line_compact():
             "issues": [],
         },
     )
-    assert "📊 Последний запуск:" in vm["last_run_line"]
-    assert "#4" in vm["last_run_line"]
+    assert vm["last_run_title_line"] == "📊 Последний запуск"
+    assert "#4" not in vm["last_run_line"]
 
 
 def test_delete_failed_has_priority_over_ready():
@@ -160,7 +160,7 @@ def test_delete_failed_has_priority_over_ready():
             "last_run_details": {"ok": True, "summary": {"delete_failed": 1}},
         },
     )
-    assert vm["title_status"] == "⚠️ Есть проблемы удаления"
+    assert vm["screen_state"] == "delete_problem"
 
 
 def test_delete_line_variants():
@@ -180,9 +180,10 @@ def test_delete_line_variants():
         saved_post_line="📝 Рекламный пост: не выбран",
         control_center={**base, "last_run_details": {"ok": True, "summary": {"deleted": 3}}},
     )
-    assert pending["last_run_delete_line"] == "🧹 Удаление последнего запуска: ожидает 2"
-    assert failed["last_run_delete_line"] == "🧹 Удаление последнего запуска: 1 ошибка"
-    assert deleted["last_run_delete_line"] == "🧹 Удаление последнего запуска: всё удалено"
+    assert pending["screen_state"] == "active_placement"
+    assert "ожида" in pending["last_run_delete_line"].lower()
+    assert failed["screen_state"] == "delete_problem"
+    assert deleted["screen_state"] in {"completed","not_configured"}
 
 
 def test_auto_delete_lines():
@@ -196,8 +197,8 @@ def test_auto_delete_lines():
         saved_post_line="📝 Рекламный пост: #13 · фото",
         control_center={"ok": True, "readiness": {"ready": False}, "issues": []},
     )
-    assert enabled["auto_delete_line"] == "🧹 Автоудаление: включено"
-    assert not_set["auto_delete_line"] == "🧹 Автоудаление: не задано"
+    assert "Автоудаление: включено" not in enabled["auto_delete_line"]
+    assert "не настроено" in not_set["auto_delete_line"]
 
 
 def test_control_center_copy_uses_ad_post_and_channels_groups():
