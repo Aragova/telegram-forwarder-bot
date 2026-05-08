@@ -343,7 +343,7 @@ def test_vip_features_view_contains_placeholder_text():
     text, keyboard = build_repost_campaign_vip_features_view(rule_id=5)
     assert "💎 VIP функции" in text
     assert "A/B-тесты" in text
-    assert "💰 К кампании" in _texts_from_keyboard(keyboard)
+    assert "⬅️ Назад" in _texts_from_keyboard(keyboard)
 
 
 def _stats_payload(channels_count=12):
@@ -699,3 +699,20 @@ def test_bot_has_real_schedule_handlers_blocks():
     assert 'async def handle_rule_repost_campaign_schedule_confirm' in source
     assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_STARTED' in source
     assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_DONE' in source
+
+def test_schedule_menu_view_shows_scheduled_launches_block():
+    from app.repost_campaign_ui import build_repost_campaign_schedule_menu_view
+    launches = [{"id": 123, "status": "scheduled", "scheduled_at": "2026-05-09T15:00:00+00:00"}]
+    text, kb = build_repost_campaign_schedule_menu_view(rule_id=7, scheduled_launches=launches)
+    assert "Ближайшие запланированные запуски:" in text
+    assert "ожидает запуска" in text
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert "📄 Открыть запуск #123" in labels
+
+
+def test_scheduled_detail_view_status_mapping_and_cancel_visibility():
+    from app.repost_campaign_ui import build_repost_campaign_scheduled_launch_detail_view
+    text, kb = build_repost_campaign_scheduled_launch_detail_view(rule_id=1, scheduled_launch={"id": 1, "status": "failed", "scheduled_at": "2026-05-09T15:00:00+00:00", "saved_post_id": 26, "show_seconds": 86400})
+    assert "❌ ошибка запуска" in text
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert "❌ Отменить запуск" not in labels
