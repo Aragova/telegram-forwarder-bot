@@ -7381,6 +7381,7 @@ async def handle_rule_repost_campaign_delete_message(callback: CallbackQuery):
             repo=db,
             renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger),
             deleter=delete_service,
+            telethon_client=telethon_client,
         )
         result = await runtime.delete_campaign_run_message_now(
             rule_id=rule_id,
@@ -10216,6 +10217,7 @@ async def _start_bot_role() -> None:
             repo=db,
             renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir),
             deleter=delete_service,
+            telethon_client=telethon_client,
         )
         asyncio.create_task(run_repost_campaign_delete_loop(runtime=delete_runtime, interval_seconds=10, batch_limit=50))
         logger.info("REPOST_CAMPAIGN_DELETE_LOOP_STARTED | interval_seconds=10 | batch_limit=50")
@@ -10272,6 +10274,7 @@ async def _start_all_role() -> None:
             repo=db,
             renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir),
             deleter=delete_service,
+            telethon_client=telethon_client,
         )
         asyncio.create_task(run_repost_campaign_delete_loop(runtime=delete_runtime, interval_seconds=10, batch_limit=50))
         logger.info("REPOST_CAMPAIGN_DELETE_LOOP_STARTED | interval_seconds=10 | batch_limit=50")

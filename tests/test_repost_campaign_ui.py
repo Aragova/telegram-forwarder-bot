@@ -543,3 +543,42 @@ def test_bot_has_campaign_target_callbacks_and_card_import():
     ]:
         assert cb in source
     assert "build_repost_campaign_target_card_view" in source
+
+
+def test_campaign_delete_loop_runtime_gets_telethon_client_in_bot_role():
+    source = Path("bot.py").read_text(encoding="utf-8")
+
+    marker = "async def _start_bot_role()"
+    start = source.index(marker)
+    end = source.index("async def _start_scheduler_role()", start)
+    block = source[start:end]
+
+    assert "run_repost_campaign_delete_loop(runtime=delete_runtime" in block
+    assert "delete_runtime = RepostCampaignRuntimeService(" in block
+    assert "telethon_client=telethon_client" in block
+
+
+def test_campaign_delete_loop_runtime_gets_telethon_client_in_all_role():
+    source = Path("bot.py").read_text(encoding="utf-8")
+
+    marker = "async def _start_all_role()"
+    start = source.index(marker)
+    end = source.index("async def main()", start) if "async def main()" in source[start:] else len(source)
+    block = source[start:end]
+
+    assert "run_repost_campaign_delete_loop(runtime=delete_runtime" in block
+    assert "delete_runtime = RepostCampaignRuntimeService(" in block
+    assert "telethon_client=telethon_client" in block
+
+
+def test_campaign_manual_delete_message_runtime_gets_telethon_client():
+    source = Path("bot.py").read_text(encoding="utf-8")
+
+    marker = "async def handle_rule_repost_campaign_delete_message"
+    start = source.index(marker)
+    end = source.index("async def", start + len(marker))
+    block = source[start:end]
+
+    assert "delete_campaign_run_message_now" in block
+    assert "runtime = RepostCampaignRuntimeService(" in block
+    assert "telethon_client=telethon_client" in block
