@@ -514,6 +514,7 @@ def build_repost_campaign_post_stats_view(*, rule_id: int, saved_post_id: int, s
         lines.append(vm["coverage_line"])
     rows = [
         [InlineKeyboardButton(text="📊 Статистика по каналам", callback_data=f"rule_repost_campaign_post_channels_stats:{rule_id}:{saved_post_id}:0")],
+        [InlineKeyboardButton(text="📤 Экспорт CSV", callback_data=f"rule_repost_campaign_post_export_csv:{rule_id}:{saved_post_id}"), InlineKeyboardButton(text="📄 Экспорт TXT", callback_data=f"rule_repost_campaign_post_export_txt:{rule_id}:{saved_post_id}")],
     ]
     if vm.get("current_line"):
         rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
@@ -579,6 +580,7 @@ def build_repost_campaign_post_channels_stats_view(
     if nav:
         rows.append(nav)
     rows.extend([
+        [InlineKeyboardButton(text="📤 Экспорт CSV", callback_data=f"rule_repost_campaign_post_export_csv:{rule_id}:{saved_post_id}"), InlineKeyboardButton(text="📄 Экспорт TXT", callback_data=f"rule_repost_campaign_post_export_txt:{rule_id}:{saved_post_id}")],
         [InlineKeyboardButton(text="📄 К посту", callback_data=f"rule_repost_campaign_post_stats:{rule_id}:{saved_post_id}")],
         [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
@@ -800,6 +802,7 @@ def build_repost_campaign_views_report_view(*, rule_id: int, run_id: int, report
         lines.extend(["", "Где нет данных:"] + vm["problem_lines"])
     lines.extend(["", vm.get("delete_note_line") or "", vm.get("summary_line") or ""])
     rows = [
+        [InlineKeyboardButton(text="📤 Экспорт CSV", callback_data=f"rule_repost_campaign_views_export_csv:{rule_id}:{run_id}"), InlineKeyboardButton(text="📄 Экспорт TXT", callback_data=f"rule_repost_campaign_views_export_txt:{rule_id}:{run_id}")],
         [InlineKeyboardButton(text="🔄 Обновить просмотры", callback_data=f"rule_repost_campaign_views_report:{rule_id}:{run_id}")],
         [InlineKeyboardButton(text="📄 Детали запуска", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run_id}")],
         [InlineKeyboardButton(text="📊 История размещений", callback_data=f"rule_repost_campaign_history:{rule_id}")],
