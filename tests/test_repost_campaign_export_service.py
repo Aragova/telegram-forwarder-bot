@@ -22,6 +22,26 @@ def test_build_campaign_run_report_csv_contains_bom_headers_and_values():
     assert "123;ok;live" in text
 
 
+def test_build_campaign_run_report_csv_supports_sent_message_ids_json_list():
+    report = {
+        "run_id": 15,
+        "saved_post_id": 26,
+        "items": [{"target_title": "A", "sent_message_ids_json": [10, 11, 12]}],
+    }
+    text = build_campaign_run_report_csv(report).decode("utf-8-sig")
+    assert "10,11,12" in text
+
+
+def test_build_campaign_run_report_csv_supports_sent_message_ids_json_string():
+    report = {
+        "run_id": 15,
+        "saved_post_id": 26,
+        "items": [{"target_title": "A", "sent_message_ids_json": "[10, 11, 12]"}],
+    }
+    text = build_campaign_run_report_csv(report).decode("utf-8-sig")
+    assert "10,11,12" in text
+
+
 def test_build_campaign_run_report_txt_contains_summary_and_channels():
     report = {"run_id": 15, "saved_post_id": 26, "views_total": 9815, "views_available": 1, "items": [{"target_title": "Wiki", "views": 1289, "views_status": "ok", "delete_status": "deleted"}]}
     text = build_campaign_run_report_txt(report)

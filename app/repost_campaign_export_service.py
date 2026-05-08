@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 
 
 def _clean_text(value) -> str:
@@ -32,6 +33,25 @@ def _format_views(item: dict) -> int | None:
     return int(value)
 
 
+def _format_message_ids(item: dict) -> str:
+    candidates = [item.get("sent_message_ids"), item.get("sent_message_ids_json")]
+    for value in candidates:
+        if isinstance(value, list):
+            return ",".join(str(int(x)) for x in value if x is not None)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except Exception:
+                return _clean_text(value)
+            if isinstance(parsed, list):
+                return ",".join(str(int(x)) for x in parsed if x is not None)
+            return _clean_text(value)
+    sent_message_id = item.get("sent_message_id")
+    if sent_message_id is not None:
+        return str(sent_message_id)
+    return ""
+
+
 def build_campaign_run_report_csv(report: dict) -> bytes:
     headers = [
         "run_id", "saved_post_id", "target_title", "target_id", "target_thread_id", "send_status", "delete_status",
@@ -40,10 +60,7 @@ def build_campaign_run_report_csv(report: dict) -> bytes:
     ]
     rows: list[list[object]] = []
     for item in (report or {}).get("items") or []:
-        sent_ids = item.get("sent_message_ids")
-        sent_ids_text = ""
-        if isinstance(sent_ids, list):
-            sent_ids_text = ",".join(str(int(x)) for x in sent_ids if x is not None)
+        sent_ids_text = _format_message_ids(item)
         rows.append([
             report.get("run_id"),
             report.get("saved_post_id"),
@@ -89,7 +106,9 @@ def build_campaign_run_report_txt(report: dict) -> str:
         suffix = ""
         if status == "deleted":
             suffix = " — удалено"
-        lines.append(f"{index}. {title} — {views:,} просмотров{suffix}".replace(",", " "))
+        message_ids = _format_message_ids(item)
+        message_ids_suffix = f" — сообщения: {message_ids}" if message_ids else ""
+        lines.append(f"{index}. {title} — {views:,} просмотров{suffix}{message_ids_suffix}".replace(",", " "))
     return "\n".join(lines)
 
 
