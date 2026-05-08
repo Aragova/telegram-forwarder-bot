@@ -177,6 +177,23 @@ def test_post_stats_vm_prefers_full_channels_stats_over_top_channels():
     assert vm["channels_items"][0]["title"] == "Полный 1"
 
 
+def test_post_stats_vm_channel_line_for_unavailable():
+    vm = build_campaign_post_stats_view_model(stats={
+        "kind": "photo",
+        "channels_stats": [{"target_title": "Channel", "views_total": 0, "views_status": "unavailable"}],
+    })
+    assert "⚠️ нет данных — Channel" in vm["channels_lines"]
+
+
+def test_post_stats_vm_channel_line_for_ok():
+    vm = build_campaign_post_stats_view_model(stats={
+        "kind": "photo",
+        "runs_count": 3,
+        "channels_stats": [{"target_title": "Channel", "views_total": 520, "views_status": "ok"}],
+    })
+    assert "👁 520 — Channel" in vm["channels_lines"][0]
+
+
 def test_views_report_vm_uses_final_snapshot_deleted_note():
     vm = build_campaign_views_report_view_model(report={
         "status": "ready",

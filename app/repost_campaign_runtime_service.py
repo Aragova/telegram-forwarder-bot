@@ -1385,22 +1385,106 @@ class RepostCampaignRuntimeService:
         top_channels = []
         problem_channels = []
         channels_stats = []
-        if include_live_views and item.get("last_run_id"):
-            report = await self.build_campaign_views_report(rule_id=rule_id, run_id=int(item.get("last_run_id")))
-            if report.get("ok"):
-                views_total = report.get("views_total")
-                views_available = int(report.get("views_available") or 0)
-                views_unavailable = int(report.get("views_unavailable") or 0)
-                top_channels = report.get("top_items") or []
-                problem_channels = report.get("problem_items") or []
-                for report_item in report.get("items") or []:
-                    channels_stats.append({
-                        "target_title": report_item.get("target_title"),
-                        "target_id": report_item.get("target_id"),
-                        "views_total": int(report_item.get("views") or 0),
-                        "views_status": report_item.get("views_status") or "ok",
-                        "runs_count": int(item.get("runs_count") or 0),
-                    })
+        if include_live_views:
+            runs = self.repo.list_campaign_runs_for_rule(rule_id, limit=500)
+            runs_for_post = [r for r in runs if int(r.get("saved_post_id") or 0) == int(saved_post_id)]
+            channels_index = {}
+            for run in runs_for_post:
+                run_id = int(run.get("id") or 0)
+                if run_id <= 0:
+                    continue
+                details = self.get_campaign_run_details(rule_id=rule_id, run_id=run_id)
+                if not details.get("ok"):
+                    continue
+                for msg in details.get("messages") or []:
+                    send_status = str(msg.get("send_status") or "").strip().lower()
+                    message_ids = self._extract_sent_message_ids(msg)
+                    if send_status != "sent" or not message_ids:
+                        continue
+                    target_id = str(msg.get("target_id") or "")
+                    if not target_id:
+                        continue
+                    row = channels_index.get(target_id)
+                    if row is None:
+                        row = {
+                            "target_title": msg.get("target_title") or target_id,
+                            "target_id": target_id,
+                            "views_total": 0,
+                            "views_status": "ok",
+                            "views_source": None,
+                            "runs_count": 0,
+                            "error_text": None,
+                        }
+                        channels_index[target_id] = row
+                    row["runs_count"] = int(row.get("runs_count") or 0) + 1
+                    final_status = str(msg.get("views_final_status") or "").strip().lower()
+                    if final_status == "collected":
+                        count = int(msg.get("views_final_count") or 0)
+                        row["views_total"] = int(row.get("views_total") or 0) + count
+                        row["views_status"] = "ok"
+                        row["views_source"] = "final_snapshot"
+                        views_available += 1
+                        views_total = int(views_total or 0) + count
+                        continue
+                    if final_status == "unavailable":
+                        row["views_status"] = "unavailable"
+                        row["views_source"] = "final_snapshot"
+                        row["error_text"] = msg.get("views_final_error_text") or "Telegram не вернул просмотры перед удалением."
+                        views_unavailable += 1
+                        if views_total is None:
+                            views_total = 0
+                        continue
+                    delete_status = str(msg.get("delete_status") or "").strip().lower()
+                    if delete_status == "deleted":
+                        row["views_status"] = "unavailable"
+                        row["views_source"] = "final_snapshot"
+                        row["error_text"] = "Публикация уже удалена, финальные просмотры недоступны."
+                        views_unavailable += 1
+                        if views_total is None:
+                            views_total = 0
+                        continue
+                    if not include_live_views:
+                        continue
+                    report_message_id = int(message_ids[0] or 0)
+                    if report_message_id <= 0:
+                        row["views_status"] = "unavailable"
+                        row["error_text"] = "Нет идентификатора сообщения для получения просмотров."
+                        views_unavailable += 1
+                        if views_total is None:
+                            views_total = 0
+                        continue
+                    try:
+                        normalized_entity = normalize_telethon_target(target_id)
+                        try:
+                            telethon_message = await self.telethon_client.get_messages(entity=normalized_entity, ids=report_message_id)
+                        except Exception:
+                            entity = await self.telethon_client.get_entity(normalized_entity)
+                            telethon_message = await self.telethon_client.get_messages(entity=entity, ids=report_message_id)
+                        views = getattr(telethon_message, "views", None) if telethon_message is not None else None
+                        if views is None:
+                            row["views_status"] = "unavailable"
+                            row["views_source"] = "live"
+                            row["error_text"] = "Публикация уже удалена или Telegram не вернул данные."
+                            views_unavailable += 1
+                            if views_total is None:
+                                views_total = 0
+                        else:
+                            row["views_total"] = int(row.get("views_total") or 0) + int(views or 0)
+                            row["views_status"] = "ok"
+                            row["views_source"] = "live"
+                            views_available += 1
+                            views_total = int(views_total or 0) + int(views or 0)
+                    except Exception:
+                        row["views_status"] = "unavailable"
+                        row["views_source"] = "live"
+                        row["error_text"] = "Telegram не вернул просмотры по этому каналу."
+                        views_unavailable += 1
+                        if views_total is None:
+                            views_total = 0
+            channels_stats = list(channels_index.values())
+            channels_stats.sort(key=lambda x: int(x.get("views_total") or 0), reverse=True)
+            top_channels = [x for x in channels_stats if str(x.get("views_status")) == "ok"][:5]
+            problem_channels = [x for x in channels_stats if str(x.get("views_status")) in {"unavailable", "failed", "problem"}]
         result = {"ok": True, "rule_id": rule_id, "saved_post_id": saved_post_id, "saved_post": item.get("saved_post"), "description": item.get("description"), "kind": item.get("kind"), "is_album": item.get("is_album"), "media_count": item.get("media_count"), "is_current": item.get("is_current"), "runs_count": item.get("runs_count"), "last_run_id": item.get("last_run_id"), "last_started_at": item.get("last_started_at"), "views_total": views_total, "views_available": views_available, "views_unavailable": views_unavailable, "views_mode": ("live" if include_live_views else "lazy"), "placements_total": item.get("placements_total"), "placements_sent": item.get("placements_sent"), "placements_failed": item.get("placements_failed"), "channels": top_channels, "runs": [], "top_channels": top_channels, "problem_channels": problem_channels, "channels_stats": channels_stats, "error_text": None}
         self.logger.info("REPOST_CAMPAIGN_POST_STATS_BUILT | rule_id=%s | saved_post_id=%s | views_mode=%s | views_total=%s", rule_id, saved_post_id, result.get("views_mode"), result.get("views_total"))
         return result
