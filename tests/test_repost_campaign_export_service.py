@@ -96,6 +96,22 @@ def test_build_campaign_run_report_xlsx_returns_valid_workbook():
     assert ws["I2"].value == "10,11,12"
 
 
+def test_build_campaign_run_report_xlsx_empty_items_has_valid_column_widths():
+    report = {
+        "ok": True,
+        "run_id": 15,
+        "saved_post_id": 26,
+        "items": [],
+    }
+    data = build_campaign_run_report_xlsx(report)
+    wb = load_workbook(BytesIO(data))
+    ws = wb["Отчёт запуска"]
+    for idx in range(1, ws.max_column + 1):
+        width = ws.column_dimensions[ws.cell(row=1, column=idx).column_letter].width
+        assert width is not None
+        assert 10 <= width <= 45
+
+
 def test_build_campaign_post_stats_xlsx_returns_valid_workbook():
     stats = {
         "saved_post_id": 26,
@@ -111,3 +127,15 @@ def test_build_campaign_post_stats_xlsx_returns_valid_workbook():
     assert ws["G2"].value == 2
     assert ws["H2"].value == 1
 
+
+def test_build_campaign_post_stats_xlsx_empty_channels_has_valid_workbook():
+    stats = {
+        "saved_post_id": 26,
+        "channels_stats": [],
+    }
+    data = build_campaign_post_stats_xlsx(stats)
+    assert isinstance(data, bytes)
+    wb = load_workbook(BytesIO(data))
+    ws = wb["Статистика поста"]
+    headers = [cell.value for cell in ws[1]]
+    assert headers == ["saved_post_id", "target_title", "target_id", "views_total", "views_status", "views_source", "runs_count", "unavailable_count", "error_text"]
