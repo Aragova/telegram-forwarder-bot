@@ -148,7 +148,18 @@ def build_campaign_target_item_view(target: dict, *, index: int | None = None) -
     title_raw = format_campaign_target_display_title(target, index=index)
     is_active = bool(target.get("is_active"))
     check_error = normalize_campaign_target_error_text(target.get("last_check_error"))
-    requires_attention = bool(check_error)
+    publish_status = (target.get("publish_status") or "").strip().lower()
+    delete_status = (target.get("delete_permission_status") or "").strip().lower()
+    has_new_status_data = bool(target.get("publish_status") or target.get("delete_permission_status") or target.get("can_post") is not None or target.get("can_delete") is not None)
+    if publish_status not in {"confirmed", "denied", "unknown"}:
+        can_post = target.get("can_post")
+        publish_status = "confirmed" if (can_post is True or (not has_new_status_data and not check_error)) else ("denied" if can_post is False and check_error else "unknown")
+    if delete_status not in {"confirmed", "denied", "unknown"}:
+        can_delete = target.get("can_delete")
+        delete_status = "confirmed" if can_delete is True else ("denied" if can_delete is False else "unknown")
+    requires_attention = (publish_status in {"denied", "unknown"} or delete_status == "denied") if has_new_status_data else bool(check_error)
+    publish_line = "Публикация: ✅ подтверждена" if publish_status == "confirmed" else ("Публикация: ❌ нет права" if publish_status == "denied" else "Публикация: 🟡 не удалось подтвердить")
+    delete_line = "Удаление: ✅ подтверждено" if delete_status == "confirmed" else ("Удаление: ❌ нет права" if delete_status == "denied" else "Удаление: 🟡 не удалось подтвердить")
     if requires_attention:
         status_icon = "⚠️"
         status_line = "Статус: ⚠️ требует внимания"
@@ -158,7 +169,7 @@ def build_campaign_target_item_view(target: dict, *, index: int | None = None) -
     elif is_active:
         status_icon = "🟢"
         status_line = "Статус: 🟢 активен"
-        check_line = "Проверка: ✅ готово"
+        check_line = "Проверка: 🟡 есть предупреждение" if delete_status == "unknown" else "Проверка: ✅ готово"
         can_pause = True
         can_enable = False
     else:
@@ -177,6 +188,8 @@ def build_campaign_target_item_view(target: dict, *, index: int | None = None) -
         "technical_line": f"Технический ID: {target_id}",
         "thread_line": f"Тема: {thread_id}" if thread_id is not None else None,
         "check_line": check_line,
+        "publish_line": publish_line,
+        "delete_line": delete_line,
         "error_line": f"Ошибка: {check_error}" if check_error else None,
         "requires_attention": requires_attention,
         "can_pause": can_pause,

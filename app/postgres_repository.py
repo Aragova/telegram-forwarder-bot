@@ -723,6 +723,11 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS result_json TEXT NULL;
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ NULL;
         ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS publish_status TEXT NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS delete_permission_status TEXT NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS publish_error_text TEXT NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS delete_error_text TEXT NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS check_source TEXT NULL;
 
 
         CREATE TABLE IF NOT EXISTS rule_repost_campaign_targets (
@@ -734,6 +739,11 @@ class PostgresRepository(RepositoryProtocol):
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             can_post BOOLEAN NULL,
             can_delete BOOLEAN NULL,
+            publish_status TEXT NULL,
+            delete_permission_status TEXT NULL,
+            publish_error_text TEXT NULL,
+            delete_error_text TEXT NULL,
+            check_source TEXT NULL,
             last_check_at TIMESTAMPTZ NULL,
             last_check_error TEXT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -7571,19 +7581,36 @@ class PostgresRepository(RepositoryProtocol):
         *,
         title: str | None = None,
         last_check_error: str | None = None,
+        can_post: bool | None = None,
+        can_delete: bool | None = None,
+        publish_status: str | None = None,
+        delete_permission_status: str | None = None,
+        publish_error_text: str | None = None,
+        delete_error_text: str | None = None,
+        check_source: str | None = None,
+        check_status_json: dict | None = None,
     ) -> bool:
+        _ = check_status_json
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE rule_repost_campaign_targets
                     SET title = COALESCE(%s, title),
+                        can_post = %s,
+                        can_delete = %s,
+                        publish_status = %s,
+                        delete_permission_status = %s,
+                        publish_error_text = %s,
+                        delete_error_text = %s,
+                        check_source = %s,
+                        last_check_at = NOW(),
                         last_check_error = %s,
                         updated_at = NOW()
                     WHERE id = %s
                     RETURNING id
                     """,
-                    (title, last_check_error, int(row_id)),
+                    (title, can_post, can_delete, publish_status, delete_permission_status, publish_error_text, delete_error_text, check_source, last_check_error, int(row_id)),
                 )
                 row = cur.fetchone()
             conn.commit()

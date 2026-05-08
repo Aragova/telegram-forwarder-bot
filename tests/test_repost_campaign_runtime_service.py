@@ -124,8 +124,8 @@ class _FakeRepo:
         self.remove_target_calls.append(target_row_id)
         return True
 
-    def update_rule_repost_campaign_target_check_result(self, row_id, *, title=None, last_check_error=None):
-        self.update_target_check_calls.append((row_id, title, last_check_error))
+    def update_rule_repost_campaign_target_check_result(self, row_id, *, title=None, last_check_error=None, **kwargs):
+        self.update_target_check_calls.append((row_id, title, last_check_error, kwargs))
         return self.update_target_check_result
 
 
@@ -838,7 +838,10 @@ def test_check_one_success_saves_result():
     assert result["ok"] is True
     assert result["target_row_id"] == 1
     assert result["saved"] is True
-    assert repo.update_target_check_calls[0] == (1, "A", None)
+    row_id, title, err, extra = repo.update_target_check_calls[0]
+    assert (row_id, title, err) == (1, "A", None)
+    assert extra.get("can_post") is True
+    assert extra.get("publish_status") == "confirmed"
 
 
 def test_set_campaign_target_active_result_contains_target_row_id():
@@ -873,7 +876,10 @@ def test_check_one_failed_saves_error():
     result=asyncio.run(rt.check_campaign_target(rule_id=1,target_row_id=1))
     assert result["ok"] is False
     assert result["check_ok"] is False
-    assert repo.update_target_check_calls[0] == (1, "A", "err")
+    row_id, title, err, extra = repo.update_target_check_calls[0]
+    assert (row_id, title) == (1, "A")
+    assert err
+    assert extra.get("publish_status") == "denied"
 
 
 def test_check_one_ok_but_save_failed():

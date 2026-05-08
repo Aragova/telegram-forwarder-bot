@@ -387,6 +387,8 @@ def build_repost_campaign_target_card_view(*, rule_id: int, target: dict | None,
         view.get("title") or "Канал/группа",
         "",
         view.get("status_line") or "Статус: —",
+        view.get("publish_line") or "Публикация: 🟡 не удалось подтвердить",
+        view.get("delete_line") or "Удаление: 🟡 не удалось подтвердить",
         view.get("check_line") or "Проверка: —",
         f"Технический ID: {target.get('target_id') or '—'}",
     ]
@@ -931,18 +933,12 @@ def build_repost_campaign_target_check_result_view(*, rule_id: int, result: dict
     saved = bool(payload.get("saved", True))
     title = (result or {}).get("target_title") or (result or {}).get("target_id") or "—"
     target_id = (result or {}).get("target_id") or "—"
-    can_publish = (result or {}).get("can_publish")
-    can_delete = (result or {}).get("can_delete")
-    publish_line = "Публикация: ⚠️ не подтверждена"
-    if can_publish is True:
-        publish_line = "Публикация: ✅ разрешена"
-    elif can_publish is False:
-        publish_line = "Публикация: ❌ нет"
-    delete_line = "Удаление: ⚠️ не подтверждено"
-    if can_delete is True:
-        delete_line = "Удаление: ✅ разрешено"
-    elif can_delete is False:
-        delete_line = "Удаление: ❌ нет"
+    p = (result or {}).get("publish_status") or ("confirmed" if (result or {}).get("can_publish") is True else "unknown")
+    d = (result or {}).get("delete_status")
+    if not d:
+        d = "confirmed" if (result or {}).get("can_delete") is True else ("denied" if (result or {}).get("can_delete") is False else "unknown")
+    publish_line = "Публикация: ✅ подтверждена" if p == "confirmed" else ("Публикация: ❌ нет права" if p == "denied" else "Публикация: 🟡 не удалось подтвердить")
+    delete_line = "Удаление: ✅ подтверждено" if d == "confirmed" else ("Удаление: ❌ нет права" if d == "denied" else "Удаление: 🟡 не удалось подтвердить")
     if check_ok and not saved:
         text = (
             "❌ Проверка выполнена, но результат не сохранён\n\n"
@@ -984,10 +980,15 @@ def build_repost_campaign_target_check_result_view(*, rule_id: int, result: dict
 
 def build_repost_campaign_targets_check_result_view(*, rule_id: int, result: dict) -> tuple[str, InlineKeyboardMarkup]:
     items = (result or {}).get("items") or []
+    blocked = sum(1 for i in items if (i.get("publish_status") in {"denied", "unknown"} or i.get("delete_status") == "denied"))
+    delete_warn = sum(1 for i in items if i.get("publish_status") == "confirmed" and i.get("delete_status") == "unknown")
     lines = [
         "🧪 Проверка прав завершена",
         "",
+        f"Проверено: {int((result or {}).get('checked') or 0)}",
         f"✅ Готово к размещению: {int((result or {}).get('passed') or 0)}",
+        f"❌ Заблокировано: {blocked}",
+        f"🟡 Не подтверждено удаление: {delete_warn}",
         f"⚠️ Требуют внимания: {int((result or {}).get('failed') or 0)}",
         f"📣 Проверено: {int((result or {}).get('checked') or 0)}",
         "",

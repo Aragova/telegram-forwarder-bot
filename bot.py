@@ -7030,7 +7030,7 @@ def _build_repost_campaign_runtime() -> RepostCampaignRuntimeService:
         repo=db,
         renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger),
         deleter=RepostCampaignDeleteService(bot=bot, telethon_client=telethon_client, logger_=logger),
-        target_checker=RepostCampaignTargetCheckService(telethon_client=telethon_client, logger_=logger),
+        target_checker=RepostCampaignTargetCheckService(telethon_client=telethon_client, bot=bot, logger_=logger),
         telethon_client=telethon_client,
         logger_=logger,
     )

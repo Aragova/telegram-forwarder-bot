@@ -229,7 +229,31 @@ class RepostCampaignRuntimeService:
         if not target:
             return {"ok": False, "rule_id": rule_id, "target_row_id": target_row_id, "error_text": "Канал/группа не найдены в кампании"}
         check = await self.target_checker.check_target(target_id=target["target_id"], target_thread_id=target.get("target_thread_id"))
-        saved = bool(self.repo.update_rule_repost_campaign_target_check_result(target_row_id, title=check.title, last_check_error=None if check.ok else check.error_text))
+        last_check_error = None
+        publish_status = getattr(check, "publish_status", ("confirmed" if getattr(check, "can_publish", False) else "denied"))
+        delete_status = getattr(check, "delete_status", ("confirmed" if getattr(check, "can_delete", None) is True else ("denied" if getattr(check, "can_delete", None) is False else "unknown")))
+        publish_error_text = getattr(check, "publish_error_text", None)
+        delete_error_text = getattr(check, "delete_error_text", None)
+        source = getattr(check, "source", "telethon")
+        details = getattr(check, "details", None)
+        if publish_status == "denied":
+            last_check_error = publish_error_text or "Нет права публикации"
+        elif publish_status == "unknown":
+            last_check_error = "Не удалось подтвердить право публикации"
+        elif delete_status == "denied":
+            last_check_error = delete_error_text or "Нет права удаления"
+        saved = bool(self.repo.update_rule_repost_campaign_target_check_result(
+            target_row_id,
+            title=check.title,
+            last_check_error=last_check_error,
+            can_post=check.can_publish,
+            can_delete=check.can_delete,
+            publish_status=publish_status,
+            delete_permission_status=delete_status,
+            publish_error_text=publish_error_text,
+            delete_error_text=delete_error_text,
+            check_source=source,
+        ))
         if not saved:
             self.logger.warning(
                 "REPOST_CAMPAIGN_TARGET_CHECK_SAVE_FAILED | rule_id=%s | target_row_id=%s | title=%s | ok=%s",
@@ -254,6 +278,12 @@ class RepostCampaignRuntimeService:
             "can_view": check.can_view,
             "can_publish": check.can_publish,
             "can_delete": check.can_delete,
+            "publish_status": publish_status,
+            "delete_status": delete_status,
+            "publish_error_text": publish_error_text,
+            "delete_error_text": delete_error_text,
+            "source": source,
+            "details": details,
         }
 
     async def check_campaign_targets(self, *, rule_id: int, active_only: bool = False, admin_id: int | None = None, limit: int = 50) -> dict:
@@ -821,7 +851,28 @@ class RepostCampaignRuntimeService:
         paused_targets = []
         problem_targets = []
         for row in targets:
-            has_problem = bool(str(row.get("last_check_error") or "").strip())
+            publish_status = (row.get("publish_status") or "").strip().lower()
+            delete_status = (row.get("delete_permission_status") or "").strip().lower()
+            can_post = row.get("can_post")
+            if publish_status not in {"confirmed", "denied", "unknown"}:
+                if can_post is True:
+                    publish_status = "confirmed"
+                elif can_post is False:
+                    publish_status = "denied"
+                else:
+                    publish_status = "unknown"
+            if delete_status not in {"confirmed", "denied", "unknown"}:
+                if row.get("can_delete") is True:
+                    delete_status = "confirmed"
+                elif row.get("can_delete") is False:
+                    delete_status = "denied"
+                else:
+                    delete_status = "unknown"
+            legacy_error = bool(str(row.get("last_check_error") or "").strip())
+            if not (row.get("publish_status") or row.get("delete_permission_status") or row.get("can_post") is not None or row.get("can_delete") is not None):
+                has_problem = legacy_error
+            else:
+                has_problem = publish_status in {"denied", "unknown"} or delete_status == "denied"
             is_active = True if row.get("is_active") is None else bool(row.get("is_active"))
             if has_problem:
                 problem_targets.append(row)
@@ -830,6 +881,21 @@ class RepostCampaignRuntimeService:
             else:
                 paused_targets.append(row)
         extra_active_problem = sum(1 for row in problem_targets if bool(row.get("is_active")))
+        targets_publish_unknown = 0
+        targets_publish_denied = 0
+        targets_delete_unknown = 0
+        targets_delete_denied = 0
+        for row in targets:
+            p = (row.get("publish_status") or "").strip().lower()
+            d = (row.get("delete_permission_status") or "").strip().lower()
+            if p == "unknown":
+                targets_publish_unknown += 1
+            elif p == "denied":
+                targets_publish_denied += 1
+            if d == "unknown":
+                targets_delete_unknown += 1
+            elif d == "denied":
+                targets_delete_denied += 1
         main_targets_count = 1 if main_target_ready else 0
         will_send_total = main_targets_count + len(ready_extra_targets)
         will_skip_total = len(paused_targets) + len(problem_targets)
@@ -887,6 +953,10 @@ class RepostCampaignRuntimeService:
             "active_run_id": int(last_run.get("id")) if last_run else None,
             "delete_pending": delete_pending,
             "delete_failed": delete_failed,
+            "targets_delete_unknown": targets_delete_unknown,
+            "targets_delete_denied": targets_delete_denied,
+            "targets_publish_unknown": targets_publish_unknown,
+            "targets_publish_denied": targets_publish_denied,
         }
         self.logger.info("REPOST_CAMPAIGN_LAUNCH_READINESS | rule_id=%s can_launch=%s will_send_total=%s extra_ready=%s extra_paused=%s extra_problem=%s extra_active_problem=%s", rule_id, can_launch, will_send_total, len(ready_extra_targets), len(paused_targets), len(problem_targets), extra_active_problem)
         return result
