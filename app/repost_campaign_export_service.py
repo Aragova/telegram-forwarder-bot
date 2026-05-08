@@ -6,7 +6,6 @@ import json
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 
-
 def _clean_text(value) -> str:
     if value is None:
         return ""
@@ -153,8 +152,7 @@ def build_campaign_post_stats_txt(stats: dict) -> str:
             lines.append(f"{index}. {title} — нет данных")
     return "\n".join(lines)
 
-
-def _style_worksheet(ws, *, wrap_columns: set[str], number_columns: set[str]) -> None:
+  def _style_worksheet(ws, *, wrap_columns: set[str], number_columns: set[str]) -> None:
     max_row = ws.max_row
     max_col = ws.max_column
     if max_row <= 0 or max_col <= 0:

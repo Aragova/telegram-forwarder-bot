@@ -587,10 +587,12 @@ def test_views_report_view_has_export_buttons_and_callbacks():
     _, kb = build_repost_campaign_views_report_view(rule_id=5, run_id=8, report={"ok": True, "items": []})
     texts = _texts_from_keyboard(kb)
     callbacks = _callbacks_from_keyboard(kb)
+
     assert "📊 Excel XLSX" in texts
     assert "📤 Экспорт CSV" in texts
     assert "📄 Экспорт TXT" in texts
     assert "rule_repost_campaign_views_export_xlsx:5:8" in callbacks
+
     assert "rule_repost_campaign_views_export_csv:5:8" in callbacks
     assert "rule_repost_campaign_views_export_txt:5:8" in callbacks
 
@@ -610,6 +612,7 @@ def test_post_stats_views_have_export_buttons():
 
 def test_bot_has_export_callbacks_and_runtime_builder_usage():
     source = Path("bot.py").read_text(encoding="utf-8")
+
     assert "rule_repost_campaign_views_export_xlsx:" in source
     assert "rule_repost_campaign_views_export_csv:" in source
     assert "rule_repost_campaign_views_export_txt:" in source
@@ -620,3 +623,4 @@ def test_bot_has_export_callbacks_and_runtime_builder_usage():
     assert "from app.repost_campaign_export_service import" in source
     assert "build_campaign_run_report_xlsx" in source
     assert "build_campaign_post_stats_xlsx" in source
+
