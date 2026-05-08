@@ -1165,6 +1165,97 @@ def test_build_post_stats_collects_live_views_only_when_requested():
         return {"ok": True, "views_total": 10, "views_available": 1, "views_unavailable": 0, "top_items": [], "problem_items": []}
     runtime.build_campaign_views_report = _fake_report
     asyncio.run(runtime.build_campaign_post_stats(rule_id=1, saved_post_id=55, include_live_views=True))
-    assert calls["n"] == 1
+    assert calls["n"] == 0
     asyncio.run(runtime.build_campaign_post_stats(rule_id=1, saved_post_id=55, include_live_views=False))
-    assert calls["n"] == 1
+    assert calls["n"] == 0
+
+
+def test_build_campaign_post_stats_uses_final_snapshot_after_delete():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=26)
+    repo = _FakeRepo(rule=rule, saved_post={"content": {"kind": "text"}})
+    repo._runs = [{"id": 8, "saved_post_id": 26, "started_at": "2026-05-07T12:04:00+00:00"}]
+    repo._run = {"id": 8, "rule_id": 1, "saved_post_id": 26}
+    repo._messages = [
+        {"send_status": "sent", "target_id": "-1001", "target_title": "A", "sent_message_id": 101, "delete_status": "deleted", "views_final_status": "collected", "views_final_count": 120},
+        {"send_status": "sent", "target_id": "-1002", "target_title": "B", "sent_message_id": 102, "delete_status": "deleted", "views_final_status": "collected", "views_final_count": 80},
+    ]
+    telethon = _FakeTelethonClient({101: 999, 102: 999})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=telethon)
+    stats = asyncio.run(runtime.build_campaign_post_stats(rule_id=1, saved_post_id=26, include_live_views=True))
+    assert stats["views_total"] == 200
+    assert stats["views_available"] == 2
+    assert telethon.get_messages_calls == []
+    assert all(item.get("views_source") == "final_snapshot" for item in stats["channels_stats"])
+
+
+def test_build_campaign_post_stats_marks_unavailable_snapshot_as_no_data():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=26)
+    repo = _FakeRepo(rule=rule, saved_post={"content": {"kind": "text"}})
+    repo._runs = [{"id": 8, "saved_post_id": 26, "started_at": "2026-05-07T12:04:00+00:00"}]
+    repo._run = {"id": 8, "rule_id": 1, "saved_post_id": 26}
+    repo._messages = [
+        {"send_status": "sent", "target_id": "-1001", "target_title": "A", "sent_message_id": 101, "delete_status": "deleted", "views_final_status": "unavailable", "views_final_error_text": "Telegram не вернул просмотры перед удалением"},
+    ]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=_FakeTelethonClient())
+    stats = asyncio.run(runtime.build_campaign_post_stats(rule_id=1, saved_post_id=26, include_live_views=True))
+    assert stats["views_total"] == 0
+    assert stats["views_unavailable"] == 1
+    assert stats["channels_stats"][0]["views_status"] == "unavailable"
+
+
+def test_build_campaign_post_stats_aggregates_same_channel_across_runs():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=26)
+    repo = _FakeRepo(rule=rule, saved_post={"content": {"kind": "text"}})
+    repo._runs = [
+        {"id": 8, "saved_post_id": 26, "started_at": "2026-05-07T12:04:00+00:00"},
+        {"id": 9, "saved_post_id": 26, "started_at": "2026-05-07T13:04:00+00:00"},
+    ]
+    run_messages = {
+        8: [{"send_status": "sent", "target_id": "-1001", "target_title": "A", "sent_message_id": 101, "delete_status": "deleted", "views_final_status": "collected", "views_final_count": 100}],
+        9: [{"send_status": "sent", "target_id": "-1001", "target_title": "A", "sent_message_id": 201, "delete_status": "deleted", "views_final_status": "collected", "views_final_count": 150}],
+    }
+    repo.get_campaign_run = lambda run_id: {"id": run_id, "rule_id": 1, "saved_post_id": 26}
+    repo.list_campaign_run_messages = lambda run_id: run_messages.get(run_id, [])
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=_FakeTelethonClient())
+    stats = asyncio.run(runtime.build_campaign_post_stats(rule_id=1, saved_post_id=26, include_live_views=True))
+    assert stats["views_total"] == 250
+    assert stats["channels_stats"][0]["views_total"] == 250
+    assert stats["channels_stats"][0]["runs_count"] == 2
+
+
+def test_build_campaign_post_stats_same_channel_mixed_collected_and_unavailable_keeps_collected_views():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=26)
+    repo = _FakeRepo(rule=rule, saved_post={"content": {"kind": "text"}})
+    repo._runs = [
+        {"id": 8, "saved_post_id": 26, "started_at": "2026-05-07T12:04:00+00:00"},
+        {"id": 9, "saved_post_id": 26, "started_at": "2026-05-07T13:04:00+00:00"},
+    ]
+    run_messages = {
+        8: [{"send_status": "sent", "target_id": "-1001", "target_title": "A", "sent_message_id": 101, "delete_status": "deleted", "views_final_status": "collected", "views_final_count": 100}],
+        9: [{"send_status": "sent", "target_id": "-1001", "target_title": "A", "sent_message_id": 201, "delete_status": "deleted", "views_final_status": "unavailable", "views_final_error_text": "Telegram не вернул просмотры перед удалением"}],
+    }
+    repo.get_campaign_run = lambda run_id: {"id": run_id, "rule_id": 1, "saved_post_id": 26}
+    repo.list_campaign_run_messages = lambda run_id: run_messages.get(run_id, [])
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=_FakeTelethonClient())
+    stats = asyncio.run(runtime.build_campaign_post_stats(rule_id=1, saved_post_id=26, include_live_views=True))
+    assert stats["views_total"] == 100
+    assert stats["views_unavailable"] == 1
+    assert stats["channels_stats"][0]["views_total"] == 100
+    assert stats["channels_stats"][0]["views_status"] != "unavailable"
+    assert stats["channels_stats"][0]["unavailable_count"] == 1
+
+
+def test_build_campaign_post_stats_deleted_without_snapshot_does_not_use_live_views():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=26)
+    repo = _FakeRepo(rule=rule, saved_post={"content": {"kind": "text"}})
+    repo._runs = [{"id": 8, "saved_post_id": 26, "started_at": "2026-05-07T12:04:00+00:00"}]
+    repo._run = {"id": 8, "rule_id": 1, "saved_post_id": 26}
+    repo._messages = [
+        {"send_status": "sent", "target_id": "-1001", "target_title": "A", "sent_message_id": 101, "delete_status": "deleted", "views_final_status": "pending"},
+    ]
+    telethon = _FakeTelethonClient({101: 777})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), telethon_client=telethon)
+    stats = asyncio.run(runtime.build_campaign_post_stats(rule_id=1, saved_post_id=26, include_live_views=True))
+    assert telethon.get_messages_calls == []
+    assert stats["views_unavailable"] == 1
+    assert stats["channels_stats"][0]["views_status"] == "unavailable"
