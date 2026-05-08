@@ -48,14 +48,16 @@ class RepostCampaignTargetCheckService:
 
     async def check_target(self, *, target_id: str | int, target_thread_id: int | None = None) -> RepostCampaignTargetCheckResult:
         target_id_str = str(target_id)
+        telethon_status = {"publish": "unknown", "delete": "unknown"}
+        title = target_id_str
         try:
             entity_ref = int(target_id_str) if target_id_str.lstrip("-").isdigit() else target_id_str
             entity = await self.telethon_client.get_entity(entity_ref)
         except Exception:
-            return RepostCampaignTargetCheckResult(ok=False, target_id=target_id_str, target_thread_id=target_thread_id, error_text="ViMi пока не видит этот канал/группу.", publish_error_text="ViMi пока не видит этот канал/группу.")
-
-        title = getattr(entity, "title", None) or getattr(entity, "username", None) or target_id_str
-        telethon_status = await self._check_telethon(entity)
+            telethon_status = {"publish": "unknown", "delete": "unknown", "error": "entity_unavailable"}
+        else:
+            title = getattr(entity, "title", None) or getattr(entity, "username", None) or target_id_str
+            telethon_status = await self._check_telethon(entity)
         bot_status = await self._check_bot_api(target_id_str=target_id_str)
         source = "combined" if self.bot else "telethon"
 
@@ -128,26 +130,41 @@ class RepostCampaignTargetCheckService:
             return {"publish": "unknown", "delete": "unknown"}
         try:
             me = await self.bot.get_me()
-            _ = await self.bot.get_chat(target_id_str)
+            chat = await self.bot.get_chat(target_id_str)
             member = await self.bot.get_chat_member(target_id_str, me.id)
             status = getattr(member, "status", "")
+            chat_type = getattr(chat, "type", "")
             if status == "creator":
                 return {"publish": "confirmed", "delete": "confirmed"}
             if status != "administrator":
-                return {"publish": "denied", "delete": "denied"}
+                if chat_type == "channel":
+                    return {"publish": "denied", "delete": "denied"}
+                return {"publish": "unknown", "delete": "unknown"}
             can_post = getattr(member, "can_post_messages", None)
             can_delete = getattr(member, "can_delete_messages", None)
-            publish = "confirmed" if can_post in (True, None) else "denied"
+            if chat_type == "channel":
+                publish = "confirmed" if can_post is True else ("denied" if can_post is False else "unknown")
+            elif chat_type in {"group", "supergroup"}:
+                publish = "confirmed"
+            else:
+                publish = "unknown"
             delete = "confirmed" if can_delete is True else ("denied" if can_delete is False else "unknown")
             return {"publish": publish, "delete": delete}
         except Exception:
             return {"publish": "unknown", "delete": "unknown"}
 
     def _merge_publish(self, t: str | None, b: str | None) -> str:
-        values = {t or "unknown", b or "unknown"}
-        if "confirmed" in values:
+        t_status = t or "unknown"
+        b_status = b or "unknown"
+        if t_status == "confirmed" and b_status == "confirmed":
             return "confirmed"
-        if values == {"denied", "unknown"} or values == {"denied"}:
+        if "confirmed" in {t_status, b_status} and "unknown" in {t_status, b_status}:
+            return "confirmed"
+        if "confirmed" in {t_status, b_status} and "denied" in {t_status, b_status}:
+            return "unknown"
+        if t_status == "denied" and b_status == "denied":
+            return "denied"
+        if "denied" in {t_status, b_status} and "unknown" in {t_status, b_status}:
             return "denied"
         return "unknown"
 
