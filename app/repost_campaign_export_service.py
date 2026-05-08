@@ -153,6 +153,7 @@ def build_campaign_post_stats_txt(stats: dict) -> str:
 
 def _style_worksheet(ws, *, wrap_columns: set[str], number_columns: set[str]) -> None:
     from openpyxl.styles import Alignment, Font
+    from openpyxl.utils import get_column_letter
     max_row = ws.max_row
     max_col = ws.max_column
     if max_row <= 0 or max_col <= 0:
@@ -174,7 +175,8 @@ def _style_worksheet(ws, *, wrap_columns: set[str], number_columns: set[str]) ->
             value_len = len(str(cell.value or ""))
             if value_len > width:
                 width = value_len
-        ws.column_dimensions[cell.column_letter].width = min(45, max(10, width + 2))
+        column_letter = get_column_letter(col_idx)
+        ws.column_dimensions[column_letter].width = min(45, max(10, width + 2))
 
 
 def build_campaign_run_report_xlsx(report: dict) -> bytes:
@@ -241,4 +243,3 @@ def build_campaign_post_stats_xlsx(stats: dict) -> bytes:
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
-
