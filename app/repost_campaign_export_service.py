@@ -151,7 +151,6 @@ def build_campaign_post_stats_txt(stats: dict) -> str:
             lines.append(f"{index}. {title} — нет данных")
     return "\n".join(lines)
 
-
 def _style_worksheet(ws, *, wrap_columns: set[str], number_columns: set[str]) -> None:
     from openpyxl.styles import Alignment, Font
     max_row = ws.max_row
@@ -242,3 +241,4 @@ def build_campaign_post_stats_xlsx(stats: dict) -> bytes:
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
+

@@ -1,3 +1,4 @@
+
 from io import BytesIO
 
 import pytest
@@ -11,6 +12,7 @@ from app.repost_campaign_export_service import (
     build_campaign_run_report_csv,
     build_campaign_run_report_txt,
     build_campaign_run_report_xlsx,
+
 )
 
 
@@ -75,6 +77,7 @@ def test_build_campaign_post_stats_txt_contains_human_text_and_no_data():
     assert "Channel — нет данных" in text
 
 
+
 def test_build_campaign_run_report_xlsx_returns_valid_workbook():
     report = {
         "ok": True,
@@ -107,3 +110,4 @@ def test_build_campaign_post_stats_xlsx_returns_valid_workbook():
     assert ws["D2"].value == 50
     assert ws["G2"].value == 2
     assert ws["H2"].value == 1
+

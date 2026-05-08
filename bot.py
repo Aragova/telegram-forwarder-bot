@@ -7282,7 +7282,6 @@ async def handle_rule_repost_campaign_views_export_csv(callback: CallbackQuery):
         logger.exception("REPOST_CAMPAIGN_EXPORT_FAILED | rule_id=%s | run_id=%s | format=csv | error=%s", rule_id, run_id, exc)
         await answer_callback_safe(callback, "❌ Не удалось отправить файл отчёта.", show_alert=True)
 
-
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_export_xlsx:"))
 async def handle_rule_repost_campaign_views_export_xlsx(callback: CallbackQuery):
     _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
@@ -7304,7 +7303,6 @@ async def handle_rule_repost_campaign_views_export_xlsx(callback: CallbackQuery)
     except Exception as exc:
         logger.exception("REPOST_CAMPAIGN_EXPORT_FAILED | rule_id=%s | run_id=%s | format=xlsx | error=%s", rule_id, run_id, exc)
         await answer_callback_safe(callback, "❌ Не удалось отправить файл отчёта.", show_alert=True)
-
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_export_txt:"))
 async def handle_rule_repost_campaign_views_export_txt(callback: CallbackQuery):
@@ -7446,7 +7444,6 @@ async def handle_rule_repost_campaign_post_export_csv(callback: CallbackQuery):
         logger.exception("REPOST_CAMPAIGN_EXPORT_FAILED | rule_id=%s | saved_post_id=%s | format=csv | error=%s", rule_id, saved_post_id, exc)
         await answer_callback_safe(callback, "❌ Не удалось отправить файл отчёта.", show_alert=True)
 
-
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_export_xlsx:"))
 async def handle_rule_repost_campaign_post_export_xlsx(callback: CallbackQuery):
     _, rule_id_raw, saved_post_id_raw = callback.data.split(":", 2)
@@ -7468,7 +7465,6 @@ async def handle_rule_repost_campaign_post_export_xlsx(callback: CallbackQuery):
     except Exception as exc:
         logger.exception("REPOST_CAMPAIGN_EXPORT_FAILED | rule_id=%s | saved_post_id=%s | format=xlsx | error=%s", rule_id, saved_post_id, exc)
         await answer_callback_safe(callback, "❌ Не удалось отправить файл отчёта.", show_alert=True)
-
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_export_txt:"))
 async def handle_rule_repost_campaign_post_export_txt(callback: CallbackQuery):
