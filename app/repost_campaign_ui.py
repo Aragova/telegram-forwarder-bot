@@ -199,7 +199,7 @@ def build_repost_campaign_schedule_wizard_step2_view(*, rule_id: int, readiness:
     if extra_count > 0:
         rows.append([InlineKeyboardButton(text="✅ Далее", callback_data=f"rule_repost_campaign_schedule_step3:{rule_id}")])
         rows.append([InlineKeyboardButton(text="📋 Список каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_schedule_menu:{rule_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_schedule_step1:{rule_id}")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 def build_repost_campaign_schedule_wizard_step3_view(*, rule_id: int, readiness: dict) -> tuple[str, InlineKeyboardMarkup]:
