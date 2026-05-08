@@ -1413,6 +1413,7 @@ class RepostCampaignRuntimeService:
                             "views_status": "ok",
                             "views_source": None,
                             "runs_count": 0,
+                            "unavailable_count": 0,
                             "error_text": None,
                         }
                         channels_index[target_id] = row
@@ -1427,7 +1428,11 @@ class RepostCampaignRuntimeService:
                         views_total = int(views_total or 0) + count
                         continue
                     if final_status == "unavailable":
-                        row["views_status"] = "unavailable"
+                        row["unavailable_count"] = int(row.get("unavailable_count") or 0) + 1
+                        if int(row.get("views_total") or 0) <= 0:
+                            row["views_status"] = "unavailable"
+                        else:
+                            row["views_status"] = "ok"
                         row["views_source"] = "final_snapshot"
                         row["error_text"] = msg.get("views_final_error_text") or "Telegram не вернул просмотры перед удалением."
                         views_unavailable += 1
