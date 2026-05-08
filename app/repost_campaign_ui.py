@@ -173,6 +173,67 @@ def build_repost_campaign_schedule_menu_view(*, rule_id: int, scheduled_launches
     rows.append([InlineKeyboardButton(text='⬅️ Назад к VIP функциям', callback_data=f'rule_repost_campaign_vip_features:{rule_id}')])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
+def build_repost_campaign_schedule_wizard_step1_view(*, rule_id: int, readiness: dict) -> tuple[str, InlineKeyboardMarkup]:
+    saved_post_ready = bool(readiness.get("saved_post_id")) and readiness.get("saved_post_exists") is not False
+    text = (
+        "🧙 VIP-запуск по расписанию · Шаг 1/4\n\n"
+        "1) Рекламный пост\n\n"
+        f"{'✅ Готов к публикации' if saved_post_ready else '❌ Не выбран'}"
+    )
+    rows = [[InlineKeyboardButton(text="✅ Далее", callback_data=f"rule_repost_campaign_schedule_step2:{rule_id}")]] if saved_post_ready else [[InlineKeyboardButton(text="➕ Добавить рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")]]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад к VIP функциям", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+def build_repost_campaign_schedule_wizard_step2_view(*, rule_id: int, readiness: dict) -> tuple[str, InlineKeyboardMarkup]:
+    extra_count = int(readiness.get("extra_total") or 0)
+    text = (
+        "🧙 VIP-запуск по расписанию · Шаг 2/4\n\n"
+        "2) Каналы/группы\n\n"
+        "Основной канал: ✅ Подключён по умолчанию\n"
+        f"Дополнительные каналы/группы: {extra_count}"
+    )
+    rows = [
+        [InlineKeyboardButton(text="📣 Добавить канал/группу", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
+        [InlineKeyboardButton(text="⏭ Пропустить шаг", callback_data=f"rule_repost_campaign_schedule_step3:{rule_id}")],
+    ]
+    if extra_count > 0:
+        rows.append([InlineKeyboardButton(text="✅ Далее", callback_data=f"rule_repost_campaign_schedule_step3:{rule_id}")])
+        rows.append([InlineKeyboardButton(text="📋 Список каналов/групп", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_schedule_step1:{rule_id}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+def build_repost_campaign_schedule_wizard_step3_view(*, rule_id: int, readiness: dict) -> tuple[str, InlineKeyboardMarkup]:
+    show_seconds = int(readiness.get("show_seconds") or 0)
+    text = (
+        "🧙 VIP-запуск по расписанию · Шаг 3/4\n\n"
+        "3) Время показа\n\n"
+        f"Текущий срок размещения: {format_campaign_show_seconds_text(show_seconds)}\n\n"
+        "Выберите срок размещения:"
+    )
+    rows = [
+        [InlineKeyboardButton(text="1 час", callback_data=f"rule_repost_campaign_schedule_show_pick:{rule_id}:3600"), InlineKeyboardButton(text="2 часа", callback_data=f"rule_repost_campaign_schedule_show_pick:{rule_id}:7200")],
+        [InlineKeyboardButton(text="6 часов", callback_data=f"rule_repost_campaign_schedule_show_pick:{rule_id}:21600"), InlineKeyboardButton(text="12 часов", callback_data=f"rule_repost_campaign_schedule_show_pick:{rule_id}:43200")],
+        [InlineKeyboardButton(text="24 часа", callback_data=f"rule_repost_campaign_schedule_show_pick:{rule_id}:86400"), InlineKeyboardButton(text="48 часов", callback_data=f"rule_repost_campaign_schedule_show_pick:{rule_id}:172800")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_schedule_step2:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+def build_repost_campaign_schedule_wizard_step4_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🧙 VIP-запуск по расписанию · Шаг 4/4\n\n"
+        "4) Время запуска\n\n"
+        "Когда запустить кампанию?\n\n"
+        "Часовой пояс: UTC+3"
+    )
+    rows = [
+        [InlineKeyboardButton(text="Сегодня в 20:00", callback_data=f"rule_repost_campaign_schedule_quick:{rule_id}:today_20")],
+        [InlineKeyboardButton(text="Завтра в 12:00", callback_data=f"rule_repost_campaign_schedule_quick:{rule_id}:tomorrow_12")],
+        [InlineKeyboardButton(text="Завтра в 18:00", callback_data=f"rule_repost_campaign_schedule_quick:{rule_id}:tomorrow_18")],
+        [InlineKeyboardButton(text="✍️ Ввести дату и время", callback_data=f"rule_repost_campaign_schedule_input:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_schedule_step3:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[str, InlineKeyboardMarkup]:
     payload = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})
