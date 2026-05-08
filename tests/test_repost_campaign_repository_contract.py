@@ -222,3 +222,13 @@ def test_claim_due_campaign_run_messages_for_delete_skips_failed_with_future_ret
     sql = captured["conn"]._cursor.last_sql
     assert "views_final_status = 'failed'" in sql
     assert "views_final_next_retry_at > NOW()" in sql
+
+def test_campaign_schedule_repository_methods_exist():
+    from app.repository import RepositoryProtocol
+    from app.postgres_repository import PostgresRepository
+    for name in [
+        'create_campaign_scheduled_launch','get_campaign_scheduled_launch','list_rule_campaign_scheduled_launches',
+        'list_due_campaign_scheduled_launches','claim_due_campaign_scheduled_launches','mark_campaign_scheduled_launch_launched',
+        'mark_campaign_scheduled_launch_failed','cancel_campaign_scheduled_launch','reset_stuck_campaign_scheduled_launches']:
+        assert hasattr(RepositoryProtocol, name)
+        assert hasattr(PostgresRepository, name)

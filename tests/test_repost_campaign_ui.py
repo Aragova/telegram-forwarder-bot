@@ -343,7 +343,7 @@ def test_vip_features_view_contains_placeholder_text():
     text, keyboard = build_repost_campaign_vip_features_view(rule_id=5)
     assert "💎 VIP функции" in text
     assert "A/B-тесты" in text
-    assert "💰 К кампании" in _texts_from_keyboard(keyboard)
+    assert "⬅️ Назад" in _texts_from_keyboard(keyboard)
 
 
 def _stats_payload(channels_count=12):
@@ -654,3 +654,65 @@ def test_bot_has_export_callbacks_and_runtime_builder_usage():
     assert "from app.repost_campaign_export_service import" in source
     assert "build_campaign_run_report_xlsx" in source
     assert "build_campaign_post_stats_xlsx" in source
+
+def test_vip_features_view_has_schedule_button():
+    from app.repost_campaign_ui import build_repost_campaign_vip_features_view
+    text,kb=build_repost_campaign_vip_features_view(rule_id=11)
+    assert '🕒 Запуск по расписанию' in text
+    assert any('rule_repost_campaign_schedule_menu:11' in b.callback_data for row in kb.inline_keyboard for b in row)
+
+def test_schedule_menu_view_has_quick_presets_and_manual_input():
+    from app.repost_campaign_ui import build_repost_campaign_schedule_menu_view
+    text,kb=build_repost_campaign_schedule_menu_view(rule_id=5)
+    assert 'Часовой пояс: UTC+3' in text
+    labels=[b.text for r in kb.inline_keyboard for b in r]
+    assert 'Сегодня в 20:00' in labels and '✍️ Ввести дату и время' in labels
+
+def test_vip_coming_soon_view():
+    from app.repost_campaign_ui import build_repost_campaign_vip_coming_soon_view
+    text,_=build_repost_campaign_vip_coming_soon_view(rule_id=1, feature='x')
+    assert 'Скоро в VIP функциях' in text
+
+def test_schedule_preview_view_contains_full_sections():
+    from datetime import datetime, timezone
+    from app.repost_campaign_ui import build_repost_campaign_schedule_preview_view
+    text, kb = build_repost_campaign_schedule_preview_view(
+        rule_id=1,
+        readiness={"can_launch": True, "saved_post_id": 2, "targets_total": 43, "will_send_total": 43, "will_skip_total": 0, "show_seconds": 86400},
+        scheduled_at_utc=datetime(2026, 5, 9, 15, 0, tzinfo=timezone.utc),
+    )
+    assert "Рекламный пост:" in text
+    assert "Публикация:" in text
+    assert "Срок размещения:" in text
+    assert "После запуска ViMi:" in text
+    assert "подготовит отчёт XLSX/CSV/TXT" in text
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert "✅ Запланировать запуск" in labels
+
+
+def test_bot_has_real_schedule_handlers_blocks():
+    from pathlib import Path
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_menu:"))' in source
+    assert 'async def handle_rule_repost_campaign_schedule_menu' in source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_confirm:"))' in source
+    assert 'async def handle_rule_repost_campaign_schedule_confirm' in source
+    assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_STARTED' in source
+    assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_DONE' in source
+
+def test_schedule_menu_view_shows_scheduled_launches_block():
+    from app.repost_campaign_ui import build_repost_campaign_schedule_menu_view
+    launches = [{"id": 123, "status": "scheduled", "scheduled_at": "2026-05-09T15:00:00+00:00"}]
+    text, kb = build_repost_campaign_schedule_menu_view(rule_id=7, scheduled_launches=launches)
+    assert "Ближайшие запланированные запуски:" in text
+    assert "ожидает запуска" in text
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert "📄 Открыть запуск #123" in labels
+
+
+def test_scheduled_detail_view_status_mapping_and_cancel_visibility():
+    from app.repost_campaign_ui import build_repost_campaign_scheduled_launch_detail_view
+    text, kb = build_repost_campaign_scheduled_launch_detail_view(rule_id=1, scheduled_launch={"id": 1, "status": "failed", "scheduled_at": "2026-05-09T15:00:00+00:00", "saved_post_id": 26, "show_seconds": 86400})
+    assert "❌ ошибка запуска" in text
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert "❌ Отменить запуск" not in labels

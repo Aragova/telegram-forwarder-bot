@@ -820,6 +820,37 @@ class PostgresRepository(RepositoryProtocol):
         CREATE INDEX IF NOT EXISTS idx_campaign_runs_status
         ON campaign_runs(status, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS campaign_scheduled_launches (
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL DEFAULT 1,
+            rule_id BIGINT NOT NULL,
+            saved_post_id BIGINT NOT NULL,
+            show_seconds BIGINT NOT NULL DEFAULT 0,
+            scheduled_at TIMESTAMPTZ NOT NULL,
+            timezone_offset_minutes INT NOT NULL DEFAULT 180,
+            timezone_label TEXT NOT NULL DEFAULT 'UTC+3',
+            status TEXT NOT NULL DEFAULT 'scheduled'
+                CHECK (status IN ('scheduled','processing','launched','failed','cancelled','expired')),
+            campaign_run_id BIGINT NULL,
+            created_by BIGINT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            locked_at TIMESTAMPTZ NULL,
+            locked_by TEXT NULL,
+            launched_at TIMESTAMPTZ NULL,
+            cancelled_at TIMESTAMPTZ NULL,
+            cancelled_by BIGINT NULL,
+            failed_at TIMESTAMPTZ NULL,
+            error_text TEXT NULL,
+            preview_json JSONB NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_due
+        ON campaign_scheduled_launches(status, scheduled_at);
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_rule_status
+        ON campaign_scheduled_launches(rule_id, status, scheduled_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_campaign_run
+        ON campaign_scheduled_launches(campaign_run_id);
+
         CREATE TABLE IF NOT EXISTS campaign_run_messages (
             id BIGSERIAL PRIMARY KEY,
             run_id BIGINT NOT NULL,
@@ -7193,6 +7224,76 @@ class PostgresRepository(RepositoryProtocol):
                 row = cur.fetchone()
             conn.commit()
             return int(row["id"]) if row else None
+
+    def create_campaign_scheduled_launch(self, *, rule_id: int, saved_post_id: int, show_seconds: int, scheduled_at: str, timezone_offset_minutes: int = 180, timezone_label: str = "UTC+3", created_by: int | None = None, preview: dict[str, Any] | None = None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT id FROM campaign_scheduled_launches WHERE rule_id=%s AND saved_post_id=%s AND scheduled_at=%s AND created_by IS NOT DISTINCT FROM %s AND status='scheduled' ORDER BY id DESC LIMIT 1""", (int(rule_id), int(saved_post_id), scheduled_at, created_by))
+                row = cur.fetchone()
+                if row:
+                    return int(row['id'])
+                cur.execute("""INSERT INTO campaign_scheduled_launches(tenant_id,rule_id,saved_post_id,show_seconds,scheduled_at,timezone_offset_minutes,timezone_label,status,created_by,preview_json) VALUES (1,%s,%s,%s,%s,%s,%s,'scheduled',%s,%s::jsonb) RETURNING id""", (int(rule_id), int(saved_post_id), int(show_seconds), scheduled_at, int(timezone_offset_minutes), str(timezone_label), created_by, _json_dumps(preview)))
+                row = cur.fetchone()
+            conn.commit()
+            return int(row['id']) if row else None
+
+    def get_campaign_scheduled_launch(self, scheduled_launch_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_scheduled_launches WHERE id=%s", (int(scheduled_launch_id),))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def list_rule_campaign_scheduled_launches(self, rule_id: int, *, statuses: list[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if statuses:
+                    cur.execute("SELECT * FROM campaign_scheduled_launches WHERE rule_id=%s AND status = ANY(%s) ORDER BY scheduled_at DESC, id DESC LIMIT %s", (int(rule_id), statuses, int(limit)))
+                else:
+                    cur.execute("SELECT * FROM campaign_scheduled_launches WHERE rule_id=%s ORDER BY scheduled_at DESC, id DESC LIMIT %s", (int(rule_id), int(limit)))
+                return [dict(r) for r in (cur.fetchall() or [])]
+
+    def list_due_campaign_scheduled_launches(self, *, now_iso: str, limit: int = 10) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_scheduled_launches WHERE status='scheduled' AND scheduled_at<=%s ORDER BY scheduled_at ASC, id ASC LIMIT %s", (now_iso, int(limit)))
+                return [dict(r) for r in (cur.fetchall() or [])]
+
+    def claim_due_campaign_scheduled_launches(self, *, now_iso: str, worker_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""WITH picked AS (SELECT id FROM campaign_scheduled_launches WHERE status='scheduled' AND scheduled_at<=%s ORDER BY scheduled_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT %s) UPDATE campaign_scheduled_launches s SET status='processing', locked_at=NOW(), locked_by=%s, updated_at=NOW() FROM picked WHERE s.id=picked.id RETURNING s.*""", (now_iso, int(limit), worker_id))
+                rows=[dict(r) for r in (cur.fetchall() or [])]
+            conn.commit()
+            return rows
+
+    def mark_campaign_scheduled_launch_launched(self, scheduled_launch_id: int, *, campaign_run_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_launches SET status='launched', campaign_run_id=%s, launched_at=NOW(), updated_at=NOW() WHERE id=%s AND status='processing'", (int(campaign_run_id), int(scheduled_launch_id)))
+                ok=cur.rowcount>0
+            conn.commit(); return ok
+
+    def mark_campaign_scheduled_launch_failed(self, scheduled_launch_id: int, *, error_text: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_launches SET status='failed', failed_at=NOW(), error_text=%s, updated_at=NOW() WHERE id=%s AND status IN ('processing','scheduled')", (error_text, int(scheduled_launch_id)))
+                ok=cur.rowcount>0
+            conn.commit(); return ok
+
+    def cancel_campaign_scheduled_launch(self, scheduled_launch_id: int, *, cancelled_by: int | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_launches SET status='cancelled', cancelled_at=NOW(), cancelled_by=%s, updated_at=NOW() WHERE id=%s AND status='scheduled'", (cancelled_by, int(scheduled_launch_id)))
+                ok=cur.rowcount>0
+            conn.commit(); return ok
+
+    def reset_stuck_campaign_scheduled_launches(self, *, stuck_seconds: int = 300) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_launches SET status='scheduled', locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE status='processing' AND locked_at < NOW() - (%s * INTERVAL '1 second') AND campaign_run_id IS NULL", (int(stuck_seconds),))
+                count=int(cur.rowcount)
+            conn.commit(); return count
 
     def update_campaign_run_status(self, run_id: int, *, status: str, render_mode: str | None = None, targets_success: int | None = None, targets_failed: int | None = None, error_text: str | None = None, report: dict[str, Any] | None = None, finish: bool = False) -> bool:
         set_parts = ["status=%s", "updated_at=NOW()"]

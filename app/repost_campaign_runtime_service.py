@@ -630,7 +630,7 @@ class RepostCampaignRuntimeService:
             extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id},
         )
 
-    async def launch_campaign_now(self, *, rule_id: int, admin_id: int | None = None) -> RepostCampaignActionResult:
+    async def launch_campaign_now(self, *, rule_id: int, admin_id: int | None = None, run_type: str = "manual") -> RepostCampaignActionResult:
         readiness = self.build_campaign_launch_readiness(rule_id=rule_id)
         if not readiness.get("can_launch"):
             return RepostCampaignActionResult(
@@ -697,7 +697,7 @@ class RepostCampaignRuntimeService:
         run_id = self.repo.create_campaign_run(
             rule_id=rule_id,
             saved_post_id=saved_post_id,
-            run_type="manual",
+            run_type=run_type,
             status="sending",
             show_seconds=show_seconds,
             started_by=admin_id,
@@ -713,8 +713,8 @@ class RepostCampaignRuntimeService:
             )
 
         self.logger.info(
-            "REPOST_CAMPAIGN_LAUNCH_STARTED | rule_id=%s | saved_post_id=%s | targets=%s | run_id=%s",
-            rule_id, saved_post_id, len(targets), run_id
+            "REPOST_CAMPAIGN_LAUNCH_STARTED | rule_id=%s | saved_post_id=%s | targets=%s | run_id=%s | run_type=%s",
+            rule_id, saved_post_id, len(targets), run_id, run_type
         )
         content = saved_post.get("content_json") or saved_post.get("content") or {}
         methods: set[str] = set()
