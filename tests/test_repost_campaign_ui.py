@@ -672,3 +672,30 @@ def test_vip_coming_soon_view():
     from app.repost_campaign_ui import build_repost_campaign_vip_coming_soon_view
     text,_=build_repost_campaign_vip_coming_soon_view(rule_id=1, feature='x')
     assert 'Скоро в VIP функциях' in text
+
+def test_schedule_preview_view_contains_full_sections():
+    from datetime import datetime, timezone
+    from app.repost_campaign_ui import build_repost_campaign_schedule_preview_view
+    text, kb = build_repost_campaign_schedule_preview_view(
+        rule_id=1,
+        readiness={"can_launch": True, "saved_post_id": 2, "targets_total": 43, "will_send_total": 43, "will_skip_total": 0, "show_seconds": 86400},
+        scheduled_at_utc=datetime(2026, 5, 9, 15, 0, tzinfo=timezone.utc),
+    )
+    assert "Рекламный пост:" in text
+    assert "Публикация:" in text
+    assert "Срок размещения:" in text
+    assert "После запуска ViMi:" in text
+    assert "подготовит отчёт XLSX/CSV/TXT" in text
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert "✅ Запланировать запуск" in labels
+
+
+def test_bot_has_real_schedule_handlers_blocks():
+    from pathlib import Path
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_menu:"))' in source
+    assert 'async def handle_rule_repost_campaign_schedule_menu' in source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_confirm:"))' in source
+    assert 'async def handle_rule_repost_campaign_schedule_confirm' in source
+    assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_STARTED' in source
+    assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_DONE' in source

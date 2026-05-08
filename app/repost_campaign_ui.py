@@ -1063,14 +1063,77 @@ def build_repost_campaign_targets_check_result_view(*, rule_id: int, result: dic
 
 def build_repost_campaign_schedule_preview_view(*, rule_id: int, readiness: dict, scheduled_at_utc: datetime, timezone_offset_minutes: int = 180, timezone_label: str = "UTC+3") -> tuple[str, InlineKeyboardMarkup]:
     from app.repost_campaign_schedule_service import format_campaign_schedule_datetime
-    text = f"👁 Предпросмотр запланированного запуска\n\nСтарт:\n🕒 {format_campaign_schedule_datetime(scheduled_at_utc, timezone_offset_minutes=timezone_offset_minutes, timezone_label=timezone_label)}\n\nUTC+3"
+    show_seconds = int(readiness.get("show_seconds") or 0)
+    expected_delete = scheduled_at_utc + timedelta(seconds=show_seconds) if show_seconds > 0 else None
+    text = (
+        "👁 Предпросмотр запланированного запуска\n\n"
+        "Старт:\n"
+        f"🕒 {format_campaign_schedule_datetime(scheduled_at_utc, timezone_offset_minutes=timezone_offset_minutes, timezone_label=timezone_label)}\n\n"
+        "Рекламный пост:\n"
+        f"{'✅ Готов к публикации' if readiness.get('saved_post_id') else '❌ Не готов к публикации'}\n\n"
+        "Публикация:\n"
+        f"📣 Каналов/групп: {int(readiness.get('targets_total') or 0)}\n"
+        f"✅ Готовы: {int(readiness.get('will_send_total') or 0)}\n"
+        f"⚠️ Требуют внимания: {int(readiness.get('will_skip_total') or 0)}\n\n"
+        "Срок размещения:\n"
+        f"⏳ {format_campaign_show_seconds_text(show_seconds)}\n"
+        f"🕒 Ожидаемое удаление: {format_campaign_schedule_datetime(expected_delete, timezone_offset_minutes=timezone_offset_minutes, timezone_label=timezone_label)}\n\n"
+        "После запуска ViMi:\n"
+        "• опубликует пост в готовые каналы;\n"
+        "• сохранит результат по каждому получателю;\n"
+        "• соберёт просмотры перед удалением;\n"
+        "• удалит копии после срока размещения;\n"
+        "• подготовит отчёт XLSX/CSV/TXT.\n\n"
+        "Если всё верно — запланируйте запуск."
+    )
     can=bool(readiness.get('can_launch'))
     rows=[[InlineKeyboardButton(text='✅ Запланировать запуск', callback_data=f"rule_repost_campaign_schedule_confirm:{rule_id}:{int(scheduled_at_utc.timestamp())}")]] if can else []
     rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_schedule_menu:{rule_id}')])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 def build_repost_campaign_scheduled_launch_detail_view(*, rule_id:int, scheduled_launch:dict) -> tuple[str, InlineKeyboardMarkup]:
-    status=scheduled_launch.get('status')
-    if status=='launched':
+    from app.repost_campaign_schedule_service import format_campaign_schedule_datetime
+    status = str(scheduled_launch.get("status") or "scheduled")
+    if status == "launched":
         return ("🕒 Запланированный запуск\n\n🚀 Запуск выполнен", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📄 Открыть размещение', callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{scheduled_launch.get('campaign_run_id')}")]]))
-    return ("🕒 Запланированный запуск\n\nСтатус: ожидает запуска", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ Отменить запуск', callback_data=f"rule_repost_campaign_scheduled_cancel_confirm:{rule_id}:{scheduled_launch.get('id')}")],[InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_schedule_menu:{rule_id}')]]))
+    text = (
+        "🕒 Запланированный запуск\n\n"
+        "Статус: ожидает запуска\n"
+        f"Старт: {format_campaign_schedule_datetime(scheduled_launch.get('scheduled_at'))}\n"
+        f"Пост: #{int(scheduled_launch.get('saved_post_id') or 0)}\n"
+        f"Срок размещения: {format_campaign_show_seconds_text(int(scheduled_launch.get('show_seconds') or 0))}\n"
+        f"Ожидаемое удаление: {format_campaign_schedule_datetime((datetime.fromisoformat(str(scheduled_launch.get('scheduled_at')).replace('Z','+00:00')) + timedelta(seconds=int(scheduled_launch.get('show_seconds') or 0))))}"
+    )
+    return (text, InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ Отменить запуск', callback_data=f"rule_repost_campaign_scheduled_cancel_confirm:{rule_id}:{scheduled_launch.get('id')}")],[InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_schedule_menu:{rule_id}')]]))
+
+
+def build_repost_campaign_schedule_result_view(*, rule_id: int, scheduled_launch: dict) -> tuple[str, InlineKeyboardMarkup]:
+    from app.repost_campaign_schedule_service import format_campaign_schedule_datetime
+    dt = scheduled_launch.get("scheduled_at")
+    show_seconds = int(scheduled_launch.get("show_seconds") or 0)
+    expected = datetime.fromisoformat(str(dt).replace("Z", "+00:00")) + timedelta(seconds=show_seconds)
+    text = (
+        "✅ Запуск запланирован\n\n"
+        f"Старт: {format_campaign_schedule_datetime(dt)}\n"
+        f"Ожидаемое удаление: {format_campaign_schedule_datetime(expected)}\n\n"
+        "ViMi автоматически запустит кампанию в указанное время."
+    )
+    return text, InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📄 Открыть запланированный запуск", callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{scheduled_launch.get('id')}")],
+        [InlineKeyboardButton(text="💎 К VIP функциям", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+
+
+def build_repost_campaign_scheduled_launch_cancel_confirm_view(*, rule_id: int, scheduled_launch_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    return ("❌ Отменить запланированный запуск?\n\nДействие нельзя отменить.", InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отменить запуск", callback_data=f"rule_repost_campaign_scheduled_cancel:{rule_id}:{scheduled_launch_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{scheduled_launch_id}")],
+    ]))
+
+
+def build_repost_campaign_scheduled_launch_cancel_result_view(*, rule_id: int, ok: bool) -> tuple[str, InlineKeyboardMarkup]:
+    return ("✅ Запланированный запуск отменён" if ok else "❌ Не удалось отменить запуск", InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🕒 К расписанию", callback_data=f"rule_repost_campaign_schedule_menu:{rule_id}")],
+        [InlineKeyboardButton(text="💎 К VIP функциям", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
+    ]))
