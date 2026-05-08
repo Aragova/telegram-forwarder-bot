@@ -130,18 +130,36 @@ def build_repost_campaign_menu_view(
 def build_repost_campaign_vip_features_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
     text = (
         "💎 VIP функции\n\n"
-        "Скоро здесь появятся расширенные инструменты для рекламных размещений:\n\n"
-        "✨ A/B-тесты рекламных постов\n"
-        "📊 Расширенная аналитика\n"
-        "🎯 Сегменты каналов\n"
+        "Продвинутые сценарии публикации для рекламных размещений.\n\n"
         "🕒 Запуск по расписанию\n"
-        "🧠 Умные рекомендации\n\n"
-        "Эти функции будут доступны в премиум-тарифах."
+        "Запланируйте кампанию заранее. ViMi сам запустит её в нужное время, удалит публикации после срока размещения и сохранит отчёт.\n\n"
+        "🧹 Чистый канал\n"
+        "Перед новой рекламой ViMi удалит предыдущую активную публикацию из этого правила.\n\n"
+        "📌 Время в топе\n"
+        "ViMi не будет публиковать обычные посты поверх рекламы в первые часы размещения.\n\n"
+        "✨ A/B-тесты\n"
+        "Сравнивайте два варианта рекламного поста по просмотрам.\n\n"
+        "Выберите функцию:"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-    ])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🕒 Запуск по расписанию", callback_data=f"rule_repost_campaign_schedule_menu:{rule_id}")],[InlineKeyboardButton(text="🧹 Чистый канал", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:clean_channel")],[InlineKeyboardButton(text="📌 Время в топе", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:top_time")],[InlineKeyboardButton(text="✨ A/B-тесты", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:ab_test")],[InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]])
     return text, kb
+
+def build_repost_campaign_vip_coming_soon_view(*, rule_id: int, feature: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    return (
+        "💎 Скоро в VIP функциях\n\nЭта функция появится в следующих обновлениях ViMi.",
+        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к VIP функциям", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")]]),
+    )
+
+def build_repost_campaign_schedule_menu_view(*, rule_id: int, scheduled_launches: list[dict] | None = None, now: datetime | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🕒 Запуск по расписанию\n\n"
+        "Запланируйте рекламную кампанию заранее.\n"
+        "ViMi сам запустит размещение в нужное время, удалит публикации после срока размещения и сохранит отчёт.\n\n"
+        "Часовой пояс: UTC+3\n\n"
+        "Выберите время запуска:"
+    )
+    rows=[[InlineKeyboardButton(text='Сегодня в 20:00', callback_data=f'rule_repost_campaign_schedule_quick:{rule_id}:today_20')],[InlineKeyboardButton(text='Завтра в 12:00', callback_data=f'rule_repost_campaign_schedule_quick:{rule_id}:tomorrow_12')],[InlineKeyboardButton(text='Завтра в 18:00', callback_data=f'rule_repost_campaign_schedule_quick:{rule_id}:tomorrow_18')],[InlineKeyboardButton(text='✍️ Ввести дату и время', callback_data=f'rule_repost_campaign_schedule_input:{rule_id}')],[InlineKeyboardButton(text='⬅️ Назад к VIP функциям', callback_data=f'rule_repost_campaign_vip_features:{rule_id}')]]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[str, InlineKeyboardMarkup]:
@@ -1042,3 +1060,17 @@ def build_repost_campaign_targets_check_result_view(*, rule_id: int, result: dic
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return "\n".join(lines), kb
+
+def build_repost_campaign_schedule_preview_view(*, rule_id: int, readiness: dict, scheduled_at_utc: datetime, timezone_offset_minutes: int = 180, timezone_label: str = "UTC+3") -> tuple[str, InlineKeyboardMarkup]:
+    from app.repost_campaign_schedule_service import format_campaign_schedule_datetime
+    text = f"👁 Предпросмотр запланированного запуска\n\nСтарт:\n🕒 {format_campaign_schedule_datetime(scheduled_at_utc, timezone_offset_minutes=timezone_offset_minutes, timezone_label=timezone_label)}\n\nUTC+3"
+    can=bool(readiness.get('can_launch'))
+    rows=[[InlineKeyboardButton(text='✅ Запланировать запуск', callback_data=f"rule_repost_campaign_schedule_confirm:{rule_id}:{int(scheduled_at_utc.timestamp())}")]] if can else []
+    rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_schedule_menu:{rule_id}')])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+def build_repost_campaign_scheduled_launch_detail_view(*, rule_id:int, scheduled_launch:dict) -> tuple[str, InlineKeyboardMarkup]:
+    status=scheduled_launch.get('status')
+    if status=='launched':
+        return ("🕒 Запланированный запуск\n\n🚀 Запуск выполнен", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📄 Открыть размещение', callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{scheduled_launch.get('campaign_run_id')}")]]))
+    return ("🕒 Запланированный запуск\n\nСтатус: ожидает запуска", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ Отменить запуск', callback_data=f"rule_repost_campaign_scheduled_cancel_confirm:{rule_id}:{scheduled_launch.get('id')}")],[InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_schedule_menu:{rule_id}')]]))

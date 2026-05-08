@@ -654,3 +654,21 @@ def test_bot_has_export_callbacks_and_runtime_builder_usage():
     assert "from app.repost_campaign_export_service import" in source
     assert "build_campaign_run_report_xlsx" in source
     assert "build_campaign_post_stats_xlsx" in source
+
+def test_vip_features_view_has_schedule_button():
+    from app.repost_campaign_ui import build_repost_campaign_vip_features_view
+    text,kb=build_repost_campaign_vip_features_view(rule_id=11)
+    assert '🕒 Запуск по расписанию' in text
+    assert any('rule_repost_campaign_schedule_menu:11' in b.callback_data for row in kb.inline_keyboard for b in row)
+
+def test_schedule_menu_view_has_quick_presets_and_manual_input():
+    from app.repost_campaign_ui import build_repost_campaign_schedule_menu_view
+    text,kb=build_repost_campaign_schedule_menu_view(rule_id=5)
+    assert 'Часовой пояс: UTC+3' in text
+    labels=[b.text for r in kb.inline_keyboard for b in r]
+    assert 'Сегодня в 20:00' in labels and '✍️ Ввести дату и время' in labels
+
+def test_vip_coming_soon_view():
+    from app.repost_campaign_ui import build_repost_campaign_vip_coming_soon_view
+    text,_=build_repost_campaign_vip_coming_soon_view(rule_id=1, feature='x')
+    assert 'Скоро в VIP функциях' in text

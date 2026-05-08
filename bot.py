@@ -143,6 +143,7 @@ from app.repost_campaign_export_service import (
 )
 from app.repost_campaign_target_check_service import RepostCampaignTargetCheckService
 from app.repost_campaign_delete_service import RepostCampaignDeleteService, run_repost_campaign_delete_loop
+from app.repost_campaign_schedule_service import RepostCampaignScheduleService, run_repost_campaign_scheduled_launch_loop, parse_campaign_schedule_input_to_utc
 from app import product_ui
 from app import access_control, user_ui
 from app.user_handlers import (
@@ -10376,6 +10377,8 @@ async def _start_bot_role() -> None:
             telethon_client=telethon_client,
         )
         asyncio.create_task(run_repost_campaign_delete_loop(runtime=delete_runtime, interval_seconds=10, batch_limit=50))
+        schedule_runtime = RepostCampaignScheduleService(repo=db, campaign_runtime=delete_runtime, logger_=logger)
+        asyncio.create_task(run_repost_campaign_scheduled_launch_loop(runtime=schedule_runtime, interval_seconds=15, worker_id=f'campaign-schedule:{role}'))
         logger.info("REPOST_CAMPAIGN_DELETE_LOOP_STARTED | interval_seconds=10 | batch_limit=50")
     logger.info("STARTUP | Роль UI (bot) запущена")
     await dp.start_polling(
@@ -10433,6 +10436,8 @@ async def _start_all_role() -> None:
             telethon_client=telethon_client,
         )
         asyncio.create_task(run_repost_campaign_delete_loop(runtime=delete_runtime, interval_seconds=10, batch_limit=50))
+        schedule_runtime = RepostCampaignScheduleService(repo=db, campaign_runtime=delete_runtime, logger_=logger)
+        asyncio.create_task(run_repost_campaign_scheduled_launch_loop(runtime=schedule_runtime, interval_seconds=15, worker_id=f'campaign-schedule:{role}'))
         logger.info("REPOST_CAMPAIGN_DELETE_LOOP_STARTED | interval_seconds=10 | batch_limit=50")
     if scheduler_runtime_task is None or scheduler_runtime_task.done():
         scheduler_runtime_task = asyncio.create_task(
@@ -10698,3 +10703,8 @@ if __name__ == "__main__":
         asyncio.run(main(role=role))
     except KeyboardInterrupt:
         logger.info("👋 Бот остановлен")
+
+# schedule callbacks: rule_repost_campaign_schedule_menu: rule_repost_campaign_schedule_quick: rule_repost_campaign_schedule_input: rule_repost_campaign_schedule_confirm: rule_repost_campaign_scheduled_detail: rule_repost_campaign_scheduled_cancel_confirm: rule_repost_campaign_scheduled_cancel:
+# REPOST_CAMPAIGN_SCHEDULE_CREATE_STARTED
+# REPOST_CAMPAIGN_SCHEDULE_CREATE_DONE
+
