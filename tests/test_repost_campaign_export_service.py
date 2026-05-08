@@ -1,8 +1,18 @@
+
+from io import BytesIO
+
+import pytest
+
+load_workbook = pytest.importorskip("openpyxl").load_workbook
+
 from app.repost_campaign_export_service import (
     build_campaign_post_stats_csv,
     build_campaign_post_stats_txt,
+    build_campaign_post_stats_xlsx,
     build_campaign_run_report_csv,
     build_campaign_run_report_txt,
+    build_campaign_run_report_xlsx,
+
 )
 
 
@@ -65,3 +75,39 @@ def test_build_campaign_post_stats_txt_contains_human_text_and_no_data():
     assert "Статистика рекламного поста" in text
     assert "Каналы:" in text
     assert "Channel — нет данных" in text
+
+
+
+def test_build_campaign_run_report_xlsx_returns_valid_workbook():
+    report = {
+        "ok": True,
+        "run_id": 15,
+        "saved_post_id": 26,
+        "items": [{"target_title": "Wiki", "views": 1289, "views_status": "ok", "sent_message_ids_json": "[10, 11, 12]"}],
+    }
+    data = build_campaign_run_report_xlsx(report)
+    assert isinstance(data, bytes)
+    wb = load_workbook(BytesIO(data))
+    ws = wb["Отчёт запуска"]
+    headers = [cell.value for cell in ws[1]]
+    assert headers[:4] == ["run_id", "saved_post_id", "target_title", "target_id"]
+    assert ws["C2"].value == "Wiki"
+    assert ws["J2"].value == 1289
+    assert ws["I2"].value == "10,11,12"
+
+
+def test_build_campaign_post_stats_xlsx_returns_valid_workbook():
+    stats = {
+        "saved_post_id": 26,
+        "channels_stats": [{"target_title": "A", "target_id": "-100", "views_total": 50, "runs_count": 2, "unavailable_count": 1, "views_status": "ok"}],
+    }
+    data = build_campaign_post_stats_xlsx(stats)
+    assert isinstance(data, bytes)
+    wb = load_workbook(BytesIO(data))
+    ws = wb["Статистика поста"]
+    headers = [cell.value for cell in ws[1]]
+    assert headers == ["saved_post_id", "target_title", "target_id", "views_total", "views_status", "views_source", "runs_count", "unavailable_count", "error_text"]
+    assert ws["D2"].value == 50
+    assert ws["G2"].value == 2
+    assert ws["H2"].value == 1
+

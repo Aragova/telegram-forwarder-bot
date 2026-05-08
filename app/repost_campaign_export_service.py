@@ -150,3 +150,95 @@ def build_campaign_post_stats_txt(stats: dict) -> str:
         else:
             lines.append(f"{index}. {title} — нет данных")
     return "\n".join(lines)
+
+def _style_worksheet(ws, *, wrap_columns: set[str], number_columns: set[str]) -> None:
+    from openpyxl.styles import Alignment, Font
+    max_row = ws.max_row
+    max_col = ws.max_column
+    if max_row <= 0 or max_col <= 0:
+        return
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    headers = [cell.value for cell in ws[1]]
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for col_idx, header in enumerate(headers, 1):
+        header_text = str(header or "")
+        width = len(header_text)
+        for row_idx in range(2, max_row + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            if header_text in number_columns and cell.value not in (None, ""):
+                cell.value = int(cell.value)
+            if header_text in wrap_columns:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+            value_len = len(str(cell.value or ""))
+            if value_len > width:
+                width = value_len
+        ws.column_dimensions[cell.column_letter].width = min(45, max(10, width + 2))
+
+
+def build_campaign_run_report_xlsx(report: dict) -> bytes:
+    from openpyxl import Workbook
+    headers = [
+        "run_id", "saved_post_id", "target_title", "target_id", "target_thread_id", "send_status", "delete_status",
+        "sent_message_id", "sent_message_ids", "views", "views_status", "views_source", "sent_at", "delete_after_at",
+        "deleted_at", "error_text", "message_url",
+    ]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Отчёт запуска"
+    ws.append(headers)
+    for item in (report or {}).get("items") or []:
+        ws.append([
+            report.get("run_id"),
+            report.get("saved_post_id"),
+            _clean_text(item.get("target_title")),
+            _clean_text(item.get("target_id")),
+            _clean_text(item.get("target_thread_id")),
+            _clean_text(item.get("send_status")),
+            _clean_text(item.get("delete_status")),
+            _clean_text(item.get("sent_message_id")),
+            _format_message_ids(item),
+            _format_views(item),
+            _clean_text(item.get("views_status") or item.get("views_final_status")),
+            _clean_text(item.get("views_source") or ("final_snapshot" if item.get("final_snapshot") else None)),
+            _clean_text(item.get("sent_at")),
+            _clean_text(item.get("delete_after_at")),
+            _clean_text(item.get("deleted_at")),
+            _clean_text(item.get("error_text") or item.get("send_error_text") or item.get("delete_error_text")),
+            _clean_text(item.get("message_url")),
+        ])
+    _style_worksheet(ws, wrap_columns={"error_text", "message_url"}, number_columns={"views"})
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def build_campaign_post_stats_xlsx(stats: dict) -> bytes:
+    from openpyxl import Workbook
+    headers = ["saved_post_id", "target_title", "target_id", "views_total", "views_status", "views_source", "runs_count", "unavailable_count", "error_text"]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Статистика поста"
+    ws.append(headers)
+    for item in (stats or {}).get("channels_stats") or []:
+        ws.append([
+            stats.get("saved_post_id"),
+            _clean_text(item.get("target_title")),
+            _clean_text(item.get("target_id")),
+            item.get("views_total"),
+            _clean_text(item.get("views_status")),
+            _clean_text(item.get("views_source")),
+            item.get("runs_count"),
+            item.get("unavailable_count"),
+            _clean_text(item.get("error_text")),
+        ])
+    _style_worksheet(
+        ws,
+        wrap_columns={"error_text"},
+        number_columns={"views_total", "runs_count", "unavailable_count"},
+    )
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
