@@ -51,12 +51,36 @@ def _format_message_ids(item: dict) -> str:
         return str(sent_message_id)
     return ""
 
+def _human_status(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    mapping = {
+        "ok": "есть данные",
+        "available": "есть данные",
+        "unavailable": "нет данных",
+        "problem": "проблема",
+        "failed": "ошибка",
+        "pending": "ожидает",
+        "processing": "обрабатывается",
+        "sent": "отправлено",
+        "sending": "отправляется",
+        "deleted": "удалено",
+        "none": "",
+        "final_snapshot": "финальный снимок",
+        "live": "live-данные",
+        "telethon_live": "live-данные",
+    }
+    return mapping.get(raw, _clean_text(value))
+
+
+def _human_views_source(value: object) -> str:
+    return _human_status(value)
+
 
 def build_campaign_run_report_csv(report: dict) -> bytes:
     headers = [
-        "run_id", "saved_post_id", "target_title", "target_id", "target_thread_id", "send_status", "delete_status",
-        "sent_message_id", "sent_message_ids", "views", "views_status", "views_source", "sent_at", "delete_after_at",
-        "deleted_at", "error_text", "message_url",
+        "ID запуска", "ID поста", "Канал/группа", "Telegram ID", "ID темы", "Статус отправки", "Статус удаления",
+        "ID сообщения", "ID сообщений", "Просмотры", "Статус просмотров", "Источник данных", "Отправлено",
+        "Удалить после", "Удалено", "Проблема", "Ссылка",
     ]
     rows: list[list[object]] = []
     for item in (report or {}).get("items") or []:
@@ -67,13 +91,13 @@ def build_campaign_run_report_csv(report: dict) -> bytes:
             item.get("target_title"),
             item.get("target_id"),
             item.get("target_thread_id"),
-            item.get("send_status"),
-            item.get("delete_status"),
+            _human_status(item.get("send_status")),
+            _human_status(item.get("delete_status")),
             item.get("sent_message_id"),
             sent_ids_text,
             _format_views(item),
-            item.get("views_status") or item.get("views_final_status"),
-            item.get("views_source") or ("final_snapshot" if item.get("final_snapshot") else None),
+            _human_status(item.get("views_status") or item.get("views_final_status")),
+            _human_views_source(item.get("views_source") or ("final_snapshot" if item.get("final_snapshot") else None)),
             item.get("sent_at"),
             item.get("delete_after_at"),
             item.get("deleted_at"),
@@ -113,7 +137,7 @@ def build_campaign_run_report_txt(report: dict) -> str:
 
 
 def build_campaign_post_stats_csv(stats: dict) -> bytes:
-    headers = ["saved_post_id", "target_title", "target_id", "views_total", "views_status", "views_source", "runs_count", "unavailable_count", "error_text"]
+    headers = ["ID поста", "Канал/группа", "Telegram ID", "Просмотры", "Статус просмотров", "Источник данных", "Запусков", "Без данных", "Проблема"]
     rows = []
     for item in (stats or {}).get("channels_stats") or []:
         rows.append([
@@ -121,8 +145,8 @@ def build_campaign_post_stats_csv(stats: dict) -> bytes:
             item.get("target_title"),
             item.get("target_id"),
             item.get("views_total"),
-            item.get("views_status"),
-            item.get("views_source"),
+            _human_status(item.get("views_status")),
+            _human_views_source(item.get("views_source")),
             item.get("runs_count"),
             item.get("unavailable_count"),
             item.get("error_text"),
@@ -182,9 +206,9 @@ def _style_worksheet(ws, *, wrap_columns: set[str], number_columns: set[str]) ->
 def build_campaign_run_report_xlsx(report: dict) -> bytes:
     from openpyxl import Workbook
     headers = [
-        "run_id", "saved_post_id", "target_title", "target_id", "target_thread_id", "send_status", "delete_status",
-        "sent_message_id", "sent_message_ids", "views", "views_status", "views_source", "sent_at", "delete_after_at",
-        "deleted_at", "error_text", "message_url",
+        "ID запуска", "ID поста", "Канал/группа", "Telegram ID", "ID темы", "Статус отправки", "Статус удаления",
+        "ID сообщения", "ID сообщений", "Просмотры", "Статус просмотров", "Источник данных", "Отправлено",
+        "Удалить после", "Удалено", "Проблема", "Ссылка",
     ]
     wb = Workbook()
     ws = wb.active
@@ -197,20 +221,24 @@ def build_campaign_run_report_xlsx(report: dict) -> bytes:
             _clean_text(item.get("target_title")),
             _clean_text(item.get("target_id")),
             _clean_text(item.get("target_thread_id")),
-            _clean_text(item.get("send_status")),
-            _clean_text(item.get("delete_status")),
+            _human_status(item.get("send_status")),
+            _human_status(item.get("delete_status")),
             _clean_text(item.get("sent_message_id")),
             _format_message_ids(item),
             _format_views(item),
-            _clean_text(item.get("views_status") or item.get("views_final_status")),
-            _clean_text(item.get("views_source") or ("final_snapshot" if item.get("final_snapshot") else None)),
+            _human_status(item.get("views_status") or item.get("views_final_status")),
+            _human_views_source(item.get("views_source") or ("final_snapshot" if item.get("final_snapshot") else None)),
             _clean_text(item.get("sent_at")),
             _clean_text(item.get("delete_after_at")),
             _clean_text(item.get("deleted_at")),
             _clean_text(item.get("error_text") or item.get("send_error_text") or item.get("delete_error_text")),
             _clean_text(item.get("message_url")),
         ])
-    _style_worksheet(ws, wrap_columns={"error_text", "message_url"}, number_columns={"views"})
+    _style_worksheet(
+        ws,
+        wrap_columns={"Проблема", "Ссылка"},
+        number_columns={"ID запуска", "ID поста", "ID темы", "ID сообщения", "Просмотры"},
+    )
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -218,7 +246,7 @@ def build_campaign_run_report_xlsx(report: dict) -> bytes:
 
 def build_campaign_post_stats_xlsx(stats: dict) -> bytes:
     from openpyxl import Workbook
-    headers = ["saved_post_id", "target_title", "target_id", "views_total", "views_status", "views_source", "runs_count", "unavailable_count", "error_text"]
+    headers = ["ID поста", "Канал/группа", "Telegram ID", "Просмотры", "Статус просмотров", "Источник данных", "Запусков", "Без данных", "Проблема"]
     wb = Workbook()
     ws = wb.active
     ws.title = "Статистика поста"
@@ -229,16 +257,16 @@ def build_campaign_post_stats_xlsx(stats: dict) -> bytes:
             _clean_text(item.get("target_title")),
             _clean_text(item.get("target_id")),
             item.get("views_total"),
-            _clean_text(item.get("views_status")),
-            _clean_text(item.get("views_source")),
+            _human_status(item.get("views_status")),
+            _human_views_source(item.get("views_source")),
             item.get("runs_count"),
             item.get("unavailable_count"),
             _clean_text(item.get("error_text")),
         ])
     _style_worksheet(
         ws,
-        wrap_columns={"error_text"},
-        number_columns={"views_total", "runs_count", "unavailable_count"},
+        wrap_columns={"Проблема"},
+        number_columns={"ID поста", "Просмотры", "Запусков", "Без данных"},
     )
     out = io.BytesIO()
     wb.save(out)

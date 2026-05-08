@@ -27,9 +27,9 @@ def test_build_campaign_run_report_csv_contains_bom_headers_and_values():
     assert isinstance(data, bytes)
     assert data.startswith(b"\xef\xbb\xbf")
     text = data.decode("utf-8-sig")
-    assert "run_id;saved_post_id;target_title" in text
+    assert "ID запуска;ID поста;Канал/группа" in text
     assert '"A;B"' in text
-    assert "123;ok;live" in text
+    assert "123;есть данные;live-данные" in text
 
 
 def test_build_campaign_run_report_csv_supports_sent_message_ids_json_list():
@@ -65,8 +65,8 @@ def test_build_campaign_post_stats_csv_contains_columns_and_values():
     stats = {"saved_post_id": 26, "channels_stats": [{"target_title": "A", "target_id": "-100", "views_total": 50, "views_status": "ok", "views_source": "final_snapshot", "runs_count": 2, "unavailable_count": 1}]}
     data = build_campaign_post_stats_csv(stats)
     text = data.decode("utf-8-sig")
-    assert "saved_post_id;target_title;target_id;views_total" in text
-    assert "26;A;-100;50;ok;final_snapshot;2;1;" in text
+    assert "ID поста;Канал/группа;Telegram ID;Просмотры" in text
+    assert "26;A;-100;50;есть данные;финальный снимок;2;1;" in text
 
 
 def test_build_campaign_post_stats_txt_contains_human_text_and_no_data():
@@ -90,7 +90,7 @@ def test_build_campaign_run_report_xlsx_returns_valid_workbook():
     wb = load_workbook(BytesIO(data))
     ws = wb["Отчёт запуска"]
     headers = [cell.value for cell in ws[1]]
-    assert headers[:4] == ["run_id", "saved_post_id", "target_title", "target_id"]
+    assert headers[:4] == ["ID запуска", "ID поста", "Канал/группа", "Telegram ID"]
     assert ws["C2"].value == "Wiki"
     assert ws["J2"].value == 1289
     assert ws["I2"].value == "10,11,12"
@@ -122,7 +122,17 @@ def test_build_campaign_post_stats_xlsx_returns_valid_workbook():
     wb = load_workbook(BytesIO(data))
     ws = wb["Статистика поста"]
     headers = [cell.value for cell in ws[1]]
-    assert headers == ["saved_post_id", "target_title", "target_id", "views_total", "views_status", "views_source", "runs_count", "unavailable_count", "error_text"]
+    assert headers == [
+        "ID поста",
+        "Канал/группа",
+        "Telegram ID",
+        "Просмотры",
+        "Статус просмотров",
+        "Источник данных",
+        "Запусков",
+        "Без данных",
+        "Проблема",
+    ]
     assert ws["D2"].value == 50
     assert ws["G2"].value == 2
     assert ws["H2"].value == 1
@@ -138,4 +148,33 @@ def test_build_campaign_post_stats_xlsx_empty_channels_has_valid_workbook():
     wb = load_workbook(BytesIO(data))
     ws = wb["Статистика поста"]
     headers = [cell.value for cell in ws[1]]
-    assert headers == ["saved_post_id", "target_title", "target_id", "views_total", "views_status", "views_source", "runs_count", "unavailable_count", "error_text"]
+    assert headers == [
+        "ID поста",
+        "Канал/группа",
+        "Telegram ID",
+        "Просмотры",
+        "Статус просмотров",
+        "Источник данных",
+        "Запусков",
+        "Без данных",
+        "Проблема",
+    ]
+
+
+def test_build_campaign_export_humanized_status_values():
+    report = {
+        "run_id": 15,
+        "saved_post_id": 26,
+        "items": [{
+            "target_title": "A",
+            "send_status": "sent",
+            "delete_status": "deleted",
+            "views_status": "unavailable",
+            "views_source": "final_snapshot",
+        }],
+    }
+    csv_text = build_campaign_run_report_csv(report).decode("utf-8-sig")
+    assert "отправлено" in csv_text
+    assert "удалено" in csv_text
+    assert "нет данных" in csv_text
+    assert "финальный снимок" in csv_text
