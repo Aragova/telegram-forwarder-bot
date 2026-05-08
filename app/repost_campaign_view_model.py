@@ -175,7 +175,7 @@ def build_campaign_target_item_view(target: dict, *, index: int | None = None) -
         "status_line": status_line,
         "target_line": None,
         "technical_line": f"Технический ID: {target_id}",
-        "thread_line": f"Тема: {thread_id}" if thread_id is not None else "Тема: не задана",
+        "thread_line": f"Тема: {thread_id}" if thread_id is not None else None,
         "check_line": check_line,
         "error_line": f"Ошибка: {check_error}" if check_error else None,
         "requires_attention": requires_attention,

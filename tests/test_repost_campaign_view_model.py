@@ -33,6 +33,30 @@ def test_target_item_view_title_equal_to_id_is_treated_as_missing():
     assert "-1002741117827" not in view["title"]
 
 
+def test_campaign_target_item_view_hides_empty_thread_line():
+    item = build_campaign_target_item_view({
+        "id": 1,
+        "target_id": "-1001",
+        "title": "Канал",
+        "is_active": True,
+        "target_thread_id": None,
+    })
+
+    assert item["thread_line"] is None
+
+
+def test_campaign_target_item_view_keeps_thread_line_when_thread_id_exists():
+    item = build_campaign_target_item_view({
+        "id": 1,
+        "target_id": "-1001",
+        "title": "Группа",
+        "is_active": True,
+        "target_thread_id": 12345,
+    })
+
+    assert item["thread_line"] == "Тема: 12345"
+
+
 def test_launch_readiness_vm_ready():
     vm = build_campaign_launch_readiness_view_model(readiness={"can_launch": True, "saved_post_exists": True, "show_seconds": 3600, "main_target_ready": True, "will_send_total": 3, "will_skip_total": 0, "extra_paused": 0, "extra_problem": 0, "extra_ready": 2}, now=datetime(2026,1,1,10,0,0))
     assert vm["status_line"] == "✅ Кампания готова к запуску"
