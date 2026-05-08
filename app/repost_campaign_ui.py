@@ -218,6 +218,22 @@ def build_repost_campaign_schedule_wizard_step3_view(*, rule_id: int, readiness:
     ]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
+def build_repost_campaign_schedule_wizard_step4_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🧙 VIP-запуск по расписанию · Шаг 4/4\n\n"
+        "4) Время запуска\n\n"
+        "Когда запустить кампанию?\n\n"
+        "Часовой пояс: UTC+3"
+    )
+    rows = [
+        [InlineKeyboardButton(text="Сегодня в 20:00", callback_data=f"rule_repost_campaign_schedule_quick:{rule_id}:today_20")],
+        [InlineKeyboardButton(text="Завтра в 12:00", callback_data=f"rule_repost_campaign_schedule_quick:{rule_id}:tomorrow_12")],
+        [InlineKeyboardButton(text="Завтра в 18:00", callback_data=f"rule_repost_campaign_schedule_quick:{rule_id}:tomorrow_18")],
+        [InlineKeyboardButton(text="✍️ Ввести дату и время", callback_data=f"rule_repost_campaign_schedule_input:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_schedule_step3:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[str, InlineKeyboardMarkup]:
     payload = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})

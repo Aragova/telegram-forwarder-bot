@@ -668,6 +668,18 @@ def test_schedule_menu_view_has_quick_presets_and_manual_input():
     labels=[b.text for r in kb.inline_keyboard for b in r]
     assert 'Сегодня в 20:00' in labels and '✍️ Ввести дату и время' in labels
 
+def test_schedule_step4_view_has_time_presets():
+    from app.repost_campaign_ui import build_repost_campaign_schedule_wizard_step4_view
+    text, kb = build_repost_campaign_schedule_wizard_step4_view(rule_id=5)
+    assert "Шаг 4/4" in text
+    labels = [b.text for r in kb.inline_keyboard for b in r]
+    callbacks = [b.callback_data for r in kb.inline_keyboard for b in r]
+    assert "Сегодня в 20:00" in labels
+    assert "Завтра в 12:00" in labels
+    assert "Завтра в 18:00" in labels
+    assert "✍️ Ввести дату и время" in labels
+    assert f"rule_repost_campaign_schedule_step3:5" in callbacks
+
 def test_vip_coming_soon_view():
     from app.repost_campaign_ui import build_repost_campaign_vip_coming_soon_view
     text,_=build_repost_campaign_vip_coming_soon_view(rule_id=1, feature='x')
@@ -699,6 +711,26 @@ def test_bot_has_real_schedule_handlers_blocks():
     assert 'async def handle_rule_repost_campaign_schedule_confirm' in source
     assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_STARTED' in source
     assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_DONE' in source
+    assert 'rule_repost_campaign_schedule_step4:' in source
+    assert 'handle_rule_repost_campaign_schedule_step4' in source
+    assert 'build_repost_campaign_schedule_wizard_step4_view' in source
+    assert 'rule_repost_campaign_schedule_step4:{rule_id}' in source
+    assert 'if int(readiness.get("show_seconds") or 0) <= 0' in source
+
+def test_schedule_show_pick_goes_to_step4():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert 'async def handle_rule_repost_campaign_schedule_show_pick' in source
+    assert 'text, kb = build_repost_campaign_schedule_wizard_step4_view(rule_id=rule_id)' in source
+
+def test_schedule_input_back_goes_to_step4():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert '⬅️ Назад к выбору времени' in source
+    assert 'rule_repost_campaign_schedule_step4:{rule_id}' in source
+
+def test_manual_input_without_show_seconds_returns_step3():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert 'if int(readiness.get("show_seconds") or 0) <= 0:' in source
+    assert 'build_repost_campaign_schedule_wizard_step3_view(rule_id=rule_id, readiness=readiness)' in source
 
 def test_schedule_menu_view_shows_scheduled_launches_block():
     from app.repost_campaign_ui import build_repost_campaign_schedule_menu_view
