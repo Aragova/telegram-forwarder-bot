@@ -330,6 +330,14 @@ class RepositoryProtocol(Protocol):
         *,
         title: str | None = None,
         last_check_error: str | None = None,
+        can_post: bool | None = None,
+        can_delete: bool | None = None,
+        publish_status: str | None = None,
+        delete_permission_status: str | None = None,
+        publish_error_text: str | None = None,
+        delete_error_text: str | None = None,
+        check_source: str | None = None,
+        check_status_json: dict | None = None,
     ) -> bool: ...
 
     def create_saved_post(self, *, rule_id: int | None, title: str | None, content: dict[str, Any], source_chat_id: str | None, source_message_id: int | None, source_media_group_id: str | None, created_by: int | None) -> int | None: ...
