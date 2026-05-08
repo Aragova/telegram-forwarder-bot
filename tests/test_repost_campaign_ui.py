@@ -150,28 +150,61 @@ def _kb_texts(kb):
 
 def test_launch_readiness_view_ready_has_confirm_button():
     text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=3, readiness={"can_launch": True, "saved_post_id": 7, "saved_post_exists": True, "show_seconds": 3600, "main_target_ready": True, "will_send_total": 3, "will_skip_total": 0, "extra_paused": 0, "extra_problem": 0})
-    assert "🚦 Проверка перед запуском" in text
-    assert "Кампания готова к запуску" in text
-    assert "Будет опубликовано" in text
+    assert "👁 Предпросмотр запуска" in text
+    assert "Рекламный пост:" in text
+    assert "✅ Готов к публикации" in text
+    assert "Публикация:" in text
+    assert "📣 Каналов/групп:" in text
+    assert "✅ Готовы:" in text
+    assert "⚠️ Требуют внимания:" in text
+    assert "Срок размещения:" in text
+    assert "🕒 Ожидаемое удаление:" in text
+    assert "UTC+3" in text
+    assert "После запуска ViMi:" in text
+    assert "подготовит отчёт XLSX/CSV/TXT" in text
     labels = _kb_texts(keyboard)
     callbacks = _callbacks_from_keyboard(keyboard)
-    assert "🚀 Подтвердить запуск" in labels
+    assert "✅ Подтвердить запуск" in labels
     assert "rule_repost_campaign_launch_confirm:3" in callbacks
     assert "rule_repost_campaign_launch:3" not in callbacks
+    assert "🔎 Проверить права" not in labels
+    assert "📣 Каналы/Группы" not in labels
+    assert "📝 Рекламный пост" not in labels
+    assert "⏳ Время показа" not in labels
 
 
 def test_launch_readiness_view_ready_mentions_final_confirmation():
     text, _ = build_repost_campaign_launch_readiness_view(rule_id=3, readiness={"can_launch": True, "saved_post_id": 7, "saved_post_exists": True, "show_seconds": 3600, "main_target_ready": True, "will_send_total": 3, "will_skip_total": 0, "extra_paused": 0, "extra_problem": 0})
-    assert "финальная проверка" in text
-    assert "После подтверждения" in text
+    assert "Если всё верно — подтвердите запуск." in text
 
 def test_launch_readiness_view_blocked_has_no_confirm_button():
     text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=3, readiness={"can_launch": False, "saved_post_exists": True, "show_seconds": 300, "main_target_ready": True, "extra_active_problem": 1, "extra_problem": 1, "will_send_total": 1, "will_skip_total": 1, "extra_paused": 0, "block_reasons": ["Есть активные каналы/группы, которые требуют настройки."]})
-    assert "Нужно проверить каналы/группы" in text
+    assert "👁 Предпросмотр запуска" in text
+    assert "Кампания не готова к запуску" in text
     labels = _kb_texts(keyboard)
-    assert "🚀 Подтвердить запуск" not in labels
-    assert "🔎 Проверить права" in labels
-    assert "📣 Каналы/Группы" in labels
+    assert "✅ Подтвердить запуск" not in labels
+    assert labels == ["⬅️ Назад"]
+
+
+def test_launch_readiness_view_expected_delete_uses_utc_plus_3():
+    from datetime import datetime, timezone
+
+    text, _ = build_repost_campaign_launch_readiness_view(
+        rule_id=3,
+        readiness={"can_launch": True, "saved_post_id": 7, "saved_post_exists": True, "show_seconds": 7200, "will_send_total": 1, "will_skip_total": 0},
+        now=datetime(2026, 5, 8, 18, 0, tzinfo=timezone.utc),
+    )
+    assert "08.05 23:00 UTC+3" in text
+
+
+def test_launch_readiness_view_has_only_confirm_and_back_when_ready():
+    _, keyboard = build_repost_campaign_launch_readiness_view(rule_id=3, readiness={"can_launch": True, "saved_post_id": 7, "saved_post_exists": True, "show_seconds": 3600, "will_send_total": 3, "will_skip_total": 0})
+    assert _kb_texts(keyboard) == ["✅ Подтвердить запуск", "⬅️ Назад"]
+
+
+def test_launch_readiness_view_has_only_back_when_blocked():
+    _, keyboard = build_repost_campaign_launch_readiness_view(rule_id=3, readiness={"can_launch": False, "saved_post_exists": False, "show_seconds": 0, "will_send_total": 0, "will_skip_total": 0})
+    assert _kb_texts(keyboard) == ["⬅️ Назад"]
 
 def test_launch_result_blocked_uses_readiness_vm():
     result = {"ok": False, "error_text": "Кампания не готова к запуску", "extra": {"launch_readiness": {"can_launch": False, "saved_post_exists": True, "show_seconds": 300, "main_target_ready": True, "extra_active_problem": 1, "extra_problem": 1, "will_send_total": 1, "will_skip_total": 1, "extra_paused": 0, "block_reasons": ["Есть активные каналы/группы, которые требуют настройки."]}}}
@@ -621,4 +654,3 @@ def test_bot_has_export_callbacks_and_runtime_builder_usage():
     assert "from app.repost_campaign_export_service import" in source
     assert "build_campaign_run_report_xlsx" in source
     assert "build_campaign_post_stats_xlsx" in source
-

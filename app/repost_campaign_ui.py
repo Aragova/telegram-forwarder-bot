@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import re
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -222,39 +222,62 @@ def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[s
 
 def build_repost_campaign_launch_readiness_view(*, rule_id: int, readiness: dict, now: datetime | None = None) -> tuple[str, InlineKeyboardMarkup]:
     vm = build_campaign_launch_readiness_view_model(readiness=readiness, now=now)
-    saved_post_id = readiness.get("saved_post_id")
-    reasons_block = ""
-    if vm["block_reason_lines"]:
-        reasons_block = "\n\nПричины:\n" + "\n".join([f"• {line}" for line in vm["block_reason_lines"]])
-    text = (
-        "🚦 Проверка перед запуском\n\n"
-        f"{vm['status_line']}\n\n"
-        f"📝 Рекламный пост\n{'Готов к публикации' if saved_post_id else 'Не выбран'}\n"
-        f"{vm['will_send_line']}\n"
-        f"{vm['will_skip_line']}\n"
-        f"{vm['show_seconds_line']}\n"
-        f"{vm['auto_delete_line']}\n"
-        f"{vm['expected_delete_line']}{reasons_block}\n\n"
-        "Это финальная проверка перед публикацией.\n"
-        "После подтверждения рекламный пост будет сразу отправлен в готовые каналы/группы.\n\n"
-        "После запуска бот:\n"
-        "• опубликует рекламный пост только в готовые каналы/группы;\n"
-        "• сохранит результат по каждому получателю;\n"
-        "• автоматически удалит публикации после времени показа;\n"
-        "• оставит историю размещения.\n\n"
-        f"{vm['next_step_line']}"
-    )
+    saved_post_ready = bool(readiness.get("saved_post_id")) and readiness.get("saved_post_exists") is not False
+    saved_post_line = "✅ Готов к публикации" if saved_post_ready else "❌ Не готов к публикации"
+    will_send_total = int(readiness.get("will_send_total") or 0)
+    will_skip_total = int(readiness.get("will_skip_total") or 0)
+    targets_total = int(readiness.get("targets_total") or 0)
+    if targets_total <= 0:
+        targets_total = will_send_total + will_skip_total
+    show_seconds = int(readiness.get("show_seconds") or 0)
+    expected_delete_line = "🕒 Ожидаемое удаление: не рассчитывается"
+    if show_seconds > 0:
+        now_dt = now or datetime.now(timezone.utc)
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+        else:
+            now_dt = now_dt.astimezone(timezone.utc)
+        expected_delete_at = now_dt + timedelta(seconds=show_seconds)
+        expected_delete_line = f"🕒 Ожидаемое удаление: {format_campaign_datetime_text(expected_delete_at, timezone_offset_hours=3)} UTC+3"
+
+    lines = [
+        "👁 Предпросмотр запуска",
+        "",
+        "Рекламный пост:",
+        saved_post_line,
+        "",
+        "Публикация:",
+        f"📣 Каналов/групп: {targets_total}",
+        f"✅ Готовы: {will_send_total}",
+        f"⚠️ Требуют внимания: {will_skip_total}",
+        "",
+        "Срок размещения:",
+        f"⏳ {format_campaign_show_seconds_text(show_seconds)}",
+        expected_delete_line,
+        "",
+        "После запуска ViMi:",
+        "• опубликует пост в готовые каналы;",
+        "• сохранит результат по каждому получателю;",
+        "• соберёт просмотры перед удалением;",
+        "• удалит копии после срока размещения;",
+        "• подготовит отчёт XLSX/CSV/TXT.",
+        "",
+    ]
+    if vm["can_launch"]:
+        lines.append("Если всё верно — подтвердите запуск.")
+    else:
+        lines.extend(["Кампания не готова к запуску.", ""])
+        if vm["block_reason_lines"]:
+            lines.append("Причины:")
+            lines.extend([f"• {line}" for line in vm["block_reason_lines"]])
+            lines.append("")
+        lines.append("Вернитесь назад и исправьте настройки.")
+    text = "\n".join(lines)
+
     rows = []
     if vm["can_launch"]:
-        rows.append([InlineKeyboardButton(text="🚀 Подтвердить запуск", callback_data=f"rule_repost_campaign_launch_confirm:{rule_id}")])
-    if vm["can_check_rights"]:
-        rows.append([InlineKeyboardButton(text="🔎 Проверить права", callback_data=f"rule_repost_campaign_check:{rule_id}")])
-    rows.extend([
-        [InlineKeyboardButton(text="📣 Каналы/Группы", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
-        [InlineKeyboardButton(text="📝 Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-        [InlineKeyboardButton(text="⏳ Время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
-        [InlineKeyboardButton(text="⬅️ Назад к кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-    ])
+        rows.append([InlineKeyboardButton(text="✅ Подтвердить запуск", callback_data=f"rule_repost_campaign_launch_confirm:{rule_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
