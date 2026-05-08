@@ -6,9 +6,11 @@ import argparse
 import json
 import re
 import time
+import tempfile
 from html import escape
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -131,6 +133,14 @@ from app.saved_posts_service import (
 from app.saved_post_renderer import SavedPostRenderer
 from app.saved_post_album_service import SavedPostAlbumCaptureBuffer
 from app.repost_campaign_runtime_service import RepostCampaignRuntimeService
+from app.repost_campaign_export_service import (
+    build_campaign_post_stats_csv,
+    build_campaign_post_stats_txt,
+    build_campaign_post_stats_xlsx,
+    build_campaign_run_report_csv,
+    build_campaign_run_report_txt,
+    build_campaign_run_report_xlsx,
+)
 from app.repost_campaign_target_check_service import RepostCampaignTargetCheckService
 from app.repost_campaign_delete_service import RepostCampaignDeleteService, run_repost_campaign_delete_loop
 from app import product_ui
@@ -7237,6 +7247,87 @@ async def handle_rule_repost_campaign_views_report(callback: CallbackQuery):
         await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
 
 
+async def _send_export_document(callback: CallbackQuery, *, filename: str, content: bytes) -> None:
+    tmp_path: Path | None = None
+    try:
+        suffix = Path(filename).suffix or ".txt"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        await callback.message.answer_document(FSInputFile(str(tmp_path), filename=filename))
+    finally:
+        if tmp_path:
+            tmp_path.unlink(missing_ok=True)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_export_csv:"))
+async def handle_rule_repost_campaign_views_export_csv(callback: CallbackQuery):
+    _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
+    rule_id = int(rule_id_raw)
+    run_id = int(run_id_raw)
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    try:
+        logger.info("REPOST_CAMPAIGN_EXPORT_STARTED | rule_id=%s | run_id=%s | format=csv", rule_id, run_id)
+        runtime = _build_repost_campaign_runtime()
+        report = await runtime.build_campaign_views_report(rule_id=rule_id, run_id=run_id)
+        if not report or not report.get("ok"):
+            await answer_callback_safe(callback, "❌ Отчёт не найден. Обновите экран и попробуйте ещё раз.", show_alert=True)
+            return
+        payload = build_campaign_run_report_csv(report)
+        await _send_export_document(callback, filename=f"campaign_run_{run_id}_report.csv", content=payload)
+        logger.info("REPOST_CAMPAIGN_EXPORT_DONE | rule_id=%s | run_id=%s | format=csv | size_bytes=%s", rule_id, run_id, len(payload))
+        await answer_callback_safe_once(callback)
+    except Exception as exc:
+        logger.exception("REPOST_CAMPAIGN_EXPORT_FAILED | rule_id=%s | run_id=%s | format=csv | error=%s", rule_id, run_id, exc)
+        await answer_callback_safe(callback, "❌ Не удалось отправить файл отчёта.", show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_export_xlsx:"))
+async def handle_rule_repost_campaign_views_export_xlsx(callback: CallbackQuery):
+    _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
+    rule_id = int(rule_id_raw)
+    run_id = int(run_id_raw)
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    try:
+        logger.info("REPOST_CAMPAIGN_EXPORT_STARTED | rule_id=%s | run_id=%s | format=xlsx", rule_id, run_id)
+        runtime = _build_repost_campaign_runtime()
+        report = await runtime.build_campaign_views_report(rule_id=rule_id, run_id=run_id)
+        if not report or not report.get("ok"):
+            await answer_callback_safe(callback, "❌ Отчёт не найден. Обновите экран и попробуйте ещё раз.", show_alert=True)
+            return
+        payload = build_campaign_run_report_xlsx(report)
+        await _send_export_document(callback, filename=f"campaign_run_{run_id}_report.xlsx", content=payload)
+        logger.info("REPOST_CAMPAIGN_EXPORT_DONE | rule_id=%s | run_id=%s | format=xlsx | size_bytes=%s", rule_id, run_id, len(payload))
+        await answer_callback_safe_once(callback)
+    except Exception as exc:
+        logger.exception("REPOST_CAMPAIGN_EXPORT_FAILED | rule_id=%s | run_id=%s | format=xlsx | error=%s", rule_id, run_id, exc)
+        await answer_callback_safe(callback, "❌ Не удалось отправить файл отчёта.", show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_export_txt:"))
+async def handle_rule_repost_campaign_views_export_txt(callback: CallbackQuery):
+    _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
+    rule_id = int(rule_id_raw)
+    run_id = int(run_id_raw)
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    try:
+        logger.info("REPOST_CAMPAIGN_EXPORT_STARTED | rule_id=%s | run_id=%s | format=txt", rule_id, run_id)
+        runtime = _build_repost_campaign_runtime()
+        report = await runtime.build_campaign_views_report(rule_id=rule_id, run_id=run_id)
+        if not report or not report.get("ok"):
+            await answer_callback_safe(callback, "❌ Отчёт не найден. Обновите экран и попробуйте ещё раз.", show_alert=True)
+            return
+        payload = build_campaign_run_report_txt(report).encode("utf-8")
+        await _send_export_document(callback, filename=f"campaign_run_{run_id}_report.txt", content=payload)
+        logger.info("REPOST_CAMPAIGN_EXPORT_DONE | rule_id=%s | run_id=%s | format=txt | size_bytes=%s", rule_id, run_id, len(payload))
+        await answer_callback_safe_once(callback)
+    except Exception as exc:
+        logger.exception("REPOST_CAMPAIGN_EXPORT_FAILED | rule_id=%s | run_id=%s | format=txt | error=%s", rule_id, run_id, exc)
+        await answer_callback_safe(callback, "❌ Не удалось отправить файл отчёта.", show_alert=True)
+
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_run_delete_confirm:"))
 async def handle_rule_repost_campaign_run_delete_confirm(callback: CallbackQuery):
     if not await is_admin_callback(callback):
@@ -7331,6 +7422,75 @@ async def handle_rule_repost_campaign_post_channels_stats(callback: CallbackQuer
     except Exception as exc:
         logger.exception("REPOST_CAMPAIGN_POST_CHANNELS_STATS_UI_FAILED | rule_id=%s | saved_post_id=%s | offset=%s | error=%s", rule_id, saved_post_id, offset, exc)
         await answer_callback_safe(callback, "Не удалось открыть статистику по каналам", show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_export_csv:"))
+async def handle_rule_repost_campaign_post_export_csv(callback: CallbackQuery):
+    _, rule_id_raw, saved_post_id_raw = callback.data.split(":", 2)
+    rule_id = int(rule_id_raw)
+    saved_post_id = int(saved_post_id_raw)
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    try:
+        logger.info("REPOST_CAMPAIGN_EXPORT_STARTED | rule_id=%s | saved_post_id=%s | format=csv", rule_id, saved_post_id)
+        runtime = _build_repost_campaign_runtime()
+        stats = await runtime.build_campaign_post_stats(rule_id=rule_id, saved_post_id=saved_post_id, include_live_views=True)
+        if not stats or not stats.get("ok"):
+            await answer_callback_safe(callback, "❌ Отчёт не найден. Обновите экран и попробуйте ещё раз.", show_alert=True)
+            return
+        payload = build_campaign_post_stats_csv(stats)
+        await _send_export_document(callback, filename=f"campaign_post_{saved_post_id}_stats.csv", content=payload)
+        logger.info("REPOST_CAMPAIGN_EXPORT_DONE | rule_id=%s | saved_post_id=%s | format=csv | size_bytes=%s", rule_id, saved_post_id, len(payload))
+        await answer_callback_safe_once(callback)
+    except Exception as exc:
+        logger.exception("REPOST_CAMPAIGN_EXPORT_FAILED | rule_id=%s | saved_post_id=%s | format=csv | error=%s", rule_id, saved_post_id, exc)
+        await answer_callback_safe(callback, "❌ Не удалось отправить файл отчёта.", show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_export_xlsx:"))
+async def handle_rule_repost_campaign_post_export_xlsx(callback: CallbackQuery):
+    _, rule_id_raw, saved_post_id_raw = callback.data.split(":", 2)
+    rule_id = int(rule_id_raw)
+    saved_post_id = int(saved_post_id_raw)
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    try:
+        logger.info("REPOST_CAMPAIGN_EXPORT_STARTED | rule_id=%s | saved_post_id=%s | format=xlsx", rule_id, saved_post_id)
+        runtime = _build_repost_campaign_runtime()
+        stats = await runtime.build_campaign_post_stats(rule_id=rule_id, saved_post_id=saved_post_id, include_live_views=True)
+        if not stats or not stats.get("ok"):
+            await answer_callback_safe(callback, "❌ Отчёт не найден. Обновите экран и попробуйте ещё раз.", show_alert=True)
+            return
+        payload = build_campaign_post_stats_xlsx(stats)
+        await _send_export_document(callback, filename=f"campaign_post_{saved_post_id}_stats.xlsx", content=payload)
+        logger.info("REPOST_CAMPAIGN_EXPORT_DONE | rule_id=%s | saved_post_id=%s | format=xlsx | size_bytes=%s", rule_id, saved_post_id, len(payload))
+        await answer_callback_safe_once(callback)
+    except Exception as exc:
+        logger.exception("REPOST_CAMPAIGN_EXPORT_FAILED | rule_id=%s | saved_post_id=%s | format=xlsx | error=%s", rule_id, saved_post_id, exc)
+        await answer_callback_safe(callback, "❌ Не удалось отправить файл отчёта.", show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_export_txt:"))
+async def handle_rule_repost_campaign_post_export_txt(callback: CallbackQuery):
+    _, rule_id_raw, saved_post_id_raw = callback.data.split(":", 2)
+    rule_id = int(rule_id_raw)
+    saved_post_id = int(saved_post_id_raw)
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    try:
+        logger.info("REPOST_CAMPAIGN_EXPORT_STARTED | rule_id=%s | saved_post_id=%s | format=txt", rule_id, saved_post_id)
+        runtime = _build_repost_campaign_runtime()
+        stats = await runtime.build_campaign_post_stats(rule_id=rule_id, saved_post_id=saved_post_id, include_live_views=True)
+        if not stats or not stats.get("ok"):
+            await answer_callback_safe(callback, "❌ Отчёт не найден. Обновите экран и попробуйте ещё раз.", show_alert=True)
+            return
+        payload = build_campaign_post_stats_txt(stats).encode("utf-8")
+        await _send_export_document(callback, filename=f"campaign_post_{saved_post_id}_stats.txt", content=payload)
+        logger.info("REPOST_CAMPAIGN_EXPORT_DONE | rule_id=%s | saved_post_id=%s | format=txt | size_bytes=%s", rule_id, saved_post_id, len(payload))
+        await answer_callback_safe_once(callback)
+    except Exception as exc:
+        logger.exception("REPOST_CAMPAIGN_EXPORT_FAILED | rule_id=%s | saved_post_id=%s | format=txt | error=%s", rule_id, saved_post_id, exc)
+        await answer_callback_safe(callback, "❌ Не удалось отправить файл отчёта.", show_alert=True)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_use:"))
 async def handle_rule_repost_campaign_post_use(callback: CallbackQuery):
