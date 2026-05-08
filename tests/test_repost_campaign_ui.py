@@ -473,6 +473,39 @@ def test_target_card_text_has_no_double_status_or_check_prefix():
     assert "Проверка: Проверка:" not in text
 
 
+def test_target_card_does_not_show_empty_topic_line():
+    text, _ = build_repost_campaign_target_card_view(
+        rule_id=3,
+        target={
+            "id": 8,
+            "target_id": "-1002741117827",
+            "title": "Шаловливый мальчуган 😜",
+            "is_active": True,
+            "target_thread_id": None,
+        },
+        page=0,
+    )
+
+    assert "Тема: не задана" not in text
+    assert "Тема:" not in text
+
+
+def test_target_card_shows_topic_line_when_thread_id_exists():
+    text, _ = build_repost_campaign_target_card_view(
+        rule_id=3,
+        target={
+            "id": 8,
+            "target_id": "-1002741117827",
+            "title": "Группа с темой",
+            "is_active": True,
+            "target_thread_id": 12345,
+        },
+        page=0,
+    )
+
+    assert "Тема: 12345" in text
+
+
 def test_target_delete_confirm_returns_to_card():
     _, kb = build_repost_campaign_target_delete_confirm_view(rule_id=1, target={"id":9,"title":"A"}, page=3)
     assert "rule_repost_campaign_target_card:1:9:3" in _callbacks_from_keyboard(kb)

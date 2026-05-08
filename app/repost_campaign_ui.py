@@ -389,9 +389,12 @@ def build_repost_campaign_target_card_view(*, rule_id: int, target: dict | None,
         view.get("status_line") or "Статус: —",
         view.get("check_line") or "Проверка: —",
         f"Технический ID: {target.get('target_id') or '—'}",
-        view.get("thread_line") or "Тема: не задана",
-        "",
     ]
+
+    if view.get("thread_line"):
+        lines.append(view["thread_line"])
+
+    lines.append("")
     if view.get("error_line"):
         lines.extend(["Ошибка:", str(view.get("error_line")).replace("⚠️ ", "")])
     else:
