@@ -25,6 +25,9 @@ class FakeRepo:
         self.checks = {}
         self.events = {}
         self._id = 1
+        self.launched_calls = []
+        self.failed_calls = []
+        self.delay_calls = []
 
     def get_rule(self, rule_id): return self.rules.get(rule_id)
     def get_saved_post(self, saved_post_id): return self.saved_posts.get(saved_post_id)
@@ -62,6 +65,14 @@ class FakeRepo:
             return False
         if self.posts[scheduled_post_id]["status"] in {"draft", "ready", "scheduled"}: self.posts[scheduled_post_id]["status"] = "cancelled"; return True
         return False
+    def reset_stuck_campaign_scheduled_posts(self, *, stuck_seconds=300): return 0
+    def claim_due_campaign_scheduled_posts(self, **kwargs): return []
+    def mark_campaign_scheduled_post_launched(self, scheduled_post_id, *, campaign_run_id):
+        self.launched_calls.append((scheduled_post_id, campaign_run_id)); return True
+    def mark_campaign_scheduled_post_failed(self, scheduled_post_id, *, error_text, campaign_run_id=None):
+        self.failed_calls.append((scheduled_post_id, error_text, campaign_run_id)); return True
+    def delay_campaign_scheduled_post_retry(self, scheduled_post_id, *, next_retry_at, error_text=None):
+        self.delay_calls.append((scheduled_post_id, next_retry_at, error_text)); return True
 
 
 class FakeCampaignRuntime:
@@ -277,3 +288,102 @@ def test_process_due_posts_claims_and_launches_snapshot():
     assert rt.calls
     assert marks == [(1,77)]
 
+
+def _mk_runtime_result(ok, run_id=None, error_text=None):
+    return type("R", (), {"ok": ok, "extra": {"campaign_run_id": run_id} if run_id else {}, "error_text": error_text})()
+
+
+def test_process_due_posts_delays_when_active_placement():
+    import asyncio
+    repo = FakeRepo(); repo.rules[1]=Rule(1); repo.saved_posts[7]={"id":7}
+    row={"id":1,"rule_id":1,"saved_post_id":7,"show_seconds":60,"status":"processing","campaign_run_id":None,"attempt_count":0}
+    repo.post_targets[1]=[{"target_id":"-1"}]; repo.claim_due_campaign_scheduled_posts=lambda **k:[row]
+    rt=FakeRuntimeLaunch(_mk_runtime_result(True,77), active=True)
+    service=RepostCampaignScheduledPostService(repo=repo,campaign_runtime=rt)
+    asyncio.run(service.process_due_posts(worker_id='w'))
+    assert not rt.calls and repo.delay_calls
+
+
+def test_process_due_posts_marks_failed_for_missing_saved_post():
+    import asyncio
+    repo = FakeRepo(); repo.rules[1]=Rule(1)
+    row={"id":1,"rule_id":1,"saved_post_id":7,"show_seconds":60,"status":"processing","campaign_run_id":None,"attempt_count":0}
+    repo.post_targets[1]=[{"target_id":"-1"}]; repo.claim_due_campaign_scheduled_posts=lambda **k:[row]
+    rt=FakeRuntimeLaunch(_mk_runtime_result(True,77))
+    service=RepostCampaignScheduledPostService(repo=repo,campaign_runtime=rt)
+    asyncio.run(service.process_due_posts(worker_id='w'))
+    assert repo.failed_calls and not rt.calls
+
+
+def test_process_due_posts_never_retries_when_campaign_run_id_exists():
+    import asyncio
+    repo = FakeRepo(); row={"id":1,"rule_id":1,"campaign_run_id":123,"attempt_count":0}
+    repo.claim_due_campaign_scheduled_posts=lambda **k:[row]
+    rt=FakeRuntimeLaunch(_mk_runtime_result(True,77))
+    service=RepostCampaignScheduledPostService(repo=repo,campaign_runtime=rt)
+    asyncio.run(service.process_due_posts(worker_id='w'))
+    assert not rt.calls and not repo.delay_calls
+
+
+def test_process_due_posts_failed_launch_with_campaign_run_id_marks_failed_without_retry():
+    import asyncio
+    repo=FakeRepo(); repo.rules[1]=Rule(1); repo.saved_posts[7]={"id":7}
+    row={"id":1,"rule_id":1,"saved_post_id":7,"show_seconds":60,"status":"processing","campaign_run_id":None,"attempt_count":0}
+    repo.post_targets[1]=[{"target_id":"-1"}]; repo.claim_due_campaign_scheduled_posts=lambda **k:[row]
+    rt=FakeRuntimeLaunch(_mk_runtime_result(False,777,'boom'))
+    service=RepostCampaignScheduledPostService(repo=repo,campaign_runtime=rt)
+    asyncio.run(service.process_due_posts(worker_id='w'))
+    assert repo.failed_calls and not repo.delay_calls
+
+
+def test_process_due_posts_failed_launch_without_run_id_delays_retry():
+    import asyncio
+    repo=FakeRepo(); repo.rules[1]=Rule(1); repo.saved_posts[7]={"id":7}
+    row={"id":1,"rule_id":1,"saved_post_id":7,"show_seconds":60,"status":"processing","campaign_run_id":None,"attempt_count":0}
+    repo.post_targets[1]=[{"target_id":"-1"}]; repo.claim_due_campaign_scheduled_posts=lambda **k:[row]
+    rt=FakeRuntimeLaunch(_mk_runtime_result(False,None,'boom'))
+    service=RepostCampaignScheduledPostService(repo=repo,campaign_runtime=rt)
+    asyncio.run(service.process_due_posts(worker_id='w'))
+    assert repo.delay_calls
+
+
+def test_process_due_posts_runtime_exception_delays_retry():
+    import asyncio
+    class X(FakeCampaignRuntime):
+        async def launch_campaign_from_snapshot(self, **kwargs):
+            raise RuntimeError('boom')
+    repo=FakeRepo(); repo.rules[1]=Rule(1); repo.saved_posts[7]={"id":7}
+    row={"id":1,"rule_id":1,"saved_post_id":7,"show_seconds":60,"status":"processing","campaign_run_id":None,"attempt_count":0}
+    repo.post_targets[1]=[{"target_id":"-1"}]; repo.claim_due_campaign_scheduled_posts=lambda **k:[row]
+    service=RepostCampaignScheduledPostService(repo=repo,campaign_runtime=X())
+    asyncio.run(service.process_due_posts(worker_id='w'))
+    assert repo.delay_calls
+
+
+def test_process_due_posts_max_attempts_marks_failed():
+    import asyncio
+    repo=FakeRepo(); repo.rules[1]=Rule(1); repo.saved_posts[7]={"id":7}
+    row={"id":1,"rule_id":1,"saved_post_id":7,"show_seconds":60,"status":"processing","campaign_run_id":None,"attempt_count":5}
+    repo.post_targets[1]=[{"target_id":"-1"}]; repo.claim_due_campaign_scheduled_posts=lambda **k:[row]
+    rt=FakeRuntimeLaunch(_mk_runtime_result(False,None,'boom'))
+    service=RepostCampaignScheduledPostService(repo=repo,campaign_runtime=rt)
+    asyncio.run(service.process_due_posts(worker_id='w'))
+    assert repo.failed_calls and not repo.delay_calls
+
+
+def test_scheduled_post_loop_runs_process_due_posts_and_stops():
+    import asyncio
+    from app.repost_campaign_scheduled_post_service import run_repost_campaign_scheduled_post_loop
+    class R:
+        def __init__(self):
+            import logging
+            self.calls=0
+            self.logger=logging.getLogger('t')
+        async def process_due_posts(self, worker_id):
+            self.calls += 1
+    runtime=R(); stop=asyncio.Event()
+    async def _run():
+        task=asyncio.create_task(run_repost_campaign_scheduled_post_loop(runtime=runtime, stop_event=stop, interval_seconds=0.01, worker_id='w'))
+        await asyncio.sleep(0.03); stop.set(); await task
+    asyncio.run(_run())
+    assert runtime.calls > 0

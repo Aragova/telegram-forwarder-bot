@@ -688,6 +688,7 @@ class RepostCampaignRuntimeService:
             run_message_id = self.repo.create_campaign_run_message(run_id=run_id, rule_id=rule_id, saved_post_id=saved_post_id, target_kind=target["target_kind"], target_id=target["target_id"], target_thread_id=target["target_thread_id"], target_title=target["target_title"], show_seconds=show_seconds, delete_after_at=build_campaign_delete_after_iso(show_seconds))
             if run_message_id is None:
                 targets_failed += 1
+                error_text = error_text or "Не удалось создать запись публикации рекламной кампании"
                 continue
             self.repo.mark_campaign_run_message_sending(run_message_id, render_mode=None)
             render_result = await self.renderer.send(chat_id=target["target_id"], content=content)
@@ -707,7 +708,7 @@ class RepostCampaignRuntimeService:
         else:
             status = "failed"
         self.repo.update_campaign_run_status(run_id, status=status, render_mode=last_render_mode, targets_success=targets_success, targets_failed=targets_failed, error_text=error_text, report={"scheduled_post_id": scheduled_post_id, "launch_source": "vip_scheduled_post", "targets_total": len(targets), "targets_success": targets_success, "targets_failed": targets_failed, "run_type": run_type}, finish=True)
-        return RepostCampaignActionResult(ok=status in {"sent", "partial"}, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text=error_text if status == "failed" else None, extra={"campaign_run_id": run_id, "scheduled_post_id": scheduled_post_id, "status": status, "targets_total": len(targets), "targets_success": targets_success, "targets_failed": targets_failed})
+        return RepostCampaignActionResult(ok=status in {"sent", "partial"}, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text=(error_text or "Не удалось запустить запланированный пост") if status == "failed" else None, extra={"campaign_run_id": run_id, "scheduled_post_id": scheduled_post_id, "status": status, "targets_total": len(targets), "targets_success": targets_success, "targets_failed": targets_failed})
 
     async def launch_campaign_now(self, *, rule_id: int, admin_id: int | None = None, run_type: str = "manual") -> RepostCampaignActionResult:
         readiness = self.build_campaign_launch_readiness(rule_id=rule_id)

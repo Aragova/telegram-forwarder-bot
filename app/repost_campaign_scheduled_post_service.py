@@ -293,11 +293,15 @@ class RepostCampaignScheduledPostService:
         return {"ok": True, "active_placement": bool(runtime_readiness.get("active_placement")), "delete_failed": int(runtime_readiness.get("delete_failed") or 0)}
 
     async def process_due_posts(self, *, worker_id: str, limit: int = 5) -> dict[str, Any]:
+        def _retry_seconds(attempt_count: int) -> int:
+            return min(VIP_SCHEDULED_POST_RETRY_BASE_SECONDS * (2 ** max(0, attempt_count)), VIP_SCHEDULED_POST_RETRY_MAX_SECONDS)
+
         self.repo.reset_stuck_campaign_scheduled_posts(stuck_seconds=VIP_SCHEDULED_POST_STUCK_SECONDS)
         claimed = self.repo.claim_due_campaign_scheduled_posts(now_iso=scheduled_post_now_utc().isoformat(), worker_id=worker_id, limit=limit)
         for row in claimed:
             sid = int(row.get("id") or 0)
             rule_id = int(row.get("rule_id") or 0)
+            attempt_count = int(row.get("attempt_count") or 0)
             self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="claimed", worker_id=worker_id)
             if row.get("campaign_run_id") is not None:
                 self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="idempotency_skip", worker_id=worker_id)
@@ -305,27 +309,46 @@ class RepostCampaignScheduledPostService:
             targets_snapshot = self.repo.list_campaign_scheduled_post_targets(sid, active_only=True) or []
             preflight = self._build_due_launch_preflight(scheduled_post=row, targets_snapshot=targets_snapshot)
             if not preflight.get("ok"):
-                self.repo.mark_campaign_scheduled_post_failed(sid, error_text=preflight.get("permanent_error") or "Не удалось запустить запланированный пост")
-                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_preflight_failed", worker_id=worker_id, error_text=preflight.get("permanent_error"))
+                ok = self.repo.mark_campaign_scheduled_post_failed(sid, error_text=preflight.get("permanent_error") or "Не удалось запустить запланированный пост")
+                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_preflight_failed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=preflight.get("permanent_error"))
                 continue
             if preflight.get("active_placement") or int(preflight.get("delete_failed") or 0) > 0:
-                retry_at = scheduled_post_now_utc() + timedelta(seconds=VIP_SCHEDULED_POST_ACTIVE_PLACEMENT_RETRY_SECONDS)
-                self.repo.delay_campaign_scheduled_post_retry(sid, next_retry_at=retry_at.isoformat(), error_text="Есть активное размещение или незавершённые удаления")
-                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed", worker_id=worker_id)
+                if attempt_count >= VIP_SCHEDULED_POST_MAX_ATTEMPTS:
+                    ok = self.repo.mark_campaign_scheduled_post_failed(sid, error_text="Превышено число попыток запуска запланированного поста")
+                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_failed" if ok else "launch_state_update_failed", worker_id=worker_id)
+                else:
+                    retry_at = scheduled_post_now_utc() + timedelta(seconds=_retry_seconds(attempt_count))
+                    ok = self.repo.delay_campaign_scheduled_post_retry(sid, next_retry_at=retry_at.isoformat(), error_text="Есть активное размещение или незавершённые удаления")
+                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed" if ok else "launch_state_update_failed", worker_id=worker_id)
                 continue
             self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_started", worker_id=worker_id)
-            result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(row.get("saved_post_id") or 0), show_seconds=int(row.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=sid)
+            try:
+                result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(row.get("saved_post_id") or 0), show_seconds=int(row.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=sid)
+            except Exception as exc:
+                self.logger.exception("VIP_SCHEDULED_POST_LAUNCH_FAILED | scheduled_post_id=%s", sid)
+                if attempt_count >= VIP_SCHEDULED_POST_MAX_ATTEMPTS:
+                    ok = self.repo.mark_campaign_scheduled_post_failed(sid, error_text=str(exc) or "Временная ошибка запуска")
+                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_failed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=str(exc))
+                else:
+                    retry_at = scheduled_post_now_utc() + timedelta(seconds=_retry_seconds(attempt_count))
+                    ok = self.repo.delay_campaign_scheduled_post_retry(sid, next_retry_at=retry_at.isoformat(), error_text=str(exc) or "Временная ошибка запуска")
+                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=str(exc))
+                continue
             run_id = int((result.extra or {}).get("campaign_run_id") or 0)
             if result.ok and run_id:
-                self.repo.mark_campaign_scheduled_post_launched(sid, campaign_run_id=run_id)
-                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_finished", worker_id=worker_id)
+                ok = self.repo.mark_campaign_scheduled_post_launched(sid, campaign_run_id=run_id)
+                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_finished" if ok else "launch_state_update_failed", worker_id=worker_id)
             elif run_id:
-                self.repo.mark_campaign_scheduled_post_failed(sid, error_text=result.error_text or "Не удалось запустить запланированный пост", campaign_run_id=run_id)
-                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_failed", worker_id=worker_id, error_text=result.error_text)
+                ok = self.repo.mark_campaign_scheduled_post_failed(sid, error_text=result.error_text or "Не удалось запустить запланированный пост", campaign_run_id=run_id)
+                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_failed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=result.error_text)
             else:
-                retry_at = scheduled_post_now_utc() + timedelta(seconds=VIP_SCHEDULED_POST_RETRY_BASE_SECONDS)
-                self.repo.delay_campaign_scheduled_post_retry(sid, next_retry_at=retry_at.isoformat(), error_text=result.error_text or "Временная ошибка запуска")
-                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed", worker_id=worker_id, error_text=result.error_text)
+                if attempt_count >= VIP_SCHEDULED_POST_MAX_ATTEMPTS:
+                    ok = self.repo.mark_campaign_scheduled_post_failed(sid, error_text=result.error_text or "Превышено число попыток запуска запланированного поста")
+                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_failed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=result.error_text)
+                else:
+                    retry_at = scheduled_post_now_utc() + timedelta(seconds=_retry_seconds(attempt_count))
+                    ok = self.repo.delay_campaign_scheduled_post_retry(sid, next_retry_at=retry_at.isoformat(), error_text=result.error_text or "Временная ошибка запуска")
+                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=result.error_text)
         self.logger.info("VIP_SCHEDULED_POST_PROCESS_DUE_DONE | worker_id=%s | claimed=%s", worker_id, len(claimed))
         return {"claimed": len(claimed)}
 
