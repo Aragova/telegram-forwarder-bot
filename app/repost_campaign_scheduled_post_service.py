@@ -123,6 +123,33 @@ class RepostCampaignScheduledPostService:
         self.logger.info("VIP_SCHEDULED_POST_SHOW_SECONDS_UPDATED | scheduled_post_id=%s | show_seconds=%s", scheduled_post_id, normalized)
         return RepostCampaignActionResult(ok=True, action="update_draft_show_seconds", rule_id=int(row.get("rule_id") or 0), extra={"show_seconds": normalized})
 
+    def add_manual_target(self, *, scheduled_post_id: int, target_id: str, target_thread_id: int | None = None, target_title: str | None = None, actor_id: int | None = None) -> RepostCampaignActionResult:
+        row = self.repo.get_campaign_scheduled_post(scheduled_post_id)
+        if not row or not self._can_edit(row):
+            return RepostCampaignActionResult(ok=False, action="add_manual_target", rule_id=int((row or {}).get("rule_id") or 0), error_text="Запланированный пост нельзя редактировать")
+        rule_id = int(row.get("rule_id") or 0)
+        existing = self.repo.list_campaign_scheduled_post_targets(scheduled_post_id, active_only=False) or []
+        normalized_targets: list[dict[str, Any]] = []
+        duplicate_active = False
+        for item in existing:
+            item_target_id = str(item.get("target_id") or "")
+            item_thread_id = item.get("target_thread_id")
+            is_active = bool(item.get("is_active", True))
+            if item_target_id == str(target_id) and item_thread_id == target_thread_id:
+                if is_active:
+                    duplicate_active = True
+                else:
+                    is_active = True
+            normalized_targets.append({"target_kind": str(item.get("target_kind") or "extra"), "target_id": item_target_id, "target_thread_id": item_thread_id, "target_title": item.get("target_title") or item.get("title"), "is_active": is_active, "metadata": item.get("metadata_json") or item.get("metadata") or {}})
+        if duplicate_active:
+            return RepostCampaignActionResult(ok=True, action="add_manual_target", rule_id=rule_id, extra={"scheduled_post_id": scheduled_post_id, "already_exists": True})
+        if not any(str(t.get("target_id")) == str(target_id) and t.get("target_thread_id") == target_thread_id for t in normalized_targets):
+            normalized_targets.append({"target_kind": "extra", "target_id": str(target_id), "target_thread_id": target_thread_id, "target_title": target_title or str(target_id), "is_active": True, "metadata": {"source": "manual_input", "added_by": actor_id}})
+        total = self.repo.replace_campaign_scheduled_post_targets(scheduled_post_id=scheduled_post_id, rule_id=rule_id, targets=normalized_targets)
+        self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="manual_target_added", actor_id=actor_id, extra={"target_id": str(target_id), "target_thread_id": target_thread_id, "targets_total": total})
+        readiness = self.build_readiness(scheduled_post_id=scheduled_post_id)
+        return RepostCampaignActionResult(ok=True, action="add_manual_target", rule_id=rule_id, extra={"scheduled_post_id": scheduled_post_id, "targets_total": total, "readiness": readiness})
+
     def update_draft_scheduled_at(self, *, scheduled_post_id: int, scheduled_at_utc: datetime, actor_id: int | None = None) -> RepostCampaignActionResult:
         row = self.repo.get_campaign_scheduled_post(scheduled_post_id)
         if not row or not self._can_edit(row):
