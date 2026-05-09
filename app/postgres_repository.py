@@ -820,8 +820,6 @@ class PostgresRepository(RepositoryProtocol):
         ON campaign_runs(saved_post_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_campaign_runs_status
         ON campaign_runs(status, created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_campaign_runs_scheduled_post
-        ON campaign_runs(scheduled_post_id);
 
         CREATE TABLE IF NOT EXISTS campaign_scheduled_launches (
             id BIGSERIAL PRIMARY KEY,
