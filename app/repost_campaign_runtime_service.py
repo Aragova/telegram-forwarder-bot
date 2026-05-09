@@ -746,6 +746,14 @@ class RepostCampaignRuntimeService:
                 delete_after_at=delete_after_at,
             )
             if run_message_id is None:
+                self.logger.warning(
+                    "REPOST_CAMPAIGN_TARGET_DUPLICATE_SKIPPED | rule_id=%s | target_id=%s | target_thread_id=%s | target_kind=%s | target_title=%s",
+                    rule_id,
+                    target["target_id"],
+                    target["target_thread_id"],
+                    target["target_kind"],
+                    target["target_title"],
+                )
                 failed_count += 1
                 if first_error_text is None:
                     first_error_text = "Не удалось создать запись публикации рекламной кампании"

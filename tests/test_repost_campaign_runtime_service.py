@@ -18,6 +18,7 @@ class _FakeRepo:
         self.mark_campaign_run_message_failed_calls = []
         self.next_run_id = 101
         self.next_run_message_id = 1001
+        self.next_run_message_ids = None
         self._runs = []
         self._run = None
         self._messages = []
@@ -57,6 +58,10 @@ class _FakeRepo:
 
     def create_campaign_run_message(self, **kwargs):
         self.create_campaign_run_message_calls.append(kwargs)
+        if isinstance(self.next_run_message_ids, list):
+            if not self.next_run_message_ids:
+                return None
+            return self.next_run_message_ids.pop(0)
         return self.next_run_message_id
 
     def mark_campaign_run_message_sending(self, message_id, **kwargs):
@@ -272,6 +277,21 @@ def test_launch_dedup_targets_and_mark_sent_when_failed_with_ids():
     assert result.ok is True
     assert len(renderer.calls) == 1
     assert len(repo.create_campaign_run_message_calls) == 1
+
+
+def test_launch_does_not_send_when_run_message_not_created():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, target_id="-1001", target_thread_id=None, target_title="Main", repost_campaign_show_seconds=300)
+    saved_post = {"content_json": {"kind": "album"}}
+    summary = {"can_launch": True}
+    repo = _FakeRepo(rule=rule, saved_post=saved_post, summary=summary)
+    repo.next_run_message_id = None
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="photo", message_id=2001, message_ids=[2001]))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1001))
+    assert result.ok is False
+    assert len(repo.create_campaign_run_message_calls) == 1
+    assert len(renderer.calls) == 0
 
 
 def test_send_does_not_render_if_run_creation_failed():
