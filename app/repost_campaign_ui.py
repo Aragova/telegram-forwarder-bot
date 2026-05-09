@@ -1387,6 +1387,61 @@ def build_vip_scheduled_post_add_target_view(*, rule_id: int, scheduled_post_id:
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_scheduled_post_step_targets:{rule_id}:{scheduled_post_id}")]])
     return text, kb
 
+def build_vip_scheduled_post_pick_targets_view(
+    *,
+    rule_id: int,
+    scheduled_post_id: int,
+    known_targets: list[dict],
+    selected_targets: list[dict],
+    page: int = 0,
+    page_size: int = 10,
+) -> tuple[str, InlineKeyboardMarkup]:
+    if not known_targets:
+        text = (
+            "📋 Выбрать канал/группу\n\n"
+            "Пока нет известных каналов/групп.\n\n"
+            "Добавьте канал вручную через кнопку:\n"
+            "➕ Добавить канал/группу"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Добавить канал/группу", callback_data=f"rule_repost_campaign_scheduled_post_add_target:{rule_id}:{scheduled_post_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_scheduled_post_step_targets:{rule_id}:{scheduled_post_id}")],
+        ])
+        return text, kb
+    page = max(0, int(page))
+    page_size = max(1, int(page_size))
+    total_pages = max(1, (len(known_targets) + page_size - 1) // page_size)
+    page = min(page, total_pages - 1)
+    start = page * page_size
+    end = start + page_size
+    page_items = known_targets[start:end]
+    selected_keys = {f"{str(t.get('target_id') or '')}|{str(t.get('target_thread_id') or '')}" for t in (selected_targets or [])}
+    text = (
+        "📋 Выбрать канал/группу\n\n"
+        "Выберите каналы/группы для этого запланированного поста.\n\n"
+        "Можно выбрать один канал, несколько или все.\n\n"
+        f"Выбрано: {len(selected_keys)}\n"
+        f"Страница: {page + 1} / {total_pages}"
+    )
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, t in enumerate(page_items, start=start):
+        tkey = f"{str(t.get('target_id') or '')}|{str(t.get('target_thread_id') or '')}"
+        prefix = "✅" if tkey in selected_keys else "➕"
+        title = str(t.get("target_title") or t.get("target_id") or "Канал/группа")
+        rows.append([InlineKeyboardButton(text=f"{prefix} {title}", callback_data=f"rule_repost_campaign_scheduled_post_add_known_target:{rule_id}:{scheduled_post_id}:{idx}:{page}")])
+    rows.append([InlineKeyboardButton(text="➕ Добавить все на странице", callback_data=f"rule_repost_campaign_scheduled_post_add_known_page:{rule_id}:{scheduled_post_id}:{page}")])
+    rows.append([InlineKeyboardButton(text="➕ Добавить все", callback_data=f"rule_repost_campaign_scheduled_post_add_known_all:{rule_id}:{scheduled_post_id}")])
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"rule_repost_campaign_scheduled_post_pick_targets:{rule_id}:{scheduled_post_id}:{page-1}"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(text="➡️ Следующая", callback_data=f"rule_repost_campaign_scheduled_post_pick_targets:{rule_id}:{scheduled_post_id}:{page+1}"))
+        if nav:
+            rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_scheduled_post_step_targets:{rule_id}:{scheduled_post_id}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
 def build_vip_scheduled_post_wizard_show_view(*, rule_id:int, scheduled_post:dict, readiness:dict)->tuple[str,InlineKeyboardMarkup]:
     sid=int(scheduled_post.get('id') or 0)
     current = format_campaign_show_seconds_text(scheduled_post.get('show_seconds'))
