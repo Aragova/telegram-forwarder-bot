@@ -1376,6 +1376,12 @@ def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tupl
     rows = []
     if st in {'draft','ready'}:
         rows += [[InlineKeyboardButton(text='✏️ Продолжить настройку', callback_data=f'rule_repost_campaign_scheduled_post_step_post:{rule_id}:{sid}')],[InlineKeyboardButton(text='👁 Предпросмотр', callback_data=f'rule_repost_campaign_scheduled_post_preview:{rule_id}:{sid}')],[InlineKeyboardButton(text='🔎 Проверить права', callback_data=f'rule_repost_campaign_scheduled_post_check_rights:{rule_id}:{sid}')],[InlineKeyboardButton(text='🗑 Отменить', callback_data=f'rule_repost_campaign_scheduled_post_cancel_confirm:{rule_id}:{sid}')]]
+    elif st == 'scheduled':
+        rows += [
+            [InlineKeyboardButton(text='🔄 Обновить', callback_data=f'rule_repost_campaign_scheduled_post_detail:{rule_id}:{sid}')],
+            [InlineKeyboardButton(text='🔎 Проверить права', callback_data=f'rule_repost_campaign_scheduled_post_check_rights:{rule_id}:{sid}')],
+            [InlineKeyboardButton(text='🗑 Отменить', callback_data=f'rule_repost_campaign_scheduled_post_cancel_confirm:{rule_id}:{sid}')],
+        ]
     elif st == 'launched':
         run_id = int(post.get('campaign_run_id') or 0)
         rows += [[InlineKeyboardButton(text='📄 Открыть запуск', callback_data=f'rule_repost_campaign_history_detail:{rule_id}:{run_id}')],[InlineKeyboardButton(text='📊 Отчёт просмотров', callback_data=f'rule_repost_campaign_views_report:{rule_id}:{run_id}')]]

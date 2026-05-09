@@ -855,9 +855,14 @@ def test_vip_scheduled_post_wizard_time_view_buttons():
     assert '👁 Предпросмотр' in labels
 
 def test_vip_scheduled_post_detail_scheduled_has_cancel_and_check_buttons():
-    text, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={'id':123, 'status':'scheduled'})
+    text, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={'post': {'id': 123, 'status': 'scheduled'}})
     labels = _texts_from_keyboard(kb)
-    assert '🔄 Обновить' in labels or '🗑 Отменить' in labels
+    callbacks = _callbacks_from_keyboard(kb)
+    assert '🟢 Запланирован' in text
+    assert '🔎 Проверить права' in labels
+    assert '🗑 Отменить' in labels
+    assert 'rule_repost_campaign_scheduled_post_check_rights:1:123' in callbacks
+    assert 'rule_repost_campaign_scheduled_post_cancel_confirm:1:123' in callbacks
 
 def test_vip_scheduled_post_detail_launched_has_run_buttons():
     _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={'post': {'id':123, 'status':'launched', 'campaign_run_id':55}})
