@@ -384,7 +384,8 @@ class RepostCampaignScheduledPostService:
                     ok = self.repo.delay_campaign_scheduled_post_retry(sid, next_retry_at=retry_at.isoformat(), error_text=result.error_text or "Временная ошибка запуска")
                     self.logger.info("VIP_SCHEDULED_POST_LAUNCH_DELAYED | scheduled_post_id=%s | attempt_count=%s | next_retry_at=%s", sid, attempt_count, retry_at.isoformat())
                     self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=result.error_text)
-        self.logger.info("VIP_SCHEDULED_POST_PROCESS_DUE_DONE | worker_id=%s | claimed=%s", worker_id, len(claimed))
+        if claimed:
+            self.logger.info("VIP_SCHEDULED_POST_PROCESS_DUE_DONE | worker_id=%s | claimed=%s", worker_id, len(claimed))
         return {"claimed": len(claimed)}
 
 
