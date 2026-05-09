@@ -158,13 +158,16 @@ class RepostCampaignScheduledPostService:
             ps = str(t.get("publish_status") or "unknown")
             ds = str(t.get("delete_status") or "unknown")
             cp = t.get("can_publish")
+            target_has_warning = False
             if ps == "denied" or cp is False:
                 blocked_count += 1
             elif ps == "confirmed" or cp is True:
                 ready_count += 1
             else:
-                warning_count += 1
+                target_has_warning = True
             if ds == "unknown":
+                target_has_warning = True
+            if target_has_warning:
                 warning_count += 1
         targets_ready = targets_total > 0 and blocked_count == 0
 
@@ -199,9 +202,11 @@ class RepostCampaignScheduledPostService:
             return RepostCampaignActionResult(ok=False, action="schedule_scheduled_post", rule_id=int(readiness.get("rule_id") or 0), saved_post_id=readiness.get("saved_post_id"), error_text="Запланированный пост не готов", extra={"scheduled_post_id": scheduled_post_id, "readiness": readiness, "block_reasons": readiness["block_reasons"], "warnings": readiness["warnings"]})
         row = self.repo.get_campaign_scheduled_post(scheduled_post_id) or {}
         ok = self.repo.schedule_campaign_scheduled_post(scheduled_post_id, scheduled_by=actor_id)
+        if not ok:
+            return RepostCampaignActionResult(ok=False, action="schedule_scheduled_post", rule_id=int(readiness.get("rule_id") or 0), saved_post_id=readiness.get("saved_post_id"), error_text="Не удалось запланировать пост. Обновите данные и повторите.", extra={"scheduled_post_id": scheduled_post_id, "readiness": readiness})
         self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=int(readiness.get("rule_id") or 0), event_type="scheduled", status_from=row.get("status"), status_to="scheduled", actor_id=actor_id)
         self.logger.info("VIP_SCHEDULED_POST_SCHEDULED | scheduled_post_id=%s", scheduled_post_id)
-        return RepostCampaignActionResult(ok=bool(ok), action="schedule_scheduled_post", rule_id=int(readiness.get("rule_id") or 0), saved_post_id=readiness.get("saved_post_id"), extra={"scheduled_post_id": scheduled_post_id, "scheduled_at": readiness.get("scheduled_at"), "scheduled_at_text": readiness.get("scheduled_at_text"), "expected_delete_at_text": readiness.get("expected_delete_at_text"), "readiness": readiness})
+        return RepostCampaignActionResult(ok=True, action="schedule_scheduled_post", rule_id=int(readiness.get("rule_id") or 0), saved_post_id=readiness.get("saved_post_id"), extra={"scheduled_post_id": scheduled_post_id, "scheduled_at": readiness.get("scheduled_at"), "scheduled_at_text": readiness.get("scheduled_at_text"), "expected_delete_at_text": readiness.get("expected_delete_at_text"), "readiness": readiness})
 
     def cancel_post(self, *, scheduled_post_id: int, actor_id: int | None = None, reason: str | None = None) -> RepostCampaignActionResult:
         row = self.repo.get_campaign_scheduled_post(scheduled_post_id)
@@ -210,9 +215,11 @@ class RepostCampaignScheduledPostService:
         if not self._can_cancel(row):
             return RepostCampaignActionResult(ok=False, action="cancel_scheduled_post", rule_id=int(row.get("rule_id") or 0), error_text="Отмена недоступна для текущего статуса")
         ok = self.repo.cancel_campaign_scheduled_post(scheduled_post_id, cancelled_by=actor_id, reason=reason)
+        if not ok:
+            return RepostCampaignActionResult(ok=False, action="cancel_scheduled_post", rule_id=int(row.get("rule_id") or 0), error_text="Не удалось отменить запланированный пост. Обновите данные и повторите.", extra={"scheduled_post_id": scheduled_post_id})
         self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=int(row.get("rule_id") or 0), event_type="cancelled", status_from=row.get("status"), status_to="cancelled", actor_id=actor_id, extra={"reason": reason})
         self.logger.info("VIP_SCHEDULED_POST_CANCELLED | scheduled_post_id=%s", scheduled_post_id)
-        return RepostCampaignActionResult(ok=bool(ok), action="cancel_scheduled_post", rule_id=int(row.get("rule_id") or 0), extra={"scheduled_post_id": scheduled_post_id})
+        return RepostCampaignActionResult(ok=True, action="cancel_scheduled_post", rule_id=int(row.get("rule_id") or 0), extra={"scheduled_post_id": scheduled_post_id})
 
     async def check_targets(self, *, scheduled_post_id: int, active_only: bool = True, actor_id: int | None = None, limit: int = 50) -> RepostCampaignActionResult:
         row = self.repo.get_campaign_scheduled_post(scheduled_post_id) or {}

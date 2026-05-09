@@ -53,9 +53,13 @@ class FakeRepo:
     def log_campaign_scheduled_post_event(self, **kwargs): self.events.setdefault(kwargs["scheduled_post_id"], []).append(kwargs); return 1
     def list_campaign_scheduled_post_events(self, scheduled_post_id, *, limit=50): return self.events.get(scheduled_post_id, [])[:limit]
     def schedule_campaign_scheduled_post(self, scheduled_post_id, *, scheduled_by=None):
+        if getattr(self, "force_schedule_fail", False):
+            return False
         if self.posts[scheduled_post_id]["status"] in {"draft", "ready"}: self.posts[scheduled_post_id]["status"] = "scheduled"; return True
         return False
     def cancel_campaign_scheduled_post(self, scheduled_post_id, *, cancelled_by=None, reason=None):
+        if getattr(self, "force_cancel_fail", False):
+            return False
         if self.posts[scheduled_post_id]["status"] in {"draft", "ready", "scheduled"}: self.posts[scheduled_post_id]["status"] = "cancelled"; return True
         return False
 
@@ -224,3 +228,24 @@ def test_check_targets_logs_failed_status_on_checker_exception():
     assert out.ok
     assert repo.checks[sid][-1]["check_type"] == "full"
     assert repo.checks[sid][-1]["status"] == "failed"
+
+
+def test_schedule_post_does_not_log_scheduled_event_when_repo_transition_fails():
+    service, repo = make_service(); sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.saved_posts[1] = {"id": 1, "title": "t", "content_json": {"kind": "text", "media_items": []}}
+    service.update_draft_saved_post(scheduled_post_id=sid, saved_post_id=1)
+    service.update_draft_show_seconds(scheduled_post_id=sid, show_seconds=60)
+    service.update_draft_scheduled_at(scheduled_post_id=sid, scheduled_at_utc=datetime.now(timezone.utc)+timedelta(minutes=2))
+    repo.post_targets[sid] = [{"id": 1, "target_id": "-1", "publish_status": "confirmed", "delete_status": "confirmed", "can_publish": True}]
+    repo.force_schedule_fail = True
+    out = service.schedule_post(scheduled_post_id=sid)
+    assert not out.ok
+    assert not any(x["event_type"] == "scheduled" for x in repo.events.get(sid, []))
+
+
+def test_cancel_post_does_not_log_cancelled_event_when_repo_transition_fails():
+    service, repo = make_service(); sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.force_cancel_fail = True
+    out = service.cancel_post(scheduled_post_id=sid)
+    assert not out.ok
+    assert not any(x["event_type"] == "cancelled" for x in repo.events.get(sid, []))
