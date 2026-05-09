@@ -259,6 +259,20 @@ def test_vip_scheduled_material_has_dedicated_handler_before_generic_album_handl
     assert vip_handler_pos < generic_album_pos
 
 
+def test_vip_scheduled_pick_show_does_not_reuse_pick_callback_data_for_step_show():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "async def _open_vip_scheduled_post_step_show_callback(" in source
+    assert "await handle_step_show(callback)" not in source[source.index("async def handle_pick_show"):source.index("@dp.callback_query(lambda c: c.data.startswith(\"rule_repost_campaign_scheduled_post_step_time:\")")]
+
+
+def test_vip_scheduled_pick_show_parses_four_part_callback():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    pick_show_block = source[source.index("async def handle_pick_show"):source.index("@dp.callback_query(lambda c: c.data.startswith(\"rule_repost_campaign_scheduled_post_step_time:\")")]
+    assert '.split(":", 3)' in pick_show_block
+    assert "scheduled_post_id = int(scheduled_post_id_text)" in pick_show_block
+    assert "show_seconds = int(show_seconds_text)" in pick_show_block
+
+
 def test_generic_album_handlers_skip_vip_scheduled_material_state():
     source = Path("bot.py").read_text(encoding="utf-8")
     assert "def _is_waiting_vip_scheduled_post_material(user_id: int | None) -> bool:" in source
