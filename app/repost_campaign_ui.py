@@ -1283,34 +1283,23 @@ def build_repost_campaign_scheduled_launch_cancel_result_view(*, rule_id: int, o
 # VIP SCHEDULED POSTS UI
 # =========================================================
 
-def build_vip_scheduled_posts_screen_view(*, rule_id: int, posts: list[dict]) -> tuple[str, InlineKeyboardMarkup]:
+def build_vip_scheduled_posts_screen_view(*, rule_id: int, posts: list[dict] | None = None) -> tuple[str, InlineKeyboardMarkup]:
     lines = [
         '🕒 Запланированные посты',
         '',
-        'Шаг 1 — создайте рекламный пост для будущего запуска.',
+        'Планируйте рекламные публикации заранее: ViMi сам отправит пост в выбранное время, выдержит срок показа и подготовит отчёт.',
         '',
-        'После добавления поста ViMi предложит:',
-        '• выбрать каналы/группы;',
-        '• задать срок показа;',
-        '• выбрать время запуска;',
-        '• проверить права перед запуском.',
+        'Как это работает:',
+        '1. Добавьте рекламный пост.',
+        '2. Выберите каналы/группы.',
+        '3. Укажите срок показа.',
+        '4. Выберите время запуска.',
         '',
-        'Ближайшие запуски:',
+        'После подтверждения пост появится в списке отложенных постов.',
     ]
-    if not posts:
-        lines.append('Пока нет запланированных постов.')
-    else:
-        for post in posts[:5]:
-            saved_post_id = int(post.get('saved_post_id') or 0)
-            scheduled_at = post.get('scheduled_at')
-            post_line = f'📝 Материал: #{saved_post_id}' if saved_post_id else '📝 Материал: не выбран'
-            time_line = f'🕒 Запуск: {format_campaign_datetime_text(scheduled_at, timezone_offset_hours=3)} UTC+3' if scheduled_at else '🕒 Запуск: не задан'
-            status = str(post.get('status') or '')
-            title_line = f"{format_vip_scheduled_post_status_text(status)} Пост #{int(post.get('id') or 0)}"
-            lines.append(f"{title_line}\n{post_line}\n{time_line}\n⏳ Показ: {format_campaign_show_seconds_text(post.get('show_seconds'))}")
     rows = [
         [InlineKeyboardButton(text='➕ Запланировать пост', callback_data=f'rule_repost_campaign_scheduled_post_new:{rule_id}')],
-        [InlineKeyboardButton(text='📄 Все запланированные посты', callback_data=f'rule_repost_campaign_scheduled_posts_list:{rule_id}:all')],
+        [InlineKeyboardButton(text='📄 Все запланированные посты', callback_data=f'rule_repost_campaign_scheduled_posts_list:{rule_id}:0')],
     ]
     rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_vip_features:{rule_id}')])
     return '\n'.join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1320,60 +1309,29 @@ def build_vip_scheduled_posts_list_view(
     *,
     rule_id: int,
     posts: list[dict],
-    status_filter: str = "all",
     page: int = 0,
     page_size: int = 10,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    filter_statuses = {
-        "all": None,
-        "draft": {"draft", "ready"},
-        "scheduled": {"scheduled", "processing"},
-        "finished": {"launched", "failed", "cancelled", "expired"},
-    }
-    allowed = filter_statuses.get(status_filter, None)
-    filtered_posts = posts if allowed is None else [post for post in posts if str(post.get("status") or "") in allowed]
-    total = len(filtered_posts)
+    visible_posts = [post for post in posts if str(post.get("status") or "").strip().lower() in {"scheduled", "processing"}]
+    visible_posts = [post for post in visible_posts if post.get("scheduled_at")]
+    total = len(visible_posts)
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = min(max(0, page), total_pages - 1)
     start = page * page_size
-    page_items = filtered_posts[start:start + page_size]
-    filter_titles = {"all": "Все", "draft": "Черновики", "scheduled": "Запланированные", "finished": "Завершённые"}
-    lines = [
-        "📄 Все запланированные посты",
-        "",
-        "Здесь показаны все посты, которые вы начали настраивать или уже запланировали.",
-        "",
-        f"Фильтр: {filter_titles.get(status_filter, 'Все')}",
-        f"Страница: {page + 1} / {total_pages}",
-    ]
+    page_items = visible_posts[start:start + page_size]
+    lines = ["📄 Все запланированные посты", "", "Пока нет отложенных постов.", "", "Создайте пост и пройдите 4 шага настройки — после подтверждения он появится здесь."] if total == 0 else ["📄 Все запланированные посты", "", "Ваши отложенные публикации:", f"Страница: {page + 1} / {total_pages}"]
     rows = []
     for post in page_items:
         post_id = int(post.get("id") or 0)
-        status = str(post.get("status") or "")
-        status_text = format_vip_scheduled_post_status_text(status)
         scheduled_at = post.get("scheduled_at")
-        if scheduled_at:
-            button_text = f"{status_text} #{post_id} · {format_campaign_datetime_text(scheduled_at, timezone_offset_hours=3)}"
-        else:
-            saved_post_id = int(post.get("saved_post_id") or 0)
-            material_text = f"Пост #{saved_post_id}" if saved_post_id else "Пост не выбран"
-            time_text = "время не задано"
-            button_text = f"{status_text} #{post_id} · {material_text} · {time_text}"
+        button_text = f"🕒 Отложенный пост от {format_campaign_datetime_text(scheduled_at, timezone_offset_hours=3)}"
         rows.append([InlineKeyboardButton(text=button_text, callback_data=f"rule_repost_campaign_scheduled_post_detail:{rule_id}:{post_id}")])
-    rows.append([
-        InlineKeyboardButton(text="Все", callback_data=f"rule_repost_campaign_scheduled_posts_list:{rule_id}:all:0"),
-        InlineKeyboardButton(text="Черновики", callback_data=f"rule_repost_campaign_scheduled_posts_list:{rule_id}:draft:0"),
-    ])
-    rows.append([
-        InlineKeyboardButton(text="Запланированные", callback_data=f"rule_repost_campaign_scheduled_posts_list:{rule_id}:scheduled:0"),
-        InlineKeyboardButton(text="Завершённые", callback_data=f"rule_repost_campaign_scheduled_posts_list:{rule_id}:finished:0"),
-    ])
     if total > page_size:
         pager = []
         if page > 0:
-            pager.append(InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"rule_repost_campaign_scheduled_posts_list:{rule_id}:{status_filter}:{page - 1}"))
+            pager.append(InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"rule_repost_campaign_scheduled_posts_list:{rule_id}:{page - 1}"))
         if page < total_pages - 1:
-            pager.append(InlineKeyboardButton(text="➡️ Следующая", callback_data=f"rule_repost_campaign_scheduled_posts_list:{rule_id}:{status_filter}:{page + 1}"))
+            pager.append(InlineKeyboardButton(text="➡️ Следующая", callback_data=f"rule_repost_campaign_scheduled_posts_list:{rule_id}:{page + 1}"))
         if pager:
             rows.append(pager)
     rows += [
@@ -1545,7 +1503,7 @@ def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tupl
     sid = int(post.get('id') or 0)
     status = format_vip_scheduled_post_status_text(post.get('status'))
     text = (
-        f"🕒 Запланированный пост #{sid}\nСтатус:\n{status}\n"
+        f"🕒 Отложенный пост\n\nСтатус: {'запланирован' if str(post.get('status') or '') == 'scheduled' else status}\n"
         f"Срок показа:\n⏳ {format_campaign_show_seconds_text(post.get('show_seconds'))}\n"
         f"Публикация:\n📣 Каналов/групп: {len(targets)}\n"
         f"✅ Готовы: {int(readiness.get('targets_ready_count') or 0)}\n"
@@ -1557,28 +1515,29 @@ def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tupl
         text += "\nИстория:\n" + "\n".join([f"• {str(e.get('event_type') or '').replace('_', ' ')}" for e in events[:3]])
     st = str(post.get('status') or 'draft')
     rows = []
-    if st in {'draft','ready'}:
-        rows += [[InlineKeyboardButton(text='✏️ Продолжить настройку', callback_data=f'rule_repost_campaign_scheduled_post_step_post:{rule_id}:{sid}')],[InlineKeyboardButton(text='👁 Предпросмотр', callback_data=f'rule_repost_campaign_scheduled_post_preview:{rule_id}:{sid}')],[InlineKeyboardButton(text='🔎 Проверить права', callback_data=f'rule_repost_campaign_scheduled_post_check_rights:{rule_id}:{sid}')],[InlineKeyboardButton(text='🗑 Отменить', callback_data=f'rule_repost_campaign_scheduled_post_cancel_confirm:{rule_id}:{sid}')]]
-    elif st == 'scheduled':
+    if st in {'scheduled', 'processing'}:
         rows += [
-            [InlineKeyboardButton(text='🔄 Обновить', callback_data=f'rule_repost_campaign_scheduled_post_detail:{rule_id}:{sid}')],
-            [InlineKeyboardButton(text='🔎 Проверить права', callback_data=f'rule_repost_campaign_scheduled_post_check_rights:{rule_id}:{sid}')],
-            [InlineKeyboardButton(text='🗑 Отменить', callback_data=f'rule_repost_campaign_scheduled_post_cancel_confirm:{rule_id}:{sid}')],
+            [InlineKeyboardButton(text='🚀 Отправить сейчас', callback_data=f'rule_repost_campaign_scheduled_post_send_now_confirm:{rule_id}:{sid}')],
+            [InlineKeyboardButton(text='✏️ Изменить пост', callback_data=f'rule_repost_campaign_scheduled_post_edit:{rule_id}:{sid}')],
+            [InlineKeyboardButton(text='🗑 Удалить пост', callback_data=f'rule_repost_campaign_scheduled_post_cancel_confirm:{rule_id}:{sid}')],
         ]
     elif st == 'launched':
         run_id = int(post.get('campaign_run_id') or 0)
         rows += [[InlineKeyboardButton(text='📄 Открыть запуск', callback_data=f'rule_repost_campaign_history_detail:{rule_id}:{run_id}')],[InlineKeyboardButton(text='📊 Отчёт просмотров', callback_data=f'rule_repost_campaign_views_report:{rule_id}:{run_id}')]]
     else:
         rows += [[InlineKeyboardButton(text='🔄 Обновить', callback_data=f'rule_repost_campaign_scheduled_post_detail:{rule_id}:{sid}')]]
-    rows.append([InlineKeyboardButton(text='⬅️ К запланированным постам', callback_data=f'rule_repost_campaign_scheduled_posts:{rule_id}')])
+    rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_posts_list:{rule_id}:0')])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_vip_scheduled_post_cancel_confirm_view(*, rule_id: int, scheduled_post: dict) -> tuple[str, InlineKeyboardMarkup]:
     sid = int(scheduled_post.get('id') or 0)
-    text = (
-        '🗑 Отменить запланированный пост?\n'
-        f'Пост #{sid} будет отменён.\nViMi не запустит его по расписанию.'
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Да, отменить', callback_data=f'rule_repost_campaign_scheduled_post_cancel:{rule_id}:{sid}')],[InlineKeyboardButton(text='⬅️ Нет, назад', callback_data=f'rule_repost_campaign_scheduled_post_detail:{rule_id}:{sid}')]])
+    text = "🗑 Удалить отложенный пост?\n\nViMi не отправит его по расписанию."
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Удалить пост', callback_data=f'rule_repost_campaign_scheduled_post_cancel:{rule_id}:{sid}')],[InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_post_detail:{rule_id}:{sid}')]])
+    return text, kb
+
+def build_vip_scheduled_post_send_now_confirm_view(*, rule_id: int, scheduled_post: dict) -> tuple[str, InlineKeyboardMarkup]:
+    sid = int(scheduled_post.get("id") or 0)
+    text = "🚀 Отправить отложенный пост сейчас?\n\nViMi запустит этот пост немедленно, не дожидаясь выбранного времени."
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Да, отправить сейчас', callback_data=f'rule_repost_campaign_scheduled_post_send_now:{rule_id}:{sid}')],[InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_post_detail:{rule_id}:{sid}')]])
     return text, kb
