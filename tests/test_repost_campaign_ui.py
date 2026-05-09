@@ -4,12 +4,14 @@ import ast
 from app.repost_campaign_ui import (
     build_repost_campaign_delete_result_view,
     build_repost_campaign_launch_result_view,
+    build_repost_campaign_launch_mode_view,
     build_repost_campaign_launch_readiness_view,
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
     build_repost_campaign_views_report_loading_view,
     build_repost_campaign_views_report_error_view,
     build_repost_campaign_vip_features_view,
+    build_repost_campaign_schedule_current_view,
     build_repost_campaign_run_details_view,
     build_repost_campaign_run_delete_confirm_view,
     build_repost_campaign_run_delete_loading_view,
@@ -658,7 +660,7 @@ def test_bot_has_export_callbacks_and_runtime_builder_usage():
 def test_vip_features_view_has_schedule_button():
     from app.repost_campaign_ui import build_repost_campaign_vip_features_view
     text,kb=build_repost_campaign_vip_features_view(rule_id=11)
-    assert '🕒 Запуск по расписанию' in text
+    assert '🕒 Запланированные посты' in text
     assert any('rule_repost_campaign_schedule_menu:11' in b.callback_data for row in kb.inline_keyboard for b in row)
 
 def test_schedule_menu_view_has_quick_presets_and_manual_input():
@@ -748,3 +750,43 @@ def test_scheduled_detail_view_status_mapping_and_cancel_visibility():
     assert "❌ ошибка запуска" in text
     labels = [b.text for row in kb.inline_keyboard for b in row]
     assert "❌ Отменить запуск" not in labels
+
+
+def test_launch_mode_view_contains_now_and_schedule_actions():
+    text, kb = build_repost_campaign_launch_mode_view(
+        rule_id=12,
+        readiness={"saved_post_id": 9, "saved_post_exists": True, "show_seconds": 86400, "will_send_total": 12, "will_skip_total": 0},
+    )
+    callbacks = _callbacks_from_keyboard(kb)
+    assert "🚀 Запуск кампании" in text
+    labels = _texts_from_keyboard(kb)
+    assert "⚡ Запустить сейчас" in labels
+    assert "🕒 Запланировать запуск" in labels
+    assert f"rule_repost_campaign_launch_now_preview:12" in callbacks
+    assert f"rule_repost_campaign_schedule_current:12" in callbacks
+
+
+def test_schedule_current_view_has_time_only_without_wizard_steps():
+    text, kb = build_repost_campaign_schedule_current_view(
+        rule_id=7,
+        readiness={"saved_post_id": 5, "saved_post_exists": True, "show_seconds": 86400, "will_send_total": 12, "will_skip_total": 0},
+    )
+    callbacks = _callbacks_from_keyboard(kb)
+    assert "🕒 Запланировать запуск текущей кампании" in text
+    assert "Шаг 1/4" not in text and "Шаг 2/4" not in text and "Шаг 3/4" not in text
+    assert f"rule_repost_campaign_schedule_quick:7:today_20" in callbacks
+    assert f"rule_repost_campaign_schedule_input:7" in callbacks
+    assert f"rule_repost_campaign_launch:7" in callbacks
+
+
+def test_vip_features_view_uses_scheduled_posts_copy():
+    text, _ = build_repost_campaign_vip_features_view(rule_id=5)
+    assert "🕒 Запланированные посты" in text
+    assert "Запуск по расписанию" not in text
+
+
+def test_bot_launch_callback_opens_launch_mode_screen():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert 'build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)' in source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_now_preview:"))' in source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_current:"))' in source
