@@ -11151,8 +11151,35 @@ async def _build_vip_scheduled_known_targets(rule_id: int, scheduled_post_id: in
 async def handle_rule_repost_campaign_scheduled_posts(callback: CallbackQuery):
     rule_id = int((callback.data or '').split(':')[1]);
     if not await ensure_rule_callback_access(callback, rule_id): return
-    text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[])
+    runtime = _build_repost_campaign_runtime()
+    readiness = await run_db(runtime.build_campaign_launch_readiness, rule_id=rule_id)
+    text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=readiness)
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_vip_delete_active:"))
+async def handle_rule_repost_campaign_vip_delete_active(callback: CallbackQuery):
+    rule_id = int((callback.data or "").split(":")[1])
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    await edit_message_text_safe(message=callback.message, text="Удаляю активный рекламный пост…")
+    runtime = _build_repost_campaign_runtime()
+    readiness = await run_db(runtime.build_campaign_launch_readiness, rule_id=rule_id)
+    active_run_id = int(readiness.get("active_run_id") or 0)
+    if active_run_id <= 0:
+        text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=readiness)
+        await edit_message_text_safe(message=callback.message, text=f"Активных рекламных постов нет.\n\n{text}", reply_markup=kb)
+        return
+    result = await runtime.delete_campaign_run_now(rule_id=rule_id, run_id=active_run_id, admin_id=callback.from_user.id if callback.from_user else None)
+    updated = await run_db(runtime.build_campaign_launch_readiness, rule_id=rule_id)
+    text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=updated)
+    extra = result.extra or {}
+    if result.ok:
+        prefix = "✅ Активный рекламный пост удалён.\n\nТеперь запланированные посты смогут стартовать."
+    elif int(extra.get("deleted") or 0) > 0:
+        prefix = f"⚠️ Удаление выполнено частично.\n\nУдалено: {int(extra.get('deleted') or 0)}\nОшибки: {int(extra.get('failed') or 0)}\nViMi повторит удаление автоматически."
+    else:
+        prefix = "Активных рекламных постов нет."
+    await edit_message_text_safe(message=callback.message, text=f"{prefix}\n\n{text}", reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_posts_list:"))
 async def handle_rule_repost_campaign_scheduled_posts_list(callback: CallbackQuery):

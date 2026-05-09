@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.repost_campaign_service import build_campaign_delete_after_iso, format_campaign_show_seconds_ru
-from app.repost_campaign_view_model import format_campaign_error_text
+from app.repost_campaign_view_model import format_campaign_error_text, format_campaign_datetime_text
 from app.saved_post_renderer import normalize_telethon_target
 from app.saved_posts_service import get_saved_post_short_description
 
@@ -1012,8 +1012,24 @@ class RepostCampaignRuntimeService:
         last_run = self.repo.list_campaign_runs_for_rule(rule_id, limit=1)[0] if self.repo.list_campaign_runs_for_rule(rule_id, limit=1) else None
         last_run_details = self.get_campaign_run_details(rule_id=rule_id, run_id=int(last_run.get("id"))) if last_run else {}
         summary = (last_run_details or {}).get("summary") or {}
+        active_messages = (last_run_details or {}).get("messages") or []
         delete_pending = int(summary.get("delete_pending") or 0)
         delete_failed = int(summary.get("delete_failed") or 0)
+        active_delete_at_values: list[datetime] = []
+        for msg in active_messages:
+            if str(msg.get("send_status") or "").strip().lower() != "sent":
+                continue
+            if str(msg.get("delete_status") or "").strip().lower() not in {"pending", "processing", "failed"}:
+                continue
+            raw = msg.get("delete_after_at")
+            if not raw:
+                continue
+            try:
+                active_delete_at_values.append(datetime.fromisoformat(str(raw).replace("Z", "+00:00")))
+            except Exception:
+                continue
+        active_delete_after_at = max(active_delete_at_values).astimezone(timezone.utc).isoformat() if active_delete_at_values else None
+        next_available_at = (datetime.fromisoformat(active_delete_after_at) + timedelta(seconds=30)).isoformat() if active_delete_after_at else None
         active_placement = delete_pending > 0 or int(summary.get("delete_processing") or 0) > 0
         can_launch = saved_post_exists and show_seconds > 0 and main_target_ready and extra_active_problem == 0 and will_send_total > 0
         if active_placement:
@@ -1049,6 +1065,10 @@ class RepostCampaignRuntimeService:
             "problem_targets": problem_targets,
             "active_placement": active_placement,
             "active_run_id": int(last_run.get("id")) if last_run else None,
+            "active_delete_after_at": active_delete_after_at,
+            "active_delete_after_text": (format_campaign_datetime_text(active_delete_after_at, timezone_offset_hours=3) + " UTC+3") if active_delete_after_at else None,
+            "next_available_at": next_available_at,
+            "next_available_text": (format_campaign_datetime_text(next_available_at, timezone_offset_hours=3) + " UTC+3") if next_available_at else None,
             "delete_pending": delete_pending,
             "delete_failed": delete_failed,
             "targets_delete_unknown": targets_delete_unknown,

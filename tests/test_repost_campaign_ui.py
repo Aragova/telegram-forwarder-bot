@@ -1089,6 +1089,25 @@ def test_vip_scheduled_posts_screen_has_only_three_main_buttons():
     _, kb = build_vip_scheduled_posts_screen_view(rule_id=1, posts=[])
     assert _texts_from_keyboard(kb) == ["➕ Запланировать пост", "📄 Все запланированные посты", "⬅️ Назад"]
 
+def test_vip_scheduled_posts_screen_shows_active_placement_block():
+    text, kb = build_vip_scheduled_posts_screen_view(
+        rule_id=4,
+        active_placement={"active_placement": True, "active_run_id": 22, "active_delete_after_text": "09.05 23:49 UTC+3", "next_available_text": "09.05 23:50 UTC+3", "delete_failed": 0},
+    )
+    labels = _texts_from_keyboard(kb)
+    assert "Сейчас активно размещение" in text
+    assert "09.05 23:49 UTC+3" in text
+    assert "🧹 Удалить активный пост" in labels
+
+def test_vip_scheduled_posts_screen_hides_delete_active_without_placement():
+    _, kb = build_vip_scheduled_posts_screen_view(rule_id=4, active_placement={"active_placement": False, "delete_failed": 0})
+    assert "🧹 Удалить активный пост" not in _texts_from_keyboard(kb)
+
+def test_bot_has_delete_active_vip_scheduled_handler():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "rule_repost_campaign_vip_delete_active:" in source
+    assert "handle_rule_repost_campaign_vip_delete_active" in source
+
 def test_scheduled_post_new_button_does_not_open_library_or_choice():
     source = Path('bot.py').read_text(encoding='utf-8')
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new:"))' in source

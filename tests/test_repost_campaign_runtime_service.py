@@ -1104,6 +1104,17 @@ def test_build_launch_readiness_blocks_active_problem():
     assert readiness["extra_active_problem"] == 1
     assert any("требуют настройки" in x for x in readiness["block_reasons"])
 
+def test_build_launch_readiness_exposes_active_placement_details():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=300, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"id":55})
+    repo._runs = [{"id": 22, "rule_id": 1}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    runtime.get_campaign_run_details = lambda **kwargs: {"summary": {"delete_pending": 1}, "messages": [{"send_status": "sent", "delete_status": "pending", "delete_after_at": "2026-05-09T20:49:00+00:00"}]}
+    readiness = runtime.build_campaign_launch_readiness(rule_id=1)
+    assert readiness["active_run_id"] == 22
+    assert readiness["active_delete_after_at"] is not None
+    assert readiness["next_available_at"] is not None
+
 def test_launch_campaign_now_does_not_create_run_when_blocked():
     rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=300, target_id="-1001")
     repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind":"text"}})

@@ -7545,6 +7545,28 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
         if ok and log_code: logger.info("%s id=%s", log_code, scheduled_post_id)
         return ok
+
+    def delay_campaign_scheduled_post_until(self, scheduled_post_id: int, *, next_retry_at: str, error_text: str | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_scheduled_posts
+                    SET status='scheduled',
+                        next_retry_at=%s,
+                        error_text=%s,
+                        locked_by=NULL,
+                        locked_at=NULL,
+                        lock_until=NULL,
+                        updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (next_retry_at, error_text, int(scheduled_post_id)),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+        return ok
+
     def claim_due_campaign_scheduled_posts(self, *, now_iso: str, worker_id: str, limit: int = 5) -> list[dict[str, Any]]:
         with self.connect() as conn:
             with conn.cursor() as cur:
