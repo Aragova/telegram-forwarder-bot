@@ -100,12 +100,14 @@ from app.repost_campaign_ui import (
     build_repost_campaign_post_channels_stats_view,
     build_repost_campaign_views_report_loading_view,
     build_repost_campaign_views_report_error_view,
+    build_repost_campaign_launch_mode_view,
     build_repost_campaign_launch_readiness_view,
     build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
     build_repost_campaign_vip_features_view,
     build_repost_campaign_vip_coming_soon_view,
+    build_repost_campaign_schedule_current_view,
     build_repost_campaign_schedule_menu_view,
     build_repost_campaign_schedule_wizard_step1_view,
     build_repost_campaign_schedule_wizard_step2_view,
@@ -7025,7 +7027,7 @@ async def handle_rule_repost_campaign_launch(callback: CallbackQuery):
         renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir)
         runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
         readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
-        text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
+        text, keyboard = build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)
         if _should_answer_new_message_for_callback(callback):
             await callback.message.answer(text, reply_markup=keyboard)
         else:
@@ -7042,6 +7044,63 @@ async def handle_rule_repost_campaign_launch(callback: CallbackQuery):
         return
     await answer_callback_safe_once(callback)
 
+
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_now_preview:"))
+async def handle_rule_repost_campaign_launch_now_preview(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    try:
+        renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir)
+        runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
+        readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
+        text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
+        if _should_answer_new_message_for_callback(callback):
+            await callback.message.answer(text, reply_markup=keyboard)
+        else:
+            await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    except Exception as exc:
+        logger.warning("REPOST_CAMPAIGN_LAUNCH_NOW_PREVIEW_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+        await answer_callback_safe(callback, "Не удалось открыть предпросмотр запуска", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_current:"))
+async def handle_rule_repost_campaign_schedule_current(callback: CallbackQuery):
+    if not await is_admin_callback(callback):
+        return
+    if not settings.repost_campaign_admin_test_enabled:
+        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except Exception:
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    try:
+        renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir)
+        runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
+        readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
+        text, keyboard = build_repost_campaign_schedule_current_view(rule_id=rule_id, readiness=readiness)
+        if _should_answer_new_message_for_callback(callback):
+            await callback.message.answer(text, reply_markup=keyboard)
+        else:
+            await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    except Exception as exc:
+        logger.warning("REPOST_CAMPAIGN_SCHEDULE_CURRENT_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+        await answer_callback_safe(callback, "Не удалось открыть планирование запуска", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_confirm:"))
 async def handle_rule_repost_campaign_launch_confirm(callback: CallbackQuery):
@@ -7062,7 +7121,7 @@ async def handle_rule_repost_campaign_launch_confirm(callback: CallbackQuery):
         readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
         if not readiness.get("can_launch"):
             logger.info("REPOST_CAMPAIGN_LAUNCH_CONFIRM_BLOCKED | rule_id=%s", rule_id)
-            text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
+            text, keyboard = build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)
             if _should_answer_new_message_for_callback(callback):
                 await callback.message.answer(text, reply_markup=keyboard)
             else:
