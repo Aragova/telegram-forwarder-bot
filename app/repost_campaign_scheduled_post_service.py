@@ -71,6 +71,8 @@ class RepostCampaignScheduledPostService:
         if str(getattr(rule, "mode", "") or "").strip().lower() != "repost":
             return RepostCampaignActionResult(ok=False, action="create_scheduled_post_draft", rule_id=rule_id, error_text="Запланированные рекламные посты доступны только для режима репоста")
         scheduled_post_id = self.repo.create_campaign_scheduled_post_draft(rule_id=rule_id, tenant_id=tenant_id, created_by=created_by, title=title)
+        if not scheduled_post_id:
+            return RepostCampaignActionResult(ok=False, action="create_scheduled_post_draft", rule_id=rule_id, error_text="Не удалось создать черновик запланированного поста")
         self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="draft_created", status_to="draft", actor_id=created_by)
         self.logger.info("VIP_SCHEDULED_POST_DRAFT_CREATED | scheduled_post_id=%s | rule_id=%s", scheduled_post_id, rule_id)
         return RepostCampaignActionResult(ok=True, action="create_scheduled_post_draft", rule_id=rule_id, extra={"scheduled_post_id": scheduled_post_id, "status": "draft"})
@@ -220,15 +222,20 @@ class RepostCampaignScheduledPostService:
         targets = (self.repo.list_campaign_scheduled_post_targets(scheduled_post_id, active_only=active_only) or [])[: int(limit)]
         passed = failed = 0
         for t in targets:
-            check = await self.target_checker.check_target(target_id=t["target_id"], target_thread_id=t.get("target_thread_id"))
-            publish_status = getattr(check, "publish_status", "confirmed" if getattr(check, "can_publish", False) else "denied")
-            delete_status = getattr(check, "delete_status", "unknown")
-            self.repo.update_campaign_scheduled_post_target_check_result(int(t.get("id") or 0), can_publish=getattr(check, "can_publish", None), can_delete=getattr(check, "can_delete", None), publish_status=publish_status, delete_status=delete_status, publish_error_text=getattr(check, "publish_error_text", None), delete_error_text=getattr(check, "delete_error_text", None), check_source=getattr(check, "source", "telethon"))
-            self.repo.log_campaign_scheduled_post_check(scheduled_post_id=scheduled_post_id, rule_id=rule_id, target_id=t["target_id"], target_thread_id=t.get("target_thread_id"), target_row_id=int(t.get("id") or 0), check_type="permissions", status="ok" if publish_status != "denied" else "failed", source=getattr(check, "source", "telethon"), error_text=getattr(check, "publish_error_text", None), details=getattr(check, "details", None))
-            if publish_status == "denied":
+            try:
+                check = await self.target_checker.check_target(target_id=t["target_id"], target_thread_id=t.get("target_thread_id"))
+                publish_status = getattr(check, "publish_status", "confirmed" if getattr(check, "can_publish", False) else "denied")
+                delete_status = getattr(check, "delete_status", "unknown")
+                status = "confirmed" if publish_status == "confirmed" else "denied" if publish_status == "denied" else "unknown"
+                self.repo.update_campaign_scheduled_post_target_check_result(int(t.get("id") or 0), can_publish=getattr(check, "can_publish", None), can_delete=getattr(check, "can_delete", None), publish_status=publish_status, delete_status=delete_status, publish_error_text=getattr(check, "publish_error_text", None), delete_error_text=getattr(check, "delete_error_text", None), check_source=getattr(check, "source", "telethon"))
+                self.repo.log_campaign_scheduled_post_check(scheduled_post_id=scheduled_post_id, rule_id=rule_id, target_id=t["target_id"], target_thread_id=t.get("target_thread_id"), target_row_id=int(t.get("id") or 0), check_type="full", status=status, source=getattr(check, "source", "telethon"), error_text=getattr(check, "publish_error_text", None), details=getattr(check, "details", None))
+                if status == "denied":
+                    failed += 1
+                else:
+                    passed += 1
+            except Exception as exc:
                 failed += 1
-            else:
-                passed += 1
+                self.repo.log_campaign_scheduled_post_check(scheduled_post_id=scheduled_post_id, rule_id=rule_id, target_id=t["target_id"], target_thread_id=t.get("target_thread_id"), target_row_id=int(t.get("id") or 0), check_type="full", status="failed", source="target_checker", error_text=str(exc), details={"exception": exc.__class__.__name__})
         readiness = self.build_readiness(scheduled_post_id=scheduled_post_id)
         self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="targets_checked", actor_id=actor_id, extra={"checked": len(targets), "passed": passed, "failed": failed})
         self.logger.info("VIP_SCHEDULED_POST_TARGETS_CHECKED | scheduled_post_id=%s | checked=%s", scheduled_post_id, len(targets))

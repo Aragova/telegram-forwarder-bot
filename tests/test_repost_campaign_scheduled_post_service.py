@@ -29,6 +29,8 @@ class FakeRepo:
     def get_rule(self, rule_id): return self.rules.get(rule_id)
     def get_saved_post(self, saved_post_id): return self.saved_posts.get(saved_post_id)
     def create_campaign_scheduled_post_draft(self, *, rule_id, tenant_id=1, created_by=None, title=None, metadata=None):
+        if getattr(self, "force_create_fail", False):
+            return None
         sid = self._id; self._id += 1
         self.posts[sid] = {"id": sid, "rule_id": rule_id, "status": "draft", "saved_post_id": None, "show_seconds": 0, "scheduled_at": None}
         return sid
@@ -43,7 +45,10 @@ class FakeRepo:
             for r in rows:
                 if int(r.get("id") or 0) == int(target_row_id): r.update(kwargs); return True
         return True
-    def log_campaign_scheduled_post_check(self, **kwargs): self.checks.setdefault(kwargs["scheduled_post_id"], []).append(kwargs); return 1
+    def log_campaign_scheduled_post_check(self, **kwargs):
+        assert kwargs["check_type"] in {"publish", "delete", "full"}
+        assert kwargs["status"] in {"confirmed", "denied", "unknown", "failed"}
+        self.checks.setdefault(kwargs["scheduled_post_id"], []).append(kwargs); return 1
     def list_campaign_scheduled_post_checks(self, scheduled_post_id, *, limit=50): return self.checks.get(scheduled_post_id, [])[:limit]
     def log_campaign_scheduled_post_event(self, **kwargs): self.events.setdefault(kwargs["scheduled_post_id"], []).append(kwargs); return 1
     def list_campaign_scheduled_post_events(self, scheduled_post_id, *, limit=50): return self.events.get(scheduled_post_id, [])[:limit]
@@ -191,7 +196,31 @@ def test_check_targets_updates_snapshot_and_history():
 def test_get_post_details_returns_post_targets_checks_events_readiness():
     service, repo = make_service(); sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
     repo.post_targets[sid] = [{"id": 1, "target_id": "-1"}]
-    repo.log_campaign_scheduled_post_check(scheduled_post_id=sid, rule_id=1, target_id="-1", target_thread_id=None, check_type="permissions", status="ok")
+    repo.log_campaign_scheduled_post_check(scheduled_post_id=sid, rule_id=1, target_id="-1", target_thread_id=None, check_type="full", status="confirmed")
     repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=1, event_type="draft_created")
     d = service.get_post_details(scheduled_post_id=sid)
     assert d and {"post", "targets", "checks", "events", "readiness"}.issubset(set(d.keys()))
+
+
+def test_create_draft_returns_error_on_repo_create_failure():
+    service, repo = make_service()
+    repo.force_create_fail = True
+    out = service.create_draft(rule_id=1)
+    assert not out.ok
+    assert out.error_text == "Не удалось создать черновик запланированного поста"
+
+
+class BoomChecker:
+    async def check_target(self, **kwargs):
+        raise RuntimeError("boom")
+
+
+def test_check_targets_logs_failed_status_on_checker_exception():
+    import asyncio
+    service, repo = make_service(checker=BoomChecker())
+    sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.post_targets[sid] = [{"id": 1, "target_id": "-1", "target_thread_id": None}]
+    out = asyncio.run(service.check_targets(scheduled_post_id=sid))
+    assert out.ok
+    assert repo.checks[sid][-1]["check_type"] == "full"
+    assert repo.checks[sid][-1]["status"] == "failed"
