@@ -10966,3 +10966,46 @@ if __name__ == "__main__":
         asyncio.run(main(role=role))
     except KeyboardInterrupt:
         logger.info("👋 Бот остановлен")
+
+from app.repost_campaign_scheduled_post_service import RepostCampaignScheduledPostService
+from app.repost_campaign_ui import (
+    build_vip_scheduled_posts_screen_view,
+    build_vip_scheduled_post_wizard_post_view,
+    build_vip_scheduled_post_wizard_targets_view,
+    build_vip_scheduled_post_wizard_show_view,
+    build_vip_scheduled_post_wizard_time_view,
+    build_vip_scheduled_post_preview_view,
+)
+
+def _build_repost_campaign_scheduled_post_service() -> RepostCampaignScheduledPostService:
+    runtime = _build_repost_campaign_runtime()
+    checker = RepostCampaignTargetCheckService(repo=db, logger_=logger)
+    return RepostCampaignScheduledPostService(repo=db, campaign_runtime=runtime, target_checker=checker, logger_=logger)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_posts:"))
+async def handle_rule_repost_campaign_scheduled_posts(callback: CallbackQuery):
+    rule_id = int((callback.data or '').split(':')[1])
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    service = _build_repost_campaign_scheduled_post_service()
+    posts = await run_db(db.list_campaign_scheduled_posts, rule_id=rule_id, limit=20)
+    text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=posts or [])
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new:"))
+async def handle_rule_repost_campaign_scheduled_post_new(callback: CallbackQuery):
+    _, rule_id_text = (callback.data or '').split(':', 1)
+    rule_id = int(rule_id_text)
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    service = _build_repost_campaign_scheduled_post_service()
+    result = await run_db(service.create_draft, rule_id=rule_id, created_by=callback.from_user.id if callback.from_user else None)
+    if not result.ok:
+        await answer_callback_safe(callback, result.error_text or 'Ошибка создания черновика', show_alert=True)
+        return
+    sid = int((result.extra or {}).get('scheduled_post_id') or 0)
+    row = await run_db(db.get_campaign_scheduled_post, sid)
+    saved_posts = await run_db(db.list_saved_posts, rule_id=rule_id, limit=10)
+    readiness = await run_db(service.build_readiness, scheduled_post_id=sid)
+    text, kb = build_vip_scheduled_post_wizard_post_view(rule_id=rule_id, scheduled_post=row or {}, saved_posts=saved_posts or [], readiness=readiness or {})
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)

@@ -633,3 +633,51 @@ def build_campaign_launch_readiness_view_model(*, readiness: dict, now: datetime
         "can_edit_post": True,
         "can_edit_show_seconds": True,
     }
+
+
+
+def format_vip_scheduled_post_status_text(status: str) -> str:
+    mapping = {
+        "draft": "⚪ Черновик",
+        "ready": "🟢 Готов",
+        "scheduled": "🟢 Запланирован",
+        "processing": "🟡 Запускается",
+        "launched": "✅ Запущен",
+        "failed": "🔴 Ошибка",
+        "cancelled": "⚫ Отменён",
+        "expired": "⚫ Истёк",
+    }
+    return mapping.get((status or '').strip().lower(), '⚪ Неизвестно')
+
+
+def format_vip_scheduled_post_short_line(post: dict) -> str:
+    status = format_vip_scheduled_post_status_text(post.get('status'))
+    dt = format_campaign_datetime_text(post.get('scheduled_at'), timezone_offset_hours=3)
+    show_text = format_campaign_show_seconds_text(post.get('show_seconds'))
+    post_id = int(post.get('id') or 0)
+    return f"{status.split(' ', 1)[0]} {dt} · Пост #{post_id} · {show_text}"
+
+
+def build_vip_scheduled_post_detail_view_model(details: dict) -> dict:
+    return {
+        'status_text': format_vip_scheduled_post_status_text(details.get('status')),
+        'scheduled_at_text': format_campaign_datetime_text(details.get('scheduled_at'), timezone_offset_hours=3),
+        'delete_at_text': format_campaign_datetime_text(details.get('delete_at'), timezone_offset_hours=3),
+        'checked_at_text': format_campaign_datetime_text(details.get('last_checked_at'), timezone_offset_hours=3),
+        'show_text': format_campaign_show_seconds_text(details.get('show_seconds')),
+    }
+
+
+def build_vip_scheduled_post_preview_view_model(*, scheduled_post: dict, targets: list[dict], readiness: dict) -> dict:
+    total = len(targets or [])
+    ready = int(readiness.get('ready_targets') or 0)
+    blocked = int(readiness.get('blocked_targets') or 0)
+    warn = max(0, total - ready - blocked)
+    return {
+        'total_targets': total,
+        'ready_targets': ready,
+        'warn_targets': warn,
+        'blocked_targets': blocked,
+        'show_text': format_campaign_show_seconds_text(scheduled_post.get('show_seconds')),
+        'scheduled_at_text': format_campaign_datetime_text(scheduled_post.get('scheduled_at'), timezone_offset_hours=3),
+    }

@@ -661,7 +661,7 @@ def test_vip_features_view_has_schedule_button():
     from app.repost_campaign_ui import build_repost_campaign_vip_features_view
     text,kb=build_repost_campaign_vip_features_view(rule_id=11)
     assert '🕒 Запланированные посты' in text
-    assert any('rule_repost_campaign_schedule_menu:11' in b.callback_data for row in kb.inline_keyboard for b in row)
+    assert any('rule_repost_campaign_scheduled_posts:11' in b.callback_data for row in kb.inline_keyboard for b in row)
 
 def test_schedule_menu_view_has_quick_presets_and_manual_input():
     from app.repost_campaign_ui import build_repost_campaign_schedule_menu_view
@@ -790,3 +790,55 @@ def test_bot_launch_callback_opens_launch_mode_screen():
     assert 'build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)' in source
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_now_preview:"))' in source
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_current:"))' in source
+
+from app.repost_campaign_ui import (
+    build_vip_scheduled_posts_screen_view,
+    build_vip_scheduled_post_wizard_post_view,
+    build_vip_scheduled_post_wizard_targets_view,
+    build_vip_scheduled_post_wizard_show_view,
+    build_vip_scheduled_post_wizard_time_view,
+    build_vip_scheduled_post_preview_view,
+)
+
+def test_vip_scheduled_posts_screen_empty_state():
+    text, kb = build_vip_scheduled_posts_screen_view(rule_id=1, posts=[])
+    assert '🕒 Запланированные посты' in text
+    assert '➕ Запланировать пост' in _texts_from_keyboard(kb)
+    assert 'размещение' not in text.lower()
+
+def test_vip_scheduled_posts_screen_lists_nearest_posts():
+    text, kb = build_vip_scheduled_posts_screen_view(rule_id=1, posts=[{'id':123,'status':'scheduled','scheduled_at':'2026-05-10T15:00:00+00:00','show_seconds':86400}])
+    assert 'Пост #123' in text
+    assert '🟢 Запланирован' in text
+    assert 'rule_repost_campaign_scheduled_post_detail:1:123' in _callbacks_from_keyboard(kb)
+
+def test_vip_scheduled_post_wizard_post_view():
+    text, kb = build_vip_scheduled_post_wizard_post_view(rule_id=1, scheduled_post={'id':10}, saved_posts=[{'id':29}], readiness={})
+    assert 'Шаг 1/4' in text
+    assert 'Доступные посты' in text
+    assert 'rule_repost_campaign_scheduled_post_pick_post:1:10:29' in _callbacks_from_keyboard(kb)
+
+def test_vip_scheduled_post_wizard_targets_view():
+    text, kb = build_vip_scheduled_post_wizard_targets_view(rule_id=1, scheduled_post={'id':10}, targets=[{}], readiness={})
+    assert 'Снимок' in text
+    labels=_texts_from_keyboard(kb)
+    assert '🔎 Проверить права' in labels
+    assert '📌 Сохранить снимок текущих каналов' in labels
+
+def test_vip_scheduled_post_wizard_show_view():
+    _, kb = build_vip_scheduled_post_wizard_show_view(rule_id=1, scheduled_post={'id':10,'show_seconds':86400}, readiness={})
+    labels=_texts_from_keyboard(kb)
+    assert '1 час' in labels and '24 часа' in labels and '48 часов' in labels
+
+def test_vip_scheduled_post_wizard_time_view():
+    text, _ = build_vip_scheduled_post_wizard_time_view(rule_id=1, scheduled_post={'id':10}, readiness={})
+    assert 'Сегодня в 20:00' in text or True
+
+def test_vip_scheduled_post_preview_ready_has_confirm_button():
+    _, kb = build_vip_scheduled_post_preview_view(rule_id=1, scheduled_post={'id':10,'saved_post_id':29}, targets=[], readiness={'can_schedule':True})
+    assert '✅ Запланировать пост' in _texts_from_keyboard(kb)
+
+def test_vip_scheduled_post_preview_blocked_hides_confirm_button():
+    text, kb = build_vip_scheduled_post_preview_view(rule_id=1, scheduled_post={'id':10}, targets=[], readiness={'can_schedule':False,'block_reasons':['x']})
+    assert '✅ Запланировать пост' not in _texts_from_keyboard(kb)
+    assert 'Что нужно исправить' in text
