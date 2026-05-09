@@ -252,17 +252,25 @@ def test_vip_scheduled_single_material_uses_shared_save_helper():
     assert "service.update_draft_saved_post" in source
 
 
-def test_vip_scheduled_album_keeps_state_until_flush():
+def test_vip_scheduled_material_has_dedicated_handler_before_generic_album_handler():
     source = Path("bot.py").read_text(encoding="utf-8")
-    start = source.index("if state.get(\"state\") == \"waiting_vip_scheduled_post_material\":")
-    end = source.index("if state.get(\"state\") == \"repost_campaign_schedule_input\":")
-    block = source[start:end]
-    album_branch = block[block.index("if getattr(message, \"media_group_id\", None):"):block.index("content_json = build_saved_post_content_from_aiogram_message(message)")]
-    assert "await saved_post_album_buffer.add_message(" in album_branch
-    before_callback = album_branch[:album_branch.index("async def _on_album_ready")]
-    assert "reset_user_state(admin_id)" not in before_callback
-    on_ready = album_branch[album_branch.index("async def _on_album_ready"):album_branch.index("is_new_album = await saved_post_album_buffer.add_message(")]
-    assert "reset_user_state(admin_id)" in on_ready
+    vip_handler_pos = source.index("async def handle_vip_scheduled_post_material_message(message: Message):")
+    generic_album_pos = source.index("on_album_ready=_finalize_repost_campaign_saved_post_album")
+    assert vip_handler_pos < generic_album_pos
+
+
+def test_generic_album_handlers_skip_vip_scheduled_material_state():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "def _is_waiting_vip_scheduled_post_material(user_id: int | None) -> bool:" in source
+    generic_state_block_pos = source.index("if state.get(\"state\") == \"awaiting_repost_campaign_saved_post\":")
+    guard_pos = source.index("if _is_waiting_vip_scheduled_post_material(user_id):", generic_state_block_pos)
+    assert guard_pos > generic_state_block_pos
+
+
+def test_stateful_handler_delegates_vip_scheduled_material_to_helper():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "if await _handle_vip_scheduled_post_material_message(message):" in source
+    assert "    return" in source[source.index("if await _handle_vip_scheduled_post_material_message(message):"):source.index("if state.get(\"state\") == \"awaiting_repost_campaign_saved_post\":")]
 
 from app.repost_campaign_ui import build_repost_campaign_posts_library_view, build_repost_campaign_post_stats_view, build_repost_campaign_post_stats_loading_view, build_repost_campaign_post_channels_stats_view
 
