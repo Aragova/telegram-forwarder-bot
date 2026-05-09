@@ -1045,6 +1045,19 @@ def test_bot_vip_pick_targets_has_pagination_callbacks():
     assert "rule_repost_campaign_scheduled_post_pick_targets:" in source
     assert "page = int(parts[3]) if len(parts) > 3 else 0" in source
 
+def test_bot_vip_pick_targets_uses_keyword_active_only_calls():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "db.list_rule_repost_campaign_targets, rule_id, True" not in source
+    assert "db.list_campaign_scheduled_post_targets, post_id, True" not in source
+    assert "db.list_campaign_scheduled_post_targets, scheduled_post_id, True" not in source
+    assert "active_only=True" in source
+
+def test_bot_vip_add_known_all_returns_via_step_targets_handler():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "_open_vip_scheduled_post_step_targets_message(callback," not in source
+    assert 'callback.data = f"rule_repost_campaign_scheduled_post_step_targets:{rule_id}:{scheduled_post_id}"' in source
+    assert "await handle_step_targets(callback)" in source
+
 
 def test_vip_scheduled_posts_screen_has_only_three_main_buttons():
     _, kb = build_vip_scheduled_posts_screen_view(rule_id=1, posts=[])
