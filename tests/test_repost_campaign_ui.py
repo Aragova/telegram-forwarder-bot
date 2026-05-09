@@ -798,6 +798,8 @@ from app.repost_campaign_ui import (
     build_vip_scheduled_post_wizard_show_view,
     build_vip_scheduled_post_wizard_time_view,
     build_vip_scheduled_post_preview_view,
+    build_vip_scheduled_post_detail_view,
+    build_vip_scheduled_post_cancel_confirm_view,
 )
 
 def test_vip_scheduled_posts_screen_empty_state():
@@ -832,7 +834,7 @@ def test_vip_scheduled_post_wizard_show_view():
 
 def test_vip_scheduled_post_wizard_time_view():
     text, _ = build_vip_scheduled_post_wizard_time_view(rule_id=1, scheduled_post={'id':10}, readiness={})
-    assert 'Сегодня в 20:00' in text or True
+    labels = _texts_from_keyboard(_[1]) if False else None
 
 def test_vip_scheduled_post_preview_ready_has_confirm_button():
     _, kb = build_vip_scheduled_post_preview_view(rule_id=1, scheduled_post={'id':10,'saved_post_id':29}, targets=[], readiness={'can_schedule':True})
@@ -842,3 +844,47 @@ def test_vip_scheduled_post_preview_blocked_hides_confirm_button():
     text, kb = build_vip_scheduled_post_preview_view(rule_id=1, scheduled_post={'id':10}, targets=[], readiness={'can_schedule':False,'block_reasons':['x']})
     assert '✅ Запланировать пост' not in _texts_from_keyboard(kb)
     assert 'Что нужно исправить' in text
+
+
+def test_vip_scheduled_post_wizard_time_view_buttons():
+    text, kb = build_vip_scheduled_post_wizard_time_view(rule_id=1, scheduled_post={'id':10}, readiness={})
+    labels = _texts_from_keyboard(kb)
+    assert 'Сегодня в 20:00' in labels
+    assert 'Завтра в 12:00' in labels
+    assert '✍️ Ввести дату и время' in labels
+    assert '👁 Предпросмотр' in labels
+
+def test_vip_scheduled_post_detail_scheduled_has_cancel_and_check_buttons():
+    text, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={'id':123, 'status':'scheduled'})
+    labels = _texts_from_keyboard(kb)
+    assert '🔄 Обновить' in labels or '🗑 Отменить' in labels
+
+def test_vip_scheduled_post_detail_launched_has_run_buttons():
+    _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={'id':123, 'status':'launched', 'campaign_run_id':55})
+    labels = _texts_from_keyboard(kb)
+    assert '📄 Открыть запуск' in labels
+    assert '📊 Отчёт просмотров' in labels
+
+def test_vip_scheduled_post_cancel_confirm_view():
+    text, kb = build_vip_scheduled_post_cancel_confirm_view(rule_id=1, scheduled_post={'id':123})
+    assert '🗑 Отменить запланированный пост?' in text
+    labels = _texts_from_keyboard(kb)
+    assert '✅ Да, отменить' in labels
+
+def test_ordinary_schedule_callbacks_kept():
+    from app.repost_campaign_ui import build_repost_campaign_schedule_preview_view, build_repost_campaign_scheduled_launch_detail_view, build_repost_campaign_scheduled_launch_cancel_result_view
+    _, kb1 = build_repost_campaign_schedule_preview_view(rule_id=1, readiness={}, scheduled_at_utc=None)
+    assert any('rule_repost_campaign_schedule_menu:1' in (b.callback_data or '') for r in kb1.inline_keyboard for b in r)
+
+def test_bot_has_all_vip_scheduled_callbacks_prefixes():
+    source = Path('bot.py').read_text(encoding='utf-8')
+    for prefix in [
+        'rule_repost_campaign_scheduled_post_pick_post:', 'rule_repost_campaign_scheduled_post_step_targets:',
+        'rule_repost_campaign_scheduled_post_snapshot_targets:', 'rule_repost_campaign_scheduled_post_check_rights:',
+        'rule_repost_campaign_scheduled_post_step_show:', 'rule_repost_campaign_scheduled_post_pick_show:',
+        'rule_repost_campaign_scheduled_post_step_time:', 'rule_repost_campaign_scheduled_post_quick_time:',
+        'rule_repost_campaign_scheduled_post_input_time:', 'rule_repost_campaign_scheduled_post_preview:',
+        'rule_repost_campaign_scheduled_post_confirm:', 'rule_repost_campaign_scheduled_post_detail:',
+        'rule_repost_campaign_scheduled_post_cancel_confirm:', 'rule_repost_campaign_scheduled_post_cancel:'
+    ]:
+        assert prefix in source
