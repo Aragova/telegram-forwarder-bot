@@ -810,6 +810,7 @@ class PostgresRepository(RepositoryProtocol):
             finished_at TIMESTAMPTZ NULL,
             error_text TEXT NULL,
             report_json JSONB NULL,
+            scheduled_post_id BIGINT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
@@ -819,6 +820,8 @@ class PostgresRepository(RepositoryProtocol):
         ON campaign_runs(saved_post_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_campaign_runs_status
         ON campaign_runs(status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_campaign_runs_scheduled_post
+        ON campaign_runs(scheduled_post_id);
 
         CREATE TABLE IF NOT EXISTS campaign_scheduled_launches (
             id BIGSERIAL PRIMARY KEY,
@@ -850,6 +853,47 @@ class PostgresRepository(RepositoryProtocol):
         ON campaign_scheduled_launches(rule_id, status, scheduled_at DESC);
         CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_campaign_run
         ON campaign_scheduled_launches(campaign_run_id);
+
+        CREATE TABLE IF NOT EXISTS campaign_scheduled_posts (
+            id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL DEFAULT 1, rule_id BIGINT NOT NULL, saved_post_id BIGINT NULL, title TEXT NULL,
+            status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','ready','scheduled','processing','launched','failed','cancelled','expired')),
+            scheduled_at TIMESTAMPTZ NULL, timezone_offset_minutes INT NOT NULL DEFAULT 180, timezone_label TEXT NOT NULL DEFAULT 'UTC+3', show_seconds BIGINT NULL,
+            targets_total BIGINT NOT NULL DEFAULT 0, targets_ready BIGINT NOT NULL DEFAULT 0, targets_with_warnings BIGINT NOT NULL DEFAULT 0, targets_blocked BIGINT NOT NULL DEFAULT 0,
+            attempt_count BIGINT NOT NULL DEFAULT 0, next_retry_at TIMESTAMPTZ NULL, campaign_run_id BIGINT NULL, created_by BIGINT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NULL, scheduled_by BIGINT NULL, scheduled_at_created TIMESTAMPTZ NULL, launched_at TIMESTAMPTZ NULL, cancelled_at TIMESTAMPTZ NULL, cancelled_by BIGINT NULL,
+            cancel_reason TEXT NULL, failed_at TIMESTAMPTZ NULL, error_text TEXT NULL, locked_by TEXT NULL, locked_at TIMESTAMPTZ NULL, lock_until TIMESTAMPTZ NULL,
+            post_snapshot_json JSONB NULL, readiness_snapshot_json JSONB NULL, preview_json JSONB NULL, metadata_json JSONB NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_posts_rule_status ON campaign_scheduled_posts(rule_id, status, scheduled_at);
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_posts_tenant_status ON campaign_scheduled_posts(tenant_id, status, scheduled_at);
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_posts_due ON campaign_scheduled_posts(status, COALESCE(next_retry_at, scheduled_at), scheduled_at) WHERE status = 'scheduled';
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_posts_run ON campaign_scheduled_posts(campaign_run_id) WHERE campaign_run_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_posts_saved_post ON campaign_scheduled_posts(saved_post_id);
+        CREATE TABLE IF NOT EXISTS campaign_scheduled_post_targets (
+            id BIGSERIAL PRIMARY KEY, scheduled_post_id BIGINT NOT NULL, rule_id BIGINT NOT NULL, target_kind TEXT NOT NULL DEFAULT 'extra' CHECK (target_kind IN ('main', 'extra')),
+            target_id TEXT NOT NULL, target_thread_id BIGINT NULL, target_title TEXT NULL, is_active BOOLEAN NOT NULL DEFAULT TRUE, can_publish BOOLEAN NULL, can_delete BOOLEAN NULL,
+            publish_status TEXT NULL, delete_status TEXT NULL, publish_error_text TEXT NULL, delete_error_text TEXT NULL, check_source TEXT NULL, checked_at TIMESTAMPTZ NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NULL, metadata_json JSONB NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_scheduled_post_targets_unique ON campaign_scheduled_post_targets(scheduled_post_id, target_id, COALESCE(target_thread_id, -1));
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_post_targets_post ON campaign_scheduled_post_targets(scheduled_post_id, is_active);
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_post_targets_rule ON campaign_scheduled_post_targets(rule_id);
+        CREATE TABLE IF NOT EXISTS campaign_scheduled_post_checks (
+            id BIGSERIAL PRIMARY KEY, scheduled_post_id BIGINT NOT NULL, target_row_id BIGINT NULL, rule_id BIGINT NOT NULL, target_id TEXT NOT NULL, target_thread_id BIGINT NULL,
+            check_type TEXT NOT NULL CHECK (check_type IN ('publish', 'delete', 'full')),
+            status TEXT NOT NULL CHECK (status IN ('confirmed', 'denied', 'unknown', 'failed')),
+            source TEXT NULL, error_text TEXT NULL, details_json JSONB NULL, checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_post_checks_post ON campaign_scheduled_post_checks(scheduled_post_id, checked_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_post_checks_target ON campaign_scheduled_post_checks(target_row_id, checked_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_post_checks_status ON campaign_scheduled_post_checks(status, checked_at DESC);
+        CREATE TABLE IF NOT EXISTS campaign_scheduled_post_events (
+            id BIGSERIAL PRIMARY KEY, scheduled_post_id BIGINT NOT NULL, rule_id BIGINT NOT NULL, event_type TEXT NOT NULL, status_from TEXT NULL, status_to TEXT NULL,
+            actor_id BIGINT NULL, worker_id TEXT NULL, message TEXT NULL, error_text TEXT NULL, extra_json JSONB NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_post_events_post ON campaign_scheduled_post_events(scheduled_post_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_post_events_rule ON campaign_scheduled_post_events(rule_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_post_events_type ON campaign_scheduled_post_events(event_type, created_at DESC);
 
         CREATE TABLE IF NOT EXISTS campaign_run_messages (
             id BIGSERIAL PRIMARY KEY,
@@ -931,6 +975,46 @@ class PostgresRepository(RepositoryProtocol):
                     ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS views_final_next_retry_at TIMESTAMPTZ NULL
                     """
                 )
+
+                cur.execute("ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS scheduled_post_id BIGINT NULL")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_campaign_runs_scheduled_post ON campaign_runs(scheduled_post_id)")
+                for _sql in [
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS tenant_id BIGINT NOT NULL DEFAULT 1",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS rule_id BIGINT NOT NULL DEFAULT 0",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS saved_post_id BIGINT NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS title TEXT NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'draft'",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS timezone_offset_minutes INT NOT NULL DEFAULT 180",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS timezone_label TEXT NOT NULL DEFAULT 'UTC+3'",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS show_seconds BIGINT NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS targets_total BIGINT NOT NULL DEFAULT 0",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS targets_ready BIGINT NOT NULL DEFAULT 0",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS targets_with_warnings BIGINT NOT NULL DEFAULT 0",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS targets_blocked BIGINT NOT NULL DEFAULT 0",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS attempt_count BIGINT NOT NULL DEFAULT 0",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS campaign_run_id BIGINT NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS created_by BIGINT NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS scheduled_by BIGINT NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS scheduled_at_created TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS launched_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS cancelled_by BIGINT NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS cancel_reason TEXT NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS failed_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS error_text TEXT NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS locked_by TEXT NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS lock_until TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS post_snapshot_json JSONB NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS readiness_snapshot_json JSONB NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS preview_json JSONB NULL",
+                    "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS metadata_json JSONB NULL",
+                ]:
+                    cur.execute(_sql)
                 cur.execute(
                     """
                     UPDATE routing
@@ -7212,16 +7296,16 @@ class PostgresRepository(RepositoryProtocol):
                 cur.execute("UPDATE routing SET repost_campaign_saved_post_id=%s WHERE id=%s", (saved_post_id, int(rule_id)))
                 return cur.rowcount > 0
 
-    def create_campaign_run(self, *, rule_id: int, saved_post_id: int, run_type: str, status: str, show_seconds: int, started_by: int | None, render_mode: str | None = None, targets_total: int = 0) -> int | None:
+    def create_campaign_run(self, *, rule_id: int, saved_post_id: int, run_type: str, status: str, show_seconds: int, started_by: int | None, render_mode: str | None = None, targets_total: int = 0, scheduled_post_id: int | None = None) -> int | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO campaign_runs(tenant_id, rule_id, saved_post_id, run_type, status, render_mode, show_seconds, targets_total, started_by)
-                    VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO campaign_runs(tenant_id, rule_id, saved_post_id, run_type, status, render_mode, show_seconds, targets_total, started_by, scheduled_post_id)
+                    VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (int(rule_id), int(saved_post_id), str(run_type), str(status), render_mode, int(show_seconds), int(targets_total), started_by),
+                    (int(rule_id), int(saved_post_id), str(run_type), str(status), render_mode, int(show_seconds), int(targets_total), started_by, scheduled_post_id),
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -7296,6 +7380,188 @@ class PostgresRepository(RepositoryProtocol):
                 cur.execute("UPDATE campaign_scheduled_launches SET status='scheduled', locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE status='processing' AND locked_at < NOW() - (%s * INTERVAL '1 second') AND campaign_run_id IS NULL", (int(stuck_seconds),))
                 count=int(cur.rowcount)
             conn.commit(); return count
+
+    def _normalize_campaign_scheduled_post_row(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        d = dict(row)
+        d["post_snapshot_json"] = _safe_json_loads(d.get("post_snapshot_json"), {})
+        d["readiness_snapshot_json"] = _safe_json_loads(d.get("readiness_snapshot_json"), {})
+        d["preview_json"] = _safe_json_loads(d.get("preview_json"), {})
+        d["metadata_json"] = _safe_json_loads(d.get("metadata_json"), {})
+        return d
+
+
+    def create_campaign_scheduled_post_draft(self, *, rule_id: int, tenant_id: int = 1, created_by: int | None = None, title: str | None = None, metadata: dict[str, Any] | None = None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO campaign_scheduled_posts(tenant_id, rule_id, created_by, title, metadata_json) VALUES (%s,%s,%s,%s,%s::jsonb) RETURNING id", (int(tenant_id), int(rule_id), created_by, title, _json_dumps(metadata)))
+                row = cur.fetchone()
+            conn.commit()
+        if row: logger.info("VIP_SCHEDULED_POST_DRAFT_CREATED id=%s rule_id=%s", row['id'], rule_id)
+        return int(row['id']) if row else None
+
+    def get_campaign_scheduled_post(self, scheduled_post_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_scheduled_posts WHERE id=%s", (int(scheduled_post_id),))
+                return self._normalize_campaign_scheduled_post_row(cur.fetchone())
+
+    def update_campaign_scheduled_post(self, scheduled_post_id: int, **kwargs) -> bool:
+        mapping={"saved_post_id":"saved_post_id=%s","title":"title=%s","show_seconds":"show_seconds=%s","scheduled_at":"scheduled_at=%s","timezone_offset_minutes":"timezone_offset_minutes=%s","timezone_label":"timezone_label=%s","status":"status=%s","targets_total":"targets_total=%s","targets_ready":"targets_ready=%s","targets_with_warnings":"targets_with_warnings=%s","targets_blocked":"targets_blocked=%s","error_text":"error_text=%s","post_snapshot":"post_snapshot_json=%s::jsonb","readiness_snapshot":"readiness_snapshot_json=%s::jsonb","preview":"preview_json=%s::jsonb","metadata":"metadata_json=%s::jsonb"}
+        set_parts=[]; params=[]
+        for k,sql in mapping.items():
+            if k in kwargs and kwargs[k] is not None:
+                set_parts.append(sql); params.append(_json_dumps(kwargs[k]) if k in {"post_snapshot","readiness_snapshot","preview","metadata"} else kwargs[k])
+        if not set_parts: return False
+        set_parts.append("updated_at=NOW()"); params.append(int(scheduled_post_id))
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE campaign_scheduled_posts SET {', '.join(set_parts)} WHERE id=%s", tuple(params)); ok=cur.rowcount>0
+            conn.commit()
+        if ok: logger.info("VIP_SCHEDULED_POST_UPDATED id=%s", scheduled_post_id)
+        return ok
+
+    def list_campaign_scheduled_posts(self, *, rule_id: int, statuses: list[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if statuses: cur.execute("SELECT * FROM campaign_scheduled_posts WHERE rule_id=%s AND status = ANY(%s) ORDER BY scheduled_at DESC NULLS LAST, id DESC LIMIT %s", (int(rule_id), statuses, int(limit)))
+                else: cur.execute("SELECT * FROM campaign_scheduled_posts WHERE rule_id=%s ORDER BY scheduled_at DESC NULLS LAST, id DESC LIMIT %s", (int(rule_id), int(limit)))
+                return [self._normalize_campaign_scheduled_post_row(r) for r in (cur.fetchall() or [])]
+
+    def list_campaign_scheduled_posts_for_tenant(self, *, tenant_id: int, statuses: list[str] | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if statuses: cur.execute("SELECT * FROM campaign_scheduled_posts WHERE tenant_id=%s AND status = ANY(%s) ORDER BY scheduled_at DESC NULLS LAST, id DESC LIMIT %s", (int(tenant_id), statuses, int(limit)))
+                else: cur.execute("SELECT * FROM campaign_scheduled_posts WHERE tenant_id=%s ORDER BY scheduled_at DESC NULLS LAST, id DESC LIMIT %s", (int(tenant_id), int(limit)))
+                return [self._normalize_campaign_scheduled_post_row(r) for r in (cur.fetchall() or [])]
+
+
+    def replace_campaign_scheduled_post_targets(self, *, scheduled_post_id: int, rule_id: int, targets: list[dict[str, Any]]) -> int:
+        active = 0
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM campaign_scheduled_post_targets WHERE scheduled_post_id=%s", (int(scheduled_post_id),))
+                for t in targets:
+                    cur.execute("""INSERT INTO campaign_scheduled_post_targets(scheduled_post_id, rule_id, target_kind, target_id, target_thread_id, target_title, is_active, metadata_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb) ON CONFLICT (scheduled_post_id, target_id, COALESCE(target_thread_id, -1)) DO UPDATE SET target_title=EXCLUDED.target_title, is_active=EXCLUDED.is_active, updated_at=NOW()""",
+                    (int(scheduled_post_id), int(rule_id), t.get('target_kind','extra'), str(t.get('target_id')), t.get('target_thread_id'), t.get('target_title'), bool(t.get('is_active', True)), _json_dumps(t.get('metadata'))))
+                    if bool(t.get('is_active', True)): active += 1
+                cur.execute("UPDATE campaign_scheduled_posts SET targets_total=%s, updated_at=NOW() WHERE id=%s", (int(active), int(scheduled_post_id)))
+            conn.commit()
+        logger.info("VIP_SCHEDULED_POST_TARGETS_REPLACED id=%s active=%s", scheduled_post_id, active)
+        return active
+
+    def list_campaign_scheduled_post_targets(self, scheduled_post_id: int, *, active_only: bool = True) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_scheduled_post_targets WHERE scheduled_post_id=%s" + (" AND is_active=TRUE" if active_only else "") + " ORDER BY id ASC", (int(scheduled_post_id),))
+                rows=[dict(r) for r in (cur.fetchall() or [])]
+                for r in rows: r['metadata_json']=_safe_json_loads(r.get('metadata_json'), {})
+                return rows
+
+    def update_campaign_scheduled_post_target_check_result(
+        self,
+        target_row_id: int,
+        *,
+        can_publish: bool | None = None,
+        can_delete: bool | None = None,
+        publish_status: str | None = None,
+        delete_status: str | None = None,
+        publish_error_text: str | None = None,
+        delete_error_text: str | None = None,
+        check_source: str | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_scheduled_post_targets
+                    SET can_publish=%s,
+                        can_delete=%s,
+                        publish_status=%s,
+                        delete_status=%s,
+                        publish_error_text=%s,
+                        delete_error_text=%s,
+                        check_source=%s,
+                        checked_at=NOW(),
+                        updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (
+                        can_publish,
+                        can_delete,
+                        publish_status,
+                        delete_status,
+                        publish_error_text,
+                        delete_error_text,
+                        check_source,
+                        int(target_row_id),
+                    ),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+        return ok
+    def log_campaign_scheduled_post_check(self, *, scheduled_post_id: int, rule_id: int, target_id: str, target_thread_id: int | None, check_type: str, status: str, target_row_id: int | None = None, source: str | None = None, error_text: str | None = None, details: dict[str, Any] | None = None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO campaign_scheduled_post_checks(scheduled_post_id,target_row_id,rule_id,target_id,target_thread_id,check_type,status,source,error_text,details_json) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb) RETURNING id", (int(scheduled_post_id), target_row_id, int(rule_id), target_id, target_thread_id, check_type, status, source, error_text, _json_dumps(details)))
+                row=cur.fetchone()
+            conn.commit(); return int(row['id']) if row else None
+    def list_campaign_scheduled_post_checks(self, scheduled_post_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_scheduled_post_checks WHERE scheduled_post_id=%s ORDER BY checked_at DESC, id DESC LIMIT %s", (int(scheduled_post_id), int(limit)))
+                rows=[dict(r) for r in (cur.fetchall() or [])]
+                for r in rows: r['details_json']=_safe_json_loads(r.get('details_json'), {})
+                return rows
+
+    def log_campaign_scheduled_post_event(self, *, scheduled_post_id: int, rule_id: int, event_type: str, status_from: str | None = None, status_to: str | None = None, actor_id: int | None = None, worker_id: str | None = None, message: str | None = None, error_text: str | None = None, extra: dict[str, Any] | None = None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO campaign_scheduled_post_events(scheduled_post_id,rule_id,event_type,status_from,status_to,actor_id,worker_id,message,error_text,extra_json) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb) RETURNING id", (int(scheduled_post_id), int(rule_id), event_type, status_from, status_to, actor_id, worker_id, message, error_text, _json_dumps(extra)))
+                row=cur.fetchone()
+            conn.commit(); return int(row['id']) if row else None
+    def list_campaign_scheduled_post_events(self, scheduled_post_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_scheduled_post_events WHERE scheduled_post_id=%s ORDER BY created_at DESC, id DESC LIMIT %s", (int(scheduled_post_id), int(limit)))
+                rows=[dict(r) for r in (cur.fetchall() or [])]
+                for r in rows: r['extra_json']=_safe_json_loads(r.get('extra_json'), {})
+                return rows
+
+    def schedule_campaign_scheduled_post(self, scheduled_post_id: int, *, scheduled_by: int | None = None) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='scheduled', scheduled_by=%s, scheduled_at_created=NOW(), updated_at=NOW()", (scheduled_by,), "status IN ('draft','ready')", "VIP_SCHEDULED_POST_SCHEDULED")
+    def cancel_campaign_scheduled_post(self, scheduled_post_id: int, *, cancelled_by: int | None = None, reason: str | None = None) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='cancelled', cancelled_at=NOW(), cancelled_by=%s, cancel_reason=%s, updated_at=NOW()", (cancelled_by, reason), "status IN ('draft','ready','scheduled')", "VIP_SCHEDULED_POST_CANCELLED")
+    def mark_campaign_scheduled_post_launched(self, scheduled_post_id: int, *, campaign_run_id: int) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='launched', campaign_run_id=%s, launched_at=NOW(), updated_at=NOW()", (int(campaign_run_id),), "status='processing'", "VIP_SCHEDULED_POST_MARKED_LAUNCHED")
+    def mark_campaign_scheduled_post_failed(self, scheduled_post_id: int, *, error_text: str) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='failed', failed_at=NOW(), error_text=%s, locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (error_text,), "status IN ('scheduled','processing')", "VIP_SCHEDULED_POST_MARKED_FAILED")
+    def delay_campaign_scheduled_post_retry(self, scheduled_post_id: int, *, next_retry_at: str, error_text: str | None = None) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='scheduled', attempt_count=attempt_count+1, next_retry_at=%s, error_text=%s, locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (next_retry_at, error_text), "status='processing'", None)
+    def _update_campaign_scheduled_post_status(self, scheduled_post_id: int, set_sql: str, params: tuple[Any, ...], where_sql: str, log_code: str | None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE campaign_scheduled_posts SET {set_sql} WHERE id=%s AND {where_sql}", (*params, int(scheduled_post_id))); ok=cur.rowcount>0
+            conn.commit()
+        if ok and log_code: logger.info("%s id=%s", log_code, scheduled_post_id)
+        return ok
+    def claim_due_campaign_scheduled_posts(self, *, now_iso: str, worker_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""WITH picked AS (SELECT id FROM campaign_scheduled_posts WHERE status='scheduled' AND campaign_run_id IS NULL AND scheduled_at IS NOT NULL AND COALESCE(next_retry_at, scheduled_at) <= %s ORDER BY COALESCE(next_retry_at, scheduled_at) ASC, scheduled_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT %s) UPDATE campaign_scheduled_posts p SET status='processing', locked_by=%s, locked_at=NOW(), lock_until=NOW() + INTERVAL '5 minutes', updated_at=NOW() FROM picked WHERE p.id = picked.id RETURNING p.*""", (now_iso, int(limit), worker_id))
+                rows=[self._normalize_campaign_scheduled_post_row(r) for r in (cur.fetchall() or [])]
+            conn.commit()
+        if rows: logger.info("VIP_SCHEDULED_POST_CLAIMED count=%s worker=%s", len(rows), worker_id)
+        return rows
+    def reset_stuck_campaign_scheduled_posts(self, *, stuck_seconds: int = 300) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_posts SET status='scheduled', locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW() WHERE status='processing' AND campaign_run_id IS NULL AND (lock_until < NOW() OR locked_at < NOW() - (%s * INTERVAL '1 second'))", (int(stuck_seconds),)); c=int(cur.rowcount)
+            conn.commit()
+        if c: logger.info("VIP_SCHEDULED_POST_STUCK_RESET count=%s", c)
+        return c
 
     def update_campaign_run_status(self, run_id: int, *, status: str, render_mode: str | None = None, targets_success: int | None = None, targets_failed: int | None = None, error_text: str | None = None, report: dict[str, Any] | None = None, finish: bool = False) -> bool:
         set_parts = ["status=%s", "updated_at=NOW()"]
