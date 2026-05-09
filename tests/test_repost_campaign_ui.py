@@ -1241,3 +1241,22 @@ def test_vip_scheduled_pick_targets_shows_add_page_when_paginated():
     labels = _texts_from_keyboard(kb)
     assert "➕ Добавить все на странице" in labels
     assert "➕ Добавить все" in labels
+
+
+def test_bot_imports_vip_scheduled_post_loop():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "run_repost_campaign_scheduled_post_loop" in source
+    assert "RepostCampaignScheduledPostService" in source
+
+
+def test_bot_starts_vip_scheduled_post_loop_with_create_task():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "asyncio.create_task(" in source
+    assert "run_repost_campaign_scheduled_post_loop(" in source
+    assert "vip-scheduled-post:" in source
+
+
+def test_bot_vip_scheduled_post_loop_uses_existing_builder():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "_build_repost_campaign_scheduled_post_service()" in source
+    assert "scheduled_post_runtime = _build_repost_campaign_scheduled_post_service()" in source

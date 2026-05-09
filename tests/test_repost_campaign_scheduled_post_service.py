@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from app.repost_campaign_scheduled_post_service import RepostCampaignScheduledPostService
 
@@ -413,3 +414,17 @@ def test_scheduled_post_loop_runs_process_due_posts_and_stops():
         await asyncio.sleep(0.03); stop.set(); await task
     asyncio.run(_run())
     assert runtime.calls > 0
+
+
+def test_vip_scheduled_post_loop_has_startup_log():
+    source = Path("app/repost_campaign_scheduled_post_service.py").read_text(encoding="utf-8")
+    assert "VIP_SCHEDULED_POST_LOOP_STARTED" in source
+    assert "worker_id" in source
+    assert "interval_seconds" in source
+
+
+def test_vip_scheduled_post_process_due_posts_has_runtime_logs():
+    source = Path("app/repost_campaign_scheduled_post_service.py").read_text(encoding="utf-8")
+    assert "VIP_SCHEDULED_POST_DUE_CLAIMED" in source
+    assert "VIP_SCHEDULED_POST_LAUNCH_STARTED" in source
+    assert "VIP_SCHEDULED_POST_LAUNCH_FINISHED" in source
