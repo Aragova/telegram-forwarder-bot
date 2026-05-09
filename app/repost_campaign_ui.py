@@ -1360,7 +1360,16 @@ def build_vip_scheduled_post_wizard_post_view(*, rule_id:int, scheduled_post:dic
 
 def build_vip_scheduled_post_wizard_targets_view(*, rule_id:int, scheduled_post:dict, targets:list[dict], readiness:dict)->tuple[str,InlineKeyboardMarkup]:
     total=len(targets or [])
-    text=(f'🧙 Запланированный пост · Шаг 2/4\n📣 Каналы/группы\nViMi сохранит Снимок текущих каналов/групп.\nПосле этого изменения в текущей кампании не изменят этот запланированный пост.\nСейчас в снимке:\n📣 Каналов/групп: {total}\n✅ Готовы: {int(readiness.get('targets_ready_count') or 0)}\n⚠️ Требуют проверки: {int(readiness.get('targets_warning_count') or 0)}\n🔴 Заблокированы: {int(readiness.get('targets_blocked_count') or 0)}')
+    text=(
+        "🧙 Запланированный пост · Шаг 2/4\n📣 Каналы/группы\n"
+        "ViMi сохранит Снимок текущих каналов/групп.\n"
+        "После этого изменения в текущей кампании не изменят этот запланированный пост.\n"
+        "Сейчас в снимке:\n"
+        f"📣 Каналов/групп: {total}\n"
+        f"✅ Готовы: {int(readiness.get('targets_ready_count') or 0)}\n"
+        f"⚠️ Требуют проверки: {int(readiness.get('targets_warning_count') or 0)}\n"
+        f"🔴 Заблокированы: {int(readiness.get('targets_blocked_count') or 0)}"
+    )
     sid=int(scheduled_post.get('id') or 0)
     rows=[[InlineKeyboardButton(text='📌 Сохранить снимок текущих каналов', callback_data=f'rule_repost_campaign_scheduled_post_snapshot_targets:{rule_id}:{sid}')],[InlineKeyboardButton(text='🔎 Проверить права', callback_data=f'rule_repost_campaign_scheduled_post_check_rights:{rule_id}:{sid}')],[InlineKeyboardButton(text='✅ Далее', callback_data=f'rule_repost_campaign_scheduled_post_step_show:{rule_id}:{sid}')],[InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_post_step_post:{rule_id}:{sid}')]]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
