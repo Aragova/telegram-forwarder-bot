@@ -249,3 +249,31 @@ def test_cancel_post_does_not_log_cancelled_event_when_repo_transition_fails():
     out = service.cancel_post(scheduled_post_id=sid)
     assert not out.ok
     assert not any(x["event_type"] == "cancelled" for x in repo.events.get(sid, []))
+
+
+class FakeRuntimeLaunch(FakeCampaignRuntime):
+    def __init__(self, result, active=False):
+        super().__init__(active=active)
+        self.result = result
+        self.calls = []
+    async def launch_campaign_from_snapshot(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.result
+
+def test_process_due_posts_claims_and_launches_snapshot():
+    import asyncio
+    repo = FakeRepo(); repo.rules[1] = Rule(1); repo.saved_posts[7] = {"id": 7}
+    repo.posts[1] = {"id": 1, "rule_id": 1, "saved_post_id": 7, "show_seconds": 60, "status": "processing", "campaign_run_id": None}
+    repo.post_targets[1] = [{"target_id": "-1001", "target_kind": "main"}]
+    repo.reset_stuck_campaign_scheduled_posts = lambda stuck_seconds=300: 0
+    repo.claim_due_campaign_scheduled_posts = lambda **kwargs: [repo.posts[1]]
+    marks = []
+    repo.mark_campaign_scheduled_post_launched = lambda sid, campaign_run_id: marks.append((sid, campaign_run_id)) or True
+    repo.mark_campaign_scheduled_post_failed = lambda *a, **k: False
+    repo.delay_campaign_scheduled_post_retry = lambda *a, **k: False
+    rt = FakeRuntimeLaunch(type('R',(),{'ok':True,'extra':{'campaign_run_id': 77},'error_text':None})())
+    service = RepostCampaignScheduledPostService(repo=repo, campaign_runtime=rt)
+    asyncio.run(service.process_due_posts(worker_id='w1'))
+    assert rt.calls
+    assert marks == [(1,77)]
+
