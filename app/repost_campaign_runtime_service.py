@@ -550,7 +550,8 @@ class RepostCampaignRuntimeService:
 
         content = saved_post.get("content_json") or saved_post.get("content") or {}
         render_result = await self.renderer.send(chat_id=target_id, content=content)
-        if not render_result.ok:
+        forced_sent = (not render_result.ok) and bool(getattr(render_result, "message_ids", None))
+        if not render_result.ok and not forced_sent:
             self.repo.mark_campaign_run_message_failed(
                 run_message_id,
                 error_text=render_result.error_text or "unknown error",
@@ -585,6 +586,11 @@ class RepostCampaignRuntimeService:
                 error_text=render_result.error_text,
                 premium_required=render_result.premium_required,
                 extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id},
+            )
+        if forced_sent:
+            self.logger.warning(
+                "REPOST_CAMPAIGN_RENDER_FAILED_BUT_IDS_RETURNED_MARK_SENT | run_id=%s | campaign_run_message_id=%s | target_id=%s | message_ids=%s | method=%s | error_text=%s",
+                run_id, run_message_id, target_id, getattr(render_result, "message_ids", None), render_result.method, render_result.error_text,
             )
 
         self.repo.mark_campaign_run_message_sent(
@@ -685,6 +691,10 @@ class RepostCampaignRuntimeService:
         for row in extra_targets:
             key = (str(row.get("target_id") or ""), row.get("target_thread_id"))
             if key in seen:
+                self.logger.info(
+                    "REPOST_CAMPAIGN_TARGET_DUPLICATE_SKIPPED | rule_id=%s | target_id=%s | target_thread_id=%s | target_kind=%s | target_title=%s",
+                    rule_id, key[0], key[1], "extra", row.get("title") or row.get("target_id"),
+                )
                 continue
             seen.add(key)
             targets.append({
@@ -736,6 +746,14 @@ class RepostCampaignRuntimeService:
                 delete_after_at=delete_after_at,
             )
             if run_message_id is None:
+                self.logger.warning(
+                    "REPOST_CAMPAIGN_TARGET_DUPLICATE_SKIPPED | rule_id=%s | target_id=%s | target_thread_id=%s | target_kind=%s | target_title=%s",
+                    rule_id,
+                    target["target_id"],
+                    target["target_thread_id"],
+                    target["target_kind"],
+                    target["target_title"],
+                )
                 failed_count += 1
                 if first_error_text is None:
                     first_error_text = "Не удалось создать запись публикации рекламной кампании"
@@ -749,7 +767,8 @@ class RepostCampaignRuntimeService:
             any_premium_required = any_premium_required or bool(getattr(render_result, "premium_required", False))
             album_ids = list(getattr(render_result, "message_ids", None) or [])
             is_album_without_ids = bool(render_result.ok and render_result.kind == "album" and not album_ids)
-            if render_result.ok and not is_album_without_ids:
+            forced_sent = (not render_result.ok) and bool(album_ids)
+            if (render_result.ok and not is_album_without_ids) or forced_sent:
                 self.repo.mark_campaign_run_message_sent(
                     run_message_id,
                     sent_message_id=render_result.message_id,
@@ -763,6 +782,11 @@ class RepostCampaignRuntimeService:
                     "REPOST_CAMPAIGN_LAUNCH_TARGET_SENT | run_id=%s | target_id=%s | message_id=%s | message_ids=%s | method=%s",
                     run_id, target["target_id"], render_result.message_id, album_ids, render_result.method
                 )
+                if forced_sent:
+                    self.logger.warning(
+                        "REPOST_CAMPAIGN_RENDER_FAILED_BUT_IDS_RETURNED_MARK_SENT | run_id=%s | campaign_run_message_id=%s | target_id=%s | message_ids=%s | method=%s | error_text=%s",
+                        run_id, run_message_id, target["target_id"], album_ids, render_result.method, getattr(render_result, "error_text", None),
+                    )
             else:
                 self.repo.mark_campaign_run_message_failed(
                     run_message_id,

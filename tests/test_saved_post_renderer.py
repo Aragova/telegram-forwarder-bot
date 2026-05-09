@@ -12,6 +12,7 @@ from app.saved_post_renderer import (
     send_saved_post_content,
     send_saved_post_content_via_telethon,
 )
+import app.saved_post_renderer as spr
 
 
 class _FakeSentMessage:
@@ -260,6 +261,47 @@ class _TelethonVerifyOk(FakeTelethonSource):
         return [SimpleNamespace(id=i, date=datetime.now(timezone.utc), peer_id=_FakePeer(2451047809)) for i in ids]
 
 
+def test_source_send_ids_verify_failed_returns_unverified_without_forward(monkeypatch):
+    telethon = FakeTelethonSource()
+
+    async def _verify(**kwargs):
+        return []
+
+    monkeypatch.setattr(spr, "verify_telethon_sent_messages", _verify)
+    result = asyncio.run(send_saved_post_album_via_telethon_source(
+        telethon_client=telethon,
+        chat_id=123,
+        content={"kind": "album", "caption": "cap", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
+    ))
+    assert result["ok"] is True
+    assert result["method"] == "telethon_source_unverified"
+    assert result["message_ids"] == [900, 901]
+
+
+def test_premium_album_with_full_source_ids_never_downloads(monkeypatch):
+    class _TelethonBroken:
+        async def get_messages(self, entity, ids):
+            return [FakeSourceMessage(i) for i in ids]
+        async def send_file(self, **kwargs):
+            raise RuntimeError("boom")
+        async def forward_messages(self, **kwargs):
+            raise RuntimeError("boom2")
+    called = {"download": 0}
+    async def _download(**kwargs):
+        called["download"] += 1
+        raise AssertionError("download should not be called")
+    monkeypatch.setattr(spr, "download_saved_post_media_item_for_telethon", _download)
+    with pytest.raises(RuntimeError):
+        asyncio.run(send_saved_post_content_via_telethon(
+            bot=_FakeBot(),
+            telethon_client=_TelethonBroken(),
+            chat_id=123,
+            content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
+            temp_dir="media/temp",
+        ))
+    assert called["download"] == 0
+
+
 def test_telethon_album_send_verifies_fresh_target_message_ids():
     telethon = _TelethonVerifyOk()
     raw = asyncio.run(send_saved_post_album_via_telethon_source(
@@ -278,12 +320,12 @@ class _TelethonOldIds(FakeTelethonSource):
 
 
 def test_telethon_album_send_rejects_old_message_ids():
-    with pytest.raises(ValueError, match="Не удалось подтвердить ID"):
-        asyncio.run(send_saved_post_album_via_telethon_source(
-            telethon_client=_TelethonOldIds(),
-            chat_id="-1002451047809",
-            content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
-        ))
+    result = asyncio.run(send_saved_post_album_via_telethon_source(
+        telethon_client=_TelethonOldIds(),
+        chat_id="-1002451047809",
+        content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
+    ))
+    assert result["method"] == "telethon_source_unverified"
 
 
 class _TelethonWrongPeer(FakeTelethonSource):
@@ -294,12 +336,12 @@ class _TelethonWrongPeer(FakeTelethonSource):
 
 
 def test_telethon_album_send_rejects_wrong_peer():
-    with pytest.raises(ValueError, match="Не удалось подтвердить ID"):
-        asyncio.run(send_saved_post_album_via_telethon_source(
-            telethon_client=_TelethonWrongPeer(),
-            chat_id="-1002451047809",
-            content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
-        ))
+    result = asyncio.run(send_saved_post_album_via_telethon_source(
+        telethon_client=_TelethonWrongPeer(),
+        chat_id="-1002451047809",
+        content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
+    ))
+    assert result["method"] == "telethon_source_unverified"
 
 
 class _FailSourceThenBuilder(_TelethonVerifyOk):
