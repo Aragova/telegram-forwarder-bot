@@ -892,6 +892,8 @@ class PostgresRepository(RepositoryProtocol):
         ON campaign_run_messages(delete_status, delete_after_at);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_run_messages_unique_target
         ON campaign_run_messages(run_id, target_kind, target_id, COALESCE(target_thread_id, -1));
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_run_messages_unique_target_per_run
+        ON campaign_run_messages(run_id, target_id, COALESCE(target_thread_id, -1));
 
         """
 
@@ -7330,6 +7332,7 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     INSERT INTO campaign_run_messages(run_id, rule_id, saved_post_id, target_kind, target_id, target_thread_id, target_title, show_seconds, delete_after_at, delete_status)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
                     RETURNING id
                     """,
                     (int(run_id), int(rule_id), int(saved_post_id), str(target_kind), str(target_id), target_thread_id, target_title, int(show_seconds), delete_after_at, delete_status),

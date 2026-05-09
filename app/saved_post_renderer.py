@@ -38,6 +38,23 @@ class SavedPostRenderResult:
             "message_ids": self.message_ids,
         }
 
+class SavedPostSentUnverifiedError(Exception):
+    def __init__(
+        self,
+        *,
+        target_id: int | str,
+        message_ids: list[int],
+        verified_ids: list[int] | None = None,
+        method: str,
+        reason: str,
+    ):
+        super().__init__(reason)
+        self.target_id = str(target_id)
+        self.message_ids = [int(x) for x in message_ids if x]
+        self.verified_ids = [int(x) for x in (verified_ids or []) if x]
+        self.method = method
+        self.reason = reason
+
 
 class SavedPostRenderer:
     def __init__(
@@ -279,6 +296,12 @@ def get_album_source_chat_id(content: dict[str, Any]) -> int | str | None:
 
 def normalize_saved_post_render_error(exc: Exception, *, kind: str, premium_required: bool) -> str:
     text = str(exc)
+    if "Для premium-альбома нет source_message_ids" in text:
+        return "Этот рекламный альбом сохранён без исходных ID сообщений. Замените рекламный пост альбомом заново."
+    if "Для premium-альбома сохранены не все source_message_ids" in text:
+        return "Этот рекламный альбом сохранён без исходных ID сообщений. Замените рекламный пост альбомом заново."
+    if "Не удалось получить исходные сообщения альбома" in text:
+        return "Не удалось отправить альбом через аккаунт. Проверьте права аккаунта в целевом канале/группе."
     if "file is too big" in text.lower() and kind == "album" and premium_required:
         return (
             "Не удалось отправить premium-альбом: один из файлов слишком большой для скачивания через Bot API. "
@@ -369,6 +392,7 @@ async def send_saved_post_album_via_telethon_source(
         if not messages:
             raise ValueError("Не удалось получить исходные сообщения альбома")
         medias = [m.media for m in messages if getattr(m, "media", None)]
+        send_file_ids: list[int] = []
         try:
             sent = await telethon_client.send_file(
                 entity=target_entity,
@@ -378,6 +402,7 @@ async def send_saved_post_album_via_telethon_source(
             )
             sent_messages = sent if isinstance(sent, list) else [sent]
             raw_ids = [int(m.id) for m in sent_messages if getattr(m, "id", None)]
+            send_file_ids = list(raw_ids)
             ids = await verify_telethon_sent_messages(
                 telethon_client=telethon_client,
                 target_id=chat_id,
@@ -385,8 +410,14 @@ async def send_saved_post_album_via_telethon_source(
                 min_date=started_at,
             )
             if len(ids) < media_items_count:
-                raise ValueError("Не удалось подтвердить ID отправленного альбома в целевом канале.")
+                logger.warning(
+                    "SAVED_POST_TELETHON_SOURCE_ALBUM_VERIFY_FAILED_BUT_IDS_RETURNED | target_id=%s | raw_ids=%s | verified_ids=%s | expected_count=%s | method=telethon_source",
+                    chat_id, raw_ids, ids, media_items_count,
+                )
+                return {"ok": True, "message_id": raw_ids[0], "message_ids": raw_ids, "chat_id": str(chat_id), "kind": "album", "method": "telethon_source_unverified", "verified_message_ids": ids, "verify_status": "failed"}
         except Exception as send_exc:
+            if send_file_ids:
+                raise
             logger.warning(
                 "SAVED_POST_TELETHON_SOURCE_ALBUM_SEND_FALLBACK_FORWARD | target_id=%s | error=%s",
                 chat_id,
@@ -407,7 +438,11 @@ async def send_saved_post_album_via_telethon_source(
                 min_date=started_at,
             )
             if len(ids) < media_items_count:
-                raise ValueError("Не удалось подтвердить ID отправленного альбома в целевом канале.")
+                logger.warning(
+                    "SAVED_POST_TELETHON_SOURCE_ALBUM_VERIFY_FAILED_BUT_IDS_RETURNED | target_id=%s | raw_ids=%s | verified_ids=%s | expected_count=%s | method=telethon_forward",
+                    chat_id, raw_ids, ids, media_items_count,
+                )
+                return {"ok": True, "message_id": raw_ids[0], "message_ids": raw_ids, "chat_id": str(chat_id), "kind": "album", "method": "telethon_forward_unverified", "verified_message_ids": ids, "verify_status": "failed"}
         logger.info(
             "SAVED_POST_TELETHON_SOURCE_ALBUM_SEND_DONE | target_id=%s | message_ids=%s | method=telethon_source",
             chat_id,
@@ -457,6 +492,9 @@ async def send_saved_post_content_via_telethon(
                     content=content,
                 )
             except Exception as source_exc:
+                source_message_ids = get_album_source_message_ids(content)
+                if source_message_ids and len(source_message_ids) >= len(media_items):
+                    raise source_exc
                 logger.warning(
                     "SAVED_POST_TELETHON_SOURCE_ALBUM_UNAVAILABLE | target_id=%s | error=%s",
                     chat_id,
