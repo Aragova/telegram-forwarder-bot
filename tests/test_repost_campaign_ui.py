@@ -856,20 +856,13 @@ from app.repost_campaign_ui import (
     build_vip_scheduled_post_pick_targets_view,
 )
 
-def test_vip_scheduled_posts_screen_empty_state():
+def test_vip_scheduled_main_screen_has_only_premium_intro_and_three_buttons():
     text, kb = build_vip_scheduled_posts_screen_view(rule_id=1, posts=[])
     assert '🕒 Запланированные посты' in text
-    assert 'Шаг 1' in text
-    assert '➕ Запланировать пост' in _texts_from_keyboard(kb)
-    assert '📄 Все запланированные посты' in _texts_from_keyboard(kb)
-    assert '⬅️ Назад' in _texts_from_keyboard(kb)
-    assert '📚 Библиотека' not in text
-    assert '📝 Черновики' not in text
-
-def test_vip_scheduled_posts_screen_lists_nearest_posts():
-    text, kb = build_vip_scheduled_posts_screen_view(rule_id=1, posts=[{'id':123,'status':'scheduled','scheduled_at':'2026-05-10T15:00:00+00:00','show_seconds':86400}])
-    assert 'Пост #123' in text
-    assert '🟢 Запланирован' in text
+    assert 'Планируйте рекламные публикации заранее' in text
+    assert 'После подтверждения пост появится' in text
+    for banned in ['Черновик', 'Ближайшие', 'Пост не выбран', 'Время не задано', 'Фильтр']:
+        assert banned not in text
     assert _texts_from_keyboard(kb) == ["➕ Запланировать пост", "📄 Все запланированные посты", "⬅️ Назад"]
 
 def test_vip_scheduled_post_wizard_post_view():
@@ -913,15 +906,14 @@ def test_vip_scheduled_post_wizard_time_view_buttons():
     assert '✍️ Ввести дату и время' in labels
     assert '👁 Предпросмотр' in labels
 
-def test_vip_scheduled_post_detail_scheduled_has_cancel_and_check_buttons():
+def test_vip_scheduled_detail_scheduled_has_premium_actions():
     text, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={'post': {'id': 123, 'status': 'scheduled'}})
     labels = _texts_from_keyboard(kb)
-    callbacks = _callbacks_from_keyboard(kb)
-    assert '🟢 Запланирован' in text
-    assert '🔎 Проверить права' in labels
-    assert '🗑 Отменить' in labels
-    assert 'rule_repost_campaign_scheduled_post_check_rights:1:123' in callbacks
-    assert 'rule_repost_campaign_scheduled_post_cancel_confirm:1:123' in callbacks
+    assert 'Статус: запланирован' in text
+    assert '🚀 Отправить сейчас' in labels
+    assert '✏️ Изменить пост' in labels
+    assert '🗑 Удалить пост' in labels
+    assert '⬅️ Назад' in labels
 
 def test_vip_scheduled_post_detail_launched_has_run_buttons():
     _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={'post': {'id':123, 'status':'launched', 'campaign_run_id':55}})
@@ -929,11 +921,12 @@ def test_vip_scheduled_post_detail_launched_has_run_buttons():
     assert '📄 Открыть запуск' in labels
     assert '📊 Отчёт просмотров' in labels
 
-def test_vip_scheduled_post_cancel_confirm_view():
+def test_vip_scheduled_delete_confirm_uses_delete_not_cancel():
     text, kb = build_vip_scheduled_post_cancel_confirm_view(rule_id=1, scheduled_post={'id':123})
-    assert '🗑 Отменить запланированный пост?' in text
+    assert 'Удалить отложенный пост' in text
     labels = _texts_from_keyboard(kb)
-    assert '✅ Да, отменить' in labels
+    assert '✅ Удалить пост' in labels
+    assert 'Отменить запланированный пост' not in text
 
 def test_ordinary_schedule_callbacks_kept():
     from app.repost_campaign_ui import build_repost_campaign_schedule_preview_view, build_repost_campaign_scheduled_launch_detail_view, build_repost_campaign_scheduled_launch_cancel_result_view
@@ -954,10 +947,18 @@ def test_bot_has_all_vip_scheduled_callbacks_prefixes():
     ]:
         assert prefix in source
 
-def test_vip_detail_view_uses_nested_details_post():
-    text, _ = build_vip_scheduled_post_detail_view(rule_id=1, details={'post': {'id': 321, 'status': 'scheduled', 'show_seconds': 3600, 'scheduled_at': '2026-05-10T15:00:00+00:00'}})
-    assert '#321' in text
-    assert '🟢 Запланирован' in text
+def test_vip_scheduled_posts_list_view_shows_only_scheduled_posts():
+    posts = [
+        {"id": 1, "status": "draft", "scheduled_at": None},
+        {"id": 2, "status": "ready", "scheduled_at": None},
+        {"id": 3, "status": "scheduled", "scheduled_at": "2026-05-10T15:00:00+00:00"},
+    ]
+    text, kb = build_vip_scheduled_posts_list_view(rule_id=1, posts=posts, page=0)
+    callbacks = _callbacks_from_keyboard(kb)
+    assert "rule_repost_campaign_scheduled_post_detail:1:1" not in callbacks
+    assert "rule_repost_campaign_scheduled_post_detail:1:2" not in callbacks
+    assert any("rule_repost_campaign_scheduled_post_detail:1:3" in c for c in callbacks)
+    assert "Отложенный пост" in text or any("Отложенный пост" in x for x in _texts_from_keyboard(kb))
 
 
 def test_vip_targets_view_uses_readiness_counters():
@@ -1098,16 +1099,9 @@ def test_vip_scheduled_waiting_material_text():
     assert "Отправьте сюда рекламный пост" in source
     assert "После сохранения поста ViMi перейдёт к шагу 2" in source
 
-def test_vip_scheduled_main_screen_hides_drafts_from_nearest():
-    text, _ = build_vip_scheduled_posts_screen_view(rule_id=1, posts=[
-        {'id': 8, 'status': 'scheduled', 'saved_post_id': 34, 'scheduled_at': '2026-05-10T15:00:00+00:00', 'show_seconds': 3600}
-    ])
-    assert "Черновик #5" not in text
-    assert "🟢 Запланирован Пост #8" in text
-
-def test_vip_scheduled_main_screen_empty_nearest_when_only_drafts():
-    text, _ = build_vip_scheduled_posts_screen_view(rule_id=1, posts=[])
-    assert "Пока нет запланированных постов." in text
+def test_vip_scheduled_posts_list_view_empty_when_only_internal_drafts():
+    text, _ = build_vip_scheduled_posts_list_view(rule_id=1, posts=[{"id": 1, "status": "draft", "scheduled_at": None}], page=0)
+    assert "Пока нет отложенных постов." in text
 
 def test_vip_scheduled_all_posts_button_opens_list_view():
     source = Path("bot.py").read_text(encoding="utf-8")
@@ -1115,16 +1109,16 @@ def test_vip_scheduled_all_posts_button_opens_list_view():
     assert "build_vip_scheduled_posts_list_view" in handler_body
     assert "build_vip_scheduled_posts_screen_view" not in handler_body
 
-def test_vip_scheduled_posts_list_view_has_clickable_items():
-    _, kb = build_vip_scheduled_posts_list_view(rule_id=1, posts=[{"id": 5, "status": "draft", "saved_post_id": 33}], status_filter="all", page=0)
-    assert "rule_repost_campaign_scheduled_post_detail:1:5" in _callbacks_from_keyboard(kb)
-
-def test_vip_scheduled_posts_list_view_has_filters_and_pagination():
-    posts = [{"id": i + 1, "status": "draft"} for i in range(11)]
-    _, kb = build_vip_scheduled_posts_list_view(rule_id=1, posts=posts, status_filter="all", page=0, page_size=10)
+def test_vip_scheduled_posts_list_view_has_no_filters():
+    posts = [{"id": i + 1, "status": "scheduled", "scheduled_at": "2026-05-10T15:00:00+00:00"} for i in range(11)]
+    _, kb = build_vip_scheduled_posts_list_view(rule_id=1, posts=posts, page=0, page_size=10)
     labels = _texts_from_keyboard(kb)
-    assert "Все" in labels
-    assert "Черновики" in labels
-    assert "Запланированные" in labels
-    assert "Завершённые" in labels
+    for banned in ["Все", "Черновики", "Запланированные", "Завершённые"]:
+        assert banned not in labels
     assert "➡️ Следующая" in labels
+
+def test_bot_vip_scheduled_list_handler_loads_only_scheduled_statuses():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert 'statuses=["scheduled", "processing"]' in source
+    handler_body = source[source.find("async def handle_rule_repost_campaign_scheduled_posts_list"):source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new:"))')]
+    assert "status_filter" not in handler_body
