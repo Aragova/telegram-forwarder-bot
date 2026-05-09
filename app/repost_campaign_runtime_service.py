@@ -636,6 +636,79 @@ class RepostCampaignRuntimeService:
             extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id},
         )
 
+    def _normalize_snapshot_targets(self, *, rule, targets_snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        seen: dict[tuple[str, Any], int] = {}
+        for row in targets_snapshot or []:
+            if row.get("is_active") is False:
+                continue
+            target_id = str(row.get("target_id") or "").strip()
+            if not target_id:
+                continue
+            target_thread_id = row.get("target_thread_id")
+            target_kind = str(row.get("target_kind") or "extra").strip().lower()
+            if target_kind not in {"main", "extra"}:
+                target_kind = "extra"
+            target_title = row.get("target_title") or row.get("title") or target_id
+            key = (target_id, target_thread_id)
+            idx = seen.get(key)
+            if idx is None:
+                seen[key] = len(out)
+                out.append({"target_kind": target_kind, "target_id": target_id, "target_thread_id": target_thread_id, "target_title": target_title})
+                continue
+            if out[idx]["target_kind"] != "main" and target_kind == "main":
+                out[idx] = {"target_kind": "main", "target_id": target_id, "target_thread_id": target_thread_id, "target_title": target_title}
+        mains = [x for x in out if x["target_kind"] == "main"]
+        extras = [x for x in out if x["target_kind"] != "main"]
+        return mains + extras
+
+    async def launch_campaign_from_snapshot(self, *, rule_id: int, saved_post_id: int, show_seconds: int, targets_snapshot: list[dict[str, Any]], admin_id: int | None = None, run_type: str = "scheduled", scheduled_post_id: int | None = None) -> RepostCampaignActionResult:
+        rule = self.repo.get_rule(rule_id)
+        if not rule:
+            return RepostCampaignActionResult(ok=False, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text="Правило не найдено")
+        if str(getattr(rule, "mode", "") or "").strip().lower() != "repost":
+            return RepostCampaignActionResult(ok=False, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text="Запланированные рекламные посты доступны только для режима репоста")
+        saved_post = self.repo.get_saved_post(saved_post_id)
+        if not saved_post:
+            return RepostCampaignActionResult(ok=False, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text="Рекламный пост не найден")
+        if int(show_seconds or 0) <= 0:
+            return RepostCampaignActionResult(ok=False, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text="Срок показа не задан")
+        targets = self._normalize_snapshot_targets(rule=rule, targets_snapshot=targets_snapshot)
+        if not targets:
+            return RepostCampaignActionResult(ok=False, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text="Каналы/группы не выбраны")
+        run_id = self.repo.create_campaign_run(rule_id=rule_id, saved_post_id=saved_post_id, run_type=run_type, status="sending", show_seconds=show_seconds, started_by=admin_id, targets_total=len(targets), scheduled_post_id=scheduled_post_id)
+        if run_id is None:
+            return RepostCampaignActionResult(ok=False, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text="Не удалось создать запись запуска рекламной кампании")
+        content = saved_post.get("content_json") or saved_post.get("content") or {}
+        targets_success = 0
+        targets_failed = 0
+        error_text = None
+        last_render_mode = None
+        for target in targets:
+            run_message_id = self.repo.create_campaign_run_message(run_id=run_id, rule_id=rule_id, saved_post_id=saved_post_id, target_kind=target["target_kind"], target_id=target["target_id"], target_thread_id=target["target_thread_id"], target_title=target["target_title"], show_seconds=show_seconds, delete_after_at=build_campaign_delete_after_iso(show_seconds))
+            if run_message_id is None:
+                targets_failed += 1
+                continue
+            self.repo.mark_campaign_run_message_sending(run_message_id, render_mode=None)
+            render_result = await self.renderer.send(chat_id=target["target_id"], content=content)
+            last_render_mode = getattr(render_result, "method", None) or last_render_mode
+            forced_sent = (not render_result.ok) and bool(getattr(render_result, "message_ids", None))
+            if render_result.ok or forced_sent:
+                self.repo.mark_campaign_run_message_sent(run_message_id, sent_message_id=render_result.message_id, sent_message_ids=getattr(render_result, "message_ids", None), render_mode=render_result.method)
+                targets_success += 1
+            else:
+                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=getattr(render_result, "error_text", None) or "unknown error", render_mode=getattr(render_result, "method", None))
+                targets_failed += 1
+                error_text = error_text or getattr(render_result, "error_text", None) or "unknown error"
+        if targets_success > 0 and targets_failed == 0:
+            status = "sent"
+        elif targets_success > 0:
+            status = "partial"
+        else:
+            status = "failed"
+        self.repo.update_campaign_run_status(run_id, status=status, render_mode=last_render_mode, targets_success=targets_success, targets_failed=targets_failed, error_text=error_text, report={"scheduled_post_id": scheduled_post_id, "launch_source": "vip_scheduled_post", "targets_total": len(targets), "targets_success": targets_success, "targets_failed": targets_failed, "run_type": run_type}, finish=True)
+        return RepostCampaignActionResult(ok=status in {"sent", "partial"}, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text=error_text if status == "failed" else None, extra={"campaign_run_id": run_id, "scheduled_post_id": scheduled_post_id, "status": status, "targets_total": len(targets), "targets_success": targets_success, "targets_failed": targets_failed})
+
     async def launch_campaign_now(self, *, rule_id: int, admin_id: int | None = None, run_type: str = "manual") -> RepostCampaignActionResult:
         readiness = self.build_campaign_launch_readiness(rule_id=rule_id)
         if not readiness.get("can_launch"):
