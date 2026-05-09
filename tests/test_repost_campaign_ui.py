@@ -1,5 +1,6 @@
 from pathlib import Path
 import ast
+import re
 
 from app.repost_campaign_ui import (
     build_repost_campaign_delete_result_view,
@@ -1008,7 +1009,7 @@ def test_bot_vip_handlers_use_ensure_rule_callback_access():
     for prefix in prefixes:
         start = source.find(prefix)
         assert start != -1
-        body = source[start:start+1200]
+        body = source[start:start+2400]
         assert "ensure_rule_callback_access" in body
 
 def test_vip_scheduled_add_target_view():
@@ -1071,8 +1072,12 @@ def test_bot_vip_pick_targets_uses_keyword_active_only_calls():
 def test_bot_vip_add_known_all_returns_via_step_targets_handler():
     source = Path("bot.py").read_text(encoding="utf-8")
     assert "_open_vip_scheduled_post_step_targets_message(callback," not in source
-    assert 'callback.data = f"rule_repost_campaign_scheduled_post_step_targets:{rule_id}:{scheduled_post_id}"' in source
-    assert "await handle_step_targets(callback)" in source
+    handler_body = source[
+        source.find("async def handle_vip_scheduled_post_add_known_all"):
+        source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_step_show:"))')
+    ]
+    assert "_open_vip_scheduled_post_step_targets_callback" in handler_body
+    assert "await handle_step_targets(callback)" not in handler_body
 
 
 def test_vip_scheduled_posts_screen_has_only_three_main_buttons():
@@ -1106,7 +1111,7 @@ def test_vip_scheduled_posts_list_view_empty_when_only_internal_drafts():
 def test_vip_scheduled_all_posts_button_opens_list_view():
     source = Path("bot.py").read_text(encoding="utf-8")
     handler_body = source[source.find("async def handle_rule_repost_campaign_scheduled_posts_list"):source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new:"))')]
-    assert "build_vip_scheduled_posts_list_view" in handler_body
+    assert "_open_vip_scheduled_posts_list_callback" in handler_body
     assert "build_vip_scheduled_posts_screen_view" not in handler_body
 
 def test_vip_scheduled_posts_list_view_has_no_filters():
@@ -1122,3 +1127,33 @@ def test_bot_vip_scheduled_list_handler_loads_only_scheduled_statuses():
     assert 'statuses=["scheduled", "processing"]' in source
     handler_body = source[source.find("async def handle_rule_repost_campaign_scheduled_posts_list"):source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new:"))')]
     assert "status_filter" not in handler_body
+
+def test_bot_does_not_mutate_callback_data():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert re.search(r"callback\.data\s*=\s*[^=]", source) is None
+
+
+def test_vip_scheduled_uses_open_helpers_instead_of_callback_data_rewrite():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "_open_vip_scheduled_post_step_targets_callback" in source
+    assert "_open_vip_scheduled_posts_list_callback" in source
+
+
+def test_vip_scheduled_confirm_opens_list_without_callback_data_mutation():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    handler_body = source[
+        source.find("async def handle_confirm"):
+        source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_detail:"))')
+    ]
+    assert re.search(r"callback\.data\s*=\s*[^=]", handler_body) is None
+    assert "_open_vip_scheduled_posts_list_callback" in handler_body
+
+
+def test_vip_scheduled_add_known_all_opens_targets_without_callback_data_mutation():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    handler_body = source[
+        source.find("async def handle_vip_scheduled_post_add_known_all"):
+        source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_step_show:"))')
+    ]
+    assert re.search(r"callback\.data\s*=\s*[^=]", handler_body) is None
+    assert "_open_vip_scheduled_post_step_targets_callback" in handler_body
