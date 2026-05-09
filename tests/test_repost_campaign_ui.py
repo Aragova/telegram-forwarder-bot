@@ -235,6 +235,35 @@ def test_bot_contains_campaign_check_loading_and_optional_page_parse():
     assert "rule_repost_campaign_check:" in source
     assert "page = int(parts[3]) if len(parts) > 3 else 0" in source
 
+
+def test_vip_scheduled_material_state_uses_album_buffer():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "waiting_vip_scheduled_post_material" in source
+    assert "saved_post_album_buffer.add_message" in source
+    assert "build_saved_post_album_content_from_aiogram_messages" in source
+    assert "Отправьте альбом ещё раз одним сообщением" not in source
+
+
+def test_vip_scheduled_single_material_uses_shared_save_helper():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "async def _save_vip_scheduled_post_material(" in source
+    assert "saved_post_id = await _save_vip_scheduled_post_material(" in source
+    assert "db.create_saved_post" in source
+    assert "service.update_draft_saved_post" in source
+
+
+def test_vip_scheduled_album_keeps_state_until_flush():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    start = source.index("if state.get(\"state\") == \"waiting_vip_scheduled_post_material\":")
+    end = source.index("if state.get(\"state\") == \"repost_campaign_schedule_input\":")
+    block = source[start:end]
+    album_branch = block[block.index("if getattr(message, \"media_group_id\", None):"):block.index("content_json = build_saved_post_content_from_aiogram_message(message)")]
+    assert "await saved_post_album_buffer.add_message(" in album_branch
+    before_callback = album_branch[:album_branch.index("async def _on_album_ready")]
+    assert "reset_user_state(admin_id)" not in before_callback
+    on_ready = album_branch[album_branch.index("async def _on_album_ready"):album_branch.index("is_new_album = await saved_post_album_buffer.add_message(")]
+    assert "reset_user_state(admin_id)" in on_ready
+
 from app.repost_campaign_ui import build_repost_campaign_posts_library_view, build_repost_campaign_post_stats_view, build_repost_campaign_post_stats_loading_view, build_repost_campaign_post_channels_stats_view
 
 def _library_payload(count=3):
