@@ -1295,7 +1295,13 @@ def build_vip_scheduled_posts_screen_view(*, rule_id: int, posts: list[dict]) ->
         lines += ['Пока нет запланированных постов.', 'Создайте первый пост заранее — ViMi запустит его в нужное время.']
     else:
         for post in posts[:5]:
-            lines.append(f"{format_vip_scheduled_post_status_text(post.get('status'))}\n{format_vip_scheduled_post_short_line(post)}")
+            saved_post_id = int(post.get('saved_post_id') or 0)
+            scheduled_at = post.get('scheduled_at')
+            post_line = f'📝 Пост #{saved_post_id}' if saved_post_id else '📝 Пост не выбран'
+            time_line = f'🕒 {format_campaign_datetime_text(scheduled_at, timezone_offset_hours=3)} UTC+3' if scheduled_at else '🕒 Время не задано'
+            status = str(post.get('status') or '')
+            title_line = f"⚪ Черновик #{int(post.get('id') or 0)}" if status == 'draft' else f"{format_vip_scheduled_post_status_text(status)} Пост #{int(post.get('id') or 0)}"
+            lines.append(f"{title_line}\n{post_line}\n{time_line}")
     rows = [
         [InlineKeyboardButton(text='➕ Запланировать пост', callback_data=f'rule_repost_campaign_scheduled_post_new:{rule_id}')],
         [InlineKeyboardButton(text='📄 Все запланированные', callback_data=f'rule_repost_campaign_scheduled_posts_list:{rule_id}:all')],
@@ -1304,14 +1310,47 @@ def build_vip_scheduled_posts_screen_view(*, rule_id: int, posts: list[dict]) ->
     ]
     for post in posts[:5]:
         pid = int(post.get('id') or 0)
-        rows.append([InlineKeyboardButton(text=f'📄 Пост #{pid}', callback_data=f'rule_repost_campaign_scheduled_post_detail:{rule_id}:{pid}')])
+        rows.append([InlineKeyboardButton(text=f'📄 Черновик #{pid}', callback_data=f'rule_repost_campaign_scheduled_post_detail:{rule_id}:{pid}')])
     rows.append([InlineKeyboardButton(text='⬅️ Назад к VIP функциям', callback_data=f'rule_repost_campaign_vip_features:{rule_id}')])
     return '\n'.join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
-def build_vip_scheduled_post_wizard_post_view(*, rule_id:int, scheduled_post:dict, saved_posts:list[dict], readiness:dict)->tuple[str,InlineKeyboardMarkup]:
+
+
+def build_vip_scheduled_post_create_choice_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🧙 Новый запланированный пост\n\n"
+        "Что запланировать?\n\n"
+        "📝 Создать новый рекламный пост\n"
+        "Создайте новый материал для будущей публикации.\n\n"
+        "📌 Использовать текущий пост кампании\n"
+        "Взять рекламный пост, который уже выбран в текущей кампании.\n\n"
+        "📚 Выбрать из библиотеки\n"
+        "Выбрать один из ранее сохранённых рекламных постов."
+    )
+    rows = [
+        [InlineKeyboardButton(text='📝 Создать новый рекламный пост', callback_data=f'rule_repost_campaign_scheduled_post_new_create_material:{rule_id}')],
+        [InlineKeyboardButton(text='📌 Использовать текущий пост кампании', callback_data=f'rule_repost_campaign_scheduled_post_new_from_current:{rule_id}')],
+        [InlineKeyboardButton(text='📚 Выбрать из библиотеки', callback_data=f'rule_repost_campaign_scheduled_post_new_from_library:{rule_id}')],
+        [InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_posts:{rule_id}')],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_vip_scheduled_post_create_material_help_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "📝 Создать новый рекламный пост\n\n"
+        "Сейчас создание нового материала выполняется через библиотеку рекламных постов.\n"
+        "Создайте пост в библиотеке, затем вернитесь сюда и выберите его для расписания."
+    )
+    rows = [
+        [InlineKeyboardButton(text='📚 Открыть библиотеку постов', callback_data=f'rule_repost_campaign_history:{rule_id}')],
+        [InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_post_create_choice:{rule_id}')],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+def build_vip_scheduled_post_wizard_post_view(*, rule_id:int, scheduled_post:dict, saved_posts:list[dict], readiness:dict, title: str = '🧙 Запланированный пост · Шаг 1/4')->tuple[str,InlineKeyboardMarkup]:
     selected = scheduled_post.get('saved_post_id')
     current = f'✅ Пост #{int(selected)}' if selected else '❌ Пост не выбран'
-    text = f'🧙 Запланированный пост · Шаг 1/4\n📝 Рекламный пост\nВыберите материал, который ViMi опубликует в указанное время.\nТекущий выбор:\n{current}\n\nДоступные посты:'
+    text = f'{title}\n📝 Рекламный пост\nВыберите материал, который ViMi опубликует в указанное время.\nТекущий выбор:\n{current}\n\n📚 Выберите рекламный пост из библиотеки'
     rows=[]
     for sp in saved_posts[:10]:
         sid=int(sp.get('id') or sp.get('saved_post_id') or 0)
