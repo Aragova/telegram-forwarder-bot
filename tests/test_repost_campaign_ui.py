@@ -876,9 +876,8 @@ def test_vip_scheduled_post_wizard_targets_view():
     text, kb = build_vip_scheduled_post_wizard_targets_view(rule_id=1, scheduled_post={'id':10}, targets=[{}], readiness={})
     assert 'Снимок текущих каналов' not in text
     labels=_texts_from_keyboard(kb)
-    assert '🔎 Проверить права' in labels
     assert '➕ Добавить канал/группу' in labels
-    assert '📋 Выбрать канал/группу' in labels
+    assert '📋 Выбрать из известных' in labels
 
 def test_vip_scheduled_post_wizard_show_view():
     _, kb = build_vip_scheduled_post_wizard_show_view(rule_id=1, scheduled_post={'id':10,'show_seconds':86400}, readiness={})
@@ -962,11 +961,17 @@ def test_vip_scheduled_posts_list_view_shows_only_scheduled_posts():
     assert "Отложенный пост" in text or any("Отложенный пост" in x for x in _texts_from_keyboard(kb))
 
 
-def test_vip_targets_view_uses_readiness_counters():
-    text, _ = build_vip_scheduled_post_wizard_targets_view(rule_id=1, scheduled_post={'id': 10}, targets=[], readiness={'targets_ready_count': 5, 'targets_warning_count': 2, 'targets_blocked_count': 1})
-    assert '✅ Готовы: 5' in text
-    assert '⚠️ Требуют проверки: 2' in text
-    assert '🔴 Заблокированы: 1' in text
+def test_vip_targets_view_shows_selected_targets_preview():
+    text, _ = build_vip_scheduled_post_wizard_targets_view(
+        rule_id=1,
+        scheduled_post={'id': 10},
+        targets=[{'target_id': '@a', 'target_title': 'A'}, {'target_id': '@b', 'target_title': 'B'}],
+        readiness={},
+    )
+    assert 'Выбрано: 2' in text
+    assert 'Выбранные каналы:' in text
+    assert '✅ A' in text
+    assert '✅ B' in text
 
 
 def test_vip_step1_back_to_scheduled_posts():
@@ -1047,8 +1052,8 @@ def test_vip_scheduled_pick_targets_view_has_add_all_buttons():
     known_targets = [{"target_id": "@x", "target_thread_id": None, "target_title": "X"}]
     _, kb = build_vip_scheduled_post_pick_targets_view(rule_id=1, scheduled_post_id=10, known_targets=known_targets, selected_targets=[])
     labels = _texts_from_keyboard(kb)
-    assert "➕ Добавить все на странице" in labels
     assert "➕ Добавить все" in labels
+    assert "➕ Добавить все на странице" not in labels
 
 def test_bot_vip_pick_targets_is_not_placeholder():
     source = Path("bot.py").read_text(encoding="utf-8")
@@ -1157,3 +1162,82 @@ def test_vip_scheduled_add_known_all_opens_targets_without_callback_data_mutatio
     ]
     assert re.search(r"callback\.data\s*=\s*[^=]", handler_body) is None
     assert "_open_vip_scheduled_post_step_targets_callback" in handler_body
+
+
+def test_vip_scheduled_step_targets_callback_helper_passes_targets():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    helper_body = source[
+        source.find("async def _open_vip_scheduled_post_step_targets_callback"):
+        source.find("async def _open_vip_scheduled_posts_list_callback")
+    ]
+    assert "db.list_campaign_scheduled_post_targets" in helper_body
+    assert "active_only=True" in helper_body
+    assert "targets=targets or []" in helper_body
+
+
+def test_vip_scheduled_step_targets_has_next_when_targets_selected():
+    text, kb = build_vip_scheduled_post_wizard_targets_view(
+        rule_id=1,
+        scheduled_post={"id": 10},
+        targets=[{"target_id": "@test", "target_title": "Test"}],
+        readiness={},
+    )
+    labels = _texts_from_keyboard(kb)
+    assert "✅ Далее" in labels
+    assert "Выбрано: 1" in text
+
+
+def test_vip_scheduled_step_targets_no_next_without_targets():
+    text, kb = build_vip_scheduled_post_wizard_targets_view(
+        rule_id=1,
+        scheduled_post={"id": 10},
+        targets=[],
+        readiness={},
+    )
+    labels = _texts_from_keyboard(kb)
+    assert "✅ Далее" not in labels
+    assert "Выбрано: 0" in text
+
+
+def test_vip_scheduled_pick_targets_has_done_button():
+    text, kb = build_vip_scheduled_post_pick_targets_view(
+        rule_id=1,
+        scheduled_post_id=10,
+        known_targets=[{"target_id": "@a", "target_title": "A"}],
+        selected_targets=[],
+        page=0,
+        page_size=10,
+    )
+    labels = _texts_from_keyboard(kb)
+    callbacks = _callbacks_from_keyboard(kb)
+    assert "✅ Готово" in labels
+    assert "rule_repost_campaign_scheduled_post_step_targets:1:10" in callbacks
+
+
+def test_vip_scheduled_pick_targets_hides_add_page_when_single_page():
+    _, kb = build_vip_scheduled_post_pick_targets_view(
+        rule_id=1,
+        scheduled_post_id=10,
+        known_targets=[{"target_id": "@a", "target_title": "A"}],
+        selected_targets=[],
+        page=0,
+        page_size=10,
+    )
+    labels = _texts_from_keyboard(kb)
+    assert "➕ Добавить все" in labels
+    assert "➕ Добавить все на странице" not in labels
+
+
+def test_vip_scheduled_pick_targets_shows_add_page_when_paginated():
+    known = [{"target_id": f"@a{i}", "target_title": f"A{i}"} for i in range(11)]
+    _, kb = build_vip_scheduled_post_pick_targets_view(
+        rule_id=1,
+        scheduled_post_id=10,
+        known_targets=known,
+        selected_targets=[],
+        page=0,
+        page_size=10,
+    )
+    labels = _texts_from_keyboard(kb)
+    assert "➕ Добавить все на странице" in labels
+    assert "➕ Добавить все" in labels

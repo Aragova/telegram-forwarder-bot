@@ -11212,9 +11212,15 @@ async def _open_vip_scheduled_post_step_targets_callback(
     service = _build_repost_campaign_scheduled_post_service()
     row = await run_db(db.get_campaign_scheduled_post, scheduled_post_id)
     readiness = await run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
+    targets = await run_db(
+        db.list_campaign_scheduled_post_targets,
+        scheduled_post_id,
+        active_only=True,
+    )
     text, kb = build_vip_scheduled_post_wizard_targets_view(
         rule_id=rule_id,
         scheduled_post=row or {},
+        targets=targets or [],
         readiness=readiness or {},
     )
     if prefix_text:
@@ -11346,7 +11352,12 @@ async def handle_vip_scheduled_post_add_known_target(callback: CallbackQuery):
     if 0 <= target_index < len(known_targets):
         target = known_targets[target_index]
         service = _build_repost_campaign_scheduled_post_service()
-        await run_db(service.add_manual_target, scheduled_post_id=scheduled_post_id, target_id=str(target.get("target_id") or ""), target_thread_id=target.get("target_thread_id"), target_title=target.get("target_title"), actor_id=callback.from_user.id if callback.from_user else None)
+        result = await run_db(service.add_manual_target, scheduled_post_id=scheduled_post_id, target_id=str(target.get("target_id") or ""), target_thread_id=target.get("target_thread_id"), target_title=target.get("target_title"), actor_id=callback.from_user.id if callback.from_user else None)
+        extra = result.extra if hasattr(result, "extra") else (result.get("extra") if isinstance(result, dict) else {})
+        if extra and extra.get("already_exists"):
+            await answer_callback_safe(callback, "Уже добавлено")
+        else:
+            await answer_callback_safe(callback, "✅ Канал/группа добавлены.")
     await _open_vip_scheduled_post_pick_targets(callback=callback, rule_id=rule_id, scheduled_post_id=scheduled_post_id, page=page)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_add_known_page:"))
@@ -11361,8 +11372,19 @@ async def handle_vip_scheduled_post_add_known_page(callback: CallbackQuery):
     start = max(0, page) * 10
     end = start + 10
     service = _build_repost_campaign_scheduled_post_service()
+    has_new_additions = False
+    has_already_added = False
     for target in known_targets[start:end]:
-        await run_db(service.add_manual_target, scheduled_post_id=scheduled_post_id, target_id=str(target.get("target_id") or ""), target_thread_id=target.get("target_thread_id"), target_title=target.get("target_title"), actor_id=callback.from_user.id if callback.from_user else None)
+        result = await run_db(service.add_manual_target, scheduled_post_id=scheduled_post_id, target_id=str(target.get("target_id") or ""), target_thread_id=target.get("target_thread_id"), target_title=target.get("target_title"), actor_id=callback.from_user.id if callback.from_user else None)
+        extra = result.extra if hasattr(result, "extra") else (result.get("extra") if isinstance(result, dict) else {})
+        if extra and extra.get("already_exists"):
+            has_already_added = True
+        else:
+            has_new_additions = True
+    if has_new_additions:
+        await answer_callback_safe(callback, "✅ Каналы/группы добавлены.")
+    elif has_already_added:
+        await answer_callback_safe(callback, "Уже добавлено")
     await _open_vip_scheduled_post_pick_targets(callback=callback, rule_id=rule_id, scheduled_post_id=scheduled_post_id, page=page)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_add_known_all:"))
