@@ -7460,7 +7460,48 @@ class PostgresRepository(RepositoryProtocol):
                 for r in rows: r['metadata_json']=_safe_json_loads(r.get('metadata_json'), {})
                 return rows
 
-    def update_campaign_scheduled_post_target_check_result(self, target_row_id: int, **kwargs) -> bool: return True
+    def update_campaign_scheduled_post_target_check_result(
+        self,
+        target_row_id: int,
+        *,
+        can_publish: bool | None = None,
+        can_delete: bool | None = None,
+        publish_status: str | None = None,
+        delete_status: str | None = None,
+        publish_error_text: str | None = None,
+        delete_error_text: str | None = None,
+        check_source: str | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_scheduled_post_targets
+                    SET can_publish=%s,
+                        can_delete=%s,
+                        publish_status=%s,
+                        delete_status=%s,
+                        publish_error_text=%s,
+                        delete_error_text=%s,
+                        check_source=%s,
+                        checked_at=NOW(),
+                        updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (
+                        can_publish,
+                        can_delete,
+                        publish_status,
+                        delete_status,
+                        publish_error_text,
+                        delete_error_text,
+                        check_source,
+                        int(target_row_id),
+                    ),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+        return ok
     def log_campaign_scheduled_post_check(self, *, scheduled_post_id: int, rule_id: int, target_id: str, target_thread_id: int | None, check_type: str, status: str, target_row_id: int | None = None, source: str | None = None, error_text: str | None = None, details: dict[str, Any] | None = None) -> int | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
