@@ -1299,8 +1299,13 @@ def build_vip_scheduled_posts_screen_view(*, rule_id: int, posts: list[dict] | N
             '',
             'Пост будет удалён:',
             f"🕘 {active.get('active_delete_after_text') or 'в ближайшее время'}",
-            '',
-            f"До удаления:\n⏳ {active.get('active_left_text') or 'скоро'}",
+        ])
+        if active.get("active_left_text"):
+            lines.extend([
+                '',
+                f"До удаления:\n⏳ {active.get('active_left_text')}",
+            ])
+        lines.extend([
             '',
             'Новые запланированные посты стартуют после освобождения места.',
             '',
