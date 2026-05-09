@@ -1286,8 +1286,14 @@ def build_repost_campaign_scheduled_launch_cancel_result_view(*, rule_id: int, o
 def build_vip_scheduled_posts_screen_view(*, rule_id: int, posts: list[dict]) -> tuple[str, InlineKeyboardMarkup]:
     lines = [
         '🕒 Запланированные посты',
-        'Создавайте рекламные посты заранее.',
-        'Каждый пост может иметь свой материал, список каналов, срок показа и время запуска.',
+        '',
+        'Шаг 1 — создайте рекламный пост для будущего запуска.',
+        '',
+        'После добавления поста ViMi предложит:',
+        '• выбрать каналы/группы;',
+        '• задать срок показа;',
+        '• выбрать время запуска;',
+        '• проверить права перед запуском.',
         '',
         'Ближайшие:',
     ]
@@ -1304,14 +1310,9 @@ def build_vip_scheduled_posts_screen_view(*, rule_id: int, posts: list[dict]) ->
             lines.append(f"{title_line}\n{post_line}\n{time_line}")
     rows = [
         [InlineKeyboardButton(text='➕ Запланировать пост', callback_data=f'rule_repost_campaign_scheduled_post_new:{rule_id}')],
-        [InlineKeyboardButton(text='📄 Все запланированные', callback_data=f'rule_repost_campaign_scheduled_posts_list:{rule_id}:all')],
-        [InlineKeyboardButton(text='📝 Черновики', callback_data=f'rule_repost_campaign_scheduled_posts_list:{rule_id}:draft')],
-        [InlineKeyboardButton(text='📚 Библиотека постов', callback_data=f'rule_repost_campaign_history:{rule_id}')],
+        [InlineKeyboardButton(text='📄 Все запланированные посты', callback_data=f'rule_repost_campaign_scheduled_posts_list:{rule_id}:all')],
     ]
-    for post in posts[:5]:
-        pid = int(post.get('id') or 0)
-        rows.append([InlineKeyboardButton(text=f'📄 Черновик #{pid}', callback_data=f'rule_repost_campaign_scheduled_post_detail:{rule_id}:{pid}')])
-    rows.append([InlineKeyboardButton(text='⬅️ Назад к VIP функциям', callback_data=f'rule_repost_campaign_vip_features:{rule_id}')])
+    rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_vip_features:{rule_id}')])
     return '\n'.join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 

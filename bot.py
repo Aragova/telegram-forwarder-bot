@@ -8900,6 +8900,46 @@ async def handle_stateful_private_inputs(message: Message):
             ]),
         )
         return
+    if state.get("state") == "waiting_vip_scheduled_post_material":
+        rule_id = int(state.get("rule_id") or 0)
+        scheduled_post_id = int(state.get("scheduled_post_id") or 0)
+        if rule_id <= 0 or scheduled_post_id <= 0:
+            reset_user_state(user_id)
+            await message.answer("❌ Не удалось определить черновик запланированного поста")
+            return
+        if getattr(message, "media_group_id", None):
+            await message.answer("⚠️ Отправьте альбом ещё раз одним сообщением после завершения загрузки.")
+            return
+        content_json = build_saved_post_content_from_aiogram_message(message)
+        saved_post_id = await run_db(
+            db.create_saved_post,
+            rule_id=rule_id,
+            title=None,
+            content=content_json,
+            source_chat_id=str(message.chat.id) if message.chat else None,
+            source_message_id=message.message_id,
+            source_media_group_id=getattr(message, "media_group_id", None),
+            created_by=message.from_user.id if message.from_user else settings.admin_id,
+        )
+        if not saved_post_id:
+            await message.answer("❌ Не удалось сохранить рекламный пост")
+            return
+        service = _build_repost_campaign_scheduled_post_service()
+        await run_db(
+            service.update_draft_saved_post,
+            scheduled_post_id=scheduled_post_id,
+            saved_post_id=int(saved_post_id),
+            actor_id=message.from_user.id if message.from_user else None,
+        )
+        reset_user_state(user_id)
+        row = await run_db(db.get_campaign_scheduled_post, scheduled_post_id)
+        targets = await run_db(db.list_campaign_scheduled_post_targets, scheduled_post_id)
+        readiness = await run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
+        text_step2, kb_step2 = build_vip_scheduled_post_wizard_targets_view(
+            rule_id=rule_id, scheduled_post=row or {}, targets=targets or [], readiness=readiness or {}
+        )
+        await message.answer(f"✅ Рекламный пост сохранён.\n\n{text_step2}", reply_markup=kb_step2)
+        return
     if state.get("state") == "repost_campaign_schedule_input":
         rule_id = int(state.get("rule_id") or 0)
         parsed = parse_campaign_schedule_input_to_utc(text)
@@ -10832,7 +10872,6 @@ from app.repost_campaign_ui import (
     build_vip_scheduled_post_wizard_targets_view, build_vip_scheduled_post_wizard_show_view,
     build_vip_scheduled_post_wizard_time_view, build_vip_scheduled_post_preview_view,
     build_vip_scheduled_post_detail_view, build_vip_scheduled_post_cancel_confirm_view,
-    build_vip_scheduled_post_create_choice_view, build_vip_scheduled_post_create_material_help_view,
 )
 
 def _build_repost_campaign_scheduled_post_service() -> RepostCampaignScheduledPostService:
@@ -10872,55 +10911,31 @@ async def handle_rule_repost_campaign_scheduled_posts_list(callback: CallbackQue
 async def handle_rule_repost_campaign_scheduled_post_new(callback: CallbackQuery):
     rule_id=int((callback.data or '').split(':')[1])
     if not await ensure_rule_callback_access(callback, rule_id): return
-    t, k = build_vip_scheduled_post_create_choice_view(rule_id=rule_id)
-    await edit_message_text_safe(message=callback.message, text=t, reply_markup=k)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_create_choice:"))
-async def handle_rule_repost_campaign_scheduled_post_create_choice(callback: CallbackQuery):
-    rule_id = int((callback.data or '').split(':')[1])
-    if not await ensure_rule_callback_access(callback, rule_id): return
-    t, k = build_vip_scheduled_post_create_choice_view(rule_id=rule_id)
-    await edit_message_text_safe(message=callback.message, text=t, reply_markup=k)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new_create_material:"))
-async def handle_rule_repost_campaign_scheduled_post_new_create_material(callback: CallbackQuery):
-    rule_id = int((callback.data or '').split(':')[1])
-    if not await ensure_rule_callback_access(callback, rule_id): return
-    t, k = build_vip_scheduled_post_create_material_help_view(rule_id=rule_id)
-    await edit_message_text_safe(message=callback.message, text=t, reply_markup=k)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new_from_library:"))
-async def handle_rule_repost_campaign_scheduled_post_new_from_library(callback: CallbackQuery):
-    rule_id = int((callback.data or '').split(':')[1])
-    if not await ensure_rule_callback_access(callback, rule_id): return
-    service = _build_repost_campaign_scheduled_post_service()
-    r = await run_db(service.create_draft, rule_id=rule_id, created_by=callback.from_user.id if callback.from_user else None)
-    if not r.ok: await answer_callback_safe(callback, r.error_text or 'Ошибка', show_alert=True); return
-    sid = int((r.extra or {}).get('scheduled_post_id') or 0)
-    await _open_vip_step_post(callback, rule_id, sid)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new_from_current:"))
-async def handle_rule_repost_campaign_scheduled_post_new_from_current(callback: CallbackQuery):
-    rule_id = int((callback.data or '').split(':')[1])
-    if not await ensure_rule_callback_access(callback, rule_id): return
-    rule = await run_db(db.get_rule, rule_id)
-    saved_post_id = int(_rule_value(rule, "repost_campaign_saved_post_id", 0) or 0)
-    if saved_post_id <= 0:
-        await answer_callback_safe(callback, "В текущей кампании ещё не выбран рекламный пост", show_alert=True)
-        t, k = build_vip_scheduled_post_create_choice_view(rule_id=rule_id)
-        await edit_message_text_safe(message=callback.message, text=t, reply_markup=k)
-        return
     service = _build_repost_campaign_scheduled_post_service()
     created = await run_db(service.create_draft, rule_id=rule_id, created_by=callback.from_user.id if callback.from_user else None)
-    if not created.ok: await answer_callback_safe(callback, created.error_text or 'Ошибка', show_alert=True); return
-    sid = int((created.extra or {}).get('scheduled_post_id') or 0)
-    await run_db(service.update_draft_saved_post, scheduled_post_id=sid, saved_post_id=saved_post_id, actor_id=callback.from_user.id if callback.from_user else None)
-    await run_db(service.update_draft_targets_from_current_campaign, scheduled_post_id=sid, actor_id=callback.from_user.id if callback.from_user else None)
-    show_seconds = int(_rule_value(rule, "repost_campaign_show_seconds", 0) or 0)
-    if show_seconds > 0:
-        await run_db(service.update_draft_show_seconds, scheduled_post_id=sid, show_seconds=show_seconds, actor_id=callback.from_user.id if callback.from_user else None)
-    callback.data = f"rule_repost_campaign_scheduled_post_step_time:{rule_id}:{sid}"
-    await handle_step_time(callback)
+    if not created.ok:
+        await answer_callback_safe(callback, created.error_text or 'Ошибка', show_alert=True)
+        return
+    scheduled_post_id = int((created.extra or {}).get("scheduled_post_id") or 0)
+    user_states[callback.from_user.id] = {
+        "state": "waiting_vip_scheduled_post_material",
+        "rule_id": rule_id,
+        "scheduled_post_id": scheduled_post_id,
+    }
+    t = (
+        "📝 Новый запланированный пост\n\n"
+        "Отправьте сюда рекламный пост, который нужно запланировать.\n\n"
+        "Можно:\n"
+        "• переслать готовый пост из канала;\n"
+        "• отправить текст;\n"
+        "• отправить фото/видео с подписью;\n"
+        "• отправить альбом.\n\n"
+        "После сохранения поста ViMi перейдёт к шагу 2 — выбору каналов/групп."
+    )
+    k = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⬅️ Отменить", callback_data=f"rule_repost_campaign_scheduled_post_cancel_confirm:{rule_id}:{scheduled_post_id}")
+    ]])
+    await edit_message_text_safe(message=callback.message, text=t, reply_markup=k)
 
 async def _open_vip_step_post(callback, rule_id:int, sid:int):
     service=_build_repost_campaign_scheduled_post_service(); row=await run_db(db.get_campaign_scheduled_post, sid); saved=await run_db(db.list_saved_posts, rule_id=rule_id, limit=10); ready=await run_db(service.build_readiness, scheduled_post_id=sid)
