@@ -11347,26 +11347,40 @@ async def handle_step_show(callback: CallbackQuery):
     rule_id = int(rid)
     if not await ensure_rule_callback_access(callback, rule_id):
         return
+    await _open_vip_scheduled_post_step_show_callback(
+        callback=callback,
+        rule_id=rule_id,
+        scheduled_post_id=int(sid),
+    )
+
+
+async def _open_vip_scheduled_post_step_show_callback(*, callback: CallbackQuery, rule_id: int, scheduled_post_id: int) -> None:
     service = _build_repost_campaign_scheduled_post_service()
-    row = await run_db(db.get_campaign_scheduled_post, int(sid))
-    ready = await run_db(service.build_readiness, scheduled_post_id=int(sid))
+    row = await run_db(db.get_campaign_scheduled_post, scheduled_post_id)
+    ready = await run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
     t, k = build_vip_scheduled_post_wizard_show_view(rule_id=rule_id, scheduled_post=row or {}, readiness=ready or {})
     await edit_message_text_safe(message=callback.message, text=t, reply_markup=k)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_pick_show:"))
 async def handle_pick_show(callback: CallbackQuery):
-    _, rid, sid, sec = (callback.data or "").split(":", 3)
-    rule_id = int(rid)
+    _, rule_id_text, scheduled_post_id_text, show_seconds_text = (callback.data or "").split(":", 3)
+    rule_id = int(rule_id_text)
     if not await ensure_rule_callback_access(callback, rule_id):
         return
+    scheduled_post_id = int(scheduled_post_id_text)
+    show_seconds = int(show_seconds_text)
     service = _build_repost_campaign_scheduled_post_service()
     await run_db(
         service.update_draft_show_seconds,
-        scheduled_post_id=int(sid),
-        show_seconds=int(sec),
+        scheduled_post_id=scheduled_post_id,
+        show_seconds=show_seconds,
         actor_id=callback.from_user.id if callback.from_user else None,
     )
-    await handle_step_show(callback)
+    await _open_vip_scheduled_post_step_show_callback(
+        callback=callback,
+        rule_id=rule_id,
+        scheduled_post_id=scheduled_post_id,
+    )
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_step_time:"))
 async def handle_step_time(callback: CallbackQuery):
