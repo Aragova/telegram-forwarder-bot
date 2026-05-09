@@ -317,7 +317,14 @@ class RepostCampaignScheduledPostService:
         if str(getattr(rule, "mode", "") or "").strip().lower() != "repost":
             return {"ok": False, "permanent_error": "Запланированные рекламные посты доступны только для режима репоста"}
         runtime_readiness = self.campaign_runtime.build_campaign_launch_readiness(rule_id=rule_id)
-        return {"ok": True, "active_placement": bool(runtime_readiness.get("active_placement")), "delete_failed": int(runtime_readiness.get("delete_failed") or 0)}
+        return {
+            "ok": True,
+            "active_placement": bool(runtime_readiness.get("active_placement")),
+            "delete_failed": int(runtime_readiness.get("delete_failed") or 0),
+            "active_run_id": runtime_readiness.get("active_run_id"),
+            "next_available_at": runtime_readiness.get("next_available_at"),
+            "active_delete_after_text": runtime_readiness.get("active_delete_after_text"),
+        }
 
     async def process_due_posts(self, *, worker_id: str, limit: int = 5) -> dict[str, Any]:
         def _retry_seconds(attempt_count: int) -> int:
@@ -341,14 +348,18 @@ class RepostCampaignScheduledPostService:
                 ok = self.repo.mark_campaign_scheduled_post_failed(sid, error_text=preflight.get("permanent_error") or "Не удалось запустить запланированный пост")
                 self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_preflight_failed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=preflight.get("permanent_error"))
                 continue
-            if preflight.get("active_placement") or int(preflight.get("delete_failed") or 0) > 0:
-                if attempt_count >= VIP_SCHEDULED_POST_MAX_ATTEMPTS:
-                    ok = self.repo.mark_campaign_scheduled_post_failed(sid, error_text="Превышено число попыток запуска запланированного поста")
-                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_failed" if ok else "launch_state_update_failed", worker_id=worker_id)
-                else:
-                    retry_at = scheduled_post_now_utc() + timedelta(seconds=_retry_seconds(attempt_count))
-                    ok = self.repo.delay_campaign_scheduled_post_retry(sid, next_retry_at=retry_at.isoformat(), error_text="Есть активное размещение или незавершённые удаления")
-                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed" if ok else "launch_state_update_failed", worker_id=worker_id)
+            if preflight.get("active_placement"):
+                next_available_raw = preflight.get("next_available_at")
+                retry_at = datetime.fromisoformat(str(next_available_raw).replace("Z", "+00:00")) if next_available_raw else (scheduled_post_now_utc() + timedelta(minutes=5))
+                active_delete_after_text = preflight.get("active_delete_after_text")
+                error_text = f"Предыдущий рекламный пост активен до {active_delete_after_text}" if active_delete_after_text else "Ожидает освобождения рекламного места"
+                ok = self.repo.delay_campaign_scheduled_post_until(sid, next_retry_at=retry_at.isoformat(), error_text=error_text)
+                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed_active_placement" if ok else "launch_state_update_failed", worker_id=worker_id, extra={"reason": "active_placement", "active_run_id": preflight.get("active_run_id"), "next_available_at": preflight.get("next_available_at"), "next_retry_at": retry_at.isoformat()})
+                continue
+            if int(preflight.get("delete_failed") or 0) > 0:
+                retry_at = scheduled_post_now_utc() + timedelta(minutes=5)
+                ok = self.repo.delay_campaign_scheduled_post_until(sid, next_retry_at=retry_at.isoformat(), error_text="Есть рекламный пост с ошибкой удаления")
+                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed" if ok else "launch_state_update_failed", worker_id=worker_id, extra={"reason": "delete_failed", "next_retry_at": retry_at.isoformat()})
                 continue
             self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_started", worker_id=worker_id)
             self.logger.info("VIP_SCHEDULED_POST_LAUNCH_STARTED | scheduled_post_id=%s | rule_id=%s | worker_id=%s", sid, rule_id, worker_id)

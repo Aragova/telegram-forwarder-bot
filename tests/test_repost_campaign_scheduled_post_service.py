@@ -74,12 +74,14 @@ class FakeRepo:
         self.failed_calls.append((scheduled_post_id, error_text, campaign_run_id)); return True
     def delay_campaign_scheduled_post_retry(self, scheduled_post_id, *, next_retry_at, error_text=None):
         self.delay_calls.append((scheduled_post_id, next_retry_at, error_text)); return True
+    def delay_campaign_scheduled_post_until(self, scheduled_post_id, *, next_retry_at, error_text=None):
+        self.delay_calls.append((scheduled_post_id, next_retry_at, error_text, "until")); return True
 
 
 class FakeCampaignRuntime:
     def __init__(self, active=False): self.active = active
     def build_campaign_launch_readiness(self, *, rule_id: int) -> dict:
-        return {"active_placement": self.active, "delete_failed": 0}
+        return {"active_placement": self.active, "delete_failed": 0, "next_available_at": "2026-05-09T20:49:30+00:00", "active_delete_after_text": "09.05 23:49 UTC+3", "active_run_id": 22}
 
 
 class CheckResult:
@@ -329,6 +331,8 @@ def test_process_due_posts_delays_when_active_placement():
     service=RepostCampaignScheduledPostService(repo=repo,campaign_runtime=rt)
     asyncio.run(service.process_due_posts(worker_id='w'))
     assert not rt.calls and repo.delay_calls
+    assert any(len(call) == 4 and call[3] == "until" for call in repo.delay_calls)
+    assert not repo.failed_calls
 
 
 def test_process_due_posts_marks_failed_for_missing_saved_post():
