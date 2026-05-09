@@ -1385,18 +1385,33 @@ def build_vip_scheduled_post_wizard_post_view(*, rule_id:int, scheduled_post:dic
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 def build_vip_scheduled_post_wizard_targets_view(*, rule_id:int, scheduled_post:dict, targets:list[dict], readiness:dict)->tuple[str,InlineKeyboardMarkup]:
-    total=len(targets or [])
-    text=(
-        "🧙 Запланированный пост · Шаг 2/4\n📣 Каналы/группы\n"
-        "Выберите, куда ViMi опубликует этот запланированный пост.\n"
-        "Каналы/группы этого поста:\n"
-        f"📣 Выбрано: {total}\n"
-        f"✅ Готовы: {int(readiness.get('targets_ready_count') or 0)}\n"
-        f"⚠️ Требуют проверки: {int(readiness.get('targets_warning_count') or 0)}\n"
-        f"🔴 Заблокированы: {int(readiness.get('targets_blocked_count') or 0)}"
-    )
-    sid=int(scheduled_post.get('id') or 0)
-    rows=[[InlineKeyboardButton(text='➕ Добавить канал/группу', callback_data=f'rule_repost_campaign_scheduled_post_add_target:{rule_id}:{sid}')],[InlineKeyboardButton(text='📋 Выбрать канал/группу', callback_data=f'rule_repost_campaign_scheduled_post_pick_targets:{rule_id}:{sid}')],[InlineKeyboardButton(text='🔎 Проверить права', callback_data=f'rule_repost_campaign_scheduled_post_check_rights:{rule_id}:{sid}')],[InlineKeyboardButton(text='✅ Далее', callback_data=f'rule_repost_campaign_scheduled_post_step_show:{rule_id}:{sid}')],[InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_post_step_post:{rule_id}:{sid}')]]
+    selected_targets = targets or []
+    selected_count = len(selected_targets)
+    sid = int(scheduled_post.get('id') or 0)
+    lines = [
+        '🧙 Запланированный пост · Шаг 2/4',
+        '📋 Каналы/группы',
+        '',
+        'Выберите, куда ViMi опубликует этот отложенный пост.',
+        '',
+        f'Выбрано: {selected_count}',
+    ]
+    if selected_targets:
+        lines.extend(['', 'Выбранные каналы:'])
+        for target in selected_targets[:5]:
+            title = str(target.get('target_title') or target.get('target_id') or 'Канал/группа')
+            lines.append(f'✅ {title}')
+        if selected_count > 5:
+            lines.append(f'…и ещё {selected_count - 5}')
+    text = "\n".join(lines)
+
+    rows = [
+        [InlineKeyboardButton(text='➕ Добавить канал/группу', callback_data=f'rule_repost_campaign_scheduled_post_add_target:{rule_id}:{sid}')],
+        [InlineKeyboardButton(text='📋 Выбрать из известных', callback_data=f'rule_repost_campaign_scheduled_post_pick_targets:{rule_id}:{sid}')],
+    ]
+    if selected_count > 0:
+        rows.append([InlineKeyboardButton(text='✅ Далее', callback_data=f'rule_repost_campaign_scheduled_post_step_show:{rule_id}:{sid}')])
+    rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_post_step_post:{rule_id}:{sid}')])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 def build_vip_scheduled_post_add_target_view(*, rule_id: int, scheduled_post_id: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -1454,7 +1469,8 @@ def build_vip_scheduled_post_pick_targets_view(
         prefix = "✅" if tkey in selected_keys else "➕"
         title = str(t.get("target_title") or t.get("target_id") or "Канал/группа")
         rows.append([InlineKeyboardButton(text=f"{prefix} {title}", callback_data=f"rule_repost_campaign_scheduled_post_add_known_target:{rule_id}:{scheduled_post_id}:{idx}:{page}")])
-    rows.append([InlineKeyboardButton(text="➕ Добавить все на странице", callback_data=f"rule_repost_campaign_scheduled_post_add_known_page:{rule_id}:{scheduled_post_id}:{page}")])
+    if total_pages > 1:
+        rows.append([InlineKeyboardButton(text="➕ Добавить все на странице", callback_data=f"rule_repost_campaign_scheduled_post_add_known_page:{rule_id}:{scheduled_post_id}:{page}")])
     rows.append([InlineKeyboardButton(text="➕ Добавить все", callback_data=f"rule_repost_campaign_scheduled_post_add_known_all:{rule_id}:{scheduled_post_id}")])
     if total_pages > 1:
         nav = []
@@ -1464,6 +1480,7 @@ def build_vip_scheduled_post_pick_targets_view(
             nav.append(InlineKeyboardButton(text="➡️ Следующая", callback_data=f"rule_repost_campaign_scheduled_post_pick_targets:{rule_id}:{scheduled_post_id}:{page+1}"))
         if nav:
             rows.append(nav)
+    rows.append([InlineKeyboardButton(text="✅ Готово", callback_data=f"rule_repost_campaign_scheduled_post_step_targets:{rule_id}:{scheduled_post_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_scheduled_post_step_targets:{rule_id}:{scheduled_post_id}")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
