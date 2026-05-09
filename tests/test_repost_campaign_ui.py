@@ -966,6 +966,14 @@ def test_scheduled_post_new_button_opens_create_choice_not_library():
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new:"))' in source
     assert 'build_vip_scheduled_post_create_choice_view(rule_id=rule_id)' in source
 
+def test_bot_rule_field_read_for_new_from_current_uses_helper():
+    source = Path('bot.py').read_text(encoding='utf-8')
+    assert '(rule or {}).get("repost_campaign_saved_post_id")' not in source
+    assert '(rule or {}).get("repost_campaign_show_seconds")' not in source
+    assert 'def _rule_value(rule, name: str, default=None):' in source
+    assert '_rule_value(rule, "repost_campaign_saved_post_id", 0)' in source
+    assert '_rule_value(rule, "repost_campaign_show_seconds", 0)' in source
+
 def test_vip_scheduled_posts_screen_draft_lines_are_human():
     text, _ = build_vip_scheduled_posts_screen_view(rule_id=1, posts=[{'id':2,'status':'draft'}])
     assert '⚪ Черновик #2' in text

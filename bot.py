@@ -10844,6 +10844,13 @@ def _parse_ids(data:str, n:int):
     parts=(data or '').split(':')
     return [int(parts[i]) for i in range(1,n+1)]
 
+def _rule_value(rule, name: str, default=None):
+    if rule is None:
+        return default
+    if isinstance(rule, dict):
+        return rule.get(name, default)
+    return getattr(rule, name, default)
+
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_posts:"))
 async def handle_rule_repost_campaign_scheduled_posts(callback: CallbackQuery):
     rule_id = int((callback.data or '').split(':')[1]);
@@ -10897,7 +10904,7 @@ async def handle_rule_repost_campaign_scheduled_post_new_from_current(callback: 
     rule_id = int((callback.data or '').split(':')[1])
     if not await ensure_rule_callback_access(callback, rule_id): return
     rule = await run_db(db.get_rule, rule_id)
-    saved_post_id = int((rule or {}).get("repost_campaign_saved_post_id") or 0)
+    saved_post_id = int(_rule_value(rule, "repost_campaign_saved_post_id", 0) or 0)
     if saved_post_id <= 0:
         await answer_callback_safe(callback, "В текущей кампании ещё не выбран рекламный пост", show_alert=True)
         t, k = build_vip_scheduled_post_create_choice_view(rule_id=rule_id)
@@ -10909,7 +10916,7 @@ async def handle_rule_repost_campaign_scheduled_post_new_from_current(callback: 
     sid = int((created.extra or {}).get('scheduled_post_id') or 0)
     await run_db(service.update_draft_saved_post, scheduled_post_id=sid, saved_post_id=saved_post_id, actor_id=callback.from_user.id if callback.from_user else None)
     await run_db(service.update_draft_targets_from_current_campaign, scheduled_post_id=sid, actor_id=callback.from_user.id if callback.from_user else None)
-    show_seconds = int((rule or {}).get("repost_campaign_show_seconds") or 0)
+    show_seconds = int(_rule_value(rule, "repost_campaign_show_seconds", 0) or 0)
     if show_seconds > 0:
         await run_db(service.update_draft_show_seconds, scheduled_post_id=sid, show_seconds=show_seconds, actor_id=callback.from_user.id if callback.from_user else None)
     callback.data = f"rule_repost_campaign_scheduled_post_step_time:{rule_id}:{sid}"
