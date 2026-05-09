@@ -11060,7 +11060,7 @@ def _register_user_saas_handlers() -> None:
 
 from app.repost_campaign_scheduled_post_service import RepostCampaignScheduledPostService
 from app.repost_campaign_ui import (
-    build_vip_scheduled_posts_screen_view, build_vip_scheduled_post_wizard_post_view,
+    build_vip_scheduled_posts_screen_view, build_vip_scheduled_posts_list_view, build_vip_scheduled_post_wizard_post_view,
     build_vip_scheduled_post_wizard_targets_view, build_vip_scheduled_post_wizard_show_view,
     build_vip_scheduled_post_wizard_time_view, build_vip_scheduled_post_preview_view,
     build_vip_scheduled_post_detail_view, build_vip_scheduled_post_cancel_confirm_view,
@@ -11147,17 +11147,26 @@ async def _build_vip_scheduled_known_targets(rule_id: int, scheduled_post_id: in
 async def handle_rule_repost_campaign_scheduled_posts(callback: CallbackQuery):
     rule_id = int((callback.data or '').split(':')[1]);
     if not await ensure_rule_callback_access(callback, rule_id): return
-    posts = await run_db(db.list_campaign_scheduled_posts, rule_id=rule_id, limit=20)
+    posts = await run_db(db.list_campaign_scheduled_posts, rule_id=rule_id, statuses=["scheduled", "processing"], limit=5)
     text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=posts or [])
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_posts_list:"))
 async def handle_rule_repost_campaign_scheduled_posts_list(callback: CallbackQuery):
-    _, rule_id_text, flt = (callback.data or '').split(':', 2); rule_id=int(rule_id_text)
+    parts = (callback.data or "").split(":")
+    rule_id = int(parts[1])
+    status_filter = parts[2] if len(parts) > 2 else "all"
+    page = int(parts[3]) if len(parts) > 3 else 0
     if not await ensure_rule_callback_access(callback, rule_id): return
-    statuses = None if flt=='all' else (["draft","ready"] if flt=='draft' else [flt])
-    posts = await run_db(db.list_campaign_scheduled_posts, rule_id=rule_id, statuses=statuses, limit=20)
-    text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=posts or [])
+    status_map = {
+        "all": None,
+        "draft": ["draft", "ready"],
+        "scheduled": ["scheduled", "processing"],
+        "finished": ["launched", "failed", "cancelled", "expired"],
+    }
+    statuses = status_map.get(status_filter)
+    posts = await run_db(db.list_campaign_scheduled_posts, rule_id=rule_id, statuses=statuses, limit=100)
+    text, kb = build_vip_scheduled_posts_list_view(rule_id=rule_id, posts=posts or [], status_filter=status_filter, page=page)
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new:"))
