@@ -837,6 +837,7 @@ from app.repost_campaign_ui import (
     build_vip_scheduled_post_preview_view,
     build_vip_scheduled_post_detail_view,
     build_vip_scheduled_post_cancel_confirm_view,
+    build_vip_scheduled_post_add_target_view,
 )
 
 def test_vip_scheduled_posts_screen_empty_state():
@@ -863,10 +864,11 @@ def test_vip_scheduled_post_wizard_post_view():
 
 def test_vip_scheduled_post_wizard_targets_view():
     text, kb = build_vip_scheduled_post_wizard_targets_view(rule_id=1, scheduled_post={'id':10}, targets=[{}], readiness={})
-    assert 'Снимок' in text
+    assert 'Снимок текущих каналов' not in text
     labels=_texts_from_keyboard(kb)
     assert '🔎 Проверить права' in labels
-    assert '📌 Сохранить снимок текущих каналов' in labels
+    assert '➕ Добавить канал/группу' in labels
+    assert '📋 Выбрать канал/группу' in labels
 
 def test_vip_scheduled_post_wizard_show_view():
     _, kb = build_vip_scheduled_post_wizard_show_view(rule_id=1, scheduled_post={'id':10,'show_seconds':86400}, readiness={})
@@ -926,6 +928,7 @@ def test_bot_has_all_vip_scheduled_callbacks_prefixes():
     source = Path('bot.py').read_text(encoding='utf-8')
     for prefix in [
         'rule_repost_campaign_scheduled_post_pick_post:', 'rule_repost_campaign_scheduled_post_step_targets:',
+        'rule_repost_campaign_scheduled_post_add_target:', 'rule_repost_campaign_scheduled_post_pick_targets:',
         'rule_repost_campaign_scheduled_post_snapshot_targets:', 'rule_repost_campaign_scheduled_post_check_rights:',
         'rule_repost_campaign_scheduled_post_step_show:', 'rule_repost_campaign_scheduled_post_pick_show:',
         'rule_repost_campaign_scheduled_post_step_time:', 'rule_repost_campaign_scheduled_post_quick_time:',
@@ -970,6 +973,8 @@ def test_bot_vip_handlers_use_ensure_rule_callback_access():
         "rule_repost_campaign_scheduled_post_step_post:",
         "rule_repost_campaign_scheduled_post_pick_post:",
         "rule_repost_campaign_scheduled_post_step_targets:",
+        "rule_repost_campaign_scheduled_post_add_target:",
+        "rule_repost_campaign_scheduled_post_pick_targets:",
         "rule_repost_campaign_scheduled_post_snapshot_targets:",
         "rule_repost_campaign_scheduled_post_step_show:",
         "rule_repost_campaign_scheduled_post_pick_show:",
@@ -988,6 +993,19 @@ def test_bot_vip_handlers_use_ensure_rule_callback_access():
         assert start != -1
         body = source[start:start+1200]
         assert "ensure_rule_callback_access" in body
+
+def test_vip_scheduled_add_target_view():
+    text, kb = build_vip_scheduled_post_add_target_view(rule_id=1, scheduled_post_id=10)
+    assert "➕ Добавить канал/группу" in text
+    assert "@channelname" in text
+    assert "https://t.me/channelname" in text
+    assert "-1001234567890" in text
+    assert "rule_repost_campaign_scheduled_post_step_targets:1:10" in _callbacks_from_keyboard(kb)
+
+def test_vip_scheduled_step2_does_not_use_snapshot_callback():
+    _, kb = build_vip_scheduled_post_wizard_targets_view(rule_id=1, scheduled_post={'id':10}, targets=[], readiness={})
+    callbacks = _callbacks_from_keyboard(kb)
+    assert not any("rule_repost_campaign_scheduled_post_snapshot_targets" in x for x in callbacks)
 
 
 def test_vip_scheduled_posts_screen_has_only_three_main_buttons():

@@ -259,6 +259,32 @@ def test_cancel_post_does_not_log_cancelled_event_when_repo_transition_fails():
     repo.force_cancel_fail = True
     out = service.cancel_post(scheduled_post_id=sid)
     assert not out.ok
+
+def test_add_manual_target_preserves_existing_targets():
+    service, repo = make_service()
+    sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.post_targets[sid] = [{"target_kind": "extra", "target_id": "-1001", "target_thread_id": None, "target_title": "A", "is_active": True}]
+    out = service.add_manual_target(scheduled_post_id=sid, target_id="-1002", target_title="B")
+    assert out.ok
+    assert len(repo.post_targets[sid]) == 2
+    assert any(x["target_id"] == "-1001" for x in repo.post_targets[sid])
+    assert any(x["target_id"] == "-1002" for x in repo.post_targets[sid])
+
+def test_add_manual_target_deduplicates_same_target():
+    service, repo = make_service()
+    sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.post_targets[sid] = [{"target_kind": "extra", "target_id": "-1001", "target_thread_id": None, "target_title": "A", "is_active": True}]
+    out = service.add_manual_target(scheduled_post_id=sid, target_id="-1001", target_title="A")
+    assert out.ok
+    assert out.extra.get("already_exists") is True
+    assert len(repo.post_targets[sid]) == 1
+
+def test_add_manual_target_rejects_non_editable_status():
+    service, repo = make_service()
+    sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.posts[sid]["status"] = "scheduled"
+    out = service.add_manual_target(scheduled_post_id=sid, target_id="-1001")
+    assert not out.ok
     assert not any(x["event_type"] == "cancelled" for x in repo.events.get(sid, []))
 
 

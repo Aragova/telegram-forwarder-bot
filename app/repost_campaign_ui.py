@@ -1363,17 +1363,29 @@ def build_vip_scheduled_post_wizard_targets_view(*, rule_id:int, scheduled_post:
     total=len(targets or [])
     text=(
         "🧙 Запланированный пост · Шаг 2/4\n📣 Каналы/группы\n"
-        "ViMi сохранит Снимок текущих каналов/групп.\n"
-        "После этого изменения в текущей кампании не изменят этот запланированный пост.\n"
-        "Сейчас в снимке:\n"
-        f"📣 Каналов/групп: {total}\n"
+        "Выберите, куда ViMi опубликует этот запланированный пост.\n"
+        "Каналы/группы этого поста:\n"
+        f"📣 Выбрано: {total}\n"
         f"✅ Готовы: {int(readiness.get('targets_ready_count') or 0)}\n"
         f"⚠️ Требуют проверки: {int(readiness.get('targets_warning_count') or 0)}\n"
         f"🔴 Заблокированы: {int(readiness.get('targets_blocked_count') or 0)}"
     )
     sid=int(scheduled_post.get('id') or 0)
-    rows=[[InlineKeyboardButton(text='📌 Сохранить снимок текущих каналов', callback_data=f'rule_repost_campaign_scheduled_post_snapshot_targets:{rule_id}:{sid}')],[InlineKeyboardButton(text='🔎 Проверить права', callback_data=f'rule_repost_campaign_scheduled_post_check_rights:{rule_id}:{sid}')],[InlineKeyboardButton(text='✅ Далее', callback_data=f'rule_repost_campaign_scheduled_post_step_show:{rule_id}:{sid}')],[InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_post_step_post:{rule_id}:{sid}')]]
+    rows=[[InlineKeyboardButton(text='➕ Добавить канал/группу', callback_data=f'rule_repost_campaign_scheduled_post_add_target:{rule_id}:{sid}')],[InlineKeyboardButton(text='📋 Выбрать канал/группу', callback_data=f'rule_repost_campaign_scheduled_post_pick_targets:{rule_id}:{sid}')],[InlineKeyboardButton(text='🔎 Проверить права', callback_data=f'rule_repost_campaign_scheduled_post_check_rights:{rule_id}:{sid}')],[InlineKeyboardButton(text='✅ Далее', callback_data=f'rule_repost_campaign_scheduled_post_step_show:{rule_id}:{sid}')],[InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_post_step_post:{rule_id}:{sid}')]]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+def build_vip_scheduled_post_add_target_view(*, rule_id: int, scheduled_post_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "➕ Добавить канал/группу\n"
+        "Отправьте ссылку или ID канала/группы, куда нужно опубликовать этот запланированный пост.\n"
+        "Можно отправить:\n"
+        "• @channelname\n"
+        "• https://t.me/channelname\n"
+        "• -1001234567890\n\n"
+        "После добавления ViMi вернёт вас на Шаг 2."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_scheduled_post_step_targets:{rule_id}:{scheduled_post_id}")]])
+    return text, kb
 
 def build_vip_scheduled_post_wizard_show_view(*, rule_id:int, scheduled_post:dict, readiness:dict)->tuple[str,InlineKeyboardMarkup]:
     sid=int(scheduled_post.get('id') or 0)
