@@ -7534,8 +7534,8 @@ class PostgresRepository(RepositoryProtocol):
         return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='cancelled', cancelled_at=NOW(), cancelled_by=%s, cancel_reason=%s, updated_at=NOW()", (cancelled_by, reason), "status IN ('draft','ready','scheduled')", "VIP_SCHEDULED_POST_CANCELLED")
     def mark_campaign_scheduled_post_launched(self, scheduled_post_id: int, *, campaign_run_id: int) -> bool:
         return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='launched', campaign_run_id=%s, launched_at=NOW(), updated_at=NOW()", (int(campaign_run_id),), "status='processing'", "VIP_SCHEDULED_POST_MARKED_LAUNCHED")
-    def mark_campaign_scheduled_post_failed(self, scheduled_post_id: int, *, error_text: str) -> bool:
-        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='failed', failed_at=NOW(), error_text=%s, locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (error_text,), "status IN ('scheduled','processing')", "VIP_SCHEDULED_POST_MARKED_FAILED")
+    def mark_campaign_scheduled_post_failed(self, scheduled_post_id: int, *, error_text: str, campaign_run_id: int | None = None) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='failed', failed_at=NOW(), error_text=%s, campaign_run_id=COALESCE(%s, campaign_run_id), locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (error_text, campaign_run_id), "status IN ('scheduled','processing')", "VIP_SCHEDULED_POST_MARKED_FAILED")
     def delay_campaign_scheduled_post_retry(self, scheduled_post_id: int, *, next_retry_at: str, error_text: str | None = None) -> bool:
         return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='scheduled', attempt_count=attempt_count+1, next_retry_at=%s, error_text=%s, locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (next_retry_at, error_text), "status='processing'", None)
     def _update_campaign_scheduled_post_status(self, scheduled_post_id: int, set_sql: str, params: tuple[Any, ...], where_sql: str, log_code: str | None) -> bool:

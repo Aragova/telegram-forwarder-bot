@@ -1313,3 +1313,54 @@ def test_build_campaign_post_stats_deleted_without_snapshot_does_not_use_live_vi
     assert telethon.get_messages_calls == []
     assert stats["views_unavailable"] == 1
     assert stats["channels_stats"][0]["views_status"] == "unavailable"
+
+
+def test_launch_from_snapshot_does_not_use_current_rule_campaign_settings():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=999, repost_campaign_show_seconds=111, target_id="-1")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", message_id=1)))
+    out = asyncio.run(runtime.launch_campaign_from_snapshot(rule_id=1, saved_post_id=55, show_seconds=300, targets_snapshot=[{"target_id": "-1001", "target_kind": "main"}], scheduled_post_id=42))
+    assert out.ok
+    assert repo.create_campaign_run_calls[0]["saved_post_id"] == 55
+    assert repo.create_campaign_run_calls[0]["show_seconds"] == 300
+    assert repo.create_campaign_run_calls[0]["scheduled_post_id"] == 42
+
+def test_launch_from_snapshot_marks_sent_when_renderer_failed_but_ids_returned():
+    rule = SimpleNamespace(mode="repost", target_id="-1")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "album"}})
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=False, method="telethon_source_unverified", kind="album", message_id=1039, message_ids=[1039, 1040], error_text="verify failed"))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    out = asyncio.run(runtime.launch_campaign_from_snapshot(rule_id=1, saved_post_id=55, show_seconds=300, targets_snapshot=[{"target_id": "-1001", "target_kind": "main"}], scheduled_post_id=3))
+    assert out.ok
+    assert repo.mark_campaign_run_message_sent_calls
+    assert not repo.mark_campaign_run_message_failed_calls
+
+
+
+def test_launch_from_snapshot_deduplicates_targets_with_main_priority():
+    rule = SimpleNamespace(mode="repost", target_id="-1")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", message_id=1)))
+    out = asyncio.run(runtime.launch_campaign_from_snapshot(rule_id=1, saved_post_id=55, show_seconds=300, targets_snapshot=[{"target_kind":"main","target_id":"-1001"},{"target_kind":"extra","target_id":"-1001"},{"target_kind":"extra","target_id":"-1002"}]))
+    assert out.ok
+    assert len(runtime.renderer.calls) == 2
+    assert repo.create_campaign_run_message_calls[0]["target_kind"] == "main"
+
+
+def test_launch_from_snapshot_partial_status():
+    rule = SimpleNamespace(mode="repost", target_id="-1")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})
+    renderer = _FakeRenderer([SavedPostRenderResult(ok=True, method="bot_api", kind="text", message_id=1), SavedPostRenderResult(ok=False, method="bot_api", kind="text", error_text="x")])
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    out = asyncio.run(runtime.launch_campaign_from_snapshot(rule_id=1, saved_post_id=55, show_seconds=300, targets_snapshot=[{"target_id":"-1001"},{"target_id":"-1002"}]))
+    assert out.ok
+    assert repo.update_campaign_run_status_calls[-1][1]["status"] == "partial"
+
+
+def test_launch_from_snapshot_no_targets_fails_before_run_creation():
+    rule = SimpleNamespace(mode="repost", target_id="-1")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    out = asyncio.run(runtime.launch_campaign_from_snapshot(rule_id=1, saved_post_id=55, show_seconds=300, targets_snapshot=[]))
+    assert not out.ok
+    assert not repo.create_campaign_run_calls
