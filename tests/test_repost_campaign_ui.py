@@ -904,7 +904,7 @@ def test_vip_scheduled_post_wizard_time_view_buttons():
     assert 'Сегодня в 20:00' in labels
     assert 'Завтра в 12:00' in labels
     assert '✍️ Ввести дату и время' in labels
-    assert '👁 Предпросмотр' in labels
+    assert '👁 Предпросмотр' not in labels
 
 def test_vip_scheduled_detail_scheduled_has_premium_actions():
     text, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={'post': {'id': 123, 'status': 'scheduled'}})
@@ -918,7 +918,7 @@ def test_vip_scheduled_detail_scheduled_has_premium_actions():
 def test_vip_scheduled_post_detail_launched_has_run_buttons():
     _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={'post': {'id':123, 'status':'launched', 'campaign_run_id':55}})
     labels = _texts_from_keyboard(kb)
-    assert '📄 Открыть запуск' in labels
+    assert '📄 Открыть запуск' not in labels
     assert '📊 Открыть отчёт' in labels
 
 def test_vip_scheduled_delete_confirm_uses_delete_not_cancel():
@@ -1297,15 +1297,31 @@ def test_vip_scheduled_detail_buttons_for_launched():
     _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "launched", "campaign_run_id": 8}})
     texts = _texts_from_keyboard(kb)
     assert "📊 Открыть отчёт" in texts and "📋 Дублировать пост" in texts and "🚀 Отправить сейчас" not in texts
+    assert "📄 Открыть запуск" not in texts
 
 def test_vip_scheduled_detail_buttons_for_terminal():
     _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "failed"}})
     texts = _texts_from_keyboard(kb)
     assert "📋 Дублировать пост" in texts and "🚀 Отправить сейчас" not in texts
 
-def test_vip_scheduled_detail_shows_campaign_run_id_and_delete_status():
-    text, _ = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "launched", "campaign_run_id": 8}, "campaign_run": {"run": {"status": "sent", "delete_after_at": "2026-05-10T10:00:00+00:00"}, "summary": {"delete_pending": 1}}})
-    assert "campaign_run_id: 8" in text and "delete_after_at:" in text and "Удаление:" in text
+def test_vip_scheduled_detail_hides_technical_fields_before_launch():
+    text, _ = build_vip_scheduled_post_detail_view(
+        rule_id=1,
+        details={"post": {"id": 1, "status": "scheduled", "scheduled_at": "2026-05-10T12:40:00+00:00", "show_seconds": 3600}},
+    )
+    forbidden = ["campaign_run_id", "delete_after_at", "pending=", "processing=", "deleted=", "failed=", "статус=—", "всего=0"]
+    for value in forbidden:
+        assert value not in text
+
+
+def test_vip_scheduled_detail_before_launch_is_human_readable():
+    text, _ = build_vip_scheduled_post_detail_view(
+        rule_id=1,
+        details={"post": {"id": 1, "status": "scheduled", "scheduled_at": "2026-05-10T12:40:00+00:00", "show_seconds": 3600}},
+    )
+    assert "Статус: запланирован" in text
+    assert "Срок показа:" in text
+    assert "Публикация ещё не запускалась" in text
 
 def test_bot_has_vip_scheduled_duplicate_handler():
     source = Path("bot.py").read_text(encoding="utf-8")
@@ -1323,8 +1339,56 @@ def test_bot_edit_rejects_non_editable_statuses():
 
 def test_vip_scheduled_detail_uses_delete_after_at_from_messages_not_run():
     text, _ = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "launched", "campaign_run_id": 8}, "campaign_run": {"run": {"status": "sent", "delete_after_at": "2026-05-01T10:00:00+00:00"}, "messages": [{"delete_after_at": "2026-05-02T10:00:00+00:00", "delete_status": "failed", "delete_error_text": "boom"}], "summary": {"delete_pending": 0, "delete_failed": 1}}})
-    assert "02.05" in text
-    assert "Ошибка удаления:" in text
+    assert "Не удалось удалить: 1" in text
+    assert "Не удалось удалить: 1" in text
+    assert "Причина: boom" in text
+
+
+def test_vip_scheduled_detail_launched_delete_summary_is_human_readable():
+    text, _ = build_vip_scheduled_post_detail_view(
+        rule_id=1,
+        details={
+            "post": {"id": 1, "status": "launched", "campaign_run_id": 22},
+            "campaign_run": {
+                "run": {"status": "sent", "targets_total": 2, "targets_success": 2, "targets_failed": 0},
+                "summary": {"delete_pending": 2, "delete_processing": 0, "delete_done": 0, "delete_failed": 0},
+                "messages": [
+                    {"delete_status": "pending", "delete_after_at": "2026-05-10T13:40:00+00:00"},
+                    {"delete_status": "pending", "delete_after_at": "2026-05-10T13:40:00+00:00"},
+                ],
+            },
+        },
+    )
+    assert "Пост будет удалён:" in text
+    assert "Ожидает удаления: 2" in text
+    assert "pending=" not in text
+    assert "delete_after_at" not in text
+
+
+def test_vip_scheduled_detail_hides_empty_views_block():
+    text, _ = build_vip_scheduled_post_detail_view(
+        rule_id=1,
+        details={"post": {"id": 1, "status": "scheduled"}, "campaign_run": None},
+    )
+    assert "Просмотры:" not in text
+    assert "всего=0" not in text
+
+
+def test_campaign_ui_does_not_render_technical_keys_in_vip_scheduled_detail():
+    text, _ = build_vip_scheduled_post_detail_view(
+        rule_id=1,
+        details={
+            "post": {"id": 2, "status": "launched", "campaign_run_id": 8},
+            "campaign_run": {
+                "run": {"status": "sent", "targets_total": 2, "targets_success": 1, "targets_failed": 1},
+                "messages": [{"delete_after_at": "2026-05-02T10:00:00+00:00", "delete_status": "pending"}],
+                "summary": {"delete_pending": 1, "delete_failed": 0},
+            },
+        },
+    )
+    forbidden_literals = ["campaign_run_id:", "delete_after_at:", "pending=", "processing=", "deleted=", "failed=", "статус=—", "всего=0"]
+    for value in forbidden_literals:
+        assert value not in text
 
 def test_report_button_callback_exists_in_bot_py():
     source = Path("bot.py").read_text(encoding="utf-8")
