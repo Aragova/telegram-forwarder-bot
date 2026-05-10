@@ -6905,14 +6905,6 @@ async def handle_rule_repost_campaign_post_menu(callback: CallbackQuery):
         return
     await answer_callback_safe_once(callback)
 
-def _build_repost_campaign_post_preview_keyboard(rule_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Это рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-        [InlineKeyboardButton(text="🔁 Заменить пост", callback_data=f"rule_repost_campaign_post_add:{rule_id}")],
-        [InlineKeyboardButton(text="⬅️ Назад к рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-    ])
-
-
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_preview:"))
 async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
     if not await is_admin_callback(callback):
