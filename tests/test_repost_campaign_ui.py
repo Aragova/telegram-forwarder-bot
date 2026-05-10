@@ -1340,7 +1340,6 @@ def test_bot_edit_rejects_non_editable_statuses():
 def test_vip_scheduled_detail_uses_delete_after_at_from_messages_not_run():
     text, _ = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "launched", "campaign_run_id": 8}, "campaign_run": {"run": {"status": "sent", "delete_after_at": "2026-05-01T10:00:00+00:00"}, "messages": [{"delete_after_at": "2026-05-02T10:00:00+00:00", "delete_status": "failed", "delete_error_text": "boom"}], "summary": {"delete_pending": 0, "delete_failed": 1}}})
     assert "Не удалось удалить: 1" in text
-    assert "Не удалось удалить: 1" in text
     assert "Причина: boom" in text
 
 
