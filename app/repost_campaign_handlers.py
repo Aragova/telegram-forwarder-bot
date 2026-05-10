@@ -6,6 +6,9 @@ from aiogram.types import CallbackQuery
 from app.repost_campaign_context import RepostCampaignHandlersContext, build_repost_campaign_runtime
 from app.repost_campaign_service import format_campaign_show_seconds_ru
 from app.repost_campaign_ui import (
+    build_repost_campaign_launch_mode_view,
+    build_repost_campaign_launch_readiness_view,
+    build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
     build_repost_campaign_target_action_result_view,
@@ -189,6 +192,110 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             return
         force_new = ctx.should_answer_new_message_for_callback(callback)
         if not await _render_repost_campaign_post_menu(callback, rule_id, ctx, force_new_message=force_new):
+            return
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch:"))
+    async def handle_rule_repost_campaign_launch(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            rule_id = int(callback.data.split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        try:
+            runtime = build_repost_campaign_runtime(ctx)
+            readiness = await ctx.run_db(lambda: runtime.build_campaign_launch_readiness(rule_id=rule_id))
+            text, keyboard = build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)
+            if ctx.should_answer_new_message_for_callback(callback):
+                await callback.message.answer(text, reply_markup=keyboard)
+            else:
+                await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+            ctx.logger.info(
+                "REPOST_CAMPAIGN_LAUNCH_PREFLIGHT_UI | rule_id=%s | can_launch=%s | will_send_total=%s",
+                rule_id,
+                bool(readiness.get("can_launch")),
+                int(readiness.get("will_send_total") or 0),
+            )
+        except Exception as exc:
+            ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            await ctx.answer_callback_safe(callback, "Не удалось запустить кампанию", show_alert=True)
+            return
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_now_preview:"))
+    async def handle_rule_repost_campaign_launch_now_preview(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            rule_id = int(callback.data.split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        try:
+            runtime = build_repost_campaign_runtime(ctx)
+            readiness = await ctx.run_db(lambda: runtime.build_campaign_launch_readiness(rule_id=rule_id))
+            text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
+            if ctx.should_answer_new_message_for_callback(callback):
+                await callback.message.answer(text, reply_markup=keyboard)
+            else:
+                await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        except Exception as exc:
+            ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_NOW_PREVIEW_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            await ctx.answer_callback_safe(callback, "Не удалось открыть предпросмотр запуска", show_alert=True)
+            return
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_confirm:"))
+    async def handle_rule_repost_campaign_launch_confirm(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            rule_id = int(callback.data.split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        try:
+            ctx.logger.info("REPOST_CAMPAIGN_LAUNCH_CONFIRM_STARTED | rule_id=%s", rule_id)
+            runtime = build_repost_campaign_runtime(ctx)
+            readiness = await ctx.run_db(lambda: runtime.build_campaign_launch_readiness(rule_id=rule_id))
+            if not readiness.get("can_launch"):
+                ctx.logger.info("REPOST_CAMPAIGN_LAUNCH_CONFIRM_BLOCKED | rule_id=%s", rule_id)
+                text, keyboard = build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)
+                if ctx.should_answer_new_message_for_callback(callback):
+                    await callback.message.answer(text, reply_markup=keyboard)
+                else:
+                    await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+                await ctx.answer_callback_safe_once(callback)
+                return
+            result = await runtime.launch_campaign_now(
+                rule_id=rule_id,
+                admin_id=callback.from_user.id if callback.from_user else None,
+            )
+            text, keyboard = build_repost_campaign_launch_result_view(rule_id=rule_id, result=result)
+            if ctx.should_answer_new_message_for_callback(callback):
+                await callback.message.answer(text, reply_markup=keyboard)
+            else:
+                await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+            ctx.logger.info(
+                "REPOST_CAMPAIGN_LAUNCH_UI_DONE | rule_id=%s | ok=%s | run_id=%s",
+                rule_id,
+                result.ok,
+                (result.extra or {}).get("campaign_run_id"),
+            )
+        except Exception as exc:
+            ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            await ctx.answer_callback_safe(callback, "Не удалось запустить кампанию", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
 

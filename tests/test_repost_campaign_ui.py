@@ -224,10 +224,12 @@ def test_launch_readiness_view_no_banned_terms():
 
 
 def test_bot_has_launch_confirm_callback_and_logs():
-    source = Path("bot.py").read_text(encoding="utf-8")
-    assert "rule_repost_campaign_launch_confirm:" in source
-    assert "REPOST_CAMPAIGN_LAUNCH_PREFLIGHT_UI" in source
-    assert "REPOST_CAMPAIGN_LAUNCH_CONFIRM_STARTED" in source
+    handlers_source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    assert "rule_repost_campaign_launch_confirm:" in handlers_source
+    assert "REPOST_CAMPAIGN_LAUNCH_PREFLIGHT_UI" in handlers_source
+    assert "REPOST_CAMPAIGN_LAUNCH_CONFIRM_STARTED" in handlers_source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_confirm:"))' not in bot_source
 
 
 def test_bot_contains_campaign_check_loading_and_optional_page_parse():
@@ -839,10 +841,12 @@ def test_vip_features_view_uses_scheduled_posts_copy():
 
 
 def test_bot_launch_callback_opens_launch_mode_screen():
-    source = Path("bot.py").read_text(encoding="utf-8")
-    assert 'build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)' in source
-    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_now_preview:"))' in source
-    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_current:"))' in source
+    handlers_source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    assert 'build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)' in handlers_source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_now_preview:"))' in handlers_source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_current:"))' in bot_source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch:"))' not in bot_source
 
 from app.repost_campaign_ui import (
     build_vip_scheduled_posts_screen_view,
