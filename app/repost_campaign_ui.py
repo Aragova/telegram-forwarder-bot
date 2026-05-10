@@ -1342,7 +1342,7 @@ def build_vip_scheduled_posts_list_view(
     page: int = 0,
     page_size: int = 10,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    visible_posts = [post for post in posts if str(post.get("status") or "").strip().lower() in {"scheduled", "processing"}]
+    visible_posts = [post for post in posts if str(post.get("status") or "").strip().lower() in {"scheduled", "processing", "launched", "failed", "cancelled", "expired"}]
     visible_posts = [post for post in visible_posts if post.get("scheduled_at")]
     total = len(visible_posts)
     total_pages = max(1, (total + page_size - 1) // page_size)

@@ -947,17 +947,23 @@ def test_bot_has_all_vip_scheduled_callbacks_prefixes():
     ]:
         assert prefix in source
 
-def test_vip_scheduled_posts_list_view_shows_only_scheduled_posts():
+def test_vip_scheduled_posts_list_view_includes_allowed_statuses_and_excludes_draft_ready():
     posts = [
         {"id": 1, "status": "draft", "scheduled_at": None},
         {"id": 2, "status": "ready", "scheduled_at": None},
         {"id": 3, "status": "scheduled", "scheduled_at": "2026-05-10T15:00:00+00:00"},
+        {"id": 4, "status": "processing", "scheduled_at": "2026-05-10T16:00:00+00:00"},
+        {"id": 5, "status": "launched", "scheduled_at": "2026-05-10T17:00:00+00:00"},
+        {"id": 6, "status": "failed", "scheduled_at": "2026-05-10T18:00:00+00:00"},
+        {"id": 7, "status": "cancelled", "scheduled_at": "2026-05-10T19:00:00+00:00"},
+        {"id": 8, "status": "expired", "scheduled_at": "2026-05-10T20:00:00+00:00"},
     ]
     text, kb = build_vip_scheduled_posts_list_view(rule_id=1, posts=posts, page=0)
     callbacks = _callbacks_from_keyboard(kb)
     assert "rule_repost_campaign_scheduled_post_detail:1:1" not in callbacks
     assert "rule_repost_campaign_scheduled_post_detail:1:2" not in callbacks
-    assert any("rule_repost_campaign_scheduled_post_detail:1:3" in c for c in callbacks)
+    for post_id in (3, 4, 5, 6, 7, 8):
+        assert any(f"rule_repost_campaign_scheduled_post_detail:1:{post_id}" in c for c in callbacks)
     assert "Отложенный пост" in text or any("Отложенный пост" in x for x in _texts_from_keyboard(kb))
 
 
@@ -1012,9 +1018,10 @@ def test_bot_vip_handlers_use_ensure_rule_callback_access():
         "rule_repost_campaign_scheduled_post_check_rights:",
     ]
     for prefix in prefixes:
-        start = source.find(prefix)
+        marker = f'@dp.callback_query(lambda c: c.data.startswith("{prefix}"))'
+        start = source.find(marker)
         assert start != -1
-        body = source[start:start+2400]
+        body = source[start:start+3200]
         assert "ensure_rule_callback_access" in body
 
 def test_vip_scheduled_add_target_view():
@@ -1146,9 +1153,9 @@ def test_vip_scheduled_posts_list_view_has_no_filters():
         assert banned not in labels
     assert "➡️ Следующая" in labels
 
-def test_bot_vip_scheduled_list_handler_loads_only_scheduled_statuses():
+def test_bot_vip_scheduled_list_handler_loads_allowed_statuses():
     source = Path("bot.py").read_text(encoding="utf-8")
-    assert 'statuses=["scheduled", "processing"]' in source
+    assert 'statuses=["scheduled", "processing", "launched", "failed", "cancelled", "expired"]' in source
     handler_body = source[source.find("async def handle_rule_repost_campaign_scheduled_posts_list"):source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new:"))')]
     assert "status_filter" not in handler_body
 
@@ -1296,8 +1303,7 @@ def test_vip_scheduled_detail_buttons_for_scheduled():
 def test_vip_scheduled_detail_buttons_for_launched():
     _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "launched", "campaign_run_id": 8}})
     texts = _texts_from_keyboard(kb)
-    assert "📊 Открыть отчёт" in texts and "📋 Дублировать пост" in texts and "🚀 Отправить сейчас" not in texts
-    assert "📄 Открыть запуск" not in texts
+    assert texts == ["📊 Открыть отчёт", "📋 Дублировать пост", "⬅️ Назад"]
 
 def test_vip_scheduled_detail_buttons_for_terminal():
     _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "failed"}})
