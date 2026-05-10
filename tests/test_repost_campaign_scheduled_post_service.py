@@ -432,3 +432,58 @@ def test_vip_scheduled_post_process_due_posts_has_runtime_logs():
     assert "VIP_SCHEDULED_POST_DUE_CLAIMED" in source
     assert "VIP_SCHEDULED_POST_LAUNCH_STARTED" in source
     assert "VIP_SCHEDULED_POST_LAUNCH_FINISHED" in source
+
+
+def test_duplicate_post_copies_saved_post_show_seconds_and_targets_but_resets_runtime_fields():
+    service, repo = make_service()
+    sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.posts[sid].update({"saved_post_id": 11, "show_seconds": 3600, "scheduled_at": "2026-05-10T10:00:00+00:00", "campaign_run_id": 99, "attempt_count": 3})
+    repo.post_targets[sid] = [{"target_kind": "extra", "target_id": "-1001", "is_active": True}]
+    out = service.duplicate_post(scheduled_post_id=sid)
+    assert out.ok
+    nid = out.extra["scheduled_post_id"]
+    assert repo.posts[nid]["saved_post_id"] == 11
+    assert repo.posts[nid]["show_seconds"] == 3600
+    assert repo.posts[nid].get("scheduled_at") is None
+    assert repo.posts[nid].get("campaign_run_id") is None
+    assert repo.post_targets[nid][0]["target_id"] == "-1001"
+    assert any(x["event_type"] == "duplicated_from" for x in repo.events[nid])
+
+
+def test_send_now_rejects_terminal_statuses():
+    import asyncio
+    service, repo = make_service()
+    sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.posts[sid]["status"] = "launched"
+    out = asyncio.run(service.send_now(scheduled_post_id=sid))
+    assert not out.ok
+
+
+def test_send_now_blocks_active_placement():
+    import asyncio
+    service, repo = make_service(active=True)
+    sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.saved_posts[1] = {"id": 1, "title": "t", "content_json": {"kind": "text", "media_items": []}}
+    service.update_draft_saved_post(scheduled_post_id=sid, saved_post_id=1)
+    service.update_draft_show_seconds(scheduled_post_id=sid, show_seconds=60)
+    service.update_draft_scheduled_at(scheduled_post_id=sid, scheduled_at_utc=datetime.now(timezone.utc)+timedelta(minutes=2))
+    repo.post_targets[sid] = [{"id": 1, "target_id": "-1", "publish_status": "confirmed", "delete_status": "confirmed", "can_publish": True}]
+    out = asyncio.run(service.send_now(scheduled_post_id=sid))
+    assert not out.ok
+    assert "активно другое размещение" in (out.error_text or "")
+
+
+def test_send_now_launches_from_snapshot():
+    import asyncio
+    rt = FakeRuntimeLaunch(type('R',(),{'ok':True,'extra':{'campaign_run_id': 77},'error_text':None, 'to_dict': lambda self: {}})())
+    repo = FakeRepo(); repo.rules[1] = Rule(1); repo.saved_posts[7] = {"id": 7, "title": "x", "content_json": {"kind": "text", "media_items": []}}
+    sid = repo.create_campaign_scheduled_post_draft(rule_id=1)
+    repo.posts[sid].update({"saved_post_id": 7, "show_seconds": 123, "status": "ready"})
+    repo.post_targets[sid] = [{"target_id": "-1001", "target_kind": "main", "is_active": True}]
+    service = RepostCampaignScheduledPostService(repo=repo, campaign_runtime=rt)
+    out = asyncio.run(service.send_now(scheduled_post_id=sid))
+    assert out.ok
+    call = rt.calls[0]
+    assert call["saved_post_id"] == 7 and call["show_seconds"] == 123
+    assert call["targets_snapshot"][0]["target_id"] == "-1001"
+    assert call["scheduled_post_id"] == sid and call["run_type"] == "scheduled"

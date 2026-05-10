@@ -911,15 +911,15 @@ def test_vip_scheduled_detail_scheduled_has_premium_actions():
     labels = _texts_from_keyboard(kb)
     assert 'Статус: запланирован' in text
     assert '🚀 Отправить сейчас' in labels
-    assert '✏️ Изменить пост' in labels
-    assert '🗑 Удалить пост' in labels
+    assert '✏️ Изменить пост' not in labels
+    assert '🗑 Отменить пост' in labels
     assert '⬅️ Назад' in labels
 
 def test_vip_scheduled_post_detail_launched_has_run_buttons():
     _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={'post': {'id':123, 'status':'launched', 'campaign_run_id':55}})
     labels = _texts_from_keyboard(kb)
     assert '📄 Открыть запуск' in labels
-    assert '📊 Отчёт просмотров' in labels
+    assert '📊 Открыть отчёт' in labels
 
 def test_vip_scheduled_delete_confirm_uses_delete_not_cancel():
     text, kb = build_vip_scheduled_post_cancel_confirm_view(rule_id=1, scheduled_post={'id':123})
@@ -1279,3 +1279,43 @@ def test_bot_vip_scheduled_post_loop_uses_existing_builder():
     source = Path("bot.py").read_text(encoding="utf-8")
     assert "_build_repost_campaign_scheduled_post_service()" in source
     assert "scheduled_post_runtime = _build_repost_campaign_scheduled_post_service()" in source
+
+
+from app.repost_campaign_ui import build_vip_scheduled_post_detail_view
+
+def test_vip_scheduled_detail_buttons_for_draft():
+    _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "draft"}})
+    texts = _texts_from_keyboard(kb)
+    assert "✏️ Изменить пост" in texts and "🚀 Отправить сейчас" in texts and "📋 Дублировать пост" in texts and "🗑 Удалить пост" in texts
+
+def test_vip_scheduled_detail_buttons_for_scheduled():
+    _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "scheduled"}})
+    texts = _texts_from_keyboard(kb)
+    assert "✏️ Изменить пост" not in texts and "🗑 Отменить пост" in texts
+
+def test_vip_scheduled_detail_buttons_for_launched():
+    _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "launched", "campaign_run_id": 8}})
+    texts = _texts_from_keyboard(kb)
+    assert "📊 Открыть отчёт" in texts and "📋 Дублировать пост" in texts and "🚀 Отправить сейчас" not in texts
+
+def test_vip_scheduled_detail_buttons_for_terminal():
+    _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "failed"}})
+    texts = _texts_from_keyboard(kb)
+    assert "📋 Дублировать пост" in texts and "🚀 Отправить сейчас" not in texts
+
+def test_vip_scheduled_detail_shows_campaign_run_id_and_delete_status():
+    text, _ = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "launched", "campaign_run_id": 8}, "campaign_run": {"run": {"status": "sent", "delete_after_at": "2026-05-10T10:00:00+00:00"}, "summary": {"delete_pending": 1}}})
+    assert "campaign_run_id: 8" in text and "delete_after_at:" in text and "Удаление:" in text
+
+def test_bot_has_vip_scheduled_duplicate_handler():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "rule_repost_campaign_scheduled_post_duplicate:" in source
+
+def test_bot_send_now_is_not_coming_soon_stub():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "Скоро: отправка отложенного поста вручную" not in source
+    assert "service.send_now" in source
+
+def test_bot_edit_rejects_non_editable_statuses():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "Запланированный пост уже подтверждён" in source

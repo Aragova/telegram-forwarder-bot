@@ -1545,35 +1545,44 @@ def build_vip_scheduled_post_preview_view(*, rule_id:int, scheduled_post:dict, t
 
 def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tuple[str, InlineKeyboardMarkup]:
     post = details.get('post') or {}
-    targets = details.get('targets') or []
-    events = details.get('events') or []
     readiness = details.get('readiness') or {}
+    run = details.get('campaign_run') or {}
     sid = int(post.get('id') or 0)
-    status = format_vip_scheduled_post_status_text(post.get('status'))
-    text = (
-        f"🕒 Отложенный пост\n\nСтатус: {'запланирован' if str(post.get('status') or '') == 'scheduled' else status}\n"
-        f"Срок показа:\n⏳ {format_campaign_show_seconds_text(post.get('show_seconds'))}\n"
-        f"Публикация:\n📣 Каналов/групп: {len(targets)}\n"
-        f"✅ Готовы: {int(readiness.get('targets_ready_count') or 0)}\n"
-        f"⚠️ Требуют проверки: {int(readiness.get('targets_warning_count') or 0)}\n"
-        f"🔴 Заблокированы: {int(readiness.get('targets_blocked_count') or 0)}\n"
-        f"Запуск:\n🕒 {format_campaign_datetime_text(post.get('scheduled_at'), timezone_offset_hours=3)} UTC+3"
-    )
-    if events:
-        text += "\nИстория:\n" + "\n".join([f"• {str(e.get('event_type') or '').replace('_', ' ')}" for e in events[:3]])
     st = str(post.get('status') or 'draft')
+    status = "запланирован" if st == "scheduled" else format_vip_scheduled_post_status_text(st)
+    delete_after = run.get('run', {}).get('delete_after_at') if run else None
+    summary = run.get('summary') or {}
+    text = (
+        f"🕒 Отложенный пост\n\n"
+        f"Статус: {status}\n"
+        f"Запуск: 🕒 {format_campaign_datetime_text(post.get('scheduled_at'), timezone_offset_hours=3)} UTC+3\n"
+        f"Срок показа: ⏳ {format_campaign_show_seconds_text(post.get('show_seconds'))}\n"
+        f"campaign_run_id: {post.get('campaign_run_id') or '—'}\n"
+        f"Статус запуска: {format_campaign_run_status_text((run.get('run') or {}).get('status')) if run else '—'}\n"
+        f"delete_after_at: {format_campaign_datetime_text(delete_after, timezone_offset_hours=3) if delete_after else '—'} UTC+3\n"
+        f"Удаление: pending={int(summary.get('delete_pending') or 0)}, processing={int(summary.get('delete_processing') or 0)}, deleted={int(summary.get('delete_done') or 0)}, failed={int(summary.get('delete_failed') or 0)}\n"
+        f"Просмотры: статус={(run.get('views', {}) or {}).get('status') if run else '—'} · всего={int((run.get('views', {}) or {}).get('total_views') or 0)}"
+    )
+    if post.get('error_text'):
+        text += f"\nОшибка: {post.get('error_text')}"
     rows = []
-    if st in {'scheduled', 'processing'}:
-        rows += [
-            [InlineKeyboardButton(text='🚀 Отправить сейчас', callback_data=f'rule_repost_campaign_scheduled_post_send_now_confirm:{rule_id}:{sid}')],
-            [InlineKeyboardButton(text='✏️ Изменить пост', callback_data=f'rule_repost_campaign_scheduled_post_edit:{rule_id}:{sid}')],
-            [InlineKeyboardButton(text='🗑 Удалить пост', callback_data=f'rule_repost_campaign_scheduled_post_cancel_confirm:{rule_id}:{sid}')],
-        ]
+    if st in {'draft', 'ready'}:
+        rows += [[InlineKeyboardButton(text='🚀 Отправить сейчас', callback_data=f'rule_repost_campaign_scheduled_post_send_now_confirm:{rule_id}:{sid}')],[InlineKeyboardButton(text='✏️ Изменить пост', callback_data=f'rule_repost_campaign_scheduled_post_edit:{rule_id}:{sid}')],[InlineKeyboardButton(text='📋 Дублировать пост', callback_data=f'rule_repost_campaign_scheduled_post_duplicate:{rule_id}:{sid}')],[InlineKeyboardButton(text='🗑 Удалить пост', callback_data=f'rule_repost_campaign_scheduled_post_cancel_confirm:{rule_id}:{sid}')]]
+    elif st == 'scheduled':
+        rows += [[InlineKeyboardButton(text='🚀 Отправить сейчас', callback_data=f'rule_repost_campaign_scheduled_post_send_now_confirm:{rule_id}:{sid}')],[InlineKeyboardButton(text='📋 Дублировать пост', callback_data=f'rule_repost_campaign_scheduled_post_duplicate:{rule_id}:{sid}')],[InlineKeyboardButton(text='🗑 Отменить пост', callback_data=f'rule_repost_campaign_scheduled_post_cancel_confirm:{rule_id}:{sid}')]]
+    elif st == 'processing':
+        text += "\n\nПост сейчас запускается. Изменения недоступны."
+        rows += [[InlineKeyboardButton(text='📋 Дублировать пост', callback_data=f'rule_repost_campaign_scheduled_post_duplicate:{rule_id}:{sid}')]]
     elif st == 'launched':
         run_id = int(post.get('campaign_run_id') or 0)
-        rows += [[InlineKeyboardButton(text='📄 Открыть запуск', callback_data=f'rule_repost_campaign_history_detail:{rule_id}:{run_id}')],[InlineKeyboardButton(text='📊 Отчёт просмотров', callback_data=f'rule_repost_campaign_views_report:{rule_id}:{run_id}')]]
+        if run_id > 0:
+            rows += [
+                [InlineKeyboardButton(text='📄 Открыть запуск', callback_data=f'rule_repost_campaign_history_detail:{rule_id}:{run_id}')],
+                [InlineKeyboardButton(text='📊 Открыть отчёт', callback_data=f'rule_repost_campaign_run_details:{rule_id}:{run_id}')],
+            ]
+        rows += [[InlineKeyboardButton(text='📋 Дублировать пост', callback_data=f'rule_repost_campaign_scheduled_post_duplicate:{rule_id}:{sid}')]]
     else:
-        rows += [[InlineKeyboardButton(text='🔄 Обновить', callback_data=f'rule_repost_campaign_scheduled_post_detail:{rule_id}:{sid}')]]
+        rows += [[InlineKeyboardButton(text='📋 Дублировать пост', callback_data=f'rule_repost_campaign_scheduled_post_duplicate:{rule_id}:{sid}')]]
     rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_posts_list:{rule_id}:0')])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 

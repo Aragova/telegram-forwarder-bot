@@ -11591,7 +11591,11 @@ async def handle_vip_scheduled_post_send_now(callback: CallbackQuery):
     rule_id = int(rid)
     if not await ensure_rule_callback_access(callback, rule_id):
         return
-    await answer_callback_safe(callback, "Скоро: отправка отложенного поста вручную", show_alert=True)
+    service = _build_repost_campaign_scheduled_post_service()
+    result = await service.send_now(scheduled_post_id=int(sid), actor_id=callback.from_user.id if callback.from_user else None)
+    if not result.ok and result.error_text:
+        await answer_callback_safe(callback, result.error_text, show_alert=True)
+    await _open_vip_scheduled_post_detail_callback(callback=callback, rule_id=rule_id, scheduled_post_id=int(sid))
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_edit:"))
 async def handle_vip_scheduled_post_edit(callback: CallbackQuery):
@@ -11599,7 +11603,31 @@ async def handle_vip_scheduled_post_edit(callback: CallbackQuery):
     rule_id = int(rid)
     if not await ensure_rule_callback_access(callback, rule_id):
         return
-    await answer_callback_safe(callback, "Редактирование отложенного поста будет добавлено следующим обновлением", show_alert=True)
+    row = await run_db(db.get_campaign_scheduled_post, int(sid)) or {}
+    st = str(row.get("status") or "")
+    if st in {"draft", "ready"}:
+        await _open_vip_step_post(callback, rule_id, int(sid))
+        return
+    if st == "scheduled":
+        await answer_callback_safe(callback, "Запланированный пост уже подтверждён. Чтобы изменить его, отмените и создайте заново или используйте Дублировать.", show_alert=True)
+        return
+    await answer_callback_safe(callback, "Редактирование недоступно для текущего статуса.", show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_duplicate:"))
+async def handle_vip_scheduled_post_duplicate(callback: CallbackQuery):
+    _, rid, sid = (callback.data or "").split(":", 2)
+    rule_id = int(rid)
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    service = _build_repost_campaign_scheduled_post_service()
+    result = await run_db(service.duplicate_post, scheduled_post_id=int(sid), actor_id=callback.from_user.id if callback.from_user else None)
+    if not result.ok:
+        await answer_callback_safe(callback, result.error_text or "Ошибка дублирования", show_alert=True)
+        return
+    new_id = int((result.extra or {}).get("scheduled_post_id") or 0)
+    await answer_callback_safe_once(callback, "✅ Пост скопирован.\n\nОткройте копию и выберите время запуска.")
+    await _open_vip_scheduled_post_detail_callback(callback=callback, rule_id=rule_id, scheduled_post_id=new_id)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_cancel_confirm:"))
 async def handle_cancel_confirm(callback: CallbackQuery):

@@ -254,6 +254,50 @@ class RepostCampaignScheduledPostService:
         self.logger.info("VIP_SCHEDULED_POST_CANCELLED | scheduled_post_id=%s", scheduled_post_id)
         return RepostCampaignActionResult(ok=True, action="cancel_scheduled_post", rule_id=int(row.get("rule_id") or 0), extra={"scheduled_post_id": scheduled_post_id})
 
+
+    async def send_now(self, *, scheduled_post_id: int, actor_id: int | None = None) -> RepostCampaignActionResult:
+        row = self.repo.get_campaign_scheduled_post(scheduled_post_id)
+        if not row:
+            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=0, error_text="Запланированный пост не найден")
+        rule_id = int(row.get("rule_id") or 0)
+        status = str(row.get("status") or "")
+        if status not in {"draft", "ready", "scheduled"}:
+            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Отправка сейчас недоступна для текущего статуса")
+        readiness = self.build_readiness(scheduled_post_id=scheduled_post_id)
+        if not readiness.get("post_ready") or int(readiness.get("targets_total") or 0) <= 0 or int(readiness.get("show_seconds") or 0) <= 0:
+            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Запланированный пост не готов к запуску", extra={"readiness": readiness})
+        launch = self.campaign_runtime.build_campaign_launch_readiness(rule_id=rule_id)
+        if launch.get("active_placement"):
+            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Сейчас активно другое размещение. Удалите активный пост или дождитесь освобождения места.")
+        targets_snapshot = self.repo.list_campaign_scheduled_post_targets(scheduled_post_id, active_only=True) or []
+        self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_started", actor_id=actor_id)
+        result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(row.get("saved_post_id") or 0), show_seconds=int(row.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=scheduled_post_id, admin_id=actor_id)
+        run_id = int((result.extra or {}).get("campaign_run_id") or 0)
+        if result.ok and run_id:
+            self.repo.mark_campaign_scheduled_post_launched(scheduled_post_id, campaign_run_id=run_id)
+            self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_finished", actor_id=actor_id, status_to="launched", extra={"campaign_run_id": run_id})
+        elif run_id:
+            self.repo.mark_campaign_scheduled_post_failed(scheduled_post_id, error_text=result.error_text or "Не удалось запустить запланированный пост", campaign_run_id=run_id)
+            self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_failed", actor_id=actor_id, error_text=result.error_text, extra={"campaign_run_id": run_id})
+        else:
+            self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_failed", actor_id=actor_id, error_text=result.error_text)
+        return RepostCampaignActionResult(ok=result.ok, action="send_now_scheduled_post", rule_id=rule_id, error_text=result.error_text, extra={"scheduled_post_id": scheduled_post_id, "campaign_run_id": run_id or None, "runtime_result": result.to_dict() if hasattr(result, "to_dict") else {}})
+
+    def duplicate_post(self, *, scheduled_post_id: int, actor_id: int | None = None) -> RepostCampaignActionResult:
+        row = self.repo.get_campaign_scheduled_post(scheduled_post_id)
+        if not row:
+            return RepostCampaignActionResult(ok=False, action="duplicate_scheduled_post", rule_id=0, error_text="Запланированный пост не найден")
+        rule_id = int(row.get("rule_id") or 0)
+        new_id = self.repo.create_campaign_scheduled_post_draft(rule_id=rule_id, tenant_id=int(row.get("tenant_id") or 1), created_by=actor_id, title=row.get("title"))
+        if not new_id:
+            return RepostCampaignActionResult(ok=False, action="duplicate_scheduled_post", rule_id=rule_id, error_text="Не удалось создать копию поста")
+        self.repo.update_campaign_scheduled_post(new_id, saved_post_id=row.get("saved_post_id"), show_seconds=row.get("show_seconds"), post_snapshot=row.get("post_snapshot_json") or row.get("post_snapshot") or {}, metadata=row.get("metadata_json") or row.get("metadata") or {})
+        src_targets = self.repo.list_campaign_scheduled_post_targets(scheduled_post_id, active_only=True) or []
+        payload = [{"target_kind": t.get("target_kind") or "extra", "target_id": str(t.get("target_id") or ""), "target_thread_id": t.get("target_thread_id"), "target_title": t.get("target_title") or t.get("title"), "is_active": bool(t.get("is_active", True)), "metadata": t.get("metadata_json") or t.get("metadata") or {}} for t in src_targets]
+        self.repo.replace_campaign_scheduled_post_targets(scheduled_post_id=new_id, rule_id=rule_id, targets=payload)
+        self.repo.log_campaign_scheduled_post_event(scheduled_post_id=new_id, rule_id=rule_id, event_type="duplicated_from", actor_id=actor_id, extra={"source_scheduled_post_id": scheduled_post_id})
+        return RepostCampaignActionResult(ok=True, action="duplicate_scheduled_post", rule_id=rule_id, extra={"scheduled_post_id": new_id})
+
     async def check_targets(self, *, scheduled_post_id: int, active_only: bool = True, actor_id: int | None = None, limit: int = 50) -> RepostCampaignActionResult:
         row = self.repo.get_campaign_scheduled_post(scheduled_post_id) or {}
         rule_id = int(row.get("rule_id") or 0)
@@ -295,6 +339,7 @@ class RepostCampaignScheduledPostService:
             "checks": self.repo.list_campaign_scheduled_post_checks(scheduled_post_id, limit=50),
             "events": self.repo.list_campaign_scheduled_post_events(scheduled_post_id, limit=50),
             "readiness": post.get("readiness_snapshot_json") or post.get("readiness_snapshot") or {},
+            "campaign_run": self.campaign_runtime.get_campaign_run_details(rule_id=int(post.get("rule_id") or 0), run_id=int(post.get("campaign_run_id") or 0)) if post.get("campaign_run_id") else None,
         }
 
     def _build_due_launch_preflight(self, *, scheduled_post: dict[str, Any], targets_snapshot: list[dict[str, Any]]) -> dict[str, Any]:
