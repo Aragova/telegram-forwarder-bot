@@ -278,11 +278,9 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
                     await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
                 await ctx.answer_callback_safe_once(callback)
                 return
-            result = await ctx.run_db(
-                lambda: runtime.launch_campaign_now(
-                    rule_id=rule_id,
-                    admin_id=callback.from_user.id if callback.from_user else None,
-                )
+            result = await runtime.launch_campaign_now(
+                rule_id=rule_id,
+                admin_id=callback.from_user.id if callback.from_user else None,
             )
             text, keyboard = build_repost_campaign_launch_result_view(rule_id=rule_id, result=result)
             if ctx.should_answer_new_message_for_callback(callback):
