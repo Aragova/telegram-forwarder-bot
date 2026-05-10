@@ -125,14 +125,6 @@ async def _render_repost_campaign_post_menu(
         return False
 
 
-def _build_repost_campaign_post_preview_keyboard(rule_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Это рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-        [InlineKeyboardButton(text="🔁 Заменить пост", callback_data=f"rule_repost_campaign_post_add:{rule_id}")],
-        [InlineKeyboardButton(text="⬅️ Назад к рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-    ])
-
-
 def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandlersContext) -> None:
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_menu:"))
     async def handle_rule_repost_campaign_menu(callback: CallbackQuery):
