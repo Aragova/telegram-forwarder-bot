@@ -136,7 +136,10 @@ from app.saved_posts_service import (
     summarize_aiogram_message_for_saved_post,
     summarize_saved_post_entities,
 )
-from app.repost_campaign_context import RepostCampaignHandlersContext
+from app.repost_campaign_context import (
+    RepostCampaignHandlersContext,
+    build_repost_campaign_runtime as build_repost_campaign_runtime_from_context,
+)
 from app.repost_campaign_handlers import register_repost_campaign_handlers
 from app.repost_campaign_scheduled_post_handlers import register_repost_campaign_scheduled_post_handlers
 from app.repost_campaign_message_handlers import (
@@ -6835,6 +6838,11 @@ def _build_repost_campaign_handlers_context() -> RepostCampaignHandlersContext:
         invalidate_rule_card_cache=invalidate_rule_card_cache,
         reset_user_state=reset_user_state,
         should_answer_new_message_for_callback=_should_answer_new_message_for_callback,
+    )
+
+def _build_repost_campaign_runtime() -> RepostCampaignRuntimeService:
+    return build_repost_campaign_runtime_from_context(
+        _build_repost_campaign_handlers_context()
     )
 
 
