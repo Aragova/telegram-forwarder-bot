@@ -209,7 +209,7 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             return
         try:
             runtime = build_repost_campaign_runtime(ctx)
-            readiness = await ctx.run_db(lambda: runtime.get_campaign_readiness(rule_id=rule_id))
+            readiness = await ctx.run_db(lambda: runtime.build_campaign_launch_readiness(rule_id=rule_id))
             text, keyboard = build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)
             if ctx.should_answer_new_message_for_callback(callback):
                 await callback.message.answer(text, reply_markup=keyboard)
@@ -241,7 +241,7 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             return
         try:
             runtime = build_repost_campaign_runtime(ctx)
-            readiness = await ctx.run_db(lambda: runtime.get_campaign_readiness(rule_id=rule_id))
+            readiness = await ctx.run_db(lambda: runtime.build_campaign_launch_readiness(rule_id=rule_id))
             text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
             if ctx.should_answer_new_message_for_callback(callback):
                 await callback.message.answer(text, reply_markup=keyboard)
@@ -268,7 +268,7 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         try:
             ctx.logger.info("REPOST_CAMPAIGN_LAUNCH_CONFIRM_STARTED | rule_id=%s", rule_id)
             runtime = build_repost_campaign_runtime(ctx)
-            readiness = await ctx.run_db(lambda: runtime.get_campaign_readiness(rule_id=rule_id))
+            readiness = await ctx.run_db(lambda: runtime.build_campaign_launch_readiness(rule_id=rule_id))
             if not readiness.get("can_launch"):
                 ctx.logger.info("REPOST_CAMPAIGN_LAUNCH_CONFIRM_BLOCKED | rule_id=%s", rule_id)
                 text, keyboard = build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)
