@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 from aiogram import Dispatcher
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import CallbackQuery
 
 from app.repost_campaign_context import RepostCampaignHandlersContext, build_repost_campaign_runtime
 from app.repost_campaign_service import format_campaign_show_seconds_ru
 from app.repost_campaign_ui import (
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
+    build_repost_campaign_target_action_result_view,
+    build_repost_campaign_target_card_view,
+    build_repost_campaign_target_check_result_view,
+    build_repost_campaign_target_delete_confirm_view,
     build_repost_campaign_preview_delete_result_view,
     build_repost_campaign_target_preview_result_view,
+    build_repost_campaign_targets_check_loading_view,
+    build_repost_campaign_targets_check_result_view,
+    build_repost_campaign_targets_list_view,
+    build_repost_campaign_targets_menu_view,
     build_repost_campaign_vip_coming_soon_view,
     build_repost_campaign_vip_features_view,
 )
@@ -123,6 +131,34 @@ async def _render_repost_campaign_post_menu(
         ctx.logger.warning("REPOST_CAMPAIGN_SAVED_POST_MENU_FAILED | rule_id=%s | error=%s", rule_id, exc)
         await ctx.answer_callback_safe(callback, "Не удалось открыть меню рекламного поста", show_alert=True)
         return False
+
+
+async def _handle_repost_campaign_target_action(
+    callback: CallbackQuery,
+    ctx: RepostCampaignHandlersContext,
+    *,
+    action: str,
+    is_active: bool | None = None,
+) -> None:
+    if not await ctx.is_admin_callback(callback):
+        return
+    if not ctx.settings.repost_campaign_admin_test_enabled:
+        await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    _, rule_id_raw, row_id_raw = parts[:3]
+    page = int(parts[3]) if len(parts) > 3 else 0
+    rule_id = int(rule_id_raw)
+    row_id = int(row_id_raw)
+    runtime = build_repost_campaign_runtime(ctx)
+    if action == "remove":
+        result = await ctx.run_db(lambda: runtime.remove_campaign_target(rule_id=rule_id, target_row_id=row_id, admin_id=callback.from_user.id if callback.from_user else None))
+    else:
+        result = await ctx.run_db(lambda: runtime.set_campaign_target_active(rule_id=rule_id, target_row_id=row_id, is_active=bool(is_active), admin_id=callback.from_user.id if callback.from_user else None))
+    text, keyboard = build_repost_campaign_target_action_result_view(rule_id=rule_id, result=result, action=action, page=page)
+    await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    ctx.logger.info("REPOST_CAMPAIGN_TARGET_ACTION_UI_DONE | rule_id=%s | row_id=%s | action=%s | ok=%s", rule_id, row_id, action, result.get("ok"))
+    await ctx.answer_callback_safe_once(callback)
 
 
 def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandlersContext) -> None:
@@ -319,6 +355,138 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             f"Метод: {result.method}"
         )
         await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_targets:"))
+    async def handle_rule_repost_campaign_targets(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            rule_id = int(callback.data.split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        rule = await ctx.run_db(ctx.db.get_rule, rule_id)
+        if not rule:
+            await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+            return
+        if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "repost":
+            await ctx.answer_callback_safe(callback, "Рекламная кампания доступна только для режима репоста", show_alert=True)
+            return
+        summary = await ctx.run_db(ctx.db.get_rule_repost_campaign_summary, rule_id)
+        text, keyboard = build_repost_campaign_targets_menu_view(rule_id=rule_id, summary=summary or {})
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_targets_list:"))
+    async def handle_rule_repost_campaign_targets_list(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        parts = callback.data.split(":")
+        try:
+            rule_id = int(parts[1])
+            page = int(parts[2]) if len(parts) > 2 else 0
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        targets = await ctx.run_db(ctx.db.list_rule_repost_campaign_targets, rule_id, active_only=False)
+        text, keyboard = build_repost_campaign_targets_list_view(rule_id=rule_id, targets=targets or [], page=page)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_pause:"))
+    async def handle_repost_campaign_target_pause(callback: CallbackQuery):
+        await _handle_repost_campaign_target_action(callback, ctx, action="pause", is_active=False)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_resume:"))
+    async def handle_repost_campaign_target_resume(callback: CallbackQuery):
+        await _handle_repost_campaign_target_action(callback, ctx, action="resume", is_active=True)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_delete_confirm:"))
+    async def handle_repost_campaign_target_delete_confirm(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        parts = callback.data.split(":")
+        _, rule_id_raw, row_id_raw = parts[:3]
+        page = int(parts[3]) if len(parts) > 3 else 0
+        rule_id = int(rule_id_raw)
+        row_id = int(row_id_raw)
+        runtime = build_repost_campaign_runtime(ctx)
+        target = await ctx.run_db(lambda: runtime.get_campaign_target(rule_id=rule_id, target_row_id=row_id))
+        text, keyboard = build_repost_campaign_target_delete_confirm_view(rule_id=rule_id, target=target, page=page)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_card:"))
+    async def handle_rule_repost_campaign_target_card(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        parts = callback.data.split(":")
+        try:
+            rule_id = int(parts[1])
+            target_row_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 else 0
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        runtime = build_repost_campaign_runtime(ctx)
+        target = await ctx.run_db(runtime.get_campaign_target, rule_id=rule_id, target_row_id=target_row_id)
+        text, keyboard = build_repost_campaign_target_card_view(rule_id=rule_id, target=target, page=page)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_delete:"))
+    async def handle_repost_campaign_target_delete(callback: CallbackQuery):
+        await _handle_repost_campaign_target_action(callback, ctx, action="remove")
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_check:"))
+    async def handle_rule_repost_campaign_check(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            rule_id = int(callback.data.split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        try:
+            runtime = build_repost_campaign_runtime(ctx)
+            targets = await ctx.run_db(ctx.db.list_rule_repost_campaign_targets, rule_id, active_only=False)
+            loading_text, loading_keyboard = build_repost_campaign_targets_check_loading_view(rule_id=rule_id, targets_count=len(targets or []))
+            await ctx.edit_message_text_safe(message=callback.message, text=loading_text, reply_markup=loading_keyboard)
+            result = await runtime.check_campaign_targets(rule_id=rule_id, active_only=False, admin_id=callback.from_user.id if callback.from_user else None)
+            text, keyboard = build_repost_campaign_targets_check_result_view(rule_id=rule_id, result=result)
+            await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+            await ctx.answer_callback_safe_once(callback)
+        except Exception as exc:
+            ctx.logger.exception("REPOST_CAMPAIGN_TARGET_CHECK_BATCH_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            await ctx.answer_callback_safe(callback, "Не удалось выполнить проверку прав каналов/групп", show_alert=True)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_target_check:"))
+    async def handle_rule_repost_campaign_target_check(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            parts = callback.data.split(":")
+            rule_id = int(parts[1])
+            row_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 else 0
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        try:
+            runtime = build_repost_campaign_runtime(ctx)
+            result = await runtime.check_campaign_target(rule_id=rule_id, target_row_id=row_id, admin_id=callback.from_user.id if callback.from_user else None)
+            text, keyboard = build_repost_campaign_target_check_result_view(rule_id=rule_id, result=result, page=page)
+            await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+            await ctx.answer_callback_safe_once(callback)
+        except Exception as exc:
+            ctx.logger.exception("REPOST_CAMPAIGN_TARGET_CHECK_UI_FAILED | rule_id=%s | row_id=%s | error=%s", rule_id, row_id, exc)
+            await ctx.answer_callback_safe(callback, "Не удалось выполнить проверку канала/группы", show_alert=True)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_vip_features:"))
     async def handle_rule_repost_campaign_vip_features(callback: CallbackQuery):
