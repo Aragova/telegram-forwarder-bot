@@ -1018,9 +1018,10 @@ def test_bot_vip_handlers_use_ensure_rule_callback_access():
         "rule_repost_campaign_scheduled_post_check_rights:",
     ]
     for prefix in prefixes:
-        start = source.find(prefix)
+        marker = f'@dp.callback_query(lambda c: c.data.startswith("{prefix}"))'
+        start = source.find(marker)
         assert start != -1
-        body = source[start:start+2400]
+        body = source[start:start+3200]
         assert "ensure_rule_callback_access" in body
 
 def test_vip_scheduled_add_target_view():
