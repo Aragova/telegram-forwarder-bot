@@ -84,6 +84,16 @@ class FakeRepo:
         self.delay_calls.append((scheduled_post_id, next_retry_at, error_text)); return True
     def delay_campaign_scheduled_post_until(self, scheduled_post_id, *, next_retry_at, error_text=None):
         self.delay_calls.append((scheduled_post_id, next_retry_at, error_text, "until")); return True
+    def reset_campaign_scheduled_post_after_send_now_failure(self, scheduled_post_id, *, status, error_text):
+        row=self.posts.get(scheduled_post_id)
+        if not row:
+            return False
+        row["status"] = status
+        row["error_text"] = error_text
+        row["locked_by"] = None
+        row["locked_at"] = None
+        row["lock_until"] = None
+        return True
 
 
 class FakeCampaignRuntime:
@@ -532,3 +542,17 @@ def test_send_now_cannot_double_launch_same_scheduled_post():
     out2 = asyncio.run(service.send_now(scheduled_post_id=sid))
     assert out1.ok and not out2.ok
     assert len(rt.calls) == 1
+
+
+def test_send_now_failure_without_run_id_resets_status_and_lock():
+    import asyncio
+    rt = FakeRuntimeLaunch(type('R',(),{'ok':False,'extra':{},'error_text':'boom', 'to_dict': lambda self: {}})())
+    repo = FakeRepo(); repo.rules[1] = Rule(1); repo.saved_posts[7] = {"id": 7, "title": "x", "content_json": {"kind": "text", "media_items": []}}
+    sid = repo.create_campaign_scheduled_post_draft(rule_id=1)
+    repo.posts[sid].update({"saved_post_id": 7, "show_seconds": 123, "status": "scheduled"})
+    repo.post_targets[sid] = [{"target_id": "-1001", "target_kind": "main", "is_active": True}]
+    service = RepostCampaignScheduledPostService(repo=repo, campaign_runtime=rt)
+    out = asyncio.run(service.send_now(scheduled_post_id=sid))
+    assert not out.ok
+    assert repo.posts[sid]["status"] == "scheduled"
+    assert repo.posts[sid].get("locked_by") is None

@@ -284,7 +284,11 @@ class RepostCampaignScheduledPostService:
             self.repo.mark_campaign_scheduled_post_failed(scheduled_post_id, error_text=result.error_text or "Не удалось запустить запланированный пост", campaign_run_id=run_id)
             self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_failed", actor_id=actor_id, error_text=result.error_text, extra={"campaign_run_id": run_id})
         else:
-            self.repo.update_campaign_scheduled_post(scheduled_post_id, status=status, error_text=result.error_text or "Временная ошибка запуска")
+            self.repo.reset_campaign_scheduled_post_after_send_now_failure(
+                scheduled_post_id,
+                status=status,
+                error_text=result.error_text or "Временная ошибка запуска",
+            )
             self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_failed", actor_id=actor_id, error_text=result.error_text)
         return RepostCampaignActionResult(ok=result.ok, action="send_now_scheduled_post", rule_id=rule_id, error_text=result.error_text, extra={"scheduled_post_id": scheduled_post_id, "campaign_run_id": run_id or None, "runtime_result": result.to_dict() if hasattr(result, "to_dict") else {}})
 

@@ -7545,6 +7545,29 @@ class PostgresRepository(RepositoryProtocol):
             "status IN ('draft','ready','scheduled') AND campaign_run_id IS NULL",
             "VIP_SCHEDULED_POST_MARKED_PROCESSING",
         )
+    def reset_campaign_scheduled_post_after_send_now_failure(self, scheduled_post_id: int, *, status: str, error_text: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_scheduled_posts
+                    SET status=%s,
+                        error_text=%s,
+                        locked_by=NULL,
+                        locked_at=NULL,
+                        lock_until=NULL,
+                        updated_at=NOW()
+                    WHERE id=%s
+                      AND status='processing'
+                      AND campaign_run_id IS NULL
+                    """,
+                    (status, error_text, int(scheduled_post_id)),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+        if ok:
+            logger.info("VIP_SCHEDULED_POST_RESET_AFTER_SEND_NOW_FAILURE id=%s", scheduled_post_id)
+        return ok
     def delay_campaign_scheduled_post_retry(self, scheduled_post_id: int, *, next_retry_at: str, error_text: str | None = None) -> bool:
         return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='scheduled', attempt_count=attempt_count+1, next_retry_at=%s, error_text=%s, locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (next_retry_at, error_text), "status='processing'", None)
     def _update_campaign_scheduled_post_status(self, scheduled_post_id: int, set_sql: str, params: tuple[Any, ...], where_sql: str, log_code: str | None) -> bool:
