@@ -1408,3 +1408,29 @@ def test_postgres_mark_processing_does_not_use_nonexistent_columns():
     assert "started_processing_at" not in block
     assert "launched_by" not in block
     assert "locked_by" in block and "locked_at=NOW()" in block and "lock_until=NOW()" in block
+
+
+def test_a1_callbacks_registered_in_repost_campaign_handlers():
+    source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
+    for marker in [
+        'rule_repost_campaign_post_menu:',
+        'rule_repost_campaign_post_preview:',
+        'rule_repost_campaign_preview_delete:',
+        'rule_repost_campaign_post_unlink:',
+        'rule_repost_campaign_test_send:',
+    ]:
+        assert marker in source
+
+
+def test_a1_legacy_decorators_removed_from_bot_py():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_menu:"))' not in source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_preview:"))' not in source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_preview_delete:"))' not in source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_unlink:"))' not in source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_test_send:"))' not in source
+
+
+def test_no_callback_data_mutation_in_repost_campaign_handlers():
+    source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
+    assert "callback.data =" not in source
