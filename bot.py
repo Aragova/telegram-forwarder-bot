@@ -143,6 +143,13 @@ from app.saved_posts_service import (
     summarize_aiogram_message_for_saved_post,
     summarize_saved_post_entities,
 )
+from app.repost_campaign_context import RepostCampaignHandlersContext
+from app.repost_campaign_handlers import register_repost_campaign_handlers
+from app.repost_campaign_scheduled_post_handlers import register_repost_campaign_scheduled_post_handlers
+from app.repost_campaign_message_handlers import (
+    handle_repost_campaign_stateful_private_input,
+    register_repost_campaign_message_handlers,
+)
 from app.saved_post_renderer import SavedPostRenderer
 from app.saved_post_album_service import SavedPostAlbumCaptureBuffer
 from app.repost_campaign_runtime_service import RepostCampaignRuntimeService
@@ -6947,6 +6954,28 @@ def _should_answer_new_message_for_callback(callback: CallbackQuery) -> bool:
     return not bool(getattr(message, "text", None))
 
 
+def _build_repost_campaign_handlers_context() -> RepostCampaignHandlersContext:
+    return RepostCampaignHandlersContext(
+        db=db,
+        settings=settings,
+        logger=logger,
+        user_states=user_states,
+        saved_post_album_buffer=saved_post_album_buffer,
+        run_db=run_db,
+        get_bot=lambda: bot,
+        get_telethon_client=lambda: telethon_client,
+        ensure_rule_callback_access=ensure_rule_callback_access,
+        is_admin_callback=is_admin_callback,
+        answer_callback_safe=answer_callback_safe,
+        answer_callback_safe_once=answer_callback_safe_once,
+        edit_message_text_safe=edit_message_text_safe,
+        send_message_safe=send_message_safe,
+        invalidate_rule_card_cache=invalidate_rule_card_cache,
+        reset_user_state=reset_user_state,
+        should_answer_new_message_for_callback=_should_answer_new_message_for_callback,
+    )
+
+
 async def _render_repost_campaign_post_menu(
     callback: CallbackQuery,
     rule_id: int,
@@ -9025,6 +9054,9 @@ async def handle_stateful_private_inputs(message: Message):
 
     action = state.get("action")
     text = (message.text or "").strip()
+
+    if await handle_repost_campaign_stateful_private_input(campaign_handlers_ctx, message, state, text):
+        return
 
     if await _handle_vip_scheduled_post_material_message(message):
         return
@@ -11789,6 +11821,10 @@ def _parse_args() -> argparse.Namespace:
 
 _register_admin_handlers()
 _register_user_saas_handlers()
+campaign_handlers_ctx = _build_repost_campaign_handlers_context()
+register_repost_campaign_handlers(dp, campaign_handlers_ctx)
+register_repost_campaign_scheduled_post_handlers(dp, campaign_handlers_ctx)
+register_repost_campaign_message_handlers(dp, campaign_handlers_ctx)
 
 
 if __name__ == "__main__":
