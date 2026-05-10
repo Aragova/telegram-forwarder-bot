@@ -261,14 +261,18 @@ class RepostCampaignScheduledPostService:
             return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=0, error_text="Запланированный пост не найден")
         rule_id = int(row.get("rule_id") or 0)
         status = str(row.get("status") or "")
-        if status not in {"draft", "ready", "scheduled"}:
+        if row.get("campaign_run_id"):
+            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Пост уже запускался")
+        if status in {"processing", "launched"} or status not in {"draft", "ready", "scheduled"}:
             return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Отправка сейчас недоступна для текущего статуса")
         readiness = self.build_readiness(scheduled_post_id=scheduled_post_id)
         if not readiness.get("post_ready") or int(readiness.get("targets_total") or 0) <= 0 or int(readiness.get("show_seconds") or 0) <= 0:
             return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Запланированный пост не готов к запуску", extra={"readiness": readiness})
         launch = self.campaign_runtime.build_campaign_launch_readiness(rule_id=rule_id)
-        if launch.get("active_placement"):
-            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Сейчас активно другое размещение. Удалите активный пост или дождитесь освобождения места.")
+        if launch.get("active_placement") or int(launch.get("delete_failed") or 0) > 0:
+            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Сейчас активно другое размещение или есть ошибки удаления. Удалите активный пост и завершите проблемные удаления.")
+        if not self.repo.mark_campaign_scheduled_post_processing(scheduled_post_id, actor_id=actor_id):
+            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Пост уже обрабатывается или запускался")
         targets_snapshot = self.repo.list_campaign_scheduled_post_targets(scheduled_post_id, active_only=True) or []
         self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_started", actor_id=actor_id)
         result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(row.get("saved_post_id") or 0), show_seconds=int(row.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=scheduled_post_id, admin_id=actor_id)
@@ -280,6 +284,7 @@ class RepostCampaignScheduledPostService:
             self.repo.mark_campaign_scheduled_post_failed(scheduled_post_id, error_text=result.error_text or "Не удалось запустить запланированный пост", campaign_run_id=run_id)
             self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_failed", actor_id=actor_id, error_text=result.error_text, extra={"campaign_run_id": run_id})
         else:
+            self.repo.update_campaign_scheduled_post(scheduled_post_id, status=status, error_text=result.error_text or "Временная ошибка запуска")
             self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_failed", actor_id=actor_id, error_text=result.error_text)
         return RepostCampaignActionResult(ok=result.ok, action="send_now_scheduled_post", rule_id=rule_id, error_text=result.error_text, extra={"scheduled_post_id": scheduled_post_id, "campaign_run_id": run_id or None, "runtime_result": result.to_dict() if hasattr(result, "to_dict") else {}})
 

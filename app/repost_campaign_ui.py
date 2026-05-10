@@ -1550,8 +1550,11 @@ def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tupl
     sid = int(post.get('id') or 0)
     st = str(post.get('status') or 'draft')
     status = "запланирован" if st == "scheduled" else format_vip_scheduled_post_status_text(st)
-    delete_after = run.get('run', {}).get('delete_after_at') if run else None
+    messages = run.get("messages") or []
+    delete_after_values = [m.get("delete_after_at") for m in messages if m.get("delete_after_at")]
+    delete_after = max(delete_after_values) if delete_after_values else None
     summary = run.get('summary') or {}
+    delete_error_text = next((str(m.get("delete_error_text") or "") for m in messages if str(m.get("delete_status") or "") == "failed" and m.get("delete_error_text")), "")
     text = (
         f"🕒 Отложенный пост\n\n"
         f"Статус: {status}\n"
@@ -1565,6 +1568,8 @@ def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tupl
     )
     if post.get('error_text'):
         text += f"\nОшибка: {post.get('error_text')}"
+    if delete_error_text:
+        text += f"\nОшибка удаления: {delete_error_text}"
     rows = []
     if st in {'draft', 'ready'}:
         rows += [[InlineKeyboardButton(text='🚀 Отправить сейчас', callback_data=f'rule_repost_campaign_scheduled_post_send_now_confirm:{rule_id}:{sid}')],[InlineKeyboardButton(text='✏️ Изменить пост', callback_data=f'rule_repost_campaign_scheduled_post_edit:{rule_id}:{sid}')],[InlineKeyboardButton(text='📋 Дублировать пост', callback_data=f'rule_repost_campaign_scheduled_post_duplicate:{rule_id}:{sid}')],[InlineKeyboardButton(text='🗑 Удалить пост', callback_data=f'rule_repost_campaign_scheduled_post_cancel_confirm:{rule_id}:{sid}')]]
@@ -1578,7 +1583,7 @@ def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tupl
         if run_id > 0:
             rows += [
                 [InlineKeyboardButton(text='📄 Открыть запуск', callback_data=f'rule_repost_campaign_history_detail:{rule_id}:{run_id}')],
-                [InlineKeyboardButton(text='📊 Открыть отчёт', callback_data=f'rule_repost_campaign_run_details:{rule_id}:{run_id}')],
+                [InlineKeyboardButton(text='📊 Открыть отчёт', callback_data=f'rule_repost_campaign_views_report:{rule_id}:{run_id}')],
             ]
         rows += [[InlineKeyboardButton(text='📋 Дублировать пост', callback_data=f'rule_repost_campaign_scheduled_post_duplicate:{rule_id}:{sid}')]]
     else:
