@@ -32,15 +32,31 @@ class RepostCampaignHandlersContext:
 
 
 def build_repost_campaign_runtime(ctx: RepostCampaignHandlersContext) -> RepostCampaignRuntimeService:
-    renderer = SavedPostRenderer(db=ctx.db, bot=ctx.get_bot(), telethon_client=ctx.get_telethon_client(), logger_=ctx.logger)
-    deleter = RepostCampaignDeleteService(repo=ctx.db, logger_=ctx.logger)
-    target_checker = RepostCampaignTargetCheckService(telethon_client=ctx.get_telethon_client(), logger_=ctx.logger)
+    bot = ctx.get_bot()
+    telethon_client = ctx.get_telethon_client()
+
+    renderer = SavedPostRenderer(
+        bot=bot,
+        telethon_client=telethon_client,
+        temp_dir=getattr(ctx.settings, "temp_dir", "media/temp"),
+        logger_=ctx.logger,
+    )
+    deleter = RepostCampaignDeleteService(
+        bot=bot,
+        telethon_client=telethon_client,
+        logger_=ctx.logger,
+    )
+    target_checker = RepostCampaignTargetCheckService(
+        telethon_client=telethon_client,
+        bot=bot,
+        logger_=ctx.logger,
+    )
     return RepostCampaignRuntimeService(
         repo=ctx.db,
         renderer=renderer,
         deleter=deleter,
         target_checker=target_checker,
-        telethon_client=ctx.get_telethon_client(),
+        telethon_client=telethon_client,
         logger_=ctx.logger,
     )
 
