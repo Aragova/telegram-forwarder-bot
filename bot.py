@@ -168,17 +168,6 @@ from app.user_handlers import (
     register_user_rule_handlers,
 )
 
-# BLOCK A2 markers (callbacks moved to app/repost_campaign_handlers.py):
-# rule_repost_campaign_check:
-# rule_repost_campaign_targets_list:
-# rule_repost_campaign_target_card:
-# rule_repost_campaign_target_pause:
-# rule_repost_campaign_target_resume:
-# rule_repost_campaign_target_check:
-# rule_repost_campaign_target_delete_confirm:
-# rule_repost_campaign_target_delete:
-# build_repost_campaign_targets_check_loading_view
-# build_repost_campaign_target_card_view
 from app.admin_handlers import (
     AdminHandlersContext,
     register_admin_menu_handlers,

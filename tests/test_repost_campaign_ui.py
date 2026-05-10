@@ -41,13 +41,14 @@ def _callbacks_from_keyboard(keyboard):
 
 
 def test_bot_no_legacy_target_check_stub():
-    source = Path("bot.py").read_text(encoding="utf-8")
-    assert "Полная проверка прав публикации и удаления будет добавлена отдельным шагом" not in source
-    assert "rule_repost_campaign_check:" in source
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    handlers_source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
+    assert "Полная проверка прав публикации и удаления будет добавлена отдельным шагом" not in bot_source
+    assert "rule_repost_campaign_check:" in handlers_source
 
-    assert "result = runtime.check_campaign_targets(" not in source
-    assert "auto_check_result = runtime.check_campaign_targets(" not in source
-    assert "result = runtime.check_campaign_target(" not in source
+    assert "result = runtime.check_campaign_targets(" not in bot_source
+    assert "auto_check_result = runtime.check_campaign_targets(" not in bot_source
+    assert "result = runtime.check_campaign_target(" not in bot_source
 
 
 def test_bot_campaign_check_calls_are_awaited_ast():
@@ -230,7 +231,7 @@ def test_bot_has_launch_confirm_callback_and_logs():
 
 
 def test_bot_contains_campaign_check_loading_and_optional_page_parse():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
     assert "build_repost_campaign_targets_check_loading_view" in source
     assert "rule_repost_campaign_target_check:" in source
     assert "rule_repost_campaign_check:" in source
@@ -618,7 +619,7 @@ def test_target_delete_confirm_not_found_keeps_page_in_callback():
 
 
 def test_bot_has_campaign_target_callbacks_and_card_import():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
     for cb in [
         "rule_repost_campaign_target_card:",
         "rule_repost_campaign_targets_list:",

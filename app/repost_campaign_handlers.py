@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aiogram import Dispatcher
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import CallbackQuery
 
 from app.repost_campaign_context import RepostCampaignHandlersContext, build_repost_campaign_runtime
 from app.repost_campaign_service import format_campaign_show_seconds_ru
