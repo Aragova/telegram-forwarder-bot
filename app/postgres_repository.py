@@ -7537,10 +7537,11 @@ class PostgresRepository(RepositoryProtocol):
     def mark_campaign_scheduled_post_failed(self, scheduled_post_id: int, *, error_text: str, campaign_run_id: int | None = None) -> bool:
         return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='failed', failed_at=NOW(), error_text=%s, campaign_run_id=COALESCE(%s, campaign_run_id), locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (error_text, campaign_run_id), "status IN ('scheduled','processing')", "VIP_SCHEDULED_POST_MARKED_FAILED")
     def mark_campaign_scheduled_post_processing(self, scheduled_post_id: int, *, actor_id: int | None = None) -> bool:
+        lock_owner = f"send-now:{actor_id}" if actor_id is not None else "send-now"
         return self._update_campaign_scheduled_post_status(
             scheduled_post_id,
-            "status='processing', started_processing_at=NOW(), launched_by=COALESCE(%s, launched_by), updated_at=NOW()",
-            (actor_id,),
+            "status='processing', locked_by=%s, locked_at=NOW(), lock_until=NOW() + INTERVAL '5 minutes', updated_at=NOW()",
+            (lock_owner,),
             "status IN ('draft','ready','scheduled') AND campaign_run_id IS NULL",
             "VIP_SCHEDULED_POST_MARKED_PROCESSING",
         )

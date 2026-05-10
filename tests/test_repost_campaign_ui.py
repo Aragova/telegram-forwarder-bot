@@ -1329,3 +1329,13 @@ def test_vip_scheduled_detail_uses_delete_after_at_from_messages_not_run():
 def test_report_button_callback_exists_in_bot_py():
     source = Path("bot.py").read_text(encoding="utf-8")
     assert "rule_repost_campaign_views_report:" in source
+
+
+def test_postgres_mark_processing_does_not_use_nonexistent_columns():
+    source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+    block_start = source.index("def mark_campaign_scheduled_post_processing")
+    block_end = source.index("def delay_campaign_scheduled_post_retry", block_start)
+    block = source[block_start:block_end]
+    assert "started_processing_at" not in block
+    assert "launched_by" not in block
+    assert "locked_by" in block and "locked_at=NOW()" in block and "lock_until=NOW()" in block
