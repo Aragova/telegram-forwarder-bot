@@ -7120,7 +7120,11 @@ async def handle_rule_repost_campaign_run_delete_now(callback: CallbackQuery):
     loading_text, loading_kb = build_repost_campaign_run_delete_loading_view(rule_id=rule_id, run_id=run_id)
     await edit_message_text_safe(message=callback.message, text=loading_text, reply_markup=loading_kb)
     runtime = _build_repost_campaign_runtime()
-    result = await run_db(lambda: runtime.delete_campaign_run_now(rule_id=rule_id, run_id=run_id, admin_id=callback.from_user.id if callback.from_user else None))
+    result = await runtime.delete_campaign_run_now(
+        rule_id=rule_id,
+        run_id=run_id,
+        admin_id=callback.from_user.id if callback.from_user else None,
+    )
     result_text, result_kb = build_repost_campaign_run_delete_result_view(rule_id=rule_id, run_id=run_id, result=result)
     await edit_message_text_safe(message=callback.message, text=result_text, reply_markup=result_kb)
 
