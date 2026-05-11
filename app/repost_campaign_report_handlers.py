@@ -17,6 +17,7 @@ from app.repost_campaign_export_service import (
     build_campaign_run_report_xlsx,
 )
 from app.repost_campaign_ui import (
+    build_repost_campaign_delete_result_view,
     build_repost_campaign_post_channels_stats_view,
     build_repost_campaign_post_stats_loading_view,
     build_repost_campaign_post_stats_view,
@@ -221,6 +222,89 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
         except Exception as exc:
             ctx.logger.exception("REPOST_CAMPAIGN_POST_CHANNELS_STATS_UI_FAILED | rule_id=%s | saved_post_id=%s | offset=%s | error=%s", rule_id, saved_post_id, offset, exc)
             await ctx.answer_callback_safe(callback, "Не удалось открыть статистику по каналам", show_alert=True)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_use:"))
+    async def handle_rule_repost_campaign_post_use(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        _, rule_id_raw, saved_post_id_raw = callback.data.split(":", 2)
+        rule_id = int(rule_id_raw)
+        saved_post_id = int(saved_post_id_raw)
+        runtime = build_repost_campaign_runtime(ctx)
+        result = await ctx.run_db(
+            lambda: runtime.select_campaign_saved_post_from_library(
+                rule_id=rule_id,
+                saved_post_id=saved_post_id,
+                admin_id=callback.from_user.id if callback.from_user else None,
+            )
+        )
+        if result.get("ok"):
+            text = (
+                "✅ Пост выбран\n\n"
+                "Этот рекламный пост теперь используется в кампании.\n\n"
+                "Перед запуском ViMi ещё раз проверит:\n"
+                "• каналы/группы;\n"
+                "• время показа;\n"
+                "• права публикации.\n\n"
+                "Запуск не выполнен автоматически."
+            )
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🚀 Проверить и запустить", callback_data=f"rule_repost_campaign_launch:{rule_id}")],
+                    [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+                    [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+                ]
+            )
+        else:
+            text = f"❌ {result.get('error_text') or 'Не удалось выбрать пост'}"
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")]]
+            )
+        ctx.logger.info("REPOST_CAMPAIGN_POST_USE_FROM_LIBRARY | rule_id=%s | saved_post_id=%s | ok=%s", rule_id, saved_post_id, bool(result.get("ok")))
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_delete_message:"))
+    async def handle_rule_repost_campaign_delete_message(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            _, rule_id_raw, run_id_raw, run_message_id_raw = callback.data.split(":", 3)
+            rule_id = int(rule_id_raw)
+            run_id = int(run_id_raw)
+            run_message_id = int(run_message_id_raw)
+            runtime = build_repost_campaign_runtime(ctx)
+            result = await runtime.delete_campaign_run_message_now(
+                rule_id=rule_id,
+                run_id=run_id,
+                run_message_id=run_message_id,
+                admin_id=callback.from_user.id if callback.from_user else None,
+            )
+            text, keyboard = build_repost_campaign_delete_result_view(rule_id=rule_id, result=result)
+            await ctx.answer_callback_safe_once(callback)
+            if ctx.should_answer_new_message_for_callback(callback):
+                await ctx.send_message_safe(chat_id=callback.from_user.id, text=text, reply_markup=keyboard)
+            else:
+                await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+            ctx.logger.info(
+                "REPOST_CAMPAIGN_MANUAL_DELETE_UI_DONE | rule_id=%s | run_id=%s | run_message_id=%s | ok=%s",
+                rule_id,
+                run_id,
+                run_message_id,
+                result.ok,
+            )
+        except Exception as exc:
+            ctx.logger.exception(
+                "REPOST_CAMPAIGN_MANUAL_DELETE_UI_FAILED | rule_id=%s | run_id=%s | run_message_id=%s | error=%s",
+                callback.data,
+                callback.data,
+                callback.data,
+                exc,
+            )
+            await ctx.answer_callback_safe(callback, "Не удалось выполнить удаление публикации", show_alert=True)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_export_csv:"))
     async def handle_rule_repost_campaign_views_export_csv(callback: CallbackQuery):
