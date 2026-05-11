@@ -1451,3 +1451,26 @@ def test_a1_legacy_decorators_removed_from_bot_py():
 def test_no_callback_data_mutation_in_repost_campaign_handlers():
     source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
     assert "callback.data =" not in source
+
+
+def test_a3_delete_run_callbacks_moved_to_report_handlers():
+    source = Path("app/repost_campaign_report_handlers.py").read_text(encoding="utf-8")
+    assert 'rule_repost_campaign_run_delete_confirm:' in source
+    assert 'rule_repost_campaign_run_delete_now:' in source
+
+
+def test_a3_delete_run_callbacks_removed_from_bot_decorators():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_run_delete_confirm:"))' not in source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_run_delete_now:"))' not in source
+
+
+def test_a3_delete_run_now_uses_direct_await_without_run_db_wrapper():
+    source = Path("app/repost_campaign_report_handlers.py").read_text(encoding="utf-8")
+    assert 'await runtime.delete_campaign_run_now(' in source
+    assert 'ctx.run_db(lambda: runtime.delete_campaign_run_now' not in source
+
+
+def test_a3_no_callback_data_mutation_in_report_handlers():
+    source = Path("app/repost_campaign_report_handlers.py").read_text(encoding="utf-8")
+    assert 'callback.data =' not in source
