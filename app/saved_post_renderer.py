@@ -146,6 +146,26 @@ class SavedPostRenderer:
                 premium_required,
             )
             return result
+        except SavedPostSentUnverifiedError as exc:
+            self.logger.warning(
+                "SAVED_POST_RENDER_SEND_UNVERIFIED | chat_id=%s | kind=%s | method=%s | target_id=%s | raw_ids=%s | verified_ids=%s | reason=%s",
+                chat_id,
+                kind,
+                exc.method,
+                exc.target_id,
+                exc.message_ids,
+                exc.verified_ids,
+                exc.reason,
+            )
+            return SavedPostRenderResult(
+                ok=False,
+                method=exc.method,
+                kind=kind,
+                chat_id=str(chat_id),
+                error_text=normalize_saved_post_render_error(exc, kind=kind, premium_required=premium_required),
+                premium_required=premium_required,
+                message_ids=None,
+            )
         except Exception as exc:
             self.logger.warning(
                 "SAVED_POST_RENDER_SEND_FAILED | chat_id=%s | kind=%s | method=%s | premium_required=%s | error=%s",
@@ -411,10 +431,16 @@ async def send_saved_post_album_via_telethon_source(
             )
             if len(ids) < media_items_count:
                 logger.warning(
-                    "SAVED_POST_TELETHON_SOURCE_ALBUM_VERIFY_FAILED_BUT_IDS_RETURNED | target_id=%s | raw_ids=%s | verified_ids=%s | expected_count=%s | method=telethon_source",
+                    "SAVED_POST_TELETHON_SOURCE_ALBUM_RAW_RESULT | target_id=%s | raw_ids=%s | verified_ids=%s | expected_count=%s | method=telethon_source_unverified",
                     chat_id, raw_ids, ids, media_items_count,
                 )
-                return {"ok": True, "message_id": raw_ids[0], "message_ids": raw_ids, "chat_id": str(chat_id), "kind": "album", "method": "telethon_source_unverified", "verified_message_ids": ids, "verify_status": "failed"}
+                raise SavedPostSentUnverifiedError(
+                    target_id=chat_id,
+                    message_ids=raw_ids,
+                    verified_ids=ids,
+                    method="telethon_source_unverified",
+                    reason="Не удалось подтвердить ID отправленного альбома в целевом канале.",
+                )
         except Exception as send_exc:
             if send_file_ids:
                 raise
@@ -439,10 +465,16 @@ async def send_saved_post_album_via_telethon_source(
             )
             if len(ids) < media_items_count:
                 logger.warning(
-                    "SAVED_POST_TELETHON_SOURCE_ALBUM_VERIFY_FAILED_BUT_IDS_RETURNED | target_id=%s | raw_ids=%s | verified_ids=%s | expected_count=%s | method=telethon_forward",
+                    "SAVED_POST_TELETHON_SOURCE_ALBUM_RAW_RESULT | target_id=%s | raw_ids=%s | verified_ids=%s | expected_count=%s | method=telethon_forward_unverified",
                     chat_id, raw_ids, ids, media_items_count,
                 )
-                return {"ok": True, "message_id": raw_ids[0], "message_ids": raw_ids, "chat_id": str(chat_id), "kind": "album", "method": "telethon_forward_unverified", "verified_message_ids": ids, "verify_status": "failed"}
+                raise SavedPostSentUnverifiedError(
+                    target_id=chat_id,
+                    message_ids=raw_ids,
+                    verified_ids=ids,
+                    method="telethon_forward_unverified",
+                    reason="Не удалось подтвердить ID отправленного альбома в целевом канале.",
+                )
         logger.info(
             "SAVED_POST_TELETHON_SOURCE_ALBUM_SEND_DONE | target_id=%s | message_ids=%s | method=telethon_source",
             chat_id,
