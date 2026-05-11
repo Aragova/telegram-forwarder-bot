@@ -10020,9 +10020,7 @@ async def _build_vip_scheduled_known_targets(rule_id: int, scheduled_post_id: in
 async def handle_rule_repost_campaign_scheduled_posts(callback: CallbackQuery):
     rule_id = int((callback.data or '').split(':')[1]);
     if not await ensure_rule_callback_access(callback, rule_id): return
-    runtime = _build_repost_campaign_runtime()
-    readiness = await run_db(runtime.build_campaign_launch_readiness, rule_id=rule_id)
-    text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=readiness)
+    text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=None)
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_vip_delete_active:"))

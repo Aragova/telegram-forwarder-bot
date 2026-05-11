@@ -1285,7 +1285,6 @@ def build_repost_campaign_scheduled_launch_cancel_result_view(*, rule_id: int, o
 def build_vip_scheduled_posts_screen_view(*, rule_id: int, posts: list[dict] | None = None, active_placement: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
     active = active_placement or {}
     has_active = bool(active.get("active_placement"))
-    delete_failed = int(active.get("delete_failed") or 0)
     lines = [
         '🕒 Запланированные посты',
         '',
@@ -1294,26 +1293,9 @@ def build_vip_scheduled_posts_screen_view(*, rule_id: int, posts: list[dict] | N
     ]
     if has_active:
         lines.extend([
-            '🟢 Сейчас активно размещение',
+            'ℹ️ Сейчас есть активное размещение по этому правилу. Это не мешает создавать отложенные посты.',
             '',
-            'Пост будет удалён:',
-            f"🕘 {active.get('active_delete_after_text') or 'в ближайшее время'}",
-        ])
-        if active.get("active_left_text"):
-            lines.extend([
-                '',
-                f"До удаления:\n⏳ {active.get('active_left_text')}",
-            ])
-        lines.extend([
-            '',
-            'Новые запланированные посты стартуют после освобождения места.',
-            '',
-        ])
-    if delete_failed > 0:
-        lines.extend([
-            '⚠️ Есть размещение с ошибкой удаления',
-            '',
-            'ViMi не запустит новый рекламный пост, пока старый не будет удалён.',
+            'Активное размещение продолжает работать отдельно от VIP отложенных постов.',
             '',
         ])
     lines.extend([
@@ -1329,8 +1311,6 @@ def build_vip_scheduled_posts_screen_view(*, rule_id: int, posts: list[dict] | N
         [InlineKeyboardButton(text='➕ Запланировать пост', callback_data=f'rule_repost_campaign_scheduled_post_new:{rule_id}')],
         [InlineKeyboardButton(text='📄 Все запланированные посты', callback_data=f'rule_repost_campaign_scheduled_posts_list:{rule_id}:0')],
     ]
-    if has_active or delete_failed > 0:
-        rows.append([InlineKeyboardButton(text='🧹 Удалить активный пост', callback_data=f'rule_repost_campaign_vip_delete_active:{rule_id}')])
     rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_vip_features:{rule_id}')])
     return '\n'.join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 

@@ -1112,19 +1112,26 @@ def test_vip_scheduled_posts_screen_has_only_three_main_buttons():
     _, kb = build_vip_scheduled_posts_screen_view(rule_id=1, posts=[])
     assert _texts_from_keyboard(kb) == ["➕ Запланировать пост", "📄 Все запланированные посты", "⬅️ Назад"]
 
-def test_vip_scheduled_posts_screen_shows_active_placement_block():
+def test_vip_scheduled_posts_screen_active_placement_is_neutral_info_only():
     text, kb = build_vip_scheduled_posts_screen_view(
         rule_id=4,
         active_placement={"active_placement": True, "active_run_id": 22, "active_delete_after_text": "09.05 23:49 UTC+3", "next_available_text": "09.05 23:50 UTC+3", "delete_failed": 0},
     )
     labels = _texts_from_keyboard(kb)
-    assert "Сейчас активно размещение" in text
-    assert "09.05 23:49 UTC+3" in text
-    assert "🧹 Удалить активный пост" in labels
+    assert "Новые запланированные посты стартуют после освобождения места" not in text
+    assert "🧹 Удалить активный пост" not in labels
+    assert "Это не мешает создавать отложенные посты." in text
 
 def test_vip_scheduled_posts_screen_hides_delete_active_without_placement():
     _, kb = build_vip_scheduled_posts_screen_view(rule_id=4, active_placement={"active_placement": False, "delete_failed": 0})
     assert "🧹 Удалить активный пост" not in _texts_from_keyboard(kb)
+
+def test_vip_scheduled_posts_screen_contains_main_sections():
+    text, kb = build_vip_scheduled_posts_screen_view(rule_id=1, posts=[])
+    labels = _texts_from_keyboard(kb)
+    assert "🕒 Запланированные посты" in text
+    assert "➕ Запланировать пост" in labels
+    assert "📄 Все запланированные посты" in labels
 
 def test_bot_has_delete_active_vip_scheduled_handler():
     source = Path("bot.py").read_text(encoding="utf-8")
