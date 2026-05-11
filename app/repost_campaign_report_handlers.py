@@ -22,6 +22,9 @@ from app.repost_campaign_ui import (
     build_repost_campaign_post_stats_view,
     build_repost_campaign_posts_library_view,
     build_repost_campaign_run_details_view,
+    build_repost_campaign_run_delete_confirm_view,
+    build_repost_campaign_run_delete_loading_view,
+    build_repost_campaign_run_delete_result_view,
     build_repost_campaign_views_report_error_view,
     build_repost_campaign_views_report_loading_view,
     build_repost_campaign_views_report_view,
@@ -91,6 +94,41 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
                 callback.data,
             )
             await ctx.answer_callback_safe(callback, "Не удалось открыть детали запуска", show_alert=True)
+
+
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_run_delete_confirm:"))
+    async def handle_rule_repost_campaign_run_delete_confirm(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
+        rule_id = int(rule_id_raw)
+        run_id = int(run_id_raw)
+        runtime = build_repost_campaign_runtime(ctx)
+        details = await ctx.run_db(lambda: runtime.get_campaign_run_details(rule_id=rule_id, run_id=run_id))
+        text, keyboard = build_repost_campaign_run_delete_confirm_view(rule_id=rule_id, run_id=run_id, details=details)
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_run_delete_now:"))
+    async def handle_rule_repost_campaign_run_delete_now(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
+        rule_id = int(rule_id_raw)
+        run_id = int(run_id_raw)
+        await ctx.answer_callback_safe_once(callback)
+        loading_text, loading_kb = build_repost_campaign_run_delete_loading_view(rule_id=rule_id, run_id=run_id)
+        await ctx.edit_message_text_safe(message=callback.message, text=loading_text, reply_markup=loading_kb)
+        runtime = build_repost_campaign_runtime(ctx)
+        result = await runtime.delete_campaign_run_now(
+            rule_id=rule_id,
+            run_id=run_id,
+            admin_id=callback.from_user.id if callback.from_user else None,
+        )
+        result_text, result_kb = build_repost_campaign_run_delete_result_view(rule_id=rule_id, run_id=run_id, result=result)
+        await ctx.edit_message_text_safe(message=callback.message, text=result_text, reply_markup=result_kb)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_report:"))
     async def handle_rule_repost_campaign_views_report(callback: CallbackQuery):
