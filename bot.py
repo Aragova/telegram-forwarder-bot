@@ -6821,7 +6821,6 @@ def _build_repost_campaign_runtime() -> RepostCampaignRuntimeService:
 
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_edit_stub:"))
-
 async def handle_rule_repost_campaign_post_edit_stub(callback: CallbackQuery):
     await answer_callback_safe_once(callback, "Редактирование текста будет добавлено следующим шагом")
 
