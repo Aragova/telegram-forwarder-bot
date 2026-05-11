@@ -134,6 +134,7 @@ from app.repost_campaign_context import (
 from app.repost_campaign_handlers import register_repost_campaign_handlers
 from app.repost_campaign_scheduled_post_handlers import register_repost_campaign_scheduled_post_handlers
 from app.repost_campaign_report_handlers import register_repost_campaign_report_handlers
+from app.repost_campaign_schedule_handlers import register_repost_campaign_schedule_handlers
 from app.repost_campaign_message_handlers import (
     handle_repost_campaign_stateful_private_input,
     register_repost_campaign_message_handlers,
@@ -6569,17 +6570,8 @@ async def handle_rule_extra_menu(callback: CallbackQuery):
             return
         logger.exception("Ошибка открытия доп. функций rule_id=%s: %s", rule_id, exc)
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_menu:"))
-async def handle_rule_repost_campaign_schedule_menu(callback: CallbackQuery):
-    rule_id = int((callback.data or "").split(":")[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    runtime = _build_repost_campaign_runtime()
-    readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
-    text, kb = build_repost_campaign_schedule_wizard_step1_view(rule_id=rule_id, readiness=readiness)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_step1:"))
+
 async def handle_rule_repost_campaign_schedule_step1(callback: CallbackQuery):
     rule_id = int((callback.data or "").split(":")[1])
     if not await ensure_rule_callback_access(callback, rule_id):
@@ -6830,34 +6822,8 @@ def _build_repost_campaign_runtime() -> RepostCampaignRuntimeService:
     )
 
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_current:"))
-async def handle_rule_repost_campaign_schedule_current(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    if not settings.repost_campaign_admin_test_enabled:
-        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
-        return
-    try:
-        rule_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    try:
-        renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir)
-        runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
-        readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
-        text, keyboard = build_repost_campaign_schedule_current_view(rule_id=rule_id, readiness=readiness)
-        if _should_answer_new_message_for_callback(callback):
-            await callback.message.answer(text, reply_markup=keyboard)
-        else:
-            await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-    except Exception as exc:
-        logger.warning("REPOST_CAMPAIGN_SCHEDULE_CURRENT_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
-        await answer_callback_safe(callback, "Не удалось открыть планирование запуска", show_alert=True)
-        return
-    await answer_callback_safe_once(callback)
-
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_edit_stub:"))
+
 async def handle_rule_repost_campaign_post_edit_stub(callback: CallbackQuery):
     await answer_callback_safe_once(callback, "Редактирование текста будет добавлено следующим шагом")
 
@@ -10697,6 +10663,7 @@ _register_admin_handlers()
 _register_user_saas_handlers()
 campaign_handlers_ctx = _build_repost_campaign_handlers_context()
 register_repost_campaign_handlers(dp, campaign_handlers_ctx)
+register_repost_campaign_schedule_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_report_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_scheduled_post_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_message_handlers(dp, campaign_handlers_ctx)

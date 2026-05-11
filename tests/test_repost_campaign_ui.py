@@ -770,18 +770,19 @@ def test_schedule_preview_view_contains_full_sections():
 
 def test_bot_has_real_schedule_handlers_blocks():
     from pathlib import Path
-    source = Path("bot.py").read_text(encoding="utf-8")
-    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_menu:"))' in source
-    assert 'async def handle_rule_repost_campaign_schedule_menu' in source
-    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_confirm:"))' in source
-    assert 'async def handle_rule_repost_campaign_schedule_confirm' in source
-    assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_STARTED' in source
-    assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_DONE' in source
-    assert 'rule_repost_campaign_schedule_step4:' in source
-    assert 'handle_rule_repost_campaign_schedule_step4' in source
-    assert 'build_repost_campaign_schedule_wizard_step4_view' in source
-    assert 'rule_repost_campaign_schedule_step4:{rule_id}' in source
-    assert 'if int(readiness.get("show_seconds") or 0) <= 0' in source
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    schedule_source = Path("app/repost_campaign_schedule_handlers.py").read_text(encoding="utf-8")
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_menu:"))' in schedule_source
+    assert 'async def handle_rule_repost_campaign_schedule_menu' in schedule_source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_confirm:"))' in bot_source
+    assert 'async def handle_rule_repost_campaign_schedule_confirm' in bot_source
+    assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_STARTED' in bot_source
+    assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_DONE' in bot_source
+    assert 'rule_repost_campaign_schedule_step4:' in bot_source
+    assert 'handle_rule_repost_campaign_schedule_step4' in bot_source
+    assert 'build_repost_campaign_schedule_wizard_step4_view' in bot_source
+    assert 'rule_repost_campaign_schedule_step4:{rule_id}' in bot_source
+    assert 'if int(readiness.get("show_seconds") or 0) <= 0' in bot_source
 
 def test_schedule_show_pick_goes_to_step4():
     source = Path("bot.py").read_text(encoding="utf-8")
@@ -854,7 +855,8 @@ def test_bot_launch_callback_opens_launch_mode_screen():
     bot_source = Path("bot.py").read_text(encoding="utf-8")
     assert 'build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)' in handlers_source
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_now_preview:"))' in handlers_source
-    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_current:"))' in bot_source
+    schedule_source = Path("app/repost_campaign_schedule_handlers.py").read_text(encoding="utf-8")
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_current:"))' in schedule_source
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch:"))' not in bot_source
 
 from app.repost_campaign_ui import (
@@ -1473,3 +1475,33 @@ def test_a3_delete_run_now_uses_direct_await_without_run_db_wrapper():
 def test_a3_no_callback_data_mutation_in_report_handlers():
     source = Path("app/repost_campaign_report_handlers.py").read_text(encoding="utf-8")
     assert 'callback.data =' not in source
+
+
+def test_schedule_handlers_module_exists_and_registered_in_bot():
+    schedule_source = Path("app/repost_campaign_schedule_handlers.py").read_text(encoding="utf-8")
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    assert "def register_repost_campaign_schedule_handlers(dp: Dispatcher, ctx: RepostCampaignHandlersContext) -> None:" in schedule_source
+    assert "register_repost_campaign_schedule_handlers(dp, campaign_handlers_ctx)" in bot_source
+
+
+def test_schedule_callbacks_moved_to_dedicated_module():
+    schedule_source = Path("app/repost_campaign_schedule_handlers.py").read_text(encoding="utf-8")
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    assert "rule_repost_campaign_schedule_current:" in schedule_source
+    assert "rule_repost_campaign_schedule_menu:" in schedule_source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_current:"))' not in bot_source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_menu:"))' not in bot_source
+
+
+def test_schedule_handlers_do_not_mutate_callback_data_and_do_not_contain_forbidden_callbacks():
+    schedule_source = Path("app/repost_campaign_schedule_handlers.py").read_text(encoding="utf-8")
+    assert "callback.data =" not in schedule_source
+    for forbidden in [
+        "rule_repost_campaign_schedule_quick:",
+        "rule_repost_campaign_schedule_input:",
+        "rule_repost_campaign_schedule_confirm:",
+        "rule_repost_campaign_scheduled_detail:",
+        "rule_repost_campaign_scheduled_cancel_confirm:",
+        "rule_repost_campaign_scheduled_cancel_now:",
+    ]:
+        assert forbidden not in schedule_source
