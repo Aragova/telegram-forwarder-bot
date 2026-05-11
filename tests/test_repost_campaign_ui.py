@@ -661,17 +661,16 @@ def test_campaign_delete_loop_runtime_gets_telethon_client_in_all_role():
     assert "telethon_client=telethon_client" in block
 
 
-def test_campaign_manual_delete_message_runtime_gets_telethon_client():
-    source = Path("bot.py").read_text(encoding="utf-8")
+def test_saved_post_action_callbacks_moved_to_report_handlers_module():
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    report_source = Path("app/repost_campaign_report_handlers.py").read_text(encoding="utf-8")
 
-    marker = "async def handle_rule_repost_campaign_delete_message"
-    start = source.index(marker)
-    end = source.index("async def", start + len(marker))
-    block = source[start:end]
-
-    assert "delete_campaign_run_message_now" in block
-    assert "runtime = RepostCampaignRuntimeService(" in block
-    assert "telethon_client=telethon_client" in block
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_use:"))' not in bot_source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_delete_message:"))' not in bot_source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_use:"))' in report_source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_delete_message:"))' in report_source
+    assert "if not await ctx.is_admin_callback(callback):" in report_source
+    assert ".data = " not in report_source
 
 def test_views_report_view_has_export_buttons_and_callbacks():
     _, kb = build_repost_campaign_views_report_view(rule_id=5, run_id=8, report={"ok": True, "items": []})
