@@ -1310,7 +1310,14 @@ class RepostCampaignRuntimeService:
             return RepostCampaignActionResult(ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, error_text="Публикация не относится к этому запуску")
         if (message.get("send_status") or "").strip().lower() != "sent":
             self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_SKIPPED | rule_id=%s | run_id=%s | run_message_id=%s | reason=%s", rule_id, run_id, run_message_id, "send_status_not_sent")
-            return RepostCampaignActionResult(ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, error_text="Публикация ещё не была успешно отправлена")
+            self.repo.mark_campaign_run_message_deleted(run_message_id)
+            return RepostCampaignActionResult(
+                ok=True,
+                action="delete_campaign_run_message_now",
+                rule_id=rule_id,
+                method="skipped_not_sent",
+                extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id, "delete_status": "deleted", "noop": True},
+            )
         message_ids = self._extract_sent_message_ids(message)
         if not message_ids:
             self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_SKIPPED | rule_id=%s | run_id=%s | run_message_id=%s | reason=%s", rule_id, run_id, run_message_id, "missing_sent_message_id")
@@ -1369,6 +1376,16 @@ class RepostCampaignRuntimeService:
                 deleted += 1
             else:
                 failed += 1
+        remaining_messages = self.repo.list_campaign_run_messages(run_id)
+        has_active_delete = any(
+            str((row or {}).get("delete_status") or "").strip().lower() in {"pending", "processing"}
+            for row in remaining_messages
+        )
+        if not has_active_delete:
+            if failed > 0:
+                self.repo.update_campaign_run_status(run_id, status="partial", error_text="Не все публикации удалось удалить")
+            else:
+                self.repo.update_campaign_run_status(run_id, status="sent", error_text=None)
         return RepostCampaignActionResult(
             ok=(failed == 0),
             action="delete_campaign_run_now",
