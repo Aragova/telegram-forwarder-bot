@@ -139,6 +139,7 @@ from app.repost_campaign_context import (
 )
 from app.repost_campaign_handlers import register_repost_campaign_handlers
 from app.repost_campaign_scheduled_post_handlers import register_repost_campaign_scheduled_post_handlers
+from app.repost_campaign_report_handlers import register_repost_campaign_report_handlers
 from app.repost_campaign_message_handlers import (
     handle_repost_campaign_stateful_private_input,
     register_repost_campaign_message_handlers,
@@ -6930,92 +6931,6 @@ async def handle_rule_repost_campaign_add_list(callback: CallbackQuery):
     )
     await answer_callback_safe_once(callback)
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_history:"))
-async def handle_rule_repost_campaign_history(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    if not settings.repost_campaign_admin_test_enabled:
-        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
-        return
-    try:
-        rule_id = int(callback.data.split(":")[1])
-        logger.info("REPOST_CAMPAIGN_POST_LIBRARY_UI_OPENED_FAST | rule_id=%s", rule_id)
-        runtime = _build_repost_campaign_runtime()
-        library = await runtime.build_campaign_posts_library(rule_id=rule_id)
-        text, keyboard = build_repost_campaign_posts_library_view(rule_id=rule_id, library=library)
-        await answer_callback_safe_once(callback)
-        if _should_answer_new_message_for_callback(callback):
-            await send_message_safe(chat_id=callback.from_user.id, text=text, reply_markup=keyboard)
-        else:
-            await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-    except Exception:
-        logger.exception("REPOST_CAMPAIGN_POST_LIBRARY_UI_FAILED | rule_id=%s | error=%s", callback.data, callback.data)
-        await answer_callback_safe(callback, "Не удалось открыть библиотеку постов", show_alert=True)
-
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_history_detail:"))
-async def handle_rule_repost_campaign_history_detail(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    if not settings.repost_campaign_admin_test_enabled:
-        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
-        return
-    try:
-        _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
-        rule_id = int(rule_id_raw)
-        run_id = int(run_id_raw)
-        logger.info("REPOST_CAMPAIGN_RUN_DETAILS_UI_OPENED | rule_id=%s | run_id=%s", rule_id, run_id)
-        renderer = SavedPostRenderer(bot=bot, telethon_client=telethon_client, logger_=logger)
-        runtime = RepostCampaignRuntimeService(repo=db, renderer=renderer)
-        details = await run_db(lambda: runtime.get_campaign_run_details(rule_id=rule_id, run_id=run_id))
-        text, keyboard = build_repost_campaign_run_details_view(rule_id=rule_id, details=details)
-        await answer_callback_safe_once(callback)
-        if _should_answer_new_message_for_callback(callback):
-            await send_message_safe(chat_id=callback.from_user.id, text=text, reply_markup=keyboard)
-        else:
-            await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-    except Exception:
-        logger.exception(
-            "REPOST_CAMPAIGN_RUN_DETAILS_UI_FAILED | rule_id=%s | run_id=%s | error=%s",
-            callback.data,
-            callback.data,
-            callback.data,
-        )
-        await answer_callback_safe(callback, "Не удалось открыть детали запуска", show_alert=True)
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_report:"))
-async def handle_rule_repost_campaign_views_report(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    if not settings.repost_campaign_admin_test_enabled:
-        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
-        return
-    rule_id = 0
-    run_id = 0
-    try:
-        _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
-        rule_id = int(rule_id_raw)
-        run_id = int(run_id_raw)
-        started = asyncio.get_event_loop().time()
-        logger.info("REPOST_CAMPAIGN_VIEWS_REPORT_UI_OPENED | rule_id=%s | run_id=%s", rule_id, run_id)
-        await answer_callback_safe_once(callback)
-        loading_text, loading_kb = build_repost_campaign_views_report_loading_view(rule_id=rule_id, run_id=run_id)
-        await edit_message_text_safe(message=callback.message, text=loading_text, reply_markup=loading_kb)
-        logger.info("REPOST_CAMPAIGN_VIEWS_REPORT_LOADING_SHOWN | rule_id=%s | run_id=%s", rule_id, run_id)
-        runtime = _build_repost_campaign_runtime()
-        report = await runtime.build_campaign_views_report(rule_id=rule_id, run_id=run_id)
-        text, keyboard = build_repost_campaign_views_report_view(rule_id=rule_id, run_id=run_id, report=report)
-        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-        duration_ms = int((asyncio.get_event_loop().time() - started) * 1000)
-        logger.info("REPOST_CAMPAIGN_VIEWS_REPORT_UI_BUILT | rule_id=%s | run_id=%s | duration_ms=%s", rule_id, run_id, duration_ms)
-    except Exception as exc:
-        logger.exception("REPOST_CAMPAIGN_VIEWS_REPORT_UI_FAILED | rule_id=%s | run_id=%s | error=%s", rule_id, run_id, exc)
-        text, keyboard = build_repost_campaign_views_report_error_view(rule_id=rule_id, run_id=run_id)
-        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-
-
 async def _send_export_document(callback: CallbackQuery, *, filename: str, content: bytes) -> None:
     tmp_path: Path | None = None
     try:
@@ -7027,7 +6942,6 @@ async def _send_export_document(callback: CallbackQuery, *, filename: str, conte
     finally:
         if tmp_path:
             tmp_path.unlink(missing_ok=True)
-
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_export_csv:"))
 async def handle_rule_repost_campaign_views_export_csv(callback: CallbackQuery):
@@ -7127,72 +7041,6 @@ async def handle_rule_repost_campaign_run_delete_now(callback: CallbackQuery):
     )
     result_text, result_kb = build_repost_campaign_run_delete_result_view(rule_id=rule_id, run_id=run_id, result=result)
     await edit_message_text_safe(message=callback.message, text=result_text, reply_markup=result_kb)
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_stats:"))
-async def handle_rule_repost_campaign_post_stats(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    _, rule_id_raw, saved_post_id_raw = callback.data.split(":", 2)
-    rule_id = int(rule_id_raw)
-    saved_post_id = int(saved_post_id_raw)
-    started = asyncio.get_event_loop().time()
-    await answer_callback_safe_once(callback)
-    loading_text, loading_kb = build_repost_campaign_post_stats_loading_view(rule_id=rule_id, saved_post_id=saved_post_id)
-    await edit_message_text_safe(message=callback.message, text=loading_text, reply_markup=loading_kb)
-    logger.info("REPOST_CAMPAIGN_POST_STATS_LOADING_SHOWN | rule_id=%s | saved_post_id=%s", rule_id, saved_post_id)
-    try:
-        runtime = _build_repost_campaign_runtime()
-        stats = await runtime.build_campaign_post_stats(rule_id=rule_id, saved_post_id=saved_post_id, include_live_views=True)
-        text, keyboard = build_repost_campaign_post_stats_view(rule_id=rule_id, saved_post_id=saved_post_id, stats=stats)
-        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-        duration_ms = int((asyncio.get_event_loop().time() - started) * 1000)
-        logger.info("REPOST_CAMPAIGN_POST_STATS_UI_BUILT | rule_id=%s | saved_post_id=%s | duration_ms=%s", rule_id, saved_post_id, duration_ms)
-    except Exception as exc:
-        logger.exception("REPOST_CAMPAIGN_POST_STATS_UI_FAILED | rule_id=%s | saved_post_id=%s | error=%s", rule_id, saved_post_id, exc)
-        text = (
-            "📄 Рекламный пост\n\n"
-            "⚠️ Статистику просмотров сейчас получить не удалось.\n\n"
-            "Пост и история размещений доступны.\n"
-            "Попробуйте обновить статистику позже."
-        )
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Обновить статистику", callback_data=f"rule_repost_campaign_post_stats:{rule_id}:{saved_post_id}")],
-            [InlineKeyboardButton(text="📚 К библиотеке", callback_data=f"rule_repost_campaign_history:{rule_id}")],
-            [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-        ])
-        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-
-
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_channels_stats:"))
-async def handle_rule_repost_campaign_post_channels_stats(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    try:
-        _, rule_id_raw, saved_post_id_raw, offset_raw = callback.data.split(":", 3)
-        rule_id = int(rule_id_raw)
-        saved_post_id = int(saved_post_id_raw)
-        offset = int(offset_raw)
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    await answer_callback_safe_once(callback)
-    try:
-        runtime = _build_repost_campaign_runtime()
-        stats = await runtime.build_campaign_post_stats(rule_id=rule_id, saved_post_id=saved_post_id, include_live_views=True)
-        text, keyboard = build_repost_campaign_post_channels_stats_view(
-            rule_id=rule_id,
-            saved_post_id=saved_post_id,
-            stats=stats,
-            offset=offset,
-            page_size=10,
-        )
-        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-    except Exception as exc:
-        logger.exception("REPOST_CAMPAIGN_POST_CHANNELS_STATS_UI_FAILED | rule_id=%s | saved_post_id=%s | offset=%s | error=%s", rule_id, saved_post_id, offset, exc)
-        await answer_callback_safe(callback, "Не удалось открыть статистику по каналам", show_alert=True)
 
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_export_csv:"))
@@ -11121,6 +10969,7 @@ _register_admin_handlers()
 _register_user_saas_handlers()
 campaign_handlers_ctx = _build_repost_campaign_handlers_context()
 register_repost_campaign_handlers(dp, campaign_handlers_ctx)
+register_repost_campaign_report_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_scheduled_post_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_message_handlers(dp, campaign_handlers_ctx)
 

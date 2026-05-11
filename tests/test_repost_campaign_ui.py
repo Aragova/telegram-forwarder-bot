@@ -701,12 +701,14 @@ def test_post_stats_views_have_export_buttons():
 def test_bot_has_export_callbacks_and_runtime_builder_usage():
     source = Path("bot.py").read_text(encoding="utf-8")
 
+    assert "def _send_export_document" in source
     assert "rule_repost_campaign_views_export_xlsx:" in source
     assert "rule_repost_campaign_views_export_csv:" in source
     assert "rule_repost_campaign_views_export_txt:" in source
     assert "rule_repost_campaign_post_export_xlsx:" in source
     assert "rule_repost_campaign_post_export_csv:" in source
     assert "rule_repost_campaign_post_export_txt:" in source
+    assert "_send_export_document(" in source
     assert "_build_repost_campaign_runtime()" in source
     assert "from app.repost_campaign_export_service import" in source
     assert "build_campaign_run_report_xlsx" in source
@@ -1400,9 +1402,11 @@ def test_campaign_ui_does_not_render_technical_keys_in_vip_scheduled_detail():
     for value in forbidden_literals:
         assert value not in text
 
-def test_report_button_callback_exists_in_bot_py():
-    source = Path("bot.py").read_text(encoding="utf-8")
+def test_report_button_callback_exists_in_report_handlers_module():
+    source = Path("app/repost_campaign_report_handlers.py").read_text(encoding="utf-8")
     assert "rule_repost_campaign_views_report:" in source
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    assert "register_repost_campaign_report_handlers(dp, campaign_handlers_ctx)" in bot_source
 
 
 def test_postgres_mark_processing_does_not_use_nonexistent_columns():
