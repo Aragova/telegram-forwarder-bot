@@ -709,6 +709,7 @@ def test_export_callbacks_moved_to_report_handlers_module():
     assert "from app.repost_campaign_export_service import" in report_source
     assert "build_campaign_run_report_xlsx" in report_source
     assert "build_campaign_post_stats_xlsx" in report_source
+    assert "ctx.ensure_rule_callback_access(callback, rule_id)" in report_source
 
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_export_csv:"))' not in bot_source
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_export_xlsx:"))' not in bot_source
@@ -718,6 +719,8 @@ def test_export_callbacks_moved_to_report_handlers_module():
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_export_txt:"))' not in bot_source
 
     assert ".data = " not in report_source
+    export_block = report_source[report_source.index('rule_repost_campaign_views_export_csv:'):report_source.index('rule_repost_campaign_post_use:') if 'rule_repost_campaign_post_use:' in report_source else len(report_source)]
+    assert "if not await ctx.is_admin_callback(callback):" not in export_block
 
 def test_vip_features_view_has_schedule_button():
     from app.repost_campaign_ui import build_repost_campaign_vip_features_view

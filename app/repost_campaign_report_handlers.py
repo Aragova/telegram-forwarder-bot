@@ -189,7 +189,7 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
         _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
         rule_id = int(rule_id_raw)
         run_id = int(run_id_raw)
-        if not await ctx.is_admin_callback(callback):
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
         try:
             ctx.logger.info("REPOST_CAMPAIGN_EXPORT_STARTED | rule_id=%s | run_id=%s | format=csv", rule_id, run_id)
@@ -211,7 +211,7 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
         _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
         rule_id = int(rule_id_raw)
         run_id = int(run_id_raw)
-        if not await ctx.is_admin_callback(callback):
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
         try:
             ctx.logger.info("REPOST_CAMPAIGN_EXPORT_STARTED | rule_id=%s | run_id=%s | format=xlsx", rule_id, run_id)
@@ -233,7 +233,7 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
         _, rule_id_raw, run_id_raw = callback.data.split(":", 2)
         rule_id = int(rule_id_raw)
         run_id = int(run_id_raw)
-        if not await ctx.is_admin_callback(callback):
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
         try:
             ctx.logger.info("REPOST_CAMPAIGN_EXPORT_STARTED | rule_id=%s | run_id=%s | format=txt", rule_id, run_id)
@@ -255,7 +255,7 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
         _, rule_id_raw, saved_post_id_raw = callback.data.split(":", 2)
         rule_id = int(rule_id_raw)
         saved_post_id = int(saved_post_id_raw)
-        if not await ctx.is_admin_callback(callback):
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
         try:
             ctx.logger.info("REPOST_CAMPAIGN_EXPORT_STARTED | rule_id=%s | saved_post_id=%s | format=csv", rule_id, saved_post_id)
@@ -277,7 +277,7 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
         _, rule_id_raw, saved_post_id_raw = callback.data.split(":", 2)
         rule_id = int(rule_id_raw)
         saved_post_id = int(saved_post_id_raw)
-        if not await ctx.is_admin_callback(callback):
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
         try:
             ctx.logger.info("REPOST_CAMPAIGN_EXPORT_STARTED | rule_id=%s | saved_post_id=%s | format=xlsx", rule_id, saved_post_id)
@@ -299,7 +299,7 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
         _, rule_id_raw, saved_post_id_raw = callback.data.split(":", 2)
         rule_id = int(rule_id_raw)
         saved_post_id = int(saved_post_id_raw)
-        if not await ctx.is_admin_callback(callback):
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
         try:
             ctx.logger.info("REPOST_CAMPAIGN_EXPORT_STARTED | rule_id=%s | saved_post_id=%s | format=txt", rule_id, saved_post_id)
