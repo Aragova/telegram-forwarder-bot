@@ -101,7 +101,6 @@ from app.repost_campaign_ui import (
     build_repost_campaign_post_menu_view,
     build_repost_campaign_vip_features_view,
     build_repost_campaign_vip_coming_soon_view,
-    build_repost_campaign_schedule_current_view,
     build_repost_campaign_schedule_menu_view,
     build_repost_campaign_schedule_wizard_step1_view,
     build_repost_campaign_schedule_wizard_step2_view,
@@ -6571,7 +6570,6 @@ async def handle_rule_extra_menu(callback: CallbackQuery):
         logger.exception("Ошибка открытия доп. функций rule_id=%s: %s", rule_id, exc)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_step1:"))
-
 async def handle_rule_repost_campaign_schedule_step1(callback: CallbackQuery):
     rule_id = int((callback.data or "").split(":")[1])
     if not await ensure_rule_callback_access(callback, rule_id):

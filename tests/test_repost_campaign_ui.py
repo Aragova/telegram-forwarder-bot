@@ -1502,6 +1502,12 @@ def test_schedule_handlers_do_not_mutate_callback_data_and_do_not_contain_forbid
         "rule_repost_campaign_schedule_confirm:",
         "rule_repost_campaign_scheduled_detail:",
         "rule_repost_campaign_scheduled_cancel_confirm:",
-        "rule_repost_campaign_scheduled_cancel_now:",
+        "rule_repost_campaign_scheduled_cancel:",
     ]:
         assert forbidden not in schedule_source
+
+
+def test_schedule_handlers_keep_access_guards():
+    schedule_source = Path("app/repost_campaign_schedule_handlers.py").read_text(encoding="utf-8")
+    assert "ctx.ensure_rule_callback_access(callback, rule_id)" in schedule_source
+    assert "ctx.is_admin_callback(callback)" in schedule_source

@@ -35,7 +35,7 @@ def register_repost_campaign_schedule_handlers(dp: Dispatcher, ctx: RepostCampai
             readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
             text, keyboard = build_repost_campaign_schedule_current_view(rule_id=rule_id, readiness=readiness)
             if ctx.should_answer_new_message_for_callback(callback):
-                await callback.message.answer(text, reply_markup=keyboard)
+                await ctx.send_message_safe(chat_id=callback.from_user.id, text=text, reply_markup=keyboard)
             else:
                 await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         except Exception as exc:
