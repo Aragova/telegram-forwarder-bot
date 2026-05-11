@@ -1400,9 +1400,11 @@ def test_campaign_ui_does_not_render_technical_keys_in_vip_scheduled_detail():
     for value in forbidden_literals:
         assert value not in text
 
-def test_report_button_callback_exists_in_bot_py():
-    source = Path("bot.py").read_text(encoding="utf-8")
+def test_report_button_callback_exists_in_report_handlers_module():
+    source = Path("app/repost_campaign_report_handlers.py").read_text(encoding="utf-8")
     assert "rule_repost_campaign_views_report:" in source
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    assert "register_repost_campaign_report_handlers(dp, campaign_handlers_ctx)" in bot_source
 
 
 def test_postgres_mark_processing_does_not_use_nonexistent_columns():
