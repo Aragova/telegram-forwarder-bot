@@ -257,19 +257,19 @@ def test_send_marks_run_failed_on_renderer_error():
     assert result.extra["campaign_run_id"] == repo.next_run_id
 
 
-def test_test_send_marks_sent_when_renderer_failed_but_ids_returned():
+def test_test_send_marks_failed_when_renderer_failed_with_ids():
     rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, target_id="-1001", repost_campaign_show_seconds=300)
     saved_post = {"content_json": {"kind": "album"}}
     repo = _FakeRepo(rule=rule, saved_post=saved_post)
     renderer = _FakeRenderer(SavedPostRenderResult(ok=False, method="telethon_source_unverified", kind="album", message_id=1039, message_ids=[1039, 1040], error_text="verify failed", premium_required=True))
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
     result = asyncio.run(runtime.test_send_saved_post_to_main_target(rule_id=300))
-    assert result.ok is True
-    assert len(repo.mark_campaign_run_message_sent_calls) == 1
-    assert len(repo.mark_campaign_run_message_failed_calls) == 0
+    assert result.ok is False
+    assert len(repo.mark_campaign_run_message_sent_calls) == 0
+    assert len(repo.mark_campaign_run_message_failed_calls) == 1
 
 
-def test_launch_dedup_targets_and_mark_sent_when_failed_with_ids():
+def test_launch_dedup_targets_stops_on_failed_main_target():
     rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, target_id="-1001", target_thread_id=None, target_title="Main", repost_campaign_show_seconds=300)
     saved_post = {"content_json": {"kind": "album"}}
     summary = {"can_launch": True, "ready_extra_targets": [{"target_id": "-1001", "target_thread_id": None, "title": "Dup"}, {"target_id": "-1002", "target_thread_id": None, "title": "Extra"}]}
@@ -280,7 +280,7 @@ def test_launch_dedup_targets_and_mark_sent_when_failed_with_ids():
     ])
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
     result = asyncio.run(runtime.launch_campaign_now(rule_id=999))
-    assert result.ok is True
+    assert result.ok is False
     assert len(renderer.calls) == 1
     assert len(repo.create_campaign_run_message_calls) == 1
 
@@ -1357,15 +1357,15 @@ def test_launch_from_snapshot_does_not_use_current_rule_campaign_settings():
     assert repo.create_campaign_run_calls[0]["show_seconds"] == 300
     assert repo.create_campaign_run_calls[0]["scheduled_post_id"] == 42
 
-def test_launch_from_snapshot_marks_sent_when_renderer_failed_but_ids_returned():
+def test_launch_from_snapshot_marks_failed_when_renderer_failed_even_with_ids():
     rule = SimpleNamespace(mode="repost", target_id="-1")
     repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "album"}})
     renderer = _FakeRenderer(SavedPostRenderResult(ok=False, method="telethon_source_unverified", kind="album", message_id=1039, message_ids=[1039, 1040], error_text="verify failed"))
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
     out = asyncio.run(runtime.launch_campaign_from_snapshot(rule_id=1, saved_post_id=55, show_seconds=300, targets_snapshot=[{"target_id": "-1001", "target_kind": "main"}], scheduled_post_id=3))
-    assert out.ok
-    assert repo.mark_campaign_run_message_sent_calls
-    assert not repo.mark_campaign_run_message_failed_calls
+    assert not out.ok
+    assert not repo.mark_campaign_run_message_sent_calls
+    assert repo.mark_campaign_run_message_failed_calls
 
 
 

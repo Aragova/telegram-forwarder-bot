@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.saved_post_renderer import (
+    SavedPostSentUnverifiedError,
     SavedPostRenderer,
     get_album_source_message_ids,
     normalize_telethon_target,
@@ -73,6 +74,27 @@ def test_saved_post_renderer_detect_render_method_premium():
         ],
     }
     assert renderer.detect_render_method(content) == "telethon_builder"
+
+
+def test_renderer_send_returns_failed_on_unverified_error(monkeypatch):
+    async def _send_via_telethon(**kwargs):
+        raise SavedPostSentUnverifiedError(
+            target_id=123,
+            message_ids=[10, 11],
+            verified_ids=[10],
+            method="telethon_source_unverified",
+            reason="Не удалось подтвердить ID отправленного альбома в целевом канале.",
+        )
+
+    monkeypatch.setattr(spr, "send_saved_post_content_via_telethon", _send_via_telethon)
+    renderer = SavedPostRenderer(bot=_FakeBot(), telethon_client=object())
+    result = asyncio.run(renderer.send(
+        chat_id=123,
+        content={"kind": "album", "media_items": [{}, {}], "caption_entities": [{"type": "custom_emoji", "offset": 0, "length": 1, "custom_emoji_id": "1"}], "forward_origin": {"chat_id": 1, "message_ids": [1, 2]}},
+    ))
+    assert result.ok is False
+    assert result.method == "telethon_source_unverified"
+    assert result.message_ids is None
 
 
 def test_saved_post_renderer_send_plain_returns_render_result():
@@ -261,21 +283,21 @@ class _TelethonVerifyOk(FakeTelethonSource):
         return [SimpleNamespace(id=i, date=datetime.now(timezone.utc), peer_id=_FakePeer(2451047809)) for i in ids]
 
 
-def test_source_send_ids_verify_failed_returns_unverified_without_forward(monkeypatch):
+def test_source_send_ids_verify_failed_raises_unverified_error_without_forward(monkeypatch):
     telethon = FakeTelethonSource()
 
     async def _verify(**kwargs):
         return []
 
     monkeypatch.setattr(spr, "verify_telethon_sent_messages", _verify)
-    result = asyncio.run(send_saved_post_album_via_telethon_source(
-        telethon_client=telethon,
-        chat_id=123,
-        content={"kind": "album", "caption": "cap", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
-    ))
-    assert result["ok"] is True
-    assert result["method"] == "telethon_source_unverified"
-    assert result["message_ids"] == [900, 901]
+    with pytest.raises(SavedPostSentUnverifiedError) as exc:
+        asyncio.run(send_saved_post_album_via_telethon_source(
+            telethon_client=telethon,
+            chat_id=123,
+            content={"kind": "album", "caption": "cap", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
+        ))
+    assert exc.value.method == "telethon_source_unverified"
+    assert exc.value.message_ids == [900, 901]
 
 
 def test_premium_album_with_full_source_ids_never_downloads(monkeypatch):
@@ -320,12 +342,13 @@ class _TelethonOldIds(FakeTelethonSource):
 
 
 def test_telethon_album_send_rejects_old_message_ids():
-    result = asyncio.run(send_saved_post_album_via_telethon_source(
-        telethon_client=_TelethonOldIds(),
-        chat_id="-1002451047809",
-        content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
-    ))
-    assert result["method"] == "telethon_source_unverified"
+    with pytest.raises(SavedPostSentUnverifiedError) as exc:
+        asyncio.run(send_saved_post_album_via_telethon_source(
+            telethon_client=_TelethonOldIds(),
+            chat_id="-1002451047809",
+            content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
+        ))
+    assert exc.value.method == "telethon_source_unverified"
 
 
 class _TelethonWrongPeer(FakeTelethonSource):
@@ -336,12 +359,13 @@ class _TelethonWrongPeer(FakeTelethonSource):
 
 
 def test_telethon_album_send_rejects_wrong_peer():
-    result = asyncio.run(send_saved_post_album_via_telethon_source(
-        telethon_client=_TelethonWrongPeer(),
-        chat_id="-1002451047809",
-        content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
-    ))
-    assert result["method"] == "telethon_source_unverified"
+    with pytest.raises(SavedPostSentUnverifiedError) as exc:
+        asyncio.run(send_saved_post_album_via_telethon_source(
+            telethon_client=_TelethonWrongPeer(),
+            chat_id="-1002451047809",
+            content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
+        ))
+    assert exc.value.method == "telethon_source_unverified"
 
 
 class _FailSourceThenBuilder(_TelethonVerifyOk):

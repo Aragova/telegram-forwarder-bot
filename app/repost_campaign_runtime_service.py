@@ -550,8 +550,7 @@ class RepostCampaignRuntimeService:
 
         content = saved_post.get("content_json") or saved_post.get("content") or {}
         render_result = await self.renderer.send(chat_id=target_id, content=content)
-        forced_sent = (not render_result.ok) and bool(getattr(render_result, "message_ids", None))
-        if not render_result.ok and not forced_sent:
+        if not render_result.ok:
             self.repo.mark_campaign_run_message_failed(
                 run_message_id,
                 error_text=render_result.error_text or "unknown error",
@@ -587,12 +586,6 @@ class RepostCampaignRuntimeService:
                 premium_required=render_result.premium_required,
                 extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id},
             )
-        if forced_sent:
-            self.logger.warning(
-                "REPOST_CAMPAIGN_RENDER_FAILED_BUT_IDS_RETURNED_MARK_SENT | run_id=%s | campaign_run_message_id=%s | target_id=%s | message_ids=%s | method=%s | error_text=%s",
-                run_id, run_message_id, target_id, getattr(render_result, "message_ids", None), render_result.method, render_result.error_text,
-            )
-
         self.repo.mark_campaign_run_message_sent(
             run_message_id,
             sent_message_id=render_result.message_id,
@@ -693,8 +686,7 @@ class RepostCampaignRuntimeService:
             self.repo.mark_campaign_run_message_sending(run_message_id, render_mode=None)
             render_result = await self.renderer.send(chat_id=target["target_id"], content=content)
             last_render_mode = getattr(render_result, "method", None) or last_render_mode
-            forced_sent = (not render_result.ok) and bool(getattr(render_result, "message_ids", None))
-            if render_result.ok or forced_sent:
+            if render_result.ok:
                 self.repo.mark_campaign_run_message_sent(run_message_id, sent_message_id=render_result.message_id, sent_message_ids=getattr(render_result, "message_ids", None), render_mode=render_result.method)
                 targets_success += 1
             else:
@@ -841,8 +833,7 @@ class RepostCampaignRuntimeService:
             any_premium_required = any_premium_required or bool(getattr(render_result, "premium_required", False))
             album_ids = list(getattr(render_result, "message_ids", None) or [])
             is_album_without_ids = bool(render_result.ok and render_result.kind == "album" and not album_ids)
-            forced_sent = (not render_result.ok) and bool(album_ids)
-            if (render_result.ok and not is_album_without_ids) or forced_sent:
+            if render_result.ok and not is_album_without_ids:
                 self.repo.mark_campaign_run_message_sent(
                     run_message_id,
                     sent_message_id=render_result.message_id,
@@ -856,11 +847,6 @@ class RepostCampaignRuntimeService:
                     "REPOST_CAMPAIGN_LAUNCH_TARGET_SENT | run_id=%s | target_id=%s | message_id=%s | message_ids=%s | method=%s",
                     run_id, target["target_id"], render_result.message_id, album_ids, render_result.method
                 )
-                if forced_sent:
-                    self.logger.warning(
-                        "REPOST_CAMPAIGN_RENDER_FAILED_BUT_IDS_RETURNED_MARK_SENT | run_id=%s | campaign_run_message_id=%s | target_id=%s | message_ids=%s | method=%s | error_text=%s",
-                        run_id, run_message_id, target["target_id"], album_ids, render_result.method, getattr(render_result, "error_text", None),
-                    )
             else:
                 self.repo.mark_campaign_run_message_failed(
                     run_message_id,
