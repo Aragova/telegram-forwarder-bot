@@ -6931,6 +6931,18 @@ async def handle_rule_repost_campaign_add_list(callback: CallbackQuery):
     )
     await answer_callback_safe_once(callback)
 
+async def _send_export_document(callback: CallbackQuery, *, filename: str, content: bytes) -> None:
+    tmp_path: Path | None = None
+    try:
+        suffix = Path(filename).suffix or ".txt"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        await callback.message.answer_document(FSInputFile(str(tmp_path), filename=filename))
+    finally:
+        if tmp_path:
+            tmp_path.unlink(missing_ok=True)
+
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_views_export_csv:"))
 async def handle_rule_repost_campaign_views_export_csv(callback: CallbackQuery):
     _, rule_id_raw, run_id_raw = callback.data.split(":", 2)

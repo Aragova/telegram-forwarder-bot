@@ -701,12 +701,14 @@ def test_post_stats_views_have_export_buttons():
 def test_bot_has_export_callbacks_and_runtime_builder_usage():
     source = Path("bot.py").read_text(encoding="utf-8")
 
+    assert "def _send_export_document" in source
     assert "rule_repost_campaign_views_export_xlsx:" in source
     assert "rule_repost_campaign_views_export_csv:" in source
     assert "rule_repost_campaign_views_export_txt:" in source
     assert "rule_repost_campaign_post_export_xlsx:" in source
     assert "rule_repost_campaign_post_export_csv:" in source
     assert "rule_repost_campaign_post_export_txt:" in source
+    assert "_send_export_document(" in source
     assert "_build_repost_campaign_runtime()" in source
     assert "from app.repost_campaign_export_service import" in source
     assert "build_campaign_run_report_xlsx" in source
