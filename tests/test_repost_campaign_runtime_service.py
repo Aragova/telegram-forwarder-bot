@@ -99,6 +99,12 @@ class _FakeRepo:
 
     def mark_campaign_run_message_deleted(self, message_id):
         self.mark_campaign_run_message_deleted_calls.append(message_id)
+        for row in self._messages:
+            if int(row.get("id") or 0) == int(message_id):
+                row["delete_status"] = "deleted"
+                break
+        if self._message and int(self._message.get("id") or 0) == int(message_id):
+            self._message["delete_status"] = "deleted"
         return True
 
     def mark_campaign_run_message_delete_failed(self, message_id, *, error_text):
@@ -657,8 +663,9 @@ def test_manual_delete_send_status_not_sent():
     repo._message = {"id": 33, "run_id": 10, "rule_id": 3, "send_status": "failed", "target_id": "-1001", "sent_message_id": 777, "delete_status": "failed"}
     runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=SimpleNamespace(delete_message=lambda **kwargs: None))
     result = asyncio.run(runtime.delete_campaign_run_message_now(rule_id=3, run_id=10, run_message_id=33))
-    assert result.ok is False
-    assert result.error_text == "Публикация ещё не была успешно отправлена"
+    assert result.ok is True
+    assert result.method == "skipped_not_sent"
+    assert repo.mark_campaign_run_message_deleted_calls == [33]
 
 
 def test_manual_delete_failed():
@@ -714,6 +721,20 @@ def test_delete_campaign_run_now_skips_deleted_and_handles_delete_error():
     assert result.ok is False
     assert repo.mark_campaign_run_message_deleted_calls == []
     assert repo.mark_campaign_run_message_delete_failed_calls[0][0] == 12
+    assert repo.update_campaign_run_status_calls[-1] == (10, {"status": "partial", "error_text": "Не все публикации удалось удалить"})
+
+
+def test_delete_campaign_run_now_closes_not_sent_messages_as_noop():
+    repo = _FakeRepo()
+    repo._run = {"id": 10, "rule_id": 3}
+    repo._messages = [
+        {"id": 31, "run_id": 10, "rule_id": 3, "target_id": "-1001", "sent_message_id": 201, "send_status": "failed", "delete_status": "failed"},
+    ]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=_FakeDeleter())
+    result = asyncio.run(runtime.delete_campaign_run_now(rule_id=3, run_id=10))
+    assert result.ok is True
+    assert repo.mark_campaign_run_message_deleted_calls == [31]
+    assert repo.update_campaign_run_status_calls[-1] == (10, {"status": "sent", "error_text": None})
 
 
 def test_delete_campaign_run_now_calls_delete_campaign_run_message_now():
