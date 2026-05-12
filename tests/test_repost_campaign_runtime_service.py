@@ -252,6 +252,7 @@ def test_send_marks_run_failed_on_renderer_error():
 
     result = asyncio.run(runtime.test_send_saved_post_to_main_target(rule_id=34))
     assert len(repo.mark_campaign_run_message_failed_calls) == 1
+    assert repo.mark_campaign_run_message_failed_calls[0][1].get("delete_status") == "failed"
     assert repo.update_campaign_run_status_calls[-1][1]["status"] == "failed"
     assert result.ok is False
     assert result.extra["campaign_run_id"] == repo.next_run_id
@@ -267,6 +268,7 @@ def test_test_send_marks_failed_when_renderer_failed_with_ids():
     assert result.ok is False
     assert len(repo.mark_campaign_run_message_sent_calls) == 0
     assert len(repo.mark_campaign_run_message_failed_calls) == 1
+    assert repo.mark_campaign_run_message_failed_calls[0][1].get("delete_status") is None
 
 
 def test_launch_dedup_targets_stops_on_failed_main_target():
@@ -283,6 +285,7 @@ def test_launch_dedup_targets_stops_on_failed_main_target():
     assert result.ok is False
     assert len(renderer.calls) == 1
     assert len(repo.create_campaign_run_message_calls) == 1
+    assert len(repo.mark_campaign_run_message_sent_calls) == 0
 
 
 def test_launch_does_not_send_when_run_message_not_created():
@@ -297,6 +300,7 @@ def test_launch_does_not_send_when_run_message_not_created():
     result = asyncio.run(runtime.launch_campaign_now(rule_id=1001))
     assert result.ok is False
     assert len(repo.create_campaign_run_message_calls) == 1
+    assert len(repo.mark_campaign_run_message_sent_calls) == 0
     assert len(renderer.calls) == 0
 
 
@@ -819,6 +823,7 @@ def test_launch_dedupe_main_and_extra():
     result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
     assert result.extra["targets_total"] == 1
     assert len(repo.create_campaign_run_message_calls) == 1
+    assert len(repo.mark_campaign_run_message_sent_calls) == 1
 
 
 def test_launch_no_show_seconds():
