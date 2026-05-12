@@ -41,15 +41,16 @@ def test_build_repost_campaign_runtime_factory_constructs_services():
 
 
 def test_vip_scheduled_posts_handler_uses_service_active_placement_source():
-    source = Path("bot.py").read_text(encoding="utf-8")
-    assert "service = _build_repost_campaign_scheduled_post_service()" in source
-    assert "active_placement = await run_db(service.build_active_scheduled_post_placement, rule_id=rule_id)" in source
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    assert "service = build_repost_campaign_scheduled_post_service(ctx)" in source
+    assert "active_placement = await ctx.run_db(service.build_active_scheduled_post_placement, rule_id=rule_id)" in source
 
 
 def test_vip_delete_handler_checks_vip_active_before_delete():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert "Активных VIP-запланированных размещений нет." in source
-    assert "updated = await run_db(service.build_active_scheduled_post_placement, rule_id=rule_id)" in source
+    assert "runtime = build_repost_campaign_runtime(ctx)" in source
+    assert "updated = await ctx.run_db(service.build_active_scheduled_post_placement, rule_id=rule_id)" in source
 
 
 def test_manual_schedule_input_branch_builds_preview_and_returns():
