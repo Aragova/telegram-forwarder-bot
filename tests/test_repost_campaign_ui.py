@@ -251,8 +251,17 @@ def test_vip_scheduled_material_state_uses_album_buffer():
 
 def test_vip_scheduled_single_material_uses_shared_save_helper():
     source = Path("app/repost_campaign_message_handlers.py").read_text(encoding="utf-8")
+    assert "async def _save_vip_scheduled_post_material(" in source
     assert "db.create_saved_post" in source
     assert "update_draft_saved_post" in source
+    assert "scheduled_post_id=scheduled_post_id" in source
+
+
+def test_vip_scheduled_album_callback_reloads_state_ids_and_uses_last_message():
+    source = Path("app/repost_campaign_message_handlers.py").read_text(encoding="utf-8")
+    assert "rule_id_now = int(state_now.get(\"rule_id\") or 0)" in source
+    assert "scheduled_post_id_now = int(state_now.get(\"scheduled_post_id\") or 0)" in source
+    assert "message=messages[-1]" in source
 
 
 def test_vip_scheduled_material_has_dedicated_handler_before_generic_album_handler():

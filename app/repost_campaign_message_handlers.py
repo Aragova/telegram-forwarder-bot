@@ -22,6 +22,55 @@ def is_waiting_vip_scheduled_post_material(ctx: RepostCampaignHandlersContext, u
     return state.get('state') == 'waiting_vip_scheduled_post_material'
 
 
+async def _save_vip_scheduled_post_material(
+    ctx: RepostCampaignHandlersContext,
+    *,
+    admin_id: int,
+    rule_id: int,
+    scheduled_post_id: int,
+    content_json: dict,
+    source_message,
+) -> int | None:
+    saved_post_id = await ctx.run_db(
+        ctx.db.create_saved_post,
+        rule_id=rule_id,
+        title=None,
+        content=content_json,
+        source_chat_id=str(source_message.chat.id) if source_message.chat else None,
+        source_message_id=source_message.message_id,
+        source_media_group_id=str(getattr(source_message, "media_group_id", "") or "") or None,
+        created_by=admin_id,
+    )
+    if not saved_post_id:
+        return None
+    service = build_repost_campaign_scheduled_post_service(ctx)
+    result = await ctx.run_db(
+        service.update_draft_saved_post,
+        scheduled_post_id=scheduled_post_id,
+        saved_post_id=int(saved_post_id),
+        actor_id=admin_id,
+    )
+    if not result.ok:
+        return None
+    return int(saved_post_id)
+
+
+async def _open_vip_scheduled_post_step_targets_message(
+    ctx: RepostCampaignHandlersContext,
+    *,
+    message,
+    rule_id: int,
+    scheduled_post_id: int,
+    prefix_text: str,
+) -> None:
+    service = build_repost_campaign_scheduled_post_service(ctx)
+    row = await ctx.run_db(ctx.db.get_campaign_scheduled_post, scheduled_post_id)
+    targets = await ctx.run_db(ctx.db.list_campaign_scheduled_post_targets, scheduled_post_id)
+    readiness = await ctx.run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
+    text_step2, kb_step2 = build_vip_scheduled_post_wizard_targets_view(rule_id=rule_id, scheduled_post=row or {}, targets=targets or [], readiness=readiness or {})
+    await message.answer(f"{prefix_text}\n\n{text_step2}", reply_markup=kb_step2)
+
+
 async def handle_vip_scheduled_post_material_message(ctx: RepostCampaignHandlersContext, message) -> bool:
     user_id = message.from_user.id if message.from_user else None
     state = ctx.user_states.get(user_id, {})
@@ -35,54 +84,41 @@ async def handle_vip_scheduled_post_material_message(ctx: RepostCampaignHandlers
         await message.answer("❌ Не удалось определить черновик запланированного поста")
         return True
 
-    async def _save(content_json: dict, src_message):
-        saved_post_id = await ctx.run_db(
-            ctx.db.create_saved_post,
-            rule_id=rule_id,
-            title=None,
-            content=content_json,
-            source_chat_id=str(src_message.chat.id) if src_message.chat else None,
-            source_message_id=src_message.message_id,
-            source_media_group_id=str(getattr(src_message, "media_group_id", "") or "") or None,
-            created_by=admin_id,
-        )
-        if not saved_post_id:
-            return None
-        service = build_repost_campaign_scheduled_post_service(ctx)
-        result = await ctx.run_db(
-            service.update_draft_saved_post,
-            scheduled_post_id=scheduled_post_id,
-            saved_post_id=int(saved_post_id),
-            actor_id=admin_id,
-        )
-        if not result.ok:
-            return None
-        return int(saved_post_id)
-
-    async def _open_targets(prefix_text: str):
-        service = build_repost_campaign_scheduled_post_service(ctx)
-        row = await ctx.run_db(ctx.db.get_campaign_scheduled_post, scheduled_post_id)
-        targets = await ctx.run_db(ctx.db.list_campaign_scheduled_post_targets, scheduled_post_id)
-        readiness = await ctx.run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
-        text_step2, kb_step2 = build_vip_scheduled_post_wizard_targets_view(rule_id=rule_id, scheduled_post=row or {}, targets=targets or [], readiness=readiness or {})
-        await message.answer(f"{prefix_text}\n\n{text_step2}", reply_markup=kb_step2)
-
     if getattr(message, "media_group_id", None):
         async def _on_album_ready(*, admin_id: int, messages: list):
             state_now = ctx.user_states.get(admin_id, {})
             if state_now.get("state") != "waiting_vip_scheduled_post_material":
+                return
+            rule_id_now = int(state_now.get("rule_id") or 0)
+            scheduled_post_id_now = int(state_now.get("scheduled_post_id") or 0)
+            if rule_id_now <= 0 or scheduled_post_id_now <= 0:
+                ctx.reset_user_state(admin_id)
+                await messages[-1].answer("❌ Не удалось определить черновик запланированного поста")
                 return
             try:
                 content_json = build_saved_post_album_content_from_aiogram_messages(messages)
             except Exception:
                 await messages[-1].answer("❌ Не удалось сохранить альбом. Попробуйте отправить его ещё раз.")
                 return
-            saved_post_id = await _save(content_json, messages[-1])
+            saved_post_id = await _save_vip_scheduled_post_material(
+                ctx,
+                admin_id=admin_id,
+                rule_id=rule_id_now,
+                scheduled_post_id=scheduled_post_id_now,
+                content_json=content_json,
+                source_message=messages[-1],
+            )
             if not saved_post_id:
                 await messages[-1].answer("❌ Не удалось сохранить рекламный альбом")
                 return
             ctx.reset_user_state(admin_id)
-            await _open_targets("✅ Рекламный альбом сохранён.")
+            await _open_vip_scheduled_post_step_targets_message(
+                ctx,
+                message=messages[-1],
+                rule_id=rule_id_now,
+                scheduled_post_id=scheduled_post_id_now,
+                prefix_text="✅ Рекламный альбом сохранён.",
+            )
 
         is_new_album = await ctx.saved_post_album_buffer.add_message(admin_id=admin_id, message=message, on_album_ready=_on_album_ready)
         if is_new_album:
@@ -90,12 +126,25 @@ async def handle_vip_scheduled_post_material_message(ctx: RepostCampaignHandlers
         return True
 
     content_json = build_saved_post_content_from_aiogram_message(message)
-    saved_post_id = await _save(content_json, message)
+    saved_post_id = await _save_vip_scheduled_post_material(
+        ctx,
+        admin_id=admin_id,
+        rule_id=rule_id,
+        scheduled_post_id=scheduled_post_id,
+        content_json=content_json,
+        source_message=message,
+    )
     if not saved_post_id:
         await message.answer("❌ Не удалось сохранить рекламный пост")
         return True
     ctx.reset_user_state(user_id)
-    await _open_targets("✅ Рекламный пост сохранён.")
+    await _open_vip_scheduled_post_step_targets_message(
+        ctx,
+        message=message,
+        rule_id=rule_id,
+        scheduled_post_id=scheduled_post_id,
+        prefix_text="✅ Рекламный пост сохранён.",
+    )
     return True
 
 
