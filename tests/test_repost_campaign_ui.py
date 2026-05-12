@@ -352,6 +352,46 @@ def test_stateful_handler_delegates_vip_scheduled_material_to_helper():
     ]
     assert "    return" in block
 
+
+def _extract_function_block(source: str, function_name: str) -> str:
+    match = re.search(rf"^(?:async\s+)?def {re.escape(function_name)}\(", source, flags=re.MULTILINE)
+    assert match is not None
+    start = match.start()
+    next_match = re.search(r"^(?:async\s+)?def [a-zA-Z0-9_]+\(", source[start + 1 :], flags=re.MULTILINE)
+    if next_match is None:
+        return source[start:]
+    return source[start : start + 1 + next_match.start()]
+
+
+def test_vip_scheduled_ctx_helpers_are_module_level_and_explicit_ctx():
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    helper_names = [
+        "_open_vip_step_post",
+        "_open_vip_scheduled_post_step_targets_callback",
+        "_open_vip_scheduled_posts_list_callback",
+        "_build_vip_scheduled_known_targets",
+        "_open_vip_scheduled_post_pick_targets",
+    ]
+    for helper_name in helper_names:
+        block = _extract_function_block(source, helper_name)
+        assert "ctx: RepostCampaignHandlersContext" in block
+
+
+def test_register_scheduled_post_handlers_has_no_nested_vip_ctx_helpers():
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    register_block = source[source.index("def register_repost_campaign_scheduled_post_handlers"): ]
+    assert re.search(r"\n\s{4}async def _open_vip_step_post\(", register_block) is None
+    assert re.search(r"\n\s{4}async def _open_vip_scheduled_post_step_targets_callback\(", register_block) is None
+    assert re.search(r"\n\s{4}async def _open_vip_scheduled_posts_list_callback\(", register_block) is None
+    assert re.search(r"\n\s{4}async def _build_vip_scheduled_known_targets\(", register_block) is None
+    assert re.search(r"\n\s{4}async def _open_vip_scheduled_post_pick_targets\(", register_block) is None
+
+
+def test_register_scheduled_post_handlers_still_has_callback_registrations():
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    register_block = source[source.index("def register_repost_campaign_scheduled_post_handlers"): ]
+    assert "@dp.callback_query(" in register_block
+
 from app.repost_campaign_ui import build_repost_campaign_posts_library_view, build_repost_campaign_post_stats_view, build_repost_campaign_post_stats_loading_view, build_repost_campaign_post_channels_stats_view
 
 def _library_payload(count=3):
