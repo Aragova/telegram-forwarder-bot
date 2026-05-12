@@ -149,6 +149,7 @@ from app.repost_campaign_scheduled_post_service import RepostCampaignScheduledPo
 from app import product_ui
 from app import access_control, user_ui
 from app.user_menu_handlers import UserMenuHandlersContext, register_user_menu_handlers
+from app.user_status_handlers import UserStatusHandlersContext, register_user_status_handlers
 from app.user_handlers import (
     UserHandlersContext,
     register_user_payment_handlers,
@@ -2743,68 +2744,6 @@ async def handle_user_channel_remove_callback(callback: CallbackQuery):
 
 
 
-@dp.callback_query(lambda c: c.data == "user_status")
-async def handle_user_status_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    sub = await run_db(subscription_service.get_active_subscription, tenant_id) or {}
-    status = str(sub.get("status") or "active")
-    usage_today = await run_db(usage_service.get_today_usage, tenant_id)
-    rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
-    active_rules = sum(1 for row in rules if bool(getattr(row, "is_active", False)))
-    rule_limit = int(sub.get("max_rules") or 0)
-    max_video = int(sub.get("max_video_per_day") or 0)
-    max_jobs = int(sub.get("max_jobs_per_day") or 0)
-    video_today = int((usage_today or {}).get("video_count") or 0)
-    jobs_today = int((usage_today or {}).get("jobs_count") or 0)
-    queue_total = 0
-    errors_total = 0
-    next_publication = "—"
-    for row in rules:
-        snapshot = await run_db(db.get_rule_card_snapshot, int(getattr(row, "id", 0)))
-        if not snapshot:
-            continue
-        queue_total += int(snapshot.get("pending_count") or 0)
-        errors_total += int(snapshot.get("faulty_count") or 0)
-        next_run = snapshot.get("next_run_at")
-        if next_run and next_publication == "—":
-            next_publication = str(next_run)[11:16]
-    state_line = "🟢 Доступ активен"
-    if status == "grace":
-        state_line = "⚠️ Льготный период"
-        await run_db(_write_billing_event, tenant_id, "subscription_grace_warning_shown", action="user_status", plan_name=str(sub.get("plan_name") or "FREE"), usage_today=usage_today)
-    elif _is_subscription_blocked_status(status):
-        state_line = "🔒 Подписка неактивна"
-    can_rule, _rule_reason = await run_db(limit_service.can_create_rule, tenant_id)
-    can_job, _job_reason = await run_db(limit_service.can_enqueue_job, tenant_id)
-    can_video, _video_reason = await run_db(limit_service.can_process_video, tenant_id)
-    if not (can_rule and can_job and can_video):
-        state_line = "🚫 Лимит достигнут"
-
-    text = (
-        "📊 Живой статус\n\n"
-        f"{state_line.replace('Доступ активен', 'Автоматизация работает')}\n\n"
-        "──────────────\n\n"
-        f"📦 В очереди: {queue_total}\n"
-        f"⏳ В обработке: {active_rules}\n"
-        f"✅ Отправлено сегодня: {jobs_today}\n"
-        f"⚠️ Ошибки: {errors_total}\n\n"
-        "──────────────\n\n"
-        f"🕒 Обновлено: {datetime.now(USER_TZ).strftime('%H:%M')} (UTC+3)\n"
-        f"Следующая публикация: {next_publication}"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="user_status")],
-        [InlineKeyboardButton(text="⚙️ Мои правила", callback_data="user_rules"), InlineKeyboardButton(text="📡 Мои каналы", callback_data="user_channels")],
-        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
-    ])
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
-
 @dp.callback_query(lambda c: c.data and c.data.startswith("user_channel_add_type:"))
 async def handle_user_channel_add_type_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
@@ -2944,6 +2883,23 @@ user_menu_ctx = UserMenuHandlersContext(
     user_targets_keyboard=_user_targets_keyboard,
 )
 register_user_menu_handlers(dp, user_menu_ctx)
+
+user_status_ctx = UserStatusHandlersContext(
+    db=db,
+    USER_TZ=USER_TZ,
+    run_db=run_db,
+    ensure_user_tenant=ensure_user_tenant,
+    subscription_service=subscription_service,
+    usage_service=usage_service,
+    limit_service=limit_service,
+    _is_admin_user=_is_admin_user,
+    answer_callback_safe=lambda *a, **k: answer_callback_safe(*a, **k),
+    answer_callback_safe_once=lambda *a, **k: answer_callback_safe_once(*a, **k),
+    edit_message_text_safe=lambda *a, **k: edit_message_text_safe(*a, **k),
+    write_billing_event=_write_billing_event,
+    is_subscription_blocked_status=_is_subscription_blocked_status,
+)
+register_user_status_handlers(dp, user_status_ctx)
 
 @dp.pre_checkout_query()
 async def handle_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):

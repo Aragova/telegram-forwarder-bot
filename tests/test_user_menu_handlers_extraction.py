@@ -37,8 +37,6 @@ def test_no_bot_import_and_no_high_risk_markers():
         assert marker not in t
 
 
-def test_user_status_stays_in_bot():
-    bt = Path('bot.py').read_text(encoding='utf-8')
+def test_user_status_not_in_user_menu_module():
     mt = Path('app/user_menu_handlers.py').read_text(encoding='utf-8')
-    assert "lambda c: c.data == \"user_status\"" in bt
     assert "lambda c: c.data == \"user_status\"" not in mt
