@@ -1334,10 +1334,9 @@ def test_vip_scheduled_uses_open_helpers_instead_of_callback_data_rewrite():
 
 def test_vip_scheduled_confirm_opens_list_without_callback_data_mutation():
     source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
-    handler_body = source[
-        source.find("async def handle_confirm"):
-        source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_detail:"))')
-    ]
+    start = source.find("async def handle_confirm")
+    end = source.find("\n    @dp.callback_query", start + 1)
+    handler_body = source[start:end]
     assert re.search(r"callback\.data\s*=\s*[^=]", handler_body) is None
     assert "_open_vip_scheduled_posts_list_callback" in handler_body
 
@@ -1745,6 +1744,103 @@ def test_vip_scheduled_helpers_rule_value_and_target_key_are_module_level():
     source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert "\ndef _rule_value(" in source
     assert "\ndef _target_key(" in source
+
+
+def _extract_vip_scheduled_register_block(source: str) -> str:
+    start = source.index("def register_repost_campaign_scheduled_post_handlers")
+    return source[start:]
+
+
+def _extract_vip_scheduled_section_blocks(register_block: str) -> dict[str, str]:
+    section_names = [
+        "Entry / list / detail",
+        "Draft / material / post",
+        "Targets",
+        "Show duration",
+        "Time",
+        "Preview / schedule",
+        "Runtime / destructive",
+    ]
+    markers = [f"    # {name}" for name in section_names]
+    positions = [register_block.index(marker) for marker in markers]
+    sections: dict[str, str] = {}
+    for idx, name in enumerate(section_names):
+        start = positions[idx]
+        end = positions[idx + 1] if idx + 1 < len(positions) else len(register_block)
+        sections[name] = register_block[start:end]
+    return sections
+
+
+def test_vip_scheduled_register_has_sections_in_order():
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    register_block = _extract_vip_scheduled_register_block(source)
+    section_names = [
+        "Entry / list / detail",
+        "Draft / material / post",
+        "Targets",
+        "Show duration",
+        "Time",
+        "Preview / schedule",
+        "Runtime / destructive",
+    ]
+    positions = [register_block.index(f"    # {name}") for name in section_names]
+    assert positions == sorted(positions)
+
+
+def test_vip_scheduled_callbacks_are_grouped_in_sections():
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    register_block = _extract_vip_scheduled_register_block(source)
+    sections = _extract_vip_scheduled_section_blocks(register_block)
+
+    expected = {
+        "Entry / list / detail": [
+            "rule_repost_campaign_scheduled_posts:",
+            "rule_repost_campaign_scheduled_posts_list:",
+            "rule_repost_campaign_scheduled_post_detail:",
+        ],
+        "Draft / material / post": [
+            "rule_repost_campaign_scheduled_post_new:",
+            "rule_repost_campaign_scheduled_post_edit:",
+            "rule_repost_campaign_scheduled_post_step_post:",
+            "rule_repost_campaign_scheduled_post_pick_post:",
+        ],
+        "Targets": [
+            "rule_repost_campaign_scheduled_post_step_targets:",
+            "rule_repost_campaign_scheduled_post_snapshot_targets:",
+            "rule_repost_campaign_scheduled_post_add_target:",
+            "rule_repost_campaign_scheduled_post_pick_targets:",
+            "rule_repost_campaign_scheduled_post_add_known_target:",
+            "rule_repost_campaign_scheduled_post_add_known_page:",
+            "rule_repost_campaign_scheduled_post_add_known_all:",
+            "rule_repost_campaign_scheduled_post_check_rights:",
+        ],
+        "Show duration": [
+            "rule_repost_campaign_scheduled_post_step_show:",
+            "rule_repost_campaign_scheduled_post_pick_show:",
+        ],
+        "Time": [
+            "rule_repost_campaign_scheduled_post_step_time:",
+            "rule_repost_campaign_scheduled_post_quick_time:",
+            "rule_repost_campaign_scheduled_post_input_time:",
+        ],
+        "Preview / schedule": [
+            "rule_repost_campaign_scheduled_post_preview:",
+            "rule_repost_campaign_scheduled_post_confirm:",
+        ],
+        "Runtime / destructive": [
+            "rule_repost_campaign_scheduled_post_send_now_confirm:",
+            "rule_repost_campaign_scheduled_post_send_now:",
+            "rule_repost_campaign_scheduled_post_duplicate:",
+            "rule_repost_campaign_scheduled_post_cancel_confirm:",
+            "rule_repost_campaign_scheduled_post_cancel:",
+            "rule_repost_campaign_vip_delete_active:",
+        ],
+    }
+
+    for section_name, callbacks in expected.items():
+        block = sections[section_name]
+        for callback_prefix in callbacks:
+            assert callback_prefix in block
 
 
 def test_vip_scheduled_callbacks_order_safety():
