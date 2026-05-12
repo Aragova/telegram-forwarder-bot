@@ -555,7 +555,6 @@ class RepostCampaignRuntimeService:
                 run_message_id,
                 error_text=render_result.error_text or "unknown error",
                 render_mode=render_result.method,
-                delete_status=(None if str(render_result.method or "").endswith("_unverified") else "failed"),
             )
             self.repo.update_campaign_run_status(
                 run_id,
@@ -851,7 +850,7 @@ class RepostCampaignRuntimeService:
                 )
             else:
                 err_text = "Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error")
-                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=err_text, render_mode=getattr(render_result, "method", None), delete_status=(None if is_unverified else "failed"))
+                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=err_text, render_mode=getattr(render_result, "method", None))
                 failed_count += 1
                 if first_error_text is None:
                     first_error_text = "Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error")
