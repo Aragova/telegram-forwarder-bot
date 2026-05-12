@@ -13,7 +13,7 @@ def test_main_menu_has_no_user_account_callback() -> None:
 
 
 def test_user_account_callback_shows_kill_screen() -> None:
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/user_menu_handlers.py").read_text(encoding="utf-8")
     assert 'lambda c: c.data == "user_account"' in source
     assert "Этот раздел больше не используется." in source
     assert "callback_data=\"user_subscription\"" in source
@@ -22,8 +22,8 @@ def test_user_account_callback_shows_kill_screen() -> None:
 
 def test_legacy_callbacks_are_disabled_and_do_not_open_old_payment_ui() -> None:
     source = Path("app/user_handlers/payments.py").read_text(encoding="utf-8")
-    bot_source = Path("bot.py").read_text(encoding="utf-8")
-    assert 'lambda c: c.data == "user_plans"' in bot_source
+    menu_source = Path("app/user_menu_handlers.py").read_text(encoding="utf-8")
+    assert 'lambda c: c.data == "user_plans"' in menu_source
     for cb in [
         "user_select_plan:",
         "user_confirm_plan:",
