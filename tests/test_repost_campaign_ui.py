@@ -242,7 +242,7 @@ def test_bot_contains_campaign_check_loading_and_optional_page_parse():
 
 
 def test_vip_scheduled_material_state_uses_album_buffer():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_message_handlers.py").read_text(encoding="utf-8")
     assert "waiting_vip_scheduled_post_material" in source
     assert "saved_post_album_buffer.add_message" in source
     assert "build_saved_post_album_content_from_aiogram_messages" in source
@@ -250,16 +250,23 @@ def test_vip_scheduled_material_state_uses_album_buffer():
 
 
 def test_vip_scheduled_single_material_uses_shared_save_helper():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_message_handlers.py").read_text(encoding="utf-8")
     assert "async def _save_vip_scheduled_post_material(" in source
-    assert "saved_post_id = await _save_vip_scheduled_post_material(" in source
     assert "db.create_saved_post" in source
-    assert "service.update_draft_saved_post" in source
+    assert "update_draft_saved_post" in source
+    assert "scheduled_post_id=scheduled_post_id" in source
+
+
+def test_vip_scheduled_album_callback_reloads_state_ids_and_uses_last_message():
+    source = Path("app/repost_campaign_message_handlers.py").read_text(encoding="utf-8")
+    assert "rule_id_now = int(state_now.get(\"rule_id\") or 0)" in source
+    assert "scheduled_post_id_now = int(state_now.get(\"scheduled_post_id\") or 0)" in source
+    assert "message=messages[-1]" in source
 
 
 def test_vip_scheduled_material_has_dedicated_handler_before_generic_album_handler():
     source = Path("bot.py").read_text(encoding="utf-8")
-    vip_handler_pos = source.index("async def handle_vip_scheduled_post_material_message(message: Message):")
+    vip_handler_pos = source.index("if await handle_vip_scheduled_post_material_message(campaign_handlers_ctx, message):")
     generic_album_pos = source.index("on_album_ready=_finalize_repost_campaign_saved_post_album")
     assert vip_handler_pos < generic_album_pos
 
@@ -304,16 +311,19 @@ def test_vip_scheduled_pick_show_parses_four_part_callback():
 
 def test_generic_album_handlers_skip_vip_scheduled_material_state():
     source = Path("bot.py").read_text(encoding="utf-8")
-    assert "def _is_waiting_vip_scheduled_post_material(user_id: int | None) -> bool:" in source
-    generic_state_block_pos = source.index("if state.get(\"state\") == \"awaiting_repost_campaign_saved_post\":")
-    guard_pos = source.index("if _is_waiting_vip_scheduled_post_material(user_id):", generic_state_block_pos)
-    assert guard_pos > generic_state_block_pos
+    module_source = Path("app/repost_campaign_message_handlers.py").read_text(encoding="utf-8")
+    assert "def _is_waiting_vip_scheduled_post_material(user_id: int | None) -> bool:" not in source
+    assert "waiting_vip_scheduled_post_material" in module_source
 
 
 def test_stateful_handler_delegates_vip_scheduled_material_to_helper():
     source = Path("bot.py").read_text(encoding="utf-8")
-    assert "if await _handle_vip_scheduled_post_material_message(message):" in source
-    assert "    return" in source[source.index("if await _handle_vip_scheduled_post_material_message(message):"):source.index("if state.get(\"state\") == \"awaiting_repost_campaign_saved_post\":")]
+    assert "if await handle_vip_scheduled_post_material_message(campaign_handlers_ctx, message):" in source
+    block = source[
+        source.index("if await handle_vip_scheduled_post_material_message(campaign_handlers_ctx, message):"):
+        source.index("if state.get(\"state\") == \"awaiting_repost_campaign_saved_post\":")
+    ]
+    assert "    return" in block
 
 from app.repost_campaign_ui import build_repost_campaign_posts_library_view, build_repost_campaign_post_stats_view, build_repost_campaign_post_stats_loading_view, build_repost_campaign_post_channels_stats_view
 
