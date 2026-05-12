@@ -9658,46 +9658,6 @@ async def handle_rule_repost_campaign_vip_delete_active(callback: CallbackQuery)
         prefix = "Активных рекламных постов нет."
     await edit_message_text_safe(message=callback.message, text=f"{prefix}\n\n{text}", reply_markup=kb)
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_snapshot_targets:"))
-async def handle_snapshot_targets(callback: CallbackQuery):
-    _, rid, sid = (callback.data or "").split(":", 2)
-    rule_id = int(rid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    service = _build_repost_campaign_scheduled_post_service()
-    await run_db(
-        service.update_draft_targets_from_current_campaign,
-        scheduled_post_id=int(sid),
-        actor_id=callback.from_user.id if callback.from_user else None,
-    )
-    await handle_step_targets(callback)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_add_target:"))
-async def handle_vip_scheduled_post_add_target(callback: CallbackQuery):
-    _, rid, sid = (callback.data or "").split(":", 2)
-    rule_id = int(rid)
-    scheduled_post_id = int(sid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    if callback.from_user:
-        user_states[callback.from_user.id] = {
-            "state": "waiting_vip_scheduled_post_target",
-            "rule_id": rule_id,
-            "scheduled_post_id": scheduled_post_id,
-        }
-    t, k = build_vip_scheduled_post_add_target_view(rule_id=rule_id, scheduled_post_id=scheduled_post_id)
-    await edit_message_text_safe(message=callback.message, text=t, reply_markup=k)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_pick_targets:"))
-async def handle_vip_scheduled_post_pick_targets(callback: CallbackQuery):
-    parts = (callback.data or "").split(":")
-    _, rid, sid = parts[:3]
-    page = int(parts[3]) if len(parts) > 3 else 0
-    rule_id = int(rid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    scheduled_post_id = int(sid)
-    await _open_vip_scheduled_post_pick_targets(callback=callback, rule_id=rule_id, scheduled_post_id=scheduled_post_id, page=page)
 
 async def _open_vip_scheduled_post_pick_targets(*, callback: CallbackQuery, rule_id: int, scheduled_post_id: int, page: int = 0):
     known_targets = await _build_vip_scheduled_known_targets(rule_id, scheduled_post_id)
@@ -9782,26 +9742,6 @@ async def _open_vip_scheduled_post_detail_callback(
     text, kb = build_vip_scheduled_post_detail_view(rule_id=rule_id, details=details or {})
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_add_known_target:"))
-async def handle_vip_scheduled_post_add_known_target(callback: CallbackQuery):
-    _, rid, sid, target_index_text, page_text = (callback.data or "").split(":", 4)
-    rule_id = int(rid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    scheduled_post_id = int(sid)
-    target_index = int(target_index_text)
-    page = int(page_text)
-    known_targets = await _build_vip_scheduled_known_targets(rule_id, scheduled_post_id)
-    if 0 <= target_index < len(known_targets):
-        target = known_targets[target_index]
-        service = _build_repost_campaign_scheduled_post_service()
-        result = await run_db(service.add_manual_target, scheduled_post_id=scheduled_post_id, target_id=str(target.get("target_id") or ""), target_thread_id=target.get("target_thread_id"), target_title=target.get("target_title"), actor_id=callback.from_user.id if callback.from_user else None)
-        extra = result.extra if hasattr(result, "extra") else (result.get("extra") if isinstance(result, dict) else {})
-        if extra and extra.get("already_exists"):
-            await answer_callback_safe(callback, "Уже добавлено")
-        else:
-            await answer_callback_safe(callback, "✅ Канал/группа добавлены.")
-    await _open_vip_scheduled_post_pick_targets(callback=callback, rule_id=rule_id, scheduled_post_id=scheduled_post_id, page=page)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_add_known_page:"))
 async def handle_vip_scheduled_post_add_known_page(callback: CallbackQuery):
@@ -9830,77 +9770,6 @@ async def handle_vip_scheduled_post_add_known_page(callback: CallbackQuery):
         await answer_callback_safe(callback, "Уже добавлено")
     await _open_vip_scheduled_post_pick_targets(callback=callback, rule_id=rule_id, scheduled_post_id=scheduled_post_id, page=page)
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_add_known_all:"))
-async def handle_vip_scheduled_post_add_known_all(callback: CallbackQuery):
-    _, rid, sid = (callback.data or "").split(":", 2)
-    rule_id = int(rid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    scheduled_post_id = int(sid)
-    known_targets = await _build_vip_scheduled_known_targets(rule_id, scheduled_post_id)
-    service = _build_repost_campaign_scheduled_post_service()
-    for target in known_targets:
-        await run_db(service.add_manual_target, scheduled_post_id=scheduled_post_id, target_id=str(target.get("target_id") or ""), target_thread_id=target.get("target_thread_id"), target_title=target.get("target_title"), actor_id=callback.from_user.id if callback.from_user else None)
-    await answer_callback_safe(callback, "✅ Каналы/группы добавлены.")
-    await _open_vip_scheduled_post_step_targets_callback(
-        callback=callback,
-        rule_id=rule_id,
-        scheduled_post_id=scheduled_post_id,
-    )
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_pick_show:"))
-async def handle_pick_show(callback: CallbackQuery):
-    _, rule_id_text, scheduled_post_id_text, show_seconds_text = (callback.data or "").split(":", 3)
-    rule_id = int(rule_id_text)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    scheduled_post_id = int(scheduled_post_id_text)
-    show_seconds = int(show_seconds_text)
-    service = _build_repost_campaign_scheduled_post_service()
-    await run_db(
-        service.update_draft_show_seconds,
-        scheduled_post_id=scheduled_post_id,
-        show_seconds=show_seconds,
-        actor_id=callback.from_user.id if callback.from_user else None,
-    )
-    await _open_vip_scheduled_post_step_show_callback(
-        callback=callback,
-        rule_id=rule_id,
-        scheduled_post_id=scheduled_post_id,
-    )
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_quick_time:"))
-async def handle_quick_time(callback: CallbackQuery):
-    _, rid, sid, preset = (callback.data or "").split(":", 3)
-    rule_id = int(rid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    now = campaign_schedule_now_utc(); local = now + timedelta(hours=3)
-    if preset == 'today_20': pick = local.replace(hour=20, minute=0, second=0, microsecond=0); pick = pick + timedelta(days=1) if pick <= local else pick
-    elif preset == 'tomorrow_12': pick = (local + timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
-    else: pick = (local + timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
-    dt=(pick - timedelta(hours=3)).replace(tzinfo=timezone.utc)
-    service = _build_repost_campaign_scheduled_post_service()
-    await run_db(
-        service.update_draft_scheduled_at,
-        scheduled_post_id=int(sid),
-        scheduled_at_utc=dt,
-        actor_id=callback.from_user.id if callback.from_user else None,
-    )
-    await handle_step_time(callback)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_input_time:"))
-async def handle_input_time(callback: CallbackQuery):
-    _, rid, sid = (callback.data or "").split(":", 2)
-    rule_id = int(rid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    user_states[callback.from_user.id] = {"state": "waiting_repost_campaign_scheduled_post_time", "rule_id": rule_id, "scheduled_post_id": int(sid)}
-    await edit_message_text_safe(
-        message=callback.message,
-        text="Введите дату и время\nПример:\n10.05 18:00",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_scheduled_post_step_time:{rid}:{sid}")]]),
-    )
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_send_now_confirm:"))
 async def handle_vip_scheduled_post_send_now_confirm(callback: CallbackQuery):
@@ -9985,20 +9854,6 @@ async def handle_cancel(callback: CallbackQuery):
         page=0,
     )
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_check_rights:"))
-async def handle_check_rights(callback: CallbackQuery):
-    _, rid, sid = (callback.data or "").split(":", 2)
-    rule_id = int(rid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    service = _build_repost_campaign_scheduled_post_service()
-    await service.check_targets(scheduled_post_id=int(sid), actor_id=callback.from_user.id if callback.from_user else None)
-    await answer_callback_safe_once(callback, "Проверка завершена")
-    await _open_vip_scheduled_post_detail_callback(
-        callback=callback,
-        rule_id=rule_id,
-        scheduled_post_id=int(sid),
-    )
 def _register_admin_handlers() -> None:
     global admin_handlers_ctx
     ctx = AdminHandlersContext(
