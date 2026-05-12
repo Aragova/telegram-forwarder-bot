@@ -244,4 +244,23 @@ async def handle_repost_campaign_stateful_private_input(ctx: RepostCampaignHandl
 
 
 def register_repost_campaign_message_handlers(dp: Dispatcher, ctx: RepostCampaignHandlersContext) -> None:
-    _ = (dp, ctx)
+    @dp.message(
+        lambda m: (
+            m.chat.type == "private"
+            and m.from_user
+            and is_waiting_vip_scheduled_post_material(ctx, m.from_user.id)
+        )
+    )
+    async def handle_vip_scheduled_post_material_registered(message):
+        ctx.logger.info(
+            "VIP_SCHEDULED_POST_MATERIAL_HANDLER_HIT | user_id=%s | content_type=%s | media_group_id=%s",
+            message.from_user.id if message.from_user else None,
+            getattr(message, "content_type", None),
+            getattr(message, "media_group_id", None),
+        )
+        handled = await handle_vip_scheduled_post_material_message(ctx, message)
+        if not handled:
+            ctx.logger.warning(
+                "VIP_SCHEDULED_POST_MATERIAL_HANDLER_NOT_HANDLED | user_id=%s",
+                message.from_user.id if message.from_user else None,
+            )

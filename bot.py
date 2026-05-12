@@ -6516,6 +6516,9 @@ def _build_repost_campaign_runtime() -> RepostCampaignRuntimeService:
         _build_repost_campaign_handlers_context()
     )
 
+campaign_handlers_ctx = _build_repost_campaign_handlers_context()
+register_repost_campaign_message_handlers(dp, campaign_handlers_ctx)
+
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_edit_stub:"))
 async def handle_rule_repost_campaign_post_edit_stub(callback: CallbackQuery):
@@ -10272,12 +10275,10 @@ def _parse_args() -> argparse.Namespace:
 
 _register_admin_handlers()
 _register_user_saas_handlers()
-campaign_handlers_ctx = _build_repost_campaign_handlers_context()
 register_repost_campaign_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_schedule_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_report_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_scheduled_post_handlers(dp, campaign_handlers_ctx)
-register_repost_campaign_message_handlers(dp, campaign_handlers_ctx)
 
 
 if __name__ == "__main__":
