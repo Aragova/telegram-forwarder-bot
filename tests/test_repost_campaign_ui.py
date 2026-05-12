@@ -1279,6 +1279,19 @@ def test_vip_scheduled_step_targets_callback_helper_passes_targets():
     assert "targets=targets or []" in helper_body
 
 
+def test_bot_has_no_unresolved_vip_scheduled_helper_calls():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    helper_names = [
+        "_open_vip_scheduled_post_step_targets_callback",
+        "_open_vip_scheduled_posts_list_callback",
+        "_open_vip_scheduled_post_detail_callback",
+        "_open_vip_scheduled_post_step_show_callback",
+    ]
+    for helper_name in helper_names:
+        if f"{helper_name}(" in source:
+            assert f"def {helper_name}(" in source
+
+
 def test_vip_scheduled_step_targets_has_next_when_targets_selected():
     text, kb = build_vip_scheduled_post_wizard_targets_view(
         rule_id=1,

@@ -9716,6 +9716,72 @@ async def _open_vip_scheduled_post_pick_targets(*, callback: CallbackQuery, rule
     )
     await edit_message_text_safe(message=callback.message, text=t, reply_markup=k)
 
+
+async def _open_vip_scheduled_post_step_targets_callback(
+    *,
+    callback: CallbackQuery,
+    rule_id: int,
+    scheduled_post_id: int,
+    prefix_text: str | None = None,
+) -> None:
+    service = _build_repost_campaign_scheduled_post_service()
+    row = await run_db(db.get_campaign_scheduled_post, scheduled_post_id)
+    readiness = await run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
+    targets = await run_db(
+        db.list_campaign_scheduled_post_targets,
+        scheduled_post_id,
+        active_only=True,
+    )
+    text, kb = build_vip_scheduled_post_wizard_targets_view(
+        rule_id=rule_id,
+        scheduled_post=row or {},
+        targets=targets or [],
+        readiness=readiness or {},
+    )
+    if prefix_text:
+        text = f"{prefix_text}\n\n{text}"
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+
+async def _open_vip_scheduled_posts_list_callback(
+    *,
+    callback: CallbackQuery,
+    rule_id: int,
+    page: int = 0,
+) -> None:
+    posts = await run_db(
+        db.list_campaign_scheduled_posts,
+        rule_id=rule_id,
+        statuses=["scheduled", "processing", "launched", "failed", "cancelled", "expired"],
+        limit=100,
+    )
+    text, kb = build_vip_scheduled_posts_list_view(
+        rule_id=rule_id,
+        posts=posts or [],
+        page=page,
+    )
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+
+async def _open_vip_scheduled_post_step_show_callback(*, callback: CallbackQuery, rule_id: int, scheduled_post_id: int) -> None:
+    service = _build_repost_campaign_scheduled_post_service()
+    row = await run_db(db.get_campaign_scheduled_post, scheduled_post_id)
+    ready = await run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
+    t, k = build_vip_scheduled_post_wizard_show_view(rule_id=rule_id, scheduled_post=row or {}, readiness=ready or {})
+    await edit_message_text_safe(message=callback.message, text=t, reply_markup=k)
+
+
+async def _open_vip_scheduled_post_detail_callback(
+    *,
+    callback: CallbackQuery,
+    rule_id: int,
+    scheduled_post_id: int,
+) -> None:
+    service = _build_repost_campaign_scheduled_post_service()
+    details = await run_db(service.get_post_details, scheduled_post_id=scheduled_post_id)
+    text, kb = build_vip_scheduled_post_detail_view(rule_id=rule_id, details=details or {})
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_add_known_target:"))
 async def handle_vip_scheduled_post_add_known_target(callback: CallbackQuery):
     _, rid, sid, target_index_text, page_text = (callback.data or "").split(":", 4)
