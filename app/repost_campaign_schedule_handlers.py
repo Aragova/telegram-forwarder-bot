@@ -99,6 +99,19 @@ def register_repost_campaign_schedule_handlers(dp: Dispatcher, ctx: RepostCampai
         text, kb = build_repost_campaign_schedule_wizard_step4_view(rule_id=rule_id)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_step4:"))
+    async def handle_rule_repost_campaign_schedule_step4(callback: CallbackQuery):
+        rule_id = int((callback.data or "").split(":")[1])
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
+            return
+        runtime = build_repost_campaign_runtime(ctx)
+        readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
+        if int(readiness.get("show_seconds") or 0) <= 0:
+            text, kb = build_repost_campaign_schedule_wizard_step3_view(rule_id=rule_id, readiness=readiness)
+        else:
+            text, kb = build_repost_campaign_schedule_wizard_step4_view(rule_id=rule_id)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_quick:"))
     async def handle_rule_repost_campaign_schedule_quick(callback: CallbackQuery):
         _, rule_id_text, preset = (callback.data or "").split(":", 2)

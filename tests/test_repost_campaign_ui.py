@@ -805,11 +805,12 @@ def test_bot_has_real_schedule_handlers_blocks():
     assert 'REPOST_CAMPAIGN_SCHEDULE_CREATE_DONE' in schedule_source
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_confirm:"))' not in bot_source
     assert 'async def handle_rule_repost_campaign_schedule_confirm' not in bot_source
-    assert 'rule_repost_campaign_schedule_step4:' in bot_source
-    assert 'handle_rule_repost_campaign_schedule_step4' in bot_source
-    assert 'build_repost_campaign_schedule_wizard_step4_view' in bot_source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_step4:"))' in schedule_source
+    assert 'async def handle_rule_repost_campaign_schedule_step4' in schedule_source
+    assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_step4:"))' not in bot_source
+    assert 'async def handle_rule_repost_campaign_schedule_step4' not in bot_source
     assert 'rule_repost_campaign_schedule_step4:{rule_id}' in schedule_source
-    assert 'if int(readiness.get("show_seconds") or 0) <= 0' in bot_source
+    assert 'if int(readiness.get("show_seconds") or 0) <= 0' in schedule_source
 
 def test_schedule_show_pick_goes_to_step4():
     source = Path("app/repost_campaign_schedule_handlers.py").read_text(encoding="utf-8")

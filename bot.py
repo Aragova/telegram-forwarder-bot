@@ -6570,22 +6570,6 @@ async def handle_rule_extra_menu(callback: CallbackQuery):
         logger.exception("Ошибка открытия доп. функций rule_id=%s: %s", rule_id, exc)
 
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_step4:"))
-async def handle_rule_repost_campaign_schedule_step4(callback: CallbackQuery):
-    rule_id = int((callback.data or "").split(":")[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    runtime = _build_repost_campaign_runtime()
-    readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
-    if int(readiness.get("show_seconds") or 0) <= 0:
-        text, kb = build_repost_campaign_schedule_wizard_step3_view(rule_id=rule_id, readiness=readiness)
-    else:
-        text, kb = build_repost_campaign_schedule_wizard_step4_view(rule_id=rule_id)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
-
-
-
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_detail:"))
 async def handle_rule_repost_campaign_scheduled_detail(callback: CallbackQuery):
     _, rule_id_text, launch_id_text = (callback.data or "").split(":", 2)
