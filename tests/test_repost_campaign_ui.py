@@ -29,6 +29,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_preview_delete_result_view,
     build_repost_campaign_views_report_view,
     format_repost_campaign_readiness_block,
+    build_vip_scheduled_posts_screen_view,
 )
 
 
@@ -261,6 +262,30 @@ def test_vip_scheduled_material_has_dedicated_handler_before_generic_album_handl
     vip_handler_pos = source.index("async def handle_vip_scheduled_post_material_message(message: Message):")
     generic_album_pos = source.index("on_album_ready=_finalize_repost_campaign_saved_post_album")
     assert vip_handler_pos < generic_album_pos
+
+
+def test_vip_scheduled_posts_screen_shows_active_placement_block_and_delete_button():
+    text, kb = build_vip_scheduled_posts_screen_view(
+        rule_id=1,
+        active_placement={
+            "active_placement": True,
+            "active_run_id": 22,
+            "active_delete_after_text": "11.05 21:47 UTC+3",
+            "delete_failed": 0,
+        },
+    )
+    assert "🟢 Сейчас активно размещение" in text
+    assert "Пост будет удалён:" in text
+    assert "11.05 21:47 UTC+3" in text
+    assert "Новые запланированные посты стартуют после освобождения места." in text
+    assert "🧹 Удалить активный пост" in _texts_from_keyboard(kb)
+
+
+def test_vip_scheduled_posts_screen_hides_active_block_and_delete_without_active():
+    text, kb = build_vip_scheduled_posts_screen_view(rule_id=1, active_placement=None)
+    assert "🟢 Сейчас активно размещение" not in text
+    assert "Новые запланированные посты стартуют после освобождения места." not in text
+    assert "🧹 Удалить активный пост" not in _texts_from_keyboard(kb)
 
 
 def test_vip_scheduled_pick_show_does_not_reuse_pick_callback_data_for_step_show():

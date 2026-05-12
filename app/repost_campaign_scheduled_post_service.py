@@ -338,6 +338,27 @@ class RepostCampaignScheduledPostService:
         safe_limit = max(1, min(int(limit or VIP_SCHEDULED_POST_DEFAULT_LIMIT), 100))
         return self.repo.list_campaign_scheduled_posts(rule_id=rule_id, statuses=statuses or None, limit=safe_limit)
 
+    def build_active_scheduled_post_placement(self, *, rule_id: int) -> dict[str, Any] | None:
+        readiness = self.campaign_runtime.build_campaign_launch_readiness(rule_id=rule_id)
+        active_run_id = int(readiness.get("active_run_id") or 0)
+        if active_run_id <= 0:
+            return None
+        run = self.repo.get_campaign_run(active_run_id)
+        if not run:
+            return None
+        scheduled_post_id = int(run.get("scheduled_post_id") or 0)
+        if scheduled_post_id <= 0:
+            return None
+        scheduled_post = self.repo.get_campaign_scheduled_post(scheduled_post_id)
+        if not scheduled_post:
+            return None
+        if int(scheduled_post.get("rule_id") or 0) != int(rule_id):
+            return None
+        payload = dict(readiness)
+        payload["scheduled_post_id"] = scheduled_post_id
+        payload["vip_scheduled_active"] = True
+        return payload
+
     def get_post_details(self, *, scheduled_post_id: int) -> dict[str, Any] | None:
         post = self.repo.get_campaign_scheduled_post(scheduled_post_id)
         if not post:

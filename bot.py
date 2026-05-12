@@ -7985,6 +7985,17 @@ async def handle_stateful_private_inputs(message: Message):
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к выбору времени", callback_data=f"rule_repost_campaign_schedule_step4:{rule_id}")]]),
             )
             return
+        runtime = _build_repost_campaign_runtime()
+        readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
+        if int(readiness.get("show_seconds") or 0) <= 0:
+            text_step3, kb_step3 = build_repost_campaign_schedule_wizard_step3_view(rule_id=rule_id, readiness=readiness)
+            reset_user_state(user_id)
+            await message.answer(text_step3, reply_markup=kb_step3)
+            return
+        text_preview, kb_preview = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=parsed)
+        reset_user_state(user_id)
+        await message.answer(text_preview, reply_markup=kb_preview)
+        return
     if state.get("state") == "waiting_vip_scheduled_post_target":
         rule_id = int(state.get("rule_id") or 0)
         scheduled_post_id = int(state.get("scheduled_post_id") or 0)
@@ -8024,17 +8035,6 @@ async def handle_stateful_private_inputs(message: Message):
         targets = await run_db(db.list_campaign_scheduled_post_targets, scheduled_post_id)
         readiness = await run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
         text_preview, kb_preview = build_vip_scheduled_post_preview_view(rule_id=rule_id, scheduled_post=row or {}, targets=targets or [], readiness=readiness or {})
-        reset_user_state(user_id)
-        await message.answer(text_preview, reply_markup=kb_preview)
-        return
-        runtime = _build_repost_campaign_runtime()
-        readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
-        if int(readiness.get("show_seconds") or 0) <= 0:
-            text_step3, kb_step3 = build_repost_campaign_schedule_wizard_step3_view(rule_id=rule_id, readiness=readiness)
-            reset_user_state(user_id)
-            await message.answer(text_step3, reply_markup=kb_step3)
-            return
-        text_preview, kb_preview = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=parsed)
         reset_user_state(user_id)
         await message.answer(text_preview, reply_markup=kb_preview)
         return
@@ -10020,9 +10020,9 @@ async def _build_vip_scheduled_known_targets(rule_id: int, scheduled_post_id: in
 async def handle_rule_repost_campaign_scheduled_posts(callback: CallbackQuery):
     rule_id = int((callback.data or '').split(':')[1]);
     if not await ensure_rule_callback_access(callback, rule_id): return
-    runtime = _build_repost_campaign_runtime()
-    readiness = await run_db(runtime.build_campaign_launch_readiness, rule_id=rule_id)
-    text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=readiness)
+    service = _build_repost_campaign_scheduled_post_service()
+    active_placement = await run_db(service.build_active_scheduled_post_placement, rule_id=rule_id)
+    text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=active_placement)
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_vip_delete_active:"))
@@ -10030,16 +10030,21 @@ async def handle_rule_repost_campaign_vip_delete_active(callback: CallbackQuery)
     rule_id = int((callback.data or "").split(":")[1])
     if not await ensure_rule_callback_access(callback, rule_id):
         return
+    service = _build_repost_campaign_scheduled_post_service()
+    active_placement = await run_db(service.build_active_scheduled_post_placement, rule_id=rule_id)
+    if active_placement is None:
+        text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=None)
+        await edit_message_text_safe(message=callback.message, text=f"Активных VIP-запланированных размещений нет.\n\n{text}", reply_markup=kb)
+        return
     await edit_message_text_safe(message=callback.message, text="Удаляю активный рекламный пост…")
     runtime = _build_repost_campaign_runtime()
-    readiness = await run_db(runtime.build_campaign_launch_readiness, rule_id=rule_id)
-    active_run_id = int(readiness.get("active_run_id") or 0)
+    active_run_id = int(active_placement.get("active_run_id") or 0)
     if active_run_id <= 0:
-        text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=readiness)
-        await edit_message_text_safe(message=callback.message, text=f"Активных рекламных постов нет.\n\n{text}", reply_markup=kb)
+        text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=None)
+        await edit_message_text_safe(message=callback.message, text=f"Активных VIP-запланированных размещений нет.\n\n{text}", reply_markup=kb)
         return
     result = await runtime.delete_campaign_run_now(rule_id=rule_id, run_id=active_run_id, admin_id=callback.from_user.id if callback.from_user else None)
-    updated = await run_db(runtime.build_campaign_launch_readiness, rule_id=rule_id)
+    updated = await run_db(service.build_active_scheduled_post_placement, rule_id=rule_id)
     text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=updated)
     extra = result.extra or {}
     if result.ok:
