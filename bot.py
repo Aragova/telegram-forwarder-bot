@@ -150,6 +150,7 @@ from app import product_ui
 from app import access_control, user_ui
 from app.user_menu_handlers import UserMenuHandlersContext, register_user_menu_handlers
 from app.user_status_handlers import UserStatusHandlersContext, register_user_status_handlers
+from app.user_channel_handlers import UserChannelHandlersContext, register_user_channel_handlers
 from app.user_handlers import (
     UserHandlersContext,
     register_user_payment_handlers,
@@ -2667,189 +2668,6 @@ async def handle_user_help_section_callback(callback: CallbackQuery):
 
 
 
-@dp.callback_query(lambda c: c.data == "user_sources_add")
-async def handle_user_sources_add_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    await answer_callback_safe_once(callback)
-    if callback.from_user:
-        user_states[callback.from_user.id] = {"action": "user_channel_add_type"}
-    await edit_message_text_safe(
-        message=callback.message,
-        text="➕ Добавить канал\n\nЧто вы хотите добавить?",
-        reply_markup=_user_channel_add_type_keyboard(),
-    )
-
-
-@dp.callback_query(lambda c: c.data == "user_channels_add")
-async def handle_user_channels_add_callback(callback: CallbackQuery):
-    await handle_user_sources_add_callback(callback)
-
-
-@dp.callback_query(lambda c: c.data == "user_targets_add")
-async def handle_user_targets_add_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    await answer_callback_safe_once(callback)
-    if callback.from_user:
-        user_states[callback.from_user.id] = {
-            "action": "user_channel_add_entity_kind",
-            "channel_type": "target",
-        }
-    await edit_message_text_safe(
-        message=callback.message,
-        text="Выберите тип:",
-        reply_markup=_user_channel_add_entity_keyboard("target"),
-    )
-
-
-@dp.callback_query(lambda c: c.data in ("user_sources_remove", "user_targets_remove"))
-async def handle_user_channel_remove_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    channel_type = "source" if callback.data == "user_sources_remove" else "target"
-    rows = await run_db(db.get_channels_for_tenant, tenant_id, channel_type) if hasattr(db, "get_channels_for_tenant") else []
-    await answer_callback_safe_once(callback)
-    if not rows:
-        title = "📡 Источники" if channel_type == "source" else "🎯 Получатели"
-        kb = _user_sources_keyboard() if channel_type == "source" else _user_targets_keyboard()
-        await edit_message_text_safe(
-            message=callback.message,
-            text=f"{title}\n\nСписок пока пуст.",
-            reply_markup=kb,
-        )
-        return
-
-    rows_kb = []
-    mapping = []
-    for idx, row in enumerate(rows):
-        title = row["title"] or row["channel_id"]
-        suffix = f" (тема {row['thread_id']})" if row["thread_id"] else ""
-        rows_kb.append([InlineKeyboardButton(text=f"🗑 {title}{suffix}", callback_data=f"user_channel_remove_pick:{idx}")])
-        mapping.append((row["channel_id"], row["thread_id"], row["channel_type"], title, suffix))
-    rows_kb.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="user_channels")])
-    if callback.from_user:
-        user_states[callback.from_user.id] = {"action": "user_channel_remove_pick", "mapping": mapping, "tenant_id": tenant_id}
-    await edit_message_text_safe(
-        message=callback.message,
-        text="🗑 Выберите канал для удаления",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows_kb),
-    )
-
-
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_channel_add_type:"))
-async def handle_user_channel_add_type_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    await answer_callback_safe_once(callback)
-    channel_type = (callback.data or "").split(":", 1)[1]
-    user_id = callback.from_user.id if callback.from_user else 0
-    user_states[user_id] = {"action": "user_channel_add_entity_kind", "channel_type": channel_type}
-    await edit_message_text_safe(
-        message=callback.message,
-        text="Выберите тип:",
-        reply_markup=_user_channel_add_entity_keyboard(channel_type),
-    )
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_channel_add_entity:"))
-async def handle_user_channel_add_entity_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    await answer_callback_safe_once(callback)
-    parts = (callback.data or "").split(":")
-    if len(parts) != 3:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    _, channel_type, entity_kind = parts
-    user_id = callback.from_user.id if callback.from_user else 0
-    user_states[user_id] = {
-        "action": "awaiting_user_channel_id",
-        "channel_type": channel_type,
-        "entity_kind": entity_kind,
-    }
-    await answer_user_inline_message(
-        callback.message,
-        "Отправьте ID канала или username.\n\nПример:\n@channel_name\nили\n-1001234567890",
-        reply_markup=_user_channel_add_text_input_keyboard(),
-    )
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_channel_remove_pick:"))
-async def handle_user_channel_remove_pick_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    state = user_states.get(user_id) or {}
-    if state.get("action") != "user_channel_remove_pick":
-        await answer_callback_safe(callback, "Сессия устарела", show_alert=True)
-        return
-    try:
-        idx = int((callback.data or "").split(":", 1)[1])
-        channel_id, thread_id, channel_type, title, suffix = state.get("mapping", [])[idx]
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    state["action"] = "user_channel_remove_confirm"
-    state["remove_selection"] = (channel_id, thread_id, channel_type, title, suffix)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=f"🗑 Удалить канал?\n\n{title}{suffix}",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🗑 Да, удалить", callback_data="user_channel_remove_confirm:1")],
-                [InlineKeyboardButton(text="⬅️ Отмена", callback_data="user_channel_remove_cancel")],
-            ]
-        ),
-    )
-
-
-@dp.callback_query(lambda c: c.data == "user_channel_remove_cancel")
-async def handle_user_channel_remove_cancel_callback(callback: CallbackQuery):
-    await answer_callback_safe_once(callback)
-    reset_user_state(callback.from_user.id if callback.from_user else None)
-    await edit_message_text_safe(message=callback.message, text="📡 Мои каналы", reply_markup=user_ui.build_user_channels_keyboard())
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("user_channel_remove_confirm:"))
-async def handle_user_channel_remove_confirm_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    state = user_states.get(user_id) or {}
-    if state.get("action") != "user_channel_remove_confirm":
-        await answer_callback_safe(callback, "Сессия устарела", show_alert=True)
-        return
-    channel_id, thread_id, channel_type, _, _ = state.get("remove_selection")
-    tenant_id = state.get("tenant_id")
-    await run_db(db.remove_channel_for_tenant, tenant_id, channel_id, thread_id, channel_type)
-    await ensure_rule_workers()
-    reset_user_state(user_id)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text="✅ Канал удалён",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📡 Мои каналы", callback_data="user_channels")],
-                [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
-            ]
-        ),
-    )
-
-
 @dp.callback_query(lambda c: c.data == "user_cancel")
 async def handle_user_cancel_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
@@ -2900,6 +2718,29 @@ user_status_ctx = UserStatusHandlersContext(
     is_subscription_blocked_status=_is_subscription_blocked_status,
 )
 register_user_status_handlers(dp, user_status_ctx)
+
+
+user_channel_ctx = UserChannelHandlersContext(
+    db=db,
+    user_states=user_states,
+    run_db=run_db,
+    ensure_user_tenant=ensure_user_tenant,
+    ensure_rule_workers=ensure_rule_workers,
+    reset_user_state=reset_user_state,
+    _is_admin_user=_is_admin_user,
+    answer_callback_safe=lambda *a, **k: answer_callback_safe(*a, **k),
+    answer_callback_safe_once=lambda *a, **k: answer_callback_safe_once(*a, **k),
+    edit_message_text_safe=lambda *a, **k: edit_message_text_safe(*a, **k),
+    answer_user_inline_message=lambda *a, **k: answer_user_inline_message(*a, **k),
+    user_sources_keyboard=_user_sources_keyboard,
+    user_targets_keyboard=_user_targets_keyboard,
+    user_channels_keyboard=user_ui.build_user_channels_keyboard,
+    user_channel_add_type_keyboard=_user_channel_add_type_keyboard,
+    user_channel_add_entity_keyboard=_user_channel_add_entity_keyboard,
+    user_channel_add_text_input_keyboard=_user_channel_add_text_input_keyboard,
+)
+register_user_channel_handlers(dp, user_channel_ctx)
+
 
 @dp.pre_checkout_query()
 async def handle_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):

@@ -212,3 +212,30 @@
   - `@dp.message` count: `32`
 - Recommended next PR: **A6c — Extract user channel stateful handlers**.
 - Alternative if channel flow risk remains high: **Extract intro management handlers**.
+
+## A6c-1 (2026-05-12): extracted user channel add/remove stateful callbacks
+- Extracted into `app/user_channel_handlers.py` callbacks/prefixes:
+  - `user_sources_add`
+  - `user_channels_add`
+  - `user_targets_add`
+  - `user_sources_remove` / `user_targets_remove` (single handler)
+  - `user_channel_add_type:`
+  - `user_channel_add_entity:`
+  - `user_channel_remove_pick:`
+  - `user_channel_remove_cancel`
+  - `user_channel_remove_confirm:`
+- Touched state names in extracted callbacks (unchanged semantics):
+  - `user_channel_add_type`
+  - `user_channel_add_entity_kind`
+  - `awaiting_user_channel_id`
+  - `user_channel_remove_pick`
+  - `user_channel_remove_confirm`
+- Message-state consumer was **left in `bot.py`** because the existing message handler is shared with unrelated states (including repost campaign input states), so moving it now would violate minimal-risk extraction scope.
+- New module/context:
+  - `app/user_channel_handlers.py`
+  - `UserChannelHandlersContext`
+- Approx metrics after A6c-1:
+  - `bot.py` line count: `9410`
+  - `@dp.callback_query` count: `83`
+  - `@dp.message` count: `32`
+- Recommended next PR: **A6c-2 — Extract user channel message-state consumer** (split shared stateful message handler first, then move channel-only branch).

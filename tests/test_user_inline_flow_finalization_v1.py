@@ -2,13 +2,13 @@ from pathlib import Path
 
 
 def test_user_channel_add_callbacks_present():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("bot.py").read_text(encoding="utf-8") + Path("app/user_channel_handlers.py").read_text(encoding="utf-8")
     assert "user_channel_add_type:" in source
     assert "user_channel_add_entity:" in source
 
 
 def test_user_channel_remove_callbacks_present():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("bot.py").read_text(encoding="utf-8") + Path("app/user_channel_handlers.py").read_text(encoding="utf-8")
     assert "user_channel_remove_type" in source or "user_sources_remove" in source
     assert "user_channel_remove_pick:" in source
     assert "user_channel_remove_confirm:" in source
