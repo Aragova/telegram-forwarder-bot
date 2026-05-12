@@ -5,7 +5,11 @@ from datetime import timedelta, timezone
 from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.repost_campaign_context import RepostCampaignHandlersContext, build_repost_campaign_runtime, build_repost_campaign_scheduled_post_service
+from app.repost_campaign_context import (
+    RepostCampaignHandlersContext,
+    build_repost_campaign_runtime,
+    build_repost_campaign_scheduled_post_service,
+)
 from app.repost_campaign_schedule_service import campaign_schedule_now_utc
 from app.repost_campaign_ui import (
     build_vip_scheduled_post_add_target_view,
@@ -46,7 +50,12 @@ async def _open_vip_step_post(
     row = await ctx.run_db(ctx.db.get_campaign_scheduled_post, scheduled_post_id)
     saved = await ctx.run_db(ctx.db.list_saved_posts, rule_id=rule_id, limit=10)
     ready = await ctx.run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
-    t, k = build_vip_scheduled_post_wizard_post_view(rule_id=rule_id, scheduled_post=row or {}, saved_posts=saved or [], readiness=ready or {})
+    t, k = build_vip_scheduled_post_wizard_post_view(
+        rule_id=rule_id,
+        scheduled_post=row or {},
+        saved_posts=saved or [],
+        readiness=ready or {},
+    )
     await ctx.edit_message_text_safe(message=callback.message, text=t, reply_markup=k)
 
 
@@ -60,8 +69,17 @@ async def _open_vip_scheduled_post_step_targets_callback(
     service = build_repost_campaign_scheduled_post_service(ctx)
     row = await ctx.run_db(ctx.db.get_campaign_scheduled_post, scheduled_post_id)
     readiness = await ctx.run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
-    targets = await ctx.run_db(ctx.db.list_campaign_scheduled_post_targets, scheduled_post_id, active_only=True)
-    text, kb = build_vip_scheduled_post_wizard_targets_view(rule_id=rule_id, scheduled_post=row or {}, targets=targets or [], readiness=readiness or {})
+    targets = await ctx.run_db(
+        ctx.db.list_campaign_scheduled_post_targets,
+        scheduled_post_id,
+        active_only=True,
+    )
+    text, kb = build_vip_scheduled_post_wizard_targets_view(
+        rule_id=rule_id,
+        scheduled_post=row or {},
+        targets=targets or [],
+        readiness=readiness or {},
+    )
     await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
 
@@ -72,7 +90,12 @@ async def _open_vip_scheduled_posts_list_callback(
     rule_id: int,
     page: int = 0,
 ) -> None:
-    posts = await ctx.run_db(ctx.db.list_campaign_scheduled_posts, rule_id=rule_id, statuses=["scheduled", "processing", "launched", "failed", "cancelled", "expired"], limit=100)
+    posts = await ctx.run_db(
+        ctx.db.list_campaign_scheduled_posts,
+        rule_id=rule_id,
+        statuses=["scheduled", "processing", "launched", "failed", "cancelled", "expired"],
+        limit=100,
+    )
     text, kb = build_vip_scheduled_posts_list_view(rule_id=rule_id, posts=posts or [], page=page)
     await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
@@ -86,10 +109,24 @@ async def _build_vip_scheduled_known_targets(
     known: list[dict] = []
     rule = await ctx.run_db(ctx.db.get_rule, rule_id)
     if rule and _rule_value(rule, "target_id"):
-        known.append({"target_id": str(_rule_value(rule, "target_id")), "target_thread_id": _rule_value(rule, "target_thread_id"), "target_title": _rule_value(rule, "target_title") or str(_rule_value(rule, "target_id")), "source": "rule_main"})
+        known.append(
+            {
+                "target_id": str(_rule_value(rule, "target_id")),
+                "target_thread_id": _rule_value(rule, "target_thread_id"),
+                "target_title": _rule_value(rule, "target_title") or str(_rule_value(rule, "target_id")),
+                "source": "rule_main",
+            }
+        )
     manual_targets = await ctx.run_db(ctx.db.list_rule_repost_campaign_targets, rule_id, active_only=True) or []
     for target in manual_targets:
-        known.append({"target_id": str(target.get("target_id") or ""), "target_thread_id": target.get("target_thread_id"), "target_title": target.get("title") or str(target.get("target_id") or ""), "source": "manual_campaign"})
+        known.append(
+            {
+                "target_id": str(target.get("target_id") or ""),
+                "target_thread_id": target.get("target_thread_id"),
+                "target_title": target.get("title") or str(target.get("target_id") or ""),
+                "source": "manual_campaign",
+            }
+        )
     posts = await ctx.run_db(ctx.db.list_campaign_scheduled_posts, rule_id=rule_id, limit=50) or []
     for post in posts:
         post_id = int(post.get("id") or 0)
