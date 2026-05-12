@@ -194,7 +194,9 @@
 
 
 ## A6a (2026-05-12): extracted read-only user menu navigation callbacks
-- Extracted into `app/user_menu_handlers.py`: `user_main`, `user_channels`, `user_sources`, `user_targets`, `user_sources_list`, `user_targets_list`, `user_status`, `user_account`, `user_plans`.
+- Extracted into `app/user_menu_handlers.py`: `user_main`, `user_channels`, `user_sources`, `user_targets`, `user_sources_list`, `user_targets_list`, `user_account`, `user_plans`.
 - Left in `bot.py`: channel add/remove stateful flows (`user_sources_add`, `user_targets_add`, `user_channel_*remove*`, `user_channel_add_*`), user cancel flows (`user_cancel`, text cancel), `/start`, payment/subscription activation handlers.
 - Approx metrics after A6a: bot.py line count and callback/message counts reduced (approximate, source-level extraction only).
-- Recommended next PR: A6b — extract user channel management stateful handlers.
+- Recommended next PR: dedicated status/usage extraction PR (including `user_status`), then A6b for channel stateful handlers.
+
+- `user_status` remains in `bot.py` in A6a because it may write billing event (`subscription_grace_warning_shown`) and depends on limits/snapshots runtime data.

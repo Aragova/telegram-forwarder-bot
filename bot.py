@@ -2743,6 +2743,68 @@ async def handle_user_channel_remove_callback(callback: CallbackQuery):
 
 
 
+@dp.callback_query(lambda c: c.data == "user_status")
+async def handle_user_status_callback(callback: CallbackQuery):
+    if _is_admin_user(callback.from_user.id if callback.from_user else None):
+        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    sub = await run_db(subscription_service.get_active_subscription, tenant_id) or {}
+    status = str(sub.get("status") or "active")
+    usage_today = await run_db(usage_service.get_today_usage, tenant_id)
+    rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
+    active_rules = sum(1 for row in rules if bool(getattr(row, "is_active", False)))
+    rule_limit = int(sub.get("max_rules") or 0)
+    max_video = int(sub.get("max_video_per_day") or 0)
+    max_jobs = int(sub.get("max_jobs_per_day") or 0)
+    video_today = int((usage_today or {}).get("video_count") or 0)
+    jobs_today = int((usage_today or {}).get("jobs_count") or 0)
+    queue_total = 0
+    errors_total = 0
+    next_publication = "—"
+    for row in rules:
+        snapshot = await run_db(db.get_rule_card_snapshot, int(getattr(row, "id", 0)))
+        if not snapshot:
+            continue
+        queue_total += int(snapshot.get("pending_count") or 0)
+        errors_total += int(snapshot.get("faulty_count") or 0)
+        next_run = snapshot.get("next_run_at")
+        if next_run and next_publication == "—":
+            next_publication = str(next_run)[11:16]
+    state_line = "🟢 Доступ активен"
+    if status == "grace":
+        state_line = "⚠️ Льготный период"
+        await run_db(_write_billing_event, tenant_id, "subscription_grace_warning_shown", action="user_status", plan_name=str(sub.get("plan_name") or "FREE"), usage_today=usage_today)
+    elif _is_subscription_blocked_status(status):
+        state_line = "🔒 Подписка неактивна"
+    can_rule, _rule_reason = await run_db(limit_service.can_create_rule, tenant_id)
+    can_job, _job_reason = await run_db(limit_service.can_enqueue_job, tenant_id)
+    can_video, _video_reason = await run_db(limit_service.can_process_video, tenant_id)
+    if not (can_rule and can_job and can_video):
+        state_line = "🚫 Лимит достигнут"
+
+    text = (
+        "📊 Живой статус\n\n"
+        f"{state_line.replace('Доступ активен', 'Автоматизация работает')}\n\n"
+        "──────────────\n\n"
+        f"📦 В очереди: {queue_total}\n"
+        f"⏳ В обработке: {active_rules}\n"
+        f"✅ Отправлено сегодня: {jobs_today}\n"
+        f"⚠️ Ошибки: {errors_total}\n\n"
+        "──────────────\n\n"
+        f"🕒 Обновлено: {datetime.now(USER_TZ).strftime('%H:%M')} (UTC+3)\n"
+        f"Следующая публикация: {next_publication}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="user_status")],
+        [InlineKeyboardButton(text="⚙️ Мои правила", callback_data="user_rules"), InlineKeyboardButton(text="📡 Мои каналы", callback_data="user_channels")],
+        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
+    ])
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+
 @dp.callback_query(lambda c: c.data and c.data.startswith("user_channel_add_type:"))
 async def handle_user_channel_add_type_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
@@ -2869,13 +2931,8 @@ async def handle_user_cancel_callback(callback: CallbackQuery):
 user_menu_ctx = UserMenuHandlersContext(
     db=db,
     logger=logger,
-    user_tz=USER_TZ,
-    user_states=user_states,
     run_db=run_db,
     ensure_user_tenant=ensure_user_tenant,
-    subscription_service=subscription_service,
-    usage_service=usage_service,
-    limit_service=limit_service,
     _is_admin_user=_is_admin_user,
     answer_callback_safe=answer_callback_safe,
     answer_callback_safe_once=answer_callback_safe_once,
@@ -2885,8 +2942,6 @@ user_menu_ctx = UserMenuHandlersContext(
     build_user_main_payload=build_user_main_payload,
     user_sources_keyboard=_user_sources_keyboard,
     user_targets_keyboard=_user_targets_keyboard,
-    write_billing_event=_write_billing_event,
-    is_subscription_blocked_status=_is_subscription_blocked_status,
 )
 register_user_menu_handlers(dp, user_menu_ctx)
 
@@ -6307,8 +6362,7 @@ def _build_repost_campaign_handlers_context() -> RepostCampaignHandlersContext:
         db=db,
         settings=settings,
         logger=logger,
-        user_states=user_states,
-        saved_post_album_buffer=saved_post_album_buffer,
+            saved_post_album_buffer=saved_post_album_buffer,
         run_db=run_db,
         get_bot=lambda: bot,
         get_telethon_client=lambda: telethon_client,
@@ -9333,15 +9387,11 @@ def _register_user_saas_handlers() -> None:
         bot=bot,
         db=db,
         tenant_service=tenant_service,
-        subscription_service=subscription_service,
-        usage_service=usage_service,
-        limit_service=limit_service,
-        invoice_service=invoice_service,
+                    invoice_service=invoice_service,
         billing_service=billing_service,
         payment_service=payment_service,
         recovery_service=recovery_service,
-        user_states=user_states,
-        run_db=run_db,
+            run_db=run_db,
         answer_callback_safe=answer_callback_safe,
         send_message_safe=send_message_safe,
         is_admin_user=is_admin_user,
@@ -9360,9 +9410,7 @@ def _register_user_saas_handlers() -> None:
         public_plans_keyboard=_public_plans_keyboard,
         public_usage_keyboard=_public_usage_keyboard,
         get_plan_info=_get_plan_info,
-        is_subscription_blocked_status=_is_subscription_blocked_status,
-        write_billing_event=_write_billing_event,
-        find_active_manual_payment_intent_for_invoice=find_active_manual_payment_intent_for_invoice,
+                find_active_manual_payment_intent_for_invoice=find_active_manual_payment_intent_for_invoice,
         find_latest_payment_intent_for_invoice=_find_latest_payment_intent_for_invoice,
         is_supported_receipt_document=_is_supported_receipt_document,
         is_admin_callback=is_admin_callback,
@@ -9406,8 +9454,7 @@ def _register_admin_handlers() -> None:
         scheduler_service=scheduler_service,
         sender_service=sender_service,
         runtime_context=runtime_context,
-        user_states=user_states,
-        dashboard_tasks=dashboard_tasks,
+            dashboard_tasks=dashboard_tasks,
         run_db=run_db,
         is_admin=is_admin,
         is_admin_callback=is_admin_callback,
