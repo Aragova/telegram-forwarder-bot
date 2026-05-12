@@ -6569,49 +6569,6 @@ async def handle_rule_extra_menu(callback: CallbackQuery):
             return
         logger.exception("Ошибка открытия доп. функций rule_id=%s: %s", rule_id, exc)
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_step1:"))
-async def handle_rule_repost_campaign_schedule_step1(callback: CallbackQuery):
-    rule_id = int((callback.data or "").split(":")[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    runtime = _build_repost_campaign_runtime()
-    readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
-    text, kb = build_repost_campaign_schedule_wizard_step1_view(rule_id=rule_id, readiness=readiness)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_step2:"))
-async def handle_rule_repost_campaign_schedule_step2(callback: CallbackQuery):
-    rule_id = int((callback.data or "").split(":")[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    runtime = _build_repost_campaign_runtime()
-    readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
-    if not (bool(readiness.get("saved_post_id")) and readiness.get("saved_post_exists") is not False):
-        text, kb = build_repost_campaign_schedule_wizard_step1_view(rule_id=rule_id, readiness=readiness)
-    else:
-        text, kb = build_repost_campaign_schedule_wizard_step2_view(rule_id=rule_id, readiness=readiness)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_step3:"))
-async def handle_rule_repost_campaign_schedule_step3(callback: CallbackQuery):
-    rule_id = int((callback.data or "").split(":")[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    runtime = _build_repost_campaign_runtime()
-    readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
-    text, kb = build_repost_campaign_schedule_wizard_step3_view(rule_id=rule_id, readiness=readiness)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_show_pick:"))
-async def handle_rule_repost_campaign_schedule_show_pick(callback: CallbackQuery):
-    _, rule_id_text, seconds_text = (callback.data or "").split(":", 2)
-    rule_id = int(rule_id_text)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    seconds = normalize_campaign_show_seconds(int(seconds_text))
-    await run_db(db.update_rule_repost_campaign_settings, rule_id, enabled=True, show_seconds=seconds)
-    text, kb = build_repost_campaign_schedule_wizard_step4_view(rule_id=rule_id)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_step4:"))
 async def handle_rule_repost_campaign_schedule_step4(callback: CallbackQuery):
@@ -6627,60 +6584,6 @@ async def handle_rule_repost_campaign_schedule_step4(callback: CallbackQuery):
     await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_quick:"))
-async def handle_rule_repost_campaign_schedule_quick(callback: CallbackQuery):
-    _, rule_id_text, preset = (callback.data or "").split(":", 2)
-    rule_id = int(rule_id_text)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    now = campaign_schedule_now_utc()
-    local = now + timedelta(hours=3)
-    if preset == "today_20":
-        pick_local = local.replace(hour=20, minute=0, second=0, microsecond=0)
-        if pick_local <= local:
-            pick_local = pick_local + timedelta(days=1)
-    elif preset == "tomorrow_12":
-        pick_local = (local + timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
-    else:
-        pick_local = (local + timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
-    scheduled_at_utc = (pick_local - timedelta(hours=3)).replace(tzinfo=timezone.utc)
-    runtime = _build_repost_campaign_runtime()
-    readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
-    if int(readiness.get("show_seconds") or 0) <= 0:
-        text, kb = build_repost_campaign_schedule_wizard_step3_view(rule_id=rule_id, readiness=readiness)
-    else:
-        text, kb = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=scheduled_at_utc)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_input:"))
-async def handle_rule_repost_campaign_schedule_input(callback: CallbackQuery):
-    rule_id = int((callback.data or "").split(":")[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    user_states[callback.from_user.id] = {"state": "repost_campaign_schedule_input", "rule_id": rule_id}
-    await edit_message_text_safe(message=callback.message, text="🧙 VIP-запуск по расписанию · Шаг 4/4\n\nВведите дату и время запуска\n\nФормат:\n09.05 18:00\n\nЧасовой пояс: UTC+3", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к выбору времени", callback_data=f"rule_repost_campaign_schedule_step4:{rule_id}")]]))
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_confirm:"))
-async def handle_rule_repost_campaign_schedule_confirm(callback: CallbackQuery):
-    _, rule_id_text, epoch_text = (callback.data or "").split(":", 2)
-    rule_id = int(rule_id_text)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    logger.info("REPOST_CAMPAIGN_SCHEDULE_CREATE_STARTED | rule_id=%s | admin_id=%s", rule_id, callback.from_user.id if callback.from_user else None)
-    scheduled_at_utc = datetime.fromtimestamp(int(epoch_text), tz=timezone.utc)
-    runtime = RepostCampaignScheduleService(repo=db, campaign_runtime=_build_repost_campaign_runtime(), logger_=logger)
-    result = runtime.schedule_campaign_launch(rule_id=rule_id, scheduled_at_utc=scheduled_at_utc, created_by=callback.from_user.id if callback.from_user else None)
-    if result.ok:
-        row = await run_db(db.get_campaign_scheduled_launch, int((result.extra or {}).get("scheduled_launch_id")))
-        text, kb = build_repost_campaign_schedule_result_view(rule_id=rule_id, scheduled_launch=row or {})
-        logger.info("REPOST_CAMPAIGN_SCHEDULE_CREATE_DONE | rule_id=%s", rule_id)
-    else:
-        readiness = (result.extra or {}).get("launch_readiness") or {}
-        text, kb = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=scheduled_at_utc)
-        logger.warning("REPOST_CAMPAIGN_SCHEDULE_CREATE_FAILED | rule_id=%s | error=%s", rule_id, result.error_text)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_detail:"))
@@ -7976,25 +7879,7 @@ async def handle_stateful_private_inputs(message: Message):
             ]),
         )
         return
-    if state.get("state") == "repost_campaign_schedule_input":
-        rule_id = int(state.get("rule_id") or 0)
-        parsed = parse_campaign_schedule_input_to_utc(text)
-        if parsed is None:
-            await message.answer(
-                "❌ Не удалось распознать дату и время.\n\nВведите в формате:\n09.05 18:00\n\nЧасовой пояс: UTC+3",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к выбору времени", callback_data=f"rule_repost_campaign_schedule_step4:{rule_id}")]]),
-            )
-            return
-        runtime = _build_repost_campaign_runtime()
-        readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
-        if int(readiness.get("show_seconds") or 0) <= 0:
-            text_step3, kb_step3 = build_repost_campaign_schedule_wizard_step3_view(rule_id=rule_id, readiness=readiness)
-            reset_user_state(user_id)
-            await message.answer(text_step3, reply_markup=kb_step3)
-            return
-        text_preview, kb_preview = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=parsed)
-        reset_user_state(user_id)
-        await message.answer(text_preview, reply_markup=kb_preview)
+    if await handle_repost_campaign_stateful_private_input(campaign_handlers_ctx, message, state, text):
         return
     if state.get("state") == "waiting_vip_scheduled_post_target":
         rule_id = int(state.get("rule_id") or 0)
