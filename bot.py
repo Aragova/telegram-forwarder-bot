@@ -136,6 +136,7 @@ from app.repost_campaign_report_handlers import register_repost_campaign_report_
 from app.repost_campaign_schedule_handlers import register_repost_campaign_schedule_handlers
 from app.repost_campaign_message_handlers import (
     handle_repost_campaign_stateful_private_input,
+    handle_vip_scheduled_post_material_message,
     register_repost_campaign_message_handlers,
 )
 from app.saved_post_renderer import SavedPostRenderer
@@ -310,8 +311,6 @@ def _get_user_state(user_id: int | None) -> dict[str, Any]:
     return user_states.get(int(user_id)) or {}
 
 
-def _is_waiting_vip_scheduled_post_material(user_id: int | None) -> bool:
-    return _get_user_state(user_id).get("state") == "waiting_vip_scheduled_post_material"
 
 def _rule_ui_task_key(kind: str, rule_id: int) -> str:
     return f"{kind}:{rule_id}"
@@ -3223,195 +3222,6 @@ async def _finalize_repost_campaign_saved_post_album(*, admin_id: int, messages:
             [InlineKeyboardButton(text="⬅️ К рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
         ]),
     )
-
-
-async def _save_vip_scheduled_post_material(
-    *,
-    admin_id: int,
-    rule_id: int,
-    scheduled_post_id: int,
-    content_json: dict,
-    source_chat_id: str | None,
-    source_message_id: int | None,
-    source_media_group_id: str | None = None,
-) -> int | None:
-    saved_post_id = await run_db(
-        db.create_saved_post,
-        rule_id=rule_id,
-        title=None,
-        content=content_json,
-        source_chat_id=source_chat_id,
-        source_message_id=source_message_id,
-        source_media_group_id=source_media_group_id,
-        created_by=admin_id,
-    )
-    if not saved_post_id:
-        return None
-
-    service = _build_repost_campaign_scheduled_post_service()
-    result = await run_db(
-        service.update_draft_saved_post,
-        scheduled_post_id=scheduled_post_id,
-        saved_post_id=int(saved_post_id),
-        actor_id=admin_id,
-    )
-    if not result.ok:
-        return None
-    return int(saved_post_id)
-
-
-async def _open_vip_scheduled_post_step_targets_message(
-    *,
-    message: Message,
-    rule_id: int,
-    scheduled_post_id: int,
-    prefix_text: str | None = None,
-) -> None:
-    service = _build_repost_campaign_scheduled_post_service()
-    row = await run_db(db.get_campaign_scheduled_post, scheduled_post_id)
-    targets = await run_db(db.list_campaign_scheduled_post_targets, scheduled_post_id)
-    readiness = await run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
-    text_step2, kb_step2 = build_vip_scheduled_post_wizard_targets_view(
-        rule_id=rule_id,
-        scheduled_post=row or {},
-        targets=targets or [],
-        readiness=readiness or {},
-    )
-    text = f"{prefix_text}\n\n{text_step2}" if prefix_text else text_step2
-    await message.answer(text, reply_markup=kb_step2)
-async def _handle_vip_scheduled_post_material_message(message: Message) -> bool:
-    user_id = message.from_user.id if message.from_user else None
-    state = _get_user_state(user_id)
-    if state.get("state") != "waiting_vip_scheduled_post_material":
-        return False
-
-    rule_id = int(state.get("rule_id") or 0)
-    scheduled_post_id = int(state.get("scheduled_post_id") or 0)
-    admin_id = message.from_user.id if message.from_user else settings.admin_id
-    logger.info(
-        "VIP_SCHEDULED_POST_MATERIAL_WAITING | rule_id=%s | scheduled_post_id=%s | admin_id=%s",
-        rule_id,
-        scheduled_post_id,
-        admin_id,
-    )
-    if rule_id <= 0 or scheduled_post_id <= 0:
-        reset_user_state(user_id)
-        await message.answer("❌ Не удалось определить черновик запланированного поста")
-        return True
-    if getattr(message, "media_group_id", None):
-        logger.info(
-            "VIP_SCHEDULED_POST_ALBUM_CAPTURE_STARTED | rule_id=%s | scheduled_post_id=%s | media_group_id=%s",
-            rule_id,
-            scheduled_post_id,
-            message.media_group_id,
-        )
-
-        async def _on_album_ready(*, admin_id: int, messages: list[Message]):
-            state_now = _get_user_state(admin_id)
-            if state_now.get("state") != "waiting_vip_scheduled_post_material":
-                return
-            rule_id_now = int(state_now.get("rule_id") or 0)
-            scheduled_post_id_now = int(state_now.get("scheduled_post_id") or 0)
-            if rule_id_now <= 0 or scheduled_post_id_now <= 0:
-                reset_user_state(admin_id)
-                await messages[-1].answer("❌ Не удалось определить черновик запланированного поста")
-                return
-            try:
-                content_json = build_saved_post_album_content_from_aiogram_messages(messages)
-            except Exception as exc:
-                logger.warning(
-                    "VIP_SCHEDULED_POST_ALBUM_BUILD_FAILED | rule_id=%s | scheduled_post_id=%s | error=%s",
-                    rule_id_now,
-                    scheduled_post_id_now,
-                    exc,
-                )
-                await messages[-1].answer("❌ Не удалось сохранить альбом. Попробуйте отправить его ещё раз.")
-                return
-            saved_post_id = await _save_vip_scheduled_post_material(
-                admin_id=admin_id,
-                rule_id=rule_id_now,
-                scheduled_post_id=scheduled_post_id_now,
-                content_json=content_json,
-                source_chat_id=str(messages[-1].chat.id) if messages[-1].chat else None,
-                source_message_id=messages[-1].message_id,
-                source_media_group_id=str(getattr(messages[-1], "media_group_id", "") or ""),
-            )
-            if not saved_post_id:
-                await messages[-1].answer("❌ Не удалось сохранить рекламный альбом")
-                return
-            logger.info(
-                "VIP_SCHEDULED_POST_ALBUM_SAVED | rule_id=%s | scheduled_post_id=%s | saved_post_id=%s | items=%s",
-                rule_id_now,
-                scheduled_post_id_now,
-                saved_post_id,
-                len(content_json.get("media_items") or []),
-            )
-            logger.info(
-                "VIP_SCHEDULED_POST_MATERIAL_SAVED | rule_id=%s | scheduled_post_id=%s | saved_post_id=%s | kind=%s",
-                rule_id_now,
-                scheduled_post_id_now,
-                saved_post_id,
-                content_json.get("kind"),
-            )
-            reset_user_state(admin_id)
-            await _open_vip_scheduled_post_step_targets_message(
-                message=messages[-1],
-                rule_id=rule_id_now,
-                scheduled_post_id=scheduled_post_id_now,
-                prefix_text="✅ Рекламный альбом сохранён.",
-            )
-
-        is_new_album = await saved_post_album_buffer.add_message(
-            admin_id=admin_id,
-            message=message,
-            on_album_ready=_on_album_ready,
-        )
-        if is_new_album:
-            await message.answer("📎 Получаю альбом… Подождите пару секунд.")
-        return True
-    content_json = build_saved_post_content_from_aiogram_message(message)
-    saved_post_id = await _save_vip_scheduled_post_material(
-        admin_id=admin_id,
-        rule_id=rule_id,
-        scheduled_post_id=scheduled_post_id,
-        content_json=content_json,
-        source_chat_id=str(message.chat.id) if message.chat else None,
-        source_message_id=message.message_id,
-        source_media_group_id=None,
-    )
-    if not saved_post_id:
-        await message.answer("❌ Не удалось сохранить рекламный пост")
-        return True
-    logger.info(
-        "VIP_SCHEDULED_POST_MATERIAL_SAVED | rule_id=%s | scheduled_post_id=%s | saved_post_id=%s | kind=%s",
-        rule_id,
-        scheduled_post_id,
-        saved_post_id,
-        content_json.get("kind"),
-    )
-    reset_user_state(user_id)
-    await _open_vip_scheduled_post_step_targets_message(
-        message=message,
-        rule_id=rule_id,
-        scheduled_post_id=scheduled_post_id,
-        prefix_text="✅ Рекламный пост сохранён.",
-    )
-    return True
-
-
-@dp.message(lambda m: (
-    m.chat.type == "private"
-    and m.from_user
-    and _is_waiting_vip_scheduled_post_material(m.from_user.id)
-))
-async def handle_vip_scheduled_post_material_message(message: Message):
-    logger.info(
-        "VIP_SCHEDULED_POST_MATERIAL_HANDLER_HIT | user_id=%s | content_type=%s | media_group_id=%s",
-        message.from_user.id if message.from_user else None,
-        getattr(message, "content_type", None),
-        getattr(message, "media_group_id", None),
-    )
-    await _handle_vip_scheduled_post_material_message(message)
 
 
 @dp.message(
@@ -7782,12 +7592,10 @@ async def handle_stateful_private_inputs(message: Message):
     if await handle_repost_campaign_stateful_private_input(campaign_handlers_ctx, message, state, text):
         return
 
-    if await _handle_vip_scheduled_post_material_message(message):
+    if await handle_vip_scheduled_post_material_message(campaign_handlers_ctx, message):
         return
 
     if state.get("state") == "awaiting_repost_campaign_saved_post":
-        if _is_waiting_vip_scheduled_post_material(user_id):
-            return
         rule_id = int(state.get("rule_id") or 0)
         message_summary = summarize_aiogram_message_for_saved_post(message)
         logger.info(
@@ -7864,48 +7672,6 @@ async def handle_stateful_private_inputs(message: Message):
         )
         return
     if await handle_repost_campaign_stateful_private_input(campaign_handlers_ctx, message, state, text):
-        return
-    if state.get("state") == "waiting_vip_scheduled_post_target":
-        rule_id = int(state.get("rule_id") or 0)
-        scheduled_post_id = int(state.get("scheduled_post_id") or 0)
-        parsed_target = _normalize_vip_scheduled_target_input(text)
-        if not parsed_target:
-            await message.answer("❌ Не удалось распознать канал/группу.\nОтправьте @channelname, t.me/channelname или -1001234567890")
-            return
-        service = _build_repost_campaign_scheduled_post_service()
-        result = await run_db(
-            service.add_manual_target,
-            scheduled_post_id=scheduled_post_id,
-            target_id=str(parsed_target["target_id"]),
-            target_thread_id=parsed_target.get("target_thread_id"),
-            target_title=parsed_target.get("target_title"),
-            actor_id=message.from_user.id if message.from_user else None,
-        )
-        if not result.ok:
-            await message.answer(f"❌ {result.error_text or 'Не удалось добавить канал/группу'}")
-            return
-        reset_user_state(user_id)
-        row = await run_db(db.get_campaign_scheduled_post, scheduled_post_id)
-        targets = await run_db(db.list_campaign_scheduled_post_targets, scheduled_post_id)
-        ready = await run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
-        t, k = build_vip_scheduled_post_wizard_targets_view(rule_id=rule_id, scheduled_post=row or {}, targets=targets or [], readiness=ready or {})
-        await message.answer(t, reply_markup=k)
-        return
-    if state.get("state") == "waiting_repost_campaign_scheduled_post_time":
-        rule_id = int(state.get("rule_id") or 0)
-        scheduled_post_id = int(state.get("scheduled_post_id") or 0)
-        parsed = parse_campaign_schedule_input_to_utc(text)
-        if parsed is None:
-            await message.answer("❌ Не понял дату и время.\nПример:\n10.05 18:00")
-            return
-        service = _build_repost_campaign_scheduled_post_service()
-        await run_db(service.update_draft_scheduled_at, scheduled_post_id=scheduled_post_id, scheduled_at_utc=parsed, actor_id=message.from_user.id if message.from_user else None)
-        row = await run_db(db.get_campaign_scheduled_post, scheduled_post_id)
-        targets = await run_db(db.list_campaign_scheduled_post_targets, scheduled_post_id)
-        readiness = await run_db(service.build_readiness, scheduled_post_id=scheduled_post_id)
-        text_preview, kb_preview = build_vip_scheduled_post_preview_view(rule_id=rule_id, scheduled_post=row or {}, targets=targets or [], readiness=readiness or {})
-        reset_user_state(user_id)
-        await message.answer(text_preview, reply_markup=kb_preview)
         return
     if state.get("state") == "awaiting_video_clip_duration" and state.get("flow") == "rule_video_clip_duration":
         if not await is_admin(message):
@@ -9824,32 +9590,6 @@ def _rule_value(rule, name: str, default=None):
     if isinstance(rule, dict):
         return rule.get(name, default)
     return getattr(rule, name, default)
-
-def _normalize_vip_scheduled_target_input(value: str) -> dict[str, Any] | None:
-    raw = (value or "").strip()
-    if not raw:
-        return None
-    normalized = raw
-    if normalized.startswith("https://t.me/"):
-        normalized = normalized[len("https://t.me/"):]
-    elif normalized.startswith("http://t.me/"):
-        normalized = normalized[len("http://t.me/"):]
-    elif normalized.startswith("t.me/"):
-        normalized = normalized[len("t.me/"):]
-    normalized = normalized.strip().strip("/")
-    target_id: str | None = None
-    target_title: str | None = None
-    if re.fullmatch(r"-100\d{6,}", normalized):
-        target_id = normalized
-        target_title = normalized
-    else:
-        username = normalized[1:] if normalized.startswith("@") else normalized
-        if re.fullmatch(r"[A-Za-z0-9_]{4,}", username):
-            target_id = f"@{username}"
-            target_title = f"@{username}"
-    if not target_id:
-        return None
-    return {"target_id": target_id, "target_thread_id": None, "target_title": target_title, "target_kind": "extra", "is_active": True, "metadata": {"source": "manual_input"}}
 
 def _target_key(target: dict) -> str:
     return f"{str(target.get('target_id') or '')}|{str(target.get('target_thread_id') or '')}"
