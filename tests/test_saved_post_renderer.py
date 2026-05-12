@@ -287,9 +287,15 @@ def test_source_send_ids_verify_failed_raises_unverified_error_without_forward(m
     telethon = FakeTelethonSource()
 
     async def _verify(**kwargs):
-        return []
+        from app.telethon_delivery_resolver import TelethonResolvedDelivery
+        return TelethonResolvedDelivery(ok=False, method="telethon_source_unverified", message_id=None, message_ids=[], grouped_id=None, recovered=False, error_text="verify fail")
 
-    monkeypatch.setattr(spr, "verify_telethon_sent_messages", _verify)
+    async def _recover(**kwargs):
+        from app.telethon_delivery_resolver import TelethonResolvedDelivery
+        return TelethonResolvedDelivery(ok=False, method="telethon_source_unverified", message_id=None, message_ids=[], grouped_id=None, recovered=True, error_text="recover fail")
+
+    monkeypatch.setattr(spr, "verify_raw_album_ids", _verify)
+    monkeypatch.setattr(spr, "recover_album_ids_by_scan", _recover)
     with pytest.raises(SavedPostSentUnverifiedError) as exc:
         asyncio.run(send_saved_post_album_via_telethon_source(
             telethon_client=telethon,

@@ -555,6 +555,7 @@ class RepostCampaignRuntimeService:
                 run_message_id,
                 error_text=render_result.error_text or "unknown error",
                 render_mode=render_result.method,
+                delete_status=(None if str(render_result.method or "").endswith("_unverified") else "failed"),
             )
             self.repo.update_campaign_run_status(
                 run_id,
@@ -833,6 +834,7 @@ class RepostCampaignRuntimeService:
             any_premium_required = any_premium_required or bool(getattr(render_result, "premium_required", False))
             album_ids = list(getattr(render_result, "message_ids", None) or [])
             is_album_without_ids = bool(render_result.ok and render_result.kind == "album" and not album_ids)
+            is_unverified = (not render_result.ok) and str(getattr(render_result, "method", "")).endswith("_unverified")
             if render_result.ok and not is_album_without_ids:
                 self.repo.mark_campaign_run_message_sent(
                     run_message_id,
@@ -848,11 +850,8 @@ class RepostCampaignRuntimeService:
                     run_id, target["target_id"], render_result.message_id, album_ids, render_result.method
                 )
             else:
-                self.repo.mark_campaign_run_message_failed(
-                    run_message_id,
-                    error_text="Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error"),
-                    render_mode=getattr(render_result, "method", None),
-                )
+                err_text = "Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error")
+                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=err_text, render_mode=getattr(render_result, "method", None), delete_status=(None if is_unverified else "failed"))
                 failed_count += 1
                 if first_error_text is None:
                     first_error_text = "Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error")
@@ -1466,9 +1465,12 @@ class RepostCampaignRuntimeService:
         message_id = int(message_ids[0])
         try:
             entity = normalize_telethon_target(message.get("target_id"))
-            msg = await self.telethon_client.get_messages(entity=entity, ids=message_id)
-            if msg is not None and getattr(msg, "views", None) is not None:
-                views_count = int(getattr(msg, "views", 0) or 0)
+            msgs = await self.telethon_client.get_messages(entity=entity, ids=message_ids if len(message_ids) > 1 else message_id)
+            if not isinstance(msgs, list):
+                msgs = [msgs]
+            views_values = [int(getattr(m, "views", 0) or 0) for m in msgs if m is not None and getattr(m, "views", None) is not None]
+            if views_values:
+                views_count = max(views_values)
                 self.repo.mark_campaign_run_message_views_collected(row_id, views_count=views_count, collected_at=now_iso)
                 self.logger.info(
                     "REPOST_CAMPAIGN_FINAL_VIEWS_COLLECT_DONE | rule_id=%s | run_id=%s | campaign_run_message_id=%s | target_id=%s | sent_message_id=%s | views_count=%s | views_final_status=%s | attempt=%s",
