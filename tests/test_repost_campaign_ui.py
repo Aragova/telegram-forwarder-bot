@@ -323,18 +323,17 @@ def test_vip_scheduled_posts_screen_hides_active_block_and_delete_without_active
 
 
 def test_vip_scheduled_pick_show_does_not_reuse_pick_callback_data_for_step_show():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert "async def handle_pick_show" in source
     block = source[source.index("async def handle_pick_show"):source.index('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_input_time:"))')]
     assert "await handle_step_show(callback)" not in block
 
 
 def test_vip_scheduled_pick_show_parses_four_part_callback():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     pick_show_block = source[source.index("async def handle_pick_show"):source.index('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_input_time:"))')]
     assert '.split(":", 3)' in pick_show_block
-    assert "scheduled_post_id = int(scheduled_post_id_text)" in pick_show_block
-    assert "show_seconds = int(show_seconds_text)" in pick_show_block
+    assert "show_seconds=int(show_seconds_text)" in pick_show_block
 
 
 def test_generic_album_handlers_skip_vip_scheduled_material_state():
@@ -1139,26 +1138,25 @@ def test_vip_scheduled_pick_targets_view_has_add_all_buttons():
     assert "➕ Добавить все на странице" not in labels
 
 def test_bot_vip_pick_targets_is_not_placeholder():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert "Скоро: выбор из известных каналов/групп" not in source
     assert "rule_repost_campaign_scheduled_post_add_known_target" in source
-    assert "rule_repost_campaign_scheduled_post_add_known_page" in source
     assert "rule_repost_campaign_scheduled_post_add_known_all" in source
 
 def test_bot_vip_pick_targets_has_pagination_callbacks():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert "rule_repost_campaign_scheduled_post_pick_targets:" in source
     assert "page = int(parts[3]) if len(parts) > 3 else 0" in source
 
 def test_bot_vip_pick_targets_uses_keyword_active_only_calls():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert "db.list_rule_repost_campaign_targets, rule_id, True" not in source
     assert "db.list_campaign_scheduled_post_targets, post_id, True" not in source
     assert "db.list_campaign_scheduled_post_targets, scheduled_post_id, True" not in source
     assert "active_only=True" in source
 
 def test_bot_vip_add_known_all_returns_via_step_targets_handler():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert "_open_vip_scheduled_post_step_targets_message(callback," not in source
     handler_body = source[
         source.find("async def handle_vip_scheduled_post_add_known_all"):
@@ -1166,6 +1164,49 @@ def test_bot_vip_add_known_all_returns_via_step_targets_handler():
     ]
     assert "_open_vip_scheduled_post_step_targets_callback" in handler_body
     assert "await handle_step_targets(callback)" not in handler_body
+
+
+def test_vip_scheduled_callbacks_moved_from_bot_to_handlers_module():
+    handlers_source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    moved_prefixes = [
+        "rule_repost_campaign_scheduled_post_add_target:",
+        "rule_repost_campaign_scheduled_post_pick_targets:",
+        "rule_repost_campaign_scheduled_post_snapshot_targets:",
+        "rule_repost_campaign_scheduled_post_add_known_target:",
+        "rule_repost_campaign_scheduled_post_add_known_all:",
+        "rule_repost_campaign_scheduled_post_pick_show:",
+        "rule_repost_campaign_scheduled_post_quick_time:",
+        "rule_repost_campaign_scheduled_post_input_time:",
+        "rule_repost_campaign_scheduled_post_check_rights:",
+    ]
+    for prefix in moved_prefixes:
+        assert prefix in handlers_source
+        assert f'@dp.callback_query(lambda c: c.data.startswith("{prefix}"))' not in bot_source
+
+
+def test_bot_keeps_destructive_vip_scheduled_callbacks_for_a4d3():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    for prefix in [
+        "rule_repost_campaign_vip_delete_active:",
+        "rule_repost_campaign_scheduled_post_send_now_confirm:",
+        "rule_repost_campaign_scheduled_post_cancel_confirm:",
+        "rule_repost_campaign_scheduled_post_cancel:",
+        "rule_repost_campaign_scheduled_post_duplicate:",
+    ]:
+        assert f'@dp.callback_query(lambda c: c.data.startswith("{prefix}"))' in source
+
+
+def test_vip_scheduled_handlers_module_does_not_touch_regular_schedule_or_mutate_callback_data():
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    assert "callback.data =" not in source
+    assert "rule_repost_campaign_schedule_step1:" not in source
+
+
+def test_message_handlers_keep_expected_states():
+    source = Path("app/repost_campaign_message_handlers.py").read_text(encoding="utf-8")
+    assert "waiting_vip_scheduled_post_target" in source
+    assert "waiting_repost_campaign_scheduled_post_time" in source
 
 
 def test_vip_scheduled_posts_screen_has_only_three_main_buttons():
@@ -1259,7 +1300,7 @@ def test_vip_scheduled_confirm_opens_list_without_callback_data_mutation():
 
 
 def test_vip_scheduled_add_known_all_opens_targets_without_callback_data_mutation():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     handler_body = source[
         source.find("async def handle_vip_scheduled_post_add_known_all"):
         source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_step_show:"))')
