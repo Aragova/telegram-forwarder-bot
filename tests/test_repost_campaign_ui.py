@@ -1287,7 +1287,7 @@ def test_bot_does_not_mutate_callback_data():
 
 
 def test_vip_scheduled_uses_open_helpers_instead_of_callback_data_rewrite():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert "_open_vip_scheduled_post_step_targets_callback" in source
     assert "_open_vip_scheduled_posts_list_callback" in source
 
@@ -1334,6 +1334,78 @@ def test_bot_has_no_unresolved_vip_scheduled_helper_calls():
     for helper_name in helper_names:
         if f"{helper_name}(" in source:
             assert f"def {helper_name}(" in source
+
+
+def test_no_duplicate_callback_prefix_registrations_across_repost_campaign_modules():
+    files = [
+        "bot.py",
+        "app/repost_campaign_handlers.py",
+        "app/repost_campaign_schedule_handlers.py",
+        "app/repost_campaign_report_handlers.py",
+        "app/repost_campaign_scheduled_post_handlers.py",
+        "app/repost_campaign_message_handlers.py",
+    ]
+    pattern = re.compile(r'@dp\.callback_query\(lambda c: c\.data\.startswith\("([^"]+)"\)\)')
+    prefixes: dict[str, list[str]] = {}
+    for file_path in files:
+        source = Path(file_path).read_text(encoding="utf-8")
+        for prefix in pattern.findall(source):
+            prefixes.setdefault(prefix, []).append(file_path)
+    duplicates = {prefix: owners for prefix, owners in prefixes.items() if len(owners) > 1}
+    assert not duplicates, f"Duplicate callback prefixes found: {duplicates}"
+
+
+def test_vip_scheduled_callbacks_registered_only_in_handlers_module():
+    handler_prefixes = [
+        "rule_repost_campaign_vip_delete_active:",
+        "rule_repost_campaign_scheduled_post_send_now_confirm:",
+        "rule_repost_campaign_scheduled_post_send_now:",
+        "rule_repost_campaign_scheduled_post_cancel_confirm:",
+        "rule_repost_campaign_scheduled_post_cancel:",
+        "rule_repost_campaign_scheduled_post_duplicate:",
+        "rule_repost_campaign_scheduled_post_add_target:",
+        "rule_repost_campaign_scheduled_post_pick_targets:",
+        "rule_repost_campaign_scheduled_post_snapshot_targets:",
+        "rule_repost_campaign_scheduled_post_add_known_target:",
+        "rule_repost_campaign_scheduled_post_add_known_all:",
+        "rule_repost_campaign_scheduled_post_pick_show:",
+        "rule_repost_campaign_scheduled_post_quick_time:",
+        "rule_repost_campaign_scheduled_post_input_time:",
+        "rule_repost_campaign_scheduled_post_check_rights:",
+        "rule_repost_campaign_scheduled_posts:",
+        "rule_repost_campaign_scheduled_posts_list:",
+        "rule_repost_campaign_scheduled_post_new:",
+        "rule_repost_campaign_scheduled_post_step_post:",
+        "rule_repost_campaign_scheduled_post_pick_post:",
+        "rule_repost_campaign_scheduled_post_step_targets:",
+        "rule_repost_campaign_scheduled_post_step_show:",
+        "rule_repost_campaign_scheduled_post_step_time:",
+        "rule_repost_campaign_scheduled_post_preview:",
+        "rule_repost_campaign_scheduled_post_confirm:",
+        "rule_repost_campaign_scheduled_post_detail:",
+    ]
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    handlers_source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    for prefix in handler_prefixes:
+        registration = f'@dp.callback_query(lambda c: c.data.startswith("{prefix}"))'
+        assert registration in handlers_source
+        assert registration not in bot_source
+
+
+def test_bot_vip_scheduled_helpers_are_removed_when_not_called():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    helper_names = [
+        "_open_vip_scheduled_post_step_targets_callback",
+        "_open_vip_scheduled_posts_list_callback",
+        "_open_vip_scheduled_post_detail_callback",
+        "_open_vip_scheduled_post_step_show_callback",
+        "_open_vip_scheduled_post_pick_targets",
+        "_build_vip_scheduled_known_targets",
+    ]
+    for helper_name in helper_names:
+        has_call = f"{helper_name}(" in source
+        has_def = f"def {helper_name}(" in source
+        assert has_call == has_def, f"Inconsistent helper presence for {helper_name}: call={has_call}, def={has_def}"
 
 
 def test_vip_scheduled_step_targets_has_next_when_targets_selected():
@@ -1474,7 +1546,7 @@ def test_handlers_send_now_is_not_coming_soon_stub():
     assert "service.send_now" in source
 
 def test_bot_edit_rejects_non_editable_statuses():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert "Запланированный пост уже подтверждён" in source
 
 
