@@ -9628,35 +9628,6 @@ async def _build_vip_scheduled_known_targets(rule_id: int, scheduled_post_id: in
             dedup[key] = target
     return list(dedup.values())
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_vip_delete_active:"))
-async def handle_rule_repost_campaign_vip_delete_active(callback: CallbackQuery):
-    rule_id = int((callback.data or "").split(":")[1])
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    service = _build_repost_campaign_scheduled_post_service()
-    active_placement = await run_db(service.build_active_scheduled_post_placement, rule_id=rule_id)
-    if active_placement is None:
-        text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=None)
-        await edit_message_text_safe(message=callback.message, text=f"Активных VIP-запланированных размещений нет.\n\n{text}", reply_markup=kb)
-        return
-    await edit_message_text_safe(message=callback.message, text="Удаляю активный рекламный пост…")
-    runtime = _build_repost_campaign_runtime()
-    active_run_id = int(active_placement.get("active_run_id") or 0)
-    if active_run_id <= 0:
-        text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=None)
-        await edit_message_text_safe(message=callback.message, text=f"Активных VIP-запланированных размещений нет.\n\n{text}", reply_markup=kb)
-        return
-    result = await runtime.delete_campaign_run_now(rule_id=rule_id, run_id=active_run_id, admin_id=callback.from_user.id if callback.from_user else None)
-    updated = await run_db(service.build_active_scheduled_post_placement, rule_id=rule_id)
-    text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=updated)
-    extra = result.extra or {}
-    if result.ok:
-        prefix = "✅ Активный рекламный пост удалён.\n\nТеперь запланированные посты смогут стартовать."
-    elif int(extra.get("deleted") or 0) > 0:
-        prefix = f"⚠️ Удаление выполнено частично.\n\nУдалено: {int(extra.get('deleted') or 0)}\nОшибки: {int(extra.get('failed') or 0)}\nViMi повторит удаление автоматически."
-    else:
-        prefix = "Активных рекламных постов нет."
-    await edit_message_text_safe(message=callback.message, text=f"{prefix}\n\n{text}", reply_markup=kb)
 
 
 async def _open_vip_scheduled_post_pick_targets(*, callback: CallbackQuery, rule_id: int, scheduled_post_id: int, page: int = 0):
@@ -9771,27 +9742,6 @@ async def handle_vip_scheduled_post_add_known_page(callback: CallbackQuery):
     await _open_vip_scheduled_post_pick_targets(callback=callback, rule_id=rule_id, scheduled_post_id=scheduled_post_id, page=page)
 
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_send_now_confirm:"))
-async def handle_vip_scheduled_post_send_now_confirm(callback: CallbackQuery):
-    _, rid, sid = (callback.data or "").split(":", 2)
-    rule_id = int(rid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    row = await run_db(db.get_campaign_scheduled_post, int(sid))
-    t, k = build_vip_scheduled_post_send_now_confirm_view(rule_id=rule_id, scheduled_post=row or {})
-    await edit_message_text_safe(message=callback.message, text=t, reply_markup=k)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_send_now:"))
-async def handle_vip_scheduled_post_send_now(callback: CallbackQuery):
-    _, rid, sid = (callback.data or "").split(":", 2)
-    rule_id = int(rid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    service = _build_repost_campaign_scheduled_post_service()
-    result = await service.send_now(scheduled_post_id=int(sid), actor_id=callback.from_user.id if callback.from_user else None)
-    if not result.ok and result.error_text:
-        await answer_callback_safe(callback, result.error_text, show_alert=True)
-    await _open_vip_scheduled_post_detail_callback(callback=callback, rule_id=rule_id, scheduled_post_id=int(sid))
 
 @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_edit:"))
 async def handle_vip_scheduled_post_edit(callback: CallbackQuery):
@@ -9810,49 +9760,6 @@ async def handle_vip_scheduled_post_edit(callback: CallbackQuery):
     await answer_callback_safe(callback, "Редактирование недоступно для текущего статуса.", show_alert=True)
 
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_duplicate:"))
-async def handle_vip_scheduled_post_duplicate(callback: CallbackQuery):
-    _, rid, sid = (callback.data or "").split(":", 2)
-    rule_id = int(rid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    service = _build_repost_campaign_scheduled_post_service()
-    result = await run_db(service.duplicate_post, scheduled_post_id=int(sid), actor_id=callback.from_user.id if callback.from_user else None)
-    if not result.ok:
-        await answer_callback_safe(callback, result.error_text or "Ошибка дублирования", show_alert=True)
-        return
-    new_id = int((result.extra or {}).get("scheduled_post_id") or 0)
-    await answer_callback_safe_once(callback, "✅ Пост скопирован.\n\nОткройте копию и выберите время запуска.")
-    await _open_vip_scheduled_post_detail_callback(callback=callback, rule_id=rule_id, scheduled_post_id=new_id)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_cancel_confirm:"))
-async def handle_cancel_confirm(callback: CallbackQuery):
-    _, rid, sid = (callback.data or "").split(":", 2)
-    rule_id = int(rid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    row = await run_db(db.get_campaign_scheduled_post, int(sid))
-    t, k = build_vip_scheduled_post_cancel_confirm_view(rule_id=rule_id, scheduled_post=row or {})
-    await edit_message_text_safe(message=callback.message, text=t, reply_markup=k)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_cancel:"))
-async def handle_cancel(callback: CallbackQuery):
-    _, rid, sid = (callback.data or "").split(":", 2)
-    rule_id = int(rid)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    service = _build_repost_campaign_scheduled_post_service()
-    await run_db(
-        service.cancel_post,
-        scheduled_post_id=int(sid),
-        actor_id=callback.from_user.id if callback.from_user else None,
-        reason="cancelled_from_ui",
-    )
-    await _open_vip_scheduled_posts_list_callback(
-        callback=callback,
-        rule_id=rule_id,
-        page=0,
-    )
 
 def _register_admin_handlers() -> None:
     global admin_handlers_ctx

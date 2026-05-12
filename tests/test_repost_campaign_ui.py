@@ -1185,16 +1185,19 @@ def test_vip_scheduled_callbacks_moved_from_bot_to_handlers_module():
         assert f'@dp.callback_query(lambda c: c.data.startswith("{prefix}"))' not in bot_source
 
 
-def test_bot_keeps_destructive_vip_scheduled_callbacks_for_a4d3():
-    source = Path("bot.py").read_text(encoding="utf-8")
+def test_destructive_vip_scheduled_callbacks_moved_from_bot_to_handlers_module():
+    handlers_source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
     for prefix in [
         "rule_repost_campaign_vip_delete_active:",
         "rule_repost_campaign_scheduled_post_send_now_confirm:",
+        "rule_repost_campaign_scheduled_post_send_now:",
         "rule_repost_campaign_scheduled_post_cancel_confirm:",
         "rule_repost_campaign_scheduled_post_cancel:",
         "rule_repost_campaign_scheduled_post_duplicate:",
     ]:
-        assert f'@dp.callback_query(lambda c: c.data.startswith("{prefix}"))' in source
+        assert f'@dp.callback_query(lambda c: c.data.startswith("{prefix}"))' in handlers_source
+        assert f'@dp.callback_query(lambda c: c.data.startswith("{prefix}"))' not in bot_source
 
 
 def test_vip_scheduled_handlers_module_does_not_touch_regular_schedule_or_mutate_callback_data():
@@ -1227,8 +1230,8 @@ def test_vip_scheduled_posts_screen_hides_delete_active_without_placement():
     _, kb = build_vip_scheduled_posts_screen_view(rule_id=4, active_placement={"active_placement": False, "delete_failed": 0})
     assert "🧹 Удалить активный пост" not in _texts_from_keyboard(kb)
 
-def test_bot_has_delete_active_vip_scheduled_handler():
-    source = Path("bot.py").read_text(encoding="utf-8")
+def test_handlers_module_has_delete_active_vip_scheduled_handler():
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert "rule_repost_campaign_vip_delete_active:" in source
     assert "handle_rule_repost_campaign_vip_delete_active" in source
 
@@ -1461,12 +1464,12 @@ def test_vip_scheduled_detail_before_launch_is_human_readable():
     assert "Срок показа:" in text
     assert "Публикация ещё не запускалась" in text
 
-def test_bot_has_vip_scheduled_duplicate_handler():
-    source = Path("bot.py").read_text(encoding="utf-8")
+def test_handlers_has_vip_scheduled_duplicate_handler():
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert "rule_repost_campaign_scheduled_post_duplicate:" in source
 
-def test_bot_send_now_is_not_coming_soon_stub():
-    source = Path("bot.py").read_text(encoding="utf-8")
+def test_handlers_send_now_is_not_coming_soon_stub():
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert "Скоро: отправка отложенного поста вручную" not in source
     assert "service.send_now" in source
 
