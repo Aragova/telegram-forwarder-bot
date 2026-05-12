@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from pathlib import Path
 
 from app.repost_campaign_context import RepostCampaignHandlersContext, build_repost_campaign_runtime
 
@@ -37,3 +38,23 @@ def test_build_repost_campaign_runtime_factory_constructs_services():
     assert runtime.renderer.telethon_client is fake_telethon
     assert runtime.deleter.bot is fake_bot
     assert runtime.target_checker.telethon_client is fake_telethon
+
+
+def test_vip_scheduled_posts_handler_uses_service_active_placement_source():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "service = _build_repost_campaign_scheduled_post_service()" in source
+    assert "active_placement = await run_db(service.build_active_scheduled_post_placement, rule_id=rule_id)" in source
+
+
+def test_vip_delete_handler_checks_vip_active_before_delete():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "Активных VIP-запланированных размещений нет." in source
+    assert "updated = await run_db(service.build_active_scheduled_post_placement, rule_id=rule_id)" in source
+
+
+def test_manual_schedule_input_branch_builds_preview_and_returns():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert 'if state.get("state") == "repost_campaign_schedule_input":' in source
+    assert "parsed = parse_campaign_schedule_input_to_utc(text)" in source
+    assert "text_preview, kb_preview = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=parsed)" in source
+    assert "reset_user_state(user_id)" in source

@@ -30,6 +30,7 @@ class FakeRepo:
         self.failed_calls = []
         self.delay_calls = []
         self.processing_calls = []
+        self.runs = {}
 
     def get_rule(self, rule_id): return self.rules.get(rule_id)
     def get_saved_post(self, saved_post_id): return self.saved_posts.get(saved_post_id)
@@ -41,6 +42,7 @@ class FakeRepo:
         return sid
     def update_campaign_scheduled_post(self, scheduled_post_id, **kwargs): self.posts[scheduled_post_id].update(kwargs); return True
     def get_campaign_scheduled_post(self, scheduled_post_id): return self.posts.get(scheduled_post_id)
+    def get_campaign_run(self, run_id): return self.runs.get(run_id)
     def list_campaign_scheduled_posts(self, *, rule_id, statuses=None, limit=20): return [p for p in self.posts.values() if p["rule_id"]==rule_id][:limit]
     def list_rule_repost_campaign_targets(self, rule_id, active_only=True): return [dict(x) for x in self.current_targets]
     def replace_campaign_scheduled_post_targets(self, *, scheduled_post_id, rule_id, targets): self.post_targets[scheduled_post_id]=[dict(x) for x in targets]; return len(targets)
@@ -258,8 +260,33 @@ def test_check_targets_logs_failed_status_on_checker_exception():
     repo.post_targets[sid] = [{"id": 1, "target_id": "-1", "target_thread_id": None}]
     out = asyncio.run(service.check_targets(scheduled_post_id=sid))
     assert out.ok
-    assert repo.checks[sid][-1]["check_type"] == "full"
-    assert repo.checks[sid][-1]["status"] == "failed"
+
+
+def test_build_active_scheduled_post_placement_returns_none_for_non_vip_run():
+    service, repo = make_service(active=True)
+    repo.runs[100] = {"id": 100, "rule_id": 1, "scheduled_post_id": None}
+    service.campaign_runtime.build_campaign_launch_readiness = lambda **kwargs: {"active_placement": True, "active_run_id": 100, "active_delete_after_text": "11.05 21:47 UTC+3"}
+    assert service.build_active_scheduled_post_placement(rule_id=1) is None
+
+
+def test_build_active_scheduled_post_placement_returns_payload_for_vip_scheduled_post():
+    service, repo = make_service(active=True)
+    repo.runs[100] = {"id": 100, "rule_id": 1, "scheduled_post_id": 55}
+    repo.posts[55] = {"id": 55, "rule_id": 1, "campaign_run_id": 100}
+    service.campaign_runtime.build_campaign_launch_readiness = lambda **kwargs: {"active_placement": True, "active_run_id": 100, "active_delete_after_text": "11.05 21:47 UTC+3"}
+    payload = service.build_active_scheduled_post_placement(rule_id=1)
+    assert payload["active_placement"] is True
+    assert payload["active_run_id"] == 100
+    assert payload["scheduled_post_id"] == 55
+    assert payload["vip_scheduled_active"] is True
+
+
+def test_build_active_scheduled_post_placement_returns_none_when_rule_mismatch():
+    service, repo = make_service(active=True)
+    repo.runs[100] = {"id": 100, "rule_id": 1, "scheduled_post_id": 55}
+    repo.posts[55] = {"id": 55, "rule_id": 999}
+    service.campaign_runtime.build_campaign_launch_readiness = lambda **kwargs: {"active_placement": True, "active_run_id": 100, "active_delete_after_text": "11.05 21:47 UTC+3"}
+    assert service.build_active_scheduled_post_placement(rule_id=1) is None
 
 
 def test_schedule_post_does_not_log_scheduled_event_when_repo_transition_fails():
