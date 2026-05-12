@@ -54,7 +54,9 @@ def test_vip_delete_handler_checks_vip_active_before_delete():
 
 def test_manual_schedule_input_branch_builds_preview_and_returns():
     source = Path("bot.py").read_text(encoding="utf-8")
-    assert 'if state.get("state") == "repost_campaign_schedule_input":' in source
-    assert "parsed = parse_campaign_schedule_input_to_utc(text)" in source
-    assert "text_preview, kb_preview = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=parsed)" in source
-    assert "reset_user_state(user_id)" in source
+    module_source = Path("app/repost_campaign_message_handlers.py").read_text(encoding="utf-8")
+    assert "if await handle_repost_campaign_stateful_private_input(campaign_handlers_ctx, message, state, text):" in source
+    assert 'if state.get("state") != "repost_campaign_schedule_input":' in module_source
+    assert "parsed = parse_campaign_schedule_input_to_utc(text)" in module_source
+    assert "text_preview, kb_preview = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=parsed)" in module_source
+    assert "ctx.reset_user_state(message.from_user.id if message.from_user else None)" in module_source
