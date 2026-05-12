@@ -260,6 +260,8 @@ def test_check_targets_logs_failed_status_on_checker_exception():
     repo.post_targets[sid] = [{"id": 1, "target_id": "-1", "target_thread_id": None}]
     out = asyncio.run(service.check_targets(scheduled_post_id=sid))
     assert out.ok
+    assert repo.checks[sid][-1]["check_type"] == "full"
+    assert repo.checks[sid][-1]["status"] == "failed"
 
 
 def test_build_active_scheduled_post_placement_returns_none_for_non_vip_run():

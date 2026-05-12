@@ -10030,13 +10030,13 @@ async def handle_rule_repost_campaign_vip_delete_active(callback: CallbackQuery)
     rule_id = int((callback.data or "").split(":")[1])
     if not await ensure_rule_callback_access(callback, rule_id):
         return
-    await edit_message_text_safe(message=callback.message, text="Удаляю активный рекламный пост…")
     service = _build_repost_campaign_scheduled_post_service()
     active_placement = await run_db(service.build_active_scheduled_post_placement, rule_id=rule_id)
     if active_placement is None:
         text, kb = build_vip_scheduled_posts_screen_view(rule_id=rule_id, posts=[], active_placement=None)
         await edit_message_text_safe(message=callback.message, text=f"Активных VIP-запланированных размещений нет.\n\n{text}", reply_markup=kb)
         return
+    await edit_message_text_safe(message=callback.message, text="Удаляю активный рекламный пост…")
     runtime = _build_repost_campaign_runtime()
     active_run_id = int(active_placement.get("active_run_id") or 0)
     if active_run_id <= 0:
