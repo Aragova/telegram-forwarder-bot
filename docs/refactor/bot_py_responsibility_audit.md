@@ -200,3 +200,15 @@
 - Recommended next PR: dedicated status/usage extraction PR (including `user_status`), then A6b for channel stateful handlers.
 
 - `user_status` remains in `bot.py` in A6a because it may write billing event (`subscription_grace_warning_shown`) and depends on limits/snapshots runtime data.
+
+## A6b (2026-05-12): extracted user_status callback
+- Extracted into `app/user_status_handlers.py`: exact moved callback prefix `user_status`.
+- Added focused context: `UserStatusHandlersContext` and registration `register_user_status_handlers(dp, user_status_ctx)` from `bot.py`.
+- Confirmed behavior intent for this extraction: billing event path preserved (`subscription_grace_warning_shown` via existing write-billing function), callback/UI/state semantics unchanged.
+- Channel stateful flows (`user_channel_add_*`, `user_channel_remove_*`, `user_sources_add`, `user_targets_add`) remain in `bot.py`.
+- Approx metrics after A6b:
+  - `bot.py` line count: `9569`
+  - `@dp.callback_query` count: `92`
+  - `@dp.message` count: `32`
+- Recommended next PR: **A6c — Extract user channel stateful handlers**.
+- Alternative if channel flow risk remains high: **Extract intro management handlers**.
