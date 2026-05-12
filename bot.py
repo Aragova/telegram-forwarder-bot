@@ -148,6 +148,7 @@ from app.repost_campaign_schedule_service import RepostCampaignScheduleService, 
 from app.repost_campaign_scheduled_post_service import RepostCampaignScheduledPostService, run_repost_campaign_scheduled_post_loop
 from app import product_ui
 from app import access_control, user_ui
+from app.user_menu_handlers import UserMenuHandlersContext, register_user_menu_handlers
 from app.user_handlers import (
     UserHandlersContext,
     register_user_payment_handlers,
@@ -2541,35 +2542,8 @@ async def handle_user_support_text(message: Message):
     await _show_public_user_menu_message(message)
 
 
-@dp.callback_query(lambda c: c.data == "user_main")
-async def handle_user_main_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    await answer_callback_safe_once(callback)
-    payload = await build_user_main_payload(callback.from_user.id if callback.from_user else 0)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=_public_user_menu_text(payload),
-        reply_markup=_public_user_menu_keyboard(),
-    )
 
 
-@dp.callback_query(lambda c: c.data == "user_channels")
-async def handle_user_channels_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    source_rows = await run_db(db.get_channels_for_tenant, tenant_id, "source") if hasattr(db, "get_channels_for_tenant") else []
-    target_rows = await run_db(db.get_channels_for_tenant, tenant_id, "target") if hasattr(db, "get_channels_for_tenant") else []
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=user_ui.build_user_channels_text(sources_count=len(source_rows), targets_count=len(target_rows)),
-        reply_markup=user_ui.build_user_channels_keyboard(),
-    )
 
 
 @dp.callback_query(lambda c: c.data == "user_language")
@@ -2684,92 +2658,12 @@ async def handle_user_help_section_callback(callback: CallbackQuery):
         reply_markup=user_ui.build_user_help_section_keyboard(),
     )
 
-@dp.callback_query(lambda c: c.data == "user_sources")
-async def handle_user_sources_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    logger.info("пользователь открыл список источников user_id=%s tenant_id=%s", user_id, tenant_id)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text="📡 Источники\n\nВыберите действие:",
-        reply_markup=_user_sources_keyboard(),
-    )
 
 
-@dp.callback_query(lambda c: c.data == "user_targets")
-async def handle_user_targets_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    logger.info("пользователь открыл список получателей user_id=%s tenant_id=%s", user_id, tenant_id)
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text="🎯 Получатели\n\nВыберите действие:",
-        reply_markup=_user_targets_keyboard(),
-    )
 
 
-@dp.callback_query(lambda c: c.data == "user_sources_list")
-async def handle_user_sources_list_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    rows = await run_db(db.get_channels_for_tenant, tenant_id, "source") if hasattr(db, "get_channels_for_tenant") else []
-    await answer_callback_safe_once(callback)
-    if not rows:
-        await edit_message_text_safe(
-            message=callback.message,
-            text="📡 Источники\n\nСписок пока пуст.",
-            reply_markup=_user_sources_keyboard(),
-        )
-        return
-    lines = ["📡 Источники\n"]
-    for idx, row in enumerate(rows, 1):
-        title = row["title"] or row["channel_id"]
-        suffix = f" (тема {row['thread_id']})" if row["thread_id"] else ""
-        lines.append(f"{idx}. {title}{suffix}")
-    await edit_message_text_safe(
-        message=callback.message,
-        text="\n".join(lines),
-        reply_markup=_user_sources_keyboard(),
-    )
 
 
-@dp.callback_query(lambda c: c.data == "user_targets_list")
-async def handle_user_targets_list_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    user_id = callback.from_user.id if callback.from_user else 0
-    tenant_id = await run_db(ensure_user_tenant, user_id)
-    rows = await run_db(db.get_channels_for_tenant, tenant_id, "target") if hasattr(db, "get_channels_for_tenant") else []
-    await answer_callback_safe_once(callback)
-    if not rows:
-        await edit_message_text_safe(
-            message=callback.message,
-            text="🎯 Получатели\n\nСписок пока пуст.",
-            reply_markup=_user_targets_keyboard(),
-        )
-        return
-    lines = ["🎯 Получатели\n"]
-    for idx, row in enumerate(rows, 1):
-        title = row["title"] or row["channel_id"]
-        suffix = f" (тема {row['thread_id']})" if row["thread_id"] else ""
-        lines.append(f"{idx}. {title}{suffix}")
-    await edit_message_text_safe(
-        message=callback.message,
-        text="\n".join(lines),
-        reply_markup=_user_targets_keyboard(),
-    )
 
 
 @dp.callback_query(lambda c: c.data == "user_sources_add")
@@ -2847,6 +2741,8 @@ async def handle_user_channel_remove_callback(callback: CallbackQuery):
     )
 
 
+
+
 @dp.callback_query(lambda c: c.data == "user_status")
 async def handle_user_status_callback(callback: CallbackQuery):
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
@@ -2888,13 +2784,6 @@ async def handle_user_status_callback(callback: CallbackQuery):
     if not (can_rule and can_job and can_video):
         state_line = "🚫 Лимит достигнут"
 
-    saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None)
-    saved_post_line = "📝 Рекламный пост: не выбран"
-    if saved_post_id:
-        saved_post = await run_db(db.get_saved_post, int(saved_post_id))
-        if saved_post:
-            content = saved_post.get("content_json") or {}
-            saved_post_line = f"📝 Рекламный пост: #{saved_post_id} · {get_saved_post_short_description(content)}"
     text = (
         "📊 Живой статус\n\n"
         f"{state_line.replace('Доступ активен', 'Автоматизация работает')}\n\n"
@@ -3034,49 +2923,27 @@ async def handle_user_cancel_callback(callback: CallbackQuery):
     await _show_public_user_menu_message(callback.message)
 
 
-@dp.callback_query(lambda c: c.data == "user_account")
-async def handle_user_account_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            "Этот раздел больше не используется.\n\n"
-            "Управление тарифом и оплатой теперь находится в разделе:\n\n"
-            "💎 Подписка"
-        ),
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="💎 Подписка", callback_data="user_subscription")],
-                [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
-            ]
-        ),
-    )
 
 
-@dp.callback_query(lambda c: c.data == "user_plans")
-async def handle_user_plans_callback(callback: CallbackQuery):
-    if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        await answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
-        return
-    await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            "Этот раздел больше не используется.\n\n"
-            "Управление тарифом и оплатой теперь находится в разделе:\n\n"
-            "💎 Подписка"
-        ),
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="💎 Подписка", callback_data="user_subscription")],
-                [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
-            ]
-        ),
-    )
 
+
+
+user_menu_ctx = UserMenuHandlersContext(
+    db=db,
+    logger=logger,
+    run_db=run_db,
+    ensure_user_tenant=ensure_user_tenant,
+    _is_admin_user=_is_admin_user,
+    answer_callback_safe=lambda *a, **k: answer_callback_safe(*a, **k),
+    answer_callback_safe_once=lambda *a, **k: answer_callback_safe_once(*a, **k),
+    edit_message_text_safe=lambda *a, **k: edit_message_text_safe(*a, **k),
+    public_user_menu_text=_public_user_menu_text,
+    public_user_menu_keyboard=_public_user_menu_keyboard,
+    build_user_main_payload=build_user_main_payload,
+    user_sources_keyboard=_user_sources_keyboard,
+    user_targets_keyboard=_user_targets_keyboard,
+)
+register_user_menu_handlers(dp, user_menu_ctx)
 
 @dp.pre_checkout_query()
 async def handle_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
@@ -6495,19 +6362,19 @@ def _build_repost_campaign_handlers_context() -> RepostCampaignHandlersContext:
         db=db,
         settings=settings,
         logger=logger,
-        user_states=user_states,
-        saved_post_album_buffer=saved_post_album_buffer,
+            saved_post_album_buffer=saved_post_album_buffer,
         run_db=run_db,
         get_bot=lambda: bot,
         get_telethon_client=lambda: telethon_client,
         ensure_rule_callback_access=ensure_rule_callback_access,
         is_admin_callback=is_admin_callback,
-        answer_callback_safe=answer_callback_safe,
-        answer_callback_safe_once=answer_callback_safe_once,
-        edit_message_text_safe=edit_message_text_safe,
+        answer_callback_safe=lambda *a, **k: answer_callback_safe(*a, **k),
+        answer_callback_safe_once=lambda *a, **k: answer_callback_safe_once(*a, **k),
+        edit_message_text_safe=lambda *a, **k: edit_message_text_safe(*a, **k),
         send_message_safe=send_message_safe,
         invalidate_rule_card_cache=invalidate_rule_card_cache,
         reset_user_state=reset_user_state,
+        user_states=user_states,
         should_answer_new_message_for_callback=_should_answer_new_message_for_callback,
     )
 
@@ -9524,20 +9391,20 @@ def _register_user_saas_handlers() -> None:
         subscription_service=subscription_service,
         usage_service=usage_service,
         limit_service=limit_service,
+        user_states=user_states,
         invoice_service=invoice_service,
         billing_service=billing_service,
         payment_service=payment_service,
         recovery_service=recovery_service,
-        user_states=user_states,
         run_db=run_db,
-        answer_callback_safe=answer_callback_safe,
+        answer_callback_safe=lambda *a, **k: answer_callback_safe(*a, **k),
         send_message_safe=send_message_safe,
         is_admin_user=is_admin_user,
         ensure_user_tenant=ensure_user_tenant,
         is_rule_owned_by_user=is_rule_owned_by_user,
         logger=logger,
-        answer_callback_safe_once=answer_callback_safe_once,
-        edit_message_text_safe=edit_message_text_safe,
+        answer_callback_safe_once=lambda *a, **k: answer_callback_safe_once(*a, **k),
+        edit_message_text_safe=lambda *a, **k: edit_message_text_safe(*a, **k),
         edit_message_reply_markup_safe=edit_message_reply_markup_safe,
         with_recovery_button=_with_recovery_button,
         recovery_has_items=_recovery_has_items,
@@ -9548,8 +9415,6 @@ def _register_user_saas_handlers() -> None:
         public_plans_keyboard=_public_plans_keyboard,
         public_usage_keyboard=_public_usage_keyboard,
         get_plan_info=_get_plan_info,
-        is_subscription_blocked_status=_is_subscription_blocked_status,
-        write_billing_event=_write_billing_event,
         find_active_manual_payment_intent_for_invoice=find_active_manual_payment_intent_for_invoice,
         find_latest_payment_intent_for_invoice=_find_latest_payment_intent_for_invoice,
         is_supported_receipt_document=_is_supported_receipt_document,
@@ -9594,17 +9459,17 @@ def _register_admin_handlers() -> None:
         scheduler_service=scheduler_service,
         sender_service=sender_service,
         runtime_context=runtime_context,
-        user_states=user_states,
-        dashboard_tasks=dashboard_tasks,
+            dashboard_tasks=dashboard_tasks,
         run_db=run_db,
         is_admin=is_admin,
         is_admin_callback=is_admin_callback,
-        answer_callback_safe=answer_callback_safe,
-        answer_callback_safe_once=answer_callback_safe_once,
+        answer_callback_safe=lambda *a, **k: answer_callback_safe(*a, **k),
+        answer_callback_safe_once=lambda *a, **k: answer_callback_safe_once(*a, **k),
         send_message_safe=send_message_safe,
         get_main_menu=get_main_menu,
         logger=logger,
         reset_user_state=reset_user_state,
+        user_states=user_states,
         ensure_rule_workers=ensure_rule_workers,
         stop_all_workers=stop_all_workers,
         parse_callback_parts=parse_callback_parts,
@@ -9613,7 +9478,7 @@ def _register_admin_handlers() -> None:
         build_faulty_inline_keyboard=build_faulty_inline_keyboard,
         build_system_journal_pages=build_system_journal_pages,
         build_system_journal_inline_keyboard=build_system_journal_inline_keyboard,
-        edit_message_text_safe=edit_message_text_safe,
+        edit_message_text_safe=lambda *a, **k: edit_message_text_safe(*a, **k),
         get_channels_menu=get_channels_menu,
         get_queue_menu=get_queue_menu,
         get_diagnostics_menu=get_diagnostics_menu,
