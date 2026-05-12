@@ -23,6 +23,18 @@ from app.repost_campaign_ui import (
 )
 
 
+def _rule_value(rule, name: str, default=None):
+    if rule is None:
+        return default
+    if isinstance(rule, dict):
+        return rule.get(name, default)
+    return getattr(rule, name, default)
+
+
+def _target_key(target: dict) -> str:
+    return f"{str(target.get('target_id') or '')}|{str(target.get('target_thread_id') or '')}"
+
+
 def register_repost_campaign_scheduled_post_handlers(dp: Dispatcher, ctx: RepostCampaignHandlersContext) -> None:
     async def _open_vip_step_post(callback: CallbackQuery, rule_id: int, sid: int):
         service = build_repost_campaign_scheduled_post_service(ctx)
@@ -44,16 +56,6 @@ def register_repost_campaign_scheduled_post_handlers(dp: Dispatcher, ctx: Repost
         posts = await ctx.run_db(ctx.db.list_campaign_scheduled_posts, rule_id=rule_id, statuses=["scheduled", "processing", "launched", "failed", "cancelled", "expired"], limit=100)
         text, kb = build_vip_scheduled_posts_list_view(rule_id=rule_id, posts=posts or [], page=page)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
-    def _rule_value(rule, name: str, default=None):
-        if rule is None:
-            return default
-        if isinstance(rule, dict):
-            return rule.get(name, default)
-        return getattr(rule, name, default)
-
-    def _target_key(target: dict) -> str:
-        return f"{str(target.get('target_id') or '')}|{str(target.get('target_thread_id') or '')}"
 
     async def _build_vip_scheduled_known_targets(rule_id: int, scheduled_post_id: int) -> list[dict]:
         known: list[dict] = []

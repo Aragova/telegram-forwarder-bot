@@ -1699,3 +1699,28 @@ def test_schedule_handlers_keep_access_guards():
     schedule_source = Path("app/repost_campaign_schedule_handlers.py").read_text(encoding="utf-8")
     assert "ctx.ensure_rule_callback_access(callback, rule_id)" in schedule_source
     assert "ctx.is_admin_callback(callback)" in schedule_source
+
+
+def test_vip_scheduled_helpers_rule_value_and_target_key_are_module_level():
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    assert "\ndef _rule_value(" in source
+    assert "\ndef _target_key(" in source
+
+
+def test_vip_scheduled_callbacks_order_safety():
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    assert source.index("rule_repost_campaign_scheduled_post_send_now_confirm:") < source.index("rule_repost_campaign_scheduled_post_send_now:")
+    assert source.index("rule_repost_campaign_scheduled_post_cancel_confirm:") < source.index("rule_repost_campaign_scheduled_post_cancel:")
+    assert source.index("rule_repost_campaign_scheduled_posts_list:") > source.index("rule_repost_campaign_scheduled_posts:")
+
+
+def test_vip_scheduled_no_forbidden_callbacks_or_callback_data_mutation():
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
+    assert "callback.data =" not in source
+    for forbidden in [
+        "rule_repost_campaign_schedule_step1:",
+        "rule_repost_campaign_schedule_step2:",
+        "rule_repost_campaign_schedule_step3:",
+        "rule_repost_campaign_schedule_step4:",
+    ]:
+        assert forbidden not in source
