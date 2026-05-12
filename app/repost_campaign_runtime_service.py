@@ -551,10 +551,12 @@ class RepostCampaignRuntimeService:
         content = saved_post.get("content_json") or saved_post.get("content") or {}
         render_result = await self.renderer.send(chat_id=target_id, content=content)
         if not render_result.ok:
+            is_unverified = str(render_result.method or "").endswith("_unverified")
             self.repo.mark_campaign_run_message_failed(
                 run_message_id,
                 error_text=render_result.error_text or "unknown error",
                 render_mode=render_result.method,
+                delete_status=None if is_unverified else "failed",
             )
             self.repo.update_campaign_run_status(
                 run_id,
@@ -690,7 +692,7 @@ class RepostCampaignRuntimeService:
                 self.repo.mark_campaign_run_message_sent(run_message_id, sent_message_id=render_result.message_id, sent_message_ids=getattr(render_result, "message_ids", None), render_mode=render_result.method)
                 targets_success += 1
             else:
-                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=getattr(render_result, "error_text", None) or "unknown error", render_mode=getattr(render_result, "method", None))
+                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=getattr(render_result, "error_text", None) or "unknown error", render_mode=getattr(render_result, "method", None), delete_status=(None if str(getattr(render_result, "method", "")).endswith("_unverified") else "failed"))
                 targets_failed += 1
                 error_text = error_text or getattr(render_result, "error_text", None) or "unknown error"
         if targets_success > 0 and targets_failed == 0:
@@ -848,11 +850,8 @@ class RepostCampaignRuntimeService:
                     run_id, target["target_id"], render_result.message_id, album_ids, render_result.method
                 )
             else:
-                self.repo.mark_campaign_run_message_failed(
-                    run_message_id,
-                    error_text="Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error"),
-                    render_mode=getattr(render_result, "method", None),
-                )
+                err_text = "Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error")
+                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=err_text, render_mode=getattr(render_result, "method", None), delete_status=(None if str(getattr(render_result, "method", "")).endswith("_unverified") else "failed"))
                 failed_count += 1
                 if first_error_text is None:
                     first_error_text = "Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error")
@@ -1466,9 +1465,12 @@ class RepostCampaignRuntimeService:
         message_id = int(message_ids[0])
         try:
             entity = normalize_telethon_target(message.get("target_id"))
-            msg = await self.telethon_client.get_messages(entity=entity, ids=message_id)
-            if msg is not None and getattr(msg, "views", None) is not None:
-                views_count = int(getattr(msg, "views", 0) or 0)
+            msgs = await self.telethon_client.get_messages(entity=entity, ids=message_ids if len(message_ids) > 1 else message_id)
+            if not isinstance(msgs, list):
+                msgs = [msgs]
+            views_values = [int(getattr(m, "views", 0) or 0) for m in msgs if m is not None and getattr(m, "views", None) is not None]
+            if views_values:
+                views_count = max(views_values)
                 self.repo.mark_campaign_run_message_views_collected(row_id, views_count=views_count, collected_at=now_iso)
                 self.logger.info(
                     "REPOST_CAMPAIGN_FINAL_VIEWS_COLLECT_DONE | rule_id=%s | run_id=%s | campaign_run_message_id=%s | target_id=%s | sent_message_id=%s | views_count=%s | views_final_status=%s | attempt=%s",

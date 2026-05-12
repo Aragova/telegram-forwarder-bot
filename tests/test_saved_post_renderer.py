@@ -236,7 +236,14 @@ class FakeTelethonSource:
 
     async def get_messages(self, entity, ids):
         self.get_messages_calls.append((entity, ids))
-        return [FakeSourceMessage(i) for i in ids]
+        if entity == 1:
+            return [FakeSourceMessage(i) for i in ids]
+        now = datetime.now(timezone.utc)
+        return [SimpleNamespace(id=i, date=now, grouped_id=777, peer_id=_FakePeer(123), message="cap") for i in ids]
+
+    async def iter_messages(self, entity, limit=None):
+        for row in []:
+            yield row
 
     async def send_file(self, entity, file, caption="", formatting_entities=None):
         self.send_file_calls.append((entity, file, caption, formatting_entities))
@@ -280,16 +287,22 @@ class _TelethonVerifyOk(FakeTelethonSource):
     async def get_messages(self, entity, ids):
         if entity == 1:
             return [FakeSourceMessage(i) for i in ids]
-        return [SimpleNamespace(id=i, date=datetime.now(timezone.utc), peer_id=_FakePeer(2451047809)) for i in ids]
+        return [SimpleNamespace(id=i, date=datetime.now(timezone.utc), grouped_id=555, peer_id=_FakePeer(2451047809), message="") for i in ids]
 
 
 def test_source_send_ids_verify_failed_raises_unverified_error_without_forward(monkeypatch):
     telethon = FakeTelethonSource()
 
     async def _verify(**kwargs):
-        return []
+        from app.telethon_delivery_resolver import TelethonResolvedDelivery
+        return TelethonResolvedDelivery(ok=False, method="telethon_source_unverified", message_id=None, message_ids=[], grouped_id=None, recovered=False, error_text="verify fail")
 
-    monkeypatch.setattr(spr, "verify_telethon_sent_messages", _verify)
+    async def _recover(**kwargs):
+        from app.telethon_delivery_resolver import TelethonResolvedDelivery
+        return TelethonResolvedDelivery(ok=False, method="telethon_source_unverified", message_id=None, message_ids=[], grouped_id=None, recovered=True, error_text="recover fail")
+
+    monkeypatch.setattr(spr, "verify_raw_album_ids", _verify)
+    monkeypatch.setattr(spr, "recover_album_ids_by_scan", _recover)
     with pytest.raises(SavedPostSentUnverifiedError) as exc:
         asyncio.run(send_saved_post_album_via_telethon_source(
             telethon_client=telethon,
@@ -338,7 +351,7 @@ class _TelethonOldIds(FakeTelethonSource):
     async def get_messages(self, entity, ids):
         if entity == 1:
             return [FakeSourceMessage(i) for i in ids]
-        return [SimpleNamespace(id=i, date=datetime.now(timezone.utc) - timedelta(days=365), peer_id=_FakePeer(2451047809)) for i in ids]
+        return [SimpleNamespace(id=i, date=datetime.now(timezone.utc) - timedelta(days=365), grouped_id=555, peer_id=_FakePeer(2451047809), message="") for i in ids]
 
 
 def test_telethon_album_send_rejects_old_message_ids():
@@ -355,7 +368,7 @@ class _TelethonWrongPeer(FakeTelethonSource):
     async def get_messages(self, entity, ids):
         if entity == 1:
             return [FakeSourceMessage(i) for i in ids]
-        return [SimpleNamespace(id=i, date=datetime.now(timezone.utc), peer_id=_FakePeer(999999)) for i in ids]
+        return [SimpleNamespace(id=i, date=datetime.now(timezone.utc), grouped_id=555, peer_id=_FakePeer(999999), message="") for i in ids]
 
 
 def test_telethon_album_send_rejects_wrong_peer():
@@ -372,7 +385,7 @@ class _FailSourceThenBuilder(_TelethonVerifyOk):
     async def get_messages(self, entity, ids):
         if entity == 1:
             raise RuntimeError("no source")
-        return [SimpleNamespace(id=i, date=datetime.now(timezone.utc), peer_id=_FakePeer(2451047809)) for i in ids]
+        return [SimpleNamespace(id=i, date=datetime.now(timezone.utc), grouped_id=555, peer_id=_FakePeer(2451047809), message="") for i in ids]
 
     async def send_file(self, entity, file, caption="", formatting_entities=None):
         return [FakeSentMessage(200 + i) for i, _ in enumerate(file)]
@@ -392,3 +405,48 @@ def test_telethon_album_builder_fallback_verifies_ids(tmp_path):
         temp_dir=tmp_path,
     ))
     assert raw["message_ids"] == [200, 201]
+
+
+def test_verify_raw_album_ids_requires_grouped_id_for_album():
+    from app.telethon_delivery_resolver import verify_raw_album_ids
+
+    class _NoGroup(FakeTelethonSource):
+        async def get_messages(self, entity, ids):
+            if entity == 1:
+                return [FakeSourceMessage(i) for i in ids]
+            now = datetime.now(timezone.utc)
+            return [SimpleNamespace(id=i, date=now, grouped_id=None, peer_id=_FakePeer(2451047809), message="cap") for i in ids]
+
+    result = asyncio.run(verify_raw_album_ids(telethon_client=_NoGroup(), target_id="-1002451047809", raw_message_ids=[900, 901], expected_count=2, expected_caption="cap", started_at=datetime.now(timezone.utc)))
+    assert result.ok is False
+
+
+def test_recover_album_ids_by_scan_skips_outside_window_and_finds_inside():
+    from app.telethon_delivery_resolver import recover_album_ids_by_scan
+    started = datetime.now(timezone.utc)
+
+    class _ScanClient(FakeTelethonSource):
+        async def iter_messages(self, entity, limit=None):
+            yield SimpleNamespace(id=1100, grouped_id=10, date=started + timedelta(minutes=10), message="cap")
+            yield SimpleNamespace(id=1200, grouped_id=11, date=started + timedelta(seconds=40), message="cap")
+            yield SimpleNamespace(id=1201, grouped_id=11, date=started + timedelta(seconds=40), message="cap")
+            yield SimpleNamespace(id=1300, grouped_id=12, date=started - timedelta(seconds=70), message="cap")
+
+    result = asyncio.run(recover_album_ids_by_scan(telethon_client=_ScanClient(), target_id="-1002451047809", expected_count=2, expected_caption="cap", started_at=started))
+    assert result.ok is True
+    assert result.method == "telethon_source_recovered_by_scan"
+    assert result.message_ids == [1200, 1201]
+
+
+def test_verify_raw_album_ids_old_album_time_fails():
+    from app.telethon_delivery_resolver import verify_raw_album_ids
+
+    class _Old(FakeTelethonSource):
+        async def get_messages(self, entity, ids):
+            if entity == 1:
+                return [FakeSourceMessage(i) for i in ids]
+            old = datetime.now(timezone.utc) - timedelta(days=1)
+            return [SimpleNamespace(id=i, date=old, grouped_id=777, peer_id=_FakePeer(2451047809), message="cap") for i in ids]
+
+    result = asyncio.run(verify_raw_album_ids(telethon_client=_Old(), target_id="-1002451047809", raw_message_ids=[900, 901], expected_count=2, expected_caption="cap", started_at=datetime.now(timezone.utc)))
+    assert result.ok is False

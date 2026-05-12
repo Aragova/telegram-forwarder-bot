@@ -7673,10 +7673,10 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return True
 
-    def mark_campaign_run_message_failed(self, message_id: int, *, error_text: str, render_mode: str | None = None) -> bool:
+    def mark_campaign_run_message_failed(self, message_id: int, *, error_text: str, render_mode: str | None = None, delete_status: str | None = "failed") -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE campaign_run_messages SET send_status='failed', send_error_text=%s, render_mode=%s, updated_at=NOW() WHERE id=%s", (error_text, render_mode, int(message_id)))
+                cur.execute("UPDATE campaign_run_messages SET send_status='failed', send_error_text=%s, render_mode=%s, delete_status=%s, updated_at=NOW() WHERE id=%s", (error_text, render_mode, delete_status, int(message_id)))
             conn.commit()
             return True
 
