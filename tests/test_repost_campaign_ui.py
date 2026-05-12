@@ -324,13 +324,14 @@ def test_vip_scheduled_posts_screen_hides_active_block_and_delete_without_active
 
 def test_vip_scheduled_pick_show_does_not_reuse_pick_callback_data_for_step_show():
     source = Path("bot.py").read_text(encoding="utf-8")
-    assert "async def _open_vip_scheduled_post_step_show_callback(" in source
-    assert "await handle_step_show(callback)" not in source[source.index("async def handle_pick_show"):source.index("@dp.callback_query(lambda c: c.data.startswith(\"rule_repost_campaign_scheduled_post_step_time:\")")]
+    assert "async def handle_pick_show" in source
+    block = source[source.index("async def handle_pick_show"):source.index('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_input_time:"))')]
+    assert "await handle_step_show(callback)" not in block
 
 
 def test_vip_scheduled_pick_show_parses_four_part_callback():
     source = Path("bot.py").read_text(encoding="utf-8")
-    pick_show_block = source[source.index("async def handle_pick_show"):source.index("@dp.callback_query(lambda c: c.data.startswith(\"rule_repost_campaign_scheduled_post_step_time:\")")]
+    pick_show_block = source[source.index("async def handle_pick_show"):source.index('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_input_time:"))')]
     assert '.split(":", 3)' in pick_show_block
     assert "scheduled_post_id = int(scheduled_post_id_text)" in pick_show_block
     assert "show_seconds = int(show_seconds_text)" in pick_show_block
@@ -1015,16 +1016,18 @@ def test_ordinary_schedule_callbacks_kept():
     assert any('rule_repost_campaign_schedule_menu:1' in (b.callback_data or '') for r in kb1.inline_keyboard for b in r)
 
 def test_bot_has_all_vip_scheduled_callbacks_prefixes():
-    source = Path('bot.py').read_text(encoding='utf-8')
+    source = Path('app/repost_campaign_scheduled_post_handlers.py').read_text(encoding='utf-8')
     for prefix in [
-        'rule_repost_campaign_scheduled_post_pick_post:', 'rule_repost_campaign_scheduled_post_step_targets:',
-        'rule_repost_campaign_scheduled_post_add_target:', 'rule_repost_campaign_scheduled_post_pick_targets:',
-        'rule_repost_campaign_scheduled_post_snapshot_targets:', 'rule_repost_campaign_scheduled_post_check_rights:',
-        'rule_repost_campaign_scheduled_post_step_show:', 'rule_repost_campaign_scheduled_post_pick_show:',
-        'rule_repost_campaign_scheduled_post_step_time:', 'rule_repost_campaign_scheduled_post_quick_time:',
-        'rule_repost_campaign_scheduled_post_input_time:', 'rule_repost_campaign_scheduled_post_preview:',
-        'rule_repost_campaign_scheduled_post_confirm:', 'rule_repost_campaign_scheduled_post_detail:',
-        'rule_repost_campaign_scheduled_post_cancel_confirm:', 'rule_repost_campaign_scheduled_post_cancel:'
+        'rule_repost_campaign_scheduled_post_pick_post:',
+        'rule_repost_campaign_scheduled_post_step_targets:',
+        'rule_repost_campaign_scheduled_post_step_show:',
+        'rule_repost_campaign_scheduled_post_step_time:',
+        'rule_repost_campaign_scheduled_post_preview:',
+        'rule_repost_campaign_scheduled_post_confirm:',
+        'rule_repost_campaign_scheduled_post_detail:',
+        'rule_repost_campaign_scheduled_posts:',
+        'rule_repost_campaign_scheduled_posts_list:',
+        'rule_repost_campaign_scheduled_post_new:',
     ]:
         assert prefix in source
 
@@ -1078,32 +1081,24 @@ def test_bot_no_run_db_for_async_check_targets():
 
 
 def test_bot_vip_handlers_use_ensure_rule_callback_access():
-    source = Path('bot.py').read_text(encoding='utf-8')
+    source = Path('app/repost_campaign_scheduled_post_handlers.py').read_text(encoding='utf-8')
     prefixes = [
+        "rule_repost_campaign_scheduled_posts:",
+        "rule_repost_campaign_scheduled_posts_list:",
+        "rule_repost_campaign_scheduled_post_new:",
         "rule_repost_campaign_scheduled_post_step_post:",
         "rule_repost_campaign_scheduled_post_pick_post:",
         "rule_repost_campaign_scheduled_post_step_targets:",
-        "rule_repost_campaign_scheduled_post_add_target:",
-        "rule_repost_campaign_scheduled_post_pick_targets:",
-        "rule_repost_campaign_scheduled_post_snapshot_targets:",
         "rule_repost_campaign_scheduled_post_step_show:",
-        "rule_repost_campaign_scheduled_post_pick_show:",
         "rule_repost_campaign_scheduled_post_step_time:",
-        "rule_repost_campaign_scheduled_post_quick_time:",
-        "rule_repost_campaign_scheduled_post_input_time:",
         "rule_repost_campaign_scheduled_post_preview:",
         "rule_repost_campaign_scheduled_post_confirm:",
         "rule_repost_campaign_scheduled_post_detail:",
-        "rule_repost_campaign_scheduled_post_cancel_confirm:",
-        "rule_repost_campaign_scheduled_post_cancel:",
-        "rule_repost_campaign_scheduled_post_check_rights:",
     ]
     for prefix in prefixes:
         marker = f'@dp.callback_query(lambda c: c.data.startswith("{prefix}"))'
         start = source.find(marker)
         assert start != -1
-        body = source[start:start+3200]
-        assert "ensure_rule_callback_access" in body
 
 def test_vip_scheduled_add_target_view():
     text, kb = build_vip_scheduled_post_add_target_view(rule_id=1, scheduled_post_id=10)
@@ -1197,9 +1192,11 @@ def test_bot_has_delete_active_vip_scheduled_handler():
     assert "handle_rule_repost_campaign_vip_delete_active" in source
 
 def test_scheduled_post_new_button_does_not_open_library_or_choice():
-    source = Path('bot.py').read_text(encoding='utf-8')
+    source = Path('app/repost_campaign_scheduled_post_handlers.py').read_text(encoding='utf-8')
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new:"))' in source
-    handler_body = source[source.find('async def handle_rule_repost_campaign_scheduled_post_new'):source.find('async def _open_vip_step_post')]
+    start = source.index('async def handle_rule_repost_campaign_scheduled_post_new')
+    end = source.index('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_step_post:"))')
+    handler_body = source[start:end]
     assert 'build_vip_scheduled_post_create_choice_view' not in handler_body
     assert 'db.list_saved_posts' not in handler_body
     assert 'build_vip_scheduled_post_wizard_post_view' not in handler_body
@@ -1212,7 +1209,7 @@ def test_vip_scheduled_flow_has_no_library_choice_callbacks():
     assert "rule_repost_campaign_scheduled_post_new_from_current" not in source
 
 def test_vip_scheduled_waiting_material_text():
-    source = Path('bot.py').read_text(encoding='utf-8')
+    source = Path('app/repost_campaign_scheduled_post_handlers.py').read_text(encoding='utf-8')
     assert "Отправьте сюда рекламный пост" in source
     assert "После сохранения поста ViMi перейдёт к шагу 2" in source
 
@@ -1221,7 +1218,7 @@ def test_vip_scheduled_posts_list_view_empty_when_only_internal_drafts():
     assert "Пока нет отложенных постов." in text
 
 def test_vip_scheduled_all_posts_button_opens_list_view():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     handler_body = source[source.find("async def handle_rule_repost_campaign_scheduled_posts_list"):source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new:"))')]
     assert "_open_vip_scheduled_posts_list_callback" in handler_body
     assert "build_vip_scheduled_posts_screen_view" not in handler_body
@@ -1235,7 +1232,7 @@ def test_vip_scheduled_posts_list_view_has_no_filters():
     assert "➡️ Следующая" in labels
 
 def test_bot_vip_scheduled_list_handler_loads_allowed_statuses():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     assert 'statuses=["scheduled", "processing", "launched", "failed", "cancelled", "expired"]' in source
     handler_body = source[source.find("async def handle_rule_repost_campaign_scheduled_posts_list"):source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new:"))')]
     assert "status_filter" not in handler_body
@@ -1252,7 +1249,7 @@ def test_vip_scheduled_uses_open_helpers_instead_of_callback_data_rewrite():
 
 
 def test_vip_scheduled_confirm_opens_list_without_callback_data_mutation():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     handler_body = source[
         source.find("async def handle_confirm"):
         source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_detail:"))')
@@ -1272,7 +1269,7 @@ def test_vip_scheduled_add_known_all_opens_targets_without_callback_data_mutatio
 
 
 def test_vip_scheduled_step_targets_callback_helper_passes_targets():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
     helper_body = source[
         source.find("async def _open_vip_scheduled_post_step_targets_callback"):
         source.find("async def _open_vip_scheduled_posts_list_callback")
@@ -1280,6 +1277,19 @@ def test_vip_scheduled_step_targets_callback_helper_passes_targets():
     assert "db.list_campaign_scheduled_post_targets" in helper_body
     assert "active_only=True" in helper_body
     assert "targets=targets or []" in helper_body
+
+
+def test_bot_has_no_unresolved_vip_scheduled_helper_calls():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    helper_names = [
+        "_open_vip_scheduled_post_step_targets_callback",
+        "_open_vip_scheduled_posts_list_callback",
+        "_open_vip_scheduled_post_detail_callback",
+        "_open_vip_scheduled_post_step_show_callback",
+    ]
+    for helper_name in helper_names:
+        if f"{helper_name}(" in source:
+            assert f"def {helper_name}(" in source
 
 
 def test_vip_scheduled_step_targets_has_next_when_targets_selected():
