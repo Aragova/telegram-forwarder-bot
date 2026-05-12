@@ -271,6 +271,33 @@ def test_vip_scheduled_material_has_dedicated_handler_before_generic_album_handl
     assert vip_handler_pos < generic_album_pos
 
 
+def test_repost_campaign_message_handlers_registers_vip_material_handler():
+    source = Path("app/repost_campaign_message_handlers.py").read_text(encoding="utf-8")
+    assert "def register_repost_campaign_message_handlers(dp: Dispatcher, ctx: RepostCampaignHandlersContext) -> None:" in source
+    assert "@dp.message(" in source[source.index("def register_repost_campaign_message_handlers"): ]
+    assert "is_waiting_vip_scheduled_post_material(ctx, m.from_user.id)" in source
+    assert "VIP_SCHEDULED_POST_MATERIAL_HANDLER_HIT" in source
+    assert "VIP_SCHEDULED_POST_MATERIAL_HANDLER_NOT_HANDLED" in source
+
+
+def test_bot_registers_repost_campaign_message_handlers():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "register_repost_campaign_message_handlers(dp, campaign_handlers_ctx)" in source
+
+
+def test_vip_material_registration_happens_before_generic_stateful_handler_registration():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    register_pos = source.index("register_repost_campaign_message_handlers(dp, campaign_handlers_ctx)")
+    generic_stateful_pos = source.index("async def handle_stateful_private_inputs(message: Message):")
+    assert register_pos < generic_stateful_pos
+
+
+def test_bot_has_no_vip_material_business_logic_inline():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    assert "VIP_SCHEDULED_POST_MATERIAL_HANDLER_HIT" not in source
+    assert "VIP_SCHEDULED_POST_MATERIAL_HANDLER_NOT_HANDLED" not in source
+
+
 def test_vip_scheduled_posts_screen_shows_active_placement_block_and_delete_button():
     text, kb = build_vip_scheduled_posts_screen_view(
         rule_id=1,
