@@ -102,7 +102,7 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
         if not await ctx.is_admin(message):
             return
-        await message.reply("⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
+        await ctx.send_message_safe(chat_id=message.chat.id, text="⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
 
     @dp.message(
         lambda m: _normalize_button_text(m.text) in {
@@ -117,12 +117,12 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             return
 
         if ctx.is_posting_active and ctx.is_posting_active():
-            await message.reply("ℹ️ Пересылка уже запущена.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="ℹ️ Пересылка уже запущена.")
             return
 
         try:
             await ctx.start_forwarding()
-            await message.reply(
+            await ctx.send_message_safe(chat_id=message.chat.id, text=
                 "▶️ Пересылка запущена.\n"
                 "Новые задачи будут обрабатываться.",
                 reply_markup=ctx.get_main_menu(),
@@ -133,7 +133,7 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             )
         except Exception as exc:
             ctx.logger.exception("Ошибка запуска пересылки: %s", exc)
-            await message.reply("❌ Ошибка запуска пересылки")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Ошибка запуска пересылки")
 
     @dp.message(
         lambda m: _normalize_button_text(m.text) in {
@@ -148,12 +148,12 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             return
 
         if ctx.is_posting_active and not ctx.is_posting_active():
-            await message.reply("ℹ️ Пересылка уже остановлена.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="ℹ️ Пересылка уже остановлена.")
             return
 
         try:
             await ctx.stop_forwarding()
-            await message.reply(
+            await ctx.send_message_safe(chat_id=message.chat.id, text=
                 "⏸ Пересылка остановлена.\n"
                 "Новые задачи запускаться не будут.",
                 reply_markup=ctx.get_main_menu(),
@@ -164,33 +164,33 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             )
         except Exception as exc:
             ctx.logger.exception("Ошибка остановки пересылки: %s", exc)
-            await message.reply("❌ Ошибка остановки пересылки")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Ошибка остановки пересылки")
 
 
     @dp.message(lambda m: _normalize_button_text(m.text) == "💱 Курсы валют")
     async def handle_billing_rates_menu(message: Message):
         if not await ctx.is_admin(message):
             return
-        await message.reply(_build_rates_text(ctx), reply_markup=_build_rates_kb())
+        await ctx.send_message_safe(chat_id=message.chat.id, text=_build_rates_text(ctx), reply_markup=_build_rates_kb())
 
     @dp.message(lambda m: _normalize_button_text(m.text) == "💫 Фикс-цены Stars/Crypto")
     async def handle_billing_fixed_menu(message: Message):
         if not await ctx.is_admin(message):
             return
-        await message.reply(_build_fixed_prices_text(ctx), reply_markup=_build_fixed_prices_kb())
+        await ctx.send_message_safe(chat_id=message.chat.id, text=_build_fixed_prices_text(ctx), reply_markup=_build_fixed_prices_kb())
 
     @dp.message(lambda m: _normalize_button_text(m.text) == "💵 Цены тарифов")
     async def handle_billing_usd_menu(message: Message):
         if not await ctx.is_admin(message):
             return
-        await message.reply(_build_tariff_prices_text(ctx), reply_markup=_build_tariff_prices_kb())
+        await ctx.send_message_safe(chat_id=message.chat.id, text=_build_tariff_prices_text(ctx), reply_markup=_build_tariff_prices_kb())
 
     @dp.callback_query(lambda c: c.data == "admin_billing_usd")
     async def handle_billing_usd_callback(callback: CallbackQuery):
         if not await ctx.is_admin(callback):
             return
-        await callback.message.edit_text(_build_tariff_prices_text(ctx), reply_markup=_build_tariff_prices_kb())
-        await callback.answer()
+        await ctx.edit_message_text_safe(message=callback.message, text=_build_tariff_prices_text(ctx), reply_markup=_build_tariff_prices_kb())
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("admin_billing_usd_plan:"))
     async def handle_billing_usd_plan(callback: CallbackQuery):
@@ -206,8 +206,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             value = plan_prices.get(period, USD_PRICES[code][period])
             lines.append([InlineKeyboardButton(text=f"{period} мес — {float(value):g} USD", callback_data=f"admin_billing_usd_edit:{code}:{period}")])
         lines.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_billing_usd")])
-        await callback.message.edit_text(f"{plan_icon} {plan_name} — цены", reply_markup=InlineKeyboardMarkup(inline_keyboard=lines))
-        await callback.answer()
+        await ctx.edit_message_text_safe(message=callback.message, text=f"{plan_icon} {plan_name} — цены", reply_markup=InlineKeyboardMarkup(inline_keyboard=lines))
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("admin_billing_usd_edit:"))
     async def handle_billing_usd_edit(callback: CallbackQuery):
@@ -216,15 +216,15 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         _, code, period = str(callback.data).split(":")
         user_id = callback.from_user.id if callback.from_user else ctx.settings.admin_id
         ctx.user_states[user_id] = {"action": "admin_billing_usd_price_input", "tariff_code": code, "period_months": int(period)}
-        await callback.message.edit_text("Введите новую цену в USD.\n\nПример:\n11\nили\n11.5")
-        await callback.answer()
+        await ctx.edit_message_text_safe(message=callback.message, text="Введите новую цену в USD.\n\nПример:\n11\nили\n11.5")
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data == "admin_billing_rates")
     async def handle_billing_rates_callback(callback: CallbackQuery):
         if not await ctx.is_admin(callback):
             return
-        await callback.message.edit_text(_build_rates_text(ctx), reply_markup=_build_rates_kb())
-        await callback.answer()
+        await ctx.edit_message_text_safe(message=callback.message, text=_build_rates_text(ctx), reply_markup=_build_rates_kb())
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("admin_billing_rate_edit:"))
     async def handle_billing_rate_edit(callback: CallbackQuery):
@@ -233,8 +233,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         currency = str(callback.data).split(":", 1)[1].upper()
         user_id = callback.from_user.id if callback.from_user else ctx.settings.admin_id
         ctx.user_states[user_id] = {"action": "admin_billing_rate_input", "currency": currency}
-        await callback.message.edit_text(f"Введите новый курс USD→{currency} (положительное число):")
-        await callback.answer()
+        await ctx.edit_message_text_safe(message=callback.message, text=f"Введите новый курс USD→{currency} (положительное число):")
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data == "admin_billing_rates_back")
     async def handle_billing_rates_back(callback: CallbackQuery):
@@ -242,8 +242,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             return
         if callback.from_user:
             ctx.reset_user_state(callback.from_user.id)
-        await callback.message.answer("⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
-        await callback.answer()
+        await ctx.send_message_safe(chat_id=callback.message.chat.id, text="⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data == "admin_billing_usd_back")
     async def handle_billing_usd_back(callback: CallbackQuery):
@@ -251,8 +251,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             return
         if callback.from_user:
             ctx.reset_user_state(callback.from_user.id)
-        await callback.message.answer("⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
-        await callback.answer()
+        await ctx.send_message_safe(chat_id=callback.message.chat.id, text="⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.message(lambda m: m.from_user is not None and ctx.user_states.get(m.from_user.id, {}).get("action") == "admin_billing_rate_input")
     async def handle_billing_rate_input(message: Message):
@@ -264,22 +264,22 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         try:
             value = float(raw)
         except Exception:
-            await message.reply("❌ Ошибка: введите положительное число.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Ошибка: введите положительное число.")
             return
         if value <= 0:
-            await message.reply("❌ Ошибка: курс должен быть больше 0.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Ошибка: курс должен быть больше 0.")
             return
         if value > 100000:
-            await message.reply("⚠️ Слишком большой курс. Введите более реалистичное значение.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="⚠️ Слишком большой курс. Введите более реалистичное значение.")
             return
         admin_id = message.from_user.id if message.from_user else ctx.settings.admin_id
         ok = await ctx.run_db(ctx.db.set_billing_exchange_rate, currency=currency, new_value=value, admin_id=admin_id)
         if not ok:
-            await message.reply("❌ Не удалось сохранить курс.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Не удалось сохранить курс.")
             return
         ctx.reset_user_state(message.from_user.id)
-        await message.reply("✅ Курс сохранён.")
-        await message.reply(_build_rates_text(ctx), reply_markup=_build_rates_kb())
+        await ctx.send_message_safe(chat_id=message.chat.id, text="✅ Курс сохранён.")
+        await ctx.send_message_safe(chat_id=message.chat.id, text=_build_rates_text(ctx), reply_markup=_build_rates_kb())
 
     @dp.message(lambda m: m.from_user is not None and ctx.user_states.get(m.from_user.id, {}).get("action") == "admin_billing_usd_price_input")
     async def handle_billing_usd_input(message: Message):
@@ -290,43 +290,43 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         try:
             value = float(raw)
         except Exception:
-            await message.reply("❌ Ошибка: введите положительное число.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Ошибка: введите положительное число.")
             return
         if value <= 0:
-            await message.reply("❌ Ошибка: цена должна быть больше 0.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Ошибка: цена должна быть больше 0.")
             return
         if value > 100000:
-            await message.reply("⚠️ Слишком большое значение. Введите более реалистичную цену.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="⚠️ Слишком большое значение. Введите более реалистичную цену.")
             return
         tariff_code = str(state.get("tariff_code") or "").lower()
         period_months = int(state.get("period_months") or 0)
         admin_id = message.from_user.id if message.from_user else ctx.settings.admin_id
         ok = await ctx.run_db(ctx.db.set_billing_usd_price, tariff_code=tariff_code, period_months=period_months, new_price=value, admin_id=admin_id)
         if not ok:
-            await message.reply("❌ Не удалось сохранить цену.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Не удалось сохранить цену.")
             return
         ctx.logger.info(
             "Обновлена USD-цена тарифа admin_id=%s tariff_code=%s period_months=%s new_price=%s",
             admin_id, tariff_code, period_months, value,
         )
         ctx.reset_user_state(message.from_user.id)
-        await message.reply("✅ Цена сохранена.")
-        await message.reply(_build_tariff_prices_text(ctx), reply_markup=_build_tariff_prices_kb())
+        await ctx.send_message_safe(chat_id=message.chat.id, text="✅ Цена сохранена.")
+        await ctx.send_message_safe(chat_id=message.chat.id, text=_build_tariff_prices_text(ctx), reply_markup=_build_tariff_prices_kb())
 
 
     @dp.callback_query(lambda c: c.data == "admin_fixed_prices")
     async def handle_fixed_prices_callback(callback: CallbackQuery):
         if not await ctx.is_admin(callback):
             return
-        await callback.message.edit_text(_build_fixed_prices_text(ctx), reply_markup=_build_fixed_prices_kb())
-        await callback.answer()
+        await ctx.edit_message_text_safe(message=callback.message, text=_build_fixed_prices_text(ctx), reply_markup=_build_fixed_prices_kb())
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data == "admin_fixed_prices_back")
     async def handle_fixed_prices_back(callback: CallbackQuery):
         if not await ctx.is_admin(callback):
             return
-        await callback.message.answer("⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
-        await callback.answer()
+        await ctx.send_message_safe(chat_id=callback.message.chat.id, text="⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("admin_fixed_prices_kind:"))
     async def handle_fixed_prices_kind(callback: CallbackQuery):
@@ -338,8 +338,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         for code, label in (("basic", "💎 BASIC"), ("pro", "🚀 PRO")):
             lines.append([InlineKeyboardButton(text=label, callback_data=f"admin_fixed_prices_plan:{kind}:{code}")])
         lines.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_fixed_prices")])
-        await callback.message.edit_text(title, reply_markup=InlineKeyboardMarkup(inline_keyboard=lines))
-        await callback.answer()
+        await ctx.edit_message_text_safe(message=callback.message, text=title, reply_markup=InlineKeyboardMarkup(inline_keyboard=lines))
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("admin_fixed_prices_plan:"))
     async def handle_fixed_prices_plan(callback: CallbackQuery):
@@ -352,8 +352,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             val = format_stars_price(code, period, repo=ctx.db) if kind == "stars" else format_crypto_price(code, period, repo=ctx.db)
             rows.append([InlineKeyboardButton(text=f"{period} месяц — {val}", callback_data=f"admin_fixed_price_edit:{kind}:{code}:{period}")])
         rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_fixed_prices_kind:{kind}")])
-        await callback.message.edit_text(f"{icon} {code.upper()} — {'Stars' if kind=='stars' else 'Crypto'}", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-        await callback.answer()
+        await ctx.edit_message_text_safe(message=callback.message, text=f"{icon} {code.upper()} — {'Stars' if kind=='stars' else 'Crypto'}", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("admin_fixed_price_edit:"))
     async def handle_fixed_price_edit(callback: CallbackQuery):
@@ -367,8 +367,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             if kind == "stars"
             else "Введите фиксированную цену для Crypto.\n\nПримеры:\n9\n9.5\n$9\n$9.50"
         )
-        await callback.message.edit_text(text)
-        await callback.answer()
+        await ctx.edit_message_text_safe(message=callback.message, text=text)
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.message(lambda m: m.from_user is not None and ctx.user_states.get(m.from_user.id, {}).get("action") == "admin_fixed_price_input")
     async def handle_fixed_price_input(message: Message):
@@ -384,21 +384,21 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         value = None
         if kind == "stars":
             if not raw.isdigit():
-                await message.reply("❌ Ошибка: введите целое положительное число.")
+                await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Ошибка: введите целое положительное число.")
                 return
             amount = int(raw)
             if amount <= 0 or amount > 10000000:
-                await message.reply("⚠️ Некорректное значение. Введите число от 1 до 10000000.")
+                await ctx.send_message_safe(chat_id=message.chat.id, text="⚠️ Некорректное значение. Введите число от 1 до 10000000.")
                 return
             value = {"amount": amount}
         else:
             try:
                 amount_f = float(raw)
             except Exception:
-                await message.reply("❌ Ошибка: введите число больше 0.")
+                await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Ошибка: введите число больше 0.")
                 return
             if amount_f <= 0 or amount_f > 10000000:
-                await message.reply("⚠️ Некорректное значение. Введите число больше 0.")
+                await ctx.send_message_safe(chat_id=message.chat.id, text="⚠️ Некорректное значение. Введите число больше 0.")
                 return
             amount = f"{amount_f:g}"
             value = {"amount": amount, "display": f"${amount}"}
@@ -412,15 +412,15 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
                 period,
                 admin_id,
             )
-            await message.reply("❌ Не удалось сохранить фикс-цену. Ошибка записана в лог.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Не удалось сохранить фикс-цену. Ошибка записана в лог.")
             return
         if not ok:
-            await message.reply("❌ Не удалось сохранить фикс-цену.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Не удалось сохранить фикс-цену.")
             return
         new_value = format_stars_price(code, period, repo=ctx.db) if kind == "stars" else format_crypto_price(code, period, repo=ctx.db)
         ctx.logger.info("Обновлена фикс-цена billing admin_id=%s kind=%s tariff_code=%s period_months=%s old_value=%s new_value=%s", admin_id, kind, code, period, old_value, new_value)
         ctx.reset_user_state(message.from_user.id)
-        await message.reply(
+        await ctx.send_message_safe(chat_id=message.chat.id, text=
             "✅ Цена %s сохранена\n\n%s / %s месяц:\n%s → %s"
             % ("Stars" if kind == "stars" else "Crypto", code.upper(), period, old_value, new_value)
         )
@@ -433,4 +433,4 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         if not await ctx.is_admin(message):
             return
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
-        await message.reply("📋 Главное меню", reply_markup=ctx.get_main_menu())
+        await ctx.send_message_safe(chat_id=message.chat.id, text="📋 Главное меню", reply_markup=ctx.get_main_menu())

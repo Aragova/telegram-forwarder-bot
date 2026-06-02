@@ -12,7 +12,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
         if not await ctx.is_admin(message):
             return
-        await message.reply("⚠️ Раздел: Диагностика", reply_markup=ctx.get_diagnostics_menu())
+        await ctx.send_message_safe(chat_id=message.chat.id, text="⚠️ Раздел: Диагностика", reply_markup=ctx.get_diagnostics_menu())
 
     @dp.message(lambda m: (m.text or "").strip() == "⚠️ Проблемные доставки")
     async def handle_faulty(message: Message):
@@ -23,7 +23,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         page = 0
         total_pages = len(pages)
         current = pages[page]
-        await message.reply(current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]))
+        await ctx.send_message_safe(chat_id=message.chat.id, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]))
 
     @dp.message(lambda m: m.text == "📊 Журнал системы")
     async def handle_system_journal(message: Message):
@@ -33,7 +33,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         pages = await ctx.run_db(ctx.build_system_journal_pages, 300)
         page = 0
         total_pages = len(pages)
-        await message.reply(pages[page], parse_mode="HTML", reply_markup=ctx.build_system_journal_inline_keyboard(page, total_pages))
+        await ctx.send_message_safe(chat_id=message.chat.id, text=pages[page], parse_mode="HTML", reply_markup=ctx.build_system_journal_inline_keyboard(page, total_pages))
 
     @dp.message(lambda m: m.text == "🎨 Тест styled-кнопок")
     async def handle_styled_buttons_test(message: Message):
@@ -51,7 +51,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
                 ],
             ]
         )
-        await message.reply(
+        await ctx.send_message_safe(chat_id=message.chat.id, text=
             "🎨 Тест styled-кнопок (только для ADMIN_ID).\n"
             "Если цвета не отображаются, остаёмся на emoji-style.",
             reply_markup=markup,

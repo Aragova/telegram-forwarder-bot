@@ -21,27 +21,27 @@ def register_admin_queue_handlers(dp: Dispatcher, ctx: AdminHandlersContext) -> 
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
         if not await ctx.is_admin(message):
             return
-        await message.reply("📦 Раздел: Очередь", reply_markup=ctx.get_queue_menu())
+        await ctx.send_message_safe(chat_id=message.chat.id, text="📦 Раздел: Очередь", reply_markup=ctx.get_queue_menu())
 
     @dp.message(lambda m: m.text in ("📋 Очередь", "📋 Общая очередь"))
     async def handle_queue(message: Message):
         if not await ctx.is_admin(message):
             return
         stats = await ctx.run_db(ctx.db.get_queue_stats)
-        await message.reply(f"📋 Очередь\n\n⏳ Pending: {stats['pending']}\n✅ Sent: {stats['sent']}\n⚠️ Faulty: {stats['faulty']}", reply_markup=ctx.get_main_menu())
+        await ctx.send_message_safe(chat_id=message.chat.id, text=f"📋 Очередь\n\n⏳ Pending: {stats['pending']}\n✅ Sent: {stats['sent']}\n⚠️ Faulty: {stats['faulty']}", reply_markup=ctx.get_main_menu())
 
     @dp.message(lambda m: m.text == "🔄 Сброс")
     async def handle_reset_menu(message: Message):
         if not await ctx.is_admin(message):
             return
-        await message.reply("Меню сброса", reply_markup=ctx.get_reset_queue_menu())
+        await ctx.send_message_safe(chat_id=message.chat.id, text="Меню сброса", reply_markup=ctx.get_reset_queue_menu())
 
     @dp.message(lambda m: m.text == "🔄 Сбросить всё")
     async def handle_reset_all(message: Message):
         if not await ctx.is_admin(message):
             return
         count, faulty = await ctx.run_db(ctx.db.reset_all_deliveries)
-        await message.reply(f"✅ Сброшено доставок: {count}\n⚠️ Faulty раньше было: {faulty}", reply_markup=ctx.get_main_menu())
+        await ctx.send_message_safe(chat_id=message.chat.id, text=f"✅ Сброшено доставок: {count}\n⚠️ Faulty раньше было: {faulty}", reply_markup=ctx.get_main_menu())
 
     @dp.message(lambda m: m.text == "📊 Сброс по источнику")
     async def handle_reset_source_pick(message: Message):
@@ -50,10 +50,10 @@ def register_admin_queue_handlers(dp: Dispatcher, ctx: AdminHandlersContext) -> 
         source_rows = await ctx.run_db(ctx.db.get_channels, "source")
         sources = [ctx.channel_choice_cls(r["channel_id"], r["thread_id"], r["title"] or r["channel_id"]) for r in source_rows]
         if not sources:
-            await message.reply("Нет источников", reply_markup=ctx.get_main_menu())
+            await ctx.send_message_safe(chat_id=message.chat.id, text="Нет источников", reply_markup=ctx.get_main_menu())
             return
         ctx.user_states[message.from_user.id] = {"action": "reset_source_inline", "sources": sources}
-        await message.reply("Выберите источник для сброса:", reply_markup=_sources_inline_keyboard(ctx, sources))
+        await ctx.send_message_safe(chat_id=message.chat.id, text="Выберите источник для сброса:", reply_markup=_sources_inline_keyboard(ctx, sources))
 
     @dp.callback_query(lambda c: c.data == "reset_back")
     async def handle_reset_back(callback: CallbackQuery):

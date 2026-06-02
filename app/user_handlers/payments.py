@@ -678,9 +678,9 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             provider_title = str(provider_payload.get("bank_title") or user_ui.payment_provider_title(str(intent.get("provider") or "")))
             provider_card = str(provider_payload.get("card_number") or "")
             try:
-                await ctx.bot.send_message(
-                    ctx.settings.admin_id,
-                    (
+                await ctx.send_message_safe(
+                    chat_id=ctx.settings.admin_id,
+                    text=(
                         "💳 Новая ручная оплата\n\n"
                         f"Пользователь: {user_id}\n"
                         f"Аккаунт: #{tenant_id}\n"
@@ -740,7 +740,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         if not intent or str(intent.get("provider") or "") != "telegram_stars":
             return
         if str(intent.get("status") or "") == "paid":
-            await message.answer("✅ Эта оплата уже обработана\n\nПодписка уже активирована.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="✅ Эта оплата уже обработана\n\nПодписка уже активирована.")
             return
         if int(payload.user_id) != int(message.from_user.id if message.from_user else 0) or int(successful.total_amount or 0) != int(float(intent.get("amount") or 0)):
             STARS_LOGGER.warning("STARS_PAYMENT_AMOUNT_MISMATCH payment_intent_id=%s", payload.payment_intent_id)
@@ -750,9 +750,9 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         await ctx.run_db(ctx.db.mark_payment_paid, int(payload.payment_intent_id), confirmation_payload=confirmation_payload)
         ok = await ctx.run_db(ctx.payment_service.activate_subscription_after_payment, int(payload.payment_intent_id))
         if ok:
-            await message.answer("✅ Оплата получена\n\nТариф BASIC активирован.\nПериод: 1 месяц\n\nСпасибо, что выбрали ViMi 🚀")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="✅ Оплата получена\n\nТариф BASIC активирован.\nПериод: 1 месяц\n\nСпасибо, что выбрали ViMi 🚀")
         else:
-            await message.answer("✅ Оплата получена\n\nМы сохранили платёж, но подписка не активировалась автоматически.\nНапишите в поддержку — доступ можно восстановить вручную.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="✅ Оплата получена\n\nМы сохранили платёж, но подписка не активировалась автоматически.\nНапишите в поддержку — доступ можно восстановить вручную.")
 
     @dp.message(lambda m: m.chat.type == "private" and m.from_user is not None and (bool(m.photo) or bool(m.document)))
     async def handle_user_payment_receipt_message(message: Message):
@@ -763,7 +763,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         intent = await _find_active_manual_payment_for_user(user_id, tenant_id)
         if not intent:
-            await message.answer(
+            await ctx.send_message_safe(chat_id=message.chat.id, text=
                 "⚠️ Не удалось найти активную ручную оплату\n\nОткройте раздел «Подписка» и выберите способ оплаты ещё раз.\nЕсли вы уже оплатили — напишите в поддержку.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Подписка", callback_data="user_subscription")],[InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],[InlineKeyboardButton(text="🏠 Главное меню", callback_data="user_main")]]),
             )
@@ -776,15 +776,15 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         if int(invoice.get("tenant_id") or 0) != int(tenant_id) or int(intent.get("invoice_id") or 0) != int(invoice_id):
             ctx.logger.warning("попытка загрузки чека в чужую оплату user_id=%s invoice_id=%s intent_id=%s", user_id, invoice_id, payment_intent_id)
             ctx.user_states.pop(user_id, None)
-            await message.answer("⛔ Нет доступа к этому платежу.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="⛔ Нет доступа к этому платежу.")
             return
         if str(intent.get("provider") or "") not in ctx.manual_payment_providers:
             ctx.user_states.pop(user_id, None)
-            await message.answer("❌ Этот способ оплаты не поддерживает ручную загрузку чека.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Этот способ оплаты не поддерживает ручную загрузку чека.")
             return
         if str(intent.get("status") or "") not in ctx.manual_payment_active_statuses:
             ctx.user_states.pop(user_id, None)
-            await message.answer("❌ Эта заявка на оплату уже закрыта.\n\nОткройте раздел оплаты и создайте новую попытку, затем прикрепите чек.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Эта заявка на оплату уже закрыта.\n\nОткройте раздел оплаты и создайте новую попытку, затем прикрепите чек.")
             return
         receipt_kind = ""
         receipt_file_id = ""
@@ -799,7 +799,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             receipt_mime_type = "image/jpeg"
         elif message.document:
             if not ctx.is_supported_receipt_document(message.document):
-                await message.answer("❌ Неподдерживаемый формат чека\n\nПрикрепите PDF, JPG, PNG или WEBP.")
+                await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Неподдерживаемый формат чека\n\nПрикрепите PDF, JPG, PNG или WEBP.")
                 return
             document = message.document
             receipt_kind = "document"
@@ -808,7 +808,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
             receipt_file_name = str(document.file_name or "")
             receipt_mime_type = str(document.mime_type or "")
         else:
-            await message.answer("❌ Чек не найден\n\nПрикрепите чек оплаты файлом или фотографией.\nПоддерживаются: PDF, JPG, PNG, WEBP.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Чек не найден\n\nПрикрепите чек оплаты файлом или фотографией.\nПоддерживаются: PDF, JPG, PNG, WEBP.")
             return
         payload = dict(intent.get("confirmation_payload_json") or {})
         payload.update(
@@ -828,7 +828,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         )
         await ctx.run_db(ctx.payment_service.save_manual_confirmation_payload, payment_intent_id, payload)
         ctx.logger.info("пользователь прикрепил чек invoice_id=%s intent_id=%s file_id=%s", invoice_id, payment_intent_id, receipt_file_id)
-        await message.answer(
+        await ctx.send_message_safe(chat_id=message.chat.id, text=
             "✅ Вы успешно отправили скриншот! Ожидайте ответа.\n\nМы передали подтверждение администратору.\nПосле проверки подписка будет активирована.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -897,9 +897,9 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
                 return
         if user_id and ctx.bot:
             try:
-                await ctx.bot.send_message(
-                    user_id,
-                    (
+                await ctx.send_message_safe(
+                    chat_id=user_id,
+                    text=(
                         "✅ Оплата подтверждена\n\n"
                         "Ваш тариф активирован.\n"
                         "Если публикации или видео были остановлены из-за лимитов, восстановите работу одним нажатием."
@@ -952,7 +952,7 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
         user_id = int(payload.get("user_id") or 0)
         if user_id and ctx.bot:
             try:
-                await ctx.bot.send_message(user_id, "❌ Оплата не подтверждена\nПлатёж не найден или данные не совпали.\n\nПроверьте чек и отправьте заявку повторно.")
+                await ctx.send_message_safe(chat_id=user_id, text="❌ Оплата не подтверждена\nПлатёж не найден или данные не совпали.\n\nПроверьте чек и отправьте заявку повторно.")
             except Exception as exc:
                 ctx.logger.warning("не удалось уведомить пользователя об отклонении user_id=%s intent_id=%s: %s", user_id, payment_intent_id, exc)
     async def _find_active_manual_payment_for_user(user_id: int, tenant_id: int) -> dict[str, Any] | None:
