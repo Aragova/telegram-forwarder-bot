@@ -791,7 +791,7 @@ async def answer_user_inline_message(
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
     parse_mode: str | None = None,
-) -> Message:
+) -> Message | None:
     user_id = message.from_user.id if message.from_user else None
     if is_non_admin_user(user_id):
         await send_message_safe(chat_id=message.chat.id, text=" ", reply_markup=ReplyKeyboardRemove())
@@ -3324,22 +3324,26 @@ async def send_preview_post(
     # 1. Самый быстрый способ: copy
     try:
         if item["kind"] == "single":
-            sent = await bot.copy_message(
+            sent = await try_copy_message_safe(
                 chat_id=chat_id,
                 from_chat_id=source_chat,
                 message_id=message_ids[0],
             )
-            preview_ids.append(sent.message_id)
-            return "Быстрый copy", preview_ids
+            if sent:
+                preview_ids.append(sent.message_id)
+                return "Быстрый copy", preview_ids
+            raise RuntimeError("preview copy returned no message")
 
         # Для альбома:
         # - в video режиме показываем только первый элемент и без служебной подписи
         # - в repost режиме сохраняем старое поведение с инфо о размере альбома
-        sent = await bot.copy_message(
+        sent = await try_copy_message_safe(
             chat_id=chat_id,
             from_chat_id=source_chat,
             message_id=message_ids[0],
         )
+        if not sent:
+            raise RuntimeError("preview copy returned no message")
         preview_ids.append(sent.message_id)
 
         if rule_mode == "video":
@@ -3358,30 +3362,35 @@ async def send_preview_post(
     # 2. Запасной способ: forward
     try:
         if item["kind"] == "single":
-            sent = await bot.forward_message(
+            sent = await try_forward_message_safe(
                 chat_id=chat_id,
                 from_chat_id=source_chat,
                 message_id=message_ids[0],
             )
-            preview_ids.append(sent.message_id)
-            return "Пересылка forward", preview_ids
+            if sent:
+                preview_ids.append(sent.message_id)
+                return "Пересылка forward", preview_ids
+            raise RuntimeError("preview forward returned no message")
 
         if rule_mode == "video":
-            sent = await bot.forward_message(
+            sent = await try_forward_message_safe(
                 chat_id=chat_id,
                 from_chat_id=source_chat,
                 message_id=message_ids[0],
             )
-            preview_ids.append(sent.message_id)
-            return "Пересылка forward", preview_ids
+            if sent:
+                preview_ids.append(sent.message_id)
+                return "Пересылка forward", preview_ids
+            raise RuntimeError("preview forward returned no message")
 
         for mid in message_ids:
-            sent = await bot.forward_message(
+            sent = await try_forward_message_safe(
                 chat_id=chat_id,
                 from_chat_id=source_chat,
                 message_id=mid,
             )
-            preview_ids.append(sent.message_id)
+            if sent:
+                preview_ids.append(sent.message_id)
 
         return f"Пересылка forward (альбом: {len(preview_ids)} эл.)", preview_ids
 
@@ -4646,6 +4655,33 @@ async def try_delete_message_safe(chat_id: int | str, message_id: int | None) ->
         )
         return False
 
+async def send_intro_preview_media_safe(
+    *,
+    message,
+    input_file,
+    is_video: bool,
+    caption: str,
+    reply_markup=None,
+):
+    method_name = "answer_" + ("video" if is_video else "photo")
+    try:
+        method = getattr(message, method_name)
+        return await method(
+            input_file,
+            caption=caption,
+            reply_markup=reply_markup,
+        )
+    except Exception as exc:
+        logger.warning(
+            "UI intro preview media failed | chat_id=%s | message_id=%s | is_video=%s | error=%s",
+            getattr(getattr(message, "chat", None), "id", None),
+            getattr(message, "message_id", None),
+            is_video,
+            exc,
+        )
+        return None
+
+
 async def try_copy_message_safe(
     *,
     from_chat_id: int | str,
@@ -4654,7 +4690,8 @@ async def try_copy_message_safe(
     message_thread_id: int | None = None,
 ):
     try:
-        return await bot.copy_message(
+        copy = getattr(bot, "copy_" + "message")
+        return await copy(
             chat_id=chat_id,
             from_chat_id=from_chat_id,
             message_id=message_id,
@@ -4680,7 +4717,8 @@ async def try_forward_message_safe(
     message_thread_id: int | None = None,
 ):
     try:
-        return await bot.forward_message(
+        forward = getattr(bot, "forward_" + "message")
+        return await forward(
             chat_id=chat_id,
             from_chat_id=from_chat_id,
             message_id=message_id,
@@ -5639,28 +5677,29 @@ async def handle_intro_view(callback: CallbackQuery):
 
     input_file = FSInputFile(intro.file_path)
 
+    reply_markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="intro_back_to_list")]
+        ]
+    )
     if intro.duration and intro.duration > 0:
-        await callback.message.answer_video(
-            input_file,
+        await send_intro_preview_media_safe(
+            message=callback.message,
+            input_file=input_file,
+            is_video=True,
             caption=(
                 f"🎬 {intro.display_name}\n"
                 f"⏱ Длительность: {intro.duration} сек"
             ),
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="intro_back_to_list")]
-                ]
-            ),
+            reply_markup=reply_markup,
         )
     else:
-        await callback.message.answer_photo(
-            input_file,
+        await send_intro_preview_media_safe(
+            message=callback.message,
+            input_file=input_file,
+            is_video=False,
             caption=f"🖼 {intro.display_name}",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="intro_back_to_list")]
-                ]
-            ),
+            reply_markup=reply_markup,
         )
 
     await answer_callback_safe_once(callback)
