@@ -30,6 +30,8 @@ class UIErrorPolicy:
     - вернуть единый контракт результата
     """
 
+    MESSAGE_EDIT_THROTTLE_SECONDS = 0.5
+
     def __init__(self, bot) -> None:
         self.bot = bot
         self._chat_retry_after_until: dict[int | str, float] = {}
@@ -331,13 +333,19 @@ class UIErrorPolicy:
 
         last_edit_at = self._last_edit_at.get(edit_key)
         now = monotonic()
-        if last_edit_at is not None and now - last_edit_at < 10:
+        elapsed_since_last_edit = now - last_edit_at if last_edit_at is not None else None
+        if (
+            elapsed_since_last_edit is not None
+            and elapsed_since_last_edit < self.MESSAGE_EDIT_THROTTLE_SECONDS
+        ):
             self._log_suppressed(
                 action="bot.edit_message_text",
                 reason="message_edit_throttled",
                 details={
                     **details,
-                    "throttle_left": round(10 - (now - last_edit_at), 3),
+                    "throttle_left": round(
+                        self.MESSAGE_EDIT_THROTTLE_SECONDS - elapsed_since_last_edit, 3
+                    ),
                 },
             )
             return UIActionResult(
