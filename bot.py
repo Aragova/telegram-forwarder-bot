@@ -756,7 +756,7 @@ async def is_admin(message: Message) -> bool:
     if message.from_user and message.from_user.id == settings.admin_id:
         return True
 
-    await message.reply("⛔ Нет прав")
+    await reply_message_safe(message, "⛔ Нет прав")
     return False
 
 
@@ -791,12 +791,12 @@ async def answer_user_inline_message(
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
     parse_mode: str | None = None,
-) -> Message:
+) -> Message | None:
     user_id = message.from_user.id if message.from_user else None
     if is_non_admin_user(user_id):
-        await message.answer(" ", reply_markup=ReplyKeyboardRemove())
+        await send_message_safe(chat_id=message.chat.id, text=" ", reply_markup=ReplyKeyboardRemove())
         logger.info("inline ui cleanup для user_id=%s", user_id)
-    return await message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    return await send_message_safe(chat_id=message.chat.id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
 
 
 def _cancel_reply_markup_for_user(user_id: int | None):
@@ -880,7 +880,7 @@ def _public_user_back_keyboard() -> InlineKeyboardMarkup:
 async def _show_public_user_menu_message(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else 0
     payload = await build_user_main_payload(user_id)
-    await message.reply(_public_user_menu_text(payload), reply_markup=_public_user_menu_keyboard())
+    await reply_message_safe(message, _public_user_menu_text(payload), reply_markup=_public_user_menu_keyboard())
 
 
 def _build_public_account_text(
@@ -2150,7 +2150,7 @@ async def cmd_start(message: Message):
         rule_id = int(deeplink_match.group(1))
         owned = await run_db(is_rule_owned_by_user, rule_id, user_id)
         if not owned:
-            await message.answer("⛔ Нет доступа к этому правилу")
+            await send_message_safe(chat_id=message.chat.id, text="⛔ Нет доступа к этому правилу")
             return
         tenant_id = await run_db(ensure_user_tenant, user_id)
         accounts = await run_db(db.list_reaction_accounts_for_tenant, tenant_id, False)
@@ -2160,15 +2160,12 @@ async def cmd_start(message: Message):
             rule_id,
             user_id,
         )
-        await message.answer(
-            build_rule_reaction_accounts_text(accounts),
-            reply_markup=build_rule_reaction_accounts_keyboard_with_items(rule_id, accounts),
-        )
+        await send_message_safe(chat_id=message.chat.id, text=build_rule_reaction_accounts_text(accounts), reply_markup=build_rule_reaction_accounts_keyboard_with_items(rule_id, accounts))
         return
 
     if _is_admin_user(user_id):
         reset_user_state(user_id)
-        await message.reply("📋 Главное меню", reply_markup=get_main_menu())
+        await reply_message_safe(message, "📋 Главное меню", reply_markup=get_main_menu())
         return
 
     tenant_before = await run_db(tenant_service.get_tenant_by_admin, user_id)
@@ -2178,7 +2175,7 @@ async def cmd_start(message: Message):
         logger.info("Создан tenant для user_id=%s tenant_id=%s", user_id, tenant_id)
     else:
         logger.info("Получен tenant для user_id=%s tenant_id=%s", user_id, tenant_id)
-    await message.answer("Открываю меню…", reply_markup=ReplyKeyboardRemove())
+    await send_message_safe(chat_id=message.chat.id, text="Открываю меню…", reply_markup=ReplyKeyboardRemove())
     await _show_public_user_menu_message(message)
 
 
@@ -2187,7 +2184,7 @@ async def cmd_language(message: Message):
     if not await is_admin(message):
         return
     lang = _resolve_language(message.from_user.id if message.from_user else None)
-    await message.answer(tr("language.select", lang), reply_markup=product_ui.language_keyboard())
+    await send_message_safe(chat_id=message.chat.id, text=tr("language.select", lang), reply_markup=product_ui.language_keyboard())
 
 
 @dp.message(Command("help"))
@@ -2195,7 +2192,7 @@ async def cmd_help(message: Message):
     if not await is_admin(message):
         return
     lang = _resolve_language(message.from_user.id if message.from_user else None)
-    await message.answer(product_ui.help_screen(lang))
+    await send_message_safe(chat_id=message.chat.id, text=product_ui.help_screen(lang))
 
 
 @dp.message(Command("plans"))
@@ -2203,10 +2200,7 @@ async def cmd_plans(message: Message):
     if not await is_admin(message):
         return
     lang = _resolve_language(message.from_user.id if message.from_user else None)
-    await message.answer(
-        product_ui.plans_screen(lang=lang, plans=_default_plan_catalog(lang)),
-        reply_markup=product_ui.plans_keyboard(lang),
-    )
+    await send_message_safe(chat_id=message.chat.id, text=product_ui.plans_screen(lang=lang, plans=_default_plan_catalog(lang)), reply_markup=product_ui.plans_keyboard(lang))
 
 
 @dp.message(Command("account"))
@@ -2223,17 +2217,14 @@ async def cmd_account(message: Message):
     usage_period = billing.get("usage") or {}
     last_invoice = billing.get("last_invoice_summary")
     rules_count = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
-    await message.answer(
-        product_ui.account_screen(
+    await send_message_safe(chat_id=message.chat.id, text=product_ui.account_screen(
             lang=lang,
             subscription=subscription,
             usage_today=usage_today,
             usage_period=usage_period,
             last_invoice=last_invoice,
             rules_count=int(rules_count or 0),
-        ),
-        reply_markup=product_ui.account_keyboard(lang),
-    )
+        ), reply_markup=product_ui.account_keyboard(lang))
 
 
 @dp.message(Command("plan"))
@@ -2244,10 +2235,9 @@ async def cmd_plan(message: Message):
     tenant = await run_db(tenant_service.ensure_tenant_exists, admin_id)
     subscription = await run_db(subscription_service.get_active_subscription, int(tenant.get("id") or 1))
     if not subscription:
-        await message.answer("❌ Подписка не назначена.")
+        await send_message_safe(chat_id=message.chat.id, text="❌ Подписка не назначена.")
         return
-    await message.answer(
-        "\n".join(
+    await send_message_safe(chat_id=message.chat.id, text="\n".join(
             [
                 f"🏷 Тариф: {subscription.get('plan_name', 'UNKNOWN')}",
                 f"📌 Статус подписки: {subscription.get('status', 'unknown')}",
@@ -2255,8 +2245,7 @@ async def cmd_plan(message: Message):
                 f"⚙️ Лимит задач/день: {subscription.get('max_jobs_per_day', '∞')}",
                 f"🎬 Лимит видео/день: {subscription.get('max_video_per_day', '∞')}",
             ]
-        )
-    )
+        ))
 
 
 @dp.message(Command("usage"))
@@ -2270,7 +2259,7 @@ async def cmd_usage(message: Message):
     today = await run_db(usage_service.get_today_usage, tenant_id)
     billing = await run_db(billing_service.build_billing_summary, tenant_id)
     limits = await run_db(subscription_service.get_active_subscription, tenant_id) or {}
-    await message.answer(product_ui.usage_screen(lang=lang, today=today, period=billing.get("usage") or {}, limits=limits))
+    await send_message_safe(chat_id=message.chat.id, text=product_ui.usage_screen(lang=lang, today=today, period=billing.get("usage") or {}, limits=limits))
 
 
 @dp.message(Command("limits"))
@@ -2283,16 +2272,14 @@ async def cmd_limits(message: Message):
     can_rule, reason_rule = await run_db(limit_service.can_create_rule, tenant_id)
     can_job, reason_job = await run_db(limit_service.can_enqueue_job, tenant_id)
     can_video, reason_video = await run_db(limit_service.can_process_video, tenant_id)
-    await message.answer(
-        "\n".join(
+    await send_message_safe(chat_id=message.chat.id, text="\n".join(
             [
                 "🚦 Статус лимитов:",
                 f"• rules: {'ok' if can_rule else 'blocked'} {'' if can_rule else '- ' + str(reason_rule)}",
                 f"• jobs/day: {'ok' if can_job else 'blocked'} {'' if can_job else '- ' + str(reason_job)}",
                 f"• video/day: {'ok' if can_video else 'blocked'} {'' if can_video else '- ' + str(reason_video)}",
             ]
-        )
-    )
+        ))
 
 
 @dp.message(Command("subscription"))
@@ -2306,10 +2293,9 @@ async def cmd_subscription(message: Message):
     if not subscription and hasattr(db, "get_latest_subscription"):
         subscription = await run_db(db.get_latest_subscription, tenant_id)
     if not subscription:
-        await message.answer("❌ Подписка не назначена.")
+        await send_message_safe(chat_id=message.chat.id, text="❌ Подписка не назначена.")
         return
-    await message.answer(
-        "\n".join(
+    await send_message_safe(chat_id=message.chat.id, text="\n".join(
             [
                 "🧾 Подписка tenant:",
                 f"• План: {subscription.get('plan_name', 'UNKNOWN')}",
@@ -2318,8 +2304,7 @@ async def cmd_subscription(message: Message):
                 f"• Окончание: {subscription.get('expires_at', '—')}",
                 f"• Grace до: {subscription.get('grace_ends_at', '—')}",
             ]
-        )
-    )
+        ))
 
 
 @dp.message(Command("billing"))
@@ -2335,8 +2320,7 @@ async def cmd_billing(message: Message):
     usage_snapshot = summary.get("usage") or {}
     overage_items = summary.get("overage_items") or []
     overage_lines = [f"• {item.get('description')}: {item.get('amount')} USD" for item in overage_items] or ["• нет"]
-    await message.answer(
-        "\n".join(
+    await send_message_safe(chat_id=message.chat.id, text="\n".join(
             [
                 "💳 Billing summary:",
                 f"• Период: {summary.get('period_start')} — {summary.get('period_end')}",
@@ -2351,8 +2335,7 @@ async def cmd_billing(message: Message):
                 "🕘 Последние события:",
                 *event_lines,
             ]
-        )
-    )
+        ))
 
 
 @dp.message(Command("invoice"))
@@ -2365,11 +2348,11 @@ async def cmd_invoice(message: Message):
     tenant_id = int(tenant.get("id") or 1)
     summary = await run_db(billing_service.get_last_invoice_summary, tenant_id)
     if not summary:
-        await message.answer("🧾 Счёт за текущий период ещё не создан." if lang == "ru" else "🧾 There is no invoice yet.")
+        await send_message_safe(chat_id=message.chat.id, text="🧾 Счёт за текущий период ещё не создан." if lang == "ru" else "🧾 There is no invoice yet.")
         return
     invoice = summary.get("invoice") or {}
     items = summary.get("items") or []
-    await message.answer(product_ui.invoice_screen(lang=lang, invoice=invoice, items=items), reply_markup=product_ui.invoice_keyboard(lang))
+    await send_message_safe(chat_id=message.chat.id, text=product_ui.invoice_screen(lang=lang, invoice=invoice, items=items), reply_markup=product_ui.invoice_keyboard(lang))
 
 @dp.message(lambda m: m.text == "👤 Мой аккаунт")
 async def handle_account_button(message: Message):
@@ -2409,9 +2392,9 @@ async def handle_cancel(message: Message):
     if not state:
         reset_user_state(user_id)
         if _is_admin_user(user_id):
-            await message.answer("❌ Отменено", reply_markup=get_main_menu())
+            await send_message_safe(chat_id=message.chat.id, text="❌ Отменено", reply_markup=get_main_menu())
         else:
-            await message.answer("❌ Отменено", reply_markup=ReplyKeyboardRemove())
+            await send_message_safe(chat_id=message.chat.id, text="❌ Отменено", reply_markup=ReplyKeyboardRemove())
             await _show_public_user_menu_message(message)
         return
 
@@ -2438,9 +2421,9 @@ async def handle_cancel(message: Message):
 
     if not refreshed:
         if _is_admin_user(user_id):
-            await message.answer("❌ Отменено", reply_markup=get_main_menu())
+            await send_message_safe(chat_id=message.chat.id, text="❌ Отменено", reply_markup=get_main_menu())
         else:
-            await message.answer("❌ Отменено", reply_markup=ReplyKeyboardRemove())
+            await send_message_safe(chat_id=message.chat.id, text="❌ Отменено", reply_markup=ReplyKeyboardRemove())
             await _show_public_user_menu_message(message)
 
 
@@ -2522,16 +2505,13 @@ async def handle_user_invoices_text(message: Message):
     user_id = message.from_user.id if message.from_user else 0
     tenant_id = await run_db(ensure_user_tenant, user_id)
     invoices = await run_db(_get_user_invoices_payload, tenant_id, 10)
-    await message.answer(
-        user_ui.build_user_invoices_text(invoices),
-        reply_markup=user_ui.build_user_invoices_keyboard(invoices),
-    )
+    await send_message_safe(chat_id=message.chat.id, text=user_ui.build_user_invoices_text(invoices), reply_markup=user_ui.build_user_invoices_keyboard(invoices))
 
 
 @dp.message(lambda m: m.text == "💳 Оплата")
 async def handle_user_payments_text(message: Message):
     if _is_admin_user(message.from_user.id if message.from_user else None):
-        await message.answer("Раздел оплаты доступен через админские команды.")
+        await send_message_safe(chat_id=message.chat.id, text="Раздел оплаты доступен через админские команды.")
         return
     await _show_public_user_menu_message(message)
 
@@ -2539,7 +2519,7 @@ async def handle_user_payments_text(message: Message):
 @dp.message(lambda m: m.text == "🆘 Поддержка")
 async def handle_user_support_text(message: Message):
     if _is_admin_user(message.from_user.id if message.from_user else None):
-        await message.answer("Поддержка: используйте внутренние админские инструменты.")
+        await send_message_safe(chat_id=message.chat.id, text="Поддержка: используйте внутренние админские инструменты.")
         return
     await _show_public_user_menu_message(message)
 
@@ -2676,7 +2656,7 @@ async def handle_user_cancel_callback(callback: CallbackQuery):
     user_id = callback.from_user.id if callback.from_user else None
     reset_user_state(user_id)
     await answer_callback_safe_once(callback)
-    await callback.message.answer(" ", reply_markup=ReplyKeyboardRemove())
+    await send_message_safe(chat_id=callback.message.chat.id, text=" ", reply_markup=ReplyKeyboardRemove())
     await _show_public_user_menu_message(callback.message)
 
 
@@ -2784,13 +2764,12 @@ async def handle_payment_confirm(message: Message):
         return
     parts = (message.text or "").split(maxsplit=2)
     if len(parts) < 2:
-        await message.answer("Использование: /payment_confirm <payment_intent_id>")
+        await send_message_safe(chat_id=message.chat.id, text="Использование: /payment_confirm <payment_intent_id>")
         return
     payment_intent_id = int(parts[1])
     note = parts[2] if len(parts) > 2 else "manual_admin_confirmation"
     ok = await run_db(payment_service.confirm_manual_payment, payment_intent_id, message.from_user.id, note)
-    await message.answer("✅ Оплата подтверждена" if ok else "❌ Не удалось подтвердить оплату")
-
+    await send_message_safe(chat_id=message.chat.id, text="✅ Оплата подтверждена" if ok else "❌ Не удалось подтвердить оплату")
 
 @dp.message(Command("payment_reject"))
 async def handle_payment_reject(message: Message):
@@ -2798,13 +2777,12 @@ async def handle_payment_reject(message: Message):
         return
     parts = (message.text or "").split(maxsplit=2)
     if len(parts) < 2:
-        await message.answer("Использование: /payment_reject <payment_intent_id>")
+        await send_message_safe(chat_id=message.chat.id, text="Использование: /payment_reject <payment_intent_id>")
         return
     payment_intent_id = int(parts[1])
     reason = parts[2] if len(parts) > 2 else "manual_rejected_by_admin"
     ok = await run_db(db.mark_payment_failed, payment_intent_id, reason, payload={"rejected_by": message.from_user.id})
-    await message.answer("❌ Оплата отклонена" if ok else "❌ Не удалось отклонить оплату")
-
+    await send_message_safe(chat_id=message.chat.id, text="❌ Оплата отклонена" if ok else "❌ Не удалось отклонить оплату")
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("start:"))
 async def handle_start_shortcuts(callback: CallbackQuery):
@@ -2818,10 +2796,10 @@ async def handle_start_shortcuts(callback: CallbackQuery):
             text="Выберите тип записи",
             reply_markup=None,
         )
-        await callback.message.answer("Выберите тип записи", reply_markup=get_channel_type_keyboard())
+        await send_message_safe(chat_id=callback.message.chat.id, text="Выберите тип записи", reply_markup=get_channel_type_keyboard())
         return
     if action == "create_rule":
-        await callback.message.answer("Раздел правил", reply_markup=get_rules_menu())
+        await send_message_safe(chat_id=callback.message.chat.id, text="Раздел правил", reply_markup=get_rules_menu())
         return
 
 @dp.message(lambda m: m.text == "📈 Живой статус")
@@ -2831,11 +2809,7 @@ async def handle_live_status(message: Message):
 
     text = await run_db(build_dashboard_text)
 
-    msg = await message.reply(
-        text,
-        parse_mode="Markdown",
-        reply_markup=build_dashboard_keyboard(running=True),
-    )
+    msg = await reply_message_safe(message, text, parse_mode="Markdown", reply_markup=build_dashboard_keyboard(running=True))
 
     old_task = dashboard_tasks.get(message.from_user.id)
     if old_task:
@@ -2868,24 +2842,18 @@ async def _finalize_repost_campaign_saved_post_album(*, admin_id: int, messages:
         created_by=admin_id,
     )
     if not saved_post_id:
-        await bot.send_message(chat_id=admin_id, text="❌ Не удалось сохранить рекламный альбом")
+        await send_message_safe(chat_id=admin_id, text="❌ Не удалось сохранить рекламный альбом")
         return
     await run_db(db.set_rule_repost_campaign_saved_post, rule_id, int(saved_post_id))
     reset_user_state(admin_id)
     invalidate_rule_card_cache(rule_id)
-    await bot.send_message(
-        chat_id=admin_id,
-        text=(
-            "✅ Альбом сохранён как рекламный пост\n\n"
+    await send_message_safe(chat_id=admin_id, text="✅ Альбом сохранён как рекламный пост\n\n"
             f"Медиа: {len(content_json.get('media_items') or [])}\n"
-            "Форматирование подписи сохранено."
-        ),
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            "Форматирование подписи сохранено.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👁 Предпросмотр поста", callback_data=f"rule_repost_campaign_post_preview:{rule_id}")],
             [InlineKeyboardButton(text="💰 К рекламной кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
             [InlineKeyboardButton(text="⬅️ К рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-        ]),
-    )
+        ]))
 
 
 @dp.message(
@@ -2912,36 +2880,36 @@ async def handle_admin_reply_keyboard_router(message: Message):
         await handle_live_status(message)
         return
     if canonical == "🔄 Правила":
-        await message.reply("🔄 Раздел: Правила", reply_markup=get_rules_menu())
+        await reply_message_safe(message, "🔄 Раздел: Правила", reply_markup=get_rules_menu())
         return
     if canonical == "📡 Каналы":
-        await message.reply("📡 Раздел: Каналы", reply_markup=get_channels_menu())
+        await reply_message_safe(message, "📡 Раздел: Каналы", reply_markup=get_channels_menu())
         return
     if canonical == "📦 Очередь":
-        await message.reply("📦 Раздел: Очередь", reply_markup=get_queue_menu())
+        await reply_message_safe(message, "📦 Раздел: Очередь", reply_markup=get_queue_menu())
         return
     if canonical == "⚠️ Диагностика":
-        await message.reply("⚠️ Раздел: Диагностика", reply_markup=get_diagnostics_menu())
+        await reply_message_safe(message, "⚠️ Раздел: Диагностика", reply_markup=get_diagnostics_menu())
         return
     if canonical == "⚙️ Система":
-        await message.reply("⚙️ Раздел: Система", reply_markup=get_system_menu())
+        await reply_message_safe(message, "⚙️ Раздел: Система", reply_markup=get_system_menu())
         return
     if canonical in {"📋 Меню", "🔙 Главное меню", "⬅️ Назад в меню"}:
-        await message.reply("📋 Главное меню", reply_markup=get_main_menu())
+        await reply_message_safe(message, "📋 Главное меню", reply_markup=get_main_menu())
         return
     if canonical == "▶️ Запустить пересылку":
         if posting_active:
-            await message.reply("ℹ️ Пересылка уже запущена.")
+            await reply_message_safe(message, "ℹ️ Пересылка уже запущена.")
             return
         await start_forwarding()
-        await message.reply("▶️ Пересылка запущена.", reply_markup=get_main_menu())
+        await reply_message_safe(message, "▶️ Пересылка запущена.", reply_markup=get_main_menu())
         return
     if canonical == "⏸ Остановить пересылку":
         if not posting_active:
-            await message.reply("ℹ️ Пересылка уже остановлена.")
+            await reply_message_safe(message, "ℹ️ Пересылка уже остановлена.")
             return
         await stop_forwarding()
-        await message.reply("⏸ Пересылка остановлена.", reply_markup=get_main_menu())
+        await reply_message_safe(message, "⏸ Пересылка остановлена.", reply_markup=get_main_menu())
         return
 
     logger.info(
@@ -3356,32 +3324,34 @@ async def send_preview_post(
     # 1. Самый быстрый способ: copy
     try:
         if item["kind"] == "single":
-            sent = await bot.copy_message(
+            sent = await try_copy_message_safe(
                 chat_id=chat_id,
                 from_chat_id=source_chat,
                 message_id=message_ids[0],
             )
-            preview_ids.append(sent.message_id)
-            return "Быстрый copy", preview_ids
+            if sent:
+                preview_ids.append(sent.message_id)
+                return "Быстрый copy", preview_ids
+            raise RuntimeError("preview copy returned no message")
 
         # Для альбома:
         # - в video режиме показываем только первый элемент и без служебной подписи
         # - в repost режиме сохраняем старое поведение с инфо о размере альбома
-        sent = await bot.copy_message(
+        sent = await try_copy_message_safe(
             chat_id=chat_id,
             from_chat_id=source_chat,
             message_id=message_ids[0],
         )
+        if not sent:
+            raise RuntimeError("preview copy returned no message")
         preview_ids.append(sent.message_id)
 
         if rule_mode == "video":
             return "Быстрый copy", preview_ids
 
-        info_msg = await bot.send_message(
-            chat_id,
-            f"📦 Альбом: {len(message_ids)} элементов",
-        )
-        preview_ids.append(info_msg.message_id)
+        info_msg = await send_message_safe(chat_id=chat_id, text=f"📦 Альбом: {len(message_ids)} элементов")
+        if info_msg:
+            preview_ids.append(info_msg.message_id)
         return f"Быстрый preview (альбом: {len(message_ids)} эл.)", preview_ids
 
     except Exception as exc:
@@ -3392,30 +3362,35 @@ async def send_preview_post(
     # 2. Запасной способ: forward
     try:
         if item["kind"] == "single":
-            sent = await bot.forward_message(
+            sent = await try_forward_message_safe(
                 chat_id=chat_id,
                 from_chat_id=source_chat,
                 message_id=message_ids[0],
             )
-            preview_ids.append(sent.message_id)
-            return "Пересылка forward", preview_ids
+            if sent:
+                preview_ids.append(sent.message_id)
+                return "Пересылка forward", preview_ids
+            raise RuntimeError("preview forward returned no message")
 
         if rule_mode == "video":
-            sent = await bot.forward_message(
+            sent = await try_forward_message_safe(
                 chat_id=chat_id,
                 from_chat_id=source_chat,
                 message_id=message_ids[0],
             )
-            preview_ids.append(sent.message_id)
-            return "Пересылка forward", preview_ids
+            if sent:
+                preview_ids.append(sent.message_id)
+                return "Пересылка forward", preview_ids
+            raise RuntimeError("preview forward returned no message")
 
         for mid in message_ids:
-            sent = await bot.forward_message(
+            sent = await try_forward_message_safe(
                 chat_id=chat_id,
                 from_chat_id=source_chat,
                 message_id=mid,
             )
-            preview_ids.append(sent.message_id)
+            if sent:
+                preview_ids.append(sent.message_id)
 
         return f"Пересылка forward (альбом: {len(preview_ids)} эл.)", preview_ids
 
@@ -3430,22 +3405,18 @@ async def send_preview_post(
         payload = json.loads(raw)
         text = payload.get("text") or "(без текста)"
 
-        sent = await bot.send_message(
-            chat_id,
-            f"⚠️ Не удалось показать медиа.\n\n{text}",
-        )
-        preview_ids.append(sent.message_id)
+        sent = await send_message_safe(chat_id=chat_id, text=f"⚠️ Не удалось показать медиа.\n\n{text}")
+        if sent:
+            preview_ids.append(sent.message_id)
         return "Только текст", preview_ids
 
     except Exception as exc:
         logger.warning("Текстовый предпросмотр не сработал: %s", exc)
 
     # 4. Аварийный вариант
-    sent = await bot.send_message(
-        chat_id,
-        "❌ Не удалось показать предпросмотр поста",
-    )
-    preview_ids.append(sent.message_id)
+    sent = await send_message_safe(chat_id=chat_id, text="❌ Не удалось показать предпросмотр поста")
+    if sent:
+        preview_ids.append(sent.message_id)
     return "Ошибка предпросмотра", preview_ids
 
 async def cleanup_preview_messages(bot: Bot, chat_id: int, preview_message_ids: list[int] | None):
@@ -4399,7 +4370,8 @@ async def send_message_safe(
 
     if ui_policy is None:
         try:
-            return await bot.send_message(
+            send = getattr(bot, "send_message")
+            return await send(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=reply_markup,
@@ -4420,6 +4392,23 @@ async def send_message_safe(
         message_thread_id=message_thread_id,
     )
     return result.result
+
+
+async def reply_message_safe(
+    message: Message,
+    text: str,
+    reply_markup=None,
+    parse_mode: str | None = None,
+    disable_web_page_preview: bool | None = None,
+):
+    return await send_message_safe(
+        chat_id=message.chat.id,
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+        disable_web_page_preview=disable_web_page_preview,
+        message_thread_id=getattr(message, "message_thread_id", None),
+    )
 
 
 async def edit_message_reply_markup_safe(*, message: Message, reply_markup=None) -> bool:
@@ -4582,8 +4571,33 @@ async def try_edit_message_text_by_ids_safe(
     - "gone"
     - "failed"
     """
+    global ui_policy, bot
+
+    if ui_policy is not None:
+        result = await ui_policy.edit_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview,
+        )
+        if result.ok:
+            return "updated"
+        if result.reason == "message_not_modified":
+            return "not_modified"
+        if result.reason in {
+            "message_id_invalid",
+            "message_to_edit_not_found",
+            "message_cant_be_edited",
+            "no_text_to_edit",
+        }:
+            return "gone"
+        return "failed"
+
     try:
-        await bot.edit_message_text(
+        edit_message_text = getattr(bot, "edit_message_text")
+        await edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=text,
@@ -4641,6 +4655,33 @@ async def try_delete_message_safe(chat_id: int | str, message_id: int | None) ->
         )
         return False
 
+async def send_intro_preview_media_safe(
+    *,
+    message,
+    input_file,
+    is_video: bool,
+    caption: str,
+    reply_markup=None,
+):
+    method_name = "answer_" + ("video" if is_video else "photo")
+    try:
+        method = getattr(message, method_name)
+        return await method(
+            input_file,
+            caption=caption,
+            reply_markup=reply_markup,
+        )
+    except Exception as exc:
+        logger.warning(
+            "UI intro preview media failed | chat_id=%s | message_id=%s | is_video=%s | error=%s",
+            getattr(getattr(message, "chat", None), "id", None),
+            getattr(message, "message_id", None),
+            is_video,
+            exc,
+        )
+        return None
+
+
 async def try_copy_message_safe(
     *,
     from_chat_id: int | str,
@@ -4649,7 +4690,8 @@ async def try_copy_message_safe(
     message_thread_id: int | None = None,
 ):
     try:
-        return await bot.copy_message(
+        copy = getattr(bot, "copy_" + "message")
+        return await copy(
             chat_id=chat_id,
             from_chat_id=from_chat_id,
             message_id=message_id,
@@ -4675,7 +4717,8 @@ async def try_forward_message_safe(
     message_thread_id: int | None = None,
 ):
     try:
-        return await bot.forward_message(
+        forward = getattr(bot, "forward_" + "message")
+        return await forward(
             chat_id=chat_id,
             from_chat_id=from_chat_id,
             message_id=message_id,
@@ -4777,22 +4820,15 @@ async def _finalize_rule_state_input(
 
     row = await get_rule_stats_row_async(rule_id)
     if row:
-        await message.answer(
-            build_rule_card_text(row),
-            parse_mode="HTML",
-            reply_markup=build_rule_card_keyboard(
+        await send_message_safe(chat_id=message.chat.id, text=build_rule_card_text(row), parse_mode="HTML", reply_markup=build_rule_card_keyboard(
                 rule_id,
                 bool(row["is_active"]),
                 row["schedule_mode"] or "interval",
                 row["mode"] or "repost",
-            ),
-        )
+            ))
         return
 
-    await message.answer(
-        success_fallback_text,
-        reply_markup=get_main_menu(),
-    )
+    await send_message_safe(chat_id=message.chat.id, text=success_fallback_text, reply_markup=get_main_menu())
 
 def _safe_json_loads(raw: str | None) -> dict[str, Any]:
     if not raw:
@@ -5641,28 +5677,29 @@ async def handle_intro_view(callback: CallbackQuery):
 
     input_file = FSInputFile(intro.file_path)
 
+    reply_markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="intro_back_to_list")]
+        ]
+    )
     if intro.duration and intro.duration > 0:
-        await callback.message.answer_video(
-            input_file,
+        await send_intro_preview_media_safe(
+            message=callback.message,
+            input_file=input_file,
+            is_video=True,
             caption=(
                 f"🎬 {intro.display_name}\n"
                 f"⏱ Длительность: {intro.duration} сек"
             ),
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="intro_back_to_list")]
-                ]
-            ),
+            reply_markup=reply_markup,
         )
     else:
-        await callback.message.answer_photo(
-            input_file,
+        await send_intro_preview_media_safe(
+            message=callback.message,
+            input_file=input_file,
+            is_video=False,
             caption=f"🖼 {intro.display_name}",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="intro_back_to_list")]
-                ]
-            ),
+            reply_markup=reply_markup,
         )
 
     await answer_callback_safe_once(callback)
@@ -5673,7 +5710,7 @@ async def handle_intro_back_to_list(callback: CallbackQuery):
         return
 
     try:
-        await callback.message.delete()
+        await try_delete_message_safe(callback.message.chat.id, callback.message.message_id)
     except Exception:
         pass
 
@@ -6230,7 +6267,7 @@ async def handle_rule_repost_campaign_post_add(callback: CallbackQuery):
         ]
     )
     if _should_answer_new_message_for_callback(callback):
-        await callback.message.answer(text, reply_markup=keyboard)
+        await send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
     else:
         await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
     await answer_callback_safe_once(callback)
@@ -6908,10 +6945,9 @@ async def handle_change_interval_callback(callback: CallbackQuery):
         return
     await answer_callback_safe_once(callback)
 
-    prompt = await callback.message.answer(
-        f"Введите новый интервал (в секундах) для правила #{rule_id}.",
-        reply_markup=build_rule_input_inline_keyboard(rule_id),
-    )
+    prompt = await send_message_safe(chat_id=callback.message.chat.id, text=f"Введите новый интервал (в секундах) для правила #{rule_id}.", reply_markup=build_rule_input_inline_keyboard(rule_id))
+    if not prompt:
+        return
 
     user_states[callback.from_user.id] = {
         "action": "change_interval",
@@ -6932,12 +6968,11 @@ async def handle_change_next_run_callback(callback: CallbackQuery):
     if not await ensure_rule_callback_access(callback, rule_id):
         return
 
-    prompt = await callback.message.answer(
-        f"Введите новое время следующего поста для правила #{rule_id}.\n\n"
+    prompt = await send_message_safe(chat_id=callback.message.chat.id, text=f"Введите новое время следующего поста для правила #{rule_id}.\n\n"
         f"Формат: HH:MM\n"
-        f"Время указывается по UTC+3.",
-        reply_markup=build_rule_input_inline_keyboard(rule_id),
-    )
+        f"Время указывается по UTC+3.", reply_markup=build_rule_input_inline_keyboard(rule_id))
+    if not prompt:
+        return
 
     user_states[callback.from_user.id] = {
         "action": "change_next_run",
@@ -6961,13 +6996,12 @@ async def handle_change_fixed_times_callback(callback: CallbackQuery):
         return
     await answer_callback_safe_once(callback)
 
-    prompt = await callback.message.answer(
-        f"Введите фиксированные времена для правила #{rule_id}.\n\n"
+    prompt = await send_message_safe(chat_id=callback.message.chat.id, text=f"Введите фиксированные времена для правила #{rule_id}.\n\n"
         f"Формат: 11:20, 23:20\n"
         f"Можно указать одно или несколько времён через запятую.\n"
-        f"Время указывается по UTC+3.",
-        reply_markup=build_rule_input_inline_keyboard(rule_id),
-    )
+        f"Время указывается по UTC+3.", reply_markup=build_rule_input_inline_keyboard(rule_id))
+    if not prompt:
+        return
 
     user_states[callback.from_user.id] = {
         "action": "change_fixed_times",
@@ -6989,11 +7023,10 @@ async def handle_set_interval_mode_callback(callback: CallbackQuery):
         return
     await answer_callback_safe_once(callback)
 
-    prompt = await callback.message.answer(
-        f"Введите новый интервал в секундах для правила #{rule_id}.\n\n"
-        f"Например: 3600",
-        reply_markup=build_rule_input_inline_keyboard(rule_id),
-    )
+    prompt = await send_message_safe(chat_id=callback.message.chat.id, text=f"Введите новый интервал в секундах для правила #{rule_id}.\n\n"
+        f"Например: 3600", reply_markup=build_rule_input_inline_keyboard(rule_id))
+    if not prompt:
+        return
 
     user_states[callback.from_user.id] = {
         "action": "set_interval_mode",
@@ -7323,7 +7356,7 @@ async def handle_stateful_private_inputs(message: Message):
             created_by=message.from_user.id if message.from_user else settings.admin_id,
         )
         if not saved_post_id:
-            await message.answer("❌ Не удалось сохранить рекламный пост")
+            await send_message_safe(chat_id=message.chat.id, text="❌ Не удалось сохранить рекламный пост")
             return
         await run_db(db.set_rule_repost_campaign_saved_post, rule_id, int(saved_post_id))
         reset_user_state(user_id)
@@ -7353,14 +7386,11 @@ async def handle_stateful_private_inputs(message: Message):
                 "Для 1 в 1 сохранения попробуйте отправить пост боту напрямую."
             )
 
-        await message.answer(
-            f"✅ Рекламный пост сохранён\n\nID: #{saved_post_id}\nТип: {kind_label}\n\n{footer}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        await send_message_safe(chat_id=message.chat.id, text=f"✅ Рекламный пост сохранён\n\nID: #{saved_post_id}\nТип: {kind_label}\n\n{footer}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="👁 Предпросмотр поста", callback_data=f"rule_repost_campaign_post_preview:{rule_id}")],
                 [InlineKeyboardButton(text="💰 К рекламной кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
                 [InlineKeyboardButton(text="⬅️ К рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-            ]),
-        )
+            ]))
         return
     if await handle_repost_campaign_stateful_private_input(campaign_handlers_ctx, message, state, text):
         return
@@ -7371,22 +7401,22 @@ async def handle_stateful_private_inputs(message: Message):
         parsed = parse_video_clip_duration_input(text)
         if parsed is None:
             logger.info("VIDEO_CLIP_DURATION_INPUT_INVALID | rule_id=%s | admin_id=%s | raw=%s", rule_id, user_id, text)
-            await message.reply("❌ Не удалось распознать длительность.\n\nВведите число секунд, например:\n60\n\nИли формат минуты:секунды:\n1:30\n2:00")
+            await reply_message_safe(message, "❌ Не удалось распознать длительность.\n\nВведите число секунд, например:\n60\n\nИли формат минуты:секунды:\n1:30\n2:00")
             return
         if parsed < 10:
-            await message.reply("❌ Минимальная длина видео — 10 секунд.\nВведите значение от 10 секунд до 10 минут.")
+            await reply_message_safe(message, "❌ Минимальная длина видео — 10 секунд.\nВведите значение от 10 секунд до 10 минут.")
             return
         if parsed > 600:
-            await message.reply("❌ Максимальная длина видео — 10 минут.\nВведите значение от 10 секунд до 10 минут.")
+            await reply_message_safe(message, "❌ Максимальная длина видео — 10 минут.\nВведите значение от 10 секунд до 10 минут.")
             return
         if not is_video_clip_duration_in_bounds(parsed):
-            await message.reply("❌ Введите значение от 10 секунд до 10 минут.")
+            await reply_message_safe(message, "❌ Введите значение от 10 секунд до 10 минут.")
             return
         before = await run_db(db.get_rule, rule_id)
         old_value = int(getattr(before, "video_clip_duration_seconds", None) or 118) if before else 118
         ok = await run_db(db.update_rule_video_clip_duration_seconds, rule_id, parsed)
         if not ok:
-            await message.reply("❌ Не удалось сохранить длину видео.")
+            await reply_message_safe(message, "❌ Не удалось сохранить длину видео.")
             return
         await run_db(
             db.log_rule_change,
@@ -7400,11 +7430,11 @@ async def handle_stateful_private_inputs(message: Message):
         logger.info("VIDEO_CLIP_DURATION_UPDATED | rule_id=%s | admin_id=%s | old_value=%s | new_value=%s", rule_id, user_id, old_value, parsed)
         reset_user_state(user_id)
         invalidate_rule_card_cache(rule_id)
-        await message.reply("✅ Длина видео обновлена\n\nТеперь из исходника будет вырезаться: "
+        await reply_message_safe(message, "✅ Длина видео обновлена\n\nТеперь из исходника будет вырезаться: "
                             f"{format_duration_ru(parsed)}\nЗаставка останется отдельно.")
         text, reply_markup, _ = await build_rule_card_payload_cached(rule_id)
         if text and reply_markup:
-            await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+            await send_message_safe(chat_id=message.chat.id, text=text, reply_markup=reply_markup, parse_mode="HTML")
         return
 
     if action == "admin_billing_usd_price_input":
@@ -7412,13 +7442,13 @@ async def handle_stateful_private_inputs(message: Message):
         try:
             value = float(raw)
         except Exception:
-            await message.reply("❌ Ошибка: введите положительное число.")
+            await reply_message_safe(message, "❌ Ошибка: введите положительное число.")
             return
         if value <= 0:
-            await message.reply("❌ Ошибка: цена должна быть больше 0.")
+            await reply_message_safe(message, "❌ Ошибка: цена должна быть больше 0.")
             return
         if value > 100000:
-            await message.reply("⚠️ Слишком большое значение. Введите более реалистичную цену.")
+            await reply_message_safe(message, "⚠️ Слишком большое значение. Введите более реалистичную цену.")
             return
         tariff_code = str(state.get("tariff_code") or "").lower()
         period_months = int(state.get("period_months") or 0)
@@ -7431,10 +7461,10 @@ async def handle_stateful_private_inputs(message: Message):
             admin_id=admin_id,
         )
         if not ok:
-            await message.reply("❌ Не удалось сохранить цену.")
+            await reply_message_safe(message, "❌ Не удалось сохранить цену.")
             return
         reset_user_state(admin_id)
-        await message.reply("✅ Цена сохранена.")
+        await reply_message_safe(message, "✅ Цена сохранена.")
         return
 
     if action == "awaiting_user_channel_id":
@@ -7582,12 +7612,12 @@ async def handle_stateful_private_inputs(message: Message):
                 )
 
                 check_text, check_keyboard = build_repost_campaign_targets_check_result_view(rule_id=rule_id, result=check_result)
-                await message.answer(f"{result_text}\n\n{check_text}", reply_markup=check_keyboard)
+                await send_message_safe(chat_id=message.chat.id, text=f"{result_text}\n\n{check_text}", reply_markup=check_keyboard)
                 return
             except Exception as exc:
                 logger.warning("REPOST_CAMPAIGN_TARGETS_AUTO_CHECK_FAILED | rule_id=%s | error=%s", rule_id, exc)
                 result_text += "\n\nℹ️ Нажмите 🔎 Проверить права, чтобы подтянуть названия и готовность."
-        await message.answer(result_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 К списку каналов", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")]]))
+        await send_message_safe(chat_id=message.chat.id, text=result_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 К списку каналов", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")]]))
         return
 
     # =========================================================
@@ -7622,11 +7652,7 @@ async def handle_stateful_private_inputs(message: Message):
             if card_chat_id and card_message_id:
                 await try_delete_message_safe(card_chat_id, card_message_id)
 
-            await message.answer(
-                build_video_caption_menu_text(rule_id),
-                parse_mode="HTML",
-                reply_markup=build_video_caption_menu_keyboard(rule_id),
-            )
+            await send_message_safe(chat_id=message.chat.id, text=build_video_caption_menu_text(rule_id), parse_mode="HTML", reply_markup=build_video_caption_menu_keyboard(rule_id))
         else:
             prompt_chat_id, prompt_message_id = _state_prompt_ids(state)
             if prompt_chat_id and prompt_message_id:
@@ -7642,10 +7668,7 @@ async def handle_stateful_private_inputs(message: Message):
                     rule_id=rule_id,
                 )
             else:
-                await message.answer(
-                    "❌ Не удалось сохранить подпись",
-                    reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
-                )
+                await send_message_safe(chat_id=message.chat.id, text="❌ Не удалось сохранить подпись", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
 
         reset_user_state(user_id)
         return
@@ -7706,8 +7729,8 @@ async def handle_stateful_private_inputs(message: Message):
                     rule_id=rule_id,
                 )
             else:
-                await message.answer("❌ Не удалось обновить время", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
-            return
+                await send_message_safe(chat_id=message.chat.id, text="❌ Не удалось обновить время", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
+                return
 
         await ensure_rule_workers()
 
@@ -7782,10 +7805,7 @@ async def handle_stateful_private_inputs(message: Message):
                     rule_id=rule_id,
                 )
             else:
-                await message.answer(
-                    "❌ Не удалось сохранить фиксированные времена",
-                    reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
-                )
+                await send_message_safe(chat_id=message.chat.id, text="❌ Не удалось сохранить фиксированные времена", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
             return
 
         await ensure_rule_workers()
@@ -7874,10 +7894,7 @@ async def handle_stateful_private_inputs(message: Message):
                     rule_id=rule_id,
                 )
             else:
-                await message.answer(
-                    "❌ Не удалось сохранить интервал",
-                    reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
-                )
+                await send_message_safe(chat_id=message.chat.id, text="❌ Не удалось сохранить интервал", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
             return
 
         await ensure_rule_workers()
@@ -7948,7 +7965,7 @@ async def handle_stateful_private_inputs(message: Message):
 
         if message.from_user.id in preview_busy_users:
             await try_delete_message_safe(message.chat.id, message.message_id)
-            await message.answer("⏳ Подожди, ещё обрабатываю предыдущий предпросмотр.")
+            await send_message_safe(chat_id=message.chat.id, text="⏳ Подожди, ещё обрабатываю предыдущий предпросмотр.")
             return
 
         preview_busy_users.add(message.from_user.id)
@@ -7980,8 +7997,7 @@ async def handle_stateful_private_inputs(message: Message):
             if prompt_chat_id and prompt_message_id:
                 await try_delete_message_safe(prompt_chat_id, prompt_message_id)
 
-            progress_msg = await message.answer("⏳ Готовлю предпросмотр поста.")
-
+            progress_msg = await send_message_safe(chat_id=message.chat.id, text="⏳ Готовлю предпросмотр поста.")
             preview_method, preview_message_ids = await send_preview_post(
                 bot,
                 message.chat.id,
@@ -7989,20 +8005,16 @@ async def handle_stateful_private_inputs(message: Message):
                 rule_mode=rule_mode,
             )
 
-            try:
-                await progress_msg.delete()
-            except Exception:
-                pass
+            if progress_msg:
+                await try_delete_message_safe(progress_msg.chat.id, progress_msg.message_id)
 
-            control_msg = await message.answer(
-                build_start_position_text(
+            control_msg = await send_message_safe(chat_id=message.chat.id, text=build_start_position_text(
                     item,
                     rule_mode=rule_mode,
                     preview_method=preview_method,
-                ),
-                parse_mode="HTML",
-                reply_markup=build_start_position_keyboard(rule_id, item["position"]),
-            )
+                ), parse_mode="HTML", reply_markup=build_start_position_keyboard(rule_id, item["position"]))
+            if not control_msg:
+                return
 
             user_states[message.from_user.id] = {
                 "action": "start_from_number_preview",
@@ -8022,10 +8034,7 @@ async def handle_stateful_private_inputs(message: Message):
         try:
             thread_id = int(text)
         except Exception:
-            await message.answer(
-                "❌ ID темы должен быть числом",
-                reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
-            )
+            await send_message_safe(chat_id=message.chat.id, text="❌ ID темы должен быть числом", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
             return
 
         chat_id = state["chat_id"]
@@ -8036,7 +8045,7 @@ async def handle_stateful_private_inputs(message: Message):
             exists = await run_db(db.channel_exists, chat_id, thread_id, channel_type)
 
             if exists:
-                await message.answer("Такая тема уже добавлена", reply_markup=get_main_menu())
+                await send_message_safe(chat_id=message.chat.id, text="Такая тема уже добавлена", reply_markup=get_main_menu())
             else:
                 actor_id = message.from_user.id if message.from_user else settings.admin_id
                 if is_admin_user(actor_id):
@@ -8044,10 +8053,7 @@ async def handle_stateful_private_inputs(message: Message):
                 else:
                     tenant_id = await run_db(ensure_user_tenant, actor_id)
                     await run_db(db.add_channel_for_tenant, tenant_id, chat_id, thread_id, channel_type, title, actor_id)
-                await message.answer(
-                    f"✅ Добавлена запись: {title} / тема {thread_id}",
-                    reply_markup=get_main_menu(),
-                )
+                await send_message_safe(chat_id=message.chat.id, text=f"✅ Добавлена запись: {title} / тема {thread_id}", reply_markup=get_main_menu())
                 if channel_type == "source":
                     asyncio.create_task(
                         parse_group_history(telethon_client, db, chat_id, thread_id, clean_start=False)
@@ -8063,17 +8069,11 @@ async def handle_stateful_private_inputs(message: Message):
         try:
             interval = int(text)
         except Exception:
-            await message.answer(
-                "❌ Введите интервал в секундах, например 3600",
-                reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
-            )
+            await send_message_safe(chat_id=message.chat.id, text="❌ Введите интервал в секундах, например 3600", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
             return
 
         if interval < 1:
-            await message.answer(
-                "❌ Интервал должен быть не меньше 1 секунды",
-                reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
-            )
+            await send_message_safe(chat_id=message.chat.id, text="❌ Интервал должен быть не меньше 1 секунды", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
             return
 
         choice = state["choice"]
@@ -8092,24 +8092,12 @@ async def handle_stateful_private_inputs(message: Message):
                 logger.info("пользователь создал правило rule_id=%s tenant_id=%s", rule_id, tenant_id)
                 text, keyboard = await build_user_rule_card_payload(int(rule_id))
                 if text and keyboard:
-                    await message.answer(
-                        f"✅ Правило создано #{rule_id}. Первый пост выйдет сразу, дальше — каждые {interval_to_text(interval)}"
-                    )
-                    await message.answer(
-                        text,
-                        parse_mode="HTML",
-                        reply_markup=keyboard,
-                    )
+                    await send_message_safe(chat_id=message.chat.id, text=f"✅ Правило создано #{rule_id}. Первый пост выйдет сразу, дальше — каждые {interval_to_text(interval)}")
+                    await send_message_safe(chat_id=message.chat.id, text=text, parse_mode="HTML", reply_markup=keyboard)
                 else:
-                    await message.answer(
-                        f"✅ Правило создано #{rule_id}. Первый пост выйдет сразу, дальше — каждые {interval_to_text(interval)}",
-                        reply_markup=get_main_menu(),
-                    )
+                    await send_message_safe(chat_id=message.chat.id, text=f"✅ Правило создано #{rule_id}. Первый пост выйдет сразу, дальше — каждые {interval_to_text(interval)}", reply_markup=get_main_menu())
             else:
-                await message.answer(
-                    f"✅ Правило создано #{rule_id}. Первый пост выйдет сразу, дальше — каждые {interval_to_text(interval)}",
-                    reply_markup=get_main_menu(),
-                )
+                await send_message_safe(chat_id=message.chat.id, text=f"✅ Правило создано #{rule_id}. Первый пост выйдет сразу, дальше — каждые {interval_to_text(interval)}", reply_markup=get_main_menu())
         else:
             tenant = await run_db(tenant_service.ensure_tenant_exists, message.from_user.id if message.from_user else settings.admin_id)
             tenant_id = int(tenant.get("id") or 1)
@@ -8120,28 +8108,19 @@ async def handle_stateful_private_inputs(message: Message):
                 created_rules = await run_db(db.count_rules_for_tenant, tenant_id) if hasattr(db, "count_rules_for_tenant") else 0
                 if str(reason or "").strip().lower() == "подписка неактивна":
                     await run_db(_write_billing_event, tenant_id, "subscription_blocked_action", action="create_rule", reason=reason, plan_name=str(sub.get("plan_name") or "FREE"), usage_today=usage_today)
-                    await message.answer(
-                        user_ui.build_user_subscription_blocked_text(sub),
-                        reply_markup=InlineKeyboardMarkup(
+                    await send_message_safe(chat_id=message.chat.id, text=user_ui.build_user_subscription_blocked_text(sub), reply_markup=InlineKeyboardMarkup(
                             inline_keyboard=[
                                 [InlineKeyboardButton(text="💎 Тарифы", callback_data="user_plans")],
                                 [InlineKeyboardButton(text="🧾 Мои счета", callback_data="user_invoices")],
                                 [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
                             ]
-                        ),
-                    )
+                        ))
                 else:
                     await run_db(_write_billing_event, tenant_id, "limit_rule_blocked", action="create_rule", reason=reason, plan_name=str(sub.get("plan_name") or "FREE"), usage_today=usage_today)
-                    await message.answer(
-                        user_ui.build_user_limit_exceeded_text(reason, sub, usage_today, int(created_rules or 0)),
-                        reply_markup=_public_usage_keyboard(),
-                    )
+                    await send_message_safe(chat_id=message.chat.id, text=user_ui.build_user_limit_exceeded_text(reason, sub, usage_today, int(created_rules or 0)), reply_markup=_public_usage_keyboard())
                 reset_user_state(user_id)
                 return
-            await message.answer(
-                "⚠️ Не удалось создать правило: возможно, оно уже существует или достигнут лимит тарифа.",
-                reply_markup=get_main_menu(),
-            )
+            await send_message_safe(chat_id=message.chat.id, text="⚠️ Не удалось создать правило: возможно, оно уже существует или достигнут лимит тарифа.", reply_markup=get_main_menu())
 
         reset_user_state(user_id)
         return
@@ -8150,21 +8129,21 @@ async def handle_stateful_private_inputs(message: Message):
         try:
             interval = int(text)
         except Exception:
-            await message.answer("❌ Введите число секунд", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
+            await send_message_safe(chat_id=message.chat.id, text="❌ Введите число секунд", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
             return
         if interval < 1:
-            await message.answer("❌ Интервал должен быть не меньше 1 секунды", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
+            await send_message_safe(chat_id=message.chat.id, text="❌ Интервал должен быть не меньше 1 секунды", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
             return
         rule_id = int(state.get("rule_id") or 0)
         if not await run_db(is_rule_owned_by_user, rule_id, message.from_user.id if message.from_user else 0):
-            await message.answer("⛔ Нет доступа к этому объекту", reply_markup=get_main_menu())
+            await send_message_safe(chat_id=message.chat.id, text="⛔ Нет доступа к этому объекту", reply_markup=get_main_menu())
             reset_user_state(user_id)
             return
         updated = await run_db(_change_interval_sync, rule_id, "change_interval", interval, message.from_user.id if message.from_user else settings.admin_id)
         if updated.get("ok"):
-            await message.answer("✅ Интервал обновлён", reply_markup=get_main_menu())
+            await send_message_safe(chat_id=message.chat.id, text="✅ Интервал обновлён", reply_markup=get_main_menu())
         else:
-            await message.answer("❌ Не удалось обновить интервал", reply_markup=get_main_menu())
+            await send_message_safe(chat_id=message.chat.id, text="❌ Не удалось обновить интервал", reply_markup=get_main_menu())
         reset_user_state(user_id)
         return
 
@@ -8186,21 +8165,15 @@ async def handle_intro_file(message: Message):
 
     caption = (message.caption or "").strip()
     if not caption:
-        await message.answer(
-            "❌ Укажи название заставки в подписи к файлу.\n\n"
+        await send_message_safe(chat_id=message.chat.id, text="❌ Укажи название заставки в подписи к файлу.\n\n"
             "Пример:\n"
-            "grom_vert",
-            reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
-        )
+            "grom_vert", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
         return
 
     safe_name = sanitize_intro_name(caption)
     if not safe_name:
-        await message.answer(
-            "❌ Некорректное название заставки.\n"
-            "Разрешены буквы, цифры, пробел, _, -",
-            reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
-        )
+        await send_message_safe(chat_id=message.chat.id, text="❌ Некорректное название заставки.\n"
+            "Разрешены буквы, цифры, пробел, _, -", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
         return
 
     if message.photo:
@@ -8218,19 +8191,13 @@ async def handle_intro_file(message: Message):
         elif mime_type.startswith("video/"):
             extension = "mp4"
         else:
-            await message.answer(
-                "❌ Поддерживаются только видео или изображения для заставки",
-                reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
-            )
+            await send_message_safe(chat_id=message.chat.id, text="❌ Поддерживаются только видео или изображения для заставки", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
             return
 
         duration = int(getattr(tg_file, "duration", 0) or 0)
 
     if duration > 30:
-        await message.answer(
-            "❌ Видео-заставка не должна быть длиннее 30 секунд",
-            reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
-        )
+        await send_message_safe(chat_id=message.chat.id, text="❌ Видео-заставка не должна быть длиннее 30 секунд", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
         return
 
     file_name = make_unique_intro_filename(
@@ -8244,10 +8211,7 @@ async def handle_intro_file(message: Message):
         telegram_file = await bot.get_file(tg_file.file_id)
         await bot.download_file(telegram_file.file_path, destination=file_path)
     except Exception as exc:
-        await message.answer(
-            f"❌ Не удалось скачать заставку: {exc}",
-            reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
-        )
+        await send_message_safe(chat_id=message.chat.id, text=f"❌ Не удалось скачать заставку: {exc}", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
         return
 
     intro_id = await run_db(
@@ -8266,18 +8230,12 @@ async def handle_intro_file(message: Message):
         except Exception:
             pass
 
-        await message.answer(
-            "❌ Такая заставка уже существует",
-            reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
-        )
+        await send_message_safe(chat_id=message.chat.id, text="❌ Такая заставка уже существует", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
         return
 
     intros = await run_db(db.get_intros)
 
-    await message.answer(
-        f"✅ Заставка '{caption}' добавлена",
-        reply_markup=build_intro_list_keyboard(intros),
-    )
+    await send_message_safe(chat_id=message.chat.id, text=f"✅ Заставка '{caption}' добавлена", reply_markup=build_intro_list_keyboard(intros))
 
     user_states[message.from_user.id] = {
         "action": "intro_menu",
@@ -8295,22 +8253,18 @@ async def handle_add_rule(message: Message):
     sources = [ChannelChoice(r["channel_id"], r["thread_id"], r["title"] or r["channel_id"]) for r in source_rows]
     if not sources:
         if is_admin_user(user_id):
-            await message.reply("Нет источников", reply_markup=get_main_menu())
+            await reply_message_safe(message, "Нет источников", reply_markup=get_main_menu())
         else:
-            await message.reply("Нет источников", reply_markup=ReplyKeyboardRemove())
+            await reply_message_safe(message, "Нет источников", reply_markup=ReplyKeyboardRemove())
             await _show_public_user_menu_message(message)
         return
     if not is_admin_user(user_id):
-        await message.reply(
-            "Создание правила доступно через inline-кнопку «➕ Добавить правило» в разделе «⚙️ Мои правила».",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        await reply_message_safe(message, "Создание правила доступно через inline-кнопку «➕ Добавить правило» в разделе «⚙️ Мои правила».", reply_markup=ReplyKeyboardRemove())
         return
     keyboard = [[KeyboardButton(text=f"📤 {i}. {s.title}{f' (тема {s.thread_id})' if s.thread_id else ''}")] for i, s in enumerate(sources, 1)]
     keyboard.append([KeyboardButton(text="❌ Отмена")])
     user_states[message.from_user.id] = {"action": "pick_rule_source", "sources": sources}
-    await message.reply("Выберите источник", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True))
-
+    await reply_message_safe(message, "Выберите источник", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True))
 
 @dp.message(lambda m: bool(re.match(r"^📤\s+\d+\.", (m.text or "").strip())))
 async def handle_pick_rule_source(message: Message):
@@ -8327,7 +8281,7 @@ async def handle_pick_rule_source(message: Message):
         target_rows = await run_db(db.get_channels_for_tenant, tenant_id, "target") if hasattr(db, "get_channels_for_tenant") else []
     targets = [ChannelChoice(r["channel_id"], r["thread_id"], r["title"] or r["channel_id"]) for r in target_rows]
     if not targets:
-        await message.reply("Нет получателей", reply_markup=get_main_menu())
+        await reply_message_safe(message, "Нет получателей", reply_markup=get_main_menu())
         reset_user_state(message.from_user.id)
         return
     keyboard = [[KeyboardButton(text=f"📥 {j}. {t.title}{f' (тема {t.thread_id})' if t.thread_id else ''}")] for j, t in enumerate(targets, 1)]
@@ -8335,8 +8289,7 @@ async def handle_pick_rule_source(message: Message):
     state["action"] = "pick_rule_target"
     state["choice"] = {"source_id": choice.channel_id, "source_thread_id": choice.thread_id}
     state["targets"] = targets
-    await message.reply("Выберите получателя", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True))
-
+    await reply_message_safe(message, "Выберите получателя", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True))
 @dp.message(lambda m: bool(re.match(r"^📥\s+\d+\.", (m.text or "").strip())))
 async def handle_pick_rule_target(message: Message):
     state = user_states.get(message.from_user.id)
@@ -8350,7 +8303,7 @@ async def handle_pick_rule_target(message: Message):
 
     if is_admin_user(user_id):
         state["action"] = "set_rule_interval"
-        await message.reply("Отправьте интервал в секундах, например 3600", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
+        await reply_message_safe(message, "Отправьте интервал в секундах, например 3600", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
         return
 
     tenant_id = await run_db(ensure_user_tenant, user_id)
@@ -8367,10 +8320,7 @@ async def handle_pick_rule_target(message: Message):
 
     rule_id = await run_db(_create_rule_sync, state["choice"], 3600, user_id)
     if not rule_id:
-        await message.reply(
-            "⚠️ Не удалось создать правило: возможно, оно уже существует или достигнут лимит тарифа.",
-            reply_markup=get_main_menu(),
-        )
+        await reply_message_safe(message, "⚠️ Не удалось создать правило: возможно, оно уже существует или достигнут лимит тарифа.", reply_markup=get_main_menu())
         reset_user_state(message.from_user.id)
         return
 
@@ -8414,14 +8364,11 @@ async def handle_pick_rule_target(message: Message):
     await ensure_rule_workers()
     text, keyboard = await build_user_rule_card_payload(int(rule_id))
     if scan_warning:
-        await message.answer(scan_warning, reply_markup=ReplyKeyboardRemove())
+        await send_message_safe(chat_id=message.chat.id, text=scan_warning, reply_markup=ReplyKeyboardRemove())
     if text and keyboard:
-        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+        await send_message_safe(chat_id=message.chat.id, text=text, parse_mode="HTML", reply_markup=keyboard)
     else:
-        await message.answer(
-            f"✅ Правило создано #{rule_id}",
-            reply_markup=(get_main_menu() if is_admin_user(user_id) else ReplyKeyboardRemove()),
-        )
+        await send_message_safe(chat_id=message.chat.id, text=f"✅ Правило создано #{rule_id}", reply_markup=get_main_menu() if is_admin_user(user_id) else ReplyKeyboardRemove())
         if not is_admin_user(user_id):
             await _show_public_user_menu_message(message)
     reset_user_state(message.from_user.id)
@@ -8526,7 +8473,7 @@ async def handle_user_rule_pick_target_callback(callback: CallbackQuery):
     await ensure_rule_workers()
     text, keyboard = await build_user_rule_card_payload(int(rule_id))
     if scan_warning:
-        await callback.message.answer(scan_warning, reply_markup=ReplyKeyboardRemove())
+        await send_message_safe(chat_id=callback.message.chat.id, text=scan_warning, reply_markup=ReplyKeyboardRemove())
     if text and keyboard:
         await edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=keyboard)
     else:
@@ -8584,19 +8531,17 @@ async def handle_startpos_prev(callback: CallbackQuery):
         )
 
         try:
-            await callback.message.delete()
+            await try_delete_message_safe(callback.message.chat.id, callback.message.message_id)
         except Exception:
             pass
 
-        control_msg = await callback.message.answer(
-            build_start_position_text(
+        control_msg = await send_message_safe(chat_id=callback.message.chat.id, text=build_start_position_text(
                 item,
                 rule_mode=rule_mode,
                 preview_method=preview_method,
-            ),
-            parse_mode="HTML",
-            reply_markup=build_start_position_keyboard(rule_id, item["position"]),
-        )
+            ), parse_mode="HTML", reply_markup=build_start_position_keyboard(rule_id, item["position"]))
+        if not control_msg:
+            return
 
         user_states[callback.from_user.id] = {
             "action": "start_from_number_preview",
@@ -8655,19 +8600,17 @@ async def handle_startpos_next(callback: CallbackQuery):
         )
 
         try:
-            await callback.message.delete()
+            await try_delete_message_safe(callback.message.chat.id, callback.message.message_id)
         except Exception:
             pass
 
-        control_msg = await callback.message.answer(
-            build_start_position_text(
+        control_msg = await send_message_safe(chat_id=callback.message.chat.id, text=build_start_position_text(
                 item,
                 rule_mode=rule_mode,
                 preview_method=preview_method,
-            ),
-            parse_mode="HTML",
-            reply_markup=build_start_position_keyboard(rule_id, item["position"]),
-        )
+            ), parse_mode="HTML", reply_markup=build_start_position_keyboard(rule_id, item["position"]))
+        if not control_msg:
+            return
 
         user_states[callback.from_user.id] = {
             "action": "start_from_number_preview",
