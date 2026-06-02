@@ -3043,7 +3043,11 @@ async def handle_dashboard_back(callback: CallbackQuery):
         if "message is not modified" not in str(exc).lower():
             logger.exception("Ошибка dashboard_back edit_text: %s", exc)
 
-    await callback.message.answer("📋 Главное меню", reply_markup=get_main_menu())
+    await send_message_safe(
+        chat_id=callback.message.chat.id,
+        text="📋 Главное меню",
+        reply_markup=get_main_menu(),
+    )
 
 @dp.message(lambda m: m.text == "📜 Список правил")
 async def handle_list_rules(message: Message):
@@ -3058,35 +3062,56 @@ async def handle_list_rules(message: Message):
 
     if not rules:
         if is_admin_mode:
-            await message.reply("Правил пока нет", reply_markup=get_rules_menu())
+            await send_message_safe(
+                chat_id=message.chat.id,
+                text="Правил пока нет",
+                reply_markup=get_rules_menu(),
+            )
         else:
-            await message.reply("Правил пока нет", reply_markup=ReplyKeyboardRemove())
-            await message.answer("⚙️ Мои правила", reply_markup=build_user_rules_keyboard([], page=0))
+            await send_message_safe(
+                chat_id=message.chat.id,
+                text="Правил пока нет",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            await send_message_safe(
+                chat_id=message.chat.id,
+                text="⚙️ Мои правила",
+                reply_markup=build_user_rules_keyboard([], page=0),
+            )
         return
 
     if is_admin_mode:
-        await message.reply(
-            "📜 Список правил:",
+        await send_message_safe(
+            chat_id=message.chat.id,
+            text="📜 Список правил:",
             reply_markup=ReplyKeyboardRemove(),
         )
-        await message.answer(
-            "📜 Список правил:",
+        await send_message_safe(
+            chat_id=message.chat.id,
+            text="📜 Список правил:",
             reply_markup=rules_list_keyboard(rules, page=0),
         )
         return
 
     if not rules:
-        await message.answer(
-            "⚙️ Мои правила\n\n"
-            "У вас пока нет правил.\n\n"
-            "Создайте первое правило:\n"
-            "1. выберите источник;\n"
-            "2. выберите получателя;\n"
-            "3. задайте интервал публикации.",
+        await send_message_safe(
+            chat_id=message.chat.id,
+            text=(
+                "⚙️ Мои правила\n\n"
+                "У вас пока нет правил.\n\n"
+                "Создайте первое правило:\n"
+                "1. выберите источник;\n"
+                "2. выберите получателя;\n"
+                "3. задайте интервал публикации."
+            ),
             reply_markup=build_user_rules_keyboard(rules, page=0),
         )
         return
-    await message.answer("⚙️ Мои правила", reply_markup=build_user_rules_keyboard(rules, page=0))
+    await send_message_safe(
+        chat_id=message.chat.id,
+        text="⚙️ Мои правила",
+        reply_markup=build_user_rules_keyboard(rules, page=0),
+    )
 
 @dp.callback_query(lambda c: c.data == "rules_back")
 async def handle_rules_back(callback: CallbackQuery):
@@ -3097,11 +3122,10 @@ async def handle_rules_back(callback: CallbackQuery):
 
     rules = await run_db(db.get_all_rules)
     if not rules:
-        try:
-            await callback.message.edit_text("Правил пока нет")
-        except Exception as exc:
-            if "message is not modified" not in str(exc).lower():
-                logger.exception("Ошибка rules_back empty: %s", exc)
+        await edit_message_text_safe(
+            message=callback.message,
+            text="Правил пока нет",
+        )
         return
 
     await edit_message_text_safe(

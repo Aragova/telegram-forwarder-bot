@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from time import monotonic
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,6 +32,9 @@ class UIErrorPolicy:
 
     def __init__(self, bot) -> None:
         self.bot = bot
+        self._chat_retry_after_until: dict[int | str, float] = {}
+        self._last_edit_at: dict[tuple[int | str, int], float] = {}
+        self._last_edit_signature: dict[tuple[int | str, int], tuple[str, str]] = {}
 
     # =========================================================
     # CLASSIFICATION
@@ -120,6 +124,46 @@ class UIErrorPolicy:
             exc,
         )
 
+    def _chat_cooldown_left(self, chat_id: int | str | None) -> float:
+        if chat_id is None:
+            return 0.0
+
+        until = self._chat_retry_after_until.get(chat_id)
+        if until is None:
+            return 0.0
+
+        left = until - monotonic()
+        if left <= 0:
+            self._chat_retry_after_until.pop(chat_id, None)
+            return 0.0
+
+        return left
+
+    def _set_chat_retry_after(
+        self,
+        *,
+        chat_id: int | str | None,
+        retry_after: int | float | None,
+    ) -> None:
+        if chat_id is None or retry_after is None:
+            return
+
+        try:
+            retry_after_seconds = float(retry_after)
+        except (TypeError, ValueError):
+            return
+
+        if retry_after_seconds <= 0:
+            return
+
+        until = monotonic() + retry_after_seconds + 3
+        current_until = self._chat_retry_after_until.get(chat_id, 0.0)
+        if until > current_until:
+            self._chat_retry_after_until[chat_id] = until
+
+    def _build_message_signature(self, *, text: str, reply_markup) -> tuple[str, str]:
+        return (text, repr(reply_markup))
+
     # =========================================================
     # CORE EXECUTOR
     # =========================================================
@@ -130,18 +174,45 @@ class UIErrorPolicy:
         action: str,
         func,
         details: dict | None = None,
+        chat_id: int | str | None = None,
     ) -> UIActionResult:
+        payload = details or {}
+        cooldown_left = self._chat_cooldown_left(chat_id)
+        if cooldown_left > 0:
+            cooldown_details = {
+                **payload,
+                "cooldown_left": round(cooldown_left, 3),
+            }
+            self._log_suppressed(
+                action=action,
+                reason="chat_retry_after_active",
+                details=cooldown_details,
+            )
+            return UIActionResult(
+                ok=False,
+                skipped=True,
+                reason="chat_retry_after_active",
+                result=None,
+            )
+
         try:
             result = await func()
             return UIActionResult(ok=True, skipped=False, reason=None, result=result)
 
         except TelegramRetryAfter as exc:
             # Для UI не устраиваем длинных ожиданий.
-            # Просто гасим, чтобы не убивать UX-хендлер.
+            # Просто гасим и ставим cooldown на чат, чтобы не убивать UX-хендлер.
+            retry_after = getattr(exc, "retry_after", None)
+            self._set_chat_retry_after(chat_id=chat_id, retry_after=retry_after)
+            retry_details = {
+                **payload,
+                "retry_after": retry_after,
+                "safety_seconds": 3,
+            }
             self._log_suppressed(
                 action=action,
                 reason="retry_after",
-                details=details,
+                details=retry_details,
                 exc=exc,
             )
             return UIActionResult(ok=False, skipped=True, reason="retry_after", result=None)
@@ -222,12 +293,63 @@ class UIErrorPolicy:
         parse_mode: str | None = None,
         disable_web_page_preview: bool | None = None,
     ) -> UIActionResult:
-        return await self._execute(
+        edit_key = (chat_id, message_id)
+        details = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+        }
+        cooldown_left = self._chat_cooldown_left(chat_id)
+        if cooldown_left > 0:
+            self._log_suppressed(
+                action="bot.edit_message_text",
+                reason="chat_retry_after_active",
+                details={
+                    **details,
+                    "cooldown_left": round(cooldown_left, 3),
+                },
+            )
+            return UIActionResult(
+                ok=False,
+                skipped=True,
+                reason="chat_retry_after_active",
+                result=None,
+            )
+
+        signature = self._build_message_signature(text=text, reply_markup=reply_markup)
+        if self._last_edit_signature.get(edit_key) == signature:
+            self._log_suppressed(
+                action="bot.edit_message_text",
+                reason="same_message_signature",
+                details=details,
+            )
+            return UIActionResult(
+                ok=False,
+                skipped=True,
+                reason="same_message_signature",
+                result=None,
+            )
+
+        last_edit_at = self._last_edit_at.get(edit_key)
+        now = monotonic()
+        if last_edit_at is not None and now - last_edit_at < 10:
+            self._log_suppressed(
+                action="bot.edit_message_text",
+                reason="message_edit_throttled",
+                details={
+                    **details,
+                    "throttle_left": round(10 - (now - last_edit_at), 3),
+                },
+            )
+            return UIActionResult(
+                ok=False,
+                skipped=True,
+                reason="message_edit_throttled",
+                result=None,
+            )
+
+        result = await self._execute(
             action="bot.edit_message_text",
-            details={
-                "chat_id": chat_id,
-                "message_id": message_id,
-            },
+            details=details,
             func=lambda: self.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
@@ -236,7 +358,12 @@ class UIErrorPolicy:
                 parse_mode=parse_mode,
                 disable_web_page_preview=disable_web_page_preview,
             ),
+            chat_id=chat_id,
         )
+        if result.ok:
+            self._last_edit_at[edit_key] = monotonic()
+            self._last_edit_signature[edit_key] = signature
+        return result
 
     async def edit_text_from_message(
         self,
@@ -303,6 +430,7 @@ class UIErrorPolicy:
                 disable_web_page_preview=disable_web_page_preview,
                 message_thread_id=message_thread_id,
             ),
+            chat_id=chat_id,
         )
 
     # =========================================================
@@ -325,6 +453,7 @@ class UIErrorPolicy:
                 chat_id=chat_id,
                 message_id=message_id,
             ),
+            chat_id=chat_id,
         )
 
     async def delete_from_message(
