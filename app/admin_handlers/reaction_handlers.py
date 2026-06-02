@@ -111,14 +111,14 @@ def register_admin_reaction_handlers(dp: Dispatcher, ctx: AdminHandlersContext) 
         tenant_id = int(state.get("tenant_id") or 0)
         if not rule_id or not tenant_id:
             ctx.user_states.pop(user_id, None)
-            await message.answer("Сессия подключения устарела. Начните заново.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="Сессия подключения устарела. Начните заново.")
             return
         try:
             if phase == "reaction_auth_wait_phone":
                 result = await auth_service.start_phone_login(tenant_id=tenant_id, rule_id=rule_id, user_id=user_id, phone=message.text or "")
                 ctx.user_states[user_id] = {"state": "reaction_auth_wait_code", "rule_id": rule_id, "tenant_id": tenant_id, "phone": result["phone"], "phone_hint": result["phone_hint"], "phone_code_hash": result["phone_code_hash"]}
                 ctx.logger.info("REACTION_AUTH_CODE_SENT | tenant_id=%s | rule_id=%s | user_id=%s | phone_hint=%s", tenant_id, rule_id, user_id, result["phone_hint"])
-                await message.answer(build_reaction_auth_code_text(result["phone_hint"]), reply_markup=build_reaction_auth_cancel_keyboard(rule_id))
+                await ctx.send_message_safe(chat_id=message.chat.id, text=build_reaction_auth_code_text(result["phone_hint"]), reply_markup=build_reaction_auth_cancel_keyboard(rule_id))
                 return
             if phase == "reaction_auth_wait_code":
                 code = (message.text or "").strip().replace(" ", "")
@@ -126,29 +126,29 @@ def register_admin_reaction_handlers(dp: Dispatcher, ctx: AdminHandlersContext) 
                 if result.get("status") == "password_required":
                     ctx.user_states[user_id] = {"state": "reaction_auth_wait_password", "rule_id": rule_id, "tenant_id": tenant_id, "phone": state.get("phone"), "phone_hint": state.get("phone_hint")}
                     ctx.logger.info("REACTION_AUTH_PASSWORD_REQUIRED | tenant_id=%s | rule_id=%s | user_id=%s | phone_hint=%s", tenant_id, rule_id, user_id, state.get("phone_hint"))
-                    await message.answer(build_reaction_auth_password_text(str(state.get("phone_hint") or "")), reply_markup=build_reaction_auth_cancel_keyboard(rule_id))
+                    await ctx.send_message_safe(chat_id=message.chat.id, text=build_reaction_auth_password_text(str(state.get("phone_hint") or "")), reply_markup=build_reaction_auth_cancel_keyboard(rule_id))
                     return
                 ctx.user_states.pop(user_id, None)
                 ctx.logger.info("REACTION_AUTH_SUCCESS | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | telegram_user_id=%s | is_premium=%s", tenant_id, rule_id, user_id, result.get("account_id"), result.get("telegram_user_id"), result.get("is_premium"))
-                await message.answer(build_reaction_auth_success_text(result), reply_markup=build_reaction_auth_success_keyboard(rule_id))
+                await ctx.send_message_safe(chat_id=message.chat.id, text=build_reaction_auth_success_text(result), reply_markup=build_reaction_auth_success_keyboard(rule_id))
                 return
             if phase == "reaction_auth_wait_password":
                 result = await auth_service.complete_password_login(tenant_id=tenant_id, rule_id=rule_id, user_id=user_id, password=message.text or "", phone=str(state.get("phone") or ""))
                 ctx.user_states.pop(user_id, None)
                 ctx.logger.info("REACTION_AUTH_SUCCESS | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | telegram_user_id=%s | is_premium=%s", tenant_id, rule_id, user_id, result.get("account_id"), result.get("telegram_user_id"), result.get("is_premium"))
-                await message.answer(build_reaction_auth_success_text(result), reply_markup=build_reaction_auth_success_keyboard(rule_id))
+                await ctx.send_message_safe(chat_id=message.chat.id, text=build_reaction_auth_success_text(result), reply_markup=build_reaction_auth_success_keyboard(rule_id))
                 return
         except ValueError as exc:
             text = str(exc)
             if "истёк" in text.lower():
                 ctx.user_states.pop(user_id, None)
             ctx.logger.info("REACTION_AUTH_FAILED | tenant_id=%s | rule_id=%s | user_id=%s | error_type=%s", tenant_id, rule_id, user_id, "value_error")
-            await message.answer(build_reaction_auth_error_text(text), reply_markup=build_reaction_auth_cancel_keyboard(rule_id))
+            await ctx.send_message_safe(chat_id=message.chat.id, text=build_reaction_auth_error_text(text), reply_markup=build_reaction_auth_cancel_keyboard(rule_id))
         except Exception:
             auth_service.cleanup_tmp_session(tenant_id=tenant_id, rule_id=rule_id, user_id=user_id)
             ctx.user_states.pop(user_id, None)
             ctx.logger.info("REACTION_AUTH_FAILED | tenant_id=%s | rule_id=%s | user_id=%s | error_type=%s", tenant_id, rule_id, user_id, "unexpected")
-            await message.answer(build_reaction_auth_error_text("Не удалось подключить аккаунт. Начните заново."), reply_markup=build_reaction_auth_cancel_keyboard(rule_id))
+            await ctx.send_message_safe(chat_id=message.chat.id, text=build_reaction_auth_error_text("Не удалось подключить аккаунт. Начните заново."), reply_markup=build_reaction_auth_cancel_keyboard(rule_id))
 
     @dp.callback_query(lambda c: c.data.startswith("rule_reactions_toggle:"))
     async def handle_rule_reactions_toggle(callback: CallbackQuery):

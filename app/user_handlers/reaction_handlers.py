@@ -389,30 +389,30 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
         )
         if str((message.text or "").strip()).lower() in {"/start", "/menu", "❌ отмена"}:
             ctx.user_states.pop(user_id, None)
-            await message.answer("Действие отменено.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="Действие отменено.")
             return
         text = (message.text or "").strip()
         if not text:
-            await message.answer("Не удалось распознать реакции. Отправьте 1 emoji для обычного аккаунта или до 3 emoji для Premium.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="Не удалось распознать реакции. Отправьте 1 emoji для обычного аккаунта или до 3 emoji для Premium.")
             return
         account = await ctx.run_db(ctx.db.get_reaction_account_for_tenant, tenant_id, account_id)
         if not account:
             ctx.user_states.pop(user_id, None)
-            await message.answer("Аккаунт не найден.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="Аккаунт не найден.")
             return
         try:
             normalized = normalize_fixed_reactions_input(text, is_premium=bool(account.get("is_premium")))
         except ValueError:
-            await message.answer("Не удалось распознать реакции. Отправьте 1 emoji для обычного аккаунта или до 3 emoji для Premium.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="Не удалось распознать реакции. Отправьте 1 emoji для обычного аккаунта или до 3 emoji для Premium.")
             return
         await ctx.run_db(ctx.db.update_reaction_account_fixed_reactions_for_tenant, tenant_id, account_id, normalized)
         ctx.logger.info("USER_REACTION_ACCOUNT_REACTIONS_UPDATED | tenant_id=%s | rule_id=%s | user_id=%s | account_id=%s | count=%s", tenant_id, rule_id, user_id, account_id, len(normalized))
         ctx.user_states.pop(user_id, None)
         updated_account = await ctx.run_db(ctx.db.get_reaction_account_for_tenant, tenant_id, account_id)
         if not updated_account:
-            await message.answer("Аккаунт не найден.")
+            await ctx.send_message_safe(chat_id=message.chat.id, text="Аккаунт не найден.")
             return
-        await message.answer(
+        await ctx.send_message_safe(chat_id=message.chat.id, text=
             "✅ Набор реакций сохранён.\n\n" + build_rule_reaction_account_detail_text(updated_account),
             reply_markup=build_rule_reaction_account_detail_keyboard(rule_id, account_id, str(updated_account.get("status") or "")),
         )
@@ -430,7 +430,7 @@ def register_user_reaction_handlers(dp: Dispatcher, ctx: UserHandlersContext) ->
         if rule_id and tenant_id:
             auth_service.cleanup_tmp_session(tenant_id=tenant_id, rule_id=rule_id, user_id=user_id)
         ctx.user_states.pop(user_id, None)
-        await message.answer(
+        await ctx.send_message_safe(chat_id=message.chat.id, text=
             "Подключение аккаунта через чат бота отключено из соображений безопасности. "
             "Откройте раздел «⚙️ Реакции» и используйте защищённую страницу подключения."
         )

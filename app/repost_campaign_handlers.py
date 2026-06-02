@@ -125,7 +125,7 @@ async def _render_repost_campaign_post_menu(
                 "REPOST_CAMPAIGN_POST_MENU_RENDER_NEW_MESSAGE | rule_id=%s | reason=callback_from_media_message",
                 rule_id,
             )
-            await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+            await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, parse_mode="HTML", reply_markup=keyboard)
         else:
             ctx.logger.info("REPOST_CAMPAIGN_POST_MENU_RENDER_EDIT | rule_id=%s", rule_id)
             await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
@@ -212,7 +212,7 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             readiness = await ctx.run_db(lambda: runtime.build_campaign_launch_readiness(rule_id=rule_id))
             text, keyboard = build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)
             if ctx.should_answer_new_message_for_callback(callback):
-                await callback.message.answer(text, reply_markup=keyboard)
+                await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
             else:
                 await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
             ctx.logger.info(
@@ -244,7 +244,7 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             readiness = await ctx.run_db(lambda: runtime.build_campaign_launch_readiness(rule_id=rule_id))
             text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
             if ctx.should_answer_new_message_for_callback(callback):
-                await callback.message.answer(text, reply_markup=keyboard)
+                await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
             else:
                 await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         except Exception as exc:
@@ -273,7 +273,7 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
                 ctx.logger.info("REPOST_CAMPAIGN_LAUNCH_CONFIRM_BLOCKED | rule_id=%s", rule_id)
                 text, keyboard = build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)
                 if ctx.should_answer_new_message_for_callback(callback):
-                    await callback.message.answer(text, reply_markup=keyboard)
+                    await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
                 else:
                     await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
                 await ctx.answer_callback_safe_once(callback)
@@ -284,7 +284,7 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             )
             text, keyboard = build_repost_campaign_launch_result_view(rule_id=rule_id, result=result)
             if ctx.should_answer_new_message_for_callback(callback):
-                await callback.message.answer(text, reply_markup=keyboard)
+                await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
             else:
                 await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
             ctx.logger.info(
@@ -330,11 +330,11 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
                 result.extra.get("message_ids") if result.extra else None,
                 result.extra.get("method") if result.extra else None,
             )
-            await callback.message.answer(text, reply_markup=keyboard)
+            await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
         else:
             ctx.logger.warning("REPOST_CAMPAIGN_TARGET_PREVIEW_UI_FAILED | rule_id=%s | error=%s", rule_id, result.error_text)
             error_text = "❌ Не удалось показать рекламный пост\n\n" f"{result.error_text or 'Неизвестная ошибка'}"
-            await callback.message.answer(error_text)
+            await ctx.send_message_safe(chat_id=callback.message.chat.id, text=error_text)
         await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_preview_delete:"))
@@ -351,7 +351,7 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             return
         preview = ctx.user_states.get(callback.from_user.id, {}).get("last_repost_campaign_preview")
         if not preview or int(preview.get("rule_id") or 0) != rule_id:
-            await callback.message.answer("Предпросмотр уже не найден. Отправьте его заново.")
+            await ctx.send_message_safe(chat_id=callback.message.chat.id, text="Предпросмотр уже не найден. Отправьте его заново.")
             await ctx.answer_callback_safe_once(callback)
             return
         runtime = build_repost_campaign_runtime(ctx)
@@ -370,7 +370,7 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         else:
             ctx.logger.warning("REPOST_CAMPAIGN_TARGET_PREVIEW_DELETE_UI_FAILED | rule_id=%s | error=%s", rule_id, result.error_text)
         text, keyboard = build_repost_campaign_preview_delete_result_view(rule_id=rule_id, result=result.to_dict())
-        await callback.message.answer(text, reply_markup=keyboard)
+        await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
         await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_unlink:"))
@@ -439,7 +439,7 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             error_text = "❌ Не удалось отправить рекламный пост\n\n" f"{result.error_text or 'Неизвестная ошибка'}"
             if result.premium_required:
                 error_text += "\n\nPremium-оформление требует Telethon-отправки. Проверьте права аккаунта-парсера в канале."
-            await callback.message.answer(error_text)
+            await ctx.send_message_safe(chat_id=callback.message.chat.id, text=error_text)
             await ctx.answer_callback_safe_once(callback)
             return
 
@@ -456,10 +456,13 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         except Exception as audit_exc:
             ctx.logger.warning("Не удалось записать аудит тестового запуска rule_id=%s: %s", rule_id, audit_exc, exc_info=True)
 
-        await callback.message.answer(
-            "✅ Тестовый запуск выполнен\n\nРекламный пост отправлен в основной канал правила.\n"
-            f"Message ID: {result.message_id}\n"
-            f"Метод: {result.method}"
+        await ctx.send_message_safe(
+            chat_id=callback.message.chat.id,
+            text=(
+                "✅ Тестовый запуск выполнен\n\nРекламный пост отправлен в основной канал правила.\n"
+                f"Message ID: {result.message_id}\n"
+                f"Метод: {result.method}"
+            ),
         )
         await ctx.answer_callback_safe_once(callback)
 
