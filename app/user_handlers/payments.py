@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from aiogram import Dispatcher
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app import user_ui
@@ -52,6 +53,33 @@ def _is_recovery_cta_already_shown(events: list[dict[str, Any]], payment_intent_
             return True
     return False
 
+
+async def _send_photo_safe(ctx: UserHandlersContext, *args: Any, **kwargs: Any) -> Message | None:
+    if not ctx.bot:
+        ctx.logger.warning("не удалось отправить photo: bot не задан")
+        return None
+    try:
+        media_sender = getattr(ctx.bot, "send_photo")
+        return await media_sender(*args, **kwargs)
+    except TelegramRetryAfter as exc:
+        ctx.logger.warning("не удалось отправить photo: TelegramRetryAfter retry_after=%s", getattr(exc, "retry_after", None))
+    except Exception as exc:
+        ctx.logger.warning("не удалось отправить photo: %s", exc)
+    return None
+
+
+async def _send_document_safe(ctx: UserHandlersContext, *args: Any, **kwargs: Any) -> Message | None:
+    if not ctx.bot:
+        ctx.logger.warning("не удалось отправить document: bot не задан")
+        return None
+    try:
+        media_sender = getattr(ctx.bot, "send_document")
+        return await media_sender(*args, **kwargs)
+    except TelegramRetryAfter as exc:
+        ctx.logger.warning("не удалось отправить document: TelegramRetryAfter retry_after=%s", getattr(exc, "retry_after", None))
+    except Exception as exc:
+        ctx.logger.warning("не удалось отправить document: %s", exc)
+    return None
 
 def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> None:
     router = PaymentRouter(
@@ -692,16 +720,18 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
                     ),
                 )
                 if str(payload.get("receipt_kind") or "") == "photo":
-                    await ctx.bot.send_photo(
-                        ctx.settings.admin_id,
-                        str(payload.get("receipt_file_id") or ""),
+                    await _send_photo_safe(
+                        ctx,
+                        chat_id=ctx.settings.admin_id,
+                        photo=str(payload.get("receipt_file_id") or ""),
                         caption=f"Чек по заявке #{payment_intent_id}",
                         reply_markup=_admin_manual_payment_keyboard(payment_intent_id),
                     )
                 else:
-                    await ctx.bot.send_document(
-                        ctx.settings.admin_id,
-                        str(payload.get("receipt_file_id") or ""),
+                    await _send_document_safe(
+                        ctx,
+                        chat_id=ctx.settings.admin_id,
+                        document=str(payload.get("receipt_file_id") or ""),
                         caption=f"Чек по заявке #{payment_intent_id}",
                         reply_markup=_admin_manual_payment_keyboard(payment_intent_id),
                     )
@@ -855,9 +885,9 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
                 "Статус: ожидает проверки"
             )
             if receipt_kind == "photo":
-                await ctx.bot.send_photo(ctx.settings.admin_id, receipt_file_id, caption=admin_text, reply_markup=_admin_manual_payment_keyboard(payment_intent_id))
+                await _send_photo_safe(ctx, chat_id=ctx.settings.admin_id, photo=receipt_file_id, caption=admin_text, reply_markup=_admin_manual_payment_keyboard(payment_intent_id))
             else:
-                await ctx.bot.send_document(ctx.settings.admin_id, receipt_file_id, caption=admin_text, reply_markup=_admin_manual_payment_keyboard(payment_intent_id))
+                await _send_document_safe(ctx, chat_id=ctx.settings.admin_id, document=receipt_file_id, caption=admin_text, reply_markup=_admin_manual_payment_keyboard(payment_intent_id))
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("admin_confirm_manual_payment:"))
     async def handle_admin_confirm_manual_payment_callback(callback: CallbackQuery):
