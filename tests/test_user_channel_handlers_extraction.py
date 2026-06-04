@@ -1,4 +1,5 @@
 from pathlib import Path
+import ast
 import re
 
 
@@ -16,10 +17,19 @@ def test_user_channel_handlers_module_exists_and_symbols():
     assert 'def register_user_channel_handlers' in t
 
 
-def test_bot_registers_user_channel_handlers():
+def test_channel_message_state_consumer_api_and_state_markers():
+    t = Path('app/user_channel_handlers.py').read_text(encoding='utf-8')
+    assert 'async def handle_user_channel_state_message' in t
+    assert '"awaiting_user_channel_id"' in t
+    assert 'return False' in t
+    assert 'return True' in t
+
+
+def test_bot_registers_user_channel_handlers_and_delegates_message_state():
     t = Path('bot.py').read_text(encoding='utf-8')
     assert 'UserChannelHandlersContext(' in t
     assert 'register_user_channel_handlers(' in t
+    assert 'handle_user_channel_state_message(message, user_channel_ctx)' in t
 
 
 def test_moved_callbacks_in_module_not_in_bot():
@@ -46,9 +56,30 @@ def test_moved_callbacks_in_module_not_in_bot():
         assert f'@dp.callback_query(lambda c: c.data and c.data.startswith("{pref}"))' not in bt
 
 
-def test_user_states_present_for_channel_input_state():
+def test_bot_no_longer_owns_awaiting_user_channel_id_branch_body():
+    bt = Path('bot.py').read_text(encoding='utf-8')
+    mt = Path('app/user_channel_handlers.py').read_text(encoding='utf-8')
+
+    assert 'if action == "awaiting_user_channel_id":' not in bt
+    assert 'if state.get("action") != "awaiting_user_channel_id":' in mt
+    assert 'ctx.db.channel_exists, chat_id, None, channel_type' in mt
+    assert 'ctx.db.add_channel_for_tenant, tenant_id, chat_id, None, channel_type, title, user_id_safe' in mt
+
+    delegation_pos = bt.index('handle_user_channel_state_message(message, user_channel_ctx)')
+    next_channel_branch_pos = bt.index('if action == "awaiting_user_channel_thread_id"', delegation_pos)
+    delegated_gap = bt[delegation_pos:next_channel_branch_pos]
+    assert 'channel_exists, chat_id, None, channel_type' not in delegated_gap
+    assert 'add_channel_for_tenant, tenant_id, chat_id, None, channel_type' not in delegated_gap
+    assert 'bot.get_chat(chat_id)' not in delegated_gap
+
+
+def test_user_channel_callback_registration_still_present():
     t = Path('app/user_channel_handlers.py').read_text(encoding='utf-8')
-    assert 'user_states' in t
+    assert 'register_user_channel_handlers' in t
+    assert 'UserChannelHandlersContext' in t
+    assert 'user_channel_add_type:' in t
+    assert 'user_channel_add_entity:' in t
+    assert 'user_channel_remove_confirm:' in t
 
 
 def test_module_has_no_forbidden_markers_and_no_bot_import():
@@ -59,8 +90,27 @@ def test_module_has_no_forbidden_markers_and_no_bot_import():
         'user_status', 'user_account', 'user_plans', 'user_subscription',
         'rule_card:', 'trigger_now:', 'rescan_rule_', 'rollback:', 'start_from_number:',
         'video_intro_', 'intro_delete:', 'intro_view:', 'rule_repost_campaign',
+        'waiting_vip_scheduled_post', 'repost_campaign_schedule_input',
     ]:
         assert marker not in t
+
+
+def test_user_channel_context_has_no_unrelated_payment_scheduler_runtime_dependencies():
+    source = Path('app/user_channel_handlers.py').read_text(encoding='utf-8')
+    tree = ast.parse(source)
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'UserChannelHandlersContext')
+    fields = {stmt.target.id for stmt in cls.body if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)}
+
+    assert not fields & {
+        'payment_service',
+        'subscription_service',
+        'product_service',
+        'scheduler_service',
+        'runtime_service',
+        'worker_policy',
+        'transport_policy',
+        'telethon_client',
+    }
 
 
 def test_no_duplicate_callback_prefixes_across_selected_modules():

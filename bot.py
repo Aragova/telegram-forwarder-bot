@@ -151,7 +151,7 @@ from app import product_ui
 from app import access_control, user_ui
 from app.user_menu_handlers import UserMenuHandlersContext, register_user_menu_handlers
 from app.user_status_handlers import UserStatusHandlersContext, register_user_status_handlers
-from app.user_channel_handlers import UserChannelHandlersContext, register_user_channel_handlers
+from app.user_channel_handlers import UserChannelHandlersContext, handle_user_channel_state_message, register_user_channel_handlers
 from app.user_handlers import (
     UserHandlersContext,
     register_user_payment_handlers,
@@ -2752,6 +2752,7 @@ user_channel_ctx = UserChannelHandlersContext(
     user_channel_add_type_keyboard=_user_channel_add_type_keyboard,
     user_channel_add_entity_keyboard=_user_channel_add_entity_keyboard,
     user_channel_add_text_input_keyboard=_user_channel_add_text_input_keyboard,
+    get_chat=lambda chat_id: bot.get_chat(chat_id),
 )
 register_user_channel_handlers(dp, user_channel_ctx)
 
@@ -7753,50 +7754,7 @@ async def handle_stateful_private_inputs(message: Message):
         await reply_message_safe(message, "✅ Цена сохранена.")
         return
 
-    if action == "awaiting_user_channel_id":
-        user_id_safe = message.from_user.id if message.from_user else 0
-        tenant_id = await run_db(ensure_user_tenant, user_id_safe)
-        channel_type = str(state.get("channel_type") or "source")
-        entity_kind = str(state.get("entity_kind") or "channel")
-        chat_id = text
-        try:
-            chat = await bot.get_chat(chat_id)
-            title = chat.title or str(chat_id)
-        except Exception as exc:
-            await answer_user_inline_message(
-                message,
-                f"❌ Не удалось получить доступ к каналу/чату: {exc}",
-                reply_markup=_user_channel_add_text_input_keyboard(),
-            )
-            return
-        if entity_kind == "forum_topic":
-            state["action"] = "awaiting_user_channel_thread_id"
-            state["chat_id"] = chat_id
-            state["title"] = title
-            await answer_user_inline_message(
-                message,
-                "Отправьте ID темы.",
-                reply_markup=_user_channel_add_text_input_keyboard(),
-            )
-            return
-        exists = await run_db(db.channel_exists, chat_id, None, channel_type)
-        if exists:
-            await answer_user_inline_message(message, "Такая запись уже есть", reply_markup=user_ui.build_user_channels_keyboard())
-            reset_user_state(user_id_safe)
-            return
-        await run_db(db.add_channel_for_tenant, tenant_id, chat_id, None, channel_type, title, user_id_safe)
-        reset_user_state(user_id_safe)
-        await answer_user_inline_message(
-            message,
-            "✅ Канал добавлен",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="📡 Мои каналы", callback_data="user_channels")],
-                    [InlineKeyboardButton(text="➕ Добавить ещё", callback_data="user_sources_add")],
-                    [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
-                ]
-            ),
-        )
+    if await handle_user_channel_state_message(message, user_channel_ctx):
         return
 
     if action == "awaiting_user_channel_thread_id":
