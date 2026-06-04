@@ -2115,6 +2115,37 @@ class SenderService:
         target_id: str,
         source_message_id: int,
     ):
+        progress_ui_last_emit_at: dict[str, float] = {}
+        progress_ui_milestones: dict[str, set[int]] = {}
+        progress_milestones = (0, 10, 25, 50, 75, 100)
+        progress_ui_min_interval_sec = 20.0
+
+        def should_emit_progress_ui(event_type: str, payload: dict) -> bool:
+            if event_type not in {"video_download_progress", "video_ffmpeg_progress"}:
+                return True
+
+            now = time.monotonic()
+            last_emit_at = progress_ui_last_emit_at.get(event_type, 0.0)
+            percent_raw = payload.get("percent")
+            try:
+                percent = int(float(percent_raw))
+            except (TypeError, ValueError):
+                percent = None
+
+            emitted = progress_ui_milestones.setdefault(event_type, set())
+            if percent is not None:
+                for milestone in progress_milestones:
+                    if percent >= milestone and milestone not in emitted:
+                        emitted.add(milestone)
+                        progress_ui_last_emit_at[event_type] = now
+                        return True
+
+            if now - last_emit_at >= progress_ui_min_interval_sec:
+                progress_ui_last_emit_at[event_type] = now
+                return True
+
+            return False
+
         def stage_logger(
             event_type: str,
             status: str | None = None,
@@ -2126,15 +2157,16 @@ class SenderService:
             payload.setdefault("target_id", target_id)
             payload.setdefault("source_message_id", source_message_id)
 
-            self._schedule_video_event_log(
-                event_type=event_type,
-                delivery_id=delivery_id,
-                rule_id=rule.id,
-                post_id=post_id,
-                status=status,
-                error_text=error_text,
-                extra=payload,
-            )
+            if should_emit_progress_ui(event_type, payload):
+                self._schedule_video_event_log(
+                    event_type=event_type,
+                    delivery_id=delivery_id,
+                    rule_id=rule.id,
+                    post_id=post_id,
+                    status=status,
+                    error_text=error_text,
+                    extra=payload,
+                )
 
             self._log_human_video_event(
                 event_type=event_type,
@@ -6067,6 +6099,10 @@ class SenderService:
         started_at = time.monotonic()
         last_emit_at = 0.0
         last_emit_percent = -1
+        last_ui_emit_at = 0.0
+        emitted_ui_milestones: set[int] = set()
+        ui_milestones = (0, 10, 25, 50, 75, 100)
+        ui_min_interval_sec = 20.0
 
         cache_dir = settings.media_cache_path
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -6079,7 +6115,7 @@ class SenderService:
         download_target_path = cache_dir / f"video_src_{delivery_part}_{message_id}_{int(time.time() * 1000)}{ext}"
 
         def progress_callback(current: int, total: int):
-            nonlocal last_emit_at, last_emit_percent
+            nonlocal last_emit_at, last_emit_percent, last_ui_emit_at
 
             now = time.monotonic()
             elapsed = max(now - started_at, 0.001)
@@ -6111,7 +6147,17 @@ class SenderService:
                 _format_eta_ru(eta_sec),
             )
 
-            if delivery_id is not None and rule_id is not None:
+            should_emit_ui = False
+            for milestone in ui_milestones:
+                if percent >= milestone and milestone not in emitted_ui_milestones:
+                    emitted_ui_milestones.add(milestone)
+                    should_emit_ui = True
+                    break
+            if now - last_ui_emit_at >= ui_min_interval_sec:
+                should_emit_ui = True
+
+            if should_emit_ui and delivery_id is not None and rule_id is not None:
+                last_ui_emit_at = now
                 try:
                     self._schedule_video_event_log(
                         event_type="video_download_progress",
