@@ -129,6 +129,17 @@ class _FakeRepo:
         job["error_text"] = error_text
         return True
 
+    def defer_job(self, job_id: int, error_text: str, delay_seconds: int) -> bool:
+        job = self.jobs.get(job_id)
+        if not job:
+            return False
+        job["status"] = "retry"
+        job["locked_by"] = None
+        job["lease_until"] = None
+        job["run_at_delay_seconds"] = max(1, int(delay_seconds))
+        job["error_text"] = (error_text or "")[:1000]
+        return True
+
     def fail_job(self, job_id: int, error_text: str) -> bool:
         job = self.jobs.get(job_id)
         if not job:
@@ -168,6 +179,24 @@ def test_retry_job() -> None:
     job = repo.get_job(job_id)
     assert job["status"] == "retry"
     assert job["attempts"] == 1
+
+
+def test_defer_job_does_not_increment_attempts() -> None:
+    repo = _FakeRepo()
+    job_id = enqueue_repost_single(repo, 10)
+    repo.lease_jobs("light", "light-worker-1", 1)
+    repo.mark_job_processing(job_id, "light-worker-1")
+    repo.get_job(job_id)["attempts"] = 2
+
+    assert repo.defer_job(job_id, "x" * 1200, 30) is True
+
+    job = repo.get_job(job_id)
+    assert job["status"] == "retry"
+    assert job["attempts"] == 2
+    assert job["run_at_delay_seconds"] == 30
+    assert job["locked_by"] is None
+    assert job["lease_until"] is None
+    assert job["error_text"] == "x" * 1000
 
 
 def test_fail_job() -> None:
