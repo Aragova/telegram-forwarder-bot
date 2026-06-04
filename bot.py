@@ -1311,21 +1311,26 @@ async def refresh_rule_card_for_actor(
     rule_id: int,
     *,
     prefix_text: str | None = None,
+    force: bool = False,
 ) -> str:
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
-        return await refresh_rule_card_message(callback, rule_id, prefix_text=prefix_text)
+        return await refresh_rule_card_message(callback, rule_id, prefix_text=prefix_text, force=force)
     text, keyboard = await build_user_rule_card_payload(rule_id)
     if not text or not keyboard:
         return "failed"
     if prefix_text:
         text = f"{prefix_text}\n\n{text}"
-    edited = await edit_message_text_safe(
+    result = await edit_message_text_safe_result(
         message=callback.message,
         text=text,
         parse_mode="HTML",
         reply_markup=keyboard,
     )
-    return "updated" if edited else "not_modified"
+    if result.ok:
+        return "updated"
+    if result.skipped:
+        return "not_modified"
+    return "failed"
 
 
 def rule_label(row) -> str:
@@ -3723,6 +3728,7 @@ async def refresh_rule_card_message(
     rule_id: int,
     *,
     prefix_text: str | None = None,
+    force: bool = False,
 ) -> str:
     """
     Быстрый путь карточки:
@@ -3730,6 +3736,7 @@ async def refresh_rule_card_message(
     - без лишнего edit на cache_hit
     - без шторма message_not_modified
     """
+    effective_force = force or bool(prefix_text)
     chat_id = getattr(getattr(callback.message, "chat", None), "id", None)
     message_id = getattr(callback.message, "message_id", None)
     if chat_id is not None and message_id is not None:
@@ -3742,7 +3749,10 @@ async def refresh_rule_card_message(
                 message_id,
             )
             return "not_modified"
-        if _is_debounce_active(rule_card_refresh_last_ts, card_key, RULE_REFRESH_DEBOUNCE_SEC):
+        if (
+            not effective_force
+            and _is_debounce_active(rule_card_refresh_last_ts, card_key, RULE_REFRESH_DEBOUNCE_SEC)
+        ):
             logger.info(
                 "RULE_CARD_MESSAGE | skipped=debounce | rule_id=%s | chat_id=%s | message_id=%s",
                 rule_id,
@@ -3750,7 +3760,8 @@ async def refresh_rule_card_message(
                 message_id,
             )
             return "not_modified"
-        _mark_debounce(rule_card_refresh_last_ts, card_key)
+        if not effective_force:
+            _mark_debounce(rule_card_refresh_last_ts, card_key)
         rule_card_refresh_inflight.add(card_key)
     else:
         card_key = None
@@ -3772,31 +3783,24 @@ async def refresh_rule_card_message(
         # КЛЮЧЕВОЕ:
         # если карточка взята из кеша и сверху нет нового prefix_text,
         # значит текст и клавиатура те же самые — edit не нужен
-        if cache_status in {"cache_hit", "cache_hit_after_wait"} and not prefix_text:
+        if (
+            cache_status in {"cache_hit", "cache_hit_after_wait"}
+            and not prefix_text
+            and not effective_force
+        ):
             return "not_modified"
 
-        try:
-            await edit_message_text_safe(
-                message=callback.message,
-                text=text,
-                parse_mode="HTML",
-                reply_markup=reply_markup,
-            )
+        result = await edit_message_text_safe_result(
+            message=callback.message,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+        if result.ok:
             return "updated"
-
-        except Exception as exc:
-            if "message is not modified" in str(exc).lower():
-                return "not_modified"
-
-            logger.warning("RULE_CARD_MESSAGE | edit failed, fallback send | %s", exc)
-
-            await send_message_safe(
-                chat_id=callback.message.chat.id,
-                text=text,
-                parse_mode="HTML",
-                reply_markup=reply_markup,
-            )
-            return "resent"
+        if result.skipped:
+            return "not_modified"
+        return "error"
 
     except Exception as exc:
         logger.exception("RULE_CARD_MESSAGE | failed | rule_id=%s | error=%s", rule_id, exc)
@@ -4213,6 +4217,7 @@ async def refresh_rule_card_by_ids(
     message_id: int,
     rule_id: int,
     prefix_text: str | None = None,
+    force: bool = False,
 ) -> str:
     """
     Возвращает:
@@ -4221,6 +4226,7 @@ async def refresh_rule_card_by_ids(
     - "resent"
     - "failed"
     """
+    effective_force = force or bool(prefix_text)
     card_key = (int(rule_id), chat_id, int(message_id))
     if card_key in rule_card_refresh_inflight:
         logger.info(
@@ -4231,7 +4237,10 @@ async def refresh_rule_card_by_ids(
         )
         return "not_modified"
 
-    if _is_debounce_active(rule_card_refresh_last_ts, card_key, RULE_REFRESH_DEBOUNCE_SEC):
+    if (
+        not effective_force
+        and _is_debounce_active(rule_card_refresh_last_ts, card_key, RULE_REFRESH_DEBOUNCE_SEC)
+    ):
         logger.info(
             "RULE_CARD_REFRESH | skipped=debounce | rule_id=%s | chat_id=%s | message_id=%s",
             rule_id,
@@ -4240,7 +4249,8 @@ async def refresh_rule_card_by_ids(
         )
         return "not_modified"
 
-    _mark_debounce(rule_card_refresh_last_ts, card_key)
+    if not effective_force:
+        _mark_debounce(rule_card_refresh_last_ts, card_key)
     rule_card_refresh_inflight.add(card_key)
     try:
         text, reply_markup, cache_status = await build_rule_card_payload_cached(rule_id)
@@ -4258,7 +4268,11 @@ async def refresh_rule_card_by_ids(
 
         # КЛЮЧЕВОЕ:
         # если cache_hit и нет prefix_text — не дёргаем edit вообще
-        if cache_status in {"cache_hit", "cache_hit_after_wait"} and not prefix_text:
+        if (
+            cache_status in {"cache_hit", "cache_hit_after_wait"}
+            and not prefix_text
+            and not effective_force
+        ):
             return "not_modified"
 
         edit_result = await try_edit_message_text_by_ids_safe(
@@ -4667,6 +4681,13 @@ async def try_edit_message_text_by_ids_safe(
         if result.ok:
             return "updated"
         if result.reason == "message_not_modified":
+            return "not_modified"
+        if result.reason in {
+            "same_message_signature",
+            "message_edit_throttled",
+            "chat_retry_after_active",
+            "retry_after",
+        }:
             return "not_modified"
         if result.reason in {
             "message_id_invalid",
@@ -8736,7 +8757,7 @@ async def handle_startpos_apply(callback: CallbackQuery):
     user_states.pop(callback.from_user.id, None)
     invalidate_rule_card_cache(rule_id)
 
-    await refresh_rule_card_for_actor(callback, rule_id)
+    await refresh_rule_card_for_actor(callback, rule_id, force=True)
     await answer_callback_safe_once(
         callback,
         f"Старт с {selected['position']}",
