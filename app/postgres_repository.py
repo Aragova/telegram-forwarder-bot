@@ -5137,6 +5137,26 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return ok
 
+    def defer_job(self, job_id: int, error_text: str, delay_seconds: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'retry',
+                        lease_until = NULL,
+                        locked_by = NULL,
+                        run_at = NOW() + make_interval(secs => %s),
+                        error_text = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (max(1, int(delay_seconds)), (error_text or "")[:1000], int(job_id)),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+            return ok
+
     def fail_job(self, job_id: int, error_text: str) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:

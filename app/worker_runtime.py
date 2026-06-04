@@ -19,6 +19,7 @@ from .job_service import (
 )
 from .limit_service import LimitService
 from .subscription_service import SubscriptionService
+from .transport_policy import TransportRateLimited
 from .usage_service import UsageService
 from .worker_load_service import build_worker_load_snapshot
 from .worker_resource_policy import POLICY, WorkerResourcePolicy
@@ -239,6 +240,83 @@ def _finalize_invalid_source_file(repo, *, payload: dict, job_id: int, error_tex
             "max_validation_attempts": details.get("max_validation_attempts"),
         },
     )
+
+
+def _log_transport_rate_limited_diagnostic_event(
+    repo,
+    *,
+    job_id: int,
+    job_type: str,
+    queue: str,
+    payload: dict,
+    exc: TransportRateLimited,
+    delay: int,
+    error_text: str,
+) -> None:
+    delivery_id_raw = payload.get("delivery_id")
+    rule_id_raw = payload.get("rule_id")
+    if delivery_id_raw is None or rule_id_raw is None:
+        return
+    try:
+        delivery_id = int(delivery_id_raw)
+        rule_id = int(rule_id_raw)
+    except Exception:
+        return
+    if delivery_id <= 0 or rule_id <= 0:
+        return
+
+    post_id = None
+    if hasattr(repo, "get_post_id_by_delivery"):
+        try:
+            post_id = repo.get_post_id_by_delivery(delivery_id)
+        except Exception as event_exc:
+            logger.warning(
+                "TRANSPORT_RATE_LIMIT_EVENT_POST_LOOKUP_FAILED | job_id=%s | delivery_id=%s | error=%s",
+                job_id,
+                delivery_id,
+                event_exc,
+            )
+
+    extra = {
+        "job_id": int(job_id),
+        "job_type": str(job_type),
+        "queue": str(queue),
+        "backend": exc.backend,
+        "op_name": exc.op_name,
+        "key": exc.key,
+        "retry_after_seconds": exc.retry_after_seconds,
+        "delay_seconds": int(delay),
+    }
+
+    try:
+        if str(job_type).startswith("video_") and hasattr(repo, "log_video_event"):
+            repo.log_video_event(
+                event_type="transport_rate_limited",
+                delivery_id=delivery_id,
+                rule_id=rule_id,
+                post_id=post_id,
+                status="retry",
+                error_text=error_text,
+                extra=extra,
+            )
+            return
+        if hasattr(repo, "log_delivery_event"):
+            repo.log_delivery_event(
+                event_type="transport_rate_limited",
+                delivery_id=delivery_id,
+                rule_id=rule_id,
+                post_id=post_id,
+                status="retry",
+                error_text=error_text,
+                extra=extra,
+            )
+    except Exception as event_exc:
+        logger.warning(
+            "TRANSPORT_RATE_LIMIT_EVENT_LOG_FAILED | job_id=%s | delivery_id=%s | error=%s",
+            job_id,
+            delivery_id,
+            event_exc,
+        )
 
 
 def cleanup_video_artifacts(payload: dict, *, mode: str) -> None:
@@ -574,6 +652,50 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             await asyncio.to_thread(repo.retry_job, job_id, error_text, delay)
             logger.warning("VIDEO STAGE RETRY | задача переведена в retry | #%s | через %s сек", job_id, delay)
             await _runtime_metrics.record_retry(job_type=job_type)
+        return True
+
+    except TransportRateLimited as exc:
+        delay = int(exc.retry_after_seconds) + 10
+        error_text = (
+            f"Transport rate limited: backend={exc.backend} "
+            f"op={exc.op_name} key={exc.key} "
+            f"retry_after={exc.retry_after_seconds}"
+        )
+
+        if hasattr(repo, "defer_job"):
+            await asyncio.to_thread(repo.defer_job, job_id, error_text, delay)
+        else:
+            logger.warning(
+                "TRANSPORT_RATE_LIMIT_DEFER_FALLBACK | job_id=%s | repository_missing_defer_job=true",
+                job_id,
+            )
+            await asyncio.to_thread(repo.retry_job, job_id, error_text, delay)
+
+        await asyncio.to_thread(
+            _log_transport_rate_limited_diagnostic_event,
+            repo,
+            job_id=job_id,
+            job_type=job_type,
+            queue=queue,
+            payload=payload,
+            exc=exc,
+            delay=delay,
+            error_text=error_text,
+        )
+
+        logger.warning(
+            "TRANSPORT_RATE_LIMIT_JOB_DEFERRED | job_id=%s | job_type=%s | queue=%s | "
+            "backend=%s | op=%s | key=%s | retry_after=%s | delay=%s",
+            job_id,
+            job_type,
+            queue,
+            exc.backend,
+            exc.op_name,
+            exc.key,
+            exc.retry_after_seconds,
+            delay,
+        )
+        await _runtime_metrics.record_retry(job_type=job_type)
         return True
 
     except Exception as exc:
