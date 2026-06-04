@@ -25,6 +25,10 @@ class UserHandlersContext:
     is_rule_owned_by_user: Callable[[int, int], bool]
     logger: Any
 
+    send_photo_safe: Callable[..., Any] | None = None
+    send_video_safe: Callable[..., Any] | None = None
+    send_document_safe: Callable[..., Any] | None = None
+
     # Shared low-level helpers from bot.py.
     answer_callback_safe_once: Callable[..., Any] | None = None
     edit_message_text_safe: Callable[..., Any] | None = None

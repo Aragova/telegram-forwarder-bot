@@ -238,6 +238,10 @@ class UIErrorPolicy:
     def _build_message_signature(self, *, text: str, reply_markup) -> tuple[str, str]:
         return (text, repr(reply_markup))
 
+
+    def _without_none(self, values: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in values.items() if value is not None}
+
     # =========================================================
     # CORE EXECUTOR
     # =========================================================
@@ -512,6 +516,168 @@ class UIErrorPolicy:
                 disable_web_page_preview=disable_web_page_preview,
                 message_thread_id=message_thread_id,
             ),
+            chat_id=chat_id,
+        )
+
+    async def send_photo(
+        self,
+        *,
+        chat_id: int | str,
+        photo,
+        caption: str | None = None,
+        reply_markup=None,
+        parse_mode: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> UIActionResult:
+        kwargs = self._without_none(
+            {
+                "chat_id": chat_id,
+                "photo": photo,
+                "caption": caption,
+                "reply_markup": reply_markup,
+                "parse_mode": parse_mode,
+                "message_thread_id": message_thread_id,
+            }
+        )
+        return await self._execute(
+            action="bot.send_photo",
+            details={
+                "chat_id": chat_id,
+                "message_thread_id": message_thread_id,
+            },
+            func=lambda: self.bot.send_photo(**kwargs),
+            chat_id=chat_id,
+        )
+
+    async def send_video(
+        self,
+        *,
+        chat_id: int | str,
+        video,
+        caption: str | None = None,
+        reply_markup=None,
+        parse_mode: str | None = None,
+        supports_streaming: bool | None = None,
+        duration: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        thumbnail=None,
+        message_thread_id: int | None = None,
+    ) -> UIActionResult:
+        kwargs = self._without_none(
+            {
+                "chat_id": chat_id,
+                "video": video,
+                "caption": caption,
+                "reply_markup": reply_markup,
+                "parse_mode": parse_mode,
+                "supports_streaming": supports_streaming,
+                "duration": duration,
+                "width": width,
+                "height": height,
+                "thumbnail": thumbnail,
+                "message_thread_id": message_thread_id,
+            }
+        )
+        return await self._execute(
+            action="bot.send_video",
+            details={
+                "chat_id": chat_id,
+                "message_thread_id": message_thread_id,
+            },
+            func=lambda: self.bot.send_video(**kwargs),
+            chat_id=chat_id,
+        )
+
+    async def send_document(
+        self,
+        *,
+        chat_id: int | str,
+        document,
+        caption: str | None = None,
+        reply_markup=None,
+        parse_mode: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> UIActionResult:
+        kwargs = self._without_none(
+            {
+                "chat_id": chat_id,
+                "document": document,
+                "caption": caption,
+                "reply_markup": reply_markup,
+                "parse_mode": parse_mode,
+                "message_thread_id": message_thread_id,
+            }
+        )
+        return await self._execute(
+            action="bot.send_document",
+            details={
+                "chat_id": chat_id,
+                "message_thread_id": message_thread_id,
+            },
+            func=lambda: self.bot.send_document(**kwargs),
+            chat_id=chat_id,
+        )
+
+    async def copy_message(
+        self,
+        *,
+        chat_id: int | str,
+        from_chat_id: int | str,
+        message_id: int,
+        caption: str | None = None,
+        reply_markup=None,
+        parse_mode: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> UIActionResult:
+        kwargs = self._without_none(
+            {
+                "chat_id": chat_id,
+                "from_chat_id": from_chat_id,
+                "message_id": message_id,
+                "caption": caption,
+                "reply_markup": reply_markup,
+                "parse_mode": parse_mode,
+                "message_thread_id": message_thread_id,
+            }
+        )
+        return await self._execute(
+            action="bot.copy_message",
+            details={
+                "chat_id": chat_id,
+                "from_chat_id": from_chat_id,
+                "message_id": message_id,
+                "message_thread_id": message_thread_id,
+            },
+            func=lambda: self.bot.copy_message(**kwargs),
+            chat_id=chat_id,
+        )
+
+    async def forward_message(
+        self,
+        *,
+        chat_id: int | str,
+        from_chat_id: int | str,
+        message_id: int,
+        message_thread_id: int | None = None,
+    ) -> UIActionResult:
+        kwargs = self._without_none(
+            {
+                "chat_id": chat_id,
+                "from_chat_id": from_chat_id,
+                "message_id": message_id,
+                "message_thread_id": message_thread_id,
+            }
+        )
+        return await self._execute(
+            action="bot.forward_message",
+            details={
+                "chat_id": chat_id,
+                "from_chat_id": from_chat_id,
+                "message_id": message_id,
+                "message_thread_id": message_thread_id,
+            },
+            func=lambda: self.bot.forward_message(**kwargs),
             chat_id=chat_id,
         )
 

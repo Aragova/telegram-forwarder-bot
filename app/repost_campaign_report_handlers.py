@@ -31,14 +31,18 @@ from app.repost_campaign_ui import (
     build_repost_campaign_views_report_view,
 )
 
-async def _send_export_document(callback: CallbackQuery, *, filename: str, content: bytes) -> None:
+async def _send_export_document(ctx: RepostCampaignHandlersContext, callback: CallbackQuery, *, filename: str, content: bytes) -> None:
     tmp_path: Path | None = None
     try:
         suffix = Path(filename).suffix or ".txt"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(content)
             tmp_path = Path(tmp.name)
-        await callback.message.answer_document(FSInputFile(str(tmp_path), filename=filename))
+        if ctx.send_document_safe is not None:
+            await ctx.send_document_safe(
+                chat_id=callback.message.chat.id,
+                document=FSInputFile(str(tmp_path), filename=filename),
+            )
     finally:
         if tmp_path:
             tmp_path.unlink(missing_ok=True)
@@ -321,7 +325,7 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
                 await ctx.answer_callback_safe(callback, "❌ Отчёт не найден. Обновите экран и попробуйте ещё раз.", show_alert=True)
                 return
             payload = build_campaign_run_report_csv(report)
-            await _send_export_document(callback, filename=f"campaign_run_{run_id}_report.csv", content=payload)
+            await _send_export_document(ctx, callback, filename=f"campaign_run_{run_id}_report.csv", content=payload)
             ctx.logger.info("REPOST_CAMPAIGN_EXPORT_DONE | rule_id=%s | run_id=%s | format=csv | size_bytes=%s", rule_id, run_id, len(payload))
             await ctx.answer_callback_safe_once(callback)
         except Exception as exc:
@@ -343,7 +347,7 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
                 await ctx.answer_callback_safe(callback, "❌ Отчёт не найден. Обновите экран и попробуйте ещё раз.", show_alert=True)
                 return
             payload = build_campaign_run_report_xlsx(report)
-            await _send_export_document(callback, filename=f"campaign_run_{run_id}_report.xlsx", content=payload)
+            await _send_export_document(ctx, callback, filename=f"campaign_run_{run_id}_report.xlsx", content=payload)
             ctx.logger.info("REPOST_CAMPAIGN_EXPORT_DONE | rule_id=%s | run_id=%s | format=xlsx | size_bytes=%s", rule_id, run_id, len(payload))
             await ctx.answer_callback_safe_once(callback)
         except Exception as exc:
@@ -365,7 +369,7 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
                 await ctx.answer_callback_safe(callback, "❌ Отчёт не найден. Обновите экран и попробуйте ещё раз.", show_alert=True)
                 return
             payload = build_campaign_run_report_txt(report).encode("utf-8")
-            await _send_export_document(callback, filename=f"campaign_run_{run_id}_report.txt", content=payload)
+            await _send_export_document(ctx, callback, filename=f"campaign_run_{run_id}_report.txt", content=payload)
             ctx.logger.info("REPOST_CAMPAIGN_EXPORT_DONE | rule_id=%s | run_id=%s | format=txt | size_bytes=%s", rule_id, run_id, len(payload))
             await ctx.answer_callback_safe_once(callback)
         except Exception as exc:
@@ -387,7 +391,7 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
                 await ctx.answer_callback_safe(callback, "❌ Отчёт не найден. Обновите экран и попробуйте ещё раз.", show_alert=True)
                 return
             payload = build_campaign_post_stats_csv(stats)
-            await _send_export_document(callback, filename=f"campaign_post_{saved_post_id}_stats.csv", content=payload)
+            await _send_export_document(ctx, callback, filename=f"campaign_post_{saved_post_id}_stats.csv", content=payload)
             ctx.logger.info("REPOST_CAMPAIGN_EXPORT_DONE | rule_id=%s | saved_post_id=%s | format=csv | size_bytes=%s", rule_id, saved_post_id, len(payload))
             await ctx.answer_callback_safe_once(callback)
         except Exception as exc:
@@ -409,7 +413,7 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
                 await ctx.answer_callback_safe(callback, "❌ Отчёт не найден. Обновите экран и попробуйте ещё раз.", show_alert=True)
                 return
             payload = build_campaign_post_stats_xlsx(stats)
-            await _send_export_document(callback, filename=f"campaign_post_{saved_post_id}_stats.xlsx", content=payload)
+            await _send_export_document(ctx, callback, filename=f"campaign_post_{saved_post_id}_stats.xlsx", content=payload)
             ctx.logger.info("REPOST_CAMPAIGN_EXPORT_DONE | rule_id=%s | saved_post_id=%s | format=xlsx | size_bytes=%s", rule_id, saved_post_id, len(payload))
             await ctx.answer_callback_safe_once(callback)
         except Exception as exc:
@@ -431,7 +435,7 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
                 await ctx.answer_callback_safe(callback, "❌ Отчёт не найден. Обновите экран и попробуйте ещё раз.", show_alert=True)
                 return
             payload = build_campaign_post_stats_txt(stats).encode("utf-8")
-            await _send_export_document(callback, filename=f"campaign_post_{saved_post_id}_stats.txt", content=payload)
+            await _send_export_document(ctx, callback, filename=f"campaign_post_{saved_post_id}_stats.txt", content=payload)
             ctx.logger.info("REPOST_CAMPAIGN_EXPORT_DONE | rule_id=%s | saved_post_id=%s | format=txt | size_bytes=%s", rule_id, saved_post_id, len(payload))
             await ctx.answer_callback_safe_once(callback)
         except Exception as exc:
