@@ -4542,7 +4542,8 @@ async def delete_message_safe(
 
     if ui_policy is None:
         try:
-            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            delete_message = getattr(bot, "delete_message")
+            await delete_message(chat_id=chat_id, message_id=message_id)
             return True
         except Exception:
             logger.exception("delete_message_safe fallback failed")
@@ -4562,7 +4563,8 @@ async def delete_from_message_safe(message) -> bool:
         try:
             chat_id = message.chat.id
             message_id = message.message_id
-            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            delete_message = getattr(bot, "delete_message")
+            await delete_message(chat_id=chat_id, message_id=message_id)
             return True
         except Exception:
             logger.exception("delete_from_message_safe fallback failed")
@@ -4737,9 +4739,27 @@ async def try_delete_message_safe(chat_id: int | str, message_id: int | None) ->
     if not chat_id or not message_id:
         return False
 
+    global ui_policy, bot
+
+    if ui_policy is not None:
+        result = await ui_policy.delete_message(
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+        return bool(result.ok)
+
     try:
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
         return True
+
+    except TelegramRetryAfter as exc:
+        logger.warning(
+            "UI delete retry_after suppressed: chat_id=%s | message_id=%s | retry_after=%s",
+            chat_id,
+            message_id,
+            getattr(exc, "retry_after", None),
+        )
+        return False
 
     except Exception as exc:
         if is_message_id_invalid_error(exc) or is_message_not_found_error(exc):
@@ -4751,7 +4771,7 @@ async def try_delete_message_safe(chat_id: int | str, message_id: int | None) ->
             )
             return False
 
-        logger.exception(
+        logger.warning(
             "UI delete failed | chat_id=%s | message_id=%s | error=%s",
             chat_id,
             message_id,
