@@ -26,6 +26,61 @@ class UserChannelHandlersContext:
     user_channel_add_type_keyboard: Callable[[], InlineKeyboardMarkup]
     user_channel_add_entity_keyboard: Callable[[str], InlineKeyboardMarkup]
     user_channel_add_text_input_keyboard: Callable[[], InlineKeyboardMarkup]
+    get_chat: Callable[[str], Awaitable[Any]]
+
+
+async def handle_user_channel_state_message(
+    message: Message,
+    ctx: UserChannelHandlersContext,
+) -> bool:
+    user_id_safe = message.from_user.id if message.from_user else 0
+    state = ctx.user_states.get(user_id_safe) or {}
+    if state.get("action") != "awaiting_user_channel_id":
+        return False
+
+    tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id_safe)
+    channel_type = str(state.get("channel_type") or "source")
+    entity_kind = str(state.get("entity_kind") or "channel")
+    chat_id = (message.text or "").strip()
+    try:
+        chat = await ctx.get_chat(chat_id)
+        title = chat.title or str(chat_id)
+    except Exception as exc:
+        await ctx.answer_user_inline_message(
+            message,
+            f"❌ Не удалось получить доступ к каналу/чату: {exc}",
+            reply_markup=ctx.user_channel_add_text_input_keyboard(),
+        )
+        return True
+    if entity_kind == "forum_topic":
+        state["action"] = "awaiting_user_channel_thread_id"
+        state["chat_id"] = chat_id
+        state["title"] = title
+        await ctx.answer_user_inline_message(
+            message,
+            "Отправьте ID темы.",
+            reply_markup=ctx.user_channel_add_text_input_keyboard(),
+        )
+        return True
+    exists = await ctx.run_db(ctx.db.channel_exists, chat_id, None, channel_type)
+    if exists:
+        await ctx.answer_user_inline_message(message, "Такая запись уже есть", reply_markup=ctx.user_channels_keyboard())
+        ctx.reset_user_state(user_id_safe)
+        return True
+    await ctx.run_db(ctx.db.add_channel_for_tenant, tenant_id, chat_id, None, channel_type, title, user_id_safe)
+    ctx.reset_user_state(user_id_safe)
+    await ctx.answer_user_inline_message(
+        message,
+        "✅ Канал добавлен",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📡 Мои каналы", callback_data="user_channels")],
+                [InlineKeyboardButton(text="➕ Добавить ещё", callback_data="user_sources_add")],
+                [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="user_main")],
+            ]
+        ),
+    )
+    return True
 
 
 def register_user_channel_handlers(dp: Dispatcher, ctx: UserChannelHandlersContext) -> None:

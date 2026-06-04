@@ -6,9 +6,9 @@
 - Этот документ является только аудитом и планом: runtime-поведение бота не меняется.
 
 ## Текущее состояние
-- Примерный размер `bot.py`: **9748 строк** (`wc -l bot.py`).
-- Примерное число регистраций `@dp.callback_query` в `bot.py`: **101** (`grep -n "@dp.callback_query" bot.py | wc -l`).
-- Примерное число регистраций `@dp.message` в `bot.py`: **32** (`grep -n "@dp.message" bot.py | wc -l`).
+- Примерный размер `bot.py`: **9629 строк** (`wc -l bot.py`).
+- Примерное число регистраций `@dp.callback_query` в `bot.py`: **83** (`rg -n "@dp.callback_query" bot.py | wc -l`).
+- Примерное число регистраций `@dp.message` в `bot.py`: **32** (`rg -n "@dp.message" bot.py | wc -l`).
 - Уже вынесенные модули repost campaign:
   - `app/repost_campaign_handlers.py`
   - `app/repost_campaign_schedule_handlers.py`
@@ -239,3 +239,26 @@
   - `@dp.callback_query` count: `83`
   - `@dp.message` count: `32`
 - Recommended next PR: **A6c-2 — Extract user channel message-state consumer** (split shared stateful message handler first, then move channel-only branch).
+
+## A6c-2 (2026-06-04): extracted user channel message-state consumer branch
+- Extracted into `app/user_channel_handlers.py`: the channel message-state consumer branch for exact state `awaiting_user_channel_id`.
+- Added module API: `handle_user_channel_state_message(message, ctx) -> bool`.
+- The shared `@dp.message` handler registration remains in `bot.py`; it now acts as router/delegator and calls `handle_user_channel_state_message(message, user_channel_ctx)` at the original branch position.
+- Left in `bot.py`:
+  - unrelated message-state branches, including repost campaign inputs and VIP scheduled post material handling;
+  - `awaiting_user_channel_thread_id` topic-id input branch;
+  - `user_cancel` / text cancel flows;
+  - `/start`;
+  - payment/subscription activation, including successful payment and manual payment confirm/reject paths.
+- Behavior-preserving confirmations for this extraction:
+  - callback data unchanged;
+  - UI text unchanged;
+  - state names unchanged;
+  - DB calls for `awaiting_user_channel_id` unchanged and only moved behind the context;
+  - payment activation, user_status, scheduler/runtime glue and rule runtime were not moved.
+- Approx metrics after A6c-2:
+  - `bot.py` line count: `9629`
+  - `@dp.callback_query` count: `83`
+  - `@dp.message` count: `32`
+- Recommended next PR: **A6c-3 — finish user channel state cleanup** if the remaining `awaiting_user_channel_thread_id` branch should be extracted into the channel module; otherwise **A6d — cleanup user handler extraction and duplicate callback scanner exact-match support**.
+- Alternative if channel flow is clean enough for the next area: **Extract intro management handlers**.
