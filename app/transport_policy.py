@@ -18,6 +18,25 @@ class RetryDecision:
     reason: str = ""
 
 
+class TransportRateLimited(Exception):
+    def __init__(
+        self,
+        *,
+        retry_after_seconds: int,
+        backend: str,
+        op_name: str,
+        key: str,
+    ) -> None:
+        self.retry_after_seconds = int(retry_after_seconds)
+        self.backend = backend
+        self.op_name = op_name
+        self.key = key
+        super().__init__(
+            f"transport rate limited: backend={backend} op={op_name} "
+            f"key={key} retry_after={self.retry_after_seconds}"
+        )
+
+
 class TransportPolicy:
     """
     Единая политика транспорта для КОНКРЕТНОГО клиента,
@@ -34,6 +53,7 @@ class TransportPolicy:
         max_backoff_sec: float = 8.0,
         jitter_sec: float = 0.25,
         retry_unknown_errors: bool = False,
+        long_retry_after_threshold_sec: int = 30,
     ) -> None:
         self.max_attempts = max(1, int(max_attempts))
         self.min_interval_sec = max(0.0, float(min_interval_sec))
@@ -41,6 +61,7 @@ class TransportPolicy:
         self.max_backoff_sec = max(self.base_backoff_sec, float(max_backoff_sec))
         self.jitter_sec = max(0.0, float(jitter_sec))
         self.retry_unknown_errors = bool(retry_unknown_errors)
+        self.long_retry_after_threshold_sec = max(1, int(long_retry_after_threshold_sec))
 
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrency)))
         self._rate_lock = asyncio.Lock()
@@ -75,11 +96,14 @@ class TransportPolicy:
                     )
                     return result
 
+            except TransportRateLimited:
+                raise
             except Exception as exc:
                 last_error = exc
                 decision = self._classify_error(
                     backend=backend,
                     op_name=op_name,
+                    key=key,
                     attempt=attempt,
                     exc=exc,
                 )
@@ -124,6 +148,7 @@ class TransportPolicy:
         *,
         backend: str,
         op_name: str,
+        key: str,
         attempt: int,
         exc: Exception,
     ) -> RetryDecision:
@@ -132,7 +157,22 @@ class TransportPolicy:
 
         flood_seconds = self._extract_wait_seconds(exc, text)
         if flood_seconds is not None:
-            delay = min(max(1.0, float(flood_seconds) + 0.5), self.max_backoff_sec)
+            if flood_seconds > self.long_retry_after_threshold_sec:
+                logger.warning(
+                    "TRANSPORT | RATE_LIMITED | backend=%s | op=%s | key=%s | retry_after=%s",
+                    backend,
+                    op_name,
+                    key,
+                    flood_seconds,
+                )
+                raise TransportRateLimited(
+                    retry_after_seconds=flood_seconds,
+                    backend=backend,
+                    op_name=op_name,
+                    key=key,
+                ) from exc
+
+            delay = max(1.0, float(flood_seconds) + 0.5)
             return RetryDecision(
                 should_retry=True,
                 delay=delay,
