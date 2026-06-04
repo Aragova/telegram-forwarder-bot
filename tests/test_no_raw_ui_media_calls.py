@@ -17,6 +17,7 @@ BOT_WRAPPER_RAW_PATTERNS = (
     "await bot.send_document",
     "await bot.copy_message",
     "await bot.forward_message",
+    "await bot.delete_message",
 )
 ALLOWED_BOT_WRAPPERS = {
     "send_photo_safe",
@@ -24,6 +25,7 @@ ALLOWED_BOT_WRAPPERS = {
     "send_document_safe",
     "copy_message_safe",
     "forward_message_safe",
+    "try_delete_message_safe",
 }
 
 
