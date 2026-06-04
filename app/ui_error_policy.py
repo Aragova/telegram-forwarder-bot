@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import logging
-from time import monotonic
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
+from app.telegram_flood_locks import TelegramFloodLockStore
+
 
 logger = logging.getLogger("forwarder.ui")
+
+RETRY_AFTER_SAFETY_SECONDS = 3
 
 
 @dataclass(slots=True)
@@ -32,11 +36,15 @@ class UIErrorPolicy:
 
     MESSAGE_EDIT_THROTTLE_SECONDS = 0.5
 
-    def __init__(self, bot) -> None:
+    def __init__(
+        self, bot, flood_lock_store: TelegramFloodLockStore | None = None
+    ) -> None:
         self.bot = bot
-        self._chat_retry_after_until: dict[int | str, float] = {}
+        self._flood_lock_store = flood_lock_store or TelegramFloodLockStore()
+        self._chat_retry_after_until: dict[str, float] = {}
         self._last_edit_at: dict[tuple[int | str, int], float] = {}
         self._last_edit_signature: dict[tuple[int | str, int], tuple[str, str]] = {}
+        self._load_persistent_chat_locks()
 
     # =========================================================
     # CLASSIFICATION
@@ -126,28 +134,77 @@ class UIErrorPolicy:
             exc,
         )
 
-    def _chat_cooldown_left(self, chat_id: int | str | None) -> float:
+    def _chat_key(self, chat_id: int | str | None) -> str | None:
         if chat_id is None:
+            return None
+        return str(chat_id)
+
+    def _load_persistent_chat_locks(self) -> None:
+        try:
+            locks = self._flood_lock_store.load_active_locks(now_epoch=time.time())
+        except Exception as exc:
+            logger.warning(
+                "UI_FLOOD_LOCKS | STORAGE_WARNING | path=%s | error=%s",
+                getattr(self._flood_lock_store, "path", "unknown"),
+                exc,
+            )
+            return
+
+        now_epoch = time.time()
+        now_monotonic = time.monotonic()
+        for chat_id, lock in locks.items():
+            remaining = lock.until_epoch - now_epoch
+            if remaining <= 0:
+                continue
+            self._chat_retry_after_until[str(chat_id)] = now_monotonic + remaining
+            logger.info(
+                "UI_FLOOD_LOCKS | RESTORED | chat_id=%s | remaining=%s",
+                chat_id,
+                round(remaining, 3),
+            )
+
+    def _chat_cooldown_left(self, chat_id: int | str | None) -> float:
+        key = self._chat_key(chat_id)
+        if key is None:
             return 0.0
 
-        until = self._chat_retry_after_until.get(chat_id)
-        if until is None:
+        until = self._chat_retry_after_until.get(key)
+        if until is not None:
+            left = until - time.monotonic()
+            if left > 0:
+                return left
+            self._chat_retry_after_until.pop(key, None)
+
+        try:
+            remaining = self._flood_lock_store.get_remaining_seconds(key)
+        except Exception as exc:
+            logger.warning(
+                "UI_FLOOD_LOCKS | STORAGE_WARNING | path=%s | error=%s",
+                getattr(self._flood_lock_store, "path", "unknown"),
+                exc,
+            )
             return 0.0
 
-        left = until - monotonic()
-        if left <= 0:
-            self._chat_retry_after_until.pop(chat_id, None)
+        if remaining <= 0:
             return 0.0
 
-        return left
+        self._chat_retry_after_until[key] = time.monotonic() + remaining
+        logger.info(
+            "UI_FLOOD_LOCKS | RESTORED | chat_id=%s | remaining=%s",
+            key,
+            round(remaining, 3),
+        )
+        return remaining
 
     def _set_chat_retry_after(
         self,
         *,
         chat_id: int | str | None,
         retry_after: int | float | None,
+        action: str,
     ) -> None:
-        if chat_id is None or retry_after is None:
+        key = self._chat_key(chat_id)
+        if key is None or retry_after is None:
             return
 
         try:
@@ -158,10 +215,25 @@ class UIErrorPolicy:
         if retry_after_seconds <= 0:
             return
 
-        until = monotonic() + retry_after_seconds + 3
-        current_until = self._chat_retry_after_until.get(chat_id, 0.0)
+        until = time.monotonic() + retry_after_seconds + RETRY_AFTER_SAFETY_SECONDS
+        current_until = self._chat_retry_after_until.get(key, 0.0)
         if until > current_until:
-            self._chat_retry_after_until[chat_id] = until
+            self._chat_retry_after_until[key] = until
+
+        try:
+            self._flood_lock_store.set_lock(
+                key,
+                retry_after_seconds=retry_after_seconds,
+                method=action,
+                safety_seconds=RETRY_AFTER_SAFETY_SECONDS,
+            )
+            self._flood_lock_store.clear_expired()
+        except Exception as exc:
+            logger.warning(
+                "UI_FLOOD_LOCKS | STORAGE_WARNING | path=%s | error=%s",
+                getattr(self._flood_lock_store, "path", "unknown"),
+                exc,
+            )
 
     def _build_message_signature(self, *, text: str, reply_markup) -> tuple[str, str]:
         return (text, repr(reply_markup))
@@ -205,7 +277,9 @@ class UIErrorPolicy:
             # Для UI не устраиваем длинных ожиданий.
             # Просто гасим и ставим cooldown на чат, чтобы не убивать UX-хендлер.
             retry_after = getattr(exc, "retry_after", None)
-            self._set_chat_retry_after(chat_id=chat_id, retry_after=retry_after)
+            self._set_chat_retry_after(
+                chat_id=chat_id, retry_after=retry_after, action=action
+            )
             retry_details = {
                 **payload,
                 "retry_after": retry_after,
@@ -332,7 +406,7 @@ class UIErrorPolicy:
             )
 
         last_edit_at = self._last_edit_at.get(edit_key)
-        now = monotonic()
+        now = time.monotonic()
         elapsed_since_last_edit = now - last_edit_at if last_edit_at is not None else None
         if (
             elapsed_since_last_edit is not None
@@ -369,7 +443,7 @@ class UIErrorPolicy:
             chat_id=chat_id,
         )
         if result.ok:
-            self._last_edit_at[edit_key] = monotonic()
+            self._last_edit_at[edit_key] = time.monotonic()
             self._last_edit_signature[edit_key] = signature
         return result
 
