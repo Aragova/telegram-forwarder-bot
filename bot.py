@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
 from aiogram.types import (
@@ -3341,7 +3342,7 @@ async def send_preview_post(
     # 1. Самый быстрый способ: copy
     try:
         if item["kind"] == "single":
-            sent = await try_copy_message_safe(
+            sent = await copy_message_safe(
                 chat_id=chat_id,
                 from_chat_id=source_chat,
                 message_id=message_ids[0],
@@ -3354,7 +3355,7 @@ async def send_preview_post(
         # Для альбома:
         # - в video режиме показываем только первый элемент и без служебной подписи
         # - в repost режиме сохраняем старое поведение с инфо о размере альбома
-        sent = await try_copy_message_safe(
+        sent = await copy_message_safe(
             chat_id=chat_id,
             from_chat_id=source_chat,
             message_id=message_ids[0],
@@ -3379,7 +3380,7 @@ async def send_preview_post(
     # 2. Запасной способ: forward
     try:
         if item["kind"] == "single":
-            sent = await try_forward_message_safe(
+            sent = await forward_message_safe(
                 chat_id=chat_id,
                 from_chat_id=source_chat,
                 message_id=message_ids[0],
@@ -3390,7 +3391,7 @@ async def send_preview_post(
             raise RuntimeError("preview forward returned no message")
 
         if rule_mode == "video":
-            sent = await try_forward_message_safe(
+            sent = await forward_message_safe(
                 chat_id=chat_id,
                 from_chat_id=source_chat,
                 message_id=message_ids[0],
@@ -3401,7 +3402,7 @@ async def send_preview_post(
             raise RuntimeError("preview forward returned no message")
 
         for mid in message_ids:
-            sent = await try_forward_message_safe(
+            sent = await forward_message_safe(
                 chat_id=chat_id,
                 from_chat_id=source_chat,
                 message_id=mid,
@@ -4487,7 +4488,7 @@ async def send_message_safe(
         disable_web_page_preview=disable_web_page_preview,
         message_thread_id=message_thread_id,
     )
-    return result.result
+    return result.result if result.ok else None
 
 
 async def reply_message_safe(
@@ -4758,85 +4759,245 @@ async def try_delete_message_safe(chat_id: int | str, message_id: int | None) ->
         )
         return False
 
-async def send_intro_preview_media_safe(
+async def send_photo_safe(
     *,
-    message,
-    input_file,
-    is_video: bool,
-    caption: str,
+    chat_id: int | str,
+    photo,
+    caption: str | None = None,
     reply_markup=None,
+    parse_mode: str | None = None,
+    message_thread_id: int | None = None,
 ):
-    method_name = "answer_" + ("video" if is_video else "photo")
-    try:
-        method = getattr(message, method_name)
-        return await method(
-            input_file,
+    global ui_policy, bot
+
+    if ui_policy is not None:
+        result = await ui_policy.send_photo(
+            chat_id=chat_id,
+            photo=photo,
             caption=caption,
             reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            message_thread_id=message_thread_id,
+        )
+        return result.result if result.ok else None
+
+    try:
+        return await bot.send_photo(
+            chat_id=chat_id,
+            photo=photo,
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            message_thread_id=message_thread_id,
+        )
+    except TelegramRetryAfter as exc:
+        logger.warning(
+            "UI send_photo fallback retry_after | chat_id=%s | retry_after=%s",
+            chat_id,
+            getattr(exc, "retry_after", None),
+        )
+    except Exception as exc:
+        logger.warning("UI send_photo fallback failed | chat_id=%s | error=%s", chat_id, exc)
+    return None
+
+
+async def send_video_safe(
+    *,
+    chat_id: int | str,
+    video,
+    caption: str | None = None,
+    reply_markup=None,
+    parse_mode: str | None = None,
+    supports_streaming: bool | None = None,
+    duration: int | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    thumbnail=None,
+    message_thread_id: int | None = None,
+):
+    global ui_policy, bot
+
+    if ui_policy is not None:
+        result = await ui_policy.send_video(
+            chat_id=chat_id,
+            video=video,
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            supports_streaming=supports_streaming,
+            duration=duration,
+            width=width,
+            height=height,
+            thumbnail=thumbnail,
+            message_thread_id=message_thread_id,
+        )
+        return result.result if result.ok else None
+
+    kwargs = {
+        "chat_id": chat_id,
+        "video": video,
+        "caption": caption,
+        "reply_markup": reply_markup,
+        "parse_mode": parse_mode,
+        "supports_streaming": supports_streaming,
+        "duration": duration,
+        "width": width,
+        "height": height,
+        "thumbnail": thumbnail,
+        "message_thread_id": message_thread_id,
+    }
+    try:
+        return await bot.send_video(**{key: value for key, value in kwargs.items() if value is not None})
+    except TelegramRetryAfter as exc:
+        logger.warning(
+            "UI send_video fallback retry_after | chat_id=%s | retry_after=%s",
+            chat_id,
+            getattr(exc, "retry_after", None),
+        )
+    except Exception as exc:
+        logger.warning("UI send_video fallback failed | chat_id=%s | error=%s", chat_id, exc)
+    return None
+
+
+async def send_document_safe(
+    *,
+    chat_id: int | str,
+    document,
+    caption: str | None = None,
+    reply_markup=None,
+    parse_mode: str | None = None,
+    message_thread_id: int | None = None,
+):
+    global ui_policy, bot
+
+    if ui_policy is not None:
+        result = await ui_policy.send_document(
+            chat_id=chat_id,
+            document=document,
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            message_thread_id=message_thread_id,
+        )
+        return result.result if result.ok else None
+
+    try:
+        return await bot.send_document(
+            chat_id=chat_id,
+            document=document,
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            message_thread_id=message_thread_id,
+        )
+    except TelegramRetryAfter as exc:
+        logger.warning(
+            "UI send_document fallback retry_after | chat_id=%s | retry_after=%s",
+            chat_id,
+            getattr(exc, "retry_after", None),
+        )
+    except Exception as exc:
+        logger.warning("UI send_document fallback failed | chat_id=%s | error=%s", chat_id, exc)
+    return None
+
+
+async def copy_message_safe(
+    *,
+    from_chat_id: int | str,
+    chat_id: int | str,
+    message_id: int,
+    caption: str | None = None,
+    reply_markup=None,
+    parse_mode: str | None = None,
+    message_thread_id: int | None = None,
+):
+    global ui_policy, bot
+
+    if ui_policy is not None:
+        result = await ui_policy.copy_message(
+            chat_id=chat_id,
+            from_chat_id=from_chat_id,
+            message_id=message_id,
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            message_thread_id=message_thread_id,
+        )
+        return result.result if result.ok else None
+
+    try:
+        return await bot.copy_message(  # allowlist: raw Bot API только внутри safe-wrapper fallback.
+            chat_id=chat_id,
+            from_chat_id=from_chat_id,
+            message_id=message_id,
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            message_thread_id=message_thread_id,
+        )
+    except TelegramRetryAfter as exc:
+        logger.warning(
+            "UI copy fallback retry_after | from_chat_id=%s | chat_id=%s | message_id=%s | retry_after=%s",
+            from_chat_id,
+            chat_id,
+            message_id,
+            getattr(exc, "retry_after", None),
         )
     except Exception as exc:
         logger.warning(
-            "UI intro preview media failed | chat_id=%s | message_id=%s | is_video=%s | error=%s",
-            getattr(getattr(message, "chat", None), "id", None),
-            getattr(message, "message_id", None),
-            is_video,
+            "UI copy fallback failed | from_chat_id=%s | chat_id=%s | message_id=%s | error=%s",
+            from_chat_id,
+            chat_id,
+            message_id,
             exc,
         )
-        return None
+    return None
 
 
-async def try_copy_message_safe(
+async def forward_message_safe(
     *,
     from_chat_id: int | str,
     chat_id: int | str,
     message_id: int,
     message_thread_id: int | None = None,
 ):
-    try:
-        copy = getattr(bot, "copy_" + "message")
-        return await copy(
+    global ui_policy, bot
+
+    if ui_policy is not None:
+        result = await ui_policy.forward_message(
             chat_id=chat_id,
             from_chat_id=from_chat_id,
             message_id=message_id,
             message_thread_id=message_thread_id,
         )
-    except Exception as exc:
-        logger.warning(
-            "UI copy failed | from_chat_id=%s | chat_id=%s | message_id=%s | thread_id=%s | error=%s",
-            from_chat_id,
-            chat_id,
-            message_id,
-            message_thread_id,
-            exc,
-        )
-        return None
+        return result.result if result.ok else None
 
-
-async def try_forward_message_safe(
-    *,
-    from_chat_id: int | str,
-    chat_id: int | str,
-    message_id: int,
-    message_thread_id: int | None = None,
-):
     try:
-        forward = getattr(bot, "forward_" + "message")
-        return await forward(
+        return await bot.forward_message(  # allowlist: raw Bot API только внутри safe-wrapper fallback.
             chat_id=chat_id,
             from_chat_id=from_chat_id,
             message_id=message_id,
             message_thread_id=message_thread_id,
         )
-    except Exception as exc:
+    except TelegramRetryAfter as exc:
         logger.warning(
-            "UI forward failed | from_chat_id=%s | chat_id=%s | message_id=%s | thread_id=%s | error=%s",
+            "UI forward fallback retry_after | from_chat_id=%s | chat_id=%s | message_id=%s | retry_after=%s",
             from_chat_id,
             chat_id,
             message_id,
-            message_thread_id,
+            getattr(exc, "retry_after", None),
+        )
+    except Exception as exc:
+        logger.warning(
+            "UI forward fallback failed | from_chat_id=%s | chat_id=%s | message_id=%s | error=%s",
+            from_chat_id,
+            chat_id,
+            message_id,
             exc,
         )
-        return None
+    return None
+
+
 
 async def answer_callback_safe_once(
     callback: CallbackQuery,
@@ -5786,10 +5947,9 @@ async def handle_intro_view(callback: CallbackQuery):
         ]
     )
     if intro.duration and intro.duration > 0:
-        await send_intro_preview_media_safe(
-            message=callback.message,
-            input_file=input_file,
-            is_video=True,
+        await send_video_safe(
+            chat_id=callback.message.chat.id,
+            video=input_file,
             caption=(
                 f"🎬 {intro.display_name}\n"
                 f"⏱ Длительность: {intro.duration} сек"
@@ -5797,10 +5957,9 @@ async def handle_intro_view(callback: CallbackQuery):
             reply_markup=reply_markup,
         )
     else:
-        await send_intro_preview_media_safe(
-            message=callback.message,
-            input_file=input_file,
-            is_video=False,
+        await send_photo_safe(
+            chat_id=callback.message.chat.id,
+            photo=input_file,
             caption=f"🖼 {intro.display_name}",
             reply_markup=reply_markup,
         )
@@ -6334,6 +6493,7 @@ def _build_repost_campaign_handlers_context() -> RepostCampaignHandlersContext:
         answer_callback_safe_once=lambda *a, **k: answer_callback_safe_once(*a, **k),
         edit_message_text_safe=lambda *a, **k: edit_message_text_safe(*a, **k),
         send_message_safe=send_message_safe,
+        send_document_safe=send_document_safe,
         invalidate_rule_card_cache=invalidate_rule_card_cache,
         reset_user_state=reset_user_state,
         user_states=user_states,
@@ -9269,6 +9429,9 @@ def _register_user_saas_handlers() -> None:
         run_db=run_db,
         answer_callback_safe=lambda *a, **k: answer_callback_safe(*a, **k),
         send_message_safe=send_message_safe,
+        send_photo_safe=send_photo_safe,
+        send_video_safe=send_video_safe,
+        send_document_safe=send_document_safe,
         is_admin_user=is_admin_user,
         ensure_user_tenant=ensure_user_tenant,
         is_rule_owned_by_user=is_rule_owned_by_user,
@@ -9336,6 +9499,11 @@ def _register_admin_handlers() -> None:
         answer_callback_safe=lambda *a, **k: answer_callback_safe(*a, **k),
         answer_callback_safe_once=lambda *a, **k: answer_callback_safe_once(*a, **k),
         send_message_safe=send_message_safe,
+        send_photo_safe=send_photo_safe,
+        send_video_safe=send_video_safe,
+        send_document_safe=send_document_safe,
+        copy_message_safe=copy_message_safe,
+        forward_message_safe=forward_message_safe,
         get_main_menu=get_main_menu,
         logger=logger,
         reset_user_state=reset_user_state,

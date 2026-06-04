@@ -29,6 +29,7 @@ class RepostCampaignHandlersContext:
     invalidate_rule_card_cache: Callable[..., Any]
     reset_user_state: Callable[..., Any]
     should_answer_new_message_for_callback: Callable[..., Any]
+    send_document_safe: Callable[..., Any] | None = None
 
 
 def build_repost_campaign_runtime(ctx: RepostCampaignHandlersContext) -> RepostCampaignRuntimeService:

@@ -22,6 +22,12 @@ class AdminHandlersContext:
     get_main_menu: Callable[..., Any]
     logger: Any
 
+    send_photo_safe: Callable[..., Any] | None = None
+    send_video_safe: Callable[..., Any] | None = None
+    send_document_safe: Callable[..., Any] | None = None
+    copy_message_safe: Callable[..., Any] | None = None
+    forward_message_safe: Callable[..., Any] | None = None
+
     reset_user_state: Callable[[int | None], None] | None = None
     ensure_rule_workers: Callable[..., Any] | None = None
     stop_all_workers: Callable[..., Any] | None = None
