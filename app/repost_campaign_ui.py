@@ -286,6 +286,17 @@ def build_repost_campaign_schedule_wizard_step4_view(*, rule_id: int) -> tuple[s
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def build_repost_campaign_launch_progress_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🚀 Кампания запущена\n\n"
+        "Идёт отправка..."
+    )
+    rows = [
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[str, InlineKeyboardMarkup]:
     payload = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})
     extra = payload.get("extra") or {}

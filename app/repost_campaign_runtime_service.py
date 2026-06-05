@@ -980,7 +980,19 @@ class RepostCampaignRuntimeService:
             elif d == "denied":
                 targets_delete_denied += 1
         main_targets_count = 1 if main_target_ready else 0
-        will_send_total = main_targets_count + len(ready_extra_targets)
+        seen_send_targets: set[tuple[str, Any]] = set()
+        if main_target_ready:
+            seen_send_targets.add((str(main_target_id), getattr(rule, "target_thread_id", None)))
+        unique_ready_extra_targets = []
+        duplicate_ready_targets = 0
+        for row in ready_extra_targets:
+            key = (str(row.get("target_id") or ""), row.get("target_thread_id"))
+            if key in seen_send_targets:
+                duplicate_ready_targets += 1
+                continue
+            seen_send_targets.add(key)
+            unique_ready_extra_targets.append(row)
+        will_send_total = len(seen_send_targets)
         will_skip_total = len(paused_targets) + len(problem_targets)
         block_reasons = []
         if not saved_post_exists:
@@ -1039,13 +1051,16 @@ class RepostCampaignRuntimeService:
             "main_target_ready": main_target_ready,
             "main_targets_count": main_targets_count,
             "extra_total": len(targets),
-            "extra_ready": len(ready_extra_targets),
+            "extra_ready": len(unique_ready_extra_targets),
+            "extra_ready_raw": len(ready_extra_targets),
+            "extra_ready_duplicates": duplicate_ready_targets,
             "extra_paused": len(paused_targets),
             "extra_problem": len(problem_targets),
             "extra_active_problem": extra_active_problem,
             "will_send_total": will_send_total,
             "will_skip_total": will_skip_total,
-            "ready_extra_targets": ready_extra_targets,
+            "ready_extra_targets": unique_ready_extra_targets,
+            "ready_extra_targets_raw": ready_extra_targets,
             "paused_targets": paused_targets,
             "problem_targets": problem_targets,
             "active_placement": active_placement,
@@ -1061,7 +1076,7 @@ class RepostCampaignRuntimeService:
             "targets_publish_unknown": targets_publish_unknown,
             "targets_publish_denied": targets_publish_denied,
         }
-        self.logger.info("REPOST_CAMPAIGN_LAUNCH_READINESS | rule_id=%s can_launch=%s will_send_total=%s extra_ready=%s extra_paused=%s extra_problem=%s extra_active_problem=%s", rule_id, can_launch, will_send_total, len(ready_extra_targets), len(paused_targets), len(problem_targets), extra_active_problem)
+        self.logger.info("REPOST_CAMPAIGN_LAUNCH_READINESS | rule_id=%s can_launch=%s will_send_total=%s extra_ready=%s extra_ready_duplicates=%s extra_paused=%s extra_problem=%s extra_active_problem=%s", rule_id, can_launch, will_send_total, len(unique_ready_extra_targets), duplicate_ready_targets, len(paused_targets), len(problem_targets), extra_active_problem)
         return result
 
     def get_campaign_readiness(self, *, rule_id: int) -> dict:
