@@ -240,7 +240,7 @@ def test_campaign_schedule_repository_methods_exist():
     from app.postgres_repository import PostgresRepository
     for name in [
         'create_campaign_scheduled_launch','get_campaign_scheduled_launch','list_rule_campaign_scheduled_launches',
-        'list_due_campaign_scheduled_launches','claim_due_campaign_scheduled_launches','mark_campaign_scheduled_launch_launched',
-        'mark_campaign_scheduled_launch_failed','cancel_campaign_scheduled_launch','reset_stuck_campaign_scheduled_launches']:
+        'list_due_campaign_scheduled_launches','claim_due_campaign_scheduled_launches','set_campaign_scheduled_launch_campaign_run_id','mark_campaign_scheduled_launch_launched',
+        'mark_campaign_scheduled_launch_failed','mark_campaign_scheduled_launch_needs_review','cancel_campaign_scheduled_launch','reset_stuck_campaign_scheduled_launches']:
         assert hasattr(RepositoryProtocol, name)
         assert hasattr(PostgresRepository, name)

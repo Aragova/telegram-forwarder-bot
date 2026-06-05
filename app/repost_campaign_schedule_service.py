@@ -137,7 +137,12 @@ class RepostCampaignScheduleService:
         return RepostCampaignActionResult(ok=ok, action="cancel_scheduled_launch", rule_id=int(row.get("rule_id") or 0))
 
     async def process_due_scheduled_launches(self, *, worker_id: str, limit: int = 5) -> dict:
-        self.repo.reset_stuck_campaign_scheduled_launches(stuck_seconds=CAMPAIGN_SCHEDULE_STUCK_SECONDS)
+        reset_result = self.repo.reset_stuck_campaign_scheduled_launches(stuck_seconds=CAMPAIGN_SCHEDULE_STUCK_SECONDS)
+        if isinstance(reset_result, dict) and reset_result.get("needs_review"):
+            self.logger.warning(
+                "CAMPAIGN_SCHEDULE_NEEDS_REVIEW | reason=stale_processing_with_campaign_run | count=%s",
+                reset_result.get("needs_review"),
+            )
         claimed = self.repo.claim_due_campaign_scheduled_launches(now_iso=campaign_schedule_now_utc().isoformat(), worker_id=worker_id, limit=limit)
 
         for row in claimed:
@@ -150,10 +155,58 @@ class RepostCampaignScheduleService:
                 self.repo.mark_campaign_scheduled_launch_failed(scheduled_launch_id, error_text="Кампания не готова к запуску в момент старта")
                 continue
 
-            result = await self.campaign_runtime.launch_campaign_now(rule_id=rule_id, admin_id=created_by, run_type="scheduled")
-            run_id = (result.extra or {}).get("campaign_run_id") if result else None
+            captured_run_id: int | None = None
+
+            def _remember_campaign_run(campaign_run_id: int) -> None:
+                nonlocal captured_run_id
+                captured_run_id = int(campaign_run_id)
+                self.repo.set_campaign_scheduled_launch_campaign_run_id(
+                    scheduled_launch_id,
+                    int(campaign_run_id),
+                )
+
+            try:
+                result = await self.campaign_runtime.launch_campaign_now(
+                    rule_id=rule_id,
+                    admin_id=created_by,
+                    run_type="scheduled",
+                    on_campaign_run_created=_remember_campaign_run,
+                )
+            except Exception as exc:
+                current = self.repo.get_campaign_scheduled_launch(scheduled_launch_id) or {}
+                run_id = int(current.get("campaign_run_id") or captured_run_id or 0)
+                if run_id:
+                    self.repo.mark_campaign_scheduled_launch_needs_review(
+                        scheduled_launch_id,
+                        error_text=str(exc) or "Запуск прерван после создания campaign_run",
+                        campaign_run_id=run_id,
+                    )
+                    self.logger.warning(
+                        "CAMPAIGN_SCHEDULE_NEEDS_REVIEW | scheduled_launch_id=%s | campaign_run_id=%s | reason=stale_processing_with_campaign_run",
+                        scheduled_launch_id,
+                        run_id,
+                    )
+                else:
+                    self.repo.mark_campaign_scheduled_launch_failed(
+                        scheduled_launch_id,
+                        error_text=str(exc) or "Ошибка запуска",
+                    )
+                continue
+
+            run_id = int(((result.extra or {}) if result else {}).get("campaign_run_id") or captured_run_id or 0)
             if result and result.ok and run_id:
-                self.repo.mark_campaign_scheduled_launch_launched(scheduled_launch_id, campaign_run_id=int(run_id))
+                self.repo.mark_campaign_scheduled_launch_launched(scheduled_launch_id, campaign_run_id=run_id)
+            elif run_id:
+                self.repo.mark_campaign_scheduled_launch_needs_review(
+                    scheduled_launch_id,
+                    error_text=(result.error_text if result else None) or "Запуск прерван после создания campaign_run",
+                    campaign_run_id=run_id,
+                )
+                self.logger.warning(
+                    "CAMPAIGN_SCHEDULE_NEEDS_REVIEW | scheduled_launch_id=%s | campaign_run_id=%s | reason=launch_failed_with_campaign_run",
+                    scheduled_launch_id,
+                    run_id,
+                )
             else:
                 self.repo.mark_campaign_scheduled_launch_failed(scheduled_launch_id, error_text=result.error_text if result else "Ошибка запуска")
 

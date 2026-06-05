@@ -831,7 +831,7 @@ class PostgresRepository(RepositoryProtocol):
             timezone_offset_minutes INT NOT NULL DEFAULT 180,
             timezone_label TEXT NOT NULL DEFAULT 'UTC+3',
             status TEXT NOT NULL DEFAULT 'scheduled'
-                CHECK (status IN ('scheduled','processing','launched','failed','cancelled','expired')),
+                CHECK (status IN ('scheduled','processing','launched','failed','needs_review','cancelled','expired')),
             campaign_run_id BIGINT NULL,
             created_by BIGINT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1009,6 +1009,8 @@ class PostgresRepository(RepositoryProtocol):
 
                 cur.execute("ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS scheduled_post_id BIGINT NULL")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_campaign_runs_scheduled_post ON campaign_runs(scheduled_post_id)")
+                cur.execute("ALTER TABLE campaign_scheduled_launches DROP CONSTRAINT IF EXISTS campaign_scheduled_launches_status_check")
+                cur.execute("ALTER TABLE campaign_scheduled_launches ADD CONSTRAINT campaign_scheduled_launches_status_check CHECK (status IN ('scheduled','processing','launched','failed','needs_review','cancelled','expired'))")
                 cur.execute("ALTER TABLE campaign_scheduled_posts DROP CONSTRAINT IF EXISTS campaign_scheduled_posts_status_check")
                 cur.execute("ALTER TABLE campaign_scheduled_posts ADD CONSTRAINT campaign_scheduled_posts_status_check CHECK (status IN ('draft','ready','scheduled','processing','launched','failed','needs_review','cancelled','expired'))")
                 for _sql in [
@@ -7406,17 +7408,31 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return rows
 
+    def set_campaign_scheduled_launch_campaign_run_id(self, scheduled_launch_id: int, campaign_run_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_launches SET campaign_run_id=%s, updated_at=NOW() WHERE id=%s AND status='processing'", (int(campaign_run_id), int(scheduled_launch_id)))
+                ok=cur.rowcount>0
+            conn.commit(); return ok
+
     def mark_campaign_scheduled_launch_launched(self, scheduled_launch_id: int, *, campaign_run_id: int) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE campaign_scheduled_launches SET status='launched', campaign_run_id=%s, launched_at=NOW(), updated_at=NOW() WHERE id=%s AND status='processing'", (int(campaign_run_id), int(scheduled_launch_id)))
+                cur.execute("UPDATE campaign_scheduled_launches SET status='launched', campaign_run_id=%s, launched_at=NOW(), locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE id=%s AND status='processing'", (int(campaign_run_id), int(scheduled_launch_id)))
                 ok=cur.rowcount>0
             conn.commit(); return ok
 
     def mark_campaign_scheduled_launch_failed(self, scheduled_launch_id: int, *, error_text: str) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE campaign_scheduled_launches SET status='failed', failed_at=NOW(), error_text=%s, updated_at=NOW() WHERE id=%s AND status IN ('processing','scheduled')", (error_text, int(scheduled_launch_id)))
+                cur.execute("UPDATE campaign_scheduled_launches SET status='failed', failed_at=NOW(), error_text=%s, locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE id=%s AND status IN ('processing','scheduled')", (error_text, int(scheduled_launch_id)))
+                ok=cur.rowcount>0
+            conn.commit(); return ok
+
+    def mark_campaign_scheduled_launch_needs_review(self, scheduled_launch_id: int, *, error_text: str, campaign_run_id: int | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_launches SET status='needs_review', failed_at=NOW(), error_text=%s, campaign_run_id=COALESCE(%s, campaign_run_id), locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE id=%s AND status='processing'", (error_text, campaign_run_id, int(scheduled_launch_id)))
                 ok=cur.rowcount>0
             conn.commit(); return ok
 
@@ -7427,12 +7443,17 @@ class PostgresRepository(RepositoryProtocol):
                 ok=cur.rowcount>0
             conn.commit(); return ok
 
-    def reset_stuck_campaign_scheduled_launches(self, *, stuck_seconds: int = 300) -> int:
+    def reset_stuck_campaign_scheduled_launches(self, *, stuck_seconds: int = 300) -> dict[str, int]:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE campaign_scheduled_launches SET status='scheduled', locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE status='processing' AND locked_at < NOW() - (%s * INTERVAL '1 second') AND campaign_run_id IS NULL", (int(stuck_seconds),))
-                count=int(cur.rowcount)
-            conn.commit(); return count
+                cur.execute("UPDATE campaign_scheduled_launches SET status='scheduled', locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE status='processing' AND campaign_run_id IS NULL AND locked_at < NOW() - (%s * INTERVAL '1 second')", (int(stuck_seconds),))
+                requeued=int(cur.rowcount)
+                cur.execute("UPDATE campaign_scheduled_launches SET status='needs_review', error_text=COALESCE(error_text, 'Запуск завис после создания campaign_run'), locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE status='processing' AND campaign_run_id IS NOT NULL AND locked_at < NOW() - (%s * INTERVAL '1 second')", (int(stuck_seconds),))
+                needs_review=int(cur.rowcount)
+            conn.commit()
+        if requeued: logger.info("CAMPAIGN_SCHEDULE_STUCK_RESET count=%s", requeued)
+        if needs_review: logger.warning("CAMPAIGN_SCHEDULE_NEEDS_REVIEW | reason=stale_processing_with_campaign_run | count=%s", needs_review)
+        return {"requeued": requeued, "needs_review": needs_review}
 
     def _normalize_campaign_scheduled_post_row(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
         if not row:
