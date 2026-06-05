@@ -264,11 +264,13 @@ def test_vip_scheduled_album_callback_reloads_state_ids_and_uses_last_message():
     assert "message=messages[-1]" in source
 
 
-def test_vip_scheduled_material_has_dedicated_handler_before_generic_album_handler():
+def test_vip_scheduled_material_has_dedicated_handler_before_generic_campaign_state_router():
     source = Path("bot.py").read_text(encoding="utf-8")
+    module_source = Path("app/repost_campaign_message_handlers.py").read_text(encoding="utf-8")
     vip_handler_pos = source.index("if await handle_vip_scheduled_post_material_message(campaign_handlers_ctx, message):")
-    generic_album_pos = source.index("on_album_ready=_finalize_repost_campaign_saved_post_album")
-    assert vip_handler_pos < generic_album_pos
+    campaign_state_router_pos = source.index("if await handle_repost_campaign_stateful_private_input(campaign_handlers_ctx, message, state, text):")
+    assert vip_handler_pos < campaign_state_router_pos
+    assert "on_album_ready=lambda **kwargs: _finalize_repost_campaign_saved_post_album(ctx, **kwargs)" in module_source
 
 
 def test_repost_campaign_message_handlers_registers_vip_material_handler():
@@ -348,7 +350,7 @@ def test_stateful_handler_delegates_vip_scheduled_material_to_helper():
     assert "if await handle_vip_scheduled_post_material_message(campaign_handlers_ctx, message):" in source
     block = source[
         source.index("if await handle_vip_scheduled_post_material_message(campaign_handlers_ctx, message):"):
-        source.index("if state.get(\"state\") == \"awaiting_repost_campaign_saved_post\":")
+        source.index("if await handle_repost_campaign_stateful_private_input(campaign_handlers_ctx, message, state, text):")
     ]
     assert "    return" in block
 

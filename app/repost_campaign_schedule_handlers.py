@@ -14,11 +14,68 @@ from app.repost_campaign_ui import (
     build_repost_campaign_schedule_wizard_step2_view,
     build_repost_campaign_schedule_wizard_step3_view,
     build_repost_campaign_schedule_wizard_step4_view,
+    build_repost_campaign_scheduled_launch_cancel_confirm_view,
+    build_repost_campaign_scheduled_launch_cancel_result_view,
+    build_repost_campaign_scheduled_launch_detail_view,
 )
 from datetime import datetime, timedelta, timezone
 
 
+REPOST_CAMPAIGN_SCHEDULED_DETAIL_PREFIX = "rule_repost_campaign_" + "scheduled_detail:"
+REPOST_CAMPAIGN_SCHEDULED_CANCEL_CONFIRM_PREFIX = "rule_repost_campaign_" + "scheduled_cancel_confirm:"
+REPOST_CAMPAIGN_SCHEDULED_CANCEL_PREFIX = "rule_repost_campaign_" + "scheduled_cancel:"
+
+
 def register_repost_campaign_schedule_handlers(dp: Dispatcher, ctx: RepostCampaignHandlersContext) -> None:
+    @dp.callback_query(lambda c: c.data.startswith(REPOST_CAMPAIGN_SCHEDULED_DETAIL_PREFIX))
+    async def handle_rule_repost_campaign_scheduled_detail(callback: CallbackQuery):
+        try:
+            _, rule_id_text, launch_id_text = (callback.data or "").split(":", 2)
+            rule_id = int(rule_id_text)
+            launch_id = int(launch_id_text)
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
+            return
+        row = await ctx.run_db(ctx.db.get_campaign_scheduled_launch, launch_id)
+        if not row:
+            await ctx.answer_callback_safe(callback, "Запланированный запуск не найден", show_alert=True)
+            return
+        text, kb = build_repost_campaign_scheduled_launch_detail_view(rule_id=rule_id, scheduled_launch=row)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+    @dp.callback_query(lambda c: c.data.startswith(REPOST_CAMPAIGN_SCHEDULED_CANCEL_CONFIRM_PREFIX))
+    async def handle_rule_repost_campaign_scheduled_cancel_confirm(callback: CallbackQuery):
+        try:
+            _, rule_id_text, launch_id_text = (callback.data or "").split(":", 2)
+            rule_id = int(rule_id_text)
+            launch_id = int(launch_id_text)
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
+            return
+        text, kb = build_repost_campaign_scheduled_launch_cancel_confirm_view(rule_id=rule_id, scheduled_launch_id=launch_id)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+
+    @dp.callback_query(lambda c: c.data.startswith(REPOST_CAMPAIGN_SCHEDULED_CANCEL_PREFIX))
+    async def handle_rule_repost_campaign_scheduled_cancel(callback: CallbackQuery):
+        try:
+            _, rule_id_text, launch_id_text = (callback.data or "").split(":", 2)
+            rule_id = int(rule_id_text)
+            launch_id = int(launch_id_text)
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
+            return
+        runtime = RepostCampaignScheduleService(repo=ctx.db, campaign_runtime=build_repost_campaign_runtime(ctx), logger_=ctx.logger)
+        result = runtime.cancel_scheduled_launch(scheduled_launch_id=launch_id, cancelled_by=callback.from_user.id if callback.from_user else None)
+        text, kb = build_repost_campaign_scheduled_launch_cancel_result_view(rule_id=rule_id, ok=result.ok)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+        await ctx.answer_callback_safe_once(callback)
+
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_menu:"))
     async def handle_rule_repost_campaign_schedule_menu(callback: CallbackQuery):
         rule_id = int((callback.data or "").split(":")[1])

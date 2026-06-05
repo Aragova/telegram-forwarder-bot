@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from aiogram import Dispatcher
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.repost_campaign_context import RepostCampaignHandlersContext, build_repost_campaign_runtime
-from app.repost_campaign_service import format_campaign_show_seconds_ru
+from app.repost_campaign_service import format_campaign_show_seconds_ru, normalize_campaign_show_seconds
 from app.repost_campaign_ui import (
     build_repost_campaign_launch_mode_view,
     build_repost_campaign_launch_readiness_view,
     build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
+    build_repost_campaign_show_menu_view,
     build_repost_campaign_post_menu_view,
     build_repost_campaign_target_action_result_view,
     build_repost_campaign_target_card_view,
@@ -181,6 +182,70 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             return
         await ctx.answer_callback_safe_once(callback)
 
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_show_menu:"))
+    async def handle_rule_repost_campaign_show_menu(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            rule_id = int(callback.data.split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        rule = await ctx.run_db(ctx.db.get_rule, rule_id)
+        if not rule:
+            await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+            return
+        show_seconds_ru = format_campaign_show_seconds_ru(int(getattr(rule, "repost_campaign_show_seconds", 0) or 0))
+        text, kb = build_repost_campaign_show_menu_view(rule_id=rule_id, current_show_seconds_text=show_seconds_ru)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_show_set:"))
+    async def handle_rule_repost_campaign_show_set(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            _, rule_id_raw, seconds_raw = callback.data.split(":")
+            rule_id = int(rule_id_raw)
+            seconds = normalize_campaign_show_seconds(int(seconds_raw))
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        await ctx.run_db(ctx.db.update_rule_repost_campaign_settings, rule_id, enabled=True, show_seconds=seconds)
+        ctx.invalidate_rule_card_cache(rule_id)
+        try:
+            await ctx.run_db(
+                ctx.db.log_rule_change,
+                event_type="repost_campaign_show_seconds_changed",
+                rule_id=rule_id,
+                admin_id=callback.from_user.id if callback.from_user else ctx.settings.admin_id,
+                old_value=None,
+                new_value={
+                    "repost_campaign_enabled": True,
+                    "repost_campaign_show_seconds": seconds,
+                },
+                extra={
+                    "source": "admin_ui",
+                },
+            )
+        except Exception as exc:
+            ctx.logger.warning(
+                "Не удалось записать аудит изменения кампании rule_id=%s event_type=%s: %s",
+                rule_id,
+                "repost_campaign_show_seconds_changed",
+                exc,
+                exc_info=True,
+            )
+        if not await _render_repost_campaign_menu(callback, rule_id, ctx):
+            return
+        await ctx.answer_callback_safe_once(callback, "Срок показа обновлён")
+
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_menu:"))
     async def handle_rule_repost_campaign_post_menu(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
@@ -193,6 +258,37 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         force_new = ctx.should_answer_new_message_for_callback(callback)
         if not await _render_repost_campaign_post_menu(callback, rule_id, ctx, force_new_message=force_new):
             return
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_edit_stub:"))
+    async def handle_rule_repost_campaign_post_edit_stub(callback: CallbackQuery):
+        await ctx.answer_callback_safe_once(callback, "Редактирование текста будет добавлено следующим шагом")
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_add:"))
+    async def handle_rule_repost_campaign_post_add(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            rule_id = int(callback.data.split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        ctx.user_states[callback.from_user.id] = {"state": "awaiting_repost_campaign_saved_post", "rule_id": rule_id}
+        text = (
+            "🔁 Замена рекламного поста\n\nОтправьте или перешлите новый рекламный пост.\n\n"
+            "Можно отправить:\n• текст\n• фото с подписью\n• видео с подписью\n• документ\n\n"
+            "Форматирование, ссылки и premium emoji будут сохранены.\n"
+            "Старый пост останется в библиотеке, но кампания будет привязана к новому посту."
+        )
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад к рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")]
+            ]
+        )
+        if ctx.should_answer_new_message_for_callback(callback):
+            await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
+        else:
+            await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch:"))
@@ -488,6 +584,39 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         summary = await ctx.run_db(ctx.db.get_rule_repost_campaign_summary, rule_id)
         text, keyboard = build_repost_campaign_targets_menu_view(rule_id=rule_id, summary=summary or {})
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_add_list:"))
+    async def handle_rule_repost_campaign_add_list(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            rule_id = int(callback.data.split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        rule = await ctx.run_db(ctx.db.get_rule, rule_id)
+        if not rule:
+            await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+            return
+        ctx.user_states[callback.from_user.id] = {"action": "awaiting_repost_campaign_targets_list", "rule_id": rule_id}
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=(
+                "📥 Добавление каналов кампании\n\n"
+                "Отправьте список каналов, каждый с новой строки.\n\n"
+                "Можно использовать:\n"
+                "@channel_username\n"
+                "-1001234567890\n\n"
+                "Пример:\n"
+                "@my_channel\n"
+                "-1001234567890"
+            ),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_targets:{rule_id}")]]),
+        )
         await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_targets_list:"))
