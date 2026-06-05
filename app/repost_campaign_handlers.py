@@ -416,7 +416,21 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
                 progress_message=progress_message,
             )
         )
-        task.add_done_callback(lambda t: ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_TASK_FAILED | rule_id=%s | error=%s", rule_id, t.exception()) if t.exception() else None)
+
+        def _log_repost_campaign_launch_task_result(done_task: asyncio.Task) -> None:
+            if done_task.cancelled():
+                ctx.logger.info("REPOST_CAMPAIGN_LAUNCH_TASK_CANCELLED | rule_id=%s", rule_id)
+                return
+            exc = done_task.exception()
+            if exc:
+                ctx.logger.warning(
+                    "REPOST_CAMPAIGN_LAUNCH_TASK_FAILED | rule_id=%s | error=%s",
+                    rule_id,
+                    exc,
+                    exc_info=True,
+                )
+
+        task.add_done_callback(_log_repost_campaign_launch_task_result)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_preview:"))
     async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):
