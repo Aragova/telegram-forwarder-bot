@@ -101,13 +101,9 @@ from app.repost_campaign_message_handlers import (
     handle_vip_scheduled_post_material_message,
     register_repost_campaign_message_handlers,
 )
-from app.saved_post_renderer import SavedPostRenderer
 from app.saved_post_album_service import SavedPostAlbumCaptureBuffer
 from app.repost_campaign_runtime_service import RepostCampaignRuntimeService
-from app.repost_campaign_target_check_service import RepostCampaignTargetCheckService
-from app.repost_campaign_delete_service import RepostCampaignDeleteService, run_repost_campaign_delete_loop
-from app.repost_campaign_schedule_service import RepostCampaignScheduleService, run_repost_campaign_scheduled_launch_loop
-from app.repost_campaign_scheduled_post_service import RepostCampaignScheduledPostService, run_repost_campaign_scheduled_post_loop
+from app.repost_campaign_runtime_tasks import RepostCampaignRuntimeTasks
 from app import product_ui
 from app import access_control, user_ui
 from app.user_menu_handlers import UserMenuHandlersContext, register_user_menu_handlers
@@ -163,6 +159,7 @@ last_notifications: dict[str, datetime] = {}
 rule_ui_tasks: dict[str, asyncio.Task] = {}
 user_handlers_ctx: UserHandlersContext | None = None
 admin_handlers_ctx: AdminHandlersContext | None = None
+repost_campaign_runtime_tasks: RepostCampaignRuntimeTasks | None = None
 
 preview_queue_cache: dict[int, dict[str, Any]] = {}
 preview_busy_users: set[int] = set()
@@ -8790,6 +8787,22 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
     )
 
 
+
+def _start_repost_campaign_runtime_tasks(*, role: str) -> None:
+    global repost_campaign_runtime_tasks
+    if repost_campaign_runtime_tasks is None:
+        repost_campaign_runtime_tasks = RepostCampaignRuntimeTasks(
+            repo=db,
+            bot=bot,
+            telethon_client=telethon_client,
+            settings=settings,
+            logger_=logger,
+            enabled=settings.repost_campaign_admin_test_enabled,
+            role=role,
+        )
+    repost_campaign_runtime_tasks.start()
+
+
 async def _shutdown_runtime(
     *,
     stop_workers_runtime: bool,
@@ -8797,7 +8810,7 @@ async def _shutdown_runtime(
     close_telegram_clients: bool,
     close_bot_session: bool,
 ) -> None:
-    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task
+    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, repost_campaign_runtime_tasks
 
     if stop_workers_runtime:
         await stop_job_workers_runtime()
@@ -8807,6 +8820,10 @@ async def _shutdown_runtime(
         for task in dashboard_tasks.values():
             task.cancel()
         dashboard_tasks.clear()
+
+    if repost_campaign_runtime_tasks is not None:
+        await repost_campaign_runtime_tasks.stop()
+        repost_campaign_runtime_tasks = None
 
     if scheduler_runtime_task and not scheduler_runtime_task.done():
         scheduler_runtime_task.cancel()
@@ -8875,20 +8892,7 @@ async def _start_bot_role() -> None:
     await _init_sender_runtime(create_ui_policy=True)
     asyncio.create_task(heartbeat_loop("bot", db))
     asyncio.create_task(watchdog_loop(db))
-    if settings.repost_campaign_admin_test_enabled:
-        delete_service = RepostCampaignDeleteService(bot=bot, telethon_client=telethon_client)
-        delete_runtime = RepostCampaignRuntimeService(
-            repo=db,
-            renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir),
-            deleter=delete_service,
-            telethon_client=telethon_client,
-        )
-        asyncio.create_task(run_repost_campaign_delete_loop(runtime=delete_runtime, interval_seconds=10, batch_limit=50))
-        schedule_runtime = RepostCampaignScheduleService(repo=db, campaign_runtime=delete_runtime, logger_=logger)
-        asyncio.create_task(run_repost_campaign_scheduled_launch_loop(runtime=schedule_runtime, interval_seconds=15, worker_id=f'campaign-schedule:{role}'))
-        scheduled_post_runtime = _build_repost_campaign_scheduled_post_service()
-        asyncio.create_task(run_repost_campaign_scheduled_post_loop(runtime=scheduled_post_runtime, interval_seconds=15, worker_id=f'vip-scheduled-post:{role}'))
-        logger.info("REPOST_CAMPAIGN_DELETE_LOOP_STARTED | interval_seconds=10 | batch_limit=50")
+    _start_repost_campaign_runtime_tasks(role="bot")
     logger.info("STARTUP | Роль UI (bot) запущена")
     await dp.start_polling(
         bot,
@@ -8936,20 +8940,7 @@ async def _start_all_role() -> None:
     asyncio.create_task(heartbeat_loop("scheduler", db))
     asyncio.create_task(heartbeat_loop("worker", db))
     asyncio.create_task(watchdog_loop(db))
-    if settings.repost_campaign_admin_test_enabled:
-        delete_service = RepostCampaignDeleteService(bot=bot, telethon_client=telethon_client)
-        delete_runtime = RepostCampaignRuntimeService(
-            repo=db,
-            renderer=SavedPostRenderer(bot=bot, telethon_client=telethon_client, temp_dir=settings.temp_dir),
-            deleter=delete_service,
-            telethon_client=telethon_client,
-        )
-        asyncio.create_task(run_repost_campaign_delete_loop(runtime=delete_runtime, interval_seconds=10, batch_limit=50))
-        schedule_runtime = RepostCampaignScheduleService(repo=db, campaign_runtime=delete_runtime, logger_=logger)
-        asyncio.create_task(run_repost_campaign_scheduled_launch_loop(runtime=schedule_runtime, interval_seconds=15, worker_id=f'campaign-schedule:{role}'))
-        scheduled_post_runtime = _build_repost_campaign_scheduled_post_service()
-        asyncio.create_task(run_repost_campaign_scheduled_post_loop(runtime=scheduled_post_runtime, interval_seconds=15, worker_id=f'vip-scheduled-post:{role}'))
-        logger.info("REPOST_CAMPAIGN_DELETE_LOOP_STARTED | interval_seconds=10 | batch_limit=50")
+    _start_repost_campaign_runtime_tasks(role="all")
     if scheduler_runtime_task is None or scheduler_runtime_task.done():
         scheduler_runtime_task = asyncio.create_task(
             run_scheduler_loop(
@@ -9058,12 +9049,6 @@ def _register_user_saas_handlers() -> None:
     register_user_rule_handlers(dp, ctx)
     user_handlers_ctx = ctx
 
-
-
-def _build_repost_campaign_scheduled_post_service() -> RepostCampaignScheduledPostService:
-    runtime = _build_repost_campaign_runtime()
-    checker = RepostCampaignTargetCheckService(telethon_client=telethon_client, bot=bot, logger_=logger)
-    return RepostCampaignScheduledPostService(repo=db, campaign_runtime=runtime, target_checker=checker, logger_=logger)
 
 
 def _register_admin_handlers() -> None:
