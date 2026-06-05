@@ -2,6 +2,8 @@ import asyncio
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from app.repost_campaign_runtime_tasks import RepostCampaignRuntimeTasks
 
 
@@ -90,5 +92,57 @@ def test_repost_campaign_runtime_tasks_logs_task_exception(monkeypatch, caplog):
             assert "repost_campaign_delete_loop" in caplog.text
             assert "boom" in caplog.text
         await manager.stop()
+
+    asyncio.run(_run())
+
+
+def test_repost_campaign_runtime_tasks_start_cleans_up_partial_tasks_on_failure(monkeypatch, caplog):
+    async def _run():
+        cancelled = asyncio.Event()
+        created_task = None
+        create_calls = 0
+
+        async def long_running_loop(**kwargs):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_delete_loop", long_running_loop)
+        monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_scheduled_launch_loop", long_running_loop)
+        monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_scheduled_post_loop", long_running_loop)
+
+        manager = RepostCampaignRuntimeTasks(
+            repo=SimpleNamespace(),
+            bot=SimpleNamespace(),
+            settings=SimpleNamespace(temp_dir="media/temp"),
+            logger_=logging.getLogger("test.repost_campaign_runtime_tasks.start_failure"),
+            role="bot",
+        )
+
+        def fail_on_second_create(name, coro):
+            nonlocal created_task, create_calls
+            create_calls += 1
+            if create_calls == 2:
+                coro.close()
+                raise RuntimeError("start failed")
+            created_task = asyncio.create_task(coro, name=name)
+            manager._tasks.append(created_task)
+            return created_task
+
+        monkeypatch.setattr(manager, "_create_task", fail_on_second_create)
+
+        with caplog.at_level(logging.ERROR, logger=manager.logger.name):
+            with pytest.raises(RuntimeError, match="start failed"):
+                manager.start()
+
+        assert manager._tasks == []
+        assert created_task is not None
+        await asyncio.sleep(0)
+        assert created_task.cancelled() or created_task.done()
+        assert cancelled.is_set() or created_task.cancelled()
+        assert "REPOST_CAMPAIGN_RUNTIME_TASKS_START_FAILED" in caplog.text
+        assert "start failed" in caplog.text
 
     asyncio.run(_run())

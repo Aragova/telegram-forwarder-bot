@@ -55,34 +55,44 @@ class RepostCampaignRuntimeTasks:
             self.logger.info("REPOST_CAMPAIGN_RUNTIME_TASKS_ALREADY_RUNNING | tasks=%s", len(self._tasks))
             return
 
-        campaign_runtime = self._build_campaign_runtime()
-        schedule_runtime = RepostCampaignScheduleService(repo=self.repo, campaign_runtime=campaign_runtime, logger_=self.logger)
-        scheduled_post_runtime = self._build_scheduled_post_runtime(campaign_runtime)
+        started_tasks_before = len(self._tasks)
+        try:
+            campaign_runtime = self._build_campaign_runtime()
+            schedule_runtime = RepostCampaignScheduleService(repo=self.repo, campaign_runtime=campaign_runtime, logger_=self.logger)
+            scheduled_post_runtime = self._build_scheduled_post_runtime(campaign_runtime)
 
-        self._create_task(
-            "repost_campaign_delete_loop",
-            run_repost_campaign_delete_loop(
-                runtime=campaign_runtime,
-                interval_seconds=self.delete_interval_seconds,
-                batch_limit=self.delete_batch_limit,
-            ),
-        )
-        self._create_task(
-            "repost_campaign_scheduled_launch_loop",
-            run_repost_campaign_scheduled_launch_loop(
-                runtime=schedule_runtime,
-                interval_seconds=self.scheduled_launch_interval_seconds,
-                worker_id=f"campaign-schedule:{self.role}",
-            ),
-        )
-        self._create_task(
-            "repost_campaign_scheduled_post_loop",
-            run_repost_campaign_scheduled_post_loop(
-                runtime=scheduled_post_runtime,
-                interval_seconds=self.scheduled_post_interval_seconds,
-                worker_id=f"vip-scheduled-post:{self.role}",
-            ),
-        )
+            self._create_task(
+                "repost_campaign_delete_loop",
+                run_repost_campaign_delete_loop(
+                    runtime=campaign_runtime,
+                    interval_seconds=self.delete_interval_seconds,
+                    batch_limit=self.delete_batch_limit,
+                ),
+            )
+            self._create_task(
+                "repost_campaign_scheduled_launch_loop",
+                run_repost_campaign_scheduled_launch_loop(
+                    runtime=schedule_runtime,
+                    interval_seconds=self.scheduled_launch_interval_seconds,
+                    worker_id=f"campaign-schedule:{self.role}",
+                ),
+            )
+            self._create_task(
+                "repost_campaign_scheduled_post_loop",
+                run_repost_campaign_scheduled_post_loop(
+                    runtime=scheduled_post_runtime,
+                    interval_seconds=self.scheduled_post_interval_seconds,
+                    worker_id=f"vip-scheduled-post:{self.role}",
+                ),
+            )
+        except Exception as exc:
+            self.logger.error(
+                "REPOST_CAMPAIGN_RUNTIME_TASKS_START_FAILED | error=%s",
+                exc,
+                exc_info=True,
+            )
+            self._cancel_started_tasks_after_failed_start(started_tasks_before)
+            raise
         self.logger.info(
             "REPOST_CAMPAIGN_RUNTIME_TASKS_STARTED | tasks=%s | delete_interval_seconds=%s | delete_batch_limit=%s",
             len(self._tasks),
@@ -101,6 +111,12 @@ class RepostCampaignRuntimeTasks:
         await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
         self.logger.info("REPOST_CAMPAIGN_RUNTIME_TASKS_STOPPED | tasks=%s", len(tasks))
+
+    def _cancel_started_tasks_after_failed_start(self, started_tasks_before: int) -> None:
+        for task in self._tasks[started_tasks_before:]:
+            if not task.done():
+                task.cancel()
+        del self._tasks[started_tasks_before:]
 
     def _build_campaign_runtime(self) -> RepostCampaignRuntimeService:
         renderer = SavedPostRenderer(
@@ -142,7 +158,13 @@ class RepostCampaignRuntimeTasks:
         )
 
     def _create_task(self, name: str, coro) -> asyncio.Task:
-        task = asyncio.create_task(coro, name=name)
+        try:
+            task = asyncio.create_task(coro, name=name)
+        except Exception:
+            close = getattr(coro, "close", None)
+            if close is not None:
+                close()
+            raise
         task.add_done_callback(lambda done_task, task_name=name: self._log_task_done(task_name, done_task))
         self._tasks.append(task)
         return task
