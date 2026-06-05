@@ -13,6 +13,7 @@ def test_bot_does_not_start_repost_campaign_loops_directly():
         "run_repost_campaign_delete_loop",
         "run_repost_campaign_scheduled_launch_loop",
         "run_repost_campaign_scheduled_post_loop",
+        "run_repost_campaign_launch_job_loop",
     ]
     for name in forbidden:
         assert name not in source
@@ -23,8 +24,8 @@ def test_repost_campaign_runtime_tasks_start_is_idempotent_and_stop_cancels(monk
         started = []
         cancelled = []
 
-        async def fake_loop(*, runtime, interval_seconds=0, batch_limit=None, worker_id=None):
-            started.append((runtime, interval_seconds, batch_limit, worker_id))
+        async def fake_loop(*, runtime=None, service=None, interval_seconds=0, batch_limit=None, worker_id=None):
+            started.append((runtime or service, interval_seconds, batch_limit, worker_id))
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -34,6 +35,7 @@ def test_repost_campaign_runtime_tasks_start_is_idempotent_and_stop_cancels(monk
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_delete_loop", fake_loop)
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_scheduled_launch_loop", fake_loop)
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_scheduled_post_loop", fake_loop)
+        monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_launch_job_loop", fake_loop)
 
         manager = RepostCampaignRuntimeTasks(
             repo=SimpleNamespace(),
@@ -47,18 +49,18 @@ def test_repost_campaign_runtime_tasks_start_is_idempotent_and_stop_cancels(monk
         manager.start()
         await asyncio.sleep(0)
         assert manager.is_running()
-        assert len(manager._tasks) == 3
-        assert len(started) == 3
+        assert len(manager._tasks) == 4
+        assert len(started) == 4
 
         manager.start()
         await asyncio.sleep(0)
-        assert len(manager._tasks) == 3
-        assert len(started) == 3
+        assert len(manager._tasks) == 4
+        assert len(started) == 4
 
         await manager.stop()
         assert not manager.is_running()
         assert manager._tasks == []
-        assert len(cancelled) == 3
+        assert len(cancelled) == 4
 
     asyncio.run(_run())
 
@@ -74,6 +76,7 @@ def test_repost_campaign_runtime_tasks_logs_task_exception(monkeypatch, caplog):
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_delete_loop", failing_loop)
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_scheduled_launch_loop", waiting_loop)
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_scheduled_post_loop", waiting_loop)
+        monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_launch_job_loop", waiting_loop)
 
         logger = logging.getLogger("test.repost_campaign_runtime_tasks.exception")
         manager = RepostCampaignRuntimeTasks(
@@ -112,6 +115,7 @@ def test_repost_campaign_runtime_tasks_start_cleans_up_partial_tasks_on_failure(
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_delete_loop", long_running_loop)
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_scheduled_launch_loop", long_running_loop)
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_scheduled_post_loop", long_running_loop)
+        monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_launch_job_loop", long_running_loop)
 
         manager = RepostCampaignRuntimeTasks(
             repo=SimpleNamespace(),

@@ -7,6 +7,9 @@ from app.repost_campaign_ui import (
     build_repost_campaign_launch_result_view,
     build_repost_campaign_launch_mode_view,
     build_repost_campaign_launch_readiness_view,
+    build_repost_campaign_launch_queued_view,
+    build_repost_campaign_launch_job_status_view,
+    build_repost_campaign_launch_needs_review_view,
     build_repost_campaign_menu_view,
     build_repost_campaign_post_menu_view,
     build_repost_campaign_views_report_loading_view,
@@ -229,7 +232,7 @@ def test_bot_has_launch_confirm_callback_and_logs():
     bot_source = Path("bot.py").read_text(encoding="utf-8")
     assert "rule_repost_campaign_launch_confirm:" in handlers_source
     assert "REPOST_CAMPAIGN_LAUNCH_PREFLIGHT_UI" in handlers_source
-    assert "REPOST_CAMPAIGN_LAUNCH_CONFIRM_STARTED" in handlers_source
+    assert "REPOST_CAMPAIGN_LAUNCH_JOB_UI_ENQUEUED" in handlers_source
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_confirm:"))' not in bot_source
 
 
@@ -1863,3 +1866,42 @@ def test_vip_scheduled_no_forbidden_callbacks_or_callback_data_mutation():
         "rule_repost_campaign_schedule_step4:",
     ]:
         assert forbidden not in source
+
+
+def test_launch_job_queued_status_and_needs_review_views():
+    text, kb = build_repost_campaign_launch_queued_view(rule_id=3, job_id=9)
+    assert "Кампания поставлена в очередь" in text
+    callbacks = _callbacks_from_keyboard(kb)
+    assert "rule_repost_campaign_launch_job_status:3:9" in callbacks
+
+    processing_text, _ = build_repost_campaign_launch_job_status_view(rule_id=3, job={"id": 9, "status": "processing"})
+    assert "Кампания отправляется" in processing_text
+
+    review_text, review_kb = build_repost_campaign_launch_needs_review_view(rule_id=3, job={"id": 9, "status": "needs_review"})
+    assert "Требуется проверка" in review_text
+    assert "не отправить рекламу дважды" in review_text
+    assert "rule_repost_campaign_launch_job_status:3:9" in _callbacks_from_keyboard(review_kb)
+
+
+def test_manual_launch_handler_uses_durable_job_not_background_send():
+    handlers_source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
+    assert "RepostCampaignLaunchJobService" in handlers_source
+    assert "enqueue_manual_launch" in handlers_source
+    assert "asyncio.create_task" not in handlers_source
+    assert "launch_campaign_now" not in handlers_source
+
+
+def test_campaign_launch_now_only_allowed_in_runtime_and_launch_job_service():
+    offenders = []
+    for path in Path("app").glob("repost_campaign_*.py"):
+        source = path.read_text(encoding="utf-8")
+        if "launch_campaign_now" in source and path.name not in {"repost_campaign_launch_job_service.py", "repost_campaign_runtime_service.py", "repost_campaign_schedule_service.py"}:
+            offenders.append(str(path))
+    assert offenders == []
+
+
+def test_bot_has_no_direct_repost_campaign_callbacks_or_launch_job_logic():
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    assert "rule_repost_campaign_launch_confirm:" not in bot_source
+    assert "rule_repost_campaign_launch_job_status:" not in bot_source
+    assert "RepostCampaignLaunchJobService" not in bot_source

@@ -1435,3 +1435,32 @@ def test_collect_final_views_for_album_uses_max_value():
     assert result["ok"] is True
     assert result["views_count"] == 856
     assert repo.mark_campaign_run_message_views_collected_calls[-1][1] == 856
+
+def test_launch_campaign_now_calls_on_campaign_run_created_before_targets():
+    events = []
+
+    class _Repo(_FakeRepo):
+        def create_campaign_run(self, **kwargs):
+            events.append("create_run")
+            return super().create_campaign_run(**kwargs)
+
+        def create_campaign_run_message(self, **kwargs):
+            events.append("create_message")
+            return super().create_campaign_run_message(**kwargs)
+
+    class _Renderer(_FakeRenderer):
+        async def send(self, **kwargs):
+            events.append("send")
+            return await super().send(**kwargs)
+
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=43200, target_id="-1001")
+    repo = _Repo(rule=rule, saved_post={"content_json": {"kind": "text"}})
+    renderer = _Renderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", chat_id="-1001", message_id=1))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+
+    seen_run_ids = []
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1, on_campaign_run_created=lambda run_id: (events.append("callback"), seen_run_ids.append(run_id))))
+
+    assert result.ok is True
+    assert seen_run_ids == [repo.next_run_id]
+    assert events[:4] == ["create_run", "callback", "create_message", "send"]

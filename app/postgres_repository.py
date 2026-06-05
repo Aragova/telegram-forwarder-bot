@@ -852,6 +852,39 @@ class PostgresRepository(RepositoryProtocol):
         CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_campaign_run
         ON campaign_scheduled_launches(campaign_run_id);
 
+        CREATE TABLE IF NOT EXISTS repost_campaign_launch_jobs (
+            id BIGSERIAL PRIMARY KEY,
+            rule_id BIGINT NOT NULL,
+            admin_id BIGINT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending','processing','sent','failed','needs_review','cancelled')),
+            payload_json JSONB NULL,
+            result_json JSONB NULL,
+            campaign_run_id BIGINT NULL,
+            progress_chat_id TEXT NULL,
+            progress_message_id BIGINT NULL,
+            attempts INT NOT NULL DEFAULT 0,
+            max_attempts INT NOT NULL DEFAULT 3,
+            locked_by TEXT NULL,
+            locked_until TIMESTAMPTZ NULL,
+            last_error TEXT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            started_at TIMESTAMPTZ NULL,
+            finished_at TIMESTAMPTZ NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_repost_campaign_launch_jobs_status_created
+        ON repost_campaign_launch_jobs(status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_repost_campaign_launch_jobs_rule
+        ON repost_campaign_launch_jobs(rule_id);
+        CREATE INDEX IF NOT EXISTS idx_repost_campaign_launch_jobs_locked_until
+        ON repost_campaign_launch_jobs(locked_until);
+        CREATE INDEX IF NOT EXISTS idx_repost_campaign_launch_jobs_campaign_run
+        ON repost_campaign_launch_jobs(campaign_run_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_repost_campaign_launch_jobs_active_rule
+        ON repost_campaign_launch_jobs(rule_id)
+        WHERE status IN ('pending','processing');
+
         CREATE TABLE IF NOT EXISTS campaign_scheduled_posts (
             id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL DEFAULT 1, rule_id BIGINT NOT NULL, saved_post_id BIGINT NULL, title TEXT NULL,
             status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','ready','scheduled','processing','launched','failed','cancelled','expired')),
@@ -7634,6 +7667,287 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
         if c: logger.info("VIP_SCHEDULED_POST_STUCK_RESET count=%s", c)
         return c
+
+    def _normalize_repost_campaign_launch_job_row(self, row) -> dict[str, Any] | None:
+        if not row:
+            return None
+        item = dict(row)
+        item["payload_json"] = _safe_json_loads(item.get("payload_json"), {})
+        item["result_json"] = _safe_json_loads(item.get("result_json"), None)
+        return item
+
+    def create_repost_campaign_launch_job(
+        self,
+        *,
+        rule_id: int,
+        admin_id: int | None,
+        progress_chat_id: int | str | None,
+        progress_message_id: int | None,
+        payload_json: dict[str, Any] | None = None,
+        max_attempts: int = 3,
+    ) -> dict[str, Any]:
+        existing = self.get_active_repost_campaign_launch_job_for_rule(rule_id)
+        if existing:
+            return existing
+        payload = dict(payload_json or {})
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO repost_campaign_launch_jobs(
+                            rule_id, admin_id, status, payload_json, progress_chat_id,
+                            progress_message_id, max_attempts, created_at, updated_at
+                        )
+                        VALUES(%s, %s, 'pending', %s::jsonb, %s, %s, %s, NOW(), NOW())
+                        RETURNING *
+                        """,
+                        (
+                            int(rule_id),
+                            admin_id,
+                            _json_dumps(payload),
+                            str(progress_chat_id) if progress_chat_id is not None else None,
+                            progress_message_id,
+                            max(1, int(max_attempts)),
+                        ),
+                    )
+                    row = cur.fetchone()
+                    conn.commit()
+                    return self._normalize_repost_campaign_launch_job_row(row) or {}
+                except Exception as exc:
+                    if "duplicate key value violates unique constraint" not in str(exc).lower():
+                        raise
+                    conn.rollback()
+        existing = self.get_active_repost_campaign_launch_job_for_rule(rule_id)
+        if existing:
+            return existing
+        raise RuntimeError("Не удалось создать durable job запуска рекламной кампании")
+
+    def get_active_repost_campaign_launch_job_for_rule(self, rule_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM repost_campaign_launch_jobs
+                    WHERE rule_id=%s AND status IN ('pending','processing')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (int(rule_id),),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def get_repost_campaign_launch_job(self, job_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM repost_campaign_launch_jobs WHERE id=%s", (int(job_id),))
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def get_due_repost_campaign_launch_jobs(self, limit: int = 5) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM repost_campaign_launch_jobs
+                    WHERE status='pending'
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT %s
+                    """,
+                    (max(1, int(limit)),),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return [self._normalize_repost_campaign_launch_job_row(r) or {} for r in rows]
+
+    def lease_repost_campaign_launch_job(self, job_id: int, worker_id: str, lock_ttl_seconds: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='processing',
+                        locked_by=%s,
+                        locked_until=NOW() + make_interval(secs => %s),
+                        attempts=attempts + 1,
+                        started_at=COALESCE(started_at, NOW()),
+                        updated_at=NOW()
+                    WHERE id=%s
+                      AND status='pending'
+                    RETURNING *
+                    """,
+                    (worker_id, max(1, int(lock_ttl_seconds)), int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def mark_repost_campaign_launch_job_processing(self, job_id: int, *, worker_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='processing', locked_by=%s, started_at=COALESCE(started_at, NOW()), updated_at=NOW()
+                    WHERE id=%s AND status='processing'
+                    RETURNING *
+                    """,
+                    (worker_id, int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def set_repost_campaign_launch_job_campaign_run_id(self, job_id: int, campaign_run_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET campaign_run_id=%s, updated_at=NOW()
+                    WHERE id=%s AND status='processing'
+                    RETURNING *
+                    """,
+                    (int(campaign_run_id), int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def mark_repost_campaign_launch_job_sent(self, job_id: int, *, campaign_run_id: int | None, result_json: dict[str, Any] | None) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='sent', campaign_run_id=%s, result_json=%s::jsonb, locked_by=NULL, locked_until=NULL, updated_at=NOW(), finished_at=NOW()
+                    WHERE id=%s AND status='processing'
+                    RETURNING *
+                    """,
+                    (campaign_run_id, _json_dumps(result_json or {}), int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def mark_repost_campaign_launch_job_failed(self, job_id: int, *, last_error: str, result_json: dict[str, Any] | None = None, retryable: bool = False) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status = CASE WHEN %s AND campaign_run_id IS NULL AND attempts < max_attempts THEN 'pending' ELSE 'failed' END,
+                        last_error=%s,
+                        result_json=COALESCE(%s::jsonb, result_json),
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        updated_at=NOW(),
+                        finished_at=CASE WHEN %s AND campaign_run_id IS NULL AND attempts < max_attempts THEN finished_at ELSE NOW() END
+                    WHERE id=%s AND status='processing'
+                    RETURNING *
+                    """,
+                    (bool(retryable), last_error, _json_dumps(result_json) if result_json is not None else None, bool(retryable), int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def mark_repost_campaign_launch_job_needs_review(self, job_id: int, *, last_error: str, campaign_run_id: int | None = None) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='needs_review',
+                        last_error=%s,
+                        campaign_run_id=COALESCE(%s, campaign_run_id),
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        updated_at=NOW(),
+                        finished_at=NOW()
+                    WHERE id=%s AND status IN ('pending','processing')
+                    RETURNING *
+                    """,
+                    (last_error, campaign_run_id, int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def mark_repost_campaign_launch_job_cancelled(self, job_id: int, *, reason: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='cancelled', last_error=%s, locked_by=NULL, locked_until=NULL, updated_at=NOW(), finished_at=NOW()
+                    WHERE id=%s AND status IN ('pending','processing')
+                    RETURNING *
+                    """,
+                    (reason, int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def recover_stale_repost_campaign_launch_jobs(self, *, worker_id: str | None = None) -> dict[str, int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='needs_review',
+                        last_error='Состояние запуска неизвестно после рестарта',
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        updated_at=NOW(),
+                        finished_at=NOW()
+                    WHERE status='processing'
+                      AND locked_until IS NOT NULL
+                      AND locked_until < NOW()
+                      AND campaign_run_id IS NOT NULL
+                    """
+                )
+                needs_review = int(cur.rowcount or 0)
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='failed',
+                        last_error=COALESCE(last_error, 'Превышено число попыток запуска кампании'),
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        updated_at=NOW(),
+                        finished_at=NOW()
+                    WHERE status='processing'
+                      AND locked_until IS NOT NULL
+                      AND locked_until < NOW()
+                      AND campaign_run_id IS NULL
+                      AND attempts >= max_attempts
+                    """
+                )
+                failed = int(cur.rowcount or 0)
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='pending',
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        updated_at=NOW()
+                    WHERE status='processing'
+                      AND locked_until IS NOT NULL
+                      AND locked_until < NOW()
+                      AND campaign_run_id IS NULL
+                      AND attempts < max_attempts
+                    """
+                )
+                requeued = int(cur.rowcount or 0)
+            conn.commit()
+        return {"requeued": requeued, "needs_review": needs_review, "failed": failed}
 
     def update_campaign_run_status(self, run_id: int, *, status: str, render_mode: str | None = None, targets_success: int | None = None, targets_failed: int | None = None, error_text: str | None = None, report: dict[str, Any] | None = None, finish: bool = False) -> bool:
         set_parts = ["status=%s", "updated_at=NOW()"]

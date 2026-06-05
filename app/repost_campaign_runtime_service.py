@@ -4,7 +4,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from app.repost_campaign_service import build_campaign_delete_after_iso, format_campaign_show_seconds_ru
 from app.repost_campaign_view_model import format_campaign_error_text, format_campaign_datetime_text
@@ -704,7 +704,14 @@ class RepostCampaignRuntimeService:
         self.repo.update_campaign_run_status(run_id, status=status, render_mode=last_render_mode, targets_success=targets_success, targets_failed=targets_failed, error_text=error_text, report={"scheduled_post_id": scheduled_post_id, "launch_source": "vip_scheduled_post", "targets_total": len(targets), "targets_success": targets_success, "targets_failed": targets_failed, "run_type": run_type}, finish=True)
         return RepostCampaignActionResult(ok=status in {"sent", "partial"}, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text=(error_text or "Не удалось запустить запланированный пост") if status == "failed" else None, extra={"campaign_run_id": run_id, "scheduled_post_id": scheduled_post_id, "status": status, "targets_total": len(targets), "targets_success": targets_success, "targets_failed": targets_failed})
 
-    async def launch_campaign_now(self, *, rule_id: int, admin_id: int | None = None, run_type: str = "manual") -> RepostCampaignActionResult:
+    async def launch_campaign_now(
+        self,
+        *,
+        rule_id: int,
+        admin_id: int | None = None,
+        run_type: str = "manual",
+        on_campaign_run_created: Callable[[int], None] | None = None,
+    ) -> RepostCampaignActionResult:
         readiness = self.build_campaign_launch_readiness(rule_id=rule_id)
         if not readiness.get("can_launch"):
             return RepostCampaignActionResult(
@@ -789,6 +796,8 @@ class RepostCampaignRuntimeService:
                 saved_post_id=saved_post_id,
                 error_text="Не удалось создать запись запуска рекламной кампании",
             )
+        if on_campaign_run_created:
+            on_campaign_run_created(int(run_id))
 
         self.logger.info(
             "REPOST_CAMPAIGN_LAUNCH_STARTED | rule_id=%s | saved_post_id=%s | targets=%s | run_id=%s | run_type=%s",
