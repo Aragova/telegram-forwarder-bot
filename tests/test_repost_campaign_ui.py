@@ -1929,3 +1929,23 @@ def test_vip_scheduled_send_now_confirm_says_publish_over_active_ad():
     text, kb = build_vip_scheduled_post_send_now_confirm_view(rule_id=1, scheduled_post={"id": 10})
     assert "После подтверждения VIP-пост будет опубликован поверх неё." in text
     assert "✅ Да, отправить сейчас" in _texts_from_keyboard(kb)
+
+
+def test_scheduled_launch_needs_review_view_explains_manual_check():
+    from app.repost_campaign_ui import build_repost_campaign_scheduled_launch_detail_view
+    text, kb = build_repost_campaign_scheduled_launch_detail_view(
+        rule_id=1,
+        scheduled_launch={
+            "id": 9,
+            "status": "needs_review",
+            "scheduled_at": "2026-05-09T15:00:00+00:00",
+            "saved_post_id": 26,
+            "show_seconds": 86400,
+        },
+    )
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert "⚠️ Требуется проверка" in text
+    assert "Запуск был прерван после создания campaign_run" in text
+    assert "Автоматический повтор остановлен" in text
+    assert "🔄 Обновить" in labels
+    assert "⬅️ Назад к кампании" in labels

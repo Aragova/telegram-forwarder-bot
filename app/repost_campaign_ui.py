@@ -1305,6 +1305,7 @@ def build_repost_campaign_scheduled_launch_detail_view(*, rule_id:int, scheduled
         "scheduled": "🕒 ожидает запуска",
         "processing": "🟡 запускается",
         "failed": "❌ ошибка запуска",
+        "needs_review": "⚠️ Требуется проверка",
         "cancelled": "⛔ отменён",
         "expired": "⚪ просрочен",
     }
@@ -1316,10 +1317,20 @@ def build_repost_campaign_scheduled_launch_detail_view(*, rule_id:int, scheduled
         f"Срок размещения: {format_campaign_show_seconds_text(int(scheduled_launch.get('show_seconds') or 0))}\n"
         f"Ожидаемое удаление: {format_campaign_schedule_datetime((datetime.fromisoformat(str(scheduled_launch.get('scheduled_at')).replace('Z','+00:00')) + timedelta(seconds=int(scheduled_launch.get('show_seconds') or 0))))}"
     )
+    if status == "needs_review":
+        text += (
+            "\n\nЗапуск был прерван после создания campaign_run.\n"
+            "Автоматический повтор остановлен, чтобы не отправить рекламу дважды."
+        )
+
     rows = []
     if status == "scheduled":
         rows.append([InlineKeyboardButton(text='❌ Отменить запуск', callback_data=f"rule_repost_campaign_scheduled_cancel_confirm:{rule_id}:{scheduled_launch.get('id')}")])
-    rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_schedule_menu:{rule_id}')])
+    if status == "needs_review":
+        rows.append([InlineKeyboardButton(text='🔄 Обновить', callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{scheduled_launch.get('id')}")])
+        rows.append([InlineKeyboardButton(text='⬅️ Назад к кампании', callback_data=f'rule_repost_campaign_menu:{rule_id}')])
+    else:
+        rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_schedule_menu:{rule_id}')])
     return (text, InlineKeyboardMarkup(inline_keyboard=rows))
 
 
