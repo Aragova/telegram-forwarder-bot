@@ -29,6 +29,8 @@ class FakeRepo:
         self.launched_calls = []
         self.failed_calls = []
         self.delay_calls = []
+        self.needs_review_calls = []
+        self.set_run_id_calls = []
         self.processing_calls = []
         self.runs = {}
 
@@ -72,9 +74,32 @@ class FakeRepo:
     def reset_stuck_campaign_scheduled_posts(self, *, stuck_seconds=300): return 0
     def claim_due_campaign_scheduled_posts(self, **kwargs): return []
     def mark_campaign_scheduled_post_launched(self, scheduled_post_id, *, campaign_run_id):
-        self.launched_calls.append((scheduled_post_id, campaign_run_id)); return True
+        self.launched_calls.append((scheduled_post_id, campaign_run_id))
+        if scheduled_post_id in self.posts:
+            self.posts[scheduled_post_id]["status"] = "launched"
+            self.posts[scheduled_post_id]["campaign_run_id"] = campaign_run_id
+        return True
     def mark_campaign_scheduled_post_failed(self, scheduled_post_id, *, error_text, campaign_run_id=None):
-        self.failed_calls.append((scheduled_post_id, error_text, campaign_run_id)); return True
+        self.failed_calls.append((scheduled_post_id, error_text, campaign_run_id))
+        if scheduled_post_id in self.posts:
+            self.posts[scheduled_post_id]["status"] = "failed"
+            if campaign_run_id is not None:
+                self.posts[scheduled_post_id]["campaign_run_id"] = campaign_run_id
+        return True
+    def mark_campaign_scheduled_post_needs_review(self, scheduled_post_id, *, error_text, campaign_run_id=None):
+        self.needs_review_calls.append((scheduled_post_id, error_text, campaign_run_id))
+        if scheduled_post_id in self.posts:
+            self.posts[scheduled_post_id]["status"] = "needs_review"
+            if campaign_run_id is not None:
+                self.posts[scheduled_post_id]["campaign_run_id"] = campaign_run_id
+        return True
+    def set_campaign_scheduled_post_campaign_run_id(self, scheduled_post_id, campaign_run_id):
+        self.set_run_id_calls.append((scheduled_post_id, campaign_run_id))
+        row = self.posts.get(scheduled_post_id)
+        if not row or row.get("status") != "processing" or row.get("campaign_run_id") is not None:
+            return False
+        row["campaign_run_id"] = campaign_run_id
+        return True
     def mark_campaign_scheduled_post_processing(self, scheduled_post_id, *, actor_id=None):
         row=self.posts.get(scheduled_post_id)
         if not row or row.get("campaign_run_id") is not None or row.get("status") not in {"draft","ready","scheduled"}:
@@ -369,7 +394,7 @@ def _mk_runtime_result(ok, run_id=None, error_text=None):
     return type("R", (), {"ok": ok, "extra": {"campaign_run_id": run_id} if run_id else {}, "error_text": error_text})()
 
 
-def test_process_due_posts_delays_when_active_placement():
+def test_process_due_posts_launches_when_active_placement():
     import asyncio
     repo = FakeRepo(); repo.rules[1]=Rule(1); repo.saved_posts[7]={"id":7}
     row={"id":1,"rule_id":1,"saved_post_id":7,"show_seconds":60,"status":"processing","campaign_run_id":None,"attempt_count":0}
@@ -377,8 +402,9 @@ def test_process_due_posts_delays_when_active_placement():
     rt=FakeRuntimeLaunch(_mk_runtime_result(True,77), active=True)
     service=RepostCampaignScheduledPostService(repo=repo,campaign_runtime=rt)
     asyncio.run(service.process_due_posts(worker_id='w'))
-    assert not rt.calls and repo.delay_calls
-    assert any(len(call) == 4 and call[3] == "until" for call in repo.delay_calls)
+    assert rt.calls and not repo.delay_calls
+    assert repo.launched_calls
+    assert any(x["event_type"] == "launch_active_placement_warning" for x in repo.events[1])
     assert not repo.failed_calls
 
 
@@ -506,9 +532,11 @@ def test_send_now_rejects_terminal_statuses():
     assert not out.ok
 
 
-def test_send_now_blocks_active_placement():
+def test_send_now_allows_active_placement_with_warning():
     import asyncio
-    service, repo = make_service(active=True)
+    rt = FakeRuntimeLaunch(type('R',(),{'ok':True,'extra':{'campaign_run_id': 88},'error_text':None, 'to_dict': lambda self: {}})(), active=True)
+    repo = FakeRepo(); repo.rules[1] = Rule(1)
+    service = RepostCampaignScheduledPostService(repo=repo, campaign_runtime=rt)
     sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
     repo.saved_posts[1] = {"id": 1, "title": "t", "content_json": {"kind": "text", "media_items": []}}
     service.update_draft_saved_post(scheduled_post_id=sid, saved_post_id=1)
@@ -516,8 +544,8 @@ def test_send_now_blocks_active_placement():
     service.update_draft_scheduled_at(scheduled_post_id=sid, scheduled_at_utc=datetime.now(timezone.utc)+timedelta(minutes=2))
     repo.post_targets[sid] = [{"id": 1, "target_id": "-1", "publish_status": "confirmed", "delete_status": "confirmed", "can_publish": True}]
     out = asyncio.run(service.send_now(scheduled_post_id=sid))
-    assert not out.ok
-    assert "активно другое размещение" in (out.error_text or "")
+    assert out.ok
+    assert any(x["event_type"] == "send_now_active_placement_warning" for x in repo.events[sid])
 
 
 def test_send_now_launches_from_snapshot():
@@ -545,9 +573,11 @@ def test_send_now_rejects_when_campaign_run_exists():
     assert not out.ok
     assert "уже запускался" in (out.error_text or "")
 
-def test_send_now_blocks_delete_failed():
+def test_send_now_allows_delete_failed_warning():
     import asyncio
-    service, repo = make_service()
+    rt = FakeRuntimeLaunch(type('R',(),{'ok':True,'extra':{'campaign_run_id': 89},'error_text':None, 'to_dict': lambda self: {}})())
+    repo = FakeRepo(); repo.rules[1] = Rule(1)
+    service = RepostCampaignScheduledPostService(repo=repo, campaign_runtime=rt)
     sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
     repo.saved_posts[1] = {"id": 1, "title": "t", "content_json": {"kind": "text", "media_items": []}}
     service.update_draft_saved_post(scheduled_post_id=sid, saved_post_id=1)
@@ -557,7 +587,8 @@ def test_send_now_blocks_delete_failed():
     service.campaign_runtime.active = False
     service.campaign_runtime.build_campaign_launch_readiness = lambda **k: {"active_placement": False, "delete_failed": 1}
     out = asyncio.run(service.send_now(scheduled_post_id=sid))
-    assert not out.ok
+    assert out.ok
+    assert any(x["event_type"] == "send_now_active_placement_warning" for x in repo.events[sid])
 
 def test_send_now_cannot_double_launch_same_scheduled_post():
     import asyncio
@@ -585,3 +616,73 @@ def test_send_now_failure_without_run_id_resets_status_and_lock():
     assert not out.ok
     assert repo.posts[sid]["status"] == "scheduled"
     assert repo.posts[sid].get("locked_by") is None
+
+
+
+def test_process_due_posts_launches_multiple_due_posts_even_after_first_active():
+    import asyncio
+    repo = FakeRepo(); repo.rules[1] = Rule(1); repo.saved_posts[7] = {"id": 7}
+    rows = []
+    for sid in (1, 2, 3):
+        row = {"id": sid, "rule_id": 1, "saved_post_id": 7, "show_seconds": 60 * sid, "status": "processing", "campaign_run_id": None, "attempt_count": 0}
+        repo.posts[sid] = row
+        repo.post_targets[sid] = [{"target_id": f"-100{sid}", "target_kind": "main"}]
+        rows.append(row)
+    repo.claim_due_campaign_scheduled_posts = lambda **kwargs: rows
+
+    class MultiRuntime(FakeCampaignRuntime):
+        def __init__(self):
+            super().__init__(active=True)
+            self.calls = []
+            self.next_run_id = 700
+        async def launch_campaign_from_snapshot(self, **kwargs):
+            self.calls.append(kwargs)
+            self.next_run_id += 1
+            cb = kwargs.get("on_campaign_run_created")
+            if cb:
+                cb(self.next_run_id)
+            return _mk_runtime_result(True, self.next_run_id)
+
+    rt = MultiRuntime()
+    service = RepostCampaignScheduledPostService(repo=repo, campaign_runtime=rt)
+    asyncio.run(service.process_due_posts(worker_id="w"))
+    assert len(rt.calls) == 3
+    assert len(repo.launched_calls) == 3
+    assert [c[1] for c in repo.launched_calls] == [701, 702, 703]
+    assert not repo.delay_calls
+
+
+def test_vip_idempotency_callback_sets_run_id_and_exception_needs_review():
+    import asyncio
+    repo = FakeRepo(); repo.rules[1] = Rule(1); repo.saved_posts[7] = {"id": 7}
+    row = {"id": 1, "rule_id": 1, "saved_post_id": 7, "show_seconds": 60, "status": "processing", "campaign_run_id": None, "attempt_count": 0}
+    repo.posts[1] = row
+    repo.post_targets[1] = [{"target_id": "-1"}]
+    repo.claim_due_campaign_scheduled_posts = lambda **k: [row]
+
+    class CrashAfterRun(FakeCampaignRuntime):
+        def __init__(self):
+            super().__init__(active=False)
+            self.calls = 0
+        async def launch_campaign_from_snapshot(self, **kwargs):
+            self.calls += 1
+            kwargs["on_campaign_run_created"](123)
+            raise RuntimeError("boom")
+
+    rt = CrashAfterRun()
+    service = RepostCampaignScheduledPostService(repo=repo, campaign_runtime=rt)
+    asyncio.run(service.process_due_posts(worker_id="w"))
+    assert repo.posts[1]["campaign_run_id"] == 123
+    assert repo.posts[1]["status"] == "needs_review"
+    assert repo.needs_review_calls
+    assert not repo.delay_calls
+    before = rt.calls
+    asyncio.run(service.process_due_posts(worker_id="w"))
+    assert rt.calls == before
+
+
+def test_vip_scheduled_post_service_source_guard_no_active_placement_blocking_error():
+    source = Path("app/repost_campaign_scheduled_post_service.py").read_text(encoding="utf-8")
+    assert "Предыдущий рекламный пост активен" + " до" not in source
+    assert "launch_delayed_active_placement" not in source
+    assert "delay_campaign_scheduled_post_until" not in source

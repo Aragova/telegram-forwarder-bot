@@ -362,7 +362,7 @@ def test_build_telegram_message_url_private_channel():
 
 
 def test_delete_preview_uses_delete_messages_for_album():
-    deleter = _FakeDeleter()
+    deleter = _FakeDeleter(result=SimpleNamespace(ok=True, error_text=None, method="bot_api"))
     runtime = RepostCampaignRuntimeService(repo=_FakeRepo(rule=SimpleNamespace(mode="repost"), saved_post={}), renderer=_FakeRenderer(None), deleter=deleter)
     result = asyncio.run(runtime.delete_preview_messages(target_id="-1001", message_ids=[1, 2, 3], render_mode="telethon_builder"))
     assert result.ok is True
@@ -371,7 +371,7 @@ def test_delete_preview_uses_delete_messages_for_album():
 
 
 def test_delete_preview_single_message():
-    deleter = _FakeDeleter()
+    deleter = _FakeDeleter(result=SimpleNamespace(ok=True, error_text=None, method="bot_api"))
     runtime = RepostCampaignRuntimeService(repo=_FakeRepo(rule=SimpleNamespace(mode="repost"), saved_post={}), renderer=_FakeRenderer(None), deleter=deleter)
     result = asyncio.run(runtime.delete_preview_messages(target_id="-1001", message_id=10, render_mode="bot_api"))
     assert result.ok is True
@@ -1464,3 +1464,44 @@ def test_launch_campaign_now_calls_on_campaign_run_created_before_targets():
     assert result.ok is True
     assert seen_run_ids == [repo.next_run_id]
     assert events[:4] == ["create_run", "callback", "create_message", "send"]
+
+
+def test_launch_campaign_from_snapshot_calls_run_created_callback_before_messages():
+    rule = SimpleNamespace(mode="repost", target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}})
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", chat_id="-1001", message_id=1))
+    order = []
+    original_create_message = repo.create_campaign_run_message
+    def create_message_with_order(**kwargs):
+        order.append("message")
+        return original_create_message(**kwargs)
+    repo.create_campaign_run_message = create_message_with_order
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    result = asyncio.run(runtime.launch_campaign_from_snapshot(
+        rule_id=1,
+        saved_post_id=55,
+        show_seconds=3600,
+        targets_snapshot=[{"target_kind": "main", "target_id": "-1001"}],
+        scheduled_post_id=10,
+        on_campaign_run_created=lambda run_id: order.append(("callback", run_id)),
+    ))
+    assert result.ok
+    assert order[0] == ("callback", repo.next_run_id)
+    assert order[1] == "message"
+
+
+def test_process_due_deletions_deletes_only_claimed_due_run_messages():
+    repo = _FakeRepo(rule=SimpleNamespace(mode="repost"), saved_post={"content_json": {"kind": "text"}})
+    repo._messages = [
+        {"id": 21, "run_id": 100, "rule_id": 1, "target_id": "-1", "sent_message_id": 501, "send_status": "sent", "delete_status": "pending", "views_final_status": "unavailable"},
+        {"id": 22, "run_id": 200, "rule_id": 1, "target_id": "-2", "sent_message_id": 502, "send_status": "sent", "delete_status": "pending", "views_final_status": "unavailable"},
+    ]
+    repo._due_delete_rows = [repo._messages[0]]
+    deleter = _FakeDeleter(result=SimpleNamespace(ok=True, error_text=None, method="bot_api"))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=deleter)
+    result = asyncio.run(runtime.process_due_deletions(limit=50))
+    assert result["deleted"] == 1
+    assert repo.mark_campaign_run_message_deleted_calls == [21]
+    assert repo._messages[0]["delete_status"] == "deleted"
+    assert repo._messages[1]["delete_status"] == "pending"
+    assert deleter.delete_message_calls[0]["target_id"] == "-1"
