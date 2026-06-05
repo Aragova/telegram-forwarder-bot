@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -7,6 +9,7 @@ from app.repost_campaign_context import RepostCampaignHandlersContext, build_rep
 from app.repost_campaign_service import format_campaign_show_seconds_ru, normalize_campaign_show_seconds
 from app.repost_campaign_ui import (
     build_repost_campaign_launch_mode_view,
+    build_repost_campaign_launch_progress_view,
     build_repost_campaign_launch_readiness_view,
     build_repost_campaign_launch_result_view,
     build_repost_campaign_menu_view,
@@ -349,6 +352,36 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             return
         await ctx.answer_callback_safe_once(callback)
 
+    async def _run_repost_campaign_launch_in_background(*, rule_id: int, admin_id: int | None, progress_message) -> None:
+        try:
+            ctx.logger.info("REPOST_CAMPAIGN_LAUNCH_CONFIRM_STARTED | rule_id=%s", rule_id)
+            runtime = build_repost_campaign_runtime(ctx)
+            readiness = await ctx.run_db(lambda: runtime.build_campaign_launch_readiness(rule_id=rule_id))
+            if not readiness.get("can_launch"):
+                ctx.logger.info("REPOST_CAMPAIGN_LAUNCH_CONFIRM_BLOCKED | rule_id=%s", rule_id)
+                text, keyboard = build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)
+                await ctx.edit_message_text_safe(message=progress_message, text=text, reply_markup=keyboard)
+                return
+            result = await runtime.launch_campaign_now(
+                rule_id=rule_id,
+                admin_id=admin_id,
+            )
+            text, keyboard = build_repost_campaign_launch_result_view(rule_id=rule_id, result=result)
+            await ctx.edit_message_text_safe(message=progress_message, text=text, reply_markup=keyboard)
+            ctx.logger.info(
+                "REPOST_CAMPAIGN_LAUNCH_UI_DONE | rule_id=%s | ok=%s | run_id=%s",
+                rule_id,
+                result.ok,
+                (result.extra or {}).get("campaign_run_id"),
+            )
+        except Exception as exc:
+            ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            await ctx.edit_message_text_safe(
+                message=progress_message,
+                text="❌ Не удалось запустить кампанию\n\nПроверьте настройки кампании и попробуйте ещё раз.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")]]),
+            )
+
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_confirm:"))
     async def handle_rule_repost_campaign_launch_confirm(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
@@ -361,39 +394,43 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         except Exception:
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
+
+        await ctx.answer_callback_safe_once(callback, "🚀 Запуск кампании начат")
+
+        text, keyboard = build_repost_campaign_launch_progress_view(rule_id=rule_id)
+        progress_message = callback.message
         try:
-            ctx.logger.info("REPOST_CAMPAIGN_LAUNCH_CONFIRM_STARTED | rule_id=%s", rule_id)
-            runtime = build_repost_campaign_runtime(ctx)
-            readiness = await ctx.run_db(lambda: runtime.build_campaign_launch_readiness(rule_id=rule_id))
-            if not readiness.get("can_launch"):
-                ctx.logger.info("REPOST_CAMPAIGN_LAUNCH_CONFIRM_BLOCKED | rule_id=%s", rule_id)
-                text, keyboard = build_repost_campaign_launch_mode_view(rule_id=rule_id, readiness=readiness)
-                if ctx.should_answer_new_message_for_callback(callback):
-                    await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
-                else:
-                    await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-                await ctx.answer_callback_safe_once(callback)
-                return
-            result = await runtime.launch_campaign_now(
-                rule_id=rule_id,
-                admin_id=callback.from_user.id if callback.from_user else None,
-            )
-            text, keyboard = build_repost_campaign_launch_result_view(rule_id=rule_id, result=result)
             if ctx.should_answer_new_message_for_callback(callback):
-                await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
+                sent_message = await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
+                if sent_message is not None:
+                    progress_message = sent_message
             else:
                 await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-            ctx.logger.info(
-                "REPOST_CAMPAIGN_LAUNCH_UI_DONE | rule_id=%s | ok=%s | run_id=%s",
-                rule_id,
-                result.ok,
-                (result.extra or {}).get("campaign_run_id"),
-            )
         except Exception as exc:
-            ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
-            await ctx.answer_callback_safe(callback, "Не удалось запустить кампанию", show_alert=True)
-            return
-        await ctx.answer_callback_safe_once(callback)
+            ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_PROGRESS_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+
+        task = asyncio.create_task(
+            _run_repost_campaign_launch_in_background(
+                rule_id=rule_id,
+                admin_id=callback.from_user.id if callback.from_user else None,
+                progress_message=progress_message,
+            )
+        )
+
+        def _log_repost_campaign_launch_task_result(done_task: asyncio.Task) -> None:
+            if done_task.cancelled():
+                ctx.logger.info("REPOST_CAMPAIGN_LAUNCH_TASK_CANCELLED | rule_id=%s", rule_id)
+                return
+            exc = done_task.exception()
+            if exc:
+                ctx.logger.warning(
+                    "REPOST_CAMPAIGN_LAUNCH_TASK_FAILED | rule_id=%s | error=%s",
+                    rule_id,
+                    exc,
+                    exc_info=True,
+                )
+
+        task.add_done_callback(_log_repost_campaign_launch_task_result)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_preview:"))
     async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):

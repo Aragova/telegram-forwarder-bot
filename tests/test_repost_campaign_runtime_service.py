@@ -1121,6 +1121,25 @@ def test_build_launch_readiness_ready():
     assert readiness["extra_paused"] == 1
     assert readiness["extra_problem"] == 0
 
+def test_build_launch_readiness_deduplicates_ready_targets_like_launch():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=300, target_id="-1001", target_thread_id=None)
+    repo = _FakeRepo(rule=rule, saved_post={"id": 55})
+    repo._targets = [
+        {"id": 1, "target_id": "-1001", "target_thread_id": None, "is_active": True, "last_check_error": None},
+        {"id": 2, "target_id": "-1002", "target_thread_id": None, "is_active": True, "last_check_error": None},
+        {"id": 3, "target_id": "-1002", "target_thread_id": None, "is_active": True, "last_check_error": None},
+    ]
+
+    readiness = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None)).build_campaign_launch_readiness(rule_id=1)
+
+    assert readiness["can_launch"] is True
+    assert readiness["will_send_total"] == 2
+    assert readiness["extra_ready"] == 1
+    assert readiness["extra_ready_raw"] == 3
+    assert readiness["extra_ready_duplicates"] == 2
+    assert [row["target_id"] for row in readiness["ready_extra_targets"]] == ["-1002"]
+
+
 def test_build_launch_readiness_blocks_active_problem():
     rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=300, target_id="-1001")
     repo = _FakeRepo(rule=rule, saved_post={"id":55})
