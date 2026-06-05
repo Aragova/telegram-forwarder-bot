@@ -68,6 +68,13 @@ class FakeLaunchJobRepo:
         job["locked_by"] = worker_id
         return self._copy(job)
 
+    def set_repost_campaign_launch_job_campaign_run_id(self, job_id, campaign_run_id):
+        job = self.jobs.get(int(job_id))
+        if not job or job["status"] != "processing":
+            return None
+        job["campaign_run_id"] = int(campaign_run_id)
+        return self._copy(job)
+
     def mark_repost_campaign_launch_job_sent(self, job_id, *, campaign_run_id, result_json):
         job = self.jobs[int(job_id)]
         job.update(status="sent", campaign_run_id=campaign_run_id, result_json=result_json, locked_by=None, locked_until=None)
@@ -126,13 +133,17 @@ class FakeRuntime:
     def build_campaign_launch_readiness(self, *, rule_id):
         return {"can_launch": self.can_launch, "rule_id": rule_id, "will_send_total": 1}
 
-    async def launch_campaign_now(self, *, rule_id, admin_id=None, run_type="manual"):
+    async def launch_campaign_now(self, *, rule_id, admin_id=None, run_type="manual", on_campaign_run_created=None):
         self.launch_calls += 1
         if self.creates_run_before_raise:
             self.repo.runs.append({"id": 77, "rule_id": int(rule_id)})
+            if on_campaign_run_created:
+                on_campaign_run_created(77)
         if self.raises:
             raise RuntimeError("boom")
         self.repo.runs.append({"id": 42, "rule_id": int(rule_id)})
+        if on_campaign_run_created:
+            on_campaign_run_created(42)
         return SimpleNamespace(to_dict=lambda: {"ok": True, "extra": {"campaign_run_id": 42, "targets_success": 1, "targets_failed": 0}})
 
 
@@ -241,4 +252,17 @@ def test_stale_processing_with_campaign_run_moves_to_needs_review():
         summary = await service.recover_stale_jobs(worker_id="w1")
         assert summary["needs_review"] == 1
         assert repo.jobs[job["id"]]["status"] == "needs_review"
+    asyncio.run(_run())
+
+
+def test_campaign_run_id_is_persisted_before_send_completes():
+    async def _run():
+        repo, runtime, service = make_service(FakeRuntime(raises=True, creates_run_before_raise=True))
+        job = service.enqueue_manual_launch(rule_id=4, admin_id=10, progress_chat_id=None, progress_message_id=None).job
+        leased = repo.lease_repost_campaign_launch_job(job["id"], "w1", 60)
+        await service.run_once(job=leased, worker_id="w1")
+        stored = repo.jobs[job["id"]]
+        assert runtime.launch_calls == 1
+        assert stored["campaign_run_id"] == 77
+        assert stored["status"] == "needs_review"
     asyncio.run(_run())

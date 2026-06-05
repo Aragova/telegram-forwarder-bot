@@ -72,6 +72,7 @@ def test_repost_campaign_repository_methods_exist():
         "get_due_repost_campaign_launch_jobs",
         "lease_repost_campaign_launch_job",
         "mark_repost_campaign_launch_job_processing",
+        "set_repost_campaign_launch_job_campaign_run_id",
         "mark_repost_campaign_launch_job_sent",
         "mark_repost_campaign_launch_job_failed",
         "mark_repost_campaign_launch_job_needs_review",

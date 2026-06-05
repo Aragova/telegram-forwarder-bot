@@ -7803,6 +7803,22 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
         return self._normalize_repost_campaign_launch_job_row(row)
 
+    def set_repost_campaign_launch_job_campaign_run_id(self, job_id: int, campaign_run_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET campaign_run_id=%s, updated_at=NOW()
+                    WHERE id=%s AND status='processing'
+                    RETURNING *
+                    """,
+                    (int(campaign_run_id), int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
     def mark_repost_campaign_launch_job_sent(self, job_id: int, *, campaign_run_id: int | None, result_json: dict[str, Any] | None) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:

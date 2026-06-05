@@ -119,9 +119,28 @@ class RepostCampaignLaunchJobService:
                 self.logger.info("REPOST_CAMPAIGN_LAUNCH_JOB_BLOCKED | job_id=%s | rule_id=%s", job_id, rule_id)
                 return updated
 
-            result = await self.campaign_runtime.launch_campaign_now(rule_id=rule_id, admin_id=admin_id, run_type="manual")
+            remembered_campaign_run_id: int | None = None
+
+            def _remember_campaign_run_id(campaign_run_id: int) -> None:
+                nonlocal remembered_campaign_run_id
+                remembered_campaign_run_id = int(campaign_run_id)
+                updated_job = self.repo.set_repost_campaign_launch_job_campaign_run_id(job_id, int(campaign_run_id))
+                if not updated_job:
+                    raise RuntimeError("Не удалось сохранить campaign_run_id для durable job запуска кампании")
+
+            result = await self.campaign_runtime.launch_campaign_now(
+                rule_id=rule_id,
+                admin_id=admin_id,
+                run_type="manual",
+                on_campaign_run_created=_remember_campaign_run_id,
+            )
             result_json = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})
-            campaign_run_id = (result_json.get("extra") or {}).get("campaign_run_id") or self._detect_new_campaign_run_id(rule_id, before_run_id)
+            campaign_run_id = (
+                (result_json.get("extra") or {}).get("campaign_run_id")
+                or remembered_campaign_run_id
+                or self._get_job_campaign_run_id(job_id)
+                or self._detect_new_campaign_run_id(rule_id, before_run_id)
+            )
             updated = self.repo.mark_repost_campaign_launch_job_sent(job_id, campaign_run_id=campaign_run_id, result_json=result_json)
             await self._update_progress_message(rule_id=rule_id, job=updated or {**job, "status": "sent", "result_json": result_json, "campaign_run_id": campaign_run_id})
             self.logger.info(
@@ -133,7 +152,8 @@ class RepostCampaignLaunchJobService:
             )
             return updated
         except Exception as exc:
-            detected_run_id = job.get("campaign_run_id") or self._detect_new_campaign_run_id(rule_id, before_run_id)
+            latest_job = self.repo.get_repost_campaign_launch_job(job_id) or job
+            detected_run_id = (latest_job or {}).get("campaign_run_id") or self._detect_new_campaign_run_id(rule_id, before_run_id)
             error_text = str(exc) or "Неизвестная ошибка запуска кампании"
             if detected_run_id:
                 updated = self.repo.mark_repost_campaign_launch_job_needs_review(
@@ -188,6 +208,18 @@ class RepostCampaignLaunchJobService:
         if latest is not None and latest != before_run_id:
             return latest
         return None
+
+    def _get_job_campaign_run_id(self, job_id: int) -> int | None:
+        try:
+            job = self.repo.get_repost_campaign_launch_job(int(job_id))
+        except Exception:
+            return None
+        if not job or job.get("campaign_run_id") is None:
+            return None
+        try:
+            return int(job.get("campaign_run_id"))
+        except Exception:
+            return None
 
     async def _update_progress_message(self, *, rule_id: int, job: dict[str, Any]) -> None:
         if self.bot is None:
