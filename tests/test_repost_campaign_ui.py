@@ -739,7 +739,7 @@ def test_bot_has_campaign_target_callbacks_and_card_import():
     assert "build_repost_campaign_target_card_view" in source
 
 
-def test_campaign_delete_loop_runtime_gets_telethon_client_in_bot_role():
+def test_campaign_runtime_tasks_started_in_bot_role():
     source = Path("bot.py").read_text(encoding="utf-8")
 
     marker = "async def _start_bot_role()"
@@ -747,12 +747,11 @@ def test_campaign_delete_loop_runtime_gets_telethon_client_in_bot_role():
     end = source.index("async def _start_scheduler_role()", start)
     block = source[start:end]
 
-    assert "run_repost_campaign_delete_loop(runtime=delete_runtime" in block
-    assert "delete_runtime = RepostCampaignRuntimeService(" in block
-    assert "telethon_client=telethon_client" in block
+    assert '_start_repost_campaign_runtime_tasks(role="bot")' in block
+    assert "run_repost_campaign_delete_loop" not in block
 
 
-def test_campaign_delete_loop_runtime_gets_telethon_client_in_all_role():
+def test_campaign_runtime_tasks_started_in_all_role():
     source = Path("bot.py").read_text(encoding="utf-8")
 
     marker = "async def _start_all_role()"
@@ -760,9 +759,8 @@ def test_campaign_delete_loop_runtime_gets_telethon_client_in_all_role():
     end = source.index("async def main()", start) if "async def main()" in source[start:] else len(source)
     block = source[start:end]
 
-    assert "run_repost_campaign_delete_loop(runtime=delete_runtime" in block
-    assert "delete_runtime = RepostCampaignRuntimeService(" in block
-    assert "telethon_client=telethon_client" in block
+    assert '_start_repost_campaign_runtime_tasks(role="all")' in block
+    assert "run_repost_campaign_delete_loop" not in block
 
 
 def test_saved_post_action_callbacks_moved_to_report_handlers_module():
@@ -1517,23 +1515,26 @@ def test_vip_scheduled_pick_targets_shows_add_page_when_paginated():
     assert "➕ Добавить все" in labels
 
 
-def test_bot_imports_vip_scheduled_post_loop():
+def test_bot_imports_campaign_runtime_tasks_manager():
     source = Path("bot.py").read_text(encoding="utf-8")
-    assert "run_repost_campaign_scheduled_post_loop" in source
-    assert "RepostCampaignScheduledPostService" in source
+    assert "RepostCampaignRuntimeTasks" in source
+    assert "run_repost_campaign_scheduled_post_loop" not in source
+    assert "RepostCampaignScheduledPostService" not in source
 
 
-def test_bot_starts_vip_scheduled_post_loop_with_create_task():
-    source = Path("bot.py").read_text(encoding="utf-8")
-    assert "asyncio.create_task(" in source
-    assert "run_repost_campaign_scheduled_post_loop(" in source
-    assert "vip-scheduled-post:" in source
+def test_bot_starts_vip_scheduled_post_loop_via_runtime_tasks_manager():
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    runtime_source = Path("app/repost_campaign_runtime_tasks.py").read_text(encoding="utf-8")
+    assert "_start_repost_campaign_runtime_tasks" in bot_source
+    assert "run_repost_campaign_scheduled_post_loop(" in runtime_source
+    assert "vip-scheduled-post:" in runtime_source
 
 
-def test_bot_vip_scheduled_post_loop_uses_existing_builder():
-    source = Path("bot.py").read_text(encoding="utf-8")
-    assert "_build_repost_campaign_scheduled_post_service()" in source
-    assert "scheduled_post_runtime = _build_repost_campaign_scheduled_post_service()" in source
+def test_bot_vip_scheduled_post_loop_uses_runtime_tasks_builder():
+    bot_source = Path("bot.py").read_text(encoding="utf-8")
+    runtime_source = Path("app/repost_campaign_runtime_tasks.py").read_text(encoding="utf-8")
+    assert "_build_repost_campaign_scheduled_post_service()" not in bot_source
+    assert "def _build_scheduled_post_runtime" in runtime_source
 
 
 from app.repost_campaign_ui import build_vip_scheduled_post_detail_view
