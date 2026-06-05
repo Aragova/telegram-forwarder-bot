@@ -373,6 +373,71 @@ def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[s
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _repost_campaign_launch_job_keyboard(rule_id: int, job_id: int | None) -> InlineKeyboardMarkup:
+    rows = []
+    if job_id:
+        rows.append([InlineKeyboardButton(text="🔄 Обновить статус", callback_data=f"rule_repost_campaign_launch_job_status:{rule_id}:{job_id}")])
+    rows.append([InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_launch_queued_view(*, rule_id: int, job_id: int | None) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🚀 Кампания поставлена в очередь\n\n"
+        "Статус: ожидает отправки.\n"
+        "Бот скоро начнёт рассылку.\n\n"
+        "Можно закрыть это окно — процесс продолжится в фоне."
+    )
+    return text, _repost_campaign_launch_job_keyboard(rule_id, job_id)
+
+
+def build_repost_campaign_launch_needs_review_view(*, rule_id: int, job: dict) -> tuple[str, InlineKeyboardMarkup]:
+    job_id = int(job.get("id") or 0) if job else None
+    text = (
+        "⚠️ Требуется проверка\n\n"
+        "Сервер был перезапущен или состояние запуска неизвестно.\n"
+        "Автоматический повтор остановлен, чтобы не отправить рекламу дважды."
+    )
+    last_error = (job or {}).get("last_error")
+    if last_error:
+        text += f"\n\nПричина: {last_error}"
+    return text, _repost_campaign_launch_job_keyboard(rule_id, job_id)
+
+
+def build_repost_campaign_launch_job_status_view(*, rule_id: int, job: dict) -> tuple[str, InlineKeyboardMarkup]:
+    payload = dict(job or {})
+    status = str(payload.get("status") or "pending").strip().lower()
+    job_id = int(payload.get("id") or 0) if payload.get("id") is not None else None
+    if status == "needs_review":
+        return build_repost_campaign_launch_needs_review_view(rule_id=rule_id, job=payload)
+    if status == "processing":
+        text = (
+            "🚀 Кампания отправляется\n\n"
+            "Статус: идёт рассылка.\n"
+            "Можно закрыть это окно — процесс продолжится в фоне."
+        )
+        return text, _repost_campaign_launch_job_keyboard(rule_id, job_id)
+    if status == "sent":
+        result_json = payload.get("result_json") or {}
+        if result_json:
+            return build_repost_campaign_launch_result_view(rule_id=rule_id, result=result_json)
+        text = "✅ Кампания завершена\n\nСтатус: рассылка завершена."
+        return text, _repost_campaign_launch_job_keyboard(rule_id, job_id)
+    if status == "failed":
+        text = (
+            "❌ Кампания не запущена\n\n"
+            f"Причина: {payload.get('last_error') or 'неизвестная ошибка'}"
+        )
+        return text, _repost_campaign_launch_job_keyboard(rule_id, job_id)
+    if status == "cancelled":
+        text = (
+            "🚫 Запуск отменён\n\n"
+            f"Причина: {payload.get('last_error') or 'запуск отменён'}"
+        )
+        return text, _repost_campaign_launch_job_keyboard(rule_id, job_id)
+    return build_repost_campaign_launch_queued_view(rule_id=rule_id, job_id=job_id)
+
+
 def build_repost_campaign_launch_readiness_view(*, rule_id: int, readiness: dict, now: datetime | None = None) -> tuple[str, InlineKeyboardMarkup]:
     vm = build_campaign_launch_readiness_view_model(readiness=readiness, now=now)
     saved_post_ready = bool(readiness.get("saved_post_id")) and readiness.get("saved_post_exists") is not False

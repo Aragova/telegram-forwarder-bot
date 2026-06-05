@@ -66,6 +66,17 @@ def test_repost_campaign_repository_methods_exist():
         "get_campaign_run_message",
         "list_campaign_runs_for_rule",
         "list_campaign_run_messages",
+        "create_repost_campaign_launch_job",
+        "get_active_repost_campaign_launch_job_for_rule",
+        "get_repost_campaign_launch_job",
+        "get_due_repost_campaign_launch_jobs",
+        "lease_repost_campaign_launch_job",
+        "mark_repost_campaign_launch_job_processing",
+        "mark_repost_campaign_launch_job_sent",
+        "mark_repost_campaign_launch_job_failed",
+        "mark_repost_campaign_launch_job_needs_review",
+        "mark_repost_campaign_launch_job_cancelled",
+        "recover_stale_repost_campaign_launch_jobs",
     ]
     for name in required:
         assert hasattr(repo, name)

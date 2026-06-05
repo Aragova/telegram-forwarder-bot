@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from app.repost_campaign_delete_service import RepostCampaignDeleteService, run_repost_campaign_delete_loop
+from app.repost_campaign_launch_job_service import RepostCampaignLaunchJobService, run_repost_campaign_launch_job_loop
 from app.repost_campaign_runtime_service import RepostCampaignRuntimeService
 from app.repost_campaign_schedule_service import RepostCampaignScheduleService, run_repost_campaign_scheduled_launch_loop
 from app.repost_campaign_scheduled_post_service import RepostCampaignScheduledPostService, run_repost_campaign_scheduled_post_loop
@@ -29,6 +30,8 @@ class RepostCampaignRuntimeTasks:
         delete_batch_limit: int = 50,
         scheduled_launch_interval_seconds: int = 15,
         scheduled_post_interval_seconds: int = 15,
+        launch_job_interval_seconds: int = 15,
+        launch_job_batch_limit: int = 5,
     ) -> None:
         self.repo = repo
         self.bot = bot
@@ -41,6 +44,8 @@ class RepostCampaignRuntimeTasks:
         self.delete_batch_limit = int(delete_batch_limit)
         self.scheduled_launch_interval_seconds = int(scheduled_launch_interval_seconds)
         self.scheduled_post_interval_seconds = int(scheduled_post_interval_seconds)
+        self.launch_job_interval_seconds = int(launch_job_interval_seconds)
+        self.launch_job_batch_limit = int(launch_job_batch_limit)
         self._tasks: list[asyncio.Task] = []
 
     def is_running(self) -> bool:
@@ -60,6 +65,7 @@ class RepostCampaignRuntimeTasks:
             campaign_runtime = self._build_campaign_runtime()
             schedule_runtime = RepostCampaignScheduleService(repo=self.repo, campaign_runtime=campaign_runtime, logger_=self.logger)
             scheduled_post_runtime = self._build_scheduled_post_runtime(campaign_runtime)
+            launch_job_runtime = RepostCampaignLaunchJobService(repo=self.repo, campaign_runtime=campaign_runtime, bot=self.bot, logger_=self.logger)
 
             self._create_task(
                 "repost_campaign_delete_loop",
@@ -83,6 +89,15 @@ class RepostCampaignRuntimeTasks:
                     runtime=scheduled_post_runtime,
                     interval_seconds=self.scheduled_post_interval_seconds,
                     worker_id=f"vip-scheduled-post:{self.role}",
+                ),
+            )
+            self._create_task(
+                "repost_campaign_launch_job_loop",
+                run_repost_campaign_launch_job_loop(
+                    service=launch_job_runtime,
+                    interval_seconds=self.launch_job_interval_seconds,
+                    worker_id=f"repost-campaign-launch:{self.role}",
+                    batch_limit=self.launch_job_batch_limit,
                 ),
             )
         except Exception as exc:
