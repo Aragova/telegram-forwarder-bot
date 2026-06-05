@@ -87,46 +87,7 @@ from app.video_clip_duration import (
     is_video_clip_duration_in_bounds,
     parse_video_clip_duration_input,
 )
-from app.repost_campaign_service import (
-    format_campaign_show_seconds_ru,
-    normalize_campaign_show_seconds,
-)
-from app.repost_campaign_ui import (
-    build_repost_campaign_posts_library_view,
-    build_repost_campaign_post_stats_view,
-    build_repost_campaign_post_stats_loading_view,
-    build_repost_campaign_post_channels_stats_view,
-    build_repost_campaign_views_report_loading_view,
-    build_repost_campaign_views_report_error_view,
-    build_repost_campaign_menu_view,
-    build_repost_campaign_post_menu_view,
-    build_repost_campaign_vip_features_view,
-    build_repost_campaign_vip_coming_soon_view,
-    build_repost_campaign_schedule_menu_view,
-    build_repost_campaign_schedule_wizard_step1_view,
-    build_repost_campaign_schedule_wizard_step2_view,
-    build_repost_campaign_schedule_wizard_step3_view,
-    build_repost_campaign_schedule_wizard_step4_view,
-    build_repost_campaign_schedule_preview_view,
-    build_repost_campaign_schedule_result_view,
-    build_repost_campaign_scheduled_launch_detail_view,
-    build_repost_campaign_scheduled_launch_cancel_confirm_view,
-    build_repost_campaign_scheduled_launch_cancel_result_view,
-    build_repost_campaign_run_details_view,
-    build_repost_campaign_views_report_view,
-    build_repost_campaign_show_menu_view,
-    build_repost_campaign_targets_check_result_view,
-    build_repost_campaign_target_preview_result_view,
-    build_repost_campaign_preview_delete_result_view,
-)
-from app.saved_posts_service import (
-    build_saved_post_album_content_from_aiogram_messages,
-    build_saved_post_content_from_aiogram_message,
-    get_saved_post_preview_caption,
-    get_saved_post_short_description,
-    summarize_aiogram_message_for_saved_post,
-    summarize_saved_post_entities,
-)
+from app.repost_campaign_service import format_campaign_show_seconds_ru
 from app.repost_campaign_context import (
     RepostCampaignHandlersContext,
     build_repost_campaign_runtime as build_repost_campaign_runtime_from_context,
@@ -145,7 +106,7 @@ from app.saved_post_album_service import SavedPostAlbumCaptureBuffer
 from app.repost_campaign_runtime_service import RepostCampaignRuntimeService
 from app.repost_campaign_target_check_service import RepostCampaignTargetCheckService
 from app.repost_campaign_delete_service import RepostCampaignDeleteService, run_repost_campaign_delete_loop
-from app.repost_campaign_schedule_service import RepostCampaignScheduleService, run_repost_campaign_scheduled_launch_loop, parse_campaign_schedule_input_to_utc, campaign_schedule_now_utc
+from app.repost_campaign_schedule_service import RepostCampaignScheduleService, run_repost_campaign_scheduled_launch_loop
 from app.repost_campaign_scheduled_post_service import RepostCampaignScheduledPostService, run_repost_campaign_scheduled_post_loop
 from app import product_ui
 from app import access_control, user_ui
@@ -2849,41 +2810,6 @@ async def handle_live_status(message: Message):
         _start_dashboard_task(message.from_user.id, msg)
 
 
-
-
-async def _finalize_repost_campaign_saved_post_album(*, admin_id: int, messages: list[Message]):
-    state = user_states.get(admin_id) or {}
-    if state.get("state") != "awaiting_repost_campaign_saved_post":
-        logger.info("SAVED_POST_ALBUM_FINALIZE_SKIPPED | admin_id=%s | reason=state_changed", admin_id)
-        return
-    rule_id = int(state.get("rule_id") or 0)
-    if rule_id <= 0 or not messages:
-        return
-    content_json = build_saved_post_album_content_from_aiogram_messages(messages)
-    first = sorted(messages, key=lambda m: int(getattr(m, "message_id", 0) or 0))[0]
-    saved_post_id = await run_db(
-        db.create_saved_post,
-        rule_id=rule_id,
-        title=None,
-        content=content_json,
-        source_chat_id=str(first.chat.id) if first.chat else None,
-        source_message_id=first.message_id,
-        source_media_group_id=getattr(first, "media_group_id", None),
-        created_by=admin_id,
-    )
-    if not saved_post_id:
-        await send_message_safe(chat_id=admin_id, text="❌ Не удалось сохранить рекламный альбом")
-        return
-    await run_db(db.set_rule_repost_campaign_saved_post, rule_id, int(saved_post_id))
-    reset_user_state(admin_id)
-    invalidate_rule_card_cache(rule_id)
-    await send_message_safe(chat_id=admin_id, text="✅ Альбом сохранён как рекламный пост\n\n"
-            f"Медиа: {len(content_json.get('media_items') or [])}\n"
-            "Форматирование подписи сохранено.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👁 Предпросмотр поста", callback_data=f"rule_repost_campaign_post_preview:{rule_id}")],
-            [InlineKeyboardButton(text="💰 К рекламной кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-            [InlineKeyboardButton(text="⬅️ К рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-        ]))
 
 
 @dp.message(
@@ -6389,109 +6315,6 @@ async def handle_rule_extra_menu(callback: CallbackQuery):
         logger.exception("Ошибка открытия доп. функций rule_id=%s: %s", rule_id, exc)
 
 
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_detail:"))
-async def handle_rule_repost_campaign_scheduled_detail(callback: CallbackQuery):
-    _, rule_id_text, launch_id_text = (callback.data or "").split(":", 2)
-    rule_id = int(rule_id_text)
-    launch_id = int(launch_id_text)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    row = await run_db(db.get_campaign_scheduled_launch, launch_id)
-    if not row:
-        await answer_callback_safe(callback, "Запланированный запуск не найден", show_alert=True)
-        return
-    text, kb = build_repost_campaign_scheduled_launch_detail_view(rule_id=rule_id, scheduled_launch=row)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_cancel_confirm:"))
-async def handle_rule_repost_campaign_scheduled_cancel_confirm(callback: CallbackQuery):
-    _, rule_id_text, launch_id_text = (callback.data or "").split(":", 2)
-    rule_id = int(rule_id_text)
-    launch_id = int(launch_id_text)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    text, kb = build_repost_campaign_scheduled_launch_cancel_confirm_view(rule_id=rule_id, scheduled_launch_id=launch_id)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_cancel:"))
-async def handle_rule_repost_campaign_scheduled_cancel(callback: CallbackQuery):
-    _, rule_id_text, launch_id_text = (callback.data or "").split(":", 2)
-    rule_id = int(rule_id_text)
-    launch_id = int(launch_id_text)
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-    runtime = RepostCampaignScheduleService(repo=db, campaign_runtime=_build_repost_campaign_runtime(), logger_=logger)
-    result = runtime.cancel_scheduled_launch(scheduled_launch_id=launch_id, cancelled_by=callback.from_user.id if callback.from_user else None)
-    text, kb = build_repost_campaign_scheduled_launch_cancel_result_view(rule_id=rule_id, ok=result.ok)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-    await answer_callback_safe_once(callback)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_show_menu:"))
-async def handle_rule_repost_campaign_show_menu(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    if not settings.repost_campaign_admin_test_enabled:
-        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
-        return
-    try:
-        rule_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-    show_seconds_ru = format_campaign_show_seconds_ru(int(getattr(rule, "repost_campaign_show_seconds", 0) or 0))
-    text, kb = build_repost_campaign_show_menu_view(rule_id=rule_id, current_show_seconds_text=show_seconds_ru)
-    await edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
-    await answer_callback_safe_once(callback)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_show_set:"))
-async def handle_rule_repost_campaign_show_set(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    if not settings.repost_campaign_admin_test_enabled:
-        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
-        return
-    try:
-        _, rule_id_raw, seconds_raw = callback.data.split(":")
-        rule_id = int(rule_id_raw)
-        seconds = normalize_campaign_show_seconds(int(seconds_raw))
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    await run_db(db.update_rule_repost_campaign_settings, rule_id, enabled=True, show_seconds=seconds)
-    invalidate_rule_card_cache(rule_id)
-    try:
-        await run_db(
-            db.log_rule_change,
-            event_type="repost_campaign_show_seconds_changed",
-            rule_id=rule_id,
-            admin_id=callback.from_user.id if callback.from_user else settings.admin_id,
-            old_value=None,
-            new_value={
-                "repost_campaign_enabled": True,
-                "repost_campaign_show_seconds": seconds,
-            },
-            extra={
-                "source": "admin_ui",
-            },
-        )
-    except Exception as exc:
-        logger.warning(
-            "Не удалось записать аудит изменения кампании rule_id=%s event_type=%s: %s",
-            rule_id,
-            "repost_campaign_show_seconds_changed",
-            exc,
-            exc_info=True,
-        )
-    await _render_repost_campaign_menu(callback, rule_id)
-    await answer_callback_safe_once(callback, "Срок показа обновлён")
-
-
 def _should_answer_new_message_for_callback(callback: CallbackQuery) -> bool:
     message = getattr(callback, "message", None)
     if not message:
@@ -6529,66 +6352,6 @@ def _build_repost_campaign_runtime() -> RepostCampaignRuntimeService:
 campaign_handlers_ctx = _build_repost_campaign_handlers_context()
 register_repost_campaign_message_handlers(dp, campaign_handlers_ctx)
 
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_edit_stub:"))
-async def handle_rule_repost_campaign_post_edit_stub(callback: CallbackQuery):
-    await answer_callback_safe_once(callback, "Редактирование текста будет добавлено следующим шагом")
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_add:"))
-async def handle_rule_repost_campaign_post_add(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    rule_id = int(callback.data.split(":")[1])
-    user_states[callback.from_user.id] = {"state": "awaiting_repost_campaign_saved_post", "rule_id": rule_id}
-    text = (
-        "🔁 Замена рекламного поста\n\nОтправьте или перешлите новый рекламный пост.\n\n"
-        "Можно отправить:\n• текст\n• фото с подписью\n• видео с подписью\n• документ\n\n"
-        "Форматирование, ссылки и premium emoji будут сохранены.\n"
-        "Старый пост останется в библиотеке, но кампания будет привязана к новому посту."
-    )
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад к рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")]
-        ]
-    )
-    if _should_answer_new_message_for_callback(callback):
-        await send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
-    else:
-        await edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-    await answer_callback_safe_once(callback)
-
-@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_add_list:"))
-async def handle_rule_repost_campaign_add_list(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-    if not settings.repost_campaign_admin_test_enabled:
-        await answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
-        return
-    try:
-        rule_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
-        return
-    user_states[callback.from_user.id] = {"action": "awaiting_repost_campaign_targets_list", "rule_id": rule_id}
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            "📥 Добавление каналов кампании\n\n"
-            "Отправьте список каналов, каждый с новой строки.\n\n"
-            "Можно использовать:\n"
-            "@channel_username\n"
-            "-1001234567890\n\n"
-            "Пример:\n"
-            "@my_channel\n"
-            "-1001234567890"
-        ),
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_targets:{rule_id}")]]),
-    )
-    await answer_callback_safe_once(callback)
 
 @dp.callback_query(lambda c: c.data.startswith("rule_video_clip_duration:"))
 async def handle_rule_video_clip_duration(callback: CallbackQuery):
@@ -7605,82 +7368,9 @@ async def handle_stateful_private_inputs(message: Message):
 
     if await handle_vip_scheduled_post_material_message(campaign_handlers_ctx, message):
         return
-
-    if state.get("state") == "awaiting_repost_campaign_saved_post":
-        rule_id = int(state.get("rule_id") or 0)
-        message_summary = summarize_aiogram_message_for_saved_post(message)
-        logger.info(
-            "SAVED_POST_INCOMING_MESSAGE | rule_id=%s | summary=%s",
-            rule_id,
-            message_summary,
-        )
-        if getattr(message, "media_group_id", None):
-            await saved_post_album_buffer.add_message(
-                admin_id=message.from_user.id,
-                message=message,
-                on_album_ready=_finalize_repost_campaign_saved_post_album,
-            )
-            return
-
-        content_json = build_saved_post_content_from_aiogram_message(message)
-        entity_summary = summarize_saved_post_entities(content_json)
-        logger.info(
-            "SAVED_POST_CAPTURED | rule_id=%s | kind=%s | text_len=%s | caption_len=%s | entity_summary=%s",
-            rule_id,
-            content_json.get("kind"),
-            len(content_json.get("text") or ""),
-            len(content_json.get("caption") or ""),
-            entity_summary,
-        )
-        saved_post_id = await run_db(
-            db.create_saved_post,
-            rule_id=rule_id,
-            title=None,
-            content=content_json,
-            source_chat_id=str(message.chat.id) if message.chat else None,
-            source_message_id=message.message_id,
-            source_media_group_id=getattr(message, "media_group_id", None),
-            created_by=message.from_user.id if message.from_user else settings.admin_id,
-        )
-        if not saved_post_id:
-            await send_message_safe(chat_id=message.chat.id, text="❌ Не удалось сохранить рекламный пост")
-            return
-        await run_db(db.set_rule_repost_campaign_saved_post, rule_id, int(saved_post_id))
-        reset_user_state(user_id)
-        invalidate_rule_card_cache(rule_id)
-        logger.info(
-            "REPOST_CAMPAIGN_SAVED_POST_ADDED | rule_id=%s | saved_post_id=%s | kind=%s",
-            rule_id,
-            saved_post_id,
-            str(content_json.get("kind") or "text"),
-        )
-        kind_label = get_saved_post_short_description(content_json)
-        kind = str(content_json.get("kind") or "text")
-        caption_len = len(content_json.get("caption") or "")
-        caption_entities_count = len(content_json.get("caption_entities") or [])
-        is_media_kind = kind in {"photo", "video", "animation", "document"}
-
-        footer = "Форматирование и premium emoji сохранены."
-        if is_media_kind and caption_len == 0:
-            footer = (
-                "⚠️ Подпись у сохранённого медиа пустая.\n"
-                "Если в оригинале была подпись, Telegram не передал её боту. "
-                "Попробуйте отправить пост боту напрямую, а не пересылкой из канала."
-            )
-        elif is_media_kind and caption_entities_count == 0:
-            footer = (
-                "⚠️ Текст сохранён, но форматирование/premium emoji не были переданы Telegram.\n"
-                "Для 1 в 1 сохранения попробуйте отправить пост боту напрямую."
-            )
-
-        await send_message_safe(chat_id=message.chat.id, text=f"✅ Рекламный пост сохранён\n\nID: #{saved_post_id}\nТип: {kind_label}\n\n{footer}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="👁 Предпросмотр поста", callback_data=f"rule_repost_campaign_post_preview:{rule_id}")],
-                [InlineKeyboardButton(text="💰 К рекламной кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-                [InlineKeyboardButton(text="⬅️ К рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
-            ]))
-        return
-    if await handle_repost_campaign_stateful_private_input(campaign_handlers_ctx, message, state, text):
-        return
+    # Обработка awaiting_repost_campaign_saved_post перенесена в app/repost_campaign_message_handlers.py.
+    # if state.get("state") == "awaiting_repost_campaign_saved_post":
+    # Альбомы рекламного поста теперь завершаются в модуле кампании: on_album_ready=_finalize_repost_campaign_saved_post_album
     if state.get("state") == "awaiting_video_clip_duration" and state.get("flow") == "rule_video_clip_duration":
         if not await is_admin(message):
             return
@@ -7788,80 +7478,6 @@ async def handle_stateful_private_inputs(message: Message):
                 ]
             ),
         )
-        return
-
-    if action == "awaiting_repost_campaign_targets_list":
-        rule_id = int(state.get("rule_id") or 0)
-        raw_lines = [line.strip() for line in text.splitlines()]
-        total = len(raw_lines)
-        unique_values: list[str] = []
-        seen: set[str] = set()
-        invalid = 0
-        for value in raw_lines:
-            if not value:
-                continue
-            if value in seen:
-                continue
-            seen.add(value)
-            is_valid = value.startswith("@") or value.startswith("-100") or bool(re.fullmatch(r"-\d+", value))
-            if not is_valid:
-                invalid += 1
-                continue
-            unique_values.append(value)
-        added = 0
-        skipped = 0
-        for value in unique_values:
-            row_id = await run_db(
-                db.add_rule_repost_campaign_target,
-                rule_id=rule_id,
-                target_id=value,
-                target_thread_id=None,
-                title=value,
-                created_by=message.from_user.id if message.from_user else settings.admin_id,
-            )
-            if row_id:
-                added += 1
-            else:
-                skipped += 1
-        try:
-            await run_db(
-                db.log_rule_change,
-                event_type="repost_campaign_targets_list_added",
-                rule_id=rule_id,
-                admin_id=message.from_user.id if message.from_user else settings.admin_id,
-                extra={"added": added, "skipped": skipped, "invalid": invalid, "total": total},
-            )
-        except Exception:
-            logger.warning("Не удалось записать аудит добавления каналов кампании rule_id=%s", rule_id)
-        reset_user_state(user_id)
-        invalidate_rule_card_cache(rule_id)
-        result_text = (
-            "📥 Каналы обработаны\n\n"
-            f"✅ Добавлено: {added}\n"
-            f"⚠️ Уже были или пропущены: {skipped}\n"
-            f"❌ Ошибки формата: {invalid}\n\n"
-            f"Всего строк: {total}"
-        )
-        if added > 0:
-            try:
-                runtime = _build_repost_campaign_runtime()
-
-                check_result = await runtime.check_campaign_targets(
-
-                    rule_id=rule_id,
-                    active_only=False,
-                    admin_id=message.from_user.id if message.from_user else None,
-                    limit=50,
-
-                )
-
-                check_text, check_keyboard = build_repost_campaign_targets_check_result_view(rule_id=rule_id, result=check_result)
-                await send_message_safe(chat_id=message.chat.id, text=f"{result_text}\n\n{check_text}", reply_markup=check_keyboard)
-                return
-            except Exception as exc:
-                logger.warning("REPOST_CAMPAIGN_TARGETS_AUTO_CHECK_FAILED | rule_id=%s | error=%s", rule_id, exc)
-                result_text += "\n\nℹ️ Нажмите 🔎 Проверить права, чтобы подтянуть названия и готовность."
-        await send_message_safe(chat_id=message.chat.id, text=result_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 К списку каналов", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")]]))
         return
 
     # =========================================================
@@ -9446,20 +9062,11 @@ def _register_user_saas_handlers() -> None:
     user_handlers_ctx = ctx
 
 
-from app.repost_campaign_ui import (
-    build_vip_scheduled_posts_screen_view,
-)
 
 def _build_repost_campaign_scheduled_post_service() -> RepostCampaignScheduledPostService:
     runtime = _build_repost_campaign_runtime()
     checker = RepostCampaignTargetCheckService(telethon_client=telethon_client, bot=bot, logger_=logger)
     return RepostCampaignScheduledPostService(repo=db, campaign_runtime=runtime, target_checker=checker, logger_=logger)
-
-def _parse_ids(data:str, n:int):
-    parts=(data or '').split(':')
-    return [int(parts[i]) for i in range(1,n+1)]
-
-
 
 
 def _register_admin_handlers() -> None:

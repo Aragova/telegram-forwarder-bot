@@ -8,12 +8,19 @@ from app.repost_campaign_context import build_repost_campaign_runtime
 from app.repost_campaign_context import build_repost_campaign_scheduled_post_service
 from app.repost_campaign_schedule_service import parse_campaign_schedule_input_to_utc
 from app.repost_campaign_ui import (
+    build_repost_campaign_targets_check_result_view,
     build_repost_campaign_schedule_preview_view,
     build_repost_campaign_schedule_wizard_step3_view,
     build_vip_scheduled_post_preview_view,
     build_vip_scheduled_post_wizard_targets_view,
 )
-from app.saved_posts_service import build_saved_post_album_content_from_aiogram_messages, build_saved_post_content_from_aiogram_message
+from app.saved_posts_service import (
+    build_saved_post_album_content_from_aiogram_messages,
+    build_saved_post_content_from_aiogram_message,
+    get_saved_post_short_description,
+    summarize_aiogram_message_for_saved_post,
+    summarize_saved_post_entities,
+)
 import re
 
 
@@ -148,6 +155,184 @@ async def handle_vip_scheduled_post_material_message(ctx: RepostCampaignHandlers
     return True
 
 
+
+async def _finalize_repost_campaign_saved_post_album(ctx: RepostCampaignHandlersContext, *, admin_id: int, messages: list) -> None:
+    state = ctx.user_states.get(admin_id) or {}
+    if state.get("state") != "awaiting_repost_campaign_saved_post":
+        ctx.logger.info("SAVED_POST_ALBUM_FINALIZE_SKIPPED | admin_id=%s | reason=state_changed", admin_id)
+        return
+    rule_id = int(state.get("rule_id") or 0)
+    if rule_id <= 0 or not messages:
+        return
+    content_json = build_saved_post_album_content_from_aiogram_messages(messages)
+    first = sorted(messages, key=lambda m: int(getattr(m, "message_id", 0) or 0))[0]
+    saved_post_id = await ctx.run_db(
+        ctx.db.create_saved_post,
+        rule_id=rule_id,
+        title=None,
+        content=content_json,
+        source_chat_id=str(first.chat.id) if first.chat else None,
+        source_message_id=first.message_id,
+        source_media_group_id=getattr(first, "media_group_id", None),
+        created_by=admin_id,
+    )
+    if not saved_post_id:
+        await ctx.send_message_safe(chat_id=admin_id, text="❌ Не удалось сохранить рекламный альбом")
+        return
+    await ctx.run_db(ctx.db.set_rule_repost_campaign_saved_post, rule_id, int(saved_post_id))
+    ctx.reset_user_state(admin_id)
+    ctx.invalidate_rule_card_cache(rule_id)
+    await ctx.send_message_safe(chat_id=admin_id, text="✅ Альбом сохранён как рекламный пост\n\n"
+            f"Медиа: {len(content_json.get('media_items') or [])}\n"
+            "Форматирование подписи сохранено.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👁 Предпросмотр поста", callback_data=f"rule_repost_campaign_post_preview:{rule_id}")],
+            [InlineKeyboardButton(text="💰 К рекламной кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+            [InlineKeyboardButton(text="⬅️ К рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
+        ]))
+
+
+async def _handle_repost_campaign_saved_post_input(ctx: RepostCampaignHandlersContext, message, state: dict) -> bool:
+    rule_id = int(state.get("rule_id") or 0)
+    user_id = message.from_user.id if message.from_user else None
+    message_summary = summarize_aiogram_message_for_saved_post(message)
+    ctx.logger.info("SAVED_POST_INCOMING_MESSAGE | rule_id=%s | summary=%s", rule_id, message_summary)
+    if getattr(message, "media_group_id", None):
+        await ctx.saved_post_album_buffer.add_message(
+            admin_id=message.from_user.id,
+            message=message,
+            on_album_ready=lambda **kwargs: _finalize_repost_campaign_saved_post_album(ctx, **kwargs),
+        )
+        return True
+
+    content_json = build_saved_post_content_from_aiogram_message(message)
+    entity_summary = summarize_saved_post_entities(content_json)
+    ctx.logger.info(
+        "SAVED_POST_CAPTURED | rule_id=%s | kind=%s | text_len=%s | caption_len=%s | entity_summary=%s",
+        rule_id,
+        content_json.get("kind"),
+        len(content_json.get("text") or ""),
+        len(content_json.get("caption") or ""),
+        entity_summary,
+    )
+    saved_post_id = await ctx.run_db(
+        ctx.db.create_saved_post,
+        rule_id=rule_id,
+        title=None,
+        content=content_json,
+        source_chat_id=str(message.chat.id) if message.chat else None,
+        source_message_id=message.message_id,
+        source_media_group_id=getattr(message, "media_group_id", None),
+        created_by=message.from_user.id if message.from_user else ctx.settings.admin_id,
+    )
+    if not saved_post_id:
+        await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Не удалось сохранить рекламный пост")
+        return True
+    await ctx.run_db(ctx.db.set_rule_repost_campaign_saved_post, rule_id, int(saved_post_id))
+    ctx.reset_user_state(user_id)
+    ctx.invalidate_rule_card_cache(rule_id)
+    ctx.logger.info(
+        "REPOST_CAMPAIGN_SAVED_POST_ADDED | rule_id=%s | saved_post_id=%s | kind=%s",
+        rule_id,
+        saved_post_id,
+        str(content_json.get("kind") or "text"),
+    )
+    kind_label = get_saved_post_short_description(content_json)
+    kind = str(content_json.get("kind") or "text")
+    caption_len = len(content_json.get("caption") or "")
+    caption_entities_count = len(content_json.get("caption_entities") or [])
+    is_media_kind = kind in {"photo", "video", "animation", "document"}
+
+    footer = "Форматирование и premium emoji сохранены."
+    if is_media_kind and caption_len == 0:
+        footer = (
+            "⚠️ Подпись у сохранённого медиа пустая.\n"
+            "Если в оригинале была подпись, Telegram не передал её боту. "
+            "Попробуйте отправить пост боту напрямую, а не пересылкой из канала."
+        )
+    elif is_media_kind and caption_entities_count == 0:
+        footer = (
+            "⚠️ Текст сохранён, но форматирование/premium emoji не были переданы Telegram.\n"
+            "Для 1 в 1 сохранения попробуйте отправить пост боту напрямую."
+        )
+
+    await ctx.send_message_safe(chat_id=message.chat.id, text=f"✅ Рекламный пост сохранён\n\nID: #{saved_post_id}\nТип: {kind_label}\n\n{footer}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👁 Предпросмотр поста", callback_data=f"rule_repost_campaign_post_preview:{rule_id}")],
+            [InlineKeyboardButton(text="💰 К рекламной кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+            [InlineKeyboardButton(text="⬅️ К рекламному посту", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
+        ]))
+    return True
+
+
+async def _handle_repost_campaign_targets_list_input(ctx: RepostCampaignHandlersContext, message, state: dict, text: str) -> bool:
+    rule_id = int(state.get("rule_id") or 0)
+    raw_lines = [line.strip() for line in text.splitlines()]
+    total = len(raw_lines)
+    unique_values: list[str] = []
+    seen: set[str] = set()
+    invalid = 0
+    for value in raw_lines:
+        if not value:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        is_valid = value.startswith("@") or value.startswith("-100") or bool(re.fullmatch(r"-\d+", value))
+        if not is_valid:
+            invalid += 1
+            continue
+        unique_values.append(value)
+    added = 0
+    skipped = 0
+    for value in unique_values:
+        row_id = await ctx.run_db(
+            ctx.db.add_rule_repost_campaign_target,
+            rule_id=rule_id,
+            target_id=value,
+            target_thread_id=None,
+            title=value,
+            created_by=message.from_user.id if message.from_user else ctx.settings.admin_id,
+        )
+        if row_id:
+            added += 1
+        else:
+            skipped += 1
+    try:
+        await ctx.run_db(
+            ctx.db.log_rule_change,
+            event_type="repost_campaign_targets_list_added",
+            rule_id=rule_id,
+            admin_id=message.from_user.id if message.from_user else ctx.settings.admin_id,
+            extra={"added": added, "skipped": skipped, "invalid": invalid, "total": total},
+        )
+    except Exception:
+        ctx.logger.warning("Не удалось записать аудит добавления каналов кампании rule_id=%s", rule_id)
+    ctx.reset_user_state(message.from_user.id if message.from_user else None)
+    ctx.invalidate_rule_card_cache(rule_id)
+    result_text = (
+        "📥 Каналы обработаны\n\n"
+        f"✅ Добавлено: {added}\n"
+        f"⚠️ Уже были или пропущены: {skipped}\n"
+        f"❌ Ошибки формата: {invalid}\n\n"
+        f"Всего строк: {total}"
+    )
+    if added > 0:
+        try:
+            runtime = build_repost_campaign_runtime(ctx)
+            check_result = await runtime.check_campaign_targets(
+                rule_id=rule_id,
+                active_only=False,
+                admin_id=message.from_user.id if message.from_user else None,
+                limit=50,
+            )
+            check_text, check_keyboard = build_repost_campaign_targets_check_result_view(rule_id=rule_id, result=check_result)
+            await ctx.send_message_safe(chat_id=message.chat.id, text=f"{result_text}\n\n{check_text}", reply_markup=check_keyboard)
+            return True
+        except Exception as exc:
+            ctx.logger.warning("REPOST_CAMPAIGN_TARGETS_AUTO_CHECK_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            result_text += "\n\nℹ️ Нажмите 🔎 Проверить права, чтобы подтянуть названия и готовность."
+    await ctx.send_message_safe(chat_id=message.chat.id, text=result_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 К списку каналов", callback_data=f"rule_repost_campaign_targets_list:{rule_id}")]]))
+    return True
+
 def _normalize_vip_scheduled_target_input(value: str) -> dict | None:
     raw = (value or "").strip()
     if not raw:
@@ -176,6 +361,10 @@ def _normalize_vip_scheduled_target_input(value: str) -> dict | None:
 
 
 async def handle_repost_campaign_stateful_private_input(ctx: RepostCampaignHandlersContext, message, state: dict, text: str) -> bool:
+    if state.get("state") == "awaiting_repost_campaign_saved_post":
+        return await _handle_repost_campaign_saved_post_input(ctx, message, state)
+    if state.get("action") == "awaiting_repost_campaign_targets_list":
+        return await _handle_repost_campaign_targets_list_input(ctx, message, state, text)
     if state.get("state") == "waiting_vip_scheduled_post_target":
         rule_id = int(state.get("rule_id") or 0)
         scheduled_post_id = int(state.get("scheduled_post_id") or 0)
