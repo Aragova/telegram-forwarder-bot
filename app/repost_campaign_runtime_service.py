@@ -657,7 +657,7 @@ class RepostCampaignRuntimeService:
         extras = [x for x in out if x["target_kind"] != "main"]
         return mains + extras
 
-    async def launch_campaign_from_snapshot(self, *, rule_id: int, saved_post_id: int, show_seconds: int, targets_snapshot: list[dict[str, Any]], admin_id: int | None = None, run_type: str = "scheduled", scheduled_post_id: int | None = None) -> RepostCampaignActionResult:
+    async def launch_campaign_from_snapshot(self, *, rule_id: int, saved_post_id: int, show_seconds: int, targets_snapshot: list[dict[str, Any]], admin_id: int | None = None, run_type: str = "scheduled", scheduled_post_id: int | None = None, on_campaign_run_created: Callable[[int], None] | None = None) -> RepostCampaignActionResult:
         rule = self.repo.get_rule(rule_id)
         if not rule:
             return RepostCampaignActionResult(ok=False, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text="Правило не найдено")
@@ -674,6 +674,8 @@ class RepostCampaignRuntimeService:
         run_id = self.repo.create_campaign_run(rule_id=rule_id, saved_post_id=saved_post_id, run_type=run_type, status="sending", show_seconds=show_seconds, started_by=admin_id, targets_total=len(targets), scheduled_post_id=scheduled_post_id)
         if run_id is None:
             return RepostCampaignActionResult(ok=False, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text="Не удалось создать запись запуска рекламной кампании")
+        if on_campaign_run_created:
+            on_campaign_run_created(int(run_id))
         content = saved_post.get("content_json") or saved_post.get("content") or {}
         targets_success = 0
         targets_failed = 0

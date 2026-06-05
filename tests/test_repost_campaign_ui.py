@@ -316,7 +316,7 @@ def test_vip_scheduled_posts_screen_shows_active_placement_block_and_delete_butt
     assert "🟢 Сейчас активно размещение" in text
     assert "Пост будет удалён:" in text
     assert "11.05 21:47 UTC+3" in text
-    assert "Новые запланированные посты стартуют после освобождения места." in text
+    assert "VIP-режим: публикация не блокируется активной рекламой." in text
     assert "🧹 Удалить активный пост" in _texts_from_keyboard(kb)
 
 
@@ -1905,3 +1905,27 @@ def test_bot_has_no_direct_repost_campaign_callbacks_or_launch_job_logic():
     assert "rule_repost_campaign_launch_confirm:" not in bot_source
     assert "rule_repost_campaign_launch_job_status:" not in bot_source
     assert "RepostCampaignLaunchJobService" not in bot_source
+
+
+def test_vip_scheduled_preview_and_detail_show_active_ad_warning_not_error():
+    warning = "⚠️ В выбранных целях уже есть активная реклама. VIP-пост всё равно будет опубликован по расписанию."
+    preview, _ = build_vip_scheduled_post_preview_view(
+        rule_id=1,
+        scheduled_post={"id": 10, "saved_post_id": 2, "scheduled_at": "2026-05-10T10:00:00+00:00", "show_seconds": 3600},
+        targets=[],
+        readiness={"can_schedule": True, "warnings": [warning]},
+    )
+    detail, _ = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 10, "status": "scheduled"}, "readiness": {"warnings": [warning]}})
+    assert warning in preview
+    assert warning in detail
+    assert "Предыдущий рекламный пост активен" + " до" not in preview
+    assert "Предыдущий рекламный пост активен" + " до" not in detail
+    assert "VIP-режим: публикация не блокируется активной рекламой." in preview
+    assert "VIP-режим: публикация не блокируется активной рекламой." in detail
+
+
+def test_vip_scheduled_send_now_confirm_says_publish_over_active_ad():
+    from app.repost_campaign_ui import build_vip_scheduled_post_send_now_confirm_view
+    text, kb = build_vip_scheduled_post_send_now_confirm_view(rule_id=1, scheduled_post={"id": 10})
+    assert "После подтверждения VIP-пост будет опубликован поверх неё." in text
+    assert "✅ Да, отправить сейчас" in _texts_from_keyboard(kb)

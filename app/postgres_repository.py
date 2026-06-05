@@ -887,7 +887,7 @@ class PostgresRepository(RepositoryProtocol):
 
         CREATE TABLE IF NOT EXISTS campaign_scheduled_posts (
             id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL DEFAULT 1, rule_id BIGINT NOT NULL, saved_post_id BIGINT NULL, title TEXT NULL,
-            status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','ready','scheduled','processing','launched','failed','cancelled','expired')),
+            status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','ready','scheduled','processing','launched','failed','needs_review','cancelled','expired')),
             scheduled_at TIMESTAMPTZ NULL, timezone_offset_minutes INT NOT NULL DEFAULT 180, timezone_label TEXT NOT NULL DEFAULT 'UTC+3', show_seconds BIGINT NULL,
             targets_total BIGINT NOT NULL DEFAULT 0, targets_ready BIGINT NOT NULL DEFAULT 0, targets_with_warnings BIGINT NOT NULL DEFAULT 0, targets_blocked BIGINT NOT NULL DEFAULT 0,
             attempt_count BIGINT NOT NULL DEFAULT 0, next_retry_at TIMESTAMPTZ NULL, campaign_run_id BIGINT NULL, created_by BIGINT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1009,6 +1009,8 @@ class PostgresRepository(RepositoryProtocol):
 
                 cur.execute("ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS scheduled_post_id BIGINT NULL")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_campaign_runs_scheduled_post ON campaign_runs(scheduled_post_id)")
+                cur.execute("ALTER TABLE campaign_scheduled_posts DROP CONSTRAINT IF EXISTS campaign_scheduled_posts_status_check")
+                cur.execute("ALTER TABLE campaign_scheduled_posts ADD CONSTRAINT campaign_scheduled_posts_status_check CHECK (status IN ('draft','ready','scheduled','processing','launched','failed','needs_review','cancelled','expired'))")
                 for _sql in [
                     "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS tenant_id BIGINT NOT NULL DEFAULT 1",
                     "ALTER TABLE campaign_scheduled_posts ADD COLUMN IF NOT EXISTS rule_id BIGINT NOT NULL DEFAULT 0",
@@ -7589,6 +7591,10 @@ class PostgresRepository(RepositoryProtocol):
         return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='launched', campaign_run_id=%s, launched_at=NOW(), updated_at=NOW()", (int(campaign_run_id),), "status='processing'", "VIP_SCHEDULED_POST_MARKED_LAUNCHED")
     def mark_campaign_scheduled_post_failed(self, scheduled_post_id: int, *, error_text: str, campaign_run_id: int | None = None) -> bool:
         return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='failed', failed_at=NOW(), error_text=%s, campaign_run_id=COALESCE(%s, campaign_run_id), locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (error_text, campaign_run_id), "status IN ('scheduled','processing')", "VIP_SCHEDULED_POST_MARKED_FAILED")
+    def mark_campaign_scheduled_post_needs_review(self, scheduled_post_id: int, *, error_text: str, campaign_run_id: int | None = None) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='needs_review', failed_at=NOW(), error_text=%s, campaign_run_id=COALESCE(%s, campaign_run_id), locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (error_text, campaign_run_id), "status='processing'", "VIP_SCHEDULED_POST_NEEDS_REVIEW")
+    def set_campaign_scheduled_post_campaign_run_id(self, scheduled_post_id: int, campaign_run_id: int) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "campaign_run_id=%s, updated_at=NOW()", (int(campaign_run_id),), "status='processing' AND campaign_run_id IS NULL", "VIP_SCHEDULED_POST_RUN_ID_SET")
     def mark_campaign_scheduled_post_processing(self, scheduled_post_id: int, *, actor_id: int | None = None) -> bool:
         lock_owner = f"send-now:{actor_id}" if actor_id is not None else "send-now"
         return self._update_campaign_scheduled_post_status(
@@ -7660,13 +7666,15 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
         if rows: logger.info("VIP_SCHEDULED_POST_CLAIMED count=%s worker=%s", len(rows), worker_id)
         return rows
-    def reset_stuck_campaign_scheduled_posts(self, *, stuck_seconds: int = 300) -> int:
+    def reset_stuck_campaign_scheduled_posts(self, *, stuck_seconds: int = 300) -> dict[str, int]:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE campaign_scheduled_posts SET status='scheduled', locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW() WHERE status='processing' AND campaign_run_id IS NULL AND (lock_until < NOW() OR locked_at < NOW() - (%s * INTERVAL '1 second'))", (int(stuck_seconds),)); c=int(cur.rowcount)
+                cur.execute("UPDATE campaign_scheduled_posts SET status='scheduled', locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW() WHERE status='processing' AND campaign_run_id IS NULL AND (lock_until < NOW() OR locked_at < NOW() - (%s * INTERVAL '1 second'))", (int(stuck_seconds),)); requeued=int(cur.rowcount)
+                cur.execute("UPDATE campaign_scheduled_posts SET status='needs_review', error_text=COALESCE(error_text, 'Запуск завис после создания campaign_run'), locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW() WHERE status='processing' AND campaign_run_id IS NOT NULL AND (lock_until < NOW() OR locked_at < NOW() - (%s * INTERVAL '1 second'))", (int(stuck_seconds),)); needs_review=int(cur.rowcount)
             conn.commit()
-        if c: logger.info("VIP_SCHEDULED_POST_STUCK_RESET count=%s", c)
-        return c
+        if requeued: logger.info("VIP_SCHEDULED_POST_STUCK_RESET count=%s", requeued)
+        if needs_review: logger.warning("VIP_SCHEDULED_POST_NEEDS_REVIEW | reason=stale_processing_with_campaign_run | count=%s", needs_review)
+        return {"requeued": requeued, "needs_review": needs_review}
 
     def _normalize_repost_campaign_launch_job_row(self, row) -> dict[str, Any] | None:
         if not row:

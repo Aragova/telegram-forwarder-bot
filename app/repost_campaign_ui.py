@@ -1382,14 +1382,14 @@ def build_vip_scheduled_posts_screen_view(*, rule_id: int, posts: list[dict] | N
             ])
         lines.extend([
             '',
-            'Новые запланированные посты стартуют после освобождения места.',
+            'VIP-режим: публикация не блокируется активной рекламой.',
             '',
         ])
     if delete_failed > 0:
         lines.extend([
             '⚠️ Есть размещение с ошибкой удаления',
             '',
-            'ViMi не запустит новый рекламный пост, пока старый не будет удалён.',
+            'VIP-пост можно опубликовать поверх неё; проверьте удаление предыдущего размещения отдельно.',
             '',
         ])
     lines.extend([
@@ -1660,9 +1660,13 @@ def format_vip_scheduled_views_summary(run: dict) -> list[str]:
 def build_vip_scheduled_post_preview_view(*, rule_id:int, scheduled_post:dict, targets:list[dict], readiness:dict)->tuple[str,InlineKeyboardMarkup]:
     sid=int(scheduled_post.get('id') or 0)
     status='\n'.join([f"• {x}" for x in (readiness.get('block_reasons') or [])])
+    warning_lines='\n'.join([str(x) for x in (readiness.get('warnings') or []) if x])
     text=(f"👁 Предпросмотр запланированного поста\nРекламный пост:\n✅ Пост #{int(scheduled_post.get('saved_post_id') or 0)}\n"
           f"Срок показа:\n⏳ {format_campaign_show_seconds_text(scheduled_post.get('show_seconds'))}\n"
           f"Запуск:\n🕒 {format_campaign_datetime_text(scheduled_post.get('scheduled_at'), timezone_offset_hours=3)} UTC+3")
+    if warning_lines:
+        text += f"\n\n{warning_lines}"
+    text += "\n\nVIP-режим: публикация не блокируется активной рекламой."
     rows=[]
     if readiness.get('can_schedule'):
         rows.append([InlineKeyboardButton(text='✅ Запланировать пост', callback_data=f'rule_repost_campaign_scheduled_post_confirm:{rule_id}:{sid}')])
@@ -1699,6 +1703,10 @@ def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tupl
             blocks.append("\n".join(views_summary))
     elif st in {"draft", "ready", "scheduled"}:
         blocks.append("Публикация ещё не запускалась.\nПосле запуска здесь появится отчёт по отправке, удалению и просмотрам.")
+        blocks.append("VIP-режим: публикация не блокируется активной рекламой.")
+        warnings = [str(x) for x in (readiness.get("warnings") or []) if x]
+        if warnings:
+            blocks.append("\n".join(warnings))
     if post.get("error_text"):
         blocks.append(f"⚠️ Есть проблема\n\nОшибка: {post.get('error_text')}")
     text = "\n\n".join([b for b in blocks if b])
@@ -1730,6 +1738,6 @@ def build_vip_scheduled_post_cancel_confirm_view(*, rule_id: int, scheduled_post
 
 def build_vip_scheduled_post_send_now_confirm_view(*, rule_id: int, scheduled_post: dict) -> tuple[str, InlineKeyboardMarkup]:
     sid = int(scheduled_post.get("id") or 0)
-    text = "🚀 Отправить отложенный пост сейчас?\n\nViMi запустит этот пост немедленно, не дожидаясь выбранного времени."
+    text = "🚀 Отправить отложенный пост сейчас?\n\nViMi запустит этот пост немедленно, не дожидаясь выбранного времени.\n\n⚠️ В этих целях уже может быть активная реклама.\nПосле подтверждения VIP-пост будет опубликован поверх неё."
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Да, отправить сейчас', callback_data=f'rule_repost_campaign_scheduled_post_send_now:{rule_id}:{sid}')],[InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_post_detail:{rule_id}:{sid}')]])
     return text, kb
