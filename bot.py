@@ -7363,14 +7363,11 @@ async def handle_stateful_private_inputs(message: Message):
     action = state.get("action")
     text = (message.text or "").strip()
 
-    if await handle_repost_campaign_stateful_private_input(campaign_handlers_ctx, message, state, text):
-        return
-
     if await handle_vip_scheduled_post_material_message(campaign_handlers_ctx, message):
         return
-    # Обработка awaiting_repost_campaign_saved_post перенесена в app/repost_campaign_message_handlers.py.
-    # if state.get("state") == "awaiting_repost_campaign_saved_post":
-    # Альбомы рекламного поста теперь завершаются в модуле кампании: on_album_ready=_finalize_repost_campaign_saved_post_album
+
+    if await handle_repost_campaign_stateful_private_input(campaign_handlers_ctx, message, state, text):
+        return
     if state.get("state") == "awaiting_video_clip_duration" and state.get("flow") == "rule_video_clip_duration":
         if not await is_admin(message):
             return
