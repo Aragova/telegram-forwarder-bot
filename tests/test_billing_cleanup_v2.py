@@ -47,8 +47,8 @@ def test_router_creates_internal_invoice() -> None:
 
 
 def test_intro_media_handler_is_scoped_to_admin_intro_state() -> None:
-    source = Path("bot.py").read_text(encoding="utf-8")
-    assert 'and is_admin_user(m.from_user.id)' in source
+    source = Path("app/intro_handlers.py").read_text(encoding="utf-8")
+    assert 'and ctx.is_admin_user(m.from_user.id)' in source
     assert 'intro_upload_wait_file' in source
     assert '@dp.message(lambda m: m.photo or m.video or m.document)' not in source
 
