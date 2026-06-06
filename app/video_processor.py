@@ -1042,10 +1042,18 @@ class VideoProcessor:
                 "-y", output_path
             ]
 
+        intro_timeout = max(120, int(float(duration or config.intro_duration) * 6))
+        intro_timeout = min(intro_timeout, 600)
+        logger.info(
+            "VIDEO_INTRO_PROCESS_TIMEOUT | duration=%s | timeout=%s",
+            duration,
+            intro_timeout,
+        )
+
         result = await self.run_ffmpeg_with_progress(
             cmd,
             "Создание заставки",
-            timeout=60,
+            timeout=intro_timeout,
             total_duration_estimate=duration,
             stage_logger=stage_logger,
         )

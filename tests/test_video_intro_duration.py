@@ -115,8 +115,9 @@ def test_video_intro_ffmpeg_command_does_not_trim_video_intro(tmp_path, monkeypa
 
     monkeypatch.setattr(video_processor_module.time, "time", lambda: 123)
 
-    async def fake_run_ffmpeg(cmd, *_args, **_kwargs):
+    async def fake_run_ffmpeg(cmd, *_args, **kwargs):
         captured["cmd"] = cmd
+        captured["timeout"] = kwargs.get("timeout")
         output_path.write_bytes(b"processed")
         return True
 
@@ -132,6 +133,37 @@ def test_video_intro_ffmpeg_command_does_not_trim_video_intro(tmp_path, monkeypa
 
     assert result == str(output_path)
     assert "-t" not in captured["cmd"]
+    assert captured["timeout"] == 120
+
+
+def test_video_intro_timeout_depends_on_intro_duration(tmp_path, monkeypatch):
+    processor = _processor(tmp_path, monkeypatch)
+    source_path = tmp_path / "intro.mp4"
+    source_path.write_bytes(b"video")
+    output_path = tmp_path / "temp" / "intro_matched_123.mp4"
+    captured = {}
+
+    monkeypatch.setattr(video_processor_module.time, "time", lambda: 123)
+
+    async def fake_run_ffmpeg(cmd, *_args, **kwargs):
+        captured["cmd"] = cmd
+        captured["timeout"] = kwargs.get("timeout")
+        output_path.write_bytes(b"processed")
+        return True
+
+    processor.run_ffmpeg_with_progress = fake_run_ffmpeg
+
+    result = asyncio.run(
+        processor.create_intro_matching_video(
+            str(source_path),
+            {"target_width": 1280, "target_height": 720, "target_fps": 30},
+            30.0,
+        )
+    )
+
+    assert result == str(output_path)
+    assert captured["timeout"] == 180
+    assert captured["timeout"] > 60
 
 
 def test_image_intro_ffmpeg_command_keeps_intro_duration_trim(tmp_path, monkeypatch):
@@ -171,3 +203,7 @@ def test_video_intro_duration_source_guards():
     assert "effective_intro_duration" in source
     assert "VIDEO_INTRO_DURATION_RESOLVED" in source
     assert "VIDEO_FINAL_DURATION_PLAN" in source
+    assert "VIDEO_INTRO_PROCESS_TIMEOUT" in source
+
+    create_intro_source = source.split("async def create_intro_matching_video", 1)[1].split("async def create_thumbnail_fast", 1)[0]
+    assert "timeout=60" not in create_intro_source
