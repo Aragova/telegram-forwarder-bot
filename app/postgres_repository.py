@@ -7886,7 +7886,7 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
         return self._normalize_repost_campaign_launch_job_row(row)
 
-    def mark_repost_campaign_launch_job_needs_review(self, job_id: int, *, last_error: str, campaign_run_id: int | None = None) -> dict[str, Any] | None:
+    def mark_repost_campaign_launch_job_needs_review(self, job_id: int, *, last_error: str, campaign_run_id: int | None = None, result_json: dict[str, Any] | None = None) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -7895,6 +7895,7 @@ class PostgresRepository(RepositoryProtocol):
                     SET status='needs_review',
                         last_error=%s,
                         campaign_run_id=COALESCE(%s, campaign_run_id),
+                        result_json=COALESCE(%s::jsonb, result_json),
                         locked_by=NULL,
                         locked_until=NULL,
                         updated_at=NOW(),
@@ -7902,7 +7903,7 @@ class PostgresRepository(RepositoryProtocol):
                     WHERE id=%s AND status IN ('pending','processing')
                     RETURNING *
                     """,
-                    (last_error, campaign_run_id, int(job_id)),
+                    (last_error, campaign_run_id, _json_dumps(result_json) if result_json is not None else None, int(job_id)),
                 )
                 row = cur.fetchone()
             conn.commit()

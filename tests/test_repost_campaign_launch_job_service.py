@@ -90,9 +90,18 @@ class FakeLaunchJobRepo:
         job["status"] = "pending" if retryable and job["campaign_run_id"] is None and job["attempts"] < job["max_attempts"] else "failed"
         return self._copy(job)
 
-    def mark_repost_campaign_launch_job_needs_review(self, job_id, *, last_error, campaign_run_id=None):
+    def mark_repost_campaign_launch_job_needs_review(self, job_id, *, last_error, campaign_run_id=None, result_json=None):
         job = self.jobs[int(job_id)]
-        job.update(status="needs_review", last_error=last_error, campaign_run_id=campaign_run_id or job.get("campaign_run_id"), locked_by=None, locked_until=None)
+        update = {
+            "status": "needs_review",
+            "last_error": last_error,
+            "campaign_run_id": campaign_run_id or job.get("campaign_run_id"),
+            "locked_by": None,
+            "locked_until": None,
+        }
+        if result_json is not None:
+            update["result_json"] = result_json
+        job.update(update)
         return self._copy(job)
 
     def mark_repost_campaign_launch_job_cancelled(self, job_id, *, reason):
@@ -123,10 +132,22 @@ class FakeLaunchJobRepo:
 
 
 class FakeRuntime:
-    def __init__(self, *, can_launch=True, raises=False, creates_run_before_raise=False):
+    def __init__(
+        self,
+        *,
+        can_launch=True,
+        raises=False,
+        creates_run_before_raise=False,
+        result_ok=True,
+        error_text=None,
+        campaign_run_id=42,
+    ):
         self.can_launch = can_launch
         self.raises = raises
         self.creates_run_before_raise = creates_run_before_raise
+        self.result_ok = result_ok
+        self.error_text = error_text
+        self.campaign_run_id = campaign_run_id
         self.launch_calls = 0
         self.repo = None
 
@@ -141,10 +162,16 @@ class FakeRuntime:
                 on_campaign_run_created(77)
         if self.raises:
             raise RuntimeError("boom")
-        self.repo.runs.append({"id": 42, "rule_id": int(rule_id)})
-        if on_campaign_run_created:
-            on_campaign_run_created(42)
-        return SimpleNamespace(to_dict=lambda: {"ok": True, "extra": {"campaign_run_id": 42, "targets_success": 1, "targets_failed": 0}})
+        extra = {"targets_success": 1, "targets_failed": 0}
+        if self.campaign_run_id is not None:
+            extra["campaign_run_id"] = int(self.campaign_run_id)
+            self.repo.runs.append({"id": int(self.campaign_run_id), "rule_id": int(rule_id)})
+            if on_campaign_run_created:
+                on_campaign_run_created(int(self.campaign_run_id))
+        result = {"ok": self.result_ok, "extra": extra}
+        if self.error_text:
+            result["error_text"] = self.error_text
+        return SimpleNamespace(to_dict=lambda: result)
 
 
 def make_service(runtime=None):
@@ -193,6 +220,50 @@ def test_successful_job_calls_runtime_once_and_saves_result_and_run_id():
         assert stored["result_json"]["extra"]["targets_success"] == 1
     asyncio.run(_run())
 
+
+
+def test_launch_job_marks_needs_review_when_result_not_ok_after_campaign_run_created():
+    async def _run():
+        repo, runtime, service = make_service(
+            FakeRuntime(
+                result_ok=False,
+                error_text="Не удалось подтвердить отправку",
+                campaign_run_id=123,
+            )
+        )
+        job = service.enqueue_manual_launch(rule_id=4, admin_id=10, progress_chat_id=None, progress_message_id=None).job
+        leased = repo.lease_repost_campaign_launch_job(job["id"], "w1", 60)
+        await service.run_once(job=leased, worker_id="w1")
+        stored = repo.jobs[job["id"]]
+        assert runtime.launch_calls == 1
+        assert stored["status"] == "needs_review"
+        assert stored["status"] != "sent"
+        assert stored["campaign_run_id"] == 123
+        assert stored["last_error"] == "Не удалось подтвердить отправку"
+        assert stored["result_json"]["extra"]["campaign_run_id"] == 123
+    asyncio.run(_run())
+
+
+def test_launch_job_marks_failed_when_result_not_ok_without_campaign_run():
+    async def _run():
+        repo, runtime, service = make_service(
+            FakeRuntime(
+                result_ok=False,
+                error_text="Запуск заблокирован",
+                campaign_run_id=None,
+            )
+        )
+        job = service.enqueue_manual_launch(rule_id=4, admin_id=10, progress_chat_id=None, progress_message_id=None).job
+        leased = repo.lease_repost_campaign_launch_job(job["id"], "w1", 60)
+        await service.run_once(job=leased, worker_id="w1")
+        stored = repo.jobs[job["id"]]
+        assert runtime.launch_calls == 1
+        assert stored["status"] == "failed"
+        assert stored["status"] != "sent"
+        assert stored["campaign_run_id"] is None
+        assert stored["last_error"] == "Запуск заблокирован"
+        assert stored["result_json"] == {"ok": False, "extra": {"targets_success": 1, "targets_failed": 0}, "error_text": "Запуск заблокирован"}
+    asyncio.run(_run())
 
 def test_readiness_blocked_does_not_call_launch_and_marks_failed_payload():
     async def _run():
