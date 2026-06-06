@@ -1231,14 +1231,13 @@ def build_repost_campaign_targets_check_result_view(*, rule_id: int, result: dic
     blocked = sum(1 for i in items if (i.get("publish_status") in {"denied", "unknown"} or i.get("delete_status") == "denied"))
     delete_warn = sum(1 for i in items if i.get("publish_status") == "confirmed" and i.get("delete_status") == "unknown")
     lines = [
-        "🧪 Проверка прав завершена",
+        "✅ Проверка завершена",
         "",
-        f"Проверено: {int((result or {}).get('checked') or 0)}",
-        f"✅ Готово к размещению: {int((result or {}).get('passed') or 0)}",
+        f"📣 Каналов/групп проверено: {int((result or {}).get('checked') or 0)}",
+        f"✅ Доступно: {int((result or {}).get('passed') or 0)}",
+        f"⚠️ Есть проблемы: {int((result or {}).get('failed') or 0)}",
         f"❌ Заблокировано: {blocked}",
         f"🟡 Не подтверждено удаление: {delete_warn}",
-        f"⚠️ Требуют внимания: {int((result or {}).get('failed') or 0)}",
-        f"📣 Проверено: {int((result or {}).get('checked') or 0)}",
         "",
     ]
     problem_lines: list[str] = []

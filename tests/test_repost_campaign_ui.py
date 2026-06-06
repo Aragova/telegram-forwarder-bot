@@ -29,6 +29,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_targets_check_loading_view,
     build_repost_campaign_target_preview_result_view,
     build_repost_campaign_target_check_result_view,
+    build_repost_campaign_targets_check_result_view,
     build_repost_campaign_preview_delete_result_view,
     build_repost_campaign_views_report_view,
     format_repost_campaign_readiness_block,
@@ -130,6 +131,33 @@ def test_targets_check_loading_view_text_and_keyboard():
     assert "🔎 Проверяем все права" in text
     assert "Каналов/групп: 42" in text
     assert "💰 К кампании" in texts
+
+
+def test_targets_check_result_view_has_single_checked_counter_and_summary():
+    text, keyboard = build_repost_campaign_targets_check_result_view(
+        rule_id=3,
+        result={
+            "checked": 3,
+            "passed": 2,
+            "failed": 1,
+            "items": [
+                {"ok": True, "target_title": "Канал A", "publish_status": "confirmed", "delete_status": "confirmed"},
+                {"ok": True, "target_title": "Канал B", "publish_status": "confirmed", "delete_status": "unknown"},
+                {"ok": False, "target_title": "Канал C", "publish_status": "denied", "delete_status": "confirmed", "error_text": "Нет прав"},
+            ],
+        },
+    )
+
+    assert "✅ Проверка завершена" in text
+    assert "📣 Каналов/групп проверено: 3" in text
+    assert text.lower().count("проверено") <= 1
+    assert "✅ Доступно: 2" in text
+    assert "⚠️ Есть проблемы: 1" in text
+    assert "Проблемные каналы/группы:" in text
+    assert "Канал C" in text
+    labels = _texts_from_keyboard(keyboard)
+    assert "📋 К списку каналов/групп" in labels
+    assert "💰 К кампании" in labels
 
 
 def test_target_card_check_callback_keeps_page():
