@@ -135,20 +135,52 @@ class RepostCampaignLaunchJobService:
                 on_campaign_run_created=_remember_campaign_run_id,
             )
             result_json = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})
-            campaign_run_id = (
-                (result_json.get("extra") or {}).get("campaign_run_id")
+            result_extra = result_json.get("extra") or {}
+            campaign_run_id = int(
+                result_extra.get("campaign_run_id")
                 or remembered_campaign_run_id
                 or self._get_job_campaign_run_id(job_id)
                 or self._detect_new_campaign_run_id(rule_id, before_run_id)
+                or 0
             )
-            updated = self.repo.mark_repost_campaign_launch_job_sent(job_id, campaign_run_id=campaign_run_id, result_json=result_json)
-            await self._update_progress_message(rule_id=rule_id, job=updated or {**job, "status": "sent", "result_json": result_json, "campaign_run_id": campaign_run_id})
-            self.logger.info(
-                "REPOST_CAMPAIGN_LAUNCH_JOB_SENT | job_id=%s | rule_id=%s | campaign_run_id=%s | ok=%s",
+            result_ok = bool(result_json.get("ok"))
+            if result_ok and campaign_run_id:
+                updated = self.repo.mark_repost_campaign_launch_job_sent(job_id, campaign_run_id=campaign_run_id, result_json=result_json)
+                await self._update_progress_message(rule_id=rule_id, job=updated or {**job, "status": "sent", "result_json": result_json, "campaign_run_id": campaign_run_id})
+                self.logger.info(
+                    "REPOST_CAMPAIGN_LAUNCH_JOB_SENT | job_id=%s | rule_id=%s | campaign_run_id=%s | ok=%s",
+                    job_id,
+                    rule_id,
+                    campaign_run_id,
+                    result_json.get("ok"),
+                )
+                return updated
+
+            error_text = result_json.get("error_text") or "Запуск рекламной кампании завершился неуспешно"
+            if campaign_run_id:
+                review_error_text = result_json.get("error_text") or "Запуск создал campaign_run, но завершился неуспешно"
+                updated = self.repo.mark_repost_campaign_launch_job_needs_review(
+                    job_id,
+                    last_error=review_error_text,
+                    campaign_run_id=campaign_run_id,
+                    result_json=result_json,
+                )
+                await self._update_progress_message(rule_id=rule_id, job=updated or {**job, "status": "needs_review", "last_error": review_error_text, "result_json": result_json, "campaign_run_id": campaign_run_id})
+                self.logger.warning(
+                    "REPOST_CAMPAIGN_LAUNCH_JOB_NEEDS_REVIEW | job_id=%s | rule_id=%s | campaign_run_id=%s | reason=launch_result_not_ok_after_campaign_run",
+                    job_id,
+                    rule_id,
+                    campaign_run_id,
+                )
+                return updated
+
+            updated = self.repo.mark_repost_campaign_launch_job_failed(job_id, last_error=error_text, result_json=result_json)
+            await self._update_progress_message(rule_id=rule_id, job=updated or {**job, "status": "failed", "last_error": error_text, "result_json": result_json})
+            self.logger.warning(
+                "REPOST_CAMPAIGN_LAUNCH_JOB_FAILED | job_id=%s | rule_id=%s | reason=launch_result_not_ok_without_campaign_run | error=%s",
                 job_id,
                 rule_id,
-                campaign_run_id,
-                result_json.get("ok"),
+                error_text,
             )
             return updated
         except Exception as exc:
