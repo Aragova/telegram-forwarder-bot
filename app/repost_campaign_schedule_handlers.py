@@ -83,7 +83,7 @@ def register_repost_campaign_schedule_handlers(dp: Dispatcher, ctx: RepostCampai
             return
         runtime = build_repost_campaign_runtime(ctx)
         readiness = runtime.build_campaign_launch_readiness(rule_id=rule_id)
-        text, kb = build_repost_campaign_schedule_wizard_step1_view(rule_id=rule_id, readiness=readiness)
+        text, kb = build_repost_campaign_schedule_current_view(rule_id=rule_id, readiness=readiness)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_current:"))
@@ -202,7 +202,7 @@ def register_repost_campaign_schedule_handlers(dp: Dispatcher, ctx: RepostCampai
         ctx.user_states[callback.from_user.id] = {"state": "repost_campaign_schedule_input", "rule_id": rule_id}
         await ctx.edit_message_text_safe(
             message=callback.message,
-            text="🧙 VIP-запуск по расписанию · Шаг 4/4\n\nВведите дату и время запуска\n\nФормат:\n09.05 18:00\n\nЧасовой пояс: UTC+3",
+            text="🕒 Запланировать запуск\n\nВведите дату и время запуска.\n\nФормат:\n09.05 18:00\n\nЧасовой пояс: UTC+3",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к выбору времени", callback_data=f"rule_repost_campaign_schedule_step4:{rule_id}")]]
             ),

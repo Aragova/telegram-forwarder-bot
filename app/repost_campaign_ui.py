@@ -221,24 +221,24 @@ def build_repost_campaign_schedule_menu_view(*, rule_id: int, scheduled_launches
         rows.append([InlineKeyboardButton(text=f"📄 Открыть запуск #{int(row.get('id') or 0)}", callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{int(row.get('id') or 0)}")])
     if pending_lines:
         text = f"{text}\n\nБлижайшие запланированные запуски:\n" + "\n".join(pending_lines[:5])
-    rows.append([InlineKeyboardButton(text='⬅️ Назад к VIP функциям', callback_data=f'rule_repost_campaign_vip_features:{rule_id}')])
+    rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_launch:{rule_id}')])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 def build_repost_campaign_schedule_wizard_step1_view(*, rule_id: int, readiness: dict) -> tuple[str, InlineKeyboardMarkup]:
     saved_post_ready = bool(readiness.get("saved_post_id")) and readiness.get("saved_post_exists") is not False
     text = (
-        "🧙 VIP-запуск по расписанию · Шаг 1/4\n\n"
+        "🕒 Запланировать запуск · Шаг 1/4\n\n"
         "1) Рекламный пост\n\n"
         f"{'✅ Готов к публикации' if saved_post_ready else '❌ Не выбран'}"
     )
     rows = [[InlineKeyboardButton(text="✅ Далее", callback_data=f"rule_repost_campaign_schedule_step2:{rule_id}")]] if saved_post_ready else [[InlineKeyboardButton(text="➕ Добавить рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")]]
-    rows.append([InlineKeyboardButton(text="⬅️ Назад к VIP функциям", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 def build_repost_campaign_schedule_wizard_step2_view(*, rule_id: int, readiness: dict) -> tuple[str, InlineKeyboardMarkup]:
     extra_count = int(readiness.get("extra_total") or 0)
     text = (
-        "🧙 VIP-запуск по расписанию · Шаг 2/4\n\n"
+        "🕒 Запланировать запуск · Шаг 2/4\n\n"
         "2) Каналы/группы\n\n"
         "Основной канал: ✅ Подключён по умолчанию\n"
         f"Дополнительные каналы/группы: {extra_count}"
@@ -256,7 +256,7 @@ def build_repost_campaign_schedule_wizard_step2_view(*, rule_id: int, readiness:
 def build_repost_campaign_schedule_wizard_step3_view(*, rule_id: int, readiness: dict) -> tuple[str, InlineKeyboardMarkup]:
     show_seconds = int(readiness.get("show_seconds") or 0)
     text = (
-        "🧙 VIP-запуск по расписанию · Шаг 3/4\n\n"
+        "🕒 Запланировать запуск · Шаг 3/4\n\n"
         "3) Время показа\n\n"
         f"Текущий срок размещения: {format_campaign_show_seconds_text(show_seconds)}\n\n"
         "Выберите срок размещения:"
@@ -271,7 +271,7 @@ def build_repost_campaign_schedule_wizard_step3_view(*, rule_id: int, readiness:
 
 def build_repost_campaign_schedule_wizard_step4_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
     text = (
-        "🧙 VIP-запуск по расписанию · Шаг 4/4\n\n"
+        "🕒 Запланировать запуск · Шаг 4/4\n\n"
         "4) Время запуска\n\n"
         "Когда запустить кампанию?\n\n"
         "Часовой пояс: UTC+3"
@@ -1352,7 +1352,7 @@ def build_repost_campaign_schedule_result_view(*, rule_id: int, scheduled_launch
     )
     return text, InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📄 Открыть запланированный запуск", callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{scheduled_launch.get('id')}")],
-        [InlineKeyboardButton(text="💎 К VIP функциям", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
+        [InlineKeyboardButton(text="🕒 Запланировать ещё", callback_data=f"rule_repost_campaign_schedule_current:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
 
@@ -1366,8 +1366,8 @@ def build_repost_campaign_scheduled_launch_cancel_confirm_view(*, rule_id: int, 
 
 def build_repost_campaign_scheduled_launch_cancel_result_view(*, rule_id: int, ok: bool) -> tuple[str, InlineKeyboardMarkup]:
     return ("✅ Запланированный запуск отменён" if ok else "❌ Не удалось отменить запуск", InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🕒 К расписанию", callback_data=f"rule_repost_campaign_schedule_menu:{rule_id}")],
-        [InlineKeyboardButton(text="💎 К VIP функциям", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
+        [InlineKeyboardButton(text="🕒 Запланировать запуск", callback_data=f"rule_repost_campaign_schedule_current:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ]))
 
 # =========================================================
