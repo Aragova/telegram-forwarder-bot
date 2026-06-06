@@ -102,6 +102,13 @@ class IntroItem:
     file_path: str
     duration: int
     created_at: str | None = None
+    rule_id: int | None = None
+    tenant_id: int | None = None
+    created_by: int | None = None
+    media_kind: str | None = None
+    status: str = "active"
+    deleted_at: str | None = None
+    updated_at: str | None = None
 
 
 @dataclass(slots=True)
