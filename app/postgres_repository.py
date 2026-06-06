@@ -410,6 +410,7 @@ class PostgresRepository(RepositoryProtocol):
             tenant_id BIGINT NOT NULL DEFAULT 1,
             created_by BIGINT NULL,
             media_kind TEXT NULL,
+            bank TEXT NULL,
             status TEXT NOT NULL DEFAULT 'active',
             deleted_at TIMESTAMPTZ NULL,
             updated_at TIMESTAMPTZ NULL
@@ -988,6 +989,7 @@ class PostgresRepository(RepositoryProtocol):
                     "ALTER TABLE intros ADD COLUMN IF NOT EXISTS tenant_id BIGINT NOT NULL DEFAULT 1",
                     "ALTER TABLE intros ADD COLUMN IF NOT EXISTS created_by BIGINT NULL",
                     "ALTER TABLE intros ADD COLUMN IF NOT EXISTS media_kind TEXT NULL",
+                    "ALTER TABLE intros ADD COLUMN IF NOT EXISTS bank TEXT NULL",
                     "ALTER TABLE intros ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'",
                     "ALTER TABLE intros ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL",
                     "ALTER TABLE intros ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NULL",
@@ -996,6 +998,8 @@ class PostgresRepository(RepositoryProtocol):
                 cur.execute("ALTER TABLE intros DROP CONSTRAINT IF EXISTS intros_status_check")
                 cur.execute("ALTER TABLE intros ADD CONSTRAINT intros_status_check CHECK (status IN ('active', 'deleted'))")
                 cur.execute("ALTER TABLE intros DROP CONSTRAINT IF EXISTS intros_display_name_key")
+                cur.execute("ALTER TABLE intros DROP CONSTRAINT IF EXISTS intros_bank_check")
+                cur.execute("ALTER TABLE intros ADD CONSTRAINT intros_bank_check CHECK (bank IS NULL OR bank IN ('horizontal', 'vertical'))")
 
                 cur.execute(
                     """
@@ -1146,10 +1150,17 @@ class PostgresRepository(RepositoryProtocol):
                     ON intros(rule_id, status, created_at DESC)
                     """
                 )
+                cur.execute("DROP INDEX IF EXISTS uq_intros_rule_display_name_active")
                 cur.execute(
                     """
-                    CREATE UNIQUE INDEX IF NOT EXISTS uq_intros_rule_display_name_active
-                    ON intros(rule_id, lower(display_name))
+                    CREATE INDEX IF NOT EXISTS idx_intros_rule_bank_status_created
+                    ON intros(rule_id, bank, status, created_at DESC)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_intros_rule_bank_display_name_active
+                    ON intros(rule_id, bank, lower(display_name))
                     WHERE rule_id IS NOT NULL AND status = 'active' AND deleted_at IS NULL
                     """
                 )
@@ -1387,6 +1398,8 @@ class PostgresRepository(RepositoryProtocol):
         try:
             stats = self.migrate_legacy_rule_intro_assignments()
             logger.info("INTRO_LEGACY_ASSIGNMENTS_MIGRATED | stats=%s", stats)
+            bank_stats = self.migrate_rule_intro_banks()
+            logger.info("INTRO_BANK_MIGRATION_DONE | stats=%s", bank_stats)
         except Exception:
             logger.exception("INTRO_LEGACY_ASSIGNMENTS_MIGRATION_FAILED")
 
@@ -2420,6 +2433,7 @@ class PostgresRepository(RepositoryProtocol):
             tenant_id=_optional_int(data.get("tenant_id")),
             created_by=_optional_int(data.get("created_by")),
             media_kind=data.get("media_kind"),
+            bank=data.get("bank"),
             status=data.get("status") or "active",
             deleted_at=_optional_str(data.get("deleted_at")),
             updated_at=_optional_str(data.get("updated_at")),
@@ -2460,7 +2474,7 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     SELECT
                         id, display_name, file_name, file_path, duration, created_at,
-                        rule_id, tenant_id, created_by, media_kind, status, deleted_at, updated_at
+                        rule_id, tenant_id, created_by, media_kind, bank, status, deleted_at, updated_at
                     FROM intros
                     WHERE status = 'active'
                       AND deleted_at IS NULL
@@ -2478,7 +2492,7 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     SELECT
                         id, display_name, file_name, file_path, duration, created_at,
-                        rule_id, tenant_id, created_by, media_kind, status, deleted_at, updated_at
+                        rule_id, tenant_id, created_by, media_kind, bank, status, deleted_at, updated_at
                     FROM intros
                     WHERE id = %s
                       AND status = 'active'
@@ -2516,6 +2530,7 @@ class PostgresRepository(RepositoryProtocol):
         created_by: int | None = None,
         media_kind: str | None = None,
         tenant_id: int = 1,
+        bank: str | None = None,
     ) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -2523,9 +2538,9 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     INSERT INTO intros(
                         rule_id, tenant_id, created_by, display_name, file_name,
-                        file_path, duration, media_kind, status, created_at, updated_at
+                        file_path, duration, media_kind, bank, status, created_at, updated_at
                     )
-                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, NOW())
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, NOW())
                     RETURNING id
                     """,
                     (
@@ -2537,6 +2552,7 @@ class PostgresRepository(RepositoryProtocol):
                         file_path,
                         int(duration or 0),
                         media_kind,
+                        bank,
                         utc_now_iso(),
                     ),
                 )
@@ -2549,22 +2565,29 @@ class PostgresRepository(RepositoryProtocol):
         self,
         rule_id: int,
         *,
+        bank: str | None = None,
         include_deleted: bool = False,
     ) -> list[IntroItem]:
         status_filter = "" if include_deleted else "AND status = 'active' AND deleted_at IS NULL"
+        bank_filter = ""
+        params: list[Any] = [int(rule_id)]
+        if bank is not None:
+            bank_filter = "AND bank = %s"
+            params.append(bank)
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
                     SELECT
                         id, display_name, file_name, file_path, duration, created_at,
-                        rule_id, tenant_id, created_by, media_kind, status, deleted_at, updated_at
+                        rule_id, tenant_id, created_by, media_kind, bank, status, deleted_at, updated_at
                     FROM intros
                     WHERE rule_id = %s
+                      {bank_filter}
                       {status_filter}
                     ORDER BY created_at DESC, id DESC
                     """,
-                    (int(rule_id),),
+                    tuple(params),
                 )
                 rows = cur.fetchall()
 
@@ -2575,23 +2598,30 @@ class PostgresRepository(RepositoryProtocol):
         rule_id: int,
         intro_id: int,
         *,
+        bank: str | None = None,
         include_deleted: bool = False,
     ) -> IntroItem | None:
         status_filter = "" if include_deleted else "AND status = 'active' AND deleted_at IS NULL"
+        bank_filter = ""
+        params: list[Any] = [int(intro_id), int(rule_id)]
+        if bank is not None:
+            bank_filter = "AND bank = %s"
+            params.append(bank)
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
                     SELECT
                         id, display_name, file_name, file_path, duration, created_at,
-                        rule_id, tenant_id, created_by, media_kind, status, deleted_at, updated_at
+                        rule_id, tenant_id, created_by, media_kind, bank, status, deleted_at, updated_at
                     FROM intros
                     WHERE id = %s
                       AND rule_id = %s
+                      {bank_filter}
                       {status_filter}
                     LIMIT 1
                     """,
-                    (int(intro_id), int(rule_id)),
+                    tuple(params),
                 )
                 row = cur.fetchone()
 
@@ -2623,19 +2653,20 @@ class PostgresRepository(RepositoryProtocol):
 
         return row is not None
 
-    def _rule_intro_display_name_exists(self, conn, rule_id: int, display_name: str) -> bool:
+    def _rule_intro_display_name_exists(self, conn, rule_id: int, display_name: str, bank: str | None = None) -> bool:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT id
                 FROM intros
                 WHERE rule_id = %s
+                  AND bank IS NOT DISTINCT FROM %s
                   AND lower(display_name) = lower(%s)
                   AND status = 'active'
                   AND deleted_at IS NULL
                 LIMIT 1
                 """,
-                (int(rule_id), display_name.strip()),
+                (int(rule_id), bank, display_name.strip()),
             )
             return cur.fetchone() is not None
 
@@ -2646,6 +2677,7 @@ class PostgresRepository(RepositoryProtocol):
         *,
         created_by: int | None = None,
         tenant_id: int = 1,
+        bank: str | None = None,
     ) -> int | None:
         source = self.get_intro(intro_id)
         if source is None:
@@ -2656,7 +2688,8 @@ class PostgresRepository(RepositoryProtocol):
         counter = 2
 
         with self.connect() as conn:
-            while self._rule_intro_display_name_exists(conn, rule_id, candidate):
+            copy_bank = bank if bank is not None else source.bank
+            while self._rule_intro_display_name_exists(conn, rule_id, candidate, copy_bank):
                 candidate = f"{base_name}_{counter}"
                 counter += 1
 
@@ -2665,9 +2698,9 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     INSERT INTO intros(
                         rule_id, tenant_id, created_by, display_name, file_name,
-                        file_path, duration, media_kind, status, created_at, updated_at
+                        file_path, duration, media_kind, bank, status, created_at, updated_at
                     )
-                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, NOW())
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, NOW())
                     RETURNING id
                     """,
                     (
@@ -2679,6 +2712,7 @@ class PostgresRepository(RepositoryProtocol):
                         source.file_path,
                         int(source.duration or 0),
                         source.media_kind,
+                        copy_bank,
                         utc_now_iso(),
                     ),
                 )
@@ -2687,7 +2721,7 @@ class PostgresRepository(RepositoryProtocol):
 
         return int(row["id"]) if row else None
 
-    def _find_existing_rule_intro_copy(self, rule_id: int, source: IntroItem) -> int | None:
+    def _find_existing_rule_intro_copy(self, rule_id: int, source: IntroItem, bank: str | None = None) -> int | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -2697,12 +2731,13 @@ class PostgresRepository(RepositoryProtocol):
                     WHERE rule_id = %s
                       AND file_path = %s
                       AND display_name = %s
+                      AND bank IS NOT DISTINCT FROM %s
                       AND status = 'active'
                       AND deleted_at IS NULL
                     ORDER BY id ASC
                     LIMIT 1
                     """,
-                    (int(rule_id), source.file_path, source.display_name),
+                    (int(rule_id), source.file_path, source.display_name, bank),
                 )
                 row = cur.fetchone()
 
@@ -2788,6 +2823,131 @@ class PostgresRepository(RepositoryProtocol):
                     )
 
         return stats
+
+    def migrate_rule_intro_banks(self) -> dict[str, int]:
+        stats = {
+            "rules_scanned": 0,
+            "intro_banks_set": 0,
+            "intro_copies_created": 0,
+            "routing_assignments_updated": 0,
+            "legacy_unassigned_copied": 0,
+        }
+        logger.info("INTRO_BANK_MIGRATION_STARTED")
+
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT id, tenant_id, video_intro_horizontal_id, video_intro_vertical_id
+                        FROM routing
+                        WHERE video_intro_horizontal_id IS NOT NULL
+                           OR video_intro_vertical_id IS NOT NULL
+                        ORDER BY id ASC
+                        """
+                    )
+                    rules = cur.fetchall()
+            stats["rules_scanned"] = len(rules)
+
+            for rule in rules:
+                rule_id = int(rule["id"])
+                tenant_id = int(rule.get("tenant_id") or 1) if hasattr(rule, "get") else 1
+                horizontal_id = rule.get("video_intro_horizontal_id") if hasattr(rule, "get") else rule["video_intro_horizontal_id"]
+                vertical_id = rule.get("video_intro_vertical_id") if hasattr(rule, "get") else rule["video_intro_vertical_id"]
+
+                if horizontal_id and vertical_id and int(horizontal_id) == int(vertical_id):
+                    intro = self.get_rule_intro(rule_id, int(horizontal_id), include_deleted=False)
+                    if intro and intro.bank is None:
+                        with self.connect() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    """
+                                    UPDATE intros
+                                    SET bank = 'horizontal', updated_at = NOW()
+                                    WHERE id = %s AND rule_id = %s AND bank IS NULL
+                                    """,
+                                    (int(horizontal_id), rule_id),
+                                )
+                                if cur.rowcount:
+                                    stats["intro_banks_set"] += 1
+                            conn.commit()
+                        new_vertical_id = self.copy_intro_to_rule(
+                            rule_id=rule_id,
+                            intro_id=int(horizontal_id),
+                            tenant_id=tenant_id or intro.tenant_id or 1,
+                            bank="vertical",
+                        )
+                        if new_vertical_id:
+                            if self.set_rule_intro_vertical(rule_id, int(new_vertical_id)):
+                                stats["routing_assignments_updated"] += 1
+                            stats["intro_copies_created"] += 1
+                    continue
+
+                for bank, intro_id in (("horizontal", horizontal_id), ("vertical", vertical_id)):
+                    if not intro_id:
+                        continue
+                    intro = self.get_rule_intro(rule_id, int(intro_id), include_deleted=False)
+                    if intro and intro.bank is None:
+                        with self.connect() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    """
+                                    UPDATE intros
+                                    SET bank = %s, updated_at = NOW()
+                                    WHERE id = %s AND rule_id = %s AND bank IS NULL
+                                    """,
+                                    (bank, int(intro_id), rule_id),
+                                )
+                                if cur.rowcount:
+                                    stats["intro_banks_set"] += 1
+                            conn.commit()
+
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT i.id, i.rule_id, i.tenant_id
+                        FROM intros i
+                        WHERE i.rule_id IS NOT NULL
+                          AND i.bank IS NULL
+                          AND i.status = 'active'
+                          AND i.deleted_at IS NULL
+                          AND NOT EXISTS (
+                              SELECT 1 FROM routing r
+                              WHERE r.id = i.rule_id
+                                AND (r.video_intro_horizontal_id = i.id OR r.video_intro_vertical_id = i.id)
+                          )
+                        ORDER BY i.id ASC
+                        """
+                    )
+                    unassigned = cur.fetchall()
+
+            for row in unassigned:
+                intro_id = int(row["id"])
+                rule_id = int(row["rule_id"])
+                tenant_id = int(row.get("tenant_id") or 1) if hasattr(row, "get") else 1
+                source = self.get_rule_intro(rule_id, intro_id, include_deleted=False)
+                if source is None:
+                    continue
+                for bank in ("horizontal", "vertical"):
+                    existing_id = self._find_existing_rule_intro_copy(rule_id, source, bank)
+                    if existing_id is not None:
+                        continue
+                    new_intro_id = self.copy_intro_to_rule(
+                        rule_id=rule_id,
+                        intro_id=intro_id,
+                        tenant_id=tenant_id,
+                        bank=bank,
+                    )
+                    if new_intro_id:
+                        stats["intro_copies_created"] += 1
+                        stats["legacy_unassigned_copied"] += 1
+
+            logger.info("INTRO_BANK_MIGRATION_DONE | stats=%s", stats)
+            return stats
+        except Exception:
+            logger.exception("INTRO_BANK_MIGRATION_FAILED")
+            return stats
 
     # =========================================================
     # POSTS / QUEUE RAW

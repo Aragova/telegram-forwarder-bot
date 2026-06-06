@@ -56,7 +56,9 @@ def test_intro_ux_polish_callbacks_and_messages_are_present():
     intro_handlers_py = (REPO_ROOT / "app" / "intro_handlers.py").read_text()
 
     assert "📦 Мои заставки" not in intro_handlers_py
-    assert "🔄 Обновить список" in intro_handlers_py
+    assert "🔄 Обновить список" not in intro_handlers_py
+    assert "Горизонтальные заставки правила" in intro_handlers_py
+    assert "Вертикальные заставки правила" in intro_handlers_py
     assert "❌ Отменить загрузку" in intro_handlers_py
     assert "handle_intro_upload_cancel" in intro_handlers_py
     assert "_is_duplicate_intro_error" in intro_handlers_py

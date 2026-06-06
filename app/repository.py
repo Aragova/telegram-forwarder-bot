@@ -561,12 +561,14 @@ class RepositoryProtocol(Protocol):
         created_by: int | None = None,
         media_kind: str | None = None,
         tenant_id: int = 1,
+        bank: str | None = None,
     ) -> int: ...
 
     def list_rule_intros(
         self,
         rule_id: int,
         *,
+        bank: str | None = None,
         include_deleted: bool = False,
     ) -> list[IntroItem]: ...
 
@@ -575,6 +577,7 @@ class RepositoryProtocol(Protocol):
         rule_id: int,
         intro_id: int,
         *,
+        bank: str | None = None,
         include_deleted: bool = False,
     ) -> IntroItem | None: ...
 
@@ -587,9 +590,11 @@ class RepositoryProtocol(Protocol):
         *,
         created_by: int | None = None,
         tenant_id: int = 1,
+        bank: str | None = None,
     ) -> int | None: ...
 
     def migrate_legacy_rule_intro_assignments(self) -> dict[str, int]: ...
+    def migrate_rule_intro_banks(self) -> dict[str, int]: ...
 
     # =========================================================
     # AUDIT
