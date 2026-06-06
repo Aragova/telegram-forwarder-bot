@@ -117,6 +117,8 @@ from app.user_handlers import (
     register_user_rule_handlers,
 )
 
+from app.intro_handlers import IntroHandlersContext, register_intro_handlers
+
 from app.admin_handlers import (
     AdminHandlersContext,
     register_admin_menu_handlers,
@@ -1759,45 +1761,6 @@ async def notify_admin_once(
         await run_db(db.mark_problem_notified, key)
     except Exception as e:
         logger.exception("Ошибка отправки уведомления админу: %s", e)
-
-def sanitize_intro_name(name: str | None) -> str | None:
-    import re
-
-    if not name:
-        return None
-
-    name = name.strip().lower()
-
-    # Разрешаем буквы, цифры, пробел, _, -, кириллицу и латиницу
-    name = re.sub(r"[^a-zA-Zа-яА-Я0-9 _-]", "", name)
-
-    # Пробелы -> подчеркивания
-    name = re.sub(r"\s+", "_", name)
-
-    # Сжимаем повторяющиеся _
-    name = re.sub(r"_+", "_", name)
-
-    name = name.strip("_- ")
-
-    return name[:60] if name else None
-
-
-def make_unique_intro_filename(base_name: str, extension: str, intros_dir: str) -> str:
-    import os
-
-    candidate = f"{base_name}.{extension}"
-    full_path = os.path.join(intros_dir, candidate)
-
-    if not os.path.exists(full_path):
-        return candidate
-
-    counter = 2
-    while True:
-        candidate = f"{base_name}_{counter}.{extension}"
-        full_path = os.path.join(intros_dir, candidate)
-        if not os.path.exists(full_path):
-            return candidate
-        counter += 1
 
 def serialize_message_entities(entities) -> str | None:
     if not entities:
@@ -4093,24 +4056,6 @@ def _apply_video_caption_delivery_mode_sync(
         "new_mode": normalized_new_mode,
     }
 
-def _apply_intro_sync(rule_id: int, mode: str, intro_id_val: int | None):
-    if mode == "horizontal":
-        db.set_rule_intro_horizontal(rule_id, intro_id_val)
-    else:
-        db.set_rule_intro_vertical(rule_id, intro_id_val)
-
-    row = get_rule_stats_row(rule_id)
-    if not row:
-        return None
-
-    horizontal_id = row["video_intro_horizontal_id"] if "video_intro_horizontal_id" in row.keys() else None
-    vertical_id = row["video_intro_vertical_id"] if "video_intro_vertical_id" in row.keys() else None
-
-    enable_intro = bool(horizontal_id or vertical_id)
-    db.set_rule_add_intro(rule_id, enable_intro)
-
-    return get_rule_stats_row(rule_id)
-
 def _build_rule_card_render_sync(rule_id: int, prefix_text: str | None = None) -> dict | None:
     row = get_rule_stats_row(rule_id)
     if not row:
@@ -5662,133 +5607,35 @@ def faulty_delivery_time_from_created_at(created_at: str | None) -> str:
     except Exception:
         return "ошибка времени"
 
-def build_intro_list_keyboard(
-    intros,
-    rule_id: int | None = None,
-) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-
-    if rule_id is not None:
-        rows.append([
-            InlineKeyboardButton(
-                text="🖥 Горизонтальная",
-                callback_data=f"video_intro_horizontal:{rule_id}",
-            ),
-            InlineKeyboardButton(
-                text="📱 Вертикальная",
-                callback_data=f"video_intro_vertical:{rule_id}",
-            ),
-        ])
-
-    for intro in intros:
-        rows.append([
-            InlineKeyboardButton(
-                text=f"👁 {intro.display_name}",
-                callback_data=f"intro_view:{intro.id}",
-            ),
-            InlineKeyboardButton(
-                text="🗑",
-                callback_data=f"intro_delete:{intro.id}",
-            ),
-        ])
-
-    rows.append([
-        InlineKeyboardButton(
-            text="➕ Загрузить заставку",
-            callback_data="intro_upload",
-        )
-    ])
-
-    rows.append([
-        InlineKeyboardButton(
-            text="⬅️ Назад к правилу",
-            callback_data="rule_back_from_intro",
-        )
-    ])
-
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-@dp.callback_query(lambda c: c.data.startswith("video_intro_menu:") or c.data.startswith("user_rule_intros:"))
-async def handle_video_intro_menu(callback: CallbackQuery):
-    try:
-        rule_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-
-    intros = await run_db(db.get_intros)
-
-    text = (
-        f"🎬 Управление заставками\n\n"
-        f"Всего заставок: {len(intros)}\n\n"
-        f"Выберите заставку для просмотра или удаления.\n"
-        f"Или загрузите новую."
+def _build_intro_handlers_context() -> IntroHandlersContext:
+    return IntroHandlersContext(
+        db=db,
+        settings=settings,
+        logger=logger,
+        user_states=user_states,
+        run_db=run_db,
+        is_admin=is_admin,
+        is_admin_callback=is_admin_callback,
+        is_admin_user=_is_admin_user,
+        ensure_rule_callback_access=ensure_rule_callback_access,
+        answer_callback_safe=answer_callback_safe,
+        answer_callback_safe_once=answer_callback_safe_once,
+        edit_message_text_safe=edit_message_text_safe,
+        send_message_safe=send_message_safe,
+        send_photo_safe=send_photo_safe,
+        send_video_safe=send_video_safe,
+        try_delete_message_safe=try_delete_message_safe,
+        get_rule_stats_row_async=get_rule_stats_row_async,
+        build_rule_card_text=build_rule_card_text,
+        build_rule_card_keyboard=build_rule_card_keyboard,
+        filter_user_rule_card_keyboard=_filter_user_rule_card_keyboard,
+        invalidate_rule_card_cache=invalidate_rule_card_cache,
+        cancel_reply_markup_for_user=_cancel_reply_markup_for_user,
     )
 
-    try:
-        await edit_message_text_safe(
-            message=callback.message,
-            text=text,
-            reply_markup=build_intro_list_keyboard(intros, rule_id=rule_id),
-        )
-    except Exception as exc:
-        if "message is not modified" not in str(exc).lower():
-            logger.exception("Ошибка handle_video_intro_menu: %s", exc)
 
-    user_states[callback.from_user.id] = {
-        "action": "intro_menu",
-        "rule_id": rule_id,
-    }
-
-    await answer_callback_safe_once(callback)
-
-@dp.callback_query(lambda c: c.data == "rule_back_from_intro")
-async def handle_intro_back(callback: CallbackQuery):
-    state = user_states.get(callback.from_user.id)
-    if not state:
-        await answer_callback_safe(callback, "Ошибка состояния", show_alert=True)
-        return
-
-    rule_id = state.get("rule_id")
-    if not await ensure_rule_callback_access(callback, int(rule_id or 0)):
-        return
-
-    row = await get_rule_stats_row_async(rule_id)
-    if not row:
-        await answer_callback_safe(callback, "Ошибка", show_alert=True)
-        return
-
-    try:
-        await edit_message_text_safe(
-            message=callback.message,
-            text=build_rule_card_text(row),
-            parse_mode="HTML",
-            reply_markup=(
-                build_rule_card_keyboard(
-                    rule_id,
-                    bool(row["is_active"]),
-                    row["schedule_mode"] or "interval",
-                    row["mode"] or "repost",
-                )
-                if _is_admin_user(callback.from_user.id if callback.from_user else None)
-                else _filter_user_rule_card_keyboard(
-                    build_rule_card_keyboard(
-                        rule_id,
-                        bool(row["is_active"]),
-                        row["schedule_mode"] or "interval",
-                        row["mode"] or "repost",
-                    ),
-                    rule_id,
-                )
-            ),
-        )
-    except Exception as exc:
-        if "message is not modified" not in str(exc).lower():
-            logger.exception("Ошибка handle_intro_back: %s", exc)
-
-    await answer_callback_safe_once(callback)
+intro_handlers_ctx = _build_intro_handlers_context()
+register_intro_handlers(dp, intro_handlers_ctx)
 
 @dp.callback_query(lambda c: c.data.startswith("caption_mode_menu:") or c.data.startswith("user_rule_caption_mode:"))
 async def handle_caption_mode_menu(callback: CallbackQuery):
@@ -5831,132 +5678,6 @@ async def handle_caption_mode_menu(callback: CallbackQuery):
         return
 
     await answer_callback_safe_once(callback)
-
-@dp.callback_query(lambda c: c.data == "intro_upload")
-async def handle_intro_upload(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
-    prev_state = user_states.get(callback.from_user.id, {})
-
-    user_states[callback.from_user.id] = {
-        "action": "intro_upload_wait_file",
-        "rule_id": prev_state.get("rule_id"),
-    }
-
-    try:
-        await edit_message_text_safe(
-            message=callback.message,
-            text=(
-                "Отправьте видео или изображение заставки.\n\n"
-                "Название укажите сразу в подписи к файлу.\n\n"
-                "Пример подписи:\n"
-                "grom_vert"
-            ),
-        )
-    except Exception as exc:
-        if "message is not modified" not in str(exc).lower():
-            logger.exception("Ошибка handle_intro_upload: %s", exc)
-
-    await answer_callback_safe_once(callback)
-
-@dp.callback_query(lambda c: c.data.startswith("intro_view:"))
-async def handle_intro_view(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
-    try:
-        intro_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-
-    intro = await run_db(db.get_intro, intro_id)
-
-    if not intro:
-        await answer_callback_safe(callback, "❌ Заставка не найдена", show_alert=True)
-        return
-
-    import os
-
-    if not intro.file_path or not os.path.exists(intro.file_path):
-        await answer_callback_safe(callback, "❌ Файл заставки не найден на диске", show_alert=True)
-        return
-
-    input_file = FSInputFile(intro.file_path)
-
-    reply_markup = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="intro_back_to_list")]
-        ]
-    )
-    if intro.duration and intro.duration > 0:
-        await send_video_safe(
-            chat_id=callback.message.chat.id,
-            video=input_file,
-            caption=(
-                f"🎬 {intro.display_name}\n"
-                f"⏱ Длительность: {intro.duration} сек"
-            ),
-            reply_markup=reply_markup,
-        )
-    else:
-        await send_photo_safe(
-            chat_id=callback.message.chat.id,
-            photo=input_file,
-            caption=f"🖼 {intro.display_name}",
-            reply_markup=reply_markup,
-        )
-
-    await answer_callback_safe_once(callback)
-
-@dp.callback_query(lambda c: c.data == "intro_back_to_list")
-async def handle_intro_back_to_list(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
-    try:
-        await try_delete_message_safe(callback.message.chat.id, callback.message.message_id)
-    except Exception:
-        pass
-
-    await answer_callback_safe_once(callback)
-
-@dp.callback_query(lambda c: c.data.startswith("intro_delete:"))
-async def handle_intro_delete(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
-    try:
-        intro_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-
-    ok = await run_db(db.delete_intro, intro_id)
-    intros = await run_db(db.get_intros)
-
-    if not ok:
-        await answer_callback_safe(callback, "❌ Заставка уже удалена или не найдена", show_alert=True)
-        return
-
-    try:
-        await edit_message_text_safe(
-            message=callback.message,
-            text=(
-                f"🗑 Заставка удалена\n\n"
-                f"🎬 Управление заставками\n\n"
-                f"Всего заставок: {len(intros)}\n\n"
-                f"Выберите заставку для просмотра или удаления.\n"
-                f"Или загрузите новую."
-            ),
-            reply_markup=build_intro_list_keyboard(intros),
-        )
-    except Exception as exc:
-        if "message is not modified" not in str(exc).lower():
-            logger.exception("Ошибка handle_intro_delete: %s", exc)
-
-    await answer_callback_safe_once(callback, "Удалено")
 
 @dp.callback_query(lambda c: c.data.startswith("video_caption_menu:") or c.data.startswith("user_rule_caption:"))
 async def handle_video_caption_menu(callback: CallbackQuery):
@@ -6071,164 +5792,6 @@ async def handle_video_caption_clear(callback: CallbackQuery):
         await answer_callback_safe_once(callback, "Очищено")
     else:
         await answer_callback_safe(callback, "Ошибка при очистке", show_alert=True)
-
-@dp.callback_query(lambda c: c.data.startswith("video_intro_horizontal:"))
-async def handle_video_intro_horizontal(callback: CallbackQuery):
-    try:
-        rule_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-
-    intros = await run_db(db.get_intros)
-
-    if not intros:
-        await answer_callback_safe(callback, "Нет заставок", show_alert=True)
-        return
-
-    rows = []
-
-    for intro in intros:
-        rows.append([
-            InlineKeyboardButton(
-                text=intro.display_name,
-                callback_data=f"apply_intro:horizontal:{rule_id}:{intro.id}",
-            )
-        ])
-
-    rows.append([
-        InlineKeyboardButton(
-            text="❌ Убрать",
-            callback_data=f"apply_intro:horizontal:{rule_id}:none",
-        )
-    ])
-
-    rows.append([
-        InlineKeyboardButton(
-            text="⬅️ Назад",
-            callback_data=f"rule_card:{rule_id}",
-        )
-    ])
-
-    try:
-        await edit_message_text_safe(
-            message=callback.message,
-            text="🎬 Выбор горизонтальной заставки",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        )
-    except Exception as exc:
-        if "message is not modified" not in str(exc).lower():
-            logger.exception("Ошибка handle_video_intro_horizontal: %s", exc)
-
-    await answer_callback_safe_once(callback)
-
-@dp.callback_query(lambda c: c.data.startswith("video_intro_vertical:"))
-async def handle_video_intro_vertical(callback: CallbackQuery):
-    try:
-        rule_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-
-    intros = await run_db(db.get_intros)
-
-    if not intros:
-        await answer_callback_safe(callback, "Нет заставок", show_alert=True)
-        return
-
-    rows = []
-
-    for intro in intros:
-        rows.append([
-            InlineKeyboardButton(
-                text=intro.display_name,
-                callback_data=f"apply_intro:vertical:{rule_id}:{intro.id}",
-            )
-        ])
-
-    rows.append([
-        InlineKeyboardButton(
-            text="❌ Убрать",
-            callback_data=f"apply_intro:vertical:{rule_id}:none",
-        )
-    ])
-
-    rows.append([
-        InlineKeyboardButton(
-            text="⬅️ Назад",
-            callback_data=f"rule_card:{rule_id}",
-        )
-    ])
-
-    try:
-        await edit_message_text_safe(
-            message=callback.message,
-            text="🎬 Выбор вертикальной заставки",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        )
-    except Exception as exc:
-        if "message is not modified" not in str(exc).lower():
-            logger.exception("Ошибка handle_video_intro_vertical: %s", exc)
-
-    await answer_callback_safe_once(callback)
-
-@dp.callback_query(lambda c: c.data.startswith("apply_intro:"))
-async def handle_apply_intro(callback: CallbackQuery):
-    try:
-        _, mode, rule_id_raw, intro_id_raw = callback.data.split(":")
-        rule_id = int(rule_id_raw)
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-
-    try:
-        intro_id_val = None if intro_id_raw == "none" else int(intro_id_raw)
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-
-    row = await run_db(_apply_intro_sync, rule_id, mode, intro_id_val)
-    if not row:
-        await answer_callback_safe(callback, "Ошибка", show_alert=True)
-        return
-
-    invalidate_rule_card_cache(rule_id)
-
-    try:
-        await edit_message_text_safe(
-            message=callback.message,
-            text=build_rule_card_text(row),
-            reply_markup=(
-                build_rule_card_keyboard(
-                    rule_id,
-                    bool(row["is_active"]),
-                    row["schedule_mode"] or "interval",
-                    row["mode"] or "repost",
-                )
-                if _is_admin_user(callback.from_user.id if callback.from_user else None)
-                else _filter_user_rule_card_keyboard(
-                    build_rule_card_keyboard(
-                        rule_id,
-                        bool(row["is_active"]),
-                        row["schedule_mode"] or "interval",
-                        row["mode"] or "repost",
-                    ),
-                    rule_id,
-                )
-            ),
-            parse_mode="HTML",
-        )
-    except Exception as exc:
-        if "message is not modified" not in str(exc).lower():
-            logger.exception("Ошибка handle_apply_intro: %s", exc)
-
-    await answer_callback_safe_once(callback, "Сохранено")
 
 @dp.callback_query(lambda c: c.data.startswith("rule_card:"))
 async def handle_rule_card(callback: CallbackQuery):
@@ -8000,101 +7563,6 @@ async def handle_stateful_private_inputs(message: Message):
             await send_message_safe(chat_id=message.chat.id, text="❌ Не удалось обновить интервал", reply_markup=get_main_menu())
         reset_user_state(user_id)
         return
-
-@dp.message(
-    lambda m:
-        m.chat.type == "private"
-        and m.from_user is not None
-        and is_admin_user(m.from_user.id)
-        and user_states.get(m.from_user.id, {}).get("action") == "intro_upload_wait_file"
-        and (m.photo or m.video or m.document)
-)
-async def handle_intro_file(message: Message):
-    state = user_states.get(message.from_user.id)
-    if not state or state.get("action") != "intro_upload_wait_file":
-        return
-
-    if not await is_admin(message):
-        return
-
-    caption = (message.caption or "").strip()
-    if not caption:
-        await send_message_safe(chat_id=message.chat.id, text="❌ Укажи название заставки в подписи к файлу.\n\n"
-            "Пример:\n"
-            "grom_vert", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
-        return
-
-    safe_name = sanitize_intro_name(caption)
-    if not safe_name:
-        await send_message_safe(chat_id=message.chat.id, text="❌ Некорректное название заставки.\n"
-            "Разрешены буквы, цифры, пробел, _, -", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
-        return
-
-    if message.photo:
-        tg_file = message.photo[-1]
-        extension = "jpg"
-        duration = 0
-    else:
-        tg_file = message.video or message.document
-        mime_type = (getattr(tg_file, "mime_type", None) or "").lower()
-
-        if message.video:
-            extension = "mp4"
-        elif mime_type.startswith("image/"):
-            extension = "jpg"
-        elif mime_type.startswith("video/"):
-            extension = "mp4"
-        else:
-            await send_message_safe(chat_id=message.chat.id, text="❌ Поддерживаются только видео или изображения для заставки", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
-            return
-
-        duration = int(getattr(tg_file, "duration", 0) or 0)
-
-    if duration > 30:
-        await send_message_safe(chat_id=message.chat.id, text="❌ Видео-заставка не должна быть длиннее 30 секунд", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
-        return
-
-    file_name = make_unique_intro_filename(
-        safe_name,
-        extension,
-        str(settings.intros_dir),
-    )
-    file_path = str(settings.intros_dir / file_name)
-
-    try:
-        telegram_file = await bot.get_file(tg_file.file_id)
-        await bot.download_file(telegram_file.file_path, destination=file_path)
-    except Exception as exc:
-        await send_message_safe(chat_id=message.chat.id, text=f"❌ Не удалось скачать заставку: {exc}", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
-        return
-
-    intro_id = await run_db(
-        db.add_intro,
-        display_name=caption,
-        file_name=file_name,
-        file_path=file_path,
-        duration=duration,
-    )
-
-    if not intro_id:
-        try:
-            import os
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except Exception:
-            pass
-
-        await send_message_safe(chat_id=message.chat.id, text="❌ Такая заставка уже существует", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
-        return
-
-    intros = await run_db(db.get_intros)
-
-    await send_message_safe(chat_id=message.chat.id, text=f"✅ Заставка '{caption}' добавлена", reply_markup=build_intro_list_keyboard(intros))
-
-    user_states[message.from_user.id] = {
-        "action": "intro_menu",
-        "rule_id": state.get("rule_id"),
-    }
 
 @dp.message(lambda m: m.text == "➕ Добавить правило")
 async def handle_add_rule(message: Message):
