@@ -71,6 +71,19 @@ def test_apply_intro_checks_bank_ownership_before_assignment():
     assert apply_handler.index("get_rule_intro") < apply_handler.index("_apply_intro_sync")
 
 
+def test_apply_intro_replaces_preview_media_with_text_result():
+    source = _source()
+    helper_block = source.split("async def _replace_callback_message_with_text", maxsplit=1)[1]
+    helper_block = helper_block.split("@dp.callback_query", maxsplit=1)[0]
+    apply_handler = source.split("async def handle_apply_intro", maxsplit=1)[1]
+    apply_handler = apply_handler.split("@dp.message", maxsplit=1)[0]
+
+    assert "try_delete_message_safe" in helper_block
+    assert "send_message_safe" in helper_block
+    assert "_replace_callback_message_with_text" in apply_handler
+    assert "edit_message_text_safe" not in apply_handler
+
+
 def test_delete_intro_is_soft_rule_and_bank_scoped():
     source = _source()
     delete_flow = source.split("async def handle_intro_delete_apply", maxsplit=1)[1]
@@ -121,8 +134,7 @@ def test_delete_confirm_deletes_media_preview_and_sends_text_message():
     confirm_block = source.split("async def handle_intro_delete_confirm", maxsplit=1)[1]
     confirm_block = confirm_block.split("@dp.callback_query(lambda c: c.data.startswith(\"intro_delete_cancel:\"))", maxsplit=1)[0]
 
-    assert "try_delete_message_safe" in confirm_block
-    assert "send_message_safe" in confirm_block
+    assert "_replace_callback_message_with_text" in confirm_block
     assert "edit_message_text_safe" not in confirm_block
 
 

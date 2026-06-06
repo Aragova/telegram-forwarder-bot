@@ -414,6 +414,22 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
         await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=markup)
         await ctx.answer_callback_safe_once(callback)
 
+    async def _replace_callback_message_with_text(
+        callback: CallbackQuery,
+        text: str,
+        reply_markup: InlineKeyboardMarkup,
+    ) -> None:
+        try:
+            await ctx.try_delete_message_safe(callback.message.chat.id, callback.message.message_id)
+        except Exception:
+            pass
+
+        await ctx.send_message_safe(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+
     @dp.callback_query(lambda c: c.data.startswith("video_intro_menu:") or c.data.startswith("user_rule_intros:"))
     async def handle_video_intro_menu(callback: CallbackQuery):
         try:
@@ -703,13 +719,8 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
             await ctx.answer_callback_safe(callback, "⚠️ Заставка не найдена в этом банке.", show_alert=True)
             return
 
-        try:
-            await ctx.try_delete_message_safe(callback.message.chat.id, callback.message.message_id)
-        except Exception:
-            pass
-
-        await ctx.send_message_safe(
-            chat_id=callback.message.chat.id,
+        await _replace_callback_message_with_text(
+            callback,
             text=(
                 "🗑 Удалить заставку?\n\n"
                 f"Правило #{rule_id}\n"
@@ -884,15 +895,11 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
                 f"Заставка: {intro.display_name}"
             )
 
-        try:
-            await ctx.edit_message_text_safe(
-                message=callback.message,
-                text=success_text,
-                reply_markup=_build_intro_bank_result_keyboard(rule_id, mode),
-            )
-        except Exception as exc:
-            if "message is not modified" not in str(exc).lower():
-                ctx.logger.exception("Ошибка handle_apply_intro: %s", exc)
+        await _replace_callback_message_with_text(
+            callback,
+            text=success_text,
+            reply_markup=_build_intro_bank_result_keyboard(rule_id, mode),
+        )
 
         await ctx.answer_callback_safe_once(callback, "Сохранено")
 
