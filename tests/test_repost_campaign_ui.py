@@ -967,6 +967,8 @@ def test_bot_launch_callback_opens_launch_mode_screen():
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_current:"))' in schedule_source
     assert '@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch:"))' not in bot_source
 
+from app.repost_campaign_view_model import format_vip_scheduled_post_status_text
+
 from app.repost_campaign_ui import (
     build_vip_scheduled_posts_screen_view,
     build_vip_scheduled_posts_list_view,
@@ -980,6 +982,10 @@ from app.repost_campaign_ui import (
     build_vip_scheduled_post_add_target_view,
     build_vip_scheduled_post_pick_targets_view,
 )
+
+def test_vip_scheduled_post_needs_review_status_text():
+    assert format_vip_scheduled_post_status_text("needs_review") == "⚠️ Требуется проверка"
+
 
 def test_vip_scheduled_main_screen_has_only_premium_intro_and_three_buttons():
     text, kb = build_vip_scheduled_posts_screen_view(rule_id=1, posts=[])
@@ -1081,15 +1087,17 @@ def test_vip_scheduled_posts_list_view_includes_allowed_statuses_and_excludes_dr
         {"id": 4, "status": "processing", "scheduled_at": "2026-05-10T16:00:00+00:00"},
         {"id": 5, "status": "launched", "scheduled_at": "2026-05-10T17:00:00+00:00"},
         {"id": 6, "status": "failed", "scheduled_at": "2026-05-10T18:00:00+00:00"},
-        {"id": 7, "status": "cancelled", "scheduled_at": "2026-05-10T19:00:00+00:00"},
-        {"id": 8, "status": "expired", "scheduled_at": "2026-05-10T20:00:00+00:00"},
+        {"id": 7, "status": "needs_review", "scheduled_at": "2026-05-10T19:00:00+00:00"},
+        {"id": 8, "status": "cancelled", "scheduled_at": "2026-05-10T20:00:00+00:00"},
+        {"id": 9, "status": "expired", "scheduled_at": "2026-05-10T21:00:00+00:00"},
     ]
     text, kb = build_vip_scheduled_posts_list_view(rule_id=1, posts=posts, page=0)
     callbacks = _callbacks_from_keyboard(kb)
     assert "rule_repost_campaign_scheduled_post_detail:1:1" not in callbacks
     assert "rule_repost_campaign_scheduled_post_detail:1:2" not in callbacks
-    for post_id in (3, 4, 5, 6, 7, 8):
+    for post_id in (3, 4, 5, 6, 7, 8, 9):
         assert any(f"rule_repost_campaign_scheduled_post_detail:1:{post_id}" in c for c in callbacks)
+    assert "⚠️ Требуется проверка" in text or any("⚠️ Требуется проверка" in x for x in _texts_from_keyboard(kb))
     assert "Отложенный пост" in text or any("Отложенный пост" in x for x in _texts_from_keyboard(kb))
 
 
@@ -1300,6 +1308,22 @@ def test_vip_scheduled_waiting_material_text():
     assert "Отправьте сюда рекламный пост" in source
     assert "После сохранения поста ViMi перейдёт к шагу 2" in source
 
+def test_vip_scheduled_posts_list_view_shows_needs_review_post():
+    posts = [
+        {
+            "id": 10,
+            "status": "needs_review",
+            "scheduled_at": "2026-05-10T15:00:00+00:00",
+            "show_seconds": 3600,
+        }
+    ]
+    text, kb = build_vip_scheduled_posts_list_view(rule_id=1, posts=posts, page=0)
+    callbacks = _callbacks_from_keyboard(kb)
+
+    assert "⚠️ Требуется проверка" in text or any("⚠️ Требуется проверка" in x for x in _texts_from_keyboard(kb))
+    assert any("rule_repost_campaign_scheduled_post_detail:1:10" in c for c in callbacks)
+
+
 def test_vip_scheduled_posts_list_view_empty_when_only_internal_drafts():
     text, _ = build_vip_scheduled_posts_list_view(rule_id=1, posts=[{"id": 1, "status": "draft", "scheduled_at": None}], page=0)
     assert "Пока нет отложенных постов." in text
@@ -1320,7 +1344,7 @@ def test_vip_scheduled_posts_list_view_has_no_filters():
 
 def test_bot_vip_scheduled_list_handler_loads_allowed_statuses():
     source = Path("app/repost_campaign_scheduled_post_handlers.py").read_text(encoding="utf-8")
-    assert 'statuses=["scheduled", "processing", "launched", "failed", "cancelled", "expired"]' in source
+    assert 'statuses=["scheduled", "processing", "launched", "failed", "needs_review", "cancelled", "expired"]' in source
     handler_body = source[source.find("async def handle_rule_repost_campaign_scheduled_posts_list"):source.find('@dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_scheduled_post_new:"))')]
     assert "status_filter" not in handler_body
 
@@ -1561,6 +1585,48 @@ def test_vip_scheduled_detail_buttons_for_terminal():
     _, kb = build_vip_scheduled_post_detail_view(rule_id=1, details={"post": {"id": 2, "status": "failed"}})
     texts = _texts_from_keyboard(kb)
     assert "📋 Дублировать пост" in texts and "🚀 Отправить сейчас" not in texts
+
+def test_vip_scheduled_detail_needs_review_explains_state_and_has_report_button():
+    text, kb = build_vip_scheduled_post_detail_view(
+        rule_id=1,
+        details={
+            "post": {
+                "id": 2,
+                "status": "needs_review",
+                "campaign_run_id": 123,
+                "error_text": "some safe error",
+            }
+        },
+    )
+    labels = _texts_from_keyboard(kb)
+    callbacks = _callbacks_from_keyboard(kb)
+
+    assert "⚠️ Требуется проверка" in text
+    assert "Автоматический повтор остановлен" in text
+    assert "Проверьте публикацию в каналах" in text
+    assert "Причина: some safe error" in text
+    assert "📊 Открыть отчёт" in labels
+    assert "📋 Дублировать пост" in labels
+    assert "⬅️ Назад" in labels
+    assert "rule_repost_campaign_views_report:1:123" in callbacks
+
+
+def test_vip_scheduled_detail_needs_review_hides_raw_sql_error():
+    text, _ = build_vip_scheduled_post_detail_view(
+        rule_id=1,
+        details={
+            "post": {
+                "id": 2,
+                "status": "needs_review",
+                "error_text": 'null value in column "delete_status" violates not-null constraint\nDETAIL: Failing row contains campaign_run_messages ...',
+            }
+        },
+    )
+
+    for value in ["violates", "DETAIL", "campaign_run_messages", "null value in column"]:
+        assert value not in text
+    assert "состояние запуска неизвестно" in text
+
 
 def test_vip_scheduled_detail_hides_technical_fields_before_launch():
     text, _ = build_vip_scheduled_post_detail_view(
