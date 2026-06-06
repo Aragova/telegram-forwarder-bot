@@ -1111,10 +1111,10 @@ def test_vip_step1_back_to_scheduled_posts():
     assert 'rule_repost_campaign_scheduled_posts:1' in _callbacks_from_keyboard(kb)
 
 
-def test_legacy_cancel_result_keeps_schedule_menu_callback():
+def test_cancel_result_uses_schedule_current_callback():
     from app.repost_campaign_ui import build_repost_campaign_scheduled_launch_cancel_result_view
     _, kb = build_repost_campaign_scheduled_launch_cancel_result_view(rule_id=1, ok=True)
-    assert 'rule_repost_campaign_schedule_menu:1' in _callbacks_from_keyboard(kb)
+    assert 'rule_repost_campaign_schedule_current:1' in _callbacks_from_keyboard(kb)
 
 
 def test_bot_no_run_db_for_async_check_targets():
@@ -1979,3 +1979,100 @@ def test_launch_result_hides_raw_delete_status_sql_error():
     assert "Реклама могла быть опубликована" in text
     assert "не смог безопасно подтвердить ID сообщений" in text
     assert "Автоматический повтор остановлен" in text
+
+
+def _render_view_payload(text, keyboard):
+    labels = _texts_from_keyboard(keyboard)
+    callbacks = _callbacks_from_keyboard(keyboard)
+    return "\n".join([text, *labels, *[c or "" for c in callbacks]])
+
+
+def test_regular_schedule_views_do_not_contain_vip_copy_or_vip_callbacks():
+    from datetime import datetime, timezone
+    from app.repost_campaign_ui import (
+        build_repost_campaign_schedule_current_view,
+        build_repost_campaign_schedule_menu_view,
+        build_repost_campaign_schedule_wizard_step1_view,
+        build_repost_campaign_schedule_wizard_step2_view,
+        build_repost_campaign_schedule_wizard_step3_view,
+        build_repost_campaign_schedule_wizard_step4_view,
+        build_repost_campaign_schedule_preview_view,
+        build_repost_campaign_schedule_result_view,
+        build_repost_campaign_scheduled_launch_detail_view,
+        build_repost_campaign_scheduled_launch_cancel_confirm_view,
+        build_repost_campaign_scheduled_launch_cancel_result_view,
+    )
+    readiness = {
+        "can_launch": True,
+        "saved_post_id": 2,
+        "saved_post_exists": True,
+        "targets_total": 3,
+        "will_send_total": 3,
+        "will_skip_total": 0,
+        "show_seconds": 86400,
+        "extra_total": 1,
+    }
+    launch = {
+        "id": 9,
+        "status": "scheduled",
+        "scheduled_at": "2026-05-09T15:00:00+00:00",
+        "saved_post_id": 2,
+        "show_seconds": 86400,
+    }
+    views = [
+        build_repost_campaign_schedule_current_view(rule_id=1, readiness=readiness),
+        build_repost_campaign_schedule_menu_view(rule_id=1, scheduled_launches=[launch]),
+        build_repost_campaign_schedule_wizard_step1_view(rule_id=1, readiness=readiness),
+        build_repost_campaign_schedule_wizard_step2_view(rule_id=1, readiness=readiness),
+        build_repost_campaign_schedule_wizard_step3_view(rule_id=1, readiness=readiness),
+        build_repost_campaign_schedule_wizard_step4_view(rule_id=1),
+        build_repost_campaign_schedule_preview_view(
+            rule_id=1,
+            readiness=readiness,
+            scheduled_at_utc=datetime(2026, 5, 9, 15, 0, tzinfo=timezone.utc),
+        ),
+        build_repost_campaign_schedule_result_view(rule_id=1, scheduled_launch=launch),
+        build_repost_campaign_scheduled_launch_detail_view(rule_id=1, scheduled_launch=launch),
+        build_repost_campaign_scheduled_launch_cancel_confirm_view(rule_id=1, scheduled_launch_id=9),
+        build_repost_campaign_scheduled_launch_cancel_result_view(rule_id=1, ok=True),
+    ]
+    forbidden_text = ["V" + "IP", "V" + "IP функции", "Запланированные посты"]
+    forbidden_callbacks = [
+        "rule_repost_campaign_" + "vip_features",
+        "rule_repost_campaign_" + "scheduled_posts",
+        "rule_repost_campaign_" + "scheduled_post_",
+    ]
+    for text, keyboard in views:
+        payload = _render_view_payload(text, keyboard)
+        for forbidden in forbidden_text + forbidden_callbacks:
+            assert forbidden not in payload
+
+
+def test_schedule_result_view_uses_regular_campaign_navigation():
+    from app.repost_campaign_ui import build_repost_campaign_schedule_result_view
+    text, kb = build_repost_campaign_schedule_result_view(
+        rule_id=1,
+        scheduled_launch={"id": 9, "scheduled_at": "2026-05-09T15:00:00+00:00", "show_seconds": 86400},
+    )
+    labels = _texts_from_keyboard(kb)
+    callbacks = _callbacks_from_keyboard(kb)
+    assert "✅ Запуск запланирован" in text
+    assert "📄 Открыть запланированный запуск" in labels
+    assert "🕒 Запланировать ещё" in labels
+    assert "💰 К кампании" in labels
+    assert "💎 К " + "VIP функциям" not in labels
+    assert "rule_repost_campaign_schedule_current:1" in callbacks
+    assert "rule_repost_campaign_menu:1" in callbacks
+
+
+def test_schedule_cancel_result_view_uses_regular_campaign_navigation():
+    from app.repost_campaign_ui import build_repost_campaign_scheduled_launch_cancel_result_view
+    text, kb = build_repost_campaign_scheduled_launch_cancel_result_view(rule_id=1, ok=True)
+    labels = _texts_from_keyboard(kb)
+    callbacks = _callbacks_from_keyboard(kb)
+    assert "✅ Запланированный запуск отменён" in text
+    assert "🕒 Запланировать запуск" in labels
+    assert "💰 К кампании" in labels
+    assert "💎 К " + "VIP функциям" not in labels
+    assert "rule_repost_campaign_schedule_current:1" in callbacks
+    assert "rule_repost_campaign_menu:1" in callbacks
