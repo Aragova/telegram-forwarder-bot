@@ -122,7 +122,6 @@ def test_row_to_rule_maps_repost_campaign_fields():
     assert rule.repost_campaign_show_seconds == 86400
 
 
-
 def test_saved_posts_repository_methods_exist():
     repo = PostgresRepository()
 
@@ -234,6 +233,33 @@ def test_claim_due_campaign_run_messages_for_delete_skips_failed_with_future_ret
     sql = captured["conn"]._cursor.last_sql
     assert "views_final_status = 'failed'" in sql
     assert "views_final_next_retry_at > NOW()" in sql
+
+
+def test_mark_campaign_run_message_failed_sanitizes_null_delete_status():
+    repo = PostgresRepository()
+    captured = {"conn": None}
+
+    @contextmanager
+    def _connect():
+        conn = _FakeConn(1, row=None)
+        captured["conn"] = conn
+        yield conn
+
+    repo.connect = _connect
+
+    assert repo.mark_campaign_run_message_failed(
+        77,
+        error_text="x",
+        render_mode="telethon_source_unverified",
+        delete_status=None,
+    ) is True
+
+    params = captured["conn"]._cursor.last_params
+    assert params[2] == "failed"
+    assert params[2] is not None
+    assert "требуется ручная проверка" in params[3]
+    assert "delete_error_text" in captured["conn"]._cursor.last_sql
+
 
 def test_campaign_schedule_repository_methods_exist():
     from app.repository import RepositoryProtocol

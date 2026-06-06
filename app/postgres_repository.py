@@ -8036,10 +8036,36 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return True
 
-    def mark_campaign_run_message_failed(self, message_id: int, *, error_text: str, render_mode: str | None = None, delete_status: str | None = "failed") -> bool:
+    def mark_campaign_run_message_failed(
+        self,
+        message_id: int,
+        *,
+        error_text: str,
+        render_mode: str | None = None,
+        delete_status: str | None = "failed",
+        delete_error_text: str | None = None,
+    ) -> bool:
+        safe_delete_status = str(delete_status or "failed")
+        if safe_delete_status not in {"none", "pending", "processing", "deleted", "failed"}:
+            safe_delete_status = "failed"
+        safe_delete_error_text = delete_error_text
+        if delete_status is None and not safe_delete_error_text:
+            safe_delete_error_text = "ID публикации не подтверждён. Автоматическое удаление невозможно, требуется ручная проверка."
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE campaign_run_messages SET send_status='failed', send_error_text=%s, render_mode=%s, delete_status=%s, updated_at=NOW() WHERE id=%s", (error_text, render_mode, delete_status, int(message_id)))
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET send_status='failed',
+                        send_error_text=%s,
+                        render_mode=%s,
+                        delete_status=%s,
+                        delete_error_text=%s,
+                        updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (error_text, render_mode, safe_delete_status, safe_delete_error_text, int(message_id)),
+                )
             conn.commit()
             return True
 
