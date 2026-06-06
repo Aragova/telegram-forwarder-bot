@@ -941,9 +941,83 @@ class VideoProcessor:
 
     # ==================== INTRO ====================
 
+    INTRO_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
+
+    def _is_intro_image(self, intro_path):
+        return str(intro_path).lower().endswith(self.INTRO_IMAGE_EXTENSIONS)
+
+    def _get_intro_item_duration(self, intro_item):
+        if intro_item is None:
+            return None
+
+        duration = None
+        if isinstance(intro_item, dict):
+            duration = intro_item.get("duration")
+        else:
+            duration = getattr(intro_item, "duration", None)
+
+        try:
+            duration = float(duration or 0)
+        except (TypeError, ValueError):
+            return None
+
+        return duration if duration > 0 else None
+
+    async def _resolve_intro_effective_duration(self, intro_path, intro_item=None):
+        media_kind = "image" if self._is_intro_image(intro_path) else "video"
+        config_duration = float(config.intro_duration)
+
+        if media_kind == "image":
+            logger.info(
+                "VIDEO_INTRO_DURATION_RESOLVED | intro_path=%s | media_kind=image | effective_intro_duration=%s | fallback=False",
+                intro_path,
+                config_duration,
+            )
+            return config_duration
+
+        video_info = await self.get_video_info(str(intro_path), use_cache=False)
+        if video_info:
+            try:
+                probed_duration = float(video_info.get("duration") or 0)
+            except (TypeError, ValueError):
+                probed_duration = 0
+            if probed_duration > 0:
+                logger.info(
+                    "VIDEO_INTRO_DURATION_RESOLVED | intro_path=%s | media_kind=video | effective_intro_duration=%s | fallback=False",
+                    intro_path,
+                    probed_duration,
+                )
+                return probed_duration
+
+        item_duration = self._get_intro_item_duration(intro_item)
+        if item_duration is not None:
+            logger.info(
+                "VIDEO_INTRO_DURATION_FALLBACK | intro_path=%s | reason=ffprobe_failed | fallback_duration=%s",
+                intro_path,
+                item_duration,
+            )
+            logger.info(
+                "VIDEO_INTRO_DURATION_RESOLVED | intro_path=%s | media_kind=video | effective_intro_duration=%s | fallback=True",
+                intro_path,
+                item_duration,
+            )
+            return item_duration
+
+        logger.info(
+            "VIDEO_INTRO_DURATION_FALLBACK | intro_path=%s | reason=ffprobe_failed_no_db_duration | fallback_duration=%s",
+            intro_path,
+            config_duration,
+        )
+        logger.info(
+            "VIDEO_INTRO_DURATION_RESOLVED | intro_path=%s | media_kind=video | effective_intro_duration=%s | fallback=True",
+            intro_path,
+            config_duration,
+        )
+        return config_duration
+
     async def create_intro_matching_video(self, source_path, profile, duration, stage_logger=None):
         output_path = os.path.join(self.temp_dir, f"intro_matched_{int(time.time())}.mp4")
-        is_image = source_path.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'))
+        is_image = self._is_intro_image(source_path)
         
         vf = self._build_video_filter(profile['target_width'], profile['target_height'], profile['target_fps'])
         
@@ -963,7 +1037,7 @@ class VideoProcessor:
                 "ffmpeg", "-i", source_path,
                 "-vf", vf,
                 *self._build_video_encode_args("veryfast", 26),
-                "-an", "-t", str(duration),
+                "-an",
                 "-movflags", "+faststart",
                 "-y", output_path
             ]
@@ -1391,6 +1465,8 @@ class VideoProcessor:
         input_file_path=None,
         clip_duration_seconds=None,
         stage_logger=None,
+        intro_item_horizontal=None,
+        intro_item_vertical=None,
     ):
         async with self.semaphore:
             return await self._process_video_internal(
@@ -1407,6 +1483,8 @@ class VideoProcessor:
                 input_file_path,
                 clip_duration_seconds,
                 stage_logger,
+                intro_item_horizontal=intro_item_horizontal,
+                intro_item_vertical=intro_item_vertical,
                 send_output=True,
             )
 
@@ -1419,6 +1497,8 @@ class VideoProcessor:
         intro_name_vertical=None,
         stage_logger=None,
         clip_duration_seconds=None,
+        intro_item_horizontal=None,
+        intro_item_vertical=None,
     ):
         async with self.semaphore:
             return await self._process_video_internal(
@@ -1435,6 +1515,8 @@ class VideoProcessor:
                 input_file_path=input_file_path,
                 stage_logger=stage_logger,
                 clip_duration_seconds=clip_duration_seconds,
+                intro_item_horizontal=intro_item_horizontal,
+                intro_item_vertical=intro_item_vertical,
                 send_output=False,
             )
 
@@ -1453,6 +1535,8 @@ class VideoProcessor:
         input_file_path=None,
         clip_duration_seconds=None,
         stage_logger=None,
+        intro_item_horizontal=None,
+        intro_item_vertical=None,
         send_output=True,
     ):
         logger.info("=" * 70)
@@ -1618,7 +1702,6 @@ class VideoProcessor:
             logger.info(f"   Downscale: {'ДА' if profile['downscale'] else 'НЕТ'}")
             logger.info(f"   Причина:  {profile['reason']}")
 
-            intro_duration = config.intro_duration
             requested_clip = max(10, min(600, int(clip_duration_seconds or 118)))
             source_duration = float(video_info["duration"])
             main_cut_duration = source_duration
@@ -1789,11 +1872,15 @@ class VideoProcessor:
 
             selected_intro_name = None
 
+            selected_intro_item = None
+
             if profile.get("is_vertical"):
                 selected_intro_name = intro_name_vertical
+                selected_intro_item = intro_item_vertical
                 logger.info("📱 Обнаружено вертикальное видео -> выбираю вертикальную заставку")
             else:
                 selected_intro_name = intro_name_horizontal
+                selected_intro_item = intro_item_horizontal
                 logger.info("🎬 Обнаружено горизонтальное видео -> выбираю горизонтальную заставку")
 
             if add_intro and selected_intro_name:
@@ -1816,10 +1903,15 @@ class VideoProcessor:
                     logger.info(f"   Выбранная заставка: {selected_intro_name}")
                     logger.info(f"   Цель: {profile['target_width']}x{profile['target_height']} @ {profile['target_fps']}fps")
 
+                    effective_intro_duration = await self._resolve_intro_effective_duration(
+                        intro_source_path,
+                        selected_intro_item,
+                    )
+
                     intro_result = await self.create_intro_matching_video(
                         intro_source_path,
                         profile,
-                        intro_duration,
+                        effective_intro_duration,
                         stage_logger=stage_logger
                     )
 
@@ -1864,8 +1956,18 @@ class VideoProcessor:
                         "with_intro": True,
                     },
                 )
+                main_duration = float(clipped_info['duration'])
+                intro_concat_duration = float(intro_info['duration'])
+                expected_total_duration = main_duration + intro_concat_duration
+                logger.info(
+                    "VIDEO_FINAL_DURATION_PLAN | main_duration=%s | intro_duration=%s | expected_total=%s",
+                    main_duration,
+                    intro_concat_duration,
+                    expected_total_duration,
+                )
+
                 if not await self.concat_videos_safe(intro_processed_path, clipped_main_path, final_output, profile,
-                                                    video_info['has_audio'], expected_duration=intro_duration + clipped_info['duration'], stage_logger=stage_logger):
+                                                    video_info['has_audio'], expected_duration=expected_total_duration, stage_logger=stage_logger):
                     logger.error("❌ Ошибка при склейке видео")
 
                     self._stage_failed(
