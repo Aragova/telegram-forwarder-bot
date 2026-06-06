@@ -1434,7 +1434,8 @@ def build_vip_scheduled_posts_list_view(
     page: int = 0,
     page_size: int = 10,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    visible_posts = [post for post in posts if str(post.get("status") or "").strip().lower() in {"scheduled", "processing", "launched", "failed", "cancelled", "expired"}]
+    visible_statuses = {"scheduled", "processing", "launched", "failed", "needs_review", "cancelled", "expired"}
+    visible_posts = [post for post in posts if str(post.get("status") or "").strip().lower() in visible_statuses]
     visible_posts = [post for post in visible_posts if post.get("scheduled_at")]
     total = len(visible_posts)
     total_pages = max(1, (total + page_size - 1) // page_size)
@@ -1446,7 +1447,8 @@ def build_vip_scheduled_posts_list_view(
     for post in page_items:
         post_id = int(post.get("id") or 0)
         scheduled_at = post.get("scheduled_at")
-        button_text = f"🕒 Отложенный пост от {format_campaign_datetime_text(scheduled_at, timezone_offset_hours=3)}"
+        status_text = format_vip_scheduled_post_status_text(post.get("status"))
+        button_text = f"🕒 Отложенный пост от {format_campaign_datetime_text(scheduled_at, timezone_offset_hours=3)} · {status_text}"
         rows.append([InlineKeyboardButton(text=button_text, callback_data=f"rule_repost_campaign_scheduled_post_detail:{rule_id}:{post_id}")])
     if total > page_size:
         pager = []
@@ -1691,12 +1693,32 @@ def build_vip_scheduled_post_preview_view(*, rule_id:int, scheduled_post:dict, t
     rows += [[InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_scheduled_post_step_time:{rule_id}:{sid}')]]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+def _format_vip_scheduled_needs_review_error_text(error_text: object) -> str:
+    text = str(error_text or "").strip()
+    if not text:
+        return ""
+    technical_markers = (
+        "Traceback",
+        "DETAIL:",
+        "violates",
+        "constraint",
+        "campaign_run_messages",
+        "null value in column",
+    )
+    if any(marker.lower() in text.lower() for marker in technical_markers):
+        return "Причина: состояние запуска неизвестно после создания размещения."
+    safe_text = format_campaign_error_text(text, limit=800)
+    if not safe_text:
+        return "Причина: состояние запуска неизвестно после создания размещения."
+    return f"Причина: {safe_text}"
+
 def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tuple[str, InlineKeyboardMarkup]:
     post = details.get('post') or {}
     readiness = details.get('readiness') or {}
     run = details.get('campaign_run') or {}
     sid = int(post.get('id') or 0)
-    st = str(post.get('status') or 'draft')
+    st = str(post.get('status') or 'draft').strip().lower()
     status = "запланирован" if st in {"draft", "ready", "scheduled"} else format_vip_scheduled_post_status_text(st)
     run_id = int(post.get("campaign_run_id") or 0)
     launch_line = f"{format_campaign_datetime_text(post.get('scheduled_at'), timezone_offset_hours=3)} UTC+3"
@@ -1707,6 +1729,19 @@ def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tupl
     if st == "processing":
         blocks[1] = "Статус: запускается\nЗапуск: сейчас\nСрок показа: " + format_campaign_show_seconds_text(post.get("show_seconds"))
         blocks.append("ViMi отправляет пост в выбранные каналы/группы.\nИзменения сейчас недоступны.")
+    elif st == "needs_review":
+        blocks.append(
+            "⚠️ Требуется проверка\n\n"
+            "Запуск был создан, но сервер не смог безопасно подтвердить итог.\n"
+            "Автоматический повтор остановлен, чтобы не отправить рекламу дважды.\n\n"
+            "Что сделать:\n"
+            "• Проверьте публикацию в каналах.\n"
+            "• Если реклама опубликована — дождитесь нужного срока показа и удалите её вручную, если бот не сможет удалить автоматически.\n"
+            "• После проверки можно продублировать пост и запланировать новый запуск."
+        )
+        review_error = _format_vip_scheduled_needs_review_error_text(post.get("error_text"))
+        if review_error:
+            blocks.append(review_error)
     elif run and run_id > 0:
         run_summary = format_vip_scheduled_run_summary(run)
         delete_summary = format_vip_scheduled_delete_summary(run)
@@ -1723,7 +1758,7 @@ def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tupl
         warnings = [str(x) for x in (readiness.get("warnings") or []) if x]
         if warnings:
             blocks.append("\n".join(warnings))
-    if post.get("error_text"):
+    if post.get("error_text") and st != "needs_review":
         blocks.append(f"⚠️ Есть проблема\n\nОшибка: {format_campaign_error_text(post.get('error_text'), limit=800) or 'Неизвестная ошибка'}")
     text = "\n\n".join([b for b in blocks if b])
     rows = []
@@ -1735,6 +1770,12 @@ def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tupl
         text += "\n\nПост сейчас запускается. Изменения недоступны."
         rows += [[InlineKeyboardButton(text='📋 Дублировать пост', callback_data=f'rule_repost_campaign_scheduled_post_duplicate:{rule_id}:{sid}')]]
     elif st == 'launched':
+        if run_id > 0:
+            rows += [
+                [InlineKeyboardButton(text='📊 Открыть отчёт', callback_data=f'rule_repost_campaign_views_report:{rule_id}:{run_id}')],
+            ]
+        rows += [[InlineKeyboardButton(text='📋 Дублировать пост', callback_data=f'rule_repost_campaign_scheduled_post_duplicate:{rule_id}:{sid}')]]
+    elif st == 'needs_review':
         if run_id > 0:
             rows += [
                 [InlineKeyboardButton(text='📊 Открыть отчёт', callback_data=f'rule_repost_campaign_views_report:{rule_id}:{run_id}')],

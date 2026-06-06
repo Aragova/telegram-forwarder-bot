@@ -93,7 +93,7 @@ async def _open_vip_scheduled_posts_list_callback(
     posts = await ctx.run_db(
         ctx.db.list_campaign_scheduled_posts,
         rule_id=rule_id,
-        statuses=["scheduled", "processing", "launched", "failed", "cancelled", "expired"],
+        statuses=["scheduled", "processing", "launched", "failed", "needs_review", "cancelled", "expired"],
         limit=100,
     )
     text, kb = build_vip_scheduled_posts_list_view(rule_id=rule_id, posts=posts or [], page=page)

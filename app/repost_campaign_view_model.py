@@ -672,6 +672,7 @@ def format_vip_scheduled_post_status_text(status: str) -> str:
         "processing": "🟡 Запускается",
         "launched": "✅ Запущен",
         "failed": "🔴 Ошибка",
+        "needs_review": "⚠️ Требуется проверка",
         "cancelled": "⚫ Отменён",
         "expired": "⚫ Истёк",
     }
