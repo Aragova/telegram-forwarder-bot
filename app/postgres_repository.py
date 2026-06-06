@@ -1384,6 +1384,11 @@ class PostgresRepository(RepositoryProtocol):
         self._ensure_payment_intents_status_constraint()
         self._ensure_reaction_jobs_status_constraint()
         self._ensure_default_plans()
+        try:
+            stats = self.migrate_legacy_rule_intro_assignments()
+            logger.info("INTRO_LEGACY_ASSIGNMENTS_MIGRATED | stats=%s", stats)
+        except Exception:
+            logger.exception("INTRO_LEGACY_ASSIGNMENTS_MIGRATION_FAILED")
 
     def _ensure_payment_intents_status_constraint(self) -> None:
         required_statuses = {
@@ -2681,6 +2686,108 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
 
         return int(row["id"]) if row else None
+
+    def _find_existing_rule_intro_copy(self, rule_id: int, source: IntroItem) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM intros
+                    WHERE rule_id = %s
+                      AND file_path = %s
+                      AND display_name = %s
+                      AND status = 'active'
+                      AND deleted_at IS NULL
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """,
+                    (int(rule_id), source.file_path, source.display_name),
+                )
+                row = cur.fetchone()
+
+        return int(row["id"]) if row else None
+
+    def migrate_legacy_rule_intro_assignments(self) -> dict[str, int]:
+        stats = {
+            "rules_scanned": 0,
+            "assignments_migrated": 0,
+            "intro_copies_created": 0,
+            "missing_intro_skipped": 0,
+        }
+        logger.info("INTRO_LEGACY_ASSIGNMENTS_MIGRATION_STARTED")
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, tenant_id, video_intro_horizontal_id, video_intro_vertical_id
+                    FROM routing
+                    WHERE video_intro_horizontal_id IS NOT NULL
+                       OR video_intro_vertical_id IS NOT NULL
+                    ORDER BY id ASC
+                    """
+                )
+                rows = cur.fetchall()
+
+        stats["rules_scanned"] = len(rows)
+        copied_by_source: dict[tuple[int, int], tuple[int, bool]] = {}
+
+        for row in rows:
+            rule_id = int(row["id"])
+            tenant_id = int(row.get("tenant_id") or 1) if hasattr(row, "get") or isinstance(row, dict) else 1
+            for field, column in (
+                ("horizontal", "video_intro_horizontal_id"),
+                ("vertical", "video_intro_vertical_id"),
+            ):
+                old_intro_id = row.get(column) if hasattr(row, "get") else row[column]
+                if old_intro_id is None:
+                    continue
+
+                source = self.get_intro(int(old_intro_id))
+                if source is None:
+                    stats["missing_intro_skipped"] += 1
+                    continue
+                if source.rule_id == rule_id:
+                    continue
+
+                cache_key = (rule_id, int(old_intro_id))
+                cached = copied_by_source.get(cache_key)
+                if cached is not None:
+                    new_intro_id, created = cached
+                else:
+                    existing_id = self._find_existing_rule_intro_copy(rule_id, source)
+                    if existing_id is not None:
+                        new_intro_id = existing_id
+                        created = False
+                    else:
+                        new_intro_id = self.copy_intro_to_rule(
+                            rule_id=rule_id,
+                            intro_id=int(old_intro_id),
+                            tenant_id=tenant_id or source.tenant_id or 1,
+                        )
+                        if new_intro_id is None:
+                            stats["missing_intro_skipped"] += 1
+                            continue
+                        created = True
+                    copied_by_source[cache_key] = (int(new_intro_id), created)
+
+                if created:
+                    stats["intro_copies_created"] += 1
+                    copied_by_source[cache_key] = (int(new_intro_id), False)
+
+                update_method = self.set_rule_intro_horizontal if field == "horizontal" else self.set_rule_intro_vertical
+                if update_method(rule_id, int(new_intro_id)):
+                    stats["assignments_migrated"] += 1
+                    logger.info(
+                        "INTRO_LEGACY_ASSIGNMENT_MIGRATED | rule_id=%s | old_intro_id=%s | new_intro_id=%s | field=%s",
+                        rule_id,
+                        old_intro_id,
+                        new_intro_id,
+                        field,
+                    )
+
+        return stats
 
     # =========================================================
     # POSTS / QUEUE RAW

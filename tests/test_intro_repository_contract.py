@@ -82,7 +82,7 @@ class _IntroCursor:
             self.rowcount = 1
             return None
 
-        if normalized.startswith("select id from intros where rule_id"):
+        if normalized.startswith("select id from intros where rule_id") and "file_path = %s" not in normalized:
             rule_id, display_name = params
             found = self.db.find_active_by_name(rule_id, display_name)
             self._row = {"id": found["id"]} if found else None
@@ -128,6 +128,48 @@ class _IntroCursor:
                 self.rowcount = 1
             return None
 
+
+        if normalized.startswith("select id, tenant_id, video_intro_horizontal_id, video_intro_vertical_id"):
+            self._rows = [
+                dict(row)
+                for row in sorted(self.db.routing_rows, key=lambda row: row["id"])
+                if row.get("video_intro_horizontal_id") is not None
+                or row.get("video_intro_vertical_id") is not None
+            ]
+            return None
+
+        if normalized.startswith("select id from intros") and "file_path = %s" in normalized:
+            rule_id, file_path, display_name = params
+            found = next(
+                (
+                    row
+                    for row in self.db.rows
+                    if row["rule_id"] == rule_id
+                    and row["file_path"] == file_path
+                    and row["display_name"] == display_name
+                    and self.db.is_active(row)
+                ),
+                None,
+            )
+            self._row = {"id": found["id"]} if found else None
+            return None
+
+        if normalized.startswith("update routing set video_intro_horizontal_id"):
+            intro_id, rule_id = params
+            row = self.db.get_routing(rule_id)
+            if row:
+                row["video_intro_horizontal_id"] = intro_id
+                self.rowcount = 1
+            return None
+
+        if normalized.startswith("update routing set video_intro_vertical_id"):
+            intro_id, rule_id = params
+            row = self.db.get_routing(rule_id)
+            if row:
+                row["video_intro_vertical_id"] = intro_id
+                self.rowcount = 1
+            return None
+
         if normalized.startswith("delete from intros where id = %s"):
             intro_id = params[0]
             before = len(self.db.rows)
@@ -152,6 +194,7 @@ class _IntroConn:
 class _IntroDb:
     def __init__(self) -> None:
         self.rows: list[dict[str, Any]] = []
+        self.routing_rows: list[dict[str, Any]] = []
         self.next_id = 1
 
     def insert(self, **values: Any) -> int:
@@ -177,6 +220,24 @@ class _IntroDb:
 
     def get(self, intro_id: int) -> dict[str, Any] | None:
         return next((row for row in self.rows if row["id"] == intro_id), None)
+
+    def add_routing(
+        self,
+        rule_id: int,
+        *,
+        horizontal_id: int | None = None,
+        vertical_id: int | None = None,
+        tenant_id: int = 1,
+    ) -> None:
+        self.routing_rows.append({
+            "id": rule_id,
+            "tenant_id": tenant_id,
+            "video_intro_horizontal_id": horizontal_id,
+            "video_intro_vertical_id": vertical_id,
+        })
+
+    def get_routing(self, rule_id: int) -> dict[str, Any] | None:
+        return next((row for row in self.routing_rows if row["id"] == rule_id), None)
 
     def is_active(self, row: dict[str, Any]) -> bool:
         return row["status"] == "active" and row["deleted_at"] is None
@@ -204,6 +265,7 @@ def repo():
         yield _IntroConn(db)
 
     repository.connect = _connect  # type: ignore[method-assign]
+    repository._test_intro_db = db  # type: ignore[attr-defined]
     return repository
 
 
@@ -317,3 +379,104 @@ def test_postgres_repository_has_rule_scoped_intro_methods():
     assert "def get_rule_intro" in source
     assert "def soft_delete_rule_intro" in source
     assert "def copy_intro_to_rule" in source
+
+
+def _test_db(repo) -> _IntroDb:
+    return repo._test_intro_db  # type: ignore[attr-defined]
+
+
+def test_migrate_legacy_rule_intro_assignments_horizontal_global_intro(repo):
+    global_intro_id = repo.add_intro("old_intro", "old_intro.mp4", "/tmp/old_intro.mp4", 8)
+    db = _test_db(repo)
+    db.add_routing(5, horizontal_id=global_intro_id)
+
+    stats = repo.migrate_legacy_rule_intro_assignments()
+
+    routing = db.get_routing(5)
+    assert routing is not None
+    new_intro_id = routing["video_intro_horizontal_id"]
+    assert new_intro_id != global_intro_id
+    assert db.get(global_intro_id)["rule_id"] is None
+    assert db.get(new_intro_id)["rule_id"] == 5
+    assert stats["assignments_migrated"] == 1
+    assert stats["intro_copies_created"] == 1
+
+
+def test_migrate_legacy_rule_intro_assignments_reuses_one_copy_for_both_fields(repo):
+    global_intro_id = repo.add_intro("old_intro", "old_intro.mp4", "/tmp/old_intro.mp4", 8)
+    db = _test_db(repo)
+    db.add_routing(5, horizontal_id=global_intro_id, vertical_id=global_intro_id)
+
+    stats = repo.migrate_legacy_rule_intro_assignments()
+
+    routing = db.get_routing(5)
+    assert routing["video_intro_horizontal_id"] == routing["video_intro_vertical_id"]
+    assert routing["video_intro_horizontal_id"] != global_intro_id
+    assert stats["assignments_migrated"] == 2
+    assert stats["intro_copies_created"] == 1
+
+
+def test_migrate_legacy_rule_intro_assignments_creates_copy_per_rule(repo):
+    global_intro_id = repo.add_intro("shared", "shared.mp4", "/tmp/shared.mp4", 8)
+    db = _test_db(repo)
+    db.add_routing(1, horizontal_id=global_intro_id)
+    db.add_routing(2, horizontal_id=global_intro_id)
+
+    stats = repo.migrate_legacy_rule_intro_assignments()
+
+    first = db.get_routing(1)["video_intro_horizontal_id"]
+    second = db.get_routing(2)["video_intro_horizontal_id"]
+    assert first != second
+    assert db.get(first)["rule_id"] == 1
+    assert db.get(second)["rule_id"] == 2
+    assert stats["assignments_migrated"] == 2
+    assert stats["intro_copies_created"] == 2
+
+
+def test_migrate_legacy_rule_intro_assignments_is_idempotent(repo):
+    global_intro_id = repo.add_intro("old_intro", "old_intro.mp4", "/tmp/old_intro.mp4", 8)
+    db = _test_db(repo)
+    db.add_routing(5, horizontal_id=global_intro_id)
+
+    first_stats = repo.migrate_legacy_rule_intro_assignments()
+    rows_after_first_run = len(db.rows)
+    second_stats = repo.migrate_legacy_rule_intro_assignments()
+
+    assert first_stats["assignments_migrated"] == 1
+    assert len(db.rows) == rows_after_first_run
+    assert second_stats["assignments_migrated"] == 0
+    assert second_stats["intro_copies_created"] == 0
+
+
+def test_migrate_legacy_rule_intro_assignments_copies_other_rule_intro(repo):
+    source_intro_id = repo.add_rule_intro(1, "rule_one", "rule_one.mp4", "/tmp/rule_one.mp4", 8)
+    db = _test_db(repo)
+    db.add_routing(2, horizontal_id=source_intro_id)
+
+    stats = repo.migrate_legacy_rule_intro_assignments()
+
+    new_intro_id = db.get_routing(2)["video_intro_horizontal_id"]
+    assert new_intro_id != source_intro_id
+    assert db.get(new_intro_id)["rule_id"] == 2
+    assert stats["assignments_migrated"] == 1
+    assert stats["intro_copies_created"] == 1
+
+
+def test_migrate_legacy_rule_intro_assignments_skips_missing_intro(repo):
+    db = _test_db(repo)
+    db.add_routing(5, horizontal_id=999999)
+
+    stats = repo.migrate_legacy_rule_intro_assignments()
+
+    assert db.get_routing(5)["video_intro_horizontal_id"] == 999999
+    assert stats["missing_intro_skipped"] == 1
+    assert stats["assignments_migrated"] == 0
+
+
+def test_intro_legacy_migration_method_exists():
+    source = Path("app/repository.py").read_text(encoding="utf-8")
+    assert "migrate_legacy_rule_intro_assignments" in source
+
+    pg_source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+    assert "def migrate_legacy_rule_intro_assignments" in pg_source
+    assert "INTRO_LEGACY_ASSIGNMENTS_MIGRATED" in pg_source
