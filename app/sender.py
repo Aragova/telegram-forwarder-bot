@@ -3462,6 +3462,8 @@ class SenderService:
             add_intro=bool(getattr(rule, "video_add_intro", False)),
             intro_name_horizontal=getattr(horizontal_intro, "file_name", None) if horizontal_intro else None,
             intro_name_vertical=getattr(vertical_intro, "file_name", None) if vertical_intro else None,
+            intro_item_horizontal=horizontal_intro,
+            intro_item_vertical=vertical_intro,
             clip_duration_seconds=clip_duration_seconds,
         )
         if not processed_result:
@@ -4594,6 +4596,8 @@ class SenderService:
                     add_intro=bool(getattr(rule, "video_add_intro", False)),
                     intro_name_horizontal=getattr(horizontal_intro, "file_name", None) if horizontal_intro else None,
                     intro_name_vertical=getattr(vertical_intro, "file_name", None) if vertical_intro else None,
+                    intro_item_horizontal=horizontal_intro,
+                    intro_item_vertical=vertical_intro,
                     caption=rule_caption or "",
                     caption_entities_json=caption_entities_json,
                     caption_send_mode=selected_mode,
