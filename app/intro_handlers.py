@@ -87,6 +87,16 @@ def _make_unique_intro_filename(base_name: str, extension: str, intros_dir: str)
         counter += 1
 
 
+def _is_duplicate_intro_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "duplicate" in text
+        or "unique" in text
+        or "uq_intros_rule_display_name_active" in text
+        or "duplicate key value" in text
+    )
+
+
 def _row_get(row: Any, key: str, default: Any = None) -> Any:
     if not row:
         return default
@@ -121,15 +131,15 @@ def build_intro_list_keyboard(
                 callback_data=f"intro_upload:{rule_id}",
             )
         ],
+        [
+            InlineKeyboardButton(
+                text="🔄 Обновить список",
+                callback_data=f"video_intro_menu:{rule_id}",
+            )
+        ],
     ]
 
     if intros:
-        rows.append([
-            InlineKeyboardButton(
-                text="📦 Мои заставки",
-                callback_data=f"intro_back_to_list:{rule_id}",
-            )
-        ])
         for intro in intros:
             rows.append([
                 InlineKeyboardButton(
@@ -424,12 +434,39 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
                     "Пример подписи:\n"
                     "intro_horizontal_main"
                 ),
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="❌ Отменить загрузку", callback_data=f"intro_upload_cancel:{rule_id}")],
+                        [InlineKeyboardButton(text="🎬 К заставкам правила", callback_data=f"video_intro_menu:{rule_id}")],
+                    ]
+                ),
             )
         except Exception as exc:
             if "message is not modified" not in str(exc).lower():
                 ctx.logger.exception("Ошибка handle_intro_upload: %s", exc)
 
         await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("intro_upload_cancel:"))
+    async def handle_intro_upload_cancel(callback: CallbackQuery):
+        try:
+            rule_id = int(callback.data.split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
+            return
+
+        user_id = callback.from_user.id
+        state = ctx.user_states.get(user_id, {})
+        if state.get("action") == "intro_upload_wait_file" and int(state.get("rule_id") or 0) == rule_id:
+            ctx.user_states[user_id] = {
+                "action": "intro_menu",
+                "rule_id": rule_id,
+            }
+
+        await _show_rule_intro_menu(callback, rule_id)
 
     @dp.callback_query(lambda c: c.data.startswith("intro_view:"))
     async def handle_intro_view(callback: CallbackQuery):
@@ -894,7 +931,21 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
                 pass
 
             ctx.logger.exception("Ошибка добавления заставки правила #%s: %s", rule_id, exc)
-            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Такая заставка уже существует", reply_markup=ctx.cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
+            if _is_duplicate_intro_error(exc):
+                error_text = (
+                    "❌ Заставка с таким названием уже есть в этом правиле.\n\n"
+                    "Выберите другое название и отправьте файл ещё раз."
+                )
+            else:
+                error_text = (
+                    "❌ Не удалось сохранить заставку.\n\n"
+                    "Файл не добавлен. Попробуйте ещё раз или пришлите другой файл."
+                )
+            await ctx.send_message_safe(
+                chat_id=message.chat.id,
+                text=error_text,
+                reply_markup=ctx.cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
+            )
             return
 
         if not intro_id:
@@ -905,7 +956,11 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
             except Exception:
                 pass
 
-            await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Такая заставка уже существует", reply_markup=ctx.cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
+            await ctx.send_message_safe(
+                chat_id=message.chat.id,
+                text="❌ Не удалось сохранить заставку.\n\nФайл не добавлен. Попробуйте ещё раз.",
+                reply_markup=ctx.cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
+            )
             return
 
         await ctx.send_message_safe(

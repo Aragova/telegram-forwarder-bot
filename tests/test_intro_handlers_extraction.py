@@ -37,6 +37,7 @@ def test_callback_prefixes_are_preserved():
         "video_intro_menu:",
         "user_rule_intros:",
         "intro_upload:",
+        "intro_upload_cancel:",
         "intro_view:",
         "intro_delete_confirm:",
         "intro_delete_apply:",
@@ -49,3 +50,15 @@ def test_callback_prefixes_are_preserved():
 
     for callback_data in preserved_callback_data:
         assert callback_data in intro_handlers_py
+
+
+def test_intro_ux_polish_callbacks_and_messages_are_present():
+    intro_handlers_py = (REPO_ROOT / "app" / "intro_handlers.py").read_text()
+
+    assert "📦 Мои заставки" not in intro_handlers_py
+    assert "🔄 Обновить список" in intro_handlers_py
+    assert "❌ Отменить загрузку" in intro_handlers_py
+    assert "handle_intro_upload_cancel" in intro_handlers_py
+    assert "_is_duplicate_intro_error" in intro_handlers_py
+    assert "Заставка с таким названием уже есть в этом правиле" in intro_handlers_py
+    assert "Не удалось сохранить заставку" in intro_handlers_py
