@@ -589,6 +589,8 @@ class RepositoryProtocol(Protocol):
         tenant_id: int = 1,
     ) -> int | None: ...
 
+    def migrate_legacy_rule_intro_assignments(self) -> dict[str, int]: ...
+
     # =========================================================
     # AUDIT
     # =========================================================
