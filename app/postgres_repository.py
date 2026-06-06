@@ -405,7 +405,14 @@ class PostgresRepository(RepositoryProtocol):
             file_name TEXT NOT NULL,
             file_path TEXT NOT NULL,
             duration BIGINT NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            rule_id BIGINT NULL,
+            tenant_id BIGINT NOT NULL DEFAULT 1,
+            created_by BIGINT NULL,
+            media_kind TEXT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            deleted_at TIMESTAMPTZ NULL,
+            updated_at TIMESTAMPTZ NULL
         );
 
         CREATE TABLE IF NOT EXISTS deliveries(
@@ -976,6 +983,20 @@ class PostgresRepository(RepositoryProtocol):
 
         with self.connect() as conn:
             with conn.cursor() as cur:
+                for _sql in [
+                    "ALTER TABLE intros ADD COLUMN IF NOT EXISTS rule_id BIGINT NULL",
+                    "ALTER TABLE intros ADD COLUMN IF NOT EXISTS tenant_id BIGINT NOT NULL DEFAULT 1",
+                    "ALTER TABLE intros ADD COLUMN IF NOT EXISTS created_by BIGINT NULL",
+                    "ALTER TABLE intros ADD COLUMN IF NOT EXISTS media_kind TEXT NULL",
+                    "ALTER TABLE intros ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'",
+                    "ALTER TABLE intros ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE intros ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NULL",
+                ]:
+                    cur.execute(_sql)
+                cur.execute("ALTER TABLE intros DROP CONSTRAINT IF EXISTS intros_status_check")
+                cur.execute("ALTER TABLE intros ADD CONSTRAINT intros_status_check CHECK (status IN ('active', 'deleted'))")
+                cur.execute("ALTER TABLE intros DROP CONSTRAINT IF EXISTS intros_display_name_key")
+
                 cur.execute(
                     """
                     ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS views_final_count BIGINT NULL
@@ -1117,6 +1138,26 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     CREATE INDEX IF NOT EXISTS idx_intros_created_at
                     ON intros(created_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_intros_rule_status_created
+                    ON intros(rule_id, status, created_at DESC)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_intros_rule_display_name_active
+                    ON intros(rule_id, lower(display_name))
+                    WHERE rule_id IS NOT NULL AND status = 'active' AND deleted_at IS NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_intros_global_display_name_active
+                    ON intros(lower(display_name))
+                    WHERE rule_id IS NULL AND status = 'active' AND deleted_at IS NULL
                     """
                 )
                 cur.execute(
@@ -2352,6 +2393,33 @@ class PostgresRepository(RepositoryProtocol):
     # INTROS
     # =========================================================
 
+    def _intro_item_from_row(self, row) -> IntroItem:
+        data = dict(row)
+
+        def _optional_int(value):
+            return int(value) if value is not None else None
+
+        def _optional_str(value):
+            if value is None:
+                return None
+            return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+        return IntroItem(
+            id=int(data["id"]),
+            display_name=data["display_name"],
+            file_name=data["file_name"],
+            file_path=data["file_path"],
+            duration=int(data.get("duration") or 0),
+            created_at=_optional_str(data.get("created_at")),
+            rule_id=_optional_int(data.get("rule_id")),
+            tenant_id=_optional_int(data.get("tenant_id")),
+            created_by=_optional_int(data.get("created_by")),
+            media_kind=data.get("media_kind"),
+            status=data.get("status") or "active",
+            deleted_at=_optional_str(data.get("deleted_at")),
+            updated_at=_optional_str(data.get("updated_at")),
+        )
+
     def add_intro(
         self,
         display_name: str,
@@ -2385,35 +2453,31 @@ class PostgresRepository(RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, display_name, file_name, file_path, duration, created_at
+                    SELECT
+                        id, display_name, file_name, file_path, duration, created_at,
+                        rule_id, tenant_id, created_by, media_kind, status, deleted_at, updated_at
                     FROM intros
+                    WHERE status = 'active'
+                      AND deleted_at IS NULL
                     ORDER BY created_at DESC, id DESC
                     """
                 )
                 rows = cur.fetchall()
 
-        items: list[IntroItem] = []
-        for row in rows:
-            items.append(
-                IntroItem(
-                    id=int(row["id"]),
-                    display_name=row["display_name"],
-                    file_name=row["file_name"],
-                    file_path=row["file_path"],
-                    duration=int(row["duration"] or 0),
-                    created_at=row["created_at"],
-                )
-            )
-        return items
+        return [self._intro_item_from_row(row) for row in rows]
 
     def get_intro(self, intro_id: int):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, display_name, file_name, file_path, duration, created_at
+                    SELECT
+                        id, display_name, file_name, file_path, duration, created_at,
+                        rule_id, tenant_id, created_by, media_kind, status, deleted_at, updated_at
                     FROM intros
                     WHERE id = %s
+                      AND status = 'active'
+                      AND deleted_at IS NULL
                     LIMIT 1
                     """,
                     (intro_id,),
@@ -2423,14 +2487,7 @@ class PostgresRepository(RepositoryProtocol):
         if not row:
             return None
 
-        return IntroItem(
-            id=int(row["id"]),
-            display_name=row["display_name"],
-            file_name=row["file_name"],
-            file_path=row["file_path"],
-            duration=int(row["duration"] or 0),
-            created_at=row["created_at"],
-        )
+        return self._intro_item_from_row(row)
 
     def get_intro_by_id(self, intro_id: int):
         return self.get_intro(intro_id)
@@ -2442,6 +2499,188 @@ class PostgresRepository(RepositoryProtocol):
                 deleted = cur.rowcount > 0
             conn.commit()
             return deleted
+
+    def add_rule_intro(
+        self,
+        rule_id: int,
+        display_name: str,
+        file_name: str,
+        file_path: str,
+        duration: int = 0,
+        *,
+        created_by: int | None = None,
+        media_kind: str | None = None,
+        tenant_id: int = 1,
+    ) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO intros(
+                        rule_id, tenant_id, created_by, display_name, file_name,
+                        file_path, duration, media_kind, status, created_at, updated_at
+                    )
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, NOW())
+                    RETURNING id
+                    """,
+                    (
+                        int(rule_id),
+                        int(tenant_id),
+                        created_by,
+                        display_name.strip(),
+                        file_name,
+                        file_path,
+                        int(duration or 0),
+                        media_kind,
+                        utc_now_iso(),
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+
+        return int(row["id"])
+
+    def list_rule_intros(
+        self,
+        rule_id: int,
+        *,
+        include_deleted: bool = False,
+    ) -> list[IntroItem]:
+        status_filter = "" if include_deleted else "AND status = 'active' AND deleted_at IS NULL"
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        id, display_name, file_name, file_path, duration, created_at,
+                        rule_id, tenant_id, created_by, media_kind, status, deleted_at, updated_at
+                    FROM intros
+                    WHERE rule_id = %s
+                      {status_filter}
+                    ORDER BY created_at DESC, id DESC
+                    """,
+                    (int(rule_id),),
+                )
+                rows = cur.fetchall()
+
+        return [self._intro_item_from_row(row) for row in rows]
+
+    def get_rule_intro(
+        self,
+        rule_id: int,
+        intro_id: int,
+        *,
+        include_deleted: bool = False,
+    ) -> IntroItem | None:
+        status_filter = "" if include_deleted else "AND status = 'active' AND deleted_at IS NULL"
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        id, display_name, file_name, file_path, duration, created_at,
+                        rule_id, tenant_id, created_by, media_kind, status, deleted_at, updated_at
+                    FROM intros
+                    WHERE id = %s
+                      AND rule_id = %s
+                      {status_filter}
+                    LIMIT 1
+                    """,
+                    (int(intro_id), int(rule_id)),
+                )
+                row = cur.fetchone()
+
+        if not row:
+            return None
+
+        return self._intro_item_from_row(row)
+
+    def soft_delete_rule_intro(self, rule_id: int, intro_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE intros
+                    SET
+                        status = 'deleted',
+                        deleted_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = %s
+                      AND rule_id = %s
+                      AND status = 'active'
+                      AND deleted_at IS NULL
+                    RETURNING id
+                    """,
+                    (int(intro_id), int(rule_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+
+        return row is not None
+
+    def _rule_intro_display_name_exists(self, conn, rule_id: int, display_name: str) -> bool:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM intros
+                WHERE rule_id = %s
+                  AND lower(display_name) = lower(%s)
+                  AND status = 'active'
+                  AND deleted_at IS NULL
+                LIMIT 1
+                """,
+                (int(rule_id), display_name.strip()),
+            )
+            return cur.fetchone() is not None
+
+    def copy_intro_to_rule(
+        self,
+        rule_id: int,
+        intro_id: int,
+        *,
+        created_by: int | None = None,
+        tenant_id: int = 1,
+    ) -> int | None:
+        source = self.get_intro(intro_id)
+        if source is None:
+            return None
+
+        base_name = source.display_name
+        candidate = base_name
+        counter = 2
+
+        with self.connect() as conn:
+            while self._rule_intro_display_name_exists(conn, rule_id, candidate):
+                candidate = f"{base_name}_{counter}"
+                counter += 1
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO intros(
+                        rule_id, tenant_id, created_by, display_name, file_name,
+                        file_path, duration, media_kind, status, created_at, updated_at
+                    )
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, NOW())
+                    RETURNING id
+                    """,
+                    (
+                        int(rule_id),
+                        int(tenant_id),
+                        created_by,
+                        candidate,
+                        source.file_name,
+                        source.file_path,
+                        int(source.duration or 0),
+                        source.media_kind,
+                        utc_now_iso(),
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+
+        return int(row["id"]) if row else None
 
     # =========================================================
     # POSTS / QUEUE RAW

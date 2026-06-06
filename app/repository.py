@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from app.repository_models import IntroItem
+
 
 class RepositoryProtocol(Protocol):
     def init(self) -> None: ...
@@ -547,6 +549,45 @@ class RepositoryProtocol(Protocol):
     def get_intro(self, intro_id: int): ...
     def get_intro_by_id(self, intro_id: int): ...
     def delete_intro(self, intro_id: int) -> bool: ...
+
+    def add_rule_intro(
+        self,
+        rule_id: int,
+        display_name: str,
+        file_name: str,
+        file_path: str,
+        duration: int = 0,
+        *,
+        created_by: int | None = None,
+        media_kind: str | None = None,
+        tenant_id: int = 1,
+    ) -> int: ...
+
+    def list_rule_intros(
+        self,
+        rule_id: int,
+        *,
+        include_deleted: bool = False,
+    ) -> list[IntroItem]: ...
+
+    def get_rule_intro(
+        self,
+        rule_id: int,
+        intro_id: int,
+        *,
+        include_deleted: bool = False,
+    ) -> IntroItem | None: ...
+
+    def soft_delete_rule_intro(self, rule_id: int, intro_id: int) -> bool: ...
+
+    def copy_intro_to_rule(
+        self,
+        rule_id: int,
+        intro_id: int,
+        *,
+        created_by: int | None = None,
+        tenant_id: int = 1,
+    ) -> int | None: ...
 
     # =========================================================
     # AUDIT
