@@ -1949,3 +1949,33 @@ def test_scheduled_launch_needs_review_view_explains_manual_check():
     assert "Автоматический повтор остановлен" in text
     assert "🔄 Обновить" in labels
     assert "⬅️ Назад к кампании" in labels
+
+
+def test_launch_needs_review_hides_raw_delete_status_sql_error():
+    raw_error = (
+        'null value in column "delete_status" of relation "campaign_run_messages" violates not-null constraint\n'
+        'DETAIL: Failing row contains campaign_run_messages delete_status.'
+    )
+    text, _ = build_repost_campaign_launch_needs_review_view(rule_id=1, job={"id": 5, "status": "needs_review", "last_error": raw_error})
+
+    assert "violates not-null constraint" not in text
+    assert "DETAIL" not in text
+    assert "campaign_run_messages" not in text
+    assert "Реклама могла быть опубликована" in text
+    assert "не смог безопасно подтвердить ID сообщений" in text
+    assert "Автоматический повтор остановлен" in text
+
+
+def test_launch_result_hides_raw_delete_status_sql_error():
+    raw_error = (
+        'null value in column "delete_status" of relation "campaign_run_messages" violates not-null constraint\n'
+        'DETAIL: Failing row contains campaign_run_messages delete_status.'
+    )
+    text, _ = build_repost_campaign_launch_result_view(rule_id=1, result={"ok": False, "error_text": raw_error, "extra": {}})
+
+    assert "violates not-null constraint" not in text
+    assert "DETAIL" not in text
+    assert "campaign_run_messages" not in text
+    assert "Реклама могла быть опубликована" in text
+    assert "не смог безопасно подтвердить ID сообщений" in text
+    assert "Автоматический повтор остановлен" in text

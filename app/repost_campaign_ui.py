@@ -346,9 +346,10 @@ def build_repost_campaign_launch_result_view(*, rule_id: int, result) -> tuple[s
                 [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
             ])
             return text, InlineKeyboardMarkup(inline_keyboard=rows)
+        safe_error_text = format_campaign_error_text(payload.get("error_text"), limit=800) or "Неизвестная ошибка"
         text = (
             "❌ Кампания не запущена\n\n"
-            f"{payload.get('error_text') or 'Неизвестная ошибка'}\n\n"
+            f"{safe_error_text}\n\n"
             "Проверьте готовность кампании:\n"
             "• рекламный пост\n"
             "• время показа\n"
@@ -398,7 +399,7 @@ def build_repost_campaign_launch_needs_review_view(*, rule_id: int, job: dict) -
         "Сервер был перезапущен или состояние запуска неизвестно.\n"
         "Автоматический повтор остановлен, чтобы не отправить рекламу дважды."
     )
-    last_error = (job or {}).get("last_error")
+    last_error = format_campaign_error_text((job or {}).get("last_error"), limit=800)
     if last_error:
         text += f"\n\nПричина: {last_error}"
     return text, _repost_campaign_launch_job_keyboard(rule_id, job_id)
@@ -1111,7 +1112,7 @@ def build_repost_campaign_delete_result_view(*, rule_id: int, result) -> tuple[s
     else:
         text = (
             "❌ Не удалось удалить публикацию\n\n"
-            f"{payload.get('error_text') or 'Неизвестная ошибка'}\n\n"
+            f"{format_campaign_error_text(payload.get('error_text'), limit=800) or 'Неизвестная ошибка'}\n\n"
             "Статус и ошибка сохранены в истории запуска."
         )
     rows = []
@@ -1318,10 +1319,14 @@ def build_repost_campaign_scheduled_launch_detail_view(*, rule_id:int, scheduled
         f"Ожидаемое удаление: {format_campaign_schedule_datetime((datetime.fromisoformat(str(scheduled_launch.get('scheduled_at')).replace('Z','+00:00')) + timedelta(seconds=int(scheduled_launch.get('show_seconds') or 0))))}"
     )
     if status == "needs_review":
-        text += (
-            "\n\nЗапуск был прерван после создания campaign_run.\n"
-            "Автоматический повтор остановлен, чтобы не отправить рекламу дважды."
-        )
+        review_error = format_campaign_error_text(scheduled_launch.get("error_text"), limit=800)
+        if review_error:
+            text += f"\n\n{review_error}"
+        else:
+            text += (
+                "\n\nЗапуск был прерван после создания campaign_run.\n"
+                "Автоматический повтор остановлен, чтобы не отправить рекламу дважды."
+            )
 
     rows = []
     if status == "scheduled":
@@ -1719,7 +1724,7 @@ def build_vip_scheduled_post_detail_view(*, rule_id: int, details: dict) -> tupl
         if warnings:
             blocks.append("\n".join(warnings))
     if post.get("error_text"):
-        blocks.append(f"⚠️ Есть проблема\n\nОшибка: {post.get('error_text')}")
+        blocks.append(f"⚠️ Есть проблема\n\nОшибка: {format_campaign_error_text(post.get('error_text'), limit=800) or 'Неизвестная ошибка'}")
     text = "\n\n".join([b for b in blocks if b])
     rows = []
     if st in {'draft', 'ready'}:

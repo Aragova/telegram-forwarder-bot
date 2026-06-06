@@ -12,6 +12,16 @@ from app.saved_post_renderer import normalize_telethon_target
 from app.saved_posts_service import get_saved_post_short_description
 
 
+def _build_failed_campaign_message_delete_fields(render_method: str | None) -> tuple[str, str | None]:
+    method = str(render_method or "")
+    if method.endswith("_unverified"):
+        return (
+            "failed",
+            "ID публикации не подтверждён. Автоматическое удаление невозможно, требуется ручная проверка.",
+        )
+    return "failed", None
+
+
 def build_telegram_message_url(*, target_id: int | str, message_id: int | None, username: str | None = None) -> str | None:
     if not message_id:
         return None
@@ -551,12 +561,13 @@ class RepostCampaignRuntimeService:
         content = saved_post.get("content_json") or saved_post.get("content") or {}
         render_result = await self.renderer.send(chat_id=target_id, content=content)
         if not render_result.ok:
-            is_unverified = str(render_result.method or "").endswith("_unverified")
+            delete_status, delete_error_text = _build_failed_campaign_message_delete_fields(render_result.method)
             self.repo.mark_campaign_run_message_failed(
                 run_message_id,
                 error_text=render_result.error_text or "unknown error",
                 render_mode=render_result.method,
-                delete_status=None if is_unverified else "failed",
+                delete_status=delete_status,
+                delete_error_text=delete_error_text,
             )
             self.repo.update_campaign_run_status(
                 run_id,
@@ -694,7 +705,8 @@ class RepostCampaignRuntimeService:
                 self.repo.mark_campaign_run_message_sent(run_message_id, sent_message_id=render_result.message_id, sent_message_ids=getattr(render_result, "message_ids", None), render_mode=render_result.method)
                 targets_success += 1
             else:
-                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=getattr(render_result, "error_text", None) or "unknown error", render_mode=getattr(render_result, "method", None), delete_status=(None if str(getattr(render_result, "method", "")).endswith("_unverified") else "failed"))
+                delete_status, delete_error_text = _build_failed_campaign_message_delete_fields(getattr(render_result, "method", None))
+                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=getattr(render_result, "error_text", None) or "unknown error", render_mode=getattr(render_result, "method", None), delete_status=delete_status, delete_error_text=delete_error_text)
                 targets_failed += 1
                 error_text = error_text or getattr(render_result, "error_text", None) or "unknown error"
         if targets_success > 0 and targets_failed == 0:
@@ -862,7 +874,8 @@ class RepostCampaignRuntimeService:
                 )
             else:
                 err_text = "Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error")
-                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=err_text, render_mode=getattr(render_result, "method", None), delete_status=(None if str(getattr(render_result, "method", "")).endswith("_unverified") else "failed"))
+                delete_status, delete_error_text = _build_failed_campaign_message_delete_fields(getattr(render_result, "method", None))
+                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=err_text, render_mode=getattr(render_result, "method", None), delete_status=delete_status, delete_error_text=delete_error_text)
                 failed_count += 1
                 if first_error_text is None:
                     first_error_text = "Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error")

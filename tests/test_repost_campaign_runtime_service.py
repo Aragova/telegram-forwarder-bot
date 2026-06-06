@@ -268,7 +268,29 @@ def test_test_send_marks_failed_when_renderer_failed_with_ids():
     assert result.ok is False
     assert len(repo.mark_campaign_run_message_sent_calls) == 0
     assert len(repo.mark_campaign_run_message_failed_calls) == 1
-    assert repo.mark_campaign_run_message_failed_calls[0][1].get("delete_status") is None
+    failed_kwargs = repo.mark_campaign_run_message_failed_calls[0][1]
+    assert failed_kwargs.get("delete_status") == "failed"
+    assert failed_kwargs.get("delete_status") is not None
+    assert "требуется ручная проверка" in failed_kwargs.get("delete_error_text")
+
+
+def test_launch_unverified_method_marks_failed_without_null_delete_status():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, target_id="-1001", target_thread_id=None, target_title="Main", repost_campaign_show_seconds=300)
+    saved_post = {"content_json": {"kind": "album"}}
+    summary = {"can_launch": True, "ready_extra_targets": []}
+    repo = _FakeRepo(rule=rule, saved_post=saved_post, summary=summary)
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=False, method="telethon_source_unverified", kind="album", error_text="Не удалось восстановить ID альбома"))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=999))
+
+    assert result.ok is False
+    assert len(repo.mark_campaign_run_message_failed_calls) == 1
+    failed_kwargs = repo.mark_campaign_run_message_failed_calls[0][1]
+    assert failed_kwargs["render_mode"] == "telethon_source_unverified"
+    assert failed_kwargs["delete_status"] == "failed"
+    assert failed_kwargs["delete_status"] is not None
+    assert "требуется ручная проверка" in failed_kwargs["delete_error_text"]
 
 
 def test_launch_dedup_targets_stops_on_failed_main_target():
@@ -1390,7 +1412,6 @@ def test_launch_from_snapshot_marks_failed_when_renderer_failed_even_with_ids():
     assert not out.ok
     assert not repo.mark_campaign_run_message_sent_calls
     assert repo.mark_campaign_run_message_failed_calls
-
 
 
 def test_launch_from_snapshot_deduplicates_targets_with_main_priority():

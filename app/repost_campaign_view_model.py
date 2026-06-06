@@ -105,10 +105,38 @@ def format_campaign_saved_post_main_line(saved_post_line: str | None) -> str:
     return text[:1].upper() + text[1:]
 
 
+UNVERIFIED_PUBLICATION_REVIEW_TEXT = (
+    "⚠️ Требуется проверка\n\n"
+    "Реклама могла быть опубликована, но бот не смог безопасно подтвердить ID сообщений.\n"
+    "Автоматический повтор остановлен, чтобы не отправить рекламу дважды.\n\n"
+    "Что сделать:\n"
+    "1. Проверьте публикацию в канале.\n"
+    "2. Если реклама опубликована — удалите её вручную после нужного срока.\n"
+    "3. После проверки можно запланировать новый запуск."
+)
+
+
+def is_campaign_run_message_delete_status_sql_error(value: str | None) -> bool:
+    text = str(value or "")
+    if not text:
+        return False
+    return (
+        "violates not-null constraint" in text
+        and "campaign_run_messages" in text
+        and "delete_status" in text
+    ) or (
+        "DETAIL:" in text
+        and "campaign_run_messages" in text
+        and "delete_status" in text
+    )
+
+
 def format_campaign_error_text(value, *, limit: int = 120) -> str | None:
     text = str(value or "").strip()
     if not text:
         return None
+    if is_campaign_run_message_delete_status_sql_error(text):
+        return UNVERIFIED_PUBLICATION_REVIEW_TEXT
     if len(text) > limit:
         return text[:limit] + "..."
     return text
