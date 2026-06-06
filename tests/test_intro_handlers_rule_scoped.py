@@ -19,6 +19,7 @@ def test_rule_scoped_callback_prefixes_exist():
         "intro_delete_apply:",
         "intro_delete_cancel:",
         "intro_back_to_list:",
+        "intro_upload_cancel:",
         "apply_intro:",
         "video_intro_menu:",
         "video_intro_horizontal:",
@@ -78,3 +79,53 @@ def test_ui_no_longer_promises_global_bank():
 
     assert "доступны только этому правилу" in source or "только этого правила" in source
     assert "Всего заставок" not in source
+
+
+def test_intro_main_keyboard_has_refresh_instead_of_my_intros():
+    source = _source()
+
+    assert "📦 Мои заставки" not in source
+    assert "🔄 Обновить список" in source
+    assert 'callback_data=f"video_intro_menu:{rule_id}"' in source
+
+
+def test_intro_main_keyboard_does_not_use_preview_back_callback():
+    source = _source()
+    build_block = source[
+        source.index("def build_intro_list_keyboard"):
+        source.index("def _build_intro_selection_keyboard")
+    ]
+
+    assert "intro_back_to_list" not in build_block
+
+
+def test_intro_preview_can_still_return_to_rule_intro_list():
+    source = _source()
+
+    assert "intro_back_to_list:{rule_id}" in source
+    assert "handle_intro_back_to_list" in source
+
+
+def test_intro_upload_screen_has_cancel_callback():
+    source = _source()
+
+    assert "intro_upload_cancel:" in source
+    assert "handle_intro_upload_cancel" in source
+    assert "❌ Отменить загрузку" in source
+
+
+def test_intro_upload_cancel_resets_state_to_intro_menu():
+    source = _source()
+    cancel_block = source.split("async def handle_intro_upload_cancel", maxsplit=1)[1]
+    cancel_block = cancel_block.split("@dp.callback_query(lambda c: c.data.startswith(\"intro_view:\"))", maxsplit=1)[0]
+
+    assert '"action": "intro_menu"' in cancel_block
+    assert '"intro_upload_wait_file"' in cancel_block
+
+
+def test_intro_save_errors_separate_duplicate_from_technical_errors():
+    source = _source()
+
+    assert "_is_duplicate_intro_error" in source
+    assert "Заставка с таким названием уже есть в этом правиле" in source
+    assert "Не удалось сохранить заставку" in source
