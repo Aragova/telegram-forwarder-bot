@@ -90,6 +90,7 @@ class FakeRepo:
         self.needs_review_calls.append((scheduled_post_id, error_text, campaign_run_id))
         if scheduled_post_id in self.posts:
             self.posts[scheduled_post_id]["status"] = "needs_review"
+            self.posts[scheduled_post_id]["error_text"] = error_text
             if campaign_run_id is not None:
                 self.posts[scheduled_post_id]["campaign_run_id"] = campaign_run_id
         return True
@@ -391,7 +392,16 @@ def test_process_due_posts_claims_and_launches_snapshot():
 
 
 def _mk_runtime_result(ok, run_id=None, error_text=None):
-    return type("R", (), {"ok": ok, "extra": {"campaign_run_id": run_id} if run_id else {}, "error_text": error_text})()
+    class RuntimeResult:
+        def __init__(self):
+            self.ok = ok
+            self.extra = {"campaign_run_id": run_id} if run_id else {}
+            self.error_text = error_text
+
+        def to_dict(self):
+            return {"ok": self.ok, "extra": self.extra, "error_text": self.error_text}
+
+    return RuntimeResult()
 
 
 def test_process_due_posts_launches_when_active_placement():
@@ -429,15 +439,30 @@ def test_process_due_posts_never_retries_when_campaign_run_id_exists():
     assert not rt.calls and not repo.delay_calls
 
 
-def test_process_due_posts_failed_launch_with_campaign_run_id_marks_failed_without_retry():
+def test_process_due_posts_failed_launch_with_campaign_run_id_marks_needs_review_without_retry():
     import asyncio
     repo=FakeRepo(); repo.rules[1]=Rule(1); repo.saved_posts[7]={"id":7}
     row={"id":1,"rule_id":1,"saved_post_id":7,"show_seconds":60,"status":"processing","campaign_run_id":None,"attempt_count":0}
+    repo.posts[1] = row
     repo.post_targets[1]=[{"target_id":"-1"}]; repo.claim_due_campaign_scheduled_posts=lambda **k:[row]
-    rt=FakeRuntimeLaunch(_mk_runtime_result(False,777,'boom'))
-    service=RepostCampaignScheduledPostService(repo=repo,campaign_runtime=rt)
+
+    class RuntimeWithCallback(FakeCampaignRuntime):
+        async def launch_campaign_from_snapshot(self, **kwargs):
+            kwargs["on_campaign_run_created"](123)
+            return _mk_runtime_result(False, 123, "Не удалось подтвердить отправку")
+
+    service=RepostCampaignScheduledPostService(repo=repo,campaign_runtime=RuntimeWithCallback())
     asyncio.run(service.process_due_posts(worker_id='w'))
-    assert repo.failed_calls and not repo.delay_calls
+    assert repo.posts[1]["status"] == "needs_review"
+    assert repo.posts[1]["campaign_run_id"] == 123
+    assert repo.posts[1]["error_text"] == "Не удалось подтвердить отправку"
+    assert not repo.failed_calls
+    assert not repo.launched_calls
+    assert not repo.delay_calls
+    assert any(x["event_type"] == "launch_needs_review" for x in repo.events[1])
+    event = next(x for x in repo.events[1] if x["event_type"] == "launch_needs_review")
+    assert event["extra"]["reason"] == "launch_result_not_ok_after_campaign_run"
+    assert event["extra"]["campaign_run_id"] == 123
 
 
 def test_process_due_posts_failed_launch_without_run_id_delays_retry():
@@ -449,6 +474,7 @@ def test_process_due_posts_failed_launch_without_run_id_delays_retry():
     service=RepostCampaignScheduledPostService(repo=repo,campaign_runtime=rt)
     asyncio.run(service.process_due_posts(worker_id='w'))
     assert repo.delay_calls
+    assert not repo.needs_review_calls
 
 
 def test_process_due_posts_runtime_exception_delays_retry():
@@ -604,6 +630,40 @@ def test_send_now_cannot_double_launch_same_scheduled_post():
     assert len(rt.calls) == 1
 
 
+
+
+def test_send_now_failed_launch_with_campaign_run_id_marks_needs_review():
+    import asyncio
+    repo = FakeRepo(); repo.rules[1] = Rule(1); repo.saved_posts[7] = {"id": 7, "title": "x", "content_json": {"kind": "text", "media_items": []}}
+    sid = repo.create_campaign_scheduled_post_draft(rule_id=1)
+    repo.posts[sid].update({"saved_post_id": 7, "show_seconds": 123, "status": "ready"})
+    repo.post_targets[sid] = [{"target_id": "-1001", "target_kind": "main", "is_active": True}]
+
+    class RuntimeWithCallback(FakeCampaignRuntime):
+        def __init__(self):
+            super().__init__(active=False)
+            self.calls = []
+
+        async def launch_campaign_from_snapshot(self, **kwargs):
+            self.calls.append(kwargs)
+            kwargs["on_campaign_run_created"](123)
+            return _mk_runtime_result(False, 123, "Не удалось подтвердить отправку")
+
+    rt = RuntimeWithCallback()
+    service = RepostCampaignScheduledPostService(repo=repo, campaign_runtime=rt)
+    out = asyncio.run(service.send_now(scheduled_post_id=sid, actor_id=42))
+    assert not out.ok
+    assert out.error_text == "Запуск создан, но завершился с ошибкой. Пост отправлен на ручную проверку."
+    assert repo.posts[sid]["status"] == "needs_review"
+    assert repo.posts[sid]["campaign_run_id"] == 123
+    assert repo.posts[sid]["error_text"] == "Не удалось подтвердить отправку"
+    assert not repo.failed_calls
+    assert not repo.launched_calls
+    assert any(x["event_type"] == "send_now_needs_review" for x in repo.events[sid])
+    event = next(x for x in repo.events[sid] if x["event_type"] == "send_now_needs_review")
+    assert event["extra"]["reason"] == "launch_result_not_ok_after_campaign_run"
+    assert event["extra"]["campaign_run_id"] == 123
+
 def test_send_now_failure_without_run_id_resets_status_and_lock():
     import asyncio
     rt = FakeRuntimeLaunch(type('R',(),{'ok':False,'extra':{},'error_text':'boom', 'to_dict': lambda self: {}})())
@@ -616,6 +676,7 @@ def test_send_now_failure_without_run_id_resets_status_and_lock():
     assert not out.ok
     assert repo.posts[sid]["status"] == "scheduled"
     assert repo.posts[sid].get("locked_by") is None
+    assert not repo.needs_review_calls
 
 
 
@@ -686,3 +747,14 @@ def test_vip_scheduled_post_service_source_guard_no_active_placement_blocking_er
     assert "Предыдущий рекламный пост активен" + " до" not in source
     assert "launch_delayed_active_placement" not in source
     assert "delay_campaign_scheduled_post_until" not in source
+
+
+def test_vip_scheduled_post_service_source_guard_no_failed_after_run_id_result():
+    source = Path("app/repost_campaign_scheduled_post_service.py").read_text(encoding="utf-8")
+    assert "launch_result_not_ok_after_campaign_run" in source
+    assert "send_now_needs_review" in source
+    assert "launch_needs_review" in source
+    forbidden = "elif run_id:\n                ok = self.repo.mark_campaign_scheduled_post_failed"
+    assert forbidden not in source
+    forbidden_send_now = "elif run_id:\n            self.repo.mark_campaign_scheduled_post_failed"
+    assert forbidden_send_now not in source

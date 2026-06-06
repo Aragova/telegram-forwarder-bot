@@ -297,8 +297,23 @@ class RepostCampaignScheduledPostService:
             self.repo.mark_campaign_scheduled_post_launched(scheduled_post_id, campaign_run_id=run_id)
             self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_finished", actor_id=actor_id, status_to="launched", extra={"campaign_run_id": run_id})
         elif run_id:
-            self.repo.mark_campaign_scheduled_post_failed(scheduled_post_id, error_text=result.error_text or "Не удалось запустить запланированный пост", campaign_run_id=run_id)
-            self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_failed", actor_id=actor_id, error_text=result.error_text, extra={"campaign_run_id": run_id})
+            error_text = result.error_text or "Не удалось подтвердить запуск запланированного поста"
+            runtime_result = result.to_dict() if hasattr(result, "to_dict") else {}
+            self.repo.mark_campaign_scheduled_post_needs_review(scheduled_post_id, error_text=error_text, campaign_run_id=run_id)
+            self.repo.log_campaign_scheduled_post_event(
+                scheduled_post_id=scheduled_post_id,
+                rule_id=rule_id,
+                event_type="send_now_needs_review",
+                actor_id=actor_id,
+                error_text=error_text,
+                extra={
+                    "reason": "launch_result_not_ok_after_campaign_run",
+                    "campaign_run_id": run_id,
+                    "runtime_result": runtime_result,
+                },
+            )
+            self.logger.warning("VIP_SCHEDULED_POST_NEEDS_REVIEW | scheduled_post_id=%s | reason=launch_result_not_ok_after_campaign_run | campaign_run_id=%s", scheduled_post_id, run_id)
+            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Запуск создан, но завершился с ошибкой. Пост отправлен на ручную проверку.", extra={"scheduled_post_id": scheduled_post_id, "campaign_run_id": run_id, "runtime_result": runtime_result})
         else:
             self.repo.reset_campaign_scheduled_post_after_send_now_failure(
                 scheduled_post_id,
@@ -476,8 +491,22 @@ class RepostCampaignScheduledPostService:
                 ok = self.repo.mark_campaign_scheduled_post_launched(sid, campaign_run_id=run_id)
                 self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_finished" if ok else "launch_state_update_failed", worker_id=worker_id)
             elif run_id:
-                ok = self.repo.mark_campaign_scheduled_post_failed(sid, error_text=result.error_text or "Не удалось запустить запланированный пост", campaign_run_id=run_id)
-                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_failed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=result.error_text)
+                error_text = result.error_text or "Не удалось подтвердить запуск запланированного поста"
+                runtime_result = result.to_dict() if hasattr(result, "to_dict") else {}
+                ok = self.repo.mark_campaign_scheduled_post_needs_review(sid, error_text=error_text, campaign_run_id=run_id)
+                self.repo.log_campaign_scheduled_post_event(
+                    scheduled_post_id=sid,
+                    rule_id=rule_id,
+                    event_type="launch_needs_review" if ok else "launch_state_update_failed",
+                    worker_id=worker_id,
+                    error_text=error_text,
+                    extra={
+                        "reason": "launch_result_not_ok_after_campaign_run",
+                        "campaign_run_id": run_id,
+                        "runtime_result": runtime_result,
+                    },
+                )
+                self.logger.warning("VIP_SCHEDULED_POST_NEEDS_REVIEW | scheduled_post_id=%s | reason=launch_result_not_ok_after_campaign_run | campaign_run_id=%s", sid, run_id)
             else:
                 if attempt_count >= VIP_SCHEDULED_POST_MAX_ATTEMPTS:
                     error_text = result.error_text or "Превышено число попыток запуска запланированного поста"
