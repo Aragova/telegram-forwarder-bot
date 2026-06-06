@@ -106,6 +106,7 @@ class IntroItem:
     tenant_id: int | None = None
     created_by: int | None = None
     media_kind: str | None = None
+    bank: str | None = None
     status: str = "active"
     deleted_at: str | None = None
     updated_at: str | None = None

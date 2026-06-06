@@ -49,24 +49,40 @@ class _IntroCursor:
                 file_path=file_path,
                 duration=duration,
                 media_kind=None,
+                bank=None,
                 created_at=created_at,
             )}
             self.rowcount = 1
             return None
 
         if normalized.startswith("insert into intros("):
-            (
-                rule_id,
-                tenant_id,
-                created_by,
-                display_name,
-                file_name,
-                file_path,
-                duration,
-                media_kind,
-                created_at,
-            ) = params
-            if self.db.find_active_by_name(rule_id, display_name) is not None:
+            if len(params) == 10:
+                (
+                    rule_id,
+                    tenant_id,
+                    created_by,
+                    display_name,
+                    file_name,
+                    file_path,
+                    duration,
+                    media_kind,
+                    bank,
+                    created_at,
+                ) = params
+            else:
+                (
+                    rule_id,
+                    tenant_id,
+                    created_by,
+                    display_name,
+                    file_name,
+                    file_path,
+                    duration,
+                    media_kind,
+                    created_at,
+                ) = params
+                bank = None
+            if self.db.find_active_by_name(rule_id, display_name, bank) is not None:
                 raise Exception("duplicate intro display_name in rule")
             self._row = {"id": self.db.insert(
                 rule_id=rule_id,
@@ -77,22 +93,28 @@ class _IntroCursor:
                 file_path=file_path,
                 duration=duration,
                 media_kind=media_kind,
+                bank=bank,
                 created_at=created_at,
             )}
             self.rowcount = 1
             return None
 
         if normalized.startswith("select id from intros where rule_id") and "file_path = %s" not in normalized:
-            rule_id, display_name = params
-            found = self.db.find_active_by_name(rule_id, display_name)
+            if len(params) == 3:
+                rule_id, bank, display_name = params
+            else:
+                rule_id, display_name = params
+                bank = None
+            found = self.db.find_active_by_name(rule_id, display_name, bank)
             self._row = {"id": found["id"]} if found else None
             return None
 
         if normalized.startswith("select id, display_name") and "where id = %s and rule_id = %s" in normalized:
-            intro_id, rule_id = params
+            intro_id, rule_id = params[0], params[1]
+            bank = params[2] if len(params) > 2 else None
             include_deleted = "status = 'active'" not in normalized
             row = self.db.get(intro_id)
-            if row and row["rule_id"] == rule_id and (include_deleted or self.db.is_active(row)):
+            if row and row["rule_id"] == rule_id and (bank is None or row.get("bank") == bank) and (include_deleted or self.db.is_active(row)):
                 self._row = dict(row)
             return None
 
@@ -105,8 +127,9 @@ class _IntroCursor:
 
         if normalized.startswith("select id, display_name") and "where rule_id = %s" in normalized:
             rule_id = params[0]
+            bank = params[1] if len(params) > 1 else None
             include_deleted = "status = 'active'" not in normalized
-            rows = [dict(row) for row in self.db.rows if row["rule_id"] == rule_id]
+            rows = [dict(row) for row in self.db.rows if row["rule_id"] == rule_id and (bank is None or row.get("bank") == bank)]
             if not include_deleted:
                 rows = [row for row in rows if self.db.is_active(row)]
             self._rows = sorted(rows, key=lambda row: (row["created_at"], row["id"]), reverse=True)
@@ -139,7 +162,11 @@ class _IntroCursor:
             return None
 
         if normalized.startswith("select id from intros") and "file_path = %s" in normalized:
-            rule_id, file_path, display_name = params
+            if len(params) == 4:
+                rule_id, file_path, display_name, bank = params
+            else:
+                rule_id, file_path, display_name = params
+                bank = None
             found = next(
                 (
                     row
@@ -147,6 +174,7 @@ class _IntroCursor:
                     if row["rule_id"] == rule_id
                     and row["file_path"] == file_path
                     and row["display_name"] == display_name
+                    and row.get("bank") == bank
                     and self.db.is_active(row)
                 ),
                 None,
@@ -210,6 +238,7 @@ class _IntroDb:
             "file_path": values["file_path"],
             "duration": values["duration"],
             "media_kind": values["media_kind"],
+            "bank": values.get("bank"),
             "status": "active",
             "created_at": f"2026-06-06T00:00:{intro_id:02d}+00:00",
             "deleted_at": None,
@@ -242,13 +271,14 @@ class _IntroDb:
     def is_active(self, row: dict[str, Any]) -> bool:
         return row["status"] == "active" and row["deleted_at"] is None
 
-    def find_active_by_name(self, rule_id: int | None, display_name: str) -> dict[str, Any] | None:
+    def find_active_by_name(self, rule_id: int | None, display_name: str, bank: str | None = None) -> dict[str, Any] | None:
         return next(
             (
                 row
                 for row in self.rows
                 if row["rule_id"] == rule_id
                 and row["display_name"].lower() == display_name.strip().lower()
+                and row.get("bank") == bank
                 and self.is_active(row)
             ),
             None,
@@ -480,3 +510,31 @@ def test_intro_legacy_migration_method_exists():
     pg_source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
     assert "def migrate_legacy_rule_intro_assignments" in pg_source
     assert "INTRO_LEGACY_ASSIGNMENTS_MIGRATED" in pg_source
+
+
+def test_same_display_name_is_allowed_in_different_banks(repo):
+    h_id = repo.add_rule_intro(101, "main", "main_h.mp4", "/tmp/main_h.mp4", bank="horizontal")
+    v_id = repo.add_rule_intro(101, "main", "main_v.mp4", "/tmp/main_v.mp4", bank="vertical")
+
+    assert h_id != v_id
+    assert repo.get_rule_intro(101, h_id, bank="horizontal") is not None
+    assert repo.get_rule_intro(101, v_id, bank="vertical") is not None
+
+
+def test_list_rule_intros_filters_by_bank(repo):
+    h_id = repo.add_rule_intro(101, "h", "h.mp4", "/tmp/h.mp4", bank="horizontal")
+    v_id = repo.add_rule_intro(101, "v", "v.mp4", "/tmp/v.mp4", bank="vertical")
+
+    horizontal = repo.list_rule_intros(101, bank="horizontal")
+    vertical = repo.list_rule_intros(101, bank="vertical")
+
+    assert [item.id for item in horizontal] == [h_id]
+    assert [item.id for item in vertical] == [v_id]
+    assert {item.id for item in repo.list_rule_intros(101)} == {h_id, v_id}
+
+
+def test_get_rule_intro_checks_bank(repo):
+    h_id = repo.add_rule_intro(101, "h", "h.mp4", "/tmp/h.mp4", bank="horizontal")
+
+    assert repo.get_rule_intro(101, h_id, bank="horizontal") is not None
+    assert repo.get_rule_intro(101, h_id, bank="vertical") is None

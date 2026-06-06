@@ -14,6 +14,13 @@ from aiogram.types import (
 
 from app.repository import RepositoryProtocol
 
+# Форматы callback для банков заставок правила:
+# intro_upload:{rule_id}:horizontal
+# intro_upload:{rule_id}:vertical
+# intro_view:{rule_id}:{bank}:{intro.id}
+# intro_delete_confirm:{rule_id}:{bank}:{intro.id}
+# intro_delete_apply:{rule_id}:{bank}:{intro_id}
+
 
 @dataclass(slots=True)
 class IntroHandlersContext:
@@ -93,6 +100,7 @@ def _is_duplicate_intro_error(exc: Exception) -> bool:
         "duplicate" in text
         or "unique" in text
         or "uq_intros_rule_display_name_active" in text
+        or "uq_intros_rule_bank_display_name_active" in text
         or "duplicate key value" in text
     )
 
@@ -108,70 +116,78 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
         return getattr(row, key, default)
 
 
+def _intro_bank_label(bank: str) -> str:
+    return "горизонтальные" if bank == "horizontal" else "вертикальные"
+
+
+def _intro_bank_title(bank: str) -> str:
+    return "горизонтальная" if bank == "horizontal" else "вертикальная"
+
+
+def _intro_bank_title_cap(bank: str) -> str:
+    return "Горизонтальная" if bank == "horizontal" else "Вертикальная"
+
+
+def _intro_bank_icon(bank: str) -> str:
+    return "🖥" if bank == "horizontal" else "📱"
+
+
+def _intro_bank_dative_label(bank: str) -> str:
+    return "горизонтальным" if bank == "horizontal" else "вертикальным"
+
+
+def _intro_bank_menu_callback(rule_id: int, bank: str) -> str:
+    return f"video_intro_{bank}:{rule_id}"
+
+
 def build_intro_list_keyboard(
     intros,
     rule_id: int,
 ) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🖥 Выбрать горизонтальную",
+                    callback_data=f"video_intro_horizontal:{rule_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📱 Выбрать вертикальную",
+                    callback_data=f"video_intro_vertical:{rule_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад к правилу",
+                    callback_data=f"rule_card:{rule_id}",
+                )
+            ],
+        ]
+    )
+
+
+def _build_intro_bank_keyboard(intros, rule_id: int, bank: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                text="🖥 Выбрать горизонтальную",
-                callback_data=f"video_intro_horizontal:{rule_id}",
+                text=f"➕ Загрузить {'горизонтальную' if bank == 'horizontal' else 'вертикальную'}",
+                callback_data=f"intro_upload:{rule_id}:{bank}",
             )
-        ],
-        [
-            InlineKeyboardButton(
-                text="📱 Выбрать вертикальную",
-                callback_data=f"video_intro_vertical:{rule_id}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="➕ Загрузить заставку",
-                callback_data=f"intro_upload:{rule_id}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="🔄 Обновить список",
-                callback_data=f"video_intro_menu:{rule_id}",
-            )
-        ],
+        ]
     ]
-
-    if intros:
-        for intro in intros:
-            rows.append([
-                InlineKeyboardButton(
-                    text=f"👁 {intro.display_name}",
-                    callback_data=f"intro_view:{rule_id}:{intro.id}",
-                )
-            ])
-
-    rows.append([
-        InlineKeyboardButton(
-            text="⬅️ Назад к правилу",
-            callback_data=f"rule_card:{rule_id}",
-        )
-    ])
-
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _build_intro_selection_keyboard(intros, rule_id: int, mode: str) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
     for intro in intros:
         rows.append([
             InlineKeyboardButton(
-                text=f"✅ {intro.display_name}",
-                callback_data=f"apply_intro:{mode}:{rule_id}:{intro.id}",
+                text=f"👁 {intro.display_name}",
+                callback_data=f"intro_view:{rule_id}:{bank}:{intro.id}",
             )
         ])
-
     rows.append([
         InlineKeyboardButton(
-            text="❌ Убрать",
-            callback_data=f"apply_intro:{mode}:{rule_id}:none",
+            text=f"❌ Убрать {'горизонтальную' if bank == 'horizontal' else 'вертикальную'}",
+            callback_data=f"intro_clear_assignment:{rule_id}:{bank}",
         )
     ])
     rows.append([
@@ -183,10 +199,10 @@ def _build_intro_selection_keyboard(intros, rule_id: int, mode: str) -> InlineKe
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _build_empty_selection_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+def _build_intro_bank_result_keyboard(rule_id: int, bank: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Загрузить заставку", callback_data=f"intro_upload:{rule_id}")],
+            [InlineKeyboardButton(text=f"{_intro_bank_icon(bank)} К {_intro_bank_dative_label(bank)} заставкам", callback_data=_intro_bank_menu_callback(rule_id, bank))],
             [InlineKeyboardButton(text="🎬 К заставкам правила", callback_data=f"video_intro_menu:{rule_id}")],
         ]
     )
@@ -242,31 +258,45 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
 
         return ctx.db.get_rule_card_snapshot(rule_id), removed_assignment
 
+    def _clear_intro_assignment_by_bank_sync(rule_id: int, bank: str, intro_id: int | None = None) -> tuple[Any, bool]:
+        row = ctx.db.get_rule_card_snapshot(rule_id)
+        if not row:
+            return None, False
+
+        horizontal_id = _row_get(row, "video_intro_horizontal_id")
+        vertical_id = _row_get(row, "video_intro_vertical_id")
+        removed_assignment = False
+
+        if bank == "horizontal":
+            if intro_id is None or horizontal_id == intro_id:
+                ctx.db.set_rule_intro_horizontal(rule_id, None)
+                horizontal_id = None
+                removed_assignment = True
+        else:
+            if intro_id is None or vertical_id == intro_id:
+                ctx.db.set_rule_intro_vertical(rule_id, None)
+                vertical_id = None
+                removed_assignment = True
+
+        if removed_assignment and not (horizontal_id or vertical_id):
+            ctx.db.set_rule_video_intro_enabled(rule_id, False)
+
+        return ctx.db.get_rule_card_snapshot(rule_id), removed_assignment
+
     async def _build_rule_intro_menu_response(rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
-        intros = await ctx.run_db(ctx.db.list_rule_intros, rule_id)
         row = await ctx.get_rule_stats_row_async(rule_id)
 
         horizontal_id = _row_get(row, "video_intro_horizontal_id")
         vertical_id = _row_get(row, "video_intro_vertical_id")
-        intro_by_id = {intro.id: intro for intro in intros}
-        legacy_notes: list[str] = []
 
-        async def selected_label(intro_id: int | None, label: str) -> str:
+        async def selected_label(intro_id: int | None) -> str:
             if not intro_id:
                 return "не выбрана"
-            rule_intro = intro_by_id.get(intro_id)
-            if rule_intro:
-                return rule_intro.display_name
-            legacy_name = await ctx.run_db(_legacy_intro_name_sync, intro_id)
-            if legacy_name:
-                legacy_notes.append(
-                    f"ℹ️ {label}: это старая общая заставка. Новые загрузки будут доступны только этому правилу."
-                )
-                return legacy_name
-            return "не выбрана"
+            intro = await ctx.run_db(_legacy_intro_name_sync, intro_id)
+            return intro or "не выбрана"
 
-        horizontal_label = await selected_label(horizontal_id, "Горизонтальная")
-        vertical_label = await selected_label(vertical_id, "Вертикальная")
+        horizontal_label = await selected_label(horizontal_id)
+        vertical_label = await selected_label(vertical_id)
 
         text_parts = [
             f"🎬 Заставки правила #{rule_id}",
@@ -275,23 +305,15 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
             "",
             f"🖥 Горизонтальная: {horizontal_label}",
             f"📱 Вертикальная: {vertical_label}",
-            f"📦 Загружено в правило: {len(intros)}",
-        ]
-        if legacy_notes:
-            text_parts.extend(["", *legacy_notes])
-        text_parts.extend([
             "",
-            "Загрузите новую заставку или выберите, какую использовать для горизонтальных и вертикальных видео.",
-        ])
-        if not intros:
-            text_parts.extend([
-                "",
-                "📦 В этом правиле пока нет заставок.",
-                "",
-                "Загрузите первую заставку, затем назначьте её горизонтальной или вертикальной.",
-            ])
+            "Заставки разделены на два банка:",
+            "🖥 горизонтальные — для горизонтальных видео",
+            "📱 вертикальные — для вертикальных видео",
+            "",
+            "Выберите, какой банк открыть.",
+        ]
 
-        return "\n".join(text_parts), build_intro_list_keyboard(intros, rule_id=rule_id)
+        return "\n".join(text_parts), build_intro_list_keyboard([], rule_id=rule_id)
 
     async def _show_rule_intro_menu(callback: CallbackQuery, rule_id: int) -> None:
         if not await ctx.ensure_rule_callback_access(callback, rule_id):
@@ -331,6 +353,82 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
             "rule_id": rule_id,
         }
         await ctx.answer_callback_safe_once(callback)
+
+    async def _build_intro_bank_response(rule_id: int, bank: str) -> tuple[str, InlineKeyboardMarkup]:
+        intros = await ctx.run_db(ctx.db.list_rule_intros, rule_id, bank=bank)
+        row = await ctx.get_rule_stats_row_async(rule_id)
+        selected_id = _row_get(row, "video_intro_horizontal_id" if bank == "horizontal" else "video_intro_vertical_id")
+        current = "не выбрана"
+        if selected_id:
+            selected = await ctx.run_db(ctx.db.get_rule_intro, rule_id, int(selected_id), bank=bank)
+            if selected:
+                current = selected.display_name
+
+        if bank == "horizontal":
+            header = f"🖥 Горизонтальные заставки правила #{rule_id}"
+        else:
+            header = f"📱 Вертикальные заставки правила #{rule_id}"
+        text_parts = [
+            header,
+            "",
+            f"Текущая: {current}",
+            "",
+        ]
+        if intros:
+            storage_text = (
+                "Здесь хранятся только горизонтальные заставки этого правила."
+                if bank == "horizontal"
+                else "Здесь хранятся только вертикальные заставки этого правила."
+            )
+            text_parts.extend([
+                storage_text,
+                "",
+                "Добавьте новую заставку или откройте предпросмотр уже загруженной.",
+            ])
+        else:
+            empty_label = "Горизонтальных" if bank == "horizontal" else "Вертикальных"
+            first_label = "горизонтальную" if bank == "horizontal" else "вертикальную"
+            text_parts.extend([
+                f"📦 {empty_label} заставок пока нет.",
+                "",
+                f"Загрузите первую {first_label} заставку.",
+            ])
+
+        return "\n".join(text_parts), _build_intro_bank_keyboard(intros, rule_id, bank)
+
+    async def _show_intro_bank(callback: CallbackQuery, rule_id: int, bank: str) -> None:
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
+            return
+        text, markup = await _build_intro_bank_response(rule_id, bank)
+        try:
+            await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=markup)
+        except Exception as exc:
+            if "message is not modified" not in str(exc).lower():
+                ctx.logger.exception("Ошибка handle_video_intro_%s: %s", bank, exc)
+        await ctx.answer_callback_safe_once(callback)
+
+    async def _send_intro_bank(callback: CallbackQuery, rule_id: int, bank: str) -> None:
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
+            return
+        text, markup = await _build_intro_bank_response(rule_id, bank)
+        await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=markup)
+        await ctx.answer_callback_safe_once(callback)
+
+    async def _replace_callback_message_with_text(
+        callback: CallbackQuery,
+        text: str,
+        reply_markup: InlineKeyboardMarkup,
+    ) -> None:
+        try:
+            await ctx.try_delete_message_safe(callback.message.chat.id, callback.message.message_id)
+        except Exception:
+            pass
+
+        await ctx.send_message_safe(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=reply_markup,
+        )
 
     @dp.callback_query(lambda c: c.data.startswith("video_intro_menu:") or c.data.startswith("user_rule_intros:"))
     async def handle_video_intro_menu(callback: CallbackQuery):
@@ -393,15 +491,19 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
             return
 
         rule_id = None
+        bank = None
         if callback.data.startswith("intro_upload:"):
             try:
-                rule_id = int(callback.data.split(":")[1])
+                parts = callback.data.split(":")
+                rule_id = int(parts[1])
+                bank = parts[2] if len(parts) > 2 else None
             except Exception:
                 await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
                 return
         else:
             prev_state = ctx.user_states.get(callback.from_user.id, {})
             rule_id = prev_state.get("rule_id")
+            bank = prev_state.get("bank")
             if not rule_id:
                 await ctx.answer_callback_safe(
                     callback,
@@ -410,33 +512,42 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
                 )
                 return
 
+        if bank not in {"horizontal", "vertical"}:
+            await ctx.answer_callback_safe(
+                callback,
+                "Сессия загрузки устарела. Откройте нужный банк заставок заново.",
+                show_alert=True,
+            )
+            return
+
         if not await ctx.ensure_rule_callback_access(callback, int(rule_id)):
             return
 
         ctx.user_states[callback.from_user.id] = {
             "action": "intro_upload_wait_file",
             "rule_id": int(rule_id),
+            "bank": bank,
             "flow": "rule_intro_upload",
         }
 
+        bank_title = "горизонтальной" if bank == "horizontal" else "вертикальной"
         try:
             await ctx.edit_message_text_safe(
                 message=callback.message,
                 text=(
-                    f"➕ Загрузка заставки для правила #{rule_id}\n\n"
-                    "Заставка будет доступна только этому правилу.\n\n"
+                    f"➕ Загрузка {bank_title} заставки для правила #{rule_id}\n\n"
+                    f"Эта заставка будет доступна только в {'горизонтальном' if bank == 'horizontal' else 'вертикальном'} банке этого правила.\n\n"
                     "Отправьте видео или изображение.\n"
                     "Название укажите в подписи к файлу.\n\n"
                     "Ограничения:\n"
                     "• видео до 30 секунд;\n"
                     "• изображение JPG/PNG;\n"
-                    "• название: буквы, цифры, пробел, _ и -.\n\n"
-                    "Пример подписи:\n"
-                    "intro_horizontal_main"
+                    "• название: буквы, цифры, пробел, _ и -."
                 ),
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="❌ Отменить загрузку", callback_data=f"intro_upload_cancel:{rule_id}")],
+                        [InlineKeyboardButton(text="❌ Отменить загрузку", callback_data=f"intro_upload_cancel:{rule_id}:{bank}")],
+                        [InlineKeyboardButton(text=f"{_intro_bank_icon(bank)} К {_intro_bank_dative_label(bank)} заставкам", callback_data=_intro_bank_menu_callback(int(rule_id), bank))],
                         [InlineKeyboardButton(text="🎬 К заставкам правила", callback_data=f"video_intro_menu:{rule_id}")],
                     ]
                 ),
@@ -450,7 +561,9 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
     @dp.callback_query(lambda c: c.data.startswith("intro_upload_cancel:"))
     async def handle_intro_upload_cancel(callback: CallbackQuery):
         try:
-            rule_id = int(callback.data.split(":")[1])
+            parts = callback.data.split(":")
+            rule_id = int(parts[1])
+            bank = parts[2] if len(parts) > 2 else None
         except Exception:
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
@@ -466,7 +579,10 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
                 "rule_id": rule_id,
             }
 
-        await _show_rule_intro_menu(callback, rule_id)
+        if bank in {"horizontal", "vertical"}:
+            await _show_intro_bank(callback, rule_id, bank)
+        else:
+            await _show_rule_intro_menu(callback, rule_id)
 
     @dp.callback_query(lambda c: c.data.startswith("intro_view:"))
     async def handle_intro_view(callback: CallbackQuery):
@@ -474,22 +590,31 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
             return
 
         try:
-            _, rule_id_raw, intro_id_raw = callback.data.split(":")
+            parts = callback.data.split(":")
+            if len(parts) == 4:
+                _, rule_id_raw, bank, intro_id_raw = parts
+            else:
+                _, rule_id_raw, intro_id_raw = parts
+                bank = None
             rule_id = int(rule_id_raw)
             intro_id = int(intro_id_raw)
         except Exception:
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
 
+        if bank not in {"horizontal", "vertical"}:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+
         if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
 
-        intro = await ctx.run_db(ctx.db.get_rule_intro, rule_id, intro_id)
+        intro = await ctx.run_db(ctx.db.get_rule_intro, rule_id, intro_id, bank=bank)
 
         if not intro:
             await ctx.answer_callback_safe(
                 callback,
-                "⚠️ Заставка не найдена в этом правиле.\n\nВозможно, она была удалена или принадлежит другому правилу.",
+                "⚠️ Заставка не найдена в этом банке.\n\nВозможно, она была удалена или принадлежит другому типу заставок.",
                 show_alert=True,
             )
             return
@@ -501,38 +626,28 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
             return
 
         input_file = FSInputFile(intro.file_path)
-
+        use_text = "✅ Использовать эту горизонтальную" if bank == "horizontal" else "✅ Использовать эту вертикальную"
+        back_text = "⬅️ К горизонтальным заставкам" if bank == "horizontal" else "⬅️ К вертикальным заставкам"
         reply_markup = InlineKeyboardMarkup(
             inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="🖥 Назначить горизонтальной", callback_data=f"apply_intro:horizontal:{rule_id}:{intro.id}"),
-                ],
-                [
-                    InlineKeyboardButton(text="📱 Назначить вертикальной", callback_data=f"apply_intro:vertical:{rule_id}:{intro.id}"),
-                ],
-                [
-                    InlineKeyboardButton(text="🗑 Удалить", callback_data=f"intro_delete_confirm:{rule_id}:{intro.id}"),
-                ],
-                [
-                    InlineKeyboardButton(text="⬅️ К заставкам правила", callback_data=f"intro_back_to_list:{rule_id}"),
-                ],
+                [InlineKeyboardButton(text=use_text, callback_data=f"apply_intro:{bank}:{rule_id}:{intro.id}")],
+                [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"intro_delete_confirm:{rule_id}:{bank}:{intro.id}")],
+                [InlineKeyboardButton(text=back_text, callback_data=f"intro_back_to_list:{rule_id}:{bank}")],
             ]
         )
+        caption = f"🎬 {intro.display_name}\n⏱ Длительность: {intro.duration} сек"
         if intro.duration and intro.duration > 0:
             await ctx.send_video_safe(
                 chat_id=callback.message.chat.id,
                 video=input_file,
-                caption=(
-                    f"🎬 {intro.display_name}\n"
-                    f"⏱ Длительность: {intro.duration} сек"
-                ),
+                caption=caption,
                 reply_markup=reply_markup,
             )
         else:
             await ctx.send_photo_safe(
                 chat_id=callback.message.chat.id,
                 photo=input_file,
-                caption=f"🖼 {intro.display_name}",
+                caption=caption,
                 reply_markup=reply_markup,
             )
 
@@ -543,12 +658,16 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
         if not await ctx.is_admin_callback(callback):
             return
 
+        bank = None
         if callback.data == "intro_back_to_list":
             state = ctx.user_states.get(callback.from_user.id, {})
             rule_id = state.get("rule_id")
+            bank = state.get("bank")
         else:
             try:
-                rule_id = int(callback.data.split(":")[1])
+                parts = callback.data.split(":")
+                rule_id = int(parts[1])
+                bank = parts[2] if len(parts) > 2 else None
             except Exception:
                 await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
                 return
@@ -569,7 +688,9 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
         except Exception:
             pass
 
-        if callback.data.startswith("intro_back_to_list:"):
+        if bank in {"horizontal", "vertical"}:
+            await _send_intro_bank(callback, int(rule_id), bank)
+        elif callback.data.startswith("intro_back_to_list:"):
             await _send_rule_intro_menu(callback, int(rule_id))
         else:
             await ctx.answer_callback_safe_once(callback)
@@ -580,42 +701,41 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
             return
 
         try:
-            _, rule_id_raw, intro_id_raw = callback.data.split(":")
+            _, rule_id_raw, bank, intro_id_raw = callback.data.split(":")
             rule_id = int(rule_id_raw)
             intro_id = int(intro_id_raw)
         except Exception:
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
 
+        if bank not in {"horizontal", "vertical"}:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
         if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
 
-        intro = await ctx.run_db(ctx.db.get_rule_intro, rule_id, intro_id)
+        intro = await ctx.run_db(ctx.db.get_rule_intro, rule_id, intro_id, bank=bank)
         if not intro:
-            await ctx.answer_callback_safe(callback, "⚠️ Заставка не найдена в этом правиле.", show_alert=True)
+            await ctx.answer_callback_safe(callback, "⚠️ Заставка не найдена в этом банке.", show_alert=True)
             return
 
-        try:
-            await ctx.edit_message_text_safe(
-                message=callback.message,
-                text=(
-                    "🗑 Удалить заставку?\n\n"
-                    f"Правило #{rule_id}\n"
-                    f"Заставка: {intro.display_name}\n\n"
-                    "Заставка будет удалена только из этого правила.\n"
-                    "Если она назначена как горизонтальная или вертикальная, назначение будет снято."
-                ),
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text="✅ Удалить", callback_data=f"intro_delete_apply:{rule_id}:{intro_id}")],
-                        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"intro_delete_cancel:{rule_id}:{intro_id}")],
-                    ]
-                ),
-            )
-        except Exception as exc:
-            if "message is not modified" not in str(exc).lower():
-                ctx.logger.exception("Ошибка handle_intro_delete_confirm: %s", exc)
-
+        await _replace_callback_message_with_text(
+            callback,
+            text=(
+                "🗑 Удалить заставку?\n\n"
+                f"Правило #{rule_id}\n"
+                f"Банк: {_intro_bank_label(bank)}\n"
+                f"Заставка: {intro.display_name}\n\n"
+                "Заставка будет удалена только из этого банка.\n"
+                "Если она назначена сейчас, назначение будет снято."
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="✅ Удалить", callback_data=f"intro_delete_apply:{rule_id}:{bank}:{intro_id}")],
+                    [InlineKeyboardButton(text="❌ Отмена", callback_data=f"intro_delete_cancel:{rule_id}:{bank}:{intro_id}")],
+                ]
+            ),
+        )
         await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data.startswith("intro_delete_cancel:"))
@@ -623,13 +743,16 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
         if not await ctx.is_admin_callback(callback):
             return
         try:
-            _, rule_id_raw, intro_id_raw = callback.data.split(":")
+            _, rule_id_raw, bank, intro_id_raw = callback.data.split(":")
             rule_id = int(rule_id_raw)
             int(intro_id_raw)
         except Exception:
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
-        await _show_rule_intro_menu(callback, rule_id)
+        if bank in {"horizontal", "vertical"}:
+            await _show_intro_bank(callback, rule_id, bank)
+        else:
+            await _show_rule_intro_menu(callback, rule_id)
 
     @dp.callback_query(lambda c: c.data.startswith("intro_delete_apply:"))
     async def handle_intro_delete_apply(callback: CallbackQuery):
@@ -637,22 +760,25 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
             return
 
         try:
-            _, rule_id_raw, intro_id_raw = callback.data.split(":")
+            _, rule_id_raw, bank, intro_id_raw = callback.data.split(":")
             rule_id = int(rule_id_raw)
             intro_id = int(intro_id_raw)
         except Exception:
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
 
+        if bank not in {"horizontal", "vertical"}:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
         if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
 
-        intro = await ctx.run_db(ctx.db.get_rule_intro, rule_id, intro_id)
+        intro = await ctx.run_db(ctx.db.get_rule_intro, rule_id, intro_id, bank=bank)
         if not intro:
-            await ctx.answer_callback_safe(callback, "⚠️ Заставка не найдена в этом правиле.", show_alert=True)
+            await ctx.answer_callback_safe(callback, "⚠️ Заставка не найдена в этом банке.", show_alert=True)
             return
 
-        _, removed_assignment = await ctx.run_db(_clear_intro_assignment_sync, rule_id, intro_id)
+        _, removed_assignment = await ctx.run_db(_clear_intro_assignment_by_bank_sync, rule_id, bank, intro_id)
         ok = await ctx.run_db(ctx.db.soft_delete_rule_intro, rule_id, intro_id)
 
         if not ok:
@@ -662,22 +788,19 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
         ctx.invalidate_rule_card_cache(rule_id)
 
         text = (
-            f"✅ Заставка удалена из правила #{rule_id}\n\n"
-            f"Название: {intro.display_name}"
+            "✅ Заставка удалена\n\n"
+            f"Правило #{rule_id}\n"
+            f"Банк: {_intro_bank_label(bank)}\n"
+            f"Заставка: {intro.display_name}"
         )
         if removed_assignment:
-            text += "\n\nℹ️ Назначение этой заставки в правиле также снято."
+            text += "\n\nℹ️ Эта заставка была назначена, поэтому назначение также снято."
 
         try:
             await ctx.edit_message_text_safe(
                 message=callback.message,
                 text=text,
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text="🎬 К заставкам правила", callback_data=f"video_intro_menu:{rule_id}")],
-                        [InlineKeyboardButton(text="💰 К правилу", callback_data=f"rule_card:{rule_id}")],
-                    ]
-                ),
+                reply_markup=_build_intro_bank_result_keyboard(rule_id, bank),
             )
         except Exception as exc:
             if "message is not modified" not in str(exc).lower():
@@ -692,36 +815,7 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
         except Exception:
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
-        if not await ctx.ensure_rule_callback_access(callback, rule_id):
-            return
-
-        intros = await ctx.run_db(ctx.db.list_rule_intros, rule_id)
-
-        if not intros:
-            text = (
-                "🖥 Горизонтальная заставка\n\n"
-                "В этом правиле пока нет загруженных заставок.\n\n"
-                "Сначала загрузите заставку, затем назначьте её горизонтальной."
-            )
-            markup = _build_empty_selection_keyboard(rule_id)
-        else:
-            text = (
-                "🖥 Выберите горизонтальную заставку\n\n"
-                "Доступны только заставки этого правила."
-            )
-            markup = _build_intro_selection_keyboard(intros, rule_id, "horizontal")
-
-        try:
-            await ctx.edit_message_text_safe(
-                message=callback.message,
-                text=text,
-                reply_markup=markup,
-            )
-        except Exception as exc:
-            if "message is not modified" not in str(exc).lower():
-                ctx.logger.exception("Ошибка handle_video_intro_horizontal: %s", exc)
-
-        await ctx.answer_callback_safe_once(callback)
+        await _show_intro_bank(callback, rule_id, "horizontal")
 
     @dp.callback_query(lambda c: c.data.startswith("video_intro_vertical:"))
     async def handle_video_intro_vertical(callback: CallbackQuery):
@@ -730,36 +824,25 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
         except Exception:
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
+        await _show_intro_bank(callback, rule_id, "vertical")
+
+    @dp.callback_query(lambda c: c.data.startswith("intro_clear_assignment:"))
+    async def handle_intro_clear_assignment(callback: CallbackQuery):
+        try:
+            _, rule_id_raw, bank = callback.data.split(":")
+            rule_id = int(rule_id_raw)
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if bank not in {"horizontal", "vertical"}:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
         if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
 
-        intros = await ctx.run_db(ctx.db.list_rule_intros, rule_id)
-
-        if not intros:
-            text = (
-                "📱 Вертикальная заставка\n\n"
-                "В этом правиле пока нет загруженных заставок.\n\n"
-                "Сначала загрузите заставку, затем назначьте её вертикальной."
-            )
-            markup = _build_empty_selection_keyboard(rule_id)
-        else:
-            text = (
-                "📱 Выберите вертикальную заставку\n\n"
-                "Доступны только заставки этого правила."
-            )
-            markup = _build_intro_selection_keyboard(intros, rule_id, "vertical")
-
-        try:
-            await ctx.edit_message_text_safe(
-                message=callback.message,
-                text=text,
-                reply_markup=markup,
-            )
-        except Exception as exc:
-            if "message is not modified" not in str(exc).lower():
-                ctx.logger.exception("Ошибка handle_video_intro_vertical: %s", exc)
-
-        await ctx.answer_callback_safe_once(callback)
+        await ctx.run_db(_clear_intro_assignment_by_bank_sync, rule_id, bank, None)
+        ctx.invalidate_rule_card_cache(rule_id)
+        await _show_intro_bank(callback, rule_id, bank)
 
     @dp.callback_query(lambda c: c.data.startswith("apply_intro:"))
     async def handle_apply_intro(callback: CallbackQuery):
@@ -784,11 +867,11 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
 
         intro = None
         if intro_id_val is not None:
-            intro = await ctx.run_db(ctx.db.get_rule_intro, rule_id, intro_id_val)
+            intro = await ctx.run_db(ctx.db.get_rule_intro, rule_id, intro_id_val, bank=mode)
             if intro is None:
                 await ctx.answer_callback_safe(
                     callback,
-                    "⚠️ Эта заставка не принадлежит выбранному правилу или была удалена.",
+                    "⚠️ Эта заставка не принадлежит нужному банку или была удалена.",
                     show_alert=True,
                 )
                 return
@@ -802,30 +885,21 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
 
         if intro_id_val is None:
             success_text = (
-                f"✅ {'Горизонтальная' if mode == 'horizontal' else 'Вертикальная'} заставка снята\n\n"
+                f"✅ {_intro_bank_title_cap(mode)} заставка снята\n\n"
                 f"Правило #{rule_id}"
             )
         else:
             success_text = (
-                f"✅ {'Горизонтальная' if mode == 'horizontal' else 'Вертикальная'} заставка назначена\n\n"
+                f"✅ {_intro_bank_title_cap(mode)} заставка назначена\n\n"
                 f"Правило #{rule_id}\n"
                 f"Заставка: {intro.display_name}"
             )
 
-        try:
-            await ctx.edit_message_text_safe(
-                message=callback.message,
-                text=success_text,
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text="🎬 К заставкам правила", callback_data=f"video_intro_menu:{rule_id}")],
-                        [InlineKeyboardButton(text="💰 К правилу", callback_data=f"rule_card:{rule_id}")],
-                    ]
-                ),
-            )
-        except Exception as exc:
-            if "message is not modified" not in str(exc).lower():
-                ctx.logger.exception("Ошибка handle_apply_intro: %s", exc)
+        await _replace_callback_message_with_text(
+            callback,
+            text=success_text,
+            reply_markup=_build_intro_bank_result_keyboard(rule_id, mode),
+        )
 
         await ctx.answer_callback_safe_once(callback, "Сохранено")
 
@@ -846,10 +920,18 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
             return
 
         rule_id = state.get("rule_id")
+        bank = state.get("bank")
         if not rule_id:
             await ctx.send_message_safe(
                 chat_id=message.chat.id,
                 text="Сессия устарела. Откройте заставки из карточки правила заново.",
+                reply_markup=ctx.cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
+            )
+            return
+        if bank not in {"horizontal", "vertical"}:
+            await ctx.send_message_safe(
+                chat_id=message.chat.id,
+                text="Сессия загрузки устарела. Откройте нужный банк заставок заново.",
                 reply_markup=ctx.cancel_reply_markup_for_user(message.from_user.id if message.from_user else None),
             )
             return
@@ -921,6 +1003,7 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
                 duration=duration,
                 created_by=message.from_user.id,
                 media_kind=media_kind,
+                bank=bank,
             )
         except Exception as exc:
             try:
@@ -966,16 +1049,16 @@ def register_intro_handlers(dp: Dispatcher, ctx: IntroHandlersContext) -> None:
         await ctx.send_message_safe(
             chat_id=message.chat.id,
             text=(
-                f"✅ Заставка добавлена в правило #{rule_id}\n\n"
+                f"✅ {_intro_bank_title_cap(bank)} заставка добавлена в правило #{rule_id}\n\n"
                 f"Название: {caption}\n"
                 f"Тип: {media_kind}\n"
                 f"Длительность: {duration} сек\n\n"
-                "Теперь её можно назначить как горизонтальную или вертикальную."
+                f"Теперь её можно использовать как {'горизонтальную' if bank == 'horizontal' else 'вертикальную'} заставку."
             ),
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="🖥 Назначить горизонтальной", callback_data=f"apply_intro:horizontal:{rule_id}:{intro_id}")],
-                    [InlineKeyboardButton(text="📱 Назначить вертикальной", callback_data=f"apply_intro:vertical:{rule_id}:{intro_id}")],
+                    [InlineKeyboardButton(text=f"✅ Использовать эту {'горизонтальную' if bank == 'horizontal' else 'вертикальную'}", callback_data=f"apply_intro:{bank}:{rule_id}:{intro_id}")],
+                    [InlineKeyboardButton(text=f"{_intro_bank_icon(bank)} К {_intro_bank_dative_label(bank)} заставкам", callback_data=_intro_bank_menu_callback(rule_id, bank))],
                     [InlineKeyboardButton(text="🎬 К заставкам правила", callback_data=f"video_intro_menu:{rule_id}")],
                 ]
             ),
