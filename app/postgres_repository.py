@@ -146,6 +146,11 @@ class PostgresRepository(RepositoryProtocol):
             caption_delivery_mode=data.get("caption_delivery_mode", "auto"),
             video_caption_delivery_mode=data.get("video_caption_delivery_mode", "auto"),
             repost_campaign_enabled=bool(data.get("repost_campaign_enabled") or False),
+            repost_campaign_clean_channel_enabled=bool(
+                data.get("repost_campaign_clean_channel_enabled")
+                if data.get("repost_campaign_clean_channel_enabled") is not None
+                else True
+            ),
             repost_campaign_show_seconds=int(data.get("repost_campaign_show_seconds") or 0),
             repost_campaign_saved_post_id=(int(data.get("repost_campaign_saved_post_id")) if data.get("repost_campaign_saved_post_id") is not None else None),
         )
@@ -706,6 +711,7 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_horizontal_id BIGINT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_vertical_id BIGINT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_clean_channel_enabled BOOLEAN NOT NULL DEFAULT TRUE;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_show_seconds BIGINT NOT NULL DEFAULT 0;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_saved_post_id BIGINT NULL;
         ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dedup_key TEXT NULL;
@@ -7856,6 +7862,56 @@ class PostgresRepository(RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute("UPDATE saved_posts SET archived_at=NOW(), status='archived', updated_at=NOW() WHERE id=%s", (int(saved_post_id),))
                 return cur.rowcount > 0
+
+    def get_rule_repost_campaign_clean_channel_settings(self, rule_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, repost_campaign_clean_channel_enabled
+                    FROM routing
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (int(rule_id),),
+                )
+                row = cur.fetchone()
+
+        if not row:
+            return {
+                "ok": False,
+                "rule_id": int(rule_id),
+                "enabled": True,
+                "error_text": "Правило не найдено",
+            }
+
+        data = dict(row)
+        raw_enabled = data.get("repost_campaign_clean_channel_enabled")
+        return {
+            "ok": True,
+            "rule_id": int(data.get("id") or rule_id),
+            "enabled": bool(raw_enabled if raw_enabled is not None else True),
+        }
+
+    def set_rule_repost_campaign_clean_channel_enabled(
+        self,
+        rule_id: int,
+        enabled: bool,
+        actor_id: int | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET repost_campaign_clean_channel_enabled = %s
+                    WHERE id = %s
+                    """,
+                    (bool(enabled), int(rule_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
 
     def set_rule_repost_campaign_saved_post(self, rule_id: int, saved_post_id: int | None) -> bool:
         with self.connect() as conn:

@@ -10,6 +10,7 @@ from app.repost_campaign_service import format_campaign_show_seconds_ru, normali
 from app.repost_campaign_ui import (
     ACTIVE_PLACEMENTS_PAGE_SIZE,
     build_repost_campaign_active_placements_view,
+    build_repost_campaign_clean_channel_settings_view,
     build_repost_campaign_launch_mode_view,
     build_repost_campaign_launch_job_status_view,
     build_repost_campaign_launch_queued_view,
@@ -145,6 +146,46 @@ async def _render_repost_campaign_active_placements(
             exc,
         )
         await ctx.answer_callback_safe(callback, "Не удалось открыть активные размещения", show_alert=True)
+        return False
+
+
+async def _render_repost_campaign_clean_channel_settings(
+    callback: CallbackQuery,
+    rule_id: int,
+    ctx: RepostCampaignHandlersContext,
+) -> bool:
+    if not await ctx.ensure_rule_callback_access(callback, rule_id):
+        return False
+    try:
+        settings = await ctx.run_db(ctx.db.get_rule_repost_campaign_clean_channel_settings, rule_id)
+        service = RepostCampaignPlacementService(ctx.db, logger=ctx.logger)
+        state = await ctx.run_db(
+            lambda: service.build_clean_channel_state(
+                rule_id=rule_id,
+                basic_only=True,
+                limit=ACTIVE_PLACEMENTS_PAGE_SIZE,
+            )
+        )
+        text, keyboard = build_repost_campaign_clean_channel_settings_view(
+            rule_id=rule_id,
+            settings=settings or {},
+            state=state,
+        )
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        ctx.logger.info(
+            "REPOST_CAMPAIGN_CLEAN_CHANNEL_SETTINGS_OPENED | rule_id=%s | enabled=%s | state=%s",
+            rule_id,
+            (settings or {}).get("enabled"),
+            (state or {}).get("state"),
+        )
+        return True
+    except Exception as exc:
+        ctx.logger.exception(
+            "REPOST_CAMPAIGN_CLEAN_CHANNEL_SETTINGS_OPEN_FAILED | rule_id=%s | error=%s",
+            rule_id,
+            exc,
+        )
+        await ctx.answer_callback_safe(callback, "Не удалось открыть Чистый канал", show_alert=True)
         return False
 
 
@@ -839,6 +880,67 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         text, kb = build_repost_campaign_vip_features_view(rule_id=rule_id)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_clean_channel:"))
+    async def handle_rule_repost_campaign_clean_channel(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            rule_id = int((callback.data or "").split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        rendered = await _render_repost_campaign_clean_channel_settings(callback, rule_id, ctx)
+        if rendered:
+            await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_clean_channel_toggle:"))
+    async def handle_rule_repost_campaign_clean_channel_toggle(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            parts = (callback.data or "").split(":")
+            rule_id = int(parts[1])
+            action = str(parts[2] or "").strip().lower()
+            if action not in {"on", "off"}:
+                raise ValueError("unknown clean channel action")
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
+            return
+        enabled = action == "on"
+        actor_id = callback.from_user.id if callback.from_user else ctx.settings.admin_id
+        try:
+            updated = await ctx.run_db(
+                ctx.db.set_rule_repost_campaign_clean_channel_enabled,
+                rule_id,
+                enabled,
+                actor_id,
+            )
+        except Exception as exc:
+            ctx.logger.exception(
+                "REPOST_CAMPAIGN_CLEAN_CHANNEL_TOGGLE_FAILED | rule_id=%s | enabled=%s | error=%s",
+                rule_id,
+                enabled,
+                exc,
+            )
+            await ctx.answer_callback_safe(callback, "Не удалось сохранить настройку", show_alert=True)
+            return
+        if not updated:
+            await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+            return
+        ctx.invalidate_rule_card_cache(rule_id)
+        rendered = await _render_repost_campaign_clean_channel_settings(callback, rule_id, ctx)
+        if rendered:
+            await ctx.answer_callback_safe_once(callback, "Чистый канал включён" if enabled else "Чистый канал выключен")
+
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_active_placements:"))
     async def handle_rule_repost_campaign_active_placements(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
@@ -871,7 +973,7 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
         if feature == "clean_channel":
-            rendered = await _render_repost_campaign_active_placements(callback, rule_id, ctx, page=0)
+            rendered = await _render_repost_campaign_clean_channel_settings(callback, rule_id, ctx)
             if rendered:
                 await ctx.answer_callback_safe_once(callback)
             return

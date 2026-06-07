@@ -187,16 +187,75 @@ def build_repost_campaign_vip_features_view(*, rule_id: int) -> tuple[str, Inlin
         "Создавайте несколько будущих рекламных постов с разными материалами, сроками показа и временем запуска.\n"
         "⚠️ Сейчас доступна черновая версия сценария.\n\n"
         "🧹 Чистый канал\n"
-        "Показывает активные рекламные размещения по правилу. "
-        "Каждое размещение можно открыть, удалить или посмотреть отчёт.\n\n"
+        "Включайте режим контроля активных рекламных размещений. "
+        "Смотрите, что сейчас опубликовано, удаляйте размещения и открывайте отчёты.\n\n"
         "📌 Время в топе\n"
         "ViMi не будет публиковать обычные посты поверх рекламы в первые часы показа.\n\n"
         "✨ A/B-тесты\n"
         "Сравнивайте два варианта рекламного поста по просмотрам.\n\n"
         "Выберите функцию:"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🕒 Запланированные посты", callback_data=f"rule_repost_campaign_scheduled_posts:{rule_id}")],[InlineKeyboardButton(text="🧹 Чистый канал", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")],[InlineKeyboardButton(text="📌 Время в топе", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:top_time")],[InlineKeyboardButton(text="✨ A/B-тесты", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:ab_test")],[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🕒 Запланированные посты", callback_data=f"rule_repost_campaign_scheduled_posts:{rule_id}")],[InlineKeyboardButton(text="🧹 Чистый канал", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],[InlineKeyboardButton(text="📌 Время в топе", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:top_time")],[InlineKeyboardButton(text="✨ A/B-тесты", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:ab_test")],[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]])
     return text, kb
+
+
+
+def build_repost_campaign_clean_channel_settings_view(
+    *,
+    rule_id: int,
+    settings: dict,
+    state: dict | None = None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    enabled = bool((settings or {}).get("enabled", True))
+    status_line = "Статус: 🟢 Включён" if enabled else "Статус: ⚪ Выключен"
+    if enabled:
+        description = (
+            "Когда режим включён, ViMi помогает держать рекламные размещения аккуратно: "
+            "активную рекламу видно сразу, а каждое размещение можно открыть, удалить или проверить по отчёту."
+        )
+        toggle_button = InlineKeyboardButton(
+            text="⚪ Выключить Чистый канал",
+            callback_data=f"rule_repost_campaign_clean_channel_toggle:{rule_id}:off",
+        )
+    else:
+        description = (
+            "Когда режим выключен, ViMi даёт больше свободы: "
+            "активные рекламные размещения можно контролировать вручную."
+        )
+        toggle_button = InlineKeyboardButton(
+            text="🟢 Включить Чистый канал",
+            callback_data=f"rule_repost_campaign_clean_channel_toggle:{rule_id}:on",
+        )
+
+    state = dict(state or {})
+    if state.get("ok", True):
+        clean_state = str(state.get("state") or "clean").strip().lower()
+        state_status = str(state.get("status_text") or _active_placements_status_text(clean_state)).strip()
+        active_total = _safe_non_negative_int(state.get("active_total"))
+        delete_problem_total = _safe_non_negative_int(state.get("delete_problem_total"))
+        state_block = (
+            "Текущее состояние:\n"
+            f"{state_status}\n\n"
+            f"Активных размещений: {active_total}\n"
+            f"Проблем удаления: {delete_problem_total}"
+        )
+    else:
+        state_block = "Текущее состояние:\n⚠️ Не удалось проверить активные размещения"
+
+    text = "\n\n".join([
+        "🧹 Чистый канал",
+        status_line,
+        description,
+        state_block,
+    ])
+    rows = [
+        [toggle_button],
+        [InlineKeyboardButton(text="🧹 Активные размещения", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],
+        [InlineKeyboardButton(text="💎 VIP функции", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return trim_campaign_text_for_telegram(text), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_repost_campaign_active_placements_view(
@@ -284,6 +343,7 @@ def build_repost_campaign_active_placements_view(
 def _active_placements_common_rows(*, rule_id: int, refresh_callback: str) -> list[list[InlineKeyboardButton]]:
     return [
         [InlineKeyboardButton(text="🔄 Обновить", callback_data=refresh_callback)],
+        [InlineKeyboardButton(text="🧹 Чистый канал", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],
         [InlineKeyboardButton(text="💎 VIP функции", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ]
