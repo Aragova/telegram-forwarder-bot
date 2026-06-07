@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from app.repost_campaign_placement_service import RepostCampaignPlacementService
 from app.repost_campaign_service import build_campaign_delete_after_iso, format_campaign_show_seconds_ru
 from app.repost_campaign_view_model import format_campaign_error_text, format_campaign_datetime_text
 from app.saved_post_renderer import normalize_telethon_target
@@ -943,6 +944,139 @@ class RepostCampaignRuntimeService:
                 "extra_problem": readiness.get("extra_problem"),
             },
         )
+
+    def build_manual_launch_policy_state(
+        self,
+        *,
+        rule_id: int,
+        force_ignore_clean_channel: bool = False,
+    ) -> dict[str, Any]:
+        base_readiness = self.build_campaign_launch_readiness(
+            rule_id=rule_id,
+            include_active_placement_block=False,
+        )
+        force = bool(force_ignore_clean_channel)
+        if not base_readiness.get("can_launch"):
+            return {
+                "ok": True,
+                "rule_id": int(rule_id),
+                "launch_mode": "manual",
+                "base_readiness": base_readiness,
+                "clean_channel_settings": None,
+                "clean_channel_enabled": True,
+                "clean_channel_policy": None,
+                "state": "base_block",
+                "can_launch": False,
+                "requires_confirmation": False,
+                "action": "base_block",
+                "blocking_text": "Кампания не готова к запуску",
+                "warning_text": None,
+                "active_placements_total": 0,
+                "delete_problem_total": 0,
+                "placements": [],
+                "force_ignore_clean_channel": force,
+            }
+
+        settings = self.repo.get_rule_repost_campaign_clean_channel_settings(rule_id) or {
+            "ok": False,
+            "rule_id": rule_id,
+            "enabled": True,
+        }
+        enabled = True if not settings.get("ok") else bool(settings.get("enabled", True))
+
+        placement_service = RepostCampaignPlacementService(self.repo, logger=self.logger)
+        policy = placement_service.build_launch_policy_preview(
+            rule_id=rule_id,
+            clean_channel_enabled=enabled,
+            launch_mode="manual",
+            basic_only=True,
+        )
+        if not policy.get("ok"):
+            error_text = policy.get("error_text") or "Не удалось проверить активные размещения"
+            self.logger.warning(
+                "REPOST_CAMPAIGN_MANUAL_LAUNCH_POLICY_FAILED | rule_id=%s | error=%s",
+                rule_id,
+                error_text,
+            )
+            return {
+                "ok": False,
+                "rule_id": int(rule_id),
+                "launch_mode": "manual",
+                "base_readiness": base_readiness,
+                "clean_channel_settings": settings,
+                "clean_channel_enabled": enabled,
+                "clean_channel_policy": policy,
+                "state": "unknown",
+                "can_launch": False,
+                "requires_confirmation": False,
+                "action": "block",
+                "blocking_text": "Не удалось проверить активные размещения",
+                "warning_text": None,
+                "active_placements_total": 0,
+                "delete_problem_total": 0,
+                "placements": [],
+                "force_ignore_clean_channel": force,
+                "error_text": error_text,
+            }
+
+        policy_action = str(policy.get("action") or "block")
+        active_placements_total = int(policy.get("active_placements_total") or 0)
+        delete_problem_total = int(policy.get("delete_problem_total") or 0)
+        placements = policy.get("placements") or []
+        state = str(policy.get("state") or "unknown")
+        blocking_text = policy.get("blocking_text")
+        warning_text = policy.get("warning_text")
+
+        if policy_action == "allow":
+            action = "allow"
+            can_launch = True
+            requires_confirmation = False
+            blocking_text = None
+        elif policy_action == "allow_with_warning":
+            if force:
+                action = "allow_forced"
+                can_launch = True
+                requires_confirmation = False
+            else:
+                action = "confirm_required"
+                can_launch = False
+                requires_confirmation = True
+            blocking_text = None
+        else:
+            action = "block"
+            can_launch = False
+            requires_confirmation = False
+            blocking_text = blocking_text or "Чистый канал не позволяет запустить кампанию поверх активной рекламы"
+            warning_text = None
+
+        self.logger.info(
+            "REPOST_CAMPAIGN_MANUAL_LAUNCH_POLICY | rule_id=%s | action=%s | clean_channel_enabled=%s | active_placements=%s | delete_problem=%s | force=%s",
+            rule_id,
+            action,
+            enabled,
+            active_placements_total,
+            delete_problem_total,
+            force,
+        )
+        return {
+            "ok": True,
+            "rule_id": int(rule_id),
+            "launch_mode": "manual",
+            "base_readiness": base_readiness,
+            "clean_channel_settings": settings,
+            "clean_channel_enabled": enabled,
+            "clean_channel_policy": policy,
+            "state": state,
+            "can_launch": can_launch,
+            "requires_confirmation": requires_confirmation,
+            "action": action,
+            "blocking_text": blocking_text,
+            "warning_text": warning_text,
+            "active_placements_total": active_placements_total,
+            "delete_problem_total": delete_problem_total,
+            "placements": placements,
+            "force_ignore_clean_channel": force,
+        }
 
     def build_campaign_launch_readiness(
         self,
