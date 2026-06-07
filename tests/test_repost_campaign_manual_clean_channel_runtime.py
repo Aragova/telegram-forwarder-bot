@@ -492,12 +492,7 @@ def test_launch_campaign_now_signature_backward_compatible_without_force_flag():
 
 def test_manual_policy_source_guards_keep_user_flow_unwired():
     guards = {
-        "app/repost_campaign_handlers.py": [
-            "rule_repost_campaign_launch_confirm_force",
-            "force_ignore_clean_channel",
-            "build_repost_campaign_launch_clean_channel_warning_view",
-            "build_manual_launch_policy_state",
-        ],
+        "app/repost_campaign_handlers.py": [],
         "app/repost_campaign_launch_job_service.py": [
             "build_manual_launch_policy_state",
         ],

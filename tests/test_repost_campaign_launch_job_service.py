@@ -472,15 +472,15 @@ def test_campaign_run_id_is_persisted_before_send_completes():
     asyncio.run(_run())
 
 
-def test_source_guards_keep_force_plumbing_out_of_handlers_and_schedule_layers():
+def test_source_guards_keep_force_plumbing_out_of_schedule_layers():
     handlers_source = Path("app/repost_campaign_handlers.py").read_text()
-    for forbidden in (
+    for required in (
         "rule_repost_campaign_launch_confirm_force",
         "force_ignore_clean_channel",
         "build_repost_campaign_launch_clean_channel_warning_view",
         "build_manual_launch_policy_state",
     ):
-        assert forbidden not in handlers_source
+        assert required in handlers_source
 
     schedule_source = Path("app/repost_campaign_schedule_service.py").read_text()
     for forbidden in (
