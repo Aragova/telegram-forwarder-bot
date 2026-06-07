@@ -11,6 +11,8 @@ from app.repost_campaign_ui import (
     ACTIVE_PLACEMENTS_PAGE_SIZE,
     build_repost_campaign_active_placements_view,
     build_repost_campaign_clean_channel_settings_view,
+    build_repost_campaign_launch_clean_channel_blocked_view,
+    build_repost_campaign_launch_clean_channel_warning_view,
     build_repost_campaign_launch_mode_view,
     build_repost_campaign_launch_job_status_view,
     build_repost_campaign_launch_queued_view,
@@ -257,6 +259,156 @@ async def _handle_repost_campaign_target_action(
     await ctx.answer_callback_safe_once(callback)
 
 
+async def _send_repost_campaign_policy_message(
+    callback: CallbackQuery,
+    ctx: RepostCampaignHandlersContext,
+    *,
+    text: str,
+    keyboard: InlineKeyboardMarkup,
+) -> None:
+    if ctx.should_answer_new_message_for_callback(callback):
+        await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
+    else:
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+
+
+async def _render_repost_campaign_manual_launch_policy_state(
+    callback: CallbackQuery,
+    rule_id: int,
+    ctx: RepostCampaignHandlersContext,
+    *,
+    policy_state: dict,
+) -> dict:
+    action = policy_state.get("action")
+    if action == "base_block":
+        readiness = policy_state.get("base_readiness") or {}
+        text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
+    elif action == "block" or policy_state.get("ok") is False:
+        text, keyboard = build_repost_campaign_launch_clean_channel_blocked_view(rule_id=rule_id, policy_state=policy_state)
+        ctx.logger.info(
+            "REPOST_CAMPAIGN_MANUAL_LAUNCH_CLEAN_CHANNEL_BLOCKED_UI | rule_id=%s | action=%s",
+            rule_id,
+            action,
+        )
+    elif action == "confirm_required":
+        text, keyboard = build_repost_campaign_launch_clean_channel_warning_view(rule_id=rule_id, policy_state=policy_state)
+        ctx.logger.info(
+            "REPOST_CAMPAIGN_MANUAL_LAUNCH_CLEAN_CHANNEL_WARNING_UI | rule_id=%s | action=%s",
+            rule_id,
+            action,
+        )
+    elif action in {"allow", "allow_forced"}:
+        readiness = policy_state.get("base_readiness") or {}
+        text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
+    else:
+        text, keyboard = build_repost_campaign_launch_clean_channel_blocked_view(rule_id=rule_id, policy_state=policy_state)
+        ctx.logger.warning(
+            "REPOST_CAMPAIGN_MANUAL_LAUNCH_POLICY_UNKNOWN_ACTION | rule_id=%s | action=%s",
+            rule_id,
+            action,
+        )
+    await _send_repost_campaign_policy_message(callback, ctx, text=text, keyboard=keyboard)
+    return policy_state
+
+
+async def _render_repost_campaign_manual_launch_policy(
+    callback: CallbackQuery,
+    rule_id: int,
+    ctx: RepostCampaignHandlersContext,
+    *,
+    force_ignore_clean_channel: bool = False,
+) -> dict | None:
+    try:
+        runtime = build_repost_campaign_runtime(ctx)
+        policy_state = await ctx.run_db(
+            lambda: runtime.build_manual_launch_policy_state(
+                rule_id=rule_id,
+                force_ignore_clean_channel=force_ignore_clean_channel,
+            )
+        )
+        return await _render_repost_campaign_manual_launch_policy_state(
+            callback,
+            rule_id,
+            ctx,
+            policy_state=policy_state,
+        )
+    except Exception as exc:
+        ctx.logger.warning(
+            "REPOST_CAMPAIGN_MANUAL_LAUNCH_POLICY_UI_FAILED | rule_id=%s | force_clean_channel=%s | error=%s",
+            rule_id,
+            bool(force_ignore_clean_channel),
+            exc,
+            exc_info=True,
+        )
+        await ctx.answer_callback_safe(callback, "Не удалось проверить запуск кампании", show_alert=True)
+        return None
+
+
+async def _enqueue_repost_campaign_manual_launch_from_callback(
+    callback: CallbackQuery,
+    rule_id: int,
+    ctx: RepostCampaignHandlersContext,
+    *,
+    force_ignore_clean_channel: bool = False,
+    answer_text: str = "🚀 Запуск кампании поставлен в очередь",
+) -> bool:
+    await ctx.answer_callback_safe_once(callback, answer_text)
+
+    progress_chat_id = getattr(getattr(callback, "message", None), "chat", None)
+    progress_chat_id = getattr(progress_chat_id, "id", None)
+    progress_message_id = getattr(getattr(callback, "message", None), "message_id", None)
+    text, keyboard = build_repost_campaign_launch_queued_view(rule_id=rule_id, job_id=None)
+    progress_message = callback.message
+    try:
+        if ctx.should_answer_new_message_for_callback(callback):
+            sent_message = await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
+            if sent_message is not None:
+                progress_message = sent_message
+                progress_chat_id = getattr(getattr(sent_message, "chat", None), "id", progress_chat_id)
+                progress_message_id = getattr(sent_message, "message_id", progress_message_id)
+        else:
+            await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    except Exception as exc:
+        ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_QUEUE_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+
+    runtime = build_repost_campaign_runtime(ctx)
+    service = RepostCampaignLaunchJobService(repo=ctx.db, campaign_runtime=runtime, bot=ctx.get_bot(), logger_=ctx.logger)
+    try:
+        enqueue_result = await ctx.run_db(
+            lambda: service.enqueue_manual_launch(
+                rule_id=rule_id,
+                admin_id=callback.from_user.id if callback.from_user else None,
+                progress_chat_id=progress_chat_id,
+                progress_message_id=progress_message_id,
+                force_ignore_clean_channel=force_ignore_clean_channel,
+            )
+        )
+        job = enqueue_result.job
+        if enqueue_result.created:
+            text, keyboard = build_repost_campaign_launch_queued_view(rule_id=rule_id, job_id=int(job.get("id") or 0))
+        else:
+            text, keyboard = build_repost_campaign_launch_job_status_view(rule_id=rule_id, job=job)
+            if str(job.get("status") or "") in {"pending", "processing"}:
+                text = "🚀 Кампания уже запускается\n\n" + "\n".join(text.splitlines()[1:]).lstrip()
+        await ctx.edit_message_text_safe(message=progress_message, text=text, reply_markup=keyboard)
+        ctx.logger.info(
+            "REPOST_CAMPAIGN_LAUNCH_JOB_UI_ENQUEUED | rule_id=%s | job_id=%s | created=%s | force_clean_channel=%s",
+            rule_id,
+            job.get("id"),
+            enqueue_result.created,
+            bool(force_ignore_clean_channel),
+        )
+        return True
+    except Exception as exc:
+        ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_JOB_ENQUEUE_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
+        await ctx.edit_message_text_safe(
+            message=progress_message,
+            text="❌ Не удалось поставить кампанию в очередь\n\nПроверьте настройки кампании и попробуйте ещё раз.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")]]),
+        )
+        return False
+
+
 def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandlersContext) -> None:
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_menu:"))
     async def handle_rule_repost_campaign_menu(callback: CallbackQuery):
@@ -427,18 +579,20 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         except Exception:
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
-        try:
-            runtime = build_repost_campaign_runtime(ctx)
-            readiness = await ctx.run_db(lambda: runtime.build_campaign_launch_readiness(rule_id=rule_id))
-            text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
-            if ctx.should_answer_new_message_for_callback(callback):
-                await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
-            else:
-                await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-        except Exception as exc:
-            ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_NOW_PREVIEW_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
-            await ctx.answer_callback_safe(callback, "Не удалось открыть предпросмотр запуска", show_alert=True)
+        policy_state = await _render_repost_campaign_manual_launch_policy(
+            callback,
+            rule_id,
+            ctx,
+            force_ignore_clean_channel=False,
+        )
+        if policy_state is None:
             return
+        ctx.logger.info(
+            "REPOST_CAMPAIGN_LAUNCH_NOW_PREVIEW_POLICY_UI | rule_id=%s | action=%s | can_launch=%s",
+            rule_id,
+            policy_state.get("action"),
+            bool(policy_state.get("can_launch")),
+        )
         await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_job_status:"))
@@ -465,6 +619,69 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await ctx.answer_callback_safe_once(callback, "Статус обновлён")
 
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_confirm_force:"))
+    async def handle_rule_repost_campaign_launch_confirm_force(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            rule_id = int(callback.data.split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
+            return
+
+        try:
+            runtime = build_repost_campaign_runtime(ctx)
+            policy_state = await ctx.run_db(
+                lambda: runtime.build_manual_launch_policy_state(
+                    rule_id=rule_id,
+                    force_ignore_clean_channel=True,
+                )
+            )
+        except Exception as exc:
+            ctx.logger.warning(
+                "REPOST_CAMPAIGN_MANUAL_LAUNCH_FORCE_POLICY_FAILED | rule_id=%s | error=%s",
+                rule_id,
+                exc,
+                exc_info=True,
+            )
+            await ctx.answer_callback_safe(callback, "Не удалось проверить запуск кампании", show_alert=True)
+            return
+
+        action = policy_state.get("action")
+        ctx.logger.info(
+            "REPOST_CAMPAIGN_MANUAL_LAUNCH_CLEAN_CHANNEL_FORCED | rule_id=%s | action=%s",
+            rule_id,
+            action,
+        )
+        if policy_state.get("can_launch") is False:
+            if action == "base_block":
+                readiness = policy_state.get("base_readiness") or {}
+                text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
+                await _send_repost_campaign_policy_message(callback, ctx, text=text, keyboard=keyboard)
+            else:
+                text, keyboard = build_repost_campaign_launch_clean_channel_blocked_view(rule_id=rule_id, policy_state=policy_state)
+                await _send_repost_campaign_policy_message(callback, ctx, text=text, keyboard=keyboard)
+                ctx.logger.info(
+                    "REPOST_CAMPAIGN_MANUAL_LAUNCH_CLEAN_CHANNEL_BLOCKED_UI | rule_id=%s | action=%s",
+                    rule_id,
+                    action,
+                )
+            await ctx.answer_callback_safe_once(callback)
+            return
+
+        await _enqueue_repost_campaign_manual_launch_from_callback(
+            callback,
+            rule_id,
+            ctx,
+            force_ignore_clean_channel=True,
+            answer_text="🚀 Запуск поверх активной рекламы поставлен в очередь",
+        )
+
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_confirm:"))
     async def handle_rule_repost_campaign_launch_confirm(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
@@ -480,58 +697,47 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
 
-        await ctx.answer_callback_safe_once(callback, "🚀 Запуск кампании поставлен в очередь")
-
-        progress_chat_id = getattr(getattr(callback, "message", None), "chat", None)
-        progress_chat_id = getattr(progress_chat_id, "id", None)
-        progress_message_id = getattr(getattr(callback, "message", None), "message_id", None)
-        placeholder_job_id = None
-        text, keyboard = build_repost_campaign_launch_queued_view(rule_id=rule_id, job_id=placeholder_job_id)
-        progress_message = callback.message
         try:
-            if ctx.should_answer_new_message_for_callback(callback):
-                sent_message = await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
-                if sent_message is not None:
-                    progress_message = sent_message
-                    progress_chat_id = getattr(getattr(sent_message, "chat", None), "id", progress_chat_id)
-                    progress_message_id = getattr(sent_message, "message_id", progress_message_id)
-            else:
-                await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
-        except Exception as exc:
-            ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_QUEUE_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
-
-        runtime = build_repost_campaign_runtime(ctx)
-        service = RepostCampaignLaunchJobService(repo=ctx.db, campaign_runtime=runtime, bot=ctx.get_bot(), logger_=ctx.logger)
-        try:
-            enqueue_result = await ctx.run_db(
-                lambda: service.enqueue_manual_launch(
+            runtime = build_repost_campaign_runtime(ctx)
+            policy_state = await ctx.run_db(
+                lambda: runtime.build_manual_launch_policy_state(
                     rule_id=rule_id,
-                    admin_id=callback.from_user.id if callback.from_user else None,
-                    progress_chat_id=progress_chat_id,
-                    progress_message_id=progress_message_id,
+                    force_ignore_clean_channel=False,
                 )
             )
-            job = enqueue_result.job
-            if enqueue_result.created:
-                text, keyboard = build_repost_campaign_launch_queued_view(rule_id=rule_id, job_id=int(job.get("id") or 0))
-            else:
-                text, keyboard = build_repost_campaign_launch_job_status_view(rule_id=rule_id, job=job)
-                if str(job.get("status") or "") in {"pending", "processing"}:
-                    text = "🚀 Кампания уже запускается\n\n" + "\n".join(text.splitlines()[1:]).lstrip()
-            await ctx.edit_message_text_safe(message=progress_message, text=text, reply_markup=keyboard)
-            ctx.logger.info(
-                "REPOST_CAMPAIGN_LAUNCH_JOB_UI_ENQUEUED | rule_id=%s | job_id=%s | created=%s",
-                rule_id,
-                job.get("id"),
-                enqueue_result.created,
-            )
         except Exception as exc:
-            ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_JOB_ENQUEUE_UI_FAILED | rule_id=%s | error=%s", rule_id, exc)
-            await ctx.edit_message_text_safe(
-                message=progress_message,
-                text="❌ Не удалось поставить кампанию в очередь\n\nПроверьте настройки кампании и попробуйте ещё раз.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")]]),
+            ctx.logger.warning(
+                "REPOST_CAMPAIGN_MANUAL_LAUNCH_CONFIRM_POLICY_FAILED | rule_id=%s | error=%s",
+                rule_id,
+                exc,
+                exc_info=True,
             )
+            await ctx.answer_callback_safe(callback, "Не удалось проверить запуск кампании", show_alert=True)
+            return
+
+        action = policy_state.get("action")
+        if action == "allow_forced":
+            ctx.logger.warning(
+                "REPOST_CAMPAIGN_MANUAL_LAUNCH_CONFIRM_UNEXPECTED_FORCED_ACTION | rule_id=%s | action=%s",
+                rule_id,
+                action,
+            )
+        if action in {"allow", "allow_forced"} and policy_state.get("can_launch") is not False:
+            await _enqueue_repost_campaign_manual_launch_from_callback(
+                callback,
+                rule_id,
+                ctx,
+                force_ignore_clean_channel=False,
+            )
+            return
+
+        await _render_repost_campaign_manual_launch_policy_state(
+            callback,
+            rule_id,
+            ctx,
+            policy_state=policy_state,
+        )
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_post_preview:"))
     async def handle_rule_repost_campaign_post_preview(callback: CallbackQuery):

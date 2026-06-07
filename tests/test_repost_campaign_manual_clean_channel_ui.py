@@ -121,19 +121,19 @@ def test_unsafe_long_policy_text_is_trimmed_and_does_not_crash():
     assert len(warning_text) <= TG_TEXT_SAFE_LIMIT
 
 
-def test_stage_five_three_source_guards_builders_are_not_wired_to_flow():
+def test_stage_five_six_source_guards_keep_ui_wiring_manual_only():
     handlers_source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
     runtime_source = Path("app/repost_campaign_runtime_service.py").read_text(encoding="utf-8")
     launch_job_source = Path("app/repost_campaign_launch_job_service.py").read_text(encoding="utf-8")
     schedule_source = Path("app/repost_campaign_schedule_service.py").read_text(encoding="utf-8")
     scheduled_post_source = Path("app/repost_campaign_scheduled_post_service.py").read_text(encoding="utf-8")
 
-    for forbidden in [
+    for required in [
         "build_repost_campaign_launch_clean_channel_blocked_view",
         "build_repost_campaign_launch_clean_channel_warning_view",
         "rule_repost_campaign_launch_confirm_force",
     ]:
-        assert forbidden not in handlers_source
+        assert required in handlers_source
 
     for forbidden in [
         "build_repost_campaign_launch_clean_channel_blocked_view",
@@ -147,6 +147,9 @@ def test_stage_five_three_source_guards_builders_are_not_wired_to_flow():
     for forbidden in [
         "rule_repost_campaign_launch_confirm_force",
         "build_repost_campaign_launch_clean_channel_warning_view",
+        "build_manual_launch_policy_state",
+        "force_ignore_clean_channel",
+        "waiting_clean_channel",
     ]:
         assert forbidden not in schedule_source
         assert forbidden not in scheduled_post_source
