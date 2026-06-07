@@ -27,6 +27,7 @@ from app.repost_campaign_view_model import (
 TG_TEXT_SAFE_LIMIT = 3800
 RUN_DETAILS_VISIBLE_MESSAGES_LIMIT = 10
 CAMPAIGN_TARGETS_PAGE_SIZE = 10
+ACTIVE_PLACEMENTS_PAGE_SIZE = 10
 
 
 def trim_campaign_text_for_telegram(text: str, *, limit: int = TG_TEXT_SAFE_LIMIT) -> str:
@@ -186,15 +187,142 @@ def build_repost_campaign_vip_features_view(*, rule_id: int) -> tuple[str, Inlin
         "Создавайте несколько будущих рекламных постов с разными материалами, сроками показа и временем запуска.\n"
         "⚠️ Сейчас доступна черновая версия сценария.\n\n"
         "🧹 Чистый канал\n"
-        "Перед новой рекламой ViMi удалит предыдущий активный рекламный пост из этого правила.\n\n"
+        "Показывает активные рекламные размещения по правилу. "
+        "Каждое размещение можно открыть, удалить или посмотреть отчёт.\n\n"
         "📌 Время в топе\n"
         "ViMi не будет публиковать обычные посты поверх рекламы в первые часы показа.\n\n"
         "✨ A/B-тесты\n"
         "Сравнивайте два варианта рекламного поста по просмотрам.\n\n"
         "Выберите функцию:"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🕒 Запланированные посты", callback_data=f"rule_repost_campaign_scheduled_posts:{rule_id}")],[InlineKeyboardButton(text="🧹 Чистый канал", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:clean_channel")],[InlineKeyboardButton(text="📌 Время в топе", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:top_time")],[InlineKeyboardButton(text="✨ A/B-тесты", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:ab_test")],[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🕒 Запланированные посты", callback_data=f"rule_repost_campaign_scheduled_posts:{rule_id}")],[InlineKeyboardButton(text="🧹 Чистый канал", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")],[InlineKeyboardButton(text="📌 Время в топе", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:top_time")],[InlineKeyboardButton(text="✨ A/B-тесты", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:ab_test")],[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]])
     return text, kb
+
+
+def build_repost_campaign_active_placements_view(
+    *,
+    rule_id: int,
+    state: dict,
+) -> tuple[str, InlineKeyboardMarkup]:
+    page = _safe_non_negative_int((state or {}).get("page"), default=0)
+    page_size = _safe_positive_int((state or {}).get("page_size"), default=ACTIVE_PLACEMENTS_PAGE_SIZE)
+    page_size = min(page_size, ACTIVE_PLACEMENTS_PAGE_SIZE)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    refresh_callback = f"rule_repost_campaign_active_placements:{rule_id}:{page}"
+
+    if not (state or {}).get("ok", True):
+        text = (
+            "🧹 Активные размещения\n\n"
+            "⚠️ Не удалось проверить канал\n\n"
+            "Не удалось получить активные размещения."
+        )
+        rows.extend(_active_placements_common_rows(rule_id=rule_id, refresh_callback=refresh_callback))
+        return trim_campaign_text_for_telegram(text), InlineKeyboardMarkup(inline_keyboard=rows)
+
+    clean_state = str((state or {}).get("state") or "clean").strip().lower()
+    status_text = str((state or {}).get("status_text") or _active_placements_status_text(clean_state)).strip()
+    description_text = str((state or {}).get("description_text") or _active_placements_description_text(clean_state)).strip()
+    placements = list((state or {}).get("placements") or [])
+    placements_total = _safe_non_negative_int((state or {}).get("placements_total"), default=len(placements))
+    active_total = _safe_non_negative_int((state or {}).get("active_total"))
+    delete_problem_total = _safe_non_negative_int((state or {}).get("delete_problem_total"))
+
+    blocks = [
+        "🧹 Активные размещения",
+        status_text,
+        description_text,
+    ]
+
+    if clean_state != "clean":
+        blocks.append(f"Активных размещений: {active_total}\nПроблем удаления: {delete_problem_total}")
+
+    start = page * page_size
+    end = start + page_size
+    visible_placements = placements[start:end]
+    for placement in visible_placements:
+        summary_text = str((placement or {}).get("summary_text") or "").strip()
+        if not summary_text:
+            run_id = _safe_non_negative_int((placement or {}).get("run_id"))
+            run_type_text = str((placement or {}).get("run_type_text") or "Запуск кампании").strip()
+            summary_text = f"#{run_id} · {run_type_text}" if run_id else run_type_text
+        blocks.append(summary_text)
+
+    if placements and not visible_placements:
+        blocks.append("На этой странице размещений нет. Обновите экран или вернитесь на первую страницу.")
+    elif placements_total > page_size:
+        shown_to = min(end, placements_total)
+        blocks.append(f"Показаны размещения {start + 1}–{shown_to} из {placements_total}.")
+
+    for placement in visible_placements:
+        run_id = _safe_non_negative_int((placement or {}).get("run_id"))
+        if run_id <= 0:
+            continue
+        details_callback = (placement or {}).get("details_callback_data") or f"rule_repost_campaign_history_detail:{rule_id}:{run_id}"
+        delete_callback = (placement or {}).get("delete_callback_data") or f"rule_repost_campaign_run_delete_confirm:{rule_id}:{run_id}"
+        report_callback = (placement or {}).get("report_callback_data") or f"rule_repost_campaign_views_report:{rule_id}:{run_id}"
+        rows.append([
+            InlineKeyboardButton(text=f"📄 #{run_id}", callback_data=details_callback),
+            InlineKeyboardButton(text=f"🧹 Удалить #{run_id}", callback_data=delete_callback),
+        ])
+        rows.append([InlineKeyboardButton(text=f"📊 Отчёт #{run_id}", callback_data=report_callback)])
+
+    if placements_total > page_size:
+        nav_row: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:{page - 1}"))
+        if end < placements_total:
+            nav_row.append(InlineKeyboardButton(text="➡️ Ещё", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:{page + 1}"))
+        if nav_row:
+            rows.append(nav_row)
+
+    rows.extend(_active_placements_common_rows(rule_id=rule_id, refresh_callback=refresh_callback))
+    text = "\n\n".join([block for block in blocks if block])
+    return trim_campaign_text_for_telegram(text), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _active_placements_common_rows(*, rule_id: int, refresh_callback: str) -> list[list[InlineKeyboardButton]]:
+    return [
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=refresh_callback)],
+        [InlineKeyboardButton(text="💎 VIP функции", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+
+
+def _active_placements_status_text(state: str) -> str:
+    if state == "active":
+        return "🟢 Есть активные размещения"
+    if state == "delete_problem":
+        return "⚠️ Есть ошибки удаления"
+    if state == "mixed":
+        return "🟡 Есть активные размещения и ошибки удаления"
+    return "✅ Канал чист"
+
+
+def _active_placements_description_text(state: str) -> str:
+    if state == "active":
+        return "Сейчас в канале есть активные рекламные посты. Их можно открыть, удалить или дождаться автоудаления."
+    if state == "delete_problem":
+        return "Некоторые рекламные посты не удалось удалить автоматически. Проверьте размещения и повторите удаление."
+    if state == "mixed":
+        return "Часть рекламных постов ещё активна, а по некоторым есть ошибки удаления."
+    return "Активных рекламных размещений по этому правилу нет."
+
+
+def _safe_non_negative_int(value, *, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return max(0, int(default))
+
+
+def _safe_positive_int(value, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = int(default)
+    return max(1, parsed)
+
 def build_repost_campaign_vip_coming_soon_view(*, rule_id: int, feature: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
     return (
         "💎 Скоро в VIP функциях\n\nЭта функция появится в следующих обновлениях ViMi.",

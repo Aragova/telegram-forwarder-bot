@@ -5,8 +5,10 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from app.repost_campaign_context import RepostCampaignHandlersContext, build_repost_campaign_runtime
 from app.repost_campaign_launch_job_service import RepostCampaignLaunchJobService
+from app.repost_campaign_placement_service import RepostCampaignPlacementService
 from app.repost_campaign_service import format_campaign_show_seconds_ru, normalize_campaign_show_seconds
 from app.repost_campaign_ui import (
+    build_repost_campaign_active_placements_view,
     build_repost_campaign_launch_mode_view,
     build_repost_campaign_launch_job_status_view,
     build_repost_campaign_launch_queued_view,
@@ -97,6 +99,50 @@ async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int, ct
     return True
 
 
+
+
+async def _render_repost_campaign_active_placements(
+    callback: CallbackQuery,
+    rule_id: int,
+    ctx: RepostCampaignHandlersContext,
+    *,
+    page: int = 0,
+) -> bool:
+    if not await ctx.ensure_rule_callback_access(callback, rule_id):
+        return False
+    normalized_page = max(0, int(page or 0))
+    try:
+        service = RepostCampaignPlacementService(ctx.db, logger=ctx.logger)
+        limit = (normalized_page + 1) * 10
+        state = await ctx.run_db(
+            lambda: service.build_clean_channel_state(
+                rule_id=rule_id,
+                basic_only=True,
+                limit=limit,
+            )
+        )
+        state = dict(state or {})
+        state["page"] = normalized_page
+        state["page_size"] = 10
+        text, keyboard = build_repost_campaign_active_placements_view(rule_id=rule_id, state=state)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        ctx.logger.info(
+            "REPOST_CAMPAIGN_ACTIVE_PLACEMENTS_OPENED | rule_id=%s | page=%s | state=%s | placements_total=%s",
+            rule_id,
+            normalized_page,
+            state.get("state"),
+            state.get("placements_total"),
+        )
+        return True
+    except Exception as exc:
+        ctx.logger.exception(
+            "REPOST_CAMPAIGN_ACTIVE_PLACEMENTS_OPEN_FAILED | rule_id=%s | page=%s | error=%s",
+            rule_id,
+            normalized_page,
+            exc,
+        )
+        await ctx.answer_callback_safe(callback, "Не удалось открыть активные размещения", show_alert=True)
+        return False
 
 
 async def _render_repost_campaign_post_menu(
@@ -790,11 +836,44 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         text, kb = build_repost_campaign_vip_features_view(rule_id=rule_id)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_active_placements:"))
+    async def handle_rule_repost_campaign_active_placements(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            parts = (callback.data or "").split(":")
+            rule_id = int(parts[1])
+            page = int(parts[2]) if len(parts) > 2 else 0
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        rendered = await _render_repost_campaign_active_placements(callback, rule_id, ctx, page=page)
+        if rendered:
+            await ctx.answer_callback_safe_once(callback)
+
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_vip_coming_soon:"))
     async def handle_rule_repost_campaign_vip_coming_soon(callback: CallbackQuery):
-        _, rule_id_text, feature = (callback.data or "").split(":", 2)
-        rule_id = int(rule_id_text)
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            _, rule_id_text, feature = (callback.data or "").split(":", 2)
+            rule_id = int(rule_id_text)
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if feature == "clean_channel":
+            rendered = await _render_repost_campaign_active_placements(callback, rule_id, ctx, page=0)
+            if rendered:
+                await ctx.answer_callback_safe_once(callback)
+            return
         if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
         text, kb = build_repost_campaign_vip_coming_soon_view(rule_id=rule_id, feature=feature)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+        await ctx.answer_callback_safe_once(callback)
