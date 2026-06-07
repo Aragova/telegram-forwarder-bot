@@ -13,6 +13,7 @@ class _PlacementCursor:
         self._runs = runs
         self._messages = messages
         self._rows: list[dict[str, Any]] = []
+        self._row: dict[str, Any] | None = None
         self.last_sql = ""
         self.last_params: tuple[Any, ...] | None = None
 
@@ -26,7 +27,8 @@ class _PlacementCursor:
         self.last_sql = sql
         self.last_params = params
         rule_id = int(params[0]) if params else 0
-        limit = int(params[-1]) if params else 20
+        is_summary = "WITH placements AS" in sql
+        limit = None if is_summary else (int(params[-1]) if params else 20)
         basic_only = "r.scheduled_post_id IS NULL" in sql
         rows: list[dict[str, Any]] = []
 
@@ -80,7 +82,24 @@ class _PlacementCursor:
             null_rank = 1 if delete_after is None else 0
             return (problem_rank, null_rank, delete_after or "", -int(row["run_id"]))
 
-        self._rows = sorted(rows, key=_sort_key)[:limit]
+        sorted_rows = sorted(rows, key=_sort_key)
+        if is_summary:
+            self._row = {
+                "placements_total": len(sorted_rows),
+                "active_total": sum(1 for row in sorted_rows if int(row.get("delete_pending") or 0) + int(row.get("delete_processing") or 0) > 0),
+                "delete_problem_total": sum(1 for row in sorted_rows if int(row.get("delete_failed") or 0) > 0),
+                "mixed_total": sum(1 for row in sorted_rows if int(row.get("delete_failed") or 0) > 0 and int(row.get("delete_pending") or 0) + int(row.get("delete_processing") or 0) > 0),
+                "delete_pending_total": sum(int(row.get("delete_pending") or 0) for row in sorted_rows),
+                "delete_processing_total": sum(int(row.get("delete_processing") or 0) for row in sorted_rows),
+                "delete_failed_total": sum(int(row.get("delete_failed") or 0) for row in sorted_rows),
+            }
+            self._rows = []
+            return
+        self._row = None
+        self._rows = sorted_rows[:limit]
+
+    def fetchone(self):
+        return self._row
 
     def fetchall(self):
         return self._rows
@@ -155,6 +174,7 @@ def test_one_active_manual_run_returns_active_pending_placement():
     assert placements[0]["placement_status"] == "active"
     assert placements[0]["delete_pending"] == 1
     assert placements[0]["delete_failed"] == 0
+    assert placements[0]["active_messages_total"] == 1
 
 
 def test_scheduled_basic_run_is_included_with_processing_delete():
@@ -232,6 +252,22 @@ def test_multiple_active_placements_are_returned_with_problem_first_and_summary_
     assert [row["run_id"] for row in placements] == [2, 3, 1]
     assert placements[0]["placement_status"] == "delete_problem"
     assert summary["placements_total"] == 3
+
+
+def test_summary_uses_unlimited_aggregate_sql_not_limited_list():
+    repo, captured = _repo_with_data(
+        [_run(run_id) for run_id in range(1, 4)],
+        [_message(run_id, run_id, "pending") for run_id in range(1, 4)],
+    )
+
+    summary = repo.get_active_campaign_placements_summary_for_rule(10)
+    sql = captured["conn"]._cursor.last_sql  # type: ignore[union-attr]
+    params = captured["conn"]._cursor.last_params  # type: ignore[union-attr]
+
+    assert summary["placements_total"] == 3
+    assert "WITH placements AS" in sql
+    assert "LIMIT" not in sql
+    assert params == (10,)
 
 
 def test_active_placements_indexes_are_created_safely_in_init_sql():

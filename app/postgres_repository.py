@@ -8689,6 +8689,7 @@ class PostgresRepository(RepositoryProtocol):
             else:
                 placement_status = "clean"
             row["sent"] = int(row.get("sent") or 0)
+            row["active_messages_total"] = row["sent"]
             row["delete_pending"] = delete_pending
             row["delete_processing"] = delete_processing
             row["delete_failed"] = delete_failed
@@ -8702,21 +8703,55 @@ class PostgresRepository(RepositoryProtocol):
         *,
         basic_only: bool = True,
     ) -> dict[str, Any]:
-        placements = self.list_active_campaign_placements_for_rule(
-            rule_id,
-            limit=500,
-            basic_only=basic_only,
-        )
+        where_parts = [
+            "r.rule_id = %s",
+            "m.send_status = 'sent'",
+            "m.delete_status IN ('pending', 'processing', 'failed')",
+        ]
+        params: list[Any] = [int(rule_id)]
+        if basic_only:
+            where_parts.append("r.scheduled_post_id IS NULL")
+            where_parts.append("r.run_type IN ('manual', 'scheduled')")
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH placements AS (
+                        SELECT
+                            r.id AS run_id,
+                            COUNT(m.id) FILTER (WHERE m.delete_status = 'pending') AS delete_pending,
+                            COUNT(m.id) FILTER (WHERE m.delete_status = 'processing') AS delete_processing,
+                            COUNT(m.id) FILTER (WHERE m.delete_status = 'failed') AS delete_failed
+                        FROM campaign_runs r
+                        JOIN campaign_run_messages m ON m.run_id = r.id
+                        WHERE {' AND '.join(where_parts)}
+                        GROUP BY r.id
+                    )
+                    SELECT
+                        COUNT(*) AS placements_total,
+                        COUNT(*) FILTER (WHERE delete_pending + delete_processing > 0) AS active_total,
+                        COUNT(*) FILTER (WHERE delete_failed > 0) AS delete_problem_total,
+                        COUNT(*) FILTER (WHERE delete_failed > 0 AND delete_pending + delete_processing > 0) AS mixed_total,
+                        COALESCE(SUM(delete_pending), 0) AS delete_pending_total,
+                        COALESCE(SUM(delete_processing), 0) AS delete_processing_total,
+                        COALESCE(SUM(delete_failed), 0) AS delete_failed_total
+                    FROM placements
+                    """,
+                    tuple(params),
+                )
+                row = dict(cur.fetchone() or {})
+
         return {
             "rule_id": int(rule_id),
             "basic_only": bool(basic_only),
-            "placements_total": len(placements),
-            "active_total": sum(1 for row in placements if row.get("placement_status") in {"active", "mixed"}),
-            "delete_problem_total": sum(1 for row in placements if row.get("placement_status") in {"delete_problem", "mixed"}),
-            "mixed_total": sum(1 for row in placements if row.get("placement_status") == "mixed"),
-            "delete_pending_total": sum(int(row.get("delete_pending") or 0) for row in placements),
-            "delete_processing_total": sum(int(row.get("delete_processing") or 0) for row in placements),
-            "delete_failed_total": sum(int(row.get("delete_failed") or 0) for row in placements),
+            "placements_total": int(row.get("placements_total") or 0),
+            "active_total": int(row.get("active_total") or 0),
+            "delete_problem_total": int(row.get("delete_problem_total") or 0),
+            "mixed_total": int(row.get("mixed_total") or 0),
+            "delete_pending_total": int(row.get("delete_pending_total") or 0),
+            "delete_processing_total": int(row.get("delete_processing_total") or 0),
+            "delete_failed_total": int(row.get("delete_failed_total") or 0),
         }
 
     def claim_due_campaign_run_messages_for_delete(self, *, limit: int = 50) -> list[dict[str, Any]]:
