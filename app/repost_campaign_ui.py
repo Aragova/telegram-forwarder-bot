@@ -340,6 +340,98 @@ def build_repost_campaign_active_placements_view(
     return trim_campaign_text_for_telegram(text), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _campaign_policy_user_note(value) -> str:
+    note = str(value or "").strip()
+    if not note:
+        return ""
+    forbidden_markers = [
+        "traceback",
+        "exception",
+        "runtime",
+        "sent_message_id",
+        "target_id",
+        "run_id",
+        "clean_channel_policy",
+        "base_readiness",
+        "db",
+        "json",
+    ]
+    note_lower = note.lower()
+    if any(marker in note_lower for marker in forbidden_markers):
+        return ""
+    return note[:800].strip()
+
+
+def build_repost_campaign_launch_clean_channel_blocked_view(
+    *,
+    rule_id: int,
+    policy_state: dict,
+) -> tuple[str, InlineKeyboardMarkup]:
+    state = dict(policy_state or {})
+    active_total = _safe_non_negative_int(state.get("active_placements_total"))
+    delete_problem_total = _safe_non_negative_int(state.get("delete_problem_total"))
+    blocking_text = _campaign_policy_user_note(state.get("blocking_text"))
+
+    blocks = [
+        "🧹 Чистый канал включён",
+        "Сейчас уже есть активные рекламные размещения.",
+        "Новый запуск не будет опубликован поверх активной рекламы, пока “Чистый канал” включён.",
+        f"Активных размещений: {active_total}\nПроблем удаления: {delete_problem_total}",
+    ]
+    if blocking_text:
+        blocks.append(f"Причина:\n{blocking_text}")
+    blocks.append(
+        "Что можно сделать:\n"
+        "• открыть активные размещения;\n"
+        "• удалить ненужное размещение;\n"
+        "• дождаться автоудаления;\n"
+        "• выключить “Чистый канал”, если хотите запускать рекламу свободно."
+    )
+
+    rows = [
+        [InlineKeyboardButton(text="🧹 Активные размещения", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")],
+        [InlineKeyboardButton(text="⚙️ Настройки Чистого канала", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к запуску", callback_data=f"rule_repost_campaign_launch:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return trim_campaign_text_for_telegram("\n\n".join(blocks)), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_launch_clean_channel_warning_view(
+    *,
+    rule_id: int,
+    policy_state: dict,
+) -> tuple[str, InlineKeyboardMarkup]:
+    state = dict(policy_state or {})
+    active_total = _safe_non_negative_int(state.get("active_placements_total"))
+    delete_problem_total = _safe_non_negative_int(state.get("delete_problem_total"))
+    warning_text = _campaign_policy_user_note(state.get("warning_text"))
+
+    blocks = [
+        "⚠️ Чистый канал выключен",
+        "Сейчас уже есть активные рекламные размещения.",
+        "Если продолжить, новая реклама будет опубликована поверх старой.",
+        (
+            "Важно:\n"
+            "• автоудаление по времени продолжит работать для каждого запуска отдельно;\n"
+            "• каждое размещение можно открыть, удалить или посмотреть отчёт отдельно;\n"
+            "• если в канале уже несколько рекламных постов, проверьте активные размещения вручную."
+        ),
+        f"Активных размещений: {active_total}\nПроблем удаления: {delete_problem_total}",
+    ]
+    if warning_text:
+        blocks.append(f"Подсказка:\n{warning_text}")
+    blocks.append("Продолжить запуск?")
+
+    rows = [
+        [InlineKeyboardButton(text="🚀 Всё равно запустить", callback_data=f"rule_repost_campaign_launch_confirm_force:{rule_id}")],
+        [InlineKeyboardButton(text="🧹 Активные размещения", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")],
+        [InlineKeyboardButton(text="⚙️ Настройки Чистого канала", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_launch:{rule_id}")],
+    ]
+    return trim_campaign_text_for_telegram("\n\n".join(blocks)), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _active_placements_common_rows(*, rule_id: int, refresh_callback: str) -> list[list[InlineKeyboardButton]]:
     return [
         [InlineKeyboardButton(text="🔄 Обновить", callback_data=refresh_callback)],
