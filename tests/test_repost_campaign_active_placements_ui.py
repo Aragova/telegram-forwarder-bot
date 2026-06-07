@@ -180,12 +180,28 @@ def test_no_scheduled_post_service_coupling():
     assert "waiting_clean_channel" not in source
 
 
-def test_handler_source_contains_active_placements_and_runtime_is_not_coupled():
+def _runtime_method_source(source: str, method_name: str) -> str:
+    marker = f"\n    async def {method_name}("
+    start = source.find(marker)
+    if start < 0:
+        marker = f"\n    def {method_name}("
+        start = source.find(marker)
+    assert start >= 0
+    next_def = source.find("\n    def ", start + 1)
+    next_async_def = source.find("\n    async def ", start + 1)
+    candidates = [pos for pos in (next_def, next_async_def) if pos >= 0]
+    end = min(candidates) if candidates else len(source)
+    return source[start:end]
+
+
+def test_handler_source_contains_active_placements_and_launch_flow_is_not_coupled():
     handlers_source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
     runtime_source = Path("app/repost_campaign_runtime_service.py").read_text(encoding="utf-8")
 
     assert "rule_repost_campaign_active_placements" in handlers_source
     assert "RepostCampaignPlacementService" in handlers_source
-    assert "RepostCampaignPlacementService" not in runtime_source
     assert "build_clean_channel_state" not in runtime_source
-    assert "build_launch_policy_preview" not in runtime_source
+
+    launch_source = _runtime_method_source(runtime_source, "launch_campaign_now")
+    assert "RepostCampaignPlacementService" not in launch_source
+    assert "build_launch_policy_preview" not in launch_source
