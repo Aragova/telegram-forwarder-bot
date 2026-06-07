@@ -32,6 +32,7 @@ def _placement(
     *,
     run_type: str = "manual",
     placement_status: str = "active",
+    targets_success: int = 3,
     delete_pending: int = 0,
     delete_processing: int = 0,
     delete_failed: int = 0,
@@ -50,7 +51,7 @@ def _placement(
         "delete_after_at_max": "2026-06-07T15:45:00+00:00",
         "last_sent_at": "2026-06-07T12:01:30+00:00",
         "targets_total": 3,
-        "targets_success": 3,
+        "targets_success": targets_success,
         "targets_failed": 0,
         "active_messages_total": delete_pending + delete_processing + delete_failed,
         "delete_pending": delete_pending,
@@ -119,6 +120,17 @@ def test_active_placement():
     assert placement["details_callback_data"] == "rule_repost_campaign_history_detail:10:123"
     assert placement["delete_callback_data"] == "rule_repost_campaign_run_delete_confirm:10:123"
     assert placement["report_callback_data"] == "rule_repost_campaign_views_report:10:123"
+
+
+def test_summary_text_uses_targets_success_for_published_count():
+    repo = FakeRepo([_placement(126, targets_success=5, delete_pending=2)])
+    service = RepostCampaignPlacementService(repo)
+
+    result = service.build_active_placements(rule_id=10)
+    placement = result["placements"][0]
+
+    assert "✅ Опубликовано: 5" in placement["summary_text"]
+    assert placement["active_messages_total"] == 2
 
 
 def test_delete_problem_placement():
@@ -229,6 +241,16 @@ def test_repository_exception():
     assert result["state"] == "unknown"
     assert result["placements"] == []
     assert result["error_text"] == "Не удалось получить активные размещения"
+
+
+def test_bad_user_tz_falls_back_to_project_timezone():
+    service = RepostCampaignPlacementService(FakeRepo([_placement(127, delete_pending=1)]), user_tz="bad")
+
+    result = service.build_active_placements(rule_id=10)
+    placement = result["placements"][0]
+
+    assert placement["created_text"] == "07.06 15:00"
+    assert placement["delete_after_text"] == "07.06 18:30"
 
 
 def test_no_scheduled_post_service_coupling():

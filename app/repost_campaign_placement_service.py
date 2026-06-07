@@ -229,6 +229,7 @@ class RepostCampaignPlacementService:
         delete_pending = _to_int(row.get("delete_pending"))
         delete_processing = _to_int(row.get("delete_processing"))
         delete_failed = _to_int(row.get("delete_failed"))
+        targets_success = _to_int(row.get("targets_success"))
         active_messages_total = _to_int(row.get("active_messages_total"), default=_to_int(row.get("sent")))
         placement_status = _normalize_placement_status(
             row.get("placement_status"),
@@ -265,7 +266,7 @@ class RepostCampaignPlacementService:
             "last_sent_at": row.get("last_sent_at"),
             "last_sent_text": _format_user_dt(row.get("last_sent_at"), user_tz=self.user_tz),
             "targets_total": _to_int(row.get("targets_total")),
-            "targets_success": _to_int(row.get("targets_success")),
+            "targets_success": targets_success,
             "targets_failed": _to_int(row.get("targets_failed")),
             "active_messages_total": active_messages_total,
             "delete_pending": delete_pending,
@@ -280,7 +281,7 @@ class RepostCampaignPlacementService:
             "short_title": short_title,
             "summary_text": _build_summary_text(
                 short_title=short_title,
-                active_messages_total=active_messages_total,
+                targets_success=targets_success,
                 delete_pending=delete_pending,
                 delete_processing=delete_processing,
                 delete_failed=delete_failed,
@@ -296,7 +297,9 @@ def _normalize_user_tz(user_tz):
         return user_tz
     if isinstance(user_tz, int):
         return timezone(timedelta(minutes=user_tz))
-    return user_tz
+    if hasattr(user_tz, "utcoffset"):
+        return user_tz
+    return USER_TZ
 
 
 def _parse_dt(value) -> datetime | None:
@@ -383,7 +386,7 @@ def _build_list_state(*, active_total: int, delete_problem_total: int, mixed_tot
 def _build_summary_text(
     *,
     short_title: str,
-    active_messages_total: int,
+    targets_success: int,
     delete_pending: int,
     delete_processing: int,
     delete_failed: int,
@@ -392,7 +395,7 @@ def _build_summary_text(
     waiting_delete = int(delete_pending) + int(delete_processing)
     lines = [
         short_title,
-        f"✅ Опубликовано: {int(active_messages_total)}",
+        f"✅ Опубликовано: {int(targets_success)}",
     ]
     if waiting_delete > 0:
         lines.append(f"🧹 Ожидают удаления: {waiting_delete}")
