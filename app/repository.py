@@ -490,6 +490,19 @@ class RepositoryProtocol(Protocol):
         *,
         limit: int = 20,
     ) -> list[dict[str, Any]]: ...
+    def list_active_campaign_placements_for_rule(
+        self,
+        rule_id: int,
+        *,
+        limit: int = 20,
+        basic_only: bool = True,
+    ) -> list[dict[str, Any]]: ...
+    def get_active_campaign_placements_summary_for_rule(
+        self,
+        rule_id: int,
+        *,
+        basic_only: bool = True,
+    ) -> dict[str, Any]: ...
     def list_campaign_run_messages(
         self,
         run_id: int,

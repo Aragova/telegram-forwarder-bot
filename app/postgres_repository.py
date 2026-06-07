@@ -828,6 +828,8 @@ class PostgresRepository(RepositoryProtocol):
         ON campaign_runs(saved_post_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_campaign_runs_status
         ON campaign_runs(status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_campaign_runs_rule_basic
+        ON campaign_runs(rule_id, scheduled_post_id, run_type, created_at DESC);
 
         CREATE TABLE IF NOT EXISTS campaign_scheduled_launches (
             id BIGSERIAL PRIMARY KEY,
@@ -973,6 +975,10 @@ class PostgresRepository(RepositoryProtocol):
         ON campaign_run_messages(rule_id, send_status, delete_status);
         CREATE INDEX IF NOT EXISTS idx_campaign_run_messages_delete
         ON campaign_run_messages(delete_status, delete_after_at);
+        CREATE INDEX IF NOT EXISTS idx_campaign_run_messages_active_by_rule
+        ON campaign_run_messages(rule_id, delete_status, send_status, delete_after_at);
+        CREATE INDEX IF NOT EXISTS idx_campaign_run_messages_active_by_run
+        ON campaign_run_messages(run_id, delete_status, send_status);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_run_messages_unique_target
         ON campaign_run_messages(run_id, target_kind, target_id, COALESCE(target_thread_id, -1));
         CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_run_messages_unique_target_per_run
@@ -8609,6 +8615,144 @@ class PostgresRepository(RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM campaign_run_messages WHERE run_id=%s ORDER BY id ASC", (int(run_id),))
                 return [dict(row) for row in (cur.fetchall() or [])]
+
+    def list_active_campaign_placements_for_rule(
+        self,
+        rule_id: int,
+        *,
+        limit: int = 20,
+        basic_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        where_parts = [
+            "r.rule_id = %s",
+            "m.send_status = 'sent'",
+            "m.delete_status IN ('pending', 'processing', 'failed')",
+        ]
+        params: list[Any] = [int(rule_id)]
+        if basic_only:
+            where_parts.append("r.scheduled_post_id IS NULL")
+            where_parts.append("r.run_type IN ('manual', 'scheduled')")
+        params.append(int(limit))
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        r.id AS run_id,
+                        r.rule_id,
+                        r.saved_post_id,
+                        r.run_type,
+                        r.status AS run_status,
+                        r.scheduled_post_id,
+                        r.created_at,
+                        r.started_at,
+                        r.finished_at,
+                        r.targets_total,
+                        r.targets_success,
+                        r.targets_failed,
+                        COUNT(m.id) FILTER (WHERE m.send_status = 'sent') AS sent,
+                        COUNT(m.id) FILTER (WHERE m.delete_status = 'pending') AS delete_pending,
+                        COUNT(m.id) FILTER (WHERE m.delete_status = 'processing') AS delete_processing,
+                        COUNT(m.id) FILTER (WHERE m.delete_status = 'failed') AS delete_failed,
+                        MIN(m.delete_after_at) AS delete_after_at_min,
+                        MAX(m.delete_after_at) AS delete_after_at_max,
+                        MAX(m.sent_at) AS last_sent_at
+                    FROM campaign_runs r
+                    JOIN campaign_run_messages m ON m.run_id = r.id
+                    WHERE {' AND '.join(where_parts)}
+                    GROUP BY r.id
+                    ORDER BY
+                        CASE
+                            WHEN COUNT(m.id) FILTER (WHERE m.delete_status = 'failed') > 0 THEN 0
+                            ELSE 1
+                        END ASC,
+                        MIN(m.delete_after_at) ASC NULLS LAST,
+                        r.id DESC
+                    LIMIT %s
+                    """,
+                    tuple(params),
+                )
+                rows = [dict(row) for row in (cur.fetchall() or [])]
+
+        for row in rows:
+            delete_pending = int(row.get("delete_pending") or 0)
+            delete_processing = int(row.get("delete_processing") or 0)
+            delete_failed = int(row.get("delete_failed") or 0)
+            active_count = delete_pending + delete_processing
+            if delete_failed > 0 and active_count > 0:
+                placement_status = "mixed"
+            elif delete_failed > 0:
+                placement_status = "delete_problem"
+            elif active_count > 0:
+                placement_status = "active"
+            else:
+                placement_status = "clean"
+            row["sent"] = int(row.get("sent") or 0)
+            row["active_messages_total"] = row["sent"]
+            row["delete_pending"] = delete_pending
+            row["delete_processing"] = delete_processing
+            row["delete_failed"] = delete_failed
+            row["placement_status"] = placement_status
+
+        return rows
+
+    def get_active_campaign_placements_summary_for_rule(
+        self,
+        rule_id: int,
+        *,
+        basic_only: bool = True,
+    ) -> dict[str, Any]:
+        where_parts = [
+            "r.rule_id = %s",
+            "m.send_status = 'sent'",
+            "m.delete_status IN ('pending', 'processing', 'failed')",
+        ]
+        params: list[Any] = [int(rule_id)]
+        if basic_only:
+            where_parts.append("r.scheduled_post_id IS NULL")
+            where_parts.append("r.run_type IN ('manual', 'scheduled')")
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH placements AS (
+                        SELECT
+                            r.id AS run_id,
+                            COUNT(m.id) FILTER (WHERE m.delete_status = 'pending') AS delete_pending,
+                            COUNT(m.id) FILTER (WHERE m.delete_status = 'processing') AS delete_processing,
+                            COUNT(m.id) FILTER (WHERE m.delete_status = 'failed') AS delete_failed
+                        FROM campaign_runs r
+                        JOIN campaign_run_messages m ON m.run_id = r.id
+                        WHERE {' AND '.join(where_parts)}
+                        GROUP BY r.id
+                    )
+                    SELECT
+                        COUNT(*) AS placements_total,
+                        COUNT(*) FILTER (WHERE delete_pending + delete_processing > 0) AS active_total,
+                        COUNT(*) FILTER (WHERE delete_failed > 0) AS delete_problem_total,
+                        COUNT(*) FILTER (WHERE delete_failed > 0 AND delete_pending + delete_processing > 0) AS mixed_total,
+                        COALESCE(SUM(delete_pending), 0) AS delete_pending_total,
+                        COALESCE(SUM(delete_processing), 0) AS delete_processing_total,
+                        COALESCE(SUM(delete_failed), 0) AS delete_failed_total
+                    FROM placements
+                    """,
+                    tuple(params),
+                )
+                row = dict(cur.fetchone() or {})
+
+        return {
+            "rule_id": int(rule_id),
+            "basic_only": bool(basic_only),
+            "placements_total": int(row.get("placements_total") or 0),
+            "active_total": int(row.get("active_total") or 0),
+            "delete_problem_total": int(row.get("delete_problem_total") or 0),
+            "mixed_total": int(row.get("mixed_total") or 0),
+            "delete_pending_total": int(row.get("delete_pending_total") or 0),
+            "delete_processing_total": int(row.get("delete_processing_total") or 0),
+            "delete_failed_total": int(row.get("delete_failed_total") or 0),
+        }
 
     def claim_due_campaign_run_messages_for_delete(self, *, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as conn:
