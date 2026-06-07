@@ -121,6 +121,32 @@ def test_multiple_placements_keep_order_and_callbacks():
     assert text.index("#123") < text.index("#122") < text.index("#121")
 
 
+def test_second_page_shows_loaded_prefix_slice():
+    placements = [_placement(run_id) for run_id in range(120, 100, -1)]
+    text, keyboard = build_repost_campaign_active_placements_view(
+        rule_id=10,
+        state=_state(
+            "active",
+            placements,
+            active_total=20,
+            placements_total=20,
+            page=1,
+            page_size=10,
+        ),
+    )
+
+    callbacks = _callbacks_from_keyboard(keyboard)
+
+    assert "#120" not in text
+    assert "#111" not in text
+    assert "#110" in text
+    assert "#101" in text
+    assert "Показаны размещения 11–20 из 20." in text
+    assert "rule_repost_campaign_history_detail:10:110" in callbacks
+    assert "rule_repost_campaign_run_delete_confirm:10:101" in callbacks
+    assert "rule_repost_campaign_active_placements:10:0" in callbacks
+
+
 def test_error_screen():
     text, keyboard = build_repost_campaign_active_placements_view(
         rule_id=10,

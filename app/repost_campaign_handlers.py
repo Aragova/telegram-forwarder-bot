@@ -8,6 +8,7 @@ from app.repost_campaign_launch_job_service import RepostCampaignLaunchJobServic
 from app.repost_campaign_placement_service import RepostCampaignPlacementService
 from app.repost_campaign_service import format_campaign_show_seconds_ru, normalize_campaign_show_seconds
 from app.repost_campaign_ui import (
+    ACTIVE_PLACEMENTS_PAGE_SIZE,
     build_repost_campaign_active_placements_view,
     build_repost_campaign_launch_mode_view,
     build_repost_campaign_launch_job_status_view,
@@ -113,7 +114,9 @@ async def _render_repost_campaign_active_placements(
     normalized_page = max(0, int(page or 0))
     try:
         service = RepostCampaignPlacementService(ctx.db, logger=ctx.logger)
-        limit = (normalized_page + 1) * 10
+        # Repository API for this stage supports limit without offset.
+        # Request the loaded prefix and let the UI builder slice the requested page.
+        limit = (normalized_page + 1) * ACTIVE_PLACEMENTS_PAGE_SIZE
         state = await ctx.run_db(
             lambda: service.build_clean_channel_state(
                 rule_id=rule_id,
@@ -123,7 +126,7 @@ async def _render_repost_campaign_active_placements(
         )
         state = dict(state or {})
         state["page"] = normalized_page
-        state["page_size"] = 10
+        state["page_size"] = ACTIVE_PLACEMENTS_PAGE_SIZE
         text, keyboard = build_repost_campaign_active_placements_view(rule_id=rule_id, state=state)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         ctx.logger.info(
