@@ -116,6 +116,7 @@ def test_source_guards_manual_clean_channel_handlers_are_wired_only_to_manual_fl
 
     confirm_slice = handlers_source.split('rule_repost_campaign_launch_confirm_force:', 1)[-1]
     assert "launch_campaign_now(" not in confirm_slice
+    assert 'action in {"allow", "allow_forced"} and policy_state.get("can_launch") is True' in confirm_slice
 
     for path in (
         "app/repost_campaign_schedule_service.py",

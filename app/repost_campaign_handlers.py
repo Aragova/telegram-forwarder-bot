@@ -658,29 +658,29 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             rule_id,
             action,
         )
-        if policy_state.get("can_launch") is False:
-            if action == "base_block":
-                readiness = policy_state.get("base_readiness") or {}
-                text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
-                await _send_repost_campaign_policy_message(callback, ctx, text=text, keyboard=keyboard)
-            else:
-                text, keyboard = build_repost_campaign_launch_clean_channel_blocked_view(rule_id=rule_id, policy_state=policy_state)
-                await _send_repost_campaign_policy_message(callback, ctx, text=text, keyboard=keyboard)
-                ctx.logger.info(
-                    "REPOST_CAMPAIGN_MANUAL_LAUNCH_CLEAN_CHANNEL_BLOCKED_UI | rule_id=%s | action=%s",
-                    rule_id,
-                    action,
-                )
-            await ctx.answer_callback_safe_once(callback)
+        if action in {"allow", "allow_forced"} and policy_state.get("can_launch") is True:
+            await _enqueue_repost_campaign_manual_launch_from_callback(
+                callback,
+                rule_id,
+                ctx,
+                force_ignore_clean_channel=True,
+                answer_text="🚀 Запуск поверх активной рекламы поставлен в очередь",
+            )
             return
 
-        await _enqueue_repost_campaign_manual_launch_from_callback(
-            callback,
-            rule_id,
-            ctx,
-            force_ignore_clean_channel=True,
-            answer_text="🚀 Запуск поверх активной рекламы поставлен в очередь",
-        )
+        if action == "base_block":
+            readiness = policy_state.get("base_readiness") or {}
+            text, keyboard = build_repost_campaign_launch_readiness_view(rule_id=rule_id, readiness=readiness)
+            await _send_repost_campaign_policy_message(callback, ctx, text=text, keyboard=keyboard)
+        else:
+            text, keyboard = build_repost_campaign_launch_clean_channel_blocked_view(rule_id=rule_id, policy_state=policy_state)
+            await _send_repost_campaign_policy_message(callback, ctx, text=text, keyboard=keyboard)
+            ctx.logger.info(
+                "REPOST_CAMPAIGN_MANUAL_LAUNCH_CLEAN_CHANNEL_BLOCKED_UI | rule_id=%s | action=%s",
+                rule_id,
+                action,
+            )
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_confirm:"))
     async def handle_rule_repost_campaign_launch_confirm(callback: CallbackQuery):
