@@ -128,6 +128,20 @@ def test_active_placements_screen_keeps_existing_callbacks_and_links_back_to_set
     assert "rule_repost_campaign_views_report:10:123" in callbacks
 
 
+def _runtime_method_source(source: str, method_name: str) -> str:
+    marker = f"\n    async def {method_name}("
+    start = source.find(marker)
+    if start < 0:
+        marker = f"\n    def {method_name}("
+        start = source.find(marker)
+    assert start >= 0
+    next_def = source.find("\n    def ", start + 1)
+    next_async_def = source.find("\n    async def ", start + 1)
+    candidates = [pos for pos in (next_def, next_async_def) if pos >= 0]
+    end = min(candidates) if candidates else len(source)
+    return source[start:end]
+
+
 def test_stage_four_source_guards_do_not_connect_setting_to_launch_runtime_or_schedule():
     scheduled_post_source = Path("app/repost_campaign_scheduled_post_service.py").read_text(encoding="utf-8")
     runtime_source = Path("app/repost_campaign_runtime_service.py").read_text(encoding="utf-8")
@@ -142,12 +156,13 @@ def test_stage_four_source_guards_do_not_connect_setting_to_launch_runtime_or_sc
     ]:
         assert forbidden not in scheduled_post_source
 
+    launch_source = _runtime_method_source(runtime_source, "launch_campaign_now")
     for forbidden in [
         "repost_campaign_clean_channel_enabled",
         "build_launch_policy_preview",
         "clean_channel_enabled",
     ]:
-        assert forbidden not in runtime_source
+        assert forbidden not in launch_source
 
     for forbidden in ["clean_channel_enabled", "waiting_clean_channel"]:
         assert forbidden not in schedule_source

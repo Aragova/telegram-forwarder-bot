@@ -185,13 +185,13 @@ def _summary_from_placements(placements: list[dict[str, Any]]) -> dict[str, int]
         delete_pending_total += delete_pending
         delete_processing_total += delete_processing
         delete_failed_total += delete_failed
-        if status == "delete_problem" or delete_failed > 0:
+        active_count = delete_pending + delete_processing
+        if status == "active" or active_count > 0:
+            active_total += 1
+        if status in {"delete_problem", "mixed"} or delete_failed > 0:
             delete_problem_total += 1
-        elif status == "mixed":
+        if status == "mixed" or (delete_failed > 0 and active_count > 0):
             mixed_total += 1
-            active_total += 1
-        elif status == "active" or delete_pending > 0 or delete_processing > 0:
-            active_total += 1
     return {
         "placements_total": len(placements),
         "active_total": active_total,
