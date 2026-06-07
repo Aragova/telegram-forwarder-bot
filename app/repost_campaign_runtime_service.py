@@ -739,6 +739,26 @@ class RepostCampaignRuntimeService:
             active_placements_total = int(manual_launch_policy.get("active_placements_total") or 0)
             delete_problem_total = int(manual_launch_policy.get("delete_problem_total") or 0)
 
+            if manual_launch_policy.get("ok") is False:
+                self.logger.info(
+                    "REPOST_CAMPAIGN_MANUAL_LAUNCH_CLEAN_CHANNEL_BLOCKED | rule_id=%s | action=%s | active_placements=%s | delete_problem=%s",
+                    rule_id,
+                    policy_action or "unknown",
+                    active_placements_total,
+                    delete_problem_total,
+                )
+                return RepostCampaignActionResult(
+                    ok=False,
+                    action="launch_campaign_now",
+                    rule_id=rule_id,
+                    saved_post_id=readiness.get("saved_post_id"),
+                    error_text=manual_launch_policy.get("blocking_text") or manual_launch_policy.get("error_text") or "Не удалось проверить активные размещения",
+                    extra={
+                        "manual_launch_policy": manual_launch_policy,
+                        "clean_channel_blocked": True,
+                    },
+                )
+
             if manual_launch_policy.get("can_launch") is False:
                 if policy_action == "confirm_required":
                     self.logger.info(
@@ -789,26 +809,6 @@ class RepostCampaignRuntimeService:
                             "launch_readiness": readiness,
                         },
                     )
-
-            if manual_launch_policy.get("ok") is False:
-                self.logger.info(
-                    "REPOST_CAMPAIGN_MANUAL_LAUNCH_CLEAN_CHANNEL_BLOCKED | rule_id=%s | action=%s | active_placements=%s | delete_problem=%s",
-                    rule_id,
-                    policy_action or "unknown",
-                    active_placements_total,
-                    delete_problem_total,
-                )
-                return RepostCampaignActionResult(
-                    ok=False,
-                    action="launch_campaign_now",
-                    rule_id=rule_id,
-                    saved_post_id=readiness.get("saved_post_id"),
-                    error_text=manual_launch_policy.get("blocking_text") or manual_launch_policy.get("error_text") or "Не удалось проверить активные размещения",
-                    extra={
-                        "manual_launch_policy": manual_launch_policy,
-                        "clean_channel_blocked": True,
-                    },
-                )
 
             if policy_action == "allow_forced":
                 self.logger.info(

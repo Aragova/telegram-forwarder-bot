@@ -352,6 +352,24 @@ def test_manual_policy_is_read_only():
     assert repo.write_calls_total == 0
 
 
+def test_launch_campaign_now_placement_exception_blocks_before_campaign_run_creation():
+    repo = FakeRepo(
+        rule=_ready_rule(),
+        saved_post={"content_json": {"kind": "text"}},
+        fail_active_placements=True,
+    )
+
+    result = asyncio.run(_runtime(repo).launch_campaign_now(rule_id=10))
+
+    assert result.ok is False
+    assert "Не удалось проверить активные размещения" in (result.error_text or "")
+    assert result.extra["clean_channel_blocked"] is True
+    assert result.extra["manual_launch_policy"]["ok"] is False
+    assert repo.create_campaign_run_calls == []
+    assert "Traceback" not in (result.error_text or "")
+    assert "database traceback" not in (result.error_text or "")
+
+
 def test_launch_campaign_now_clean_channel_on_active_placements_blocks():
     repo = FakeRepo(rule=_ready_rule(), saved_post={"content_json": {"kind": "text"}}, placements=[_placement(11, delete_pending=1)])
 
