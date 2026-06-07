@@ -726,8 +726,113 @@ class RepostCampaignRuntimeService:
         admin_id: int | None = None,
         run_type: str = "manual",
         on_campaign_run_created: Callable[[int], None] | None = None,
+        force_ignore_clean_channel: bool = False,
     ) -> RepostCampaignActionResult:
-        readiness = self.build_campaign_launch_readiness(rule_id=rule_id)
+        manual_launch_policy: dict[str, Any] | None = None
+        if run_type == "manual":
+            manual_launch_policy = self.build_manual_launch_policy_state(
+                rule_id=rule_id,
+                force_ignore_clean_channel=force_ignore_clean_channel,
+            )
+            readiness = manual_launch_policy.get("base_readiness") or {}
+            policy_action = str(manual_launch_policy.get("action") or "")
+            active_placements_total = int(manual_launch_policy.get("active_placements_total") or 0)
+            delete_problem_total = int(manual_launch_policy.get("delete_problem_total") or 0)
+
+            if manual_launch_policy.get("ok") is False:
+                self.logger.info(
+                    "REPOST_CAMPAIGN_MANUAL_LAUNCH_CLEAN_CHANNEL_BLOCKED | rule_id=%s | action=%s | active_placements=%s | delete_problem=%s",
+                    rule_id,
+                    policy_action or "unknown",
+                    active_placements_total,
+                    delete_problem_total,
+                )
+                return RepostCampaignActionResult(
+                    ok=False,
+                    action="launch_campaign_now",
+                    rule_id=rule_id,
+                    saved_post_id=readiness.get("saved_post_id"),
+                    error_text=manual_launch_policy.get("blocking_text") or manual_launch_policy.get("error_text") or "Не удалось проверить активные размещения",
+                    extra={
+                        "manual_launch_policy": manual_launch_policy,
+                        "clean_channel_blocked": True,
+                    },
+                )
+
+            if manual_launch_policy.get("can_launch") is False:
+                if policy_action == "confirm_required":
+                    self.logger.info(
+                        "REPOST_CAMPAIGN_MANUAL_LAUNCH_CLEAN_CHANNEL_CONFIRM_REQUIRED | rule_id=%s | active_placements=%s | delete_problem=%s",
+                        rule_id,
+                        active_placements_total,
+                        delete_problem_total,
+                    )
+                    return RepostCampaignActionResult(
+                        ok=False,
+                        action="launch_campaign_now",
+                        rule_id=rule_id,
+                        saved_post_id=readiness.get("saved_post_id"),
+                        error_text="Нужно подтвердить запуск поверх активной рекламы",
+                        extra={
+                            "manual_launch_policy": manual_launch_policy,
+                            "requires_clean_channel_confirmation": True,
+                        },
+                    )
+                if policy_action == "block":
+                    self.logger.info(
+                        "REPOST_CAMPAIGN_MANUAL_LAUNCH_CLEAN_CHANNEL_BLOCKED | rule_id=%s | action=%s | active_placements=%s | delete_problem=%s",
+                        rule_id,
+                        policy_action,
+                        active_placements_total,
+                        delete_problem_total,
+                    )
+                    return RepostCampaignActionResult(
+                        ok=False,
+                        action="launch_campaign_now",
+                        rule_id=rule_id,
+                        saved_post_id=readiness.get("saved_post_id"),
+                        error_text=manual_launch_policy.get("blocking_text") or "Чистый канал не позволяет запустить кампанию поверх активной рекламы",
+                        extra={
+                            "manual_launch_policy": manual_launch_policy,
+                            "clean_channel_blocked": True,
+                        },
+                    )
+                if policy_action == "base_block":
+                    return RepostCampaignActionResult(
+                        ok=False,
+                        action="launch_campaign_now",
+                        rule_id=rule_id,
+                        saved_post_id=readiness.get("saved_post_id"),
+                        error_text="Кампания не готова к запуску",
+                        extra={
+                            "manual_launch_policy": manual_launch_policy,
+                            "launch_readiness": readiness,
+                        },
+                    )
+
+            if policy_action == "allow_forced":
+                self.logger.info(
+                    "REPOST_CAMPAIGN_MANUAL_LAUNCH_CLEAN_CHANNEL_FORCE_ALLOWED | rule_id=%s | active_placements=%s | delete_problem=%s",
+                    rule_id,
+                    active_placements_total,
+                    delete_problem_total,
+                )
+        else:
+            readiness = self.build_campaign_launch_readiness(rule_id=rule_id)
+
+        if run_type != "manual" and (readiness.get("active_placement") or int(readiness.get("delete_failed") or 0) > 0):
+            return RepostCampaignActionResult(
+                ok=False,
+                action="launch_campaign",
+                rule_id=rule_id,
+                saved_post_id=readiness.get("saved_post_id"),
+                error_text="Кампания уже активна" if readiness.get("active_placement") else "Есть проблемы удаления в предыдущем запуске.",
+                extra={
+                    "active_placement": bool(readiness.get("active_placement")),
+                    "last_run_id": readiness.get("active_run_id"),
+                    "launch_readiness": readiness,
+                },
+            )
         if not readiness.get("can_launch"):
             return RepostCampaignActionResult(
                 ok=False,
@@ -739,19 +844,6 @@ class RepostCampaignRuntimeService:
                     "launch_readiness": readiness,
                     "block_reasons": readiness.get("block_reasons") or [],
                     "warnings": readiness.get("warnings") or [],
-                },
-            )
-        if readiness.get("active_placement") or int(readiness.get("delete_failed") or 0) > 0:
-            return RepostCampaignActionResult(
-                ok=False,
-                action="launch_campaign",
-                rule_id=rule_id,
-                saved_post_id=readiness.get("saved_post_id"),
-                error_text="Кампания уже активна" if readiness.get("active_placement") else "Есть проблемы удаления в предыдущем запуске.",
-                extra={
-                    "active_placement": bool(readiness.get("active_placement")),
-                    "last_run_id": readiness.get("active_run_id"),
-                    "launch_readiness": readiness,
                 },
             )
         loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="launch_campaign")
@@ -942,6 +1034,7 @@ class RepostCampaignRuntimeService:
                 "extra_ready": readiness.get("extra_ready"),
                 "extra_paused": readiness.get("extra_paused"),
                 "extra_problem": readiness.get("extra_problem"),
+                **({"manual_launch_policy": manual_launch_policy} if manual_launch_policy is not None else {}),
             },
         )
 

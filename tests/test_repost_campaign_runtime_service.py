@@ -48,6 +48,23 @@ class _FakeRepo:
     def get_rule_repost_campaign_summary(self, rule_id):
         return self._summary
 
+    def get_rule_repost_campaign_clean_channel_settings(self, rule_id):
+        return {"ok": True, "rule_id": rule_id, "enabled": True}
+
+    def list_active_campaign_placements_for_rule(self, rule_id, *, limit=20, basic_only=True):
+        return []
+
+    def get_active_campaign_placements_summary_for_rule(self, rule_id, *, basic_only=True):
+        return {
+            "placements_total": 0,
+            "active_total": 0,
+            "delete_problem_total": 0,
+            "mixed_total": 0,
+            "delete_pending_total": 0,
+            "delete_processing_total": 0,
+            "delete_failed_total": 0,
+        }
+
     def create_campaign_run(self, **kwargs):
         self.create_campaign_run_calls.append(kwargs)
         return self.next_run_id
