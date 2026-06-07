@@ -46,6 +46,7 @@ class RepostCampaignLaunchJobService:
         admin_id: int | None,
         progress_chat_id: int | str | None,
         progress_message_id: int | None,
+        force_ignore_clean_channel: bool = False,
     ) -> RepostCampaignLaunchJobEnqueueResult:
         existing = self.repo.get_active_repost_campaign_launch_job_for_rule(int(rule_id))
         if existing:
@@ -64,6 +65,7 @@ class RepostCampaignLaunchJobService:
             "progress_message_id": progress_message_id,
             "launch_type": "manual",
             "requested_at": datetime.now(timezone.utc).isoformat(),
+            "force_ignore_clean_channel": bool(force_ignore_clean_channel),
         }
         job = self.repo.create_repost_campaign_launch_job(
             rule_id=int(rule_id),
@@ -73,10 +75,11 @@ class RepostCampaignLaunchJobService:
             payload_json=payload,
         )
         self.logger.info(
-            "REPOST_CAMPAIGN_LAUNCH_JOB_ENQUEUED | rule_id=%s | job_id=%s | admin_id=%s",
+            "REPOST_CAMPAIGN_LAUNCH_JOB_ENQUEUED | rule_id=%s | job_id=%s | admin_id=%s | force_clean_channel=%s",
             rule_id,
             job.get("id") if job else None,
             admin_id,
+            bool(force_ignore_clean_channel),
         )
         return RepostCampaignLaunchJobEnqueueResult(job=job, created=True)
 
@@ -106,19 +109,14 @@ class RepostCampaignLaunchJobService:
         job_id = int(job["id"])
         rule_id = int(job["rule_id"])
         admin_id = job.get("admin_id")
+        payload = job.get("payload_json") or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        force_ignore_clean_channel = bool(payload.get("force_ignore_clean_channel"))
         self.repo.mark_repost_campaign_launch_job_processing(job_id, worker_id=worker_id)
         self.logger.info("REPOST_CAMPAIGN_LAUNCH_JOB_STARTED | job_id=%s | rule_id=%s", job_id, rule_id)
         before_run_id = self._latest_campaign_run_id(rule_id)
         try:
-            readiness = self.campaign_runtime.build_campaign_launch_readiness(rule_id=rule_id)
-            if not readiness.get("can_launch"):
-                error_text = "Кампания не готова к запуску"
-                result_json = {"ok": False, "error_text": error_text, "extra": {"launch_readiness": readiness}}
-                updated = self.repo.mark_repost_campaign_launch_job_failed(job_id, last_error=error_text, result_json=result_json)
-                await self._update_progress_message(rule_id=rule_id, job=updated or {**job, "status": "failed", "result_json": result_json})
-                self.logger.info("REPOST_CAMPAIGN_LAUNCH_JOB_BLOCKED | job_id=%s | rule_id=%s", job_id, rule_id)
-                return updated
-
             remembered_campaign_run_id: int | None = None
 
             def _remember_campaign_run_id(campaign_run_id: int) -> None:
@@ -128,11 +126,18 @@ class RepostCampaignLaunchJobService:
                 if not updated_job:
                     raise RuntimeError("Не удалось сохранить campaign_run_id для durable job запуска кампании")
 
+            self.logger.info(
+                "REPOST_CAMPAIGN_LAUNCH_JOB_RUNTIME_START | job_id=%s | rule_id=%s | force_clean_channel=%s",
+                job_id,
+                rule_id,
+                force_ignore_clean_channel,
+            )
             result = await self.campaign_runtime.launch_campaign_now(
                 rule_id=rule_id,
                 admin_id=admin_id,
                 run_type="manual",
                 on_campaign_run_created=_remember_campaign_run_id,
+                force_ignore_clean_channel=force_ignore_clean_channel,
             )
             result_json = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})
             result_extra = result_json.get("extra") or {}
