@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from app.repost_campaign_runtime_service import RepostCampaignRuntimeService
+from app.saved_post_renderer import SavedPostRenderResult
 
 
 class FakeRepo:
@@ -19,6 +21,7 @@ class FakeRepo:
         placements: list[dict[str, Any]] | None = None,
         placement_summary: dict[str, Any] | None = None,
         fail_active_placements: bool = False,
+        campaign_runs: list[dict[str, Any]] | None = None,
     ):
         self._rule = rule
         self._saved_post = saved_post
@@ -39,6 +42,7 @@ class FakeRepo:
         self.mark_campaign_run_message_deleted_calls: list[int] = []
         self.mark_campaign_run_message_delete_failed_calls: list[dict[str, Any]] = []
         self.enqueue_campaign_launch_job_calls: list[dict[str, Any]] = []
+        self._campaign_runs = list(campaign_runs or [])
 
     def get_rule(self, rule_id: int):
         return self._rule
@@ -50,7 +54,7 @@ class FakeRepo:
         return list(self._targets)
 
     def list_campaign_runs_for_rule(self, rule_id: int, limit: int = 10) -> list[dict[str, Any]]:
-        return []
+        return self._campaign_runs[:limit]
 
     def get_rule_repost_campaign_clean_channel_settings(self, rule_id: int) -> dict[str, Any] | None:
         self.clean_channel_settings_calls.append(rule_id)
@@ -138,8 +142,24 @@ def _ready_rule():
     )
 
 
-def _runtime(repo: FakeRepo) -> RepostCampaignRuntimeService:
-    return RepostCampaignRuntimeService(repo=repo, renderer=None)
+class FakeRenderer:
+    def __init__(self, result=None):
+        self.result = result if result is not None else SavedPostRenderResult(
+            ok=True,
+            method="bot_api",
+            kind="text",
+            chat_id="-1001",
+            message_id=777,
+        )
+        self.calls: list[dict[str, Any]] = []
+
+    async def send(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.result
+
+
+def _runtime(repo: FakeRepo, renderer=None) -> RepostCampaignRuntimeService:
+    return RepostCampaignRuntimeService(repo=repo, renderer=renderer or FakeRenderer())
 
 
 def _placement(
@@ -332,16 +352,150 @@ def test_manual_policy_is_read_only():
     assert repo.write_calls_total == 0
 
 
+def test_launch_campaign_now_clean_channel_on_active_placements_blocks():
+    repo = FakeRepo(rule=_ready_rule(), saved_post={"content_json": {"kind": "text"}}, placements=[_placement(11, delete_pending=1)])
+
+    result = asyncio.run(_runtime(repo).launch_campaign_now(rule_id=10, run_type="manual"))
+
+    assert result.ok is False
+    assert "Чистый канал" in (result.error_text or "")
+    assert result.extra["clean_channel_blocked"] is True
+    assert result.extra["manual_launch_policy"]["action"] == "block"
+    assert repo.create_campaign_run_calls == []
+    assert repo.write_calls_total == 0
+
+
+def test_launch_campaign_now_clean_channel_on_delete_problem_blocks():
+    repo = FakeRepo(
+        rule=_ready_rule(),
+        saved_post={"content_json": {"kind": "text"}},
+        placements=[_placement(12, placement_status="delete_problem", delete_failed=1)],
+    )
+
+    result = asyncio.run(_runtime(repo).launch_campaign_now(rule_id=10, run_type="manual"))
+
+    assert result.ok is False
+    assert result.extra["clean_channel_blocked"] is True
+    assert result.extra["manual_launch_policy"]["action"] == "block"
+    assert repo.create_campaign_run_calls == []
+
+
+def test_launch_campaign_now_clean_channel_off_active_requires_confirmation_without_force():
+    repo = FakeRepo(
+        rule=_ready_rule(),
+        saved_post={"content_json": {"kind": "text"}},
+        clean_channel_settings={"ok": True, "rule_id": 10, "enabled": False},
+        placements=[_placement(13, delete_pending=1)],
+    )
+
+    result = asyncio.run(_runtime(repo).launch_campaign_now(rule_id=10, force_ignore_clean_channel=False))
+
+    assert result.ok is False
+    assert result.error_text == "Нужно подтвердить запуск поверх активной рекламы"
+    assert result.extra["requires_clean_channel_confirmation"] is True
+    assert result.extra["manual_launch_policy"]["action"] == "confirm_required"
+    assert repo.create_campaign_run_calls == []
+
+
+def test_launch_campaign_now_clean_channel_off_active_force_allows_campaign_run_creation():
+    repo = FakeRepo(
+        rule=_ready_rule(),
+        saved_post={"content_json": {"kind": "text"}},
+        clean_channel_settings={"ok": True, "rule_id": 10, "enabled": False},
+        placements=[_placement(14, delete_pending=1)],
+    )
+
+    result = asyncio.run(_runtime(repo).launch_campaign_now(rule_id=10, force_ignore_clean_channel=True))
+
+    assert result.ok is True
+    assert result.extra["campaign_run_id"] == 1
+    assert repo.create_campaign_run_calls
+    assert result.extra["manual_launch_policy"]["action"] == "allow_forced"
+    assert "clean_channel_blocked" not in result.extra
+
+
+def test_launch_campaign_now_clean_state_launches_normally():
+    repo = FakeRepo(rule=_ready_rule(), saved_post={"content_json": {"kind": "text"}}, placements=[])
+
+    result = asyncio.run(_runtime(repo).launch_campaign_now(rule_id=10))
+
+    assert result.ok is True
+    assert repo.create_campaign_run_calls
+    assert result.extra["manual_launch_policy"]["action"] == "allow"
+
+
+def test_launch_campaign_now_base_readiness_blocks_before_placement_service():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=None, repost_campaign_show_seconds=0, target_id="-1001")
+    repo = FakeRepo(rule=rule, saved_post=None, placements=[_placement(15, delete_pending=1)])
+
+    result = asyncio.run(_runtime(repo).launch_campaign_now(rule_id=10))
+
+    assert result.ok is False
+    assert result.extra["manual_launch_policy"]["action"] == "base_block"
+    assert repo.clean_channel_settings_calls == []
+    assert repo.list_active_campaign_placements_calls == []
+    assert repo.active_campaign_placements_summary_calls == []
+    assert repo.create_campaign_run_calls == []
+
+
+def test_launch_campaign_now_non_manual_ignores_force_and_keeps_legacy_active_block():
+    repo = FakeRepo(
+        rule=_ready_rule(),
+        saved_post={"content_json": {"kind": "text"}},
+        clean_channel_settings={"ok": True, "rule_id": 10, "enabled": False},
+        placements=[_placement(16, delete_pending=1)],
+        campaign_runs=[{"id": 99}],
+    )
+    runtime = _runtime(repo)
+    runtime.get_campaign_run_details = lambda **kwargs: {
+        "summary": {"delete_pending": 1, "delete_processing": 0, "delete_failed": 0},
+        "messages": [{"send_status": "sent", "delete_status": "pending", "delete_after_at": "2026-06-07T15:30:00+00:00"}],
+    }
+
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=10, run_type="scheduled", force_ignore_clean_channel=True))
+
+    assert result.ok is False
+    assert result.error_text == "Кампания уже активна"
+    assert result.extra["active_placement"] is True
+    assert repo.clean_channel_settings_calls == []
+    assert repo.list_active_campaign_placements_calls == []
+    assert repo.active_campaign_placements_summary_calls == []
+    assert repo.create_campaign_run_calls == []
+
+
+def test_launch_campaign_now_signature_backward_compatible_without_force_flag():
+    repo = FakeRepo(rule=_ready_rule(), saved_post={"content_json": {"kind": "text"}}, placements=[])
+
+    result = asyncio.run(_runtime(repo).launch_campaign_now(rule_id=10, admin_id=123))
+
+    assert result.ok is True
+    assert repo.create_campaign_run_calls[0]["started_by"] == 123
+
+
 def test_manual_policy_source_guards_keep_user_flow_unwired():
-    forbidden_files = [
-        "app/repost_campaign_ui.py",
-        "app/repost_campaign_handlers.py",
-        "app/repost_campaign_launch_job_service.py",
-        "app/repost_campaign_schedule_service.py",
-        "app/repost_campaign_scheduled_post_service.py",
-    ]
-    for file_name in forbidden_files:
-        assert "build_manual_launch_policy_state" not in Path(file_name).read_text()
+    guards = {
+        "app/repost_campaign_handlers.py": [
+            "rule_repost_campaign_launch_confirm_force",
+            "build_manual_launch_policy_state",
+        ],
+        "app/repost_campaign_launch_job_service.py": [
+            "force_ignore_clean_channel",
+            "build_manual_launch_policy_state",
+        ],
+        "app/repost_campaign_schedule_service.py": [
+            "force_ignore_clean_channel",
+            "build_manual_launch_policy_state",
+        ],
+        "app/repost_campaign_scheduled_post_service.py": [
+            "force_ignore_clean_channel",
+            "build_manual_launch_policy_state",
+            "RepostCampaignPlacementService",
+        ],
+    }
+    for file_name, forbidden_strings in guards.items():
+        source = Path(file_name).read_text()
+        for forbidden in forbidden_strings:
+            assert forbidden not in source
 
     runtime_source = Path("app/repost_campaign_runtime_service.py").read_text()
     match = re.search(
@@ -351,5 +505,5 @@ def test_manual_policy_source_guards_keep_user_flow_unwired():
     )
     assert match is not None
     launch_source = match.group(0)
-    assert "force_ignore_clean_channel" not in launch_source
-    assert "build_manual_launch_policy_state" not in launch_source
+    assert "force_ignore_clean_channel: bool = False" in launch_source
+    assert "build_manual_launch_policy_state" in launch_source
