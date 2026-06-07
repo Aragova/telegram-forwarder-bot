@@ -148,6 +148,7 @@ class Rule:
     video_intro_horizontal_id: int | None = None
     video_intro_vertical_id: int | None = None
     repost_campaign_enabled: bool = False
+    repost_campaign_clean_channel_enabled: bool = True
     repost_campaign_show_seconds: int = 0
     repost_campaign_saved_post_id: int | None = None
 

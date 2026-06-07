@@ -165,7 +165,8 @@ def test_vip_menu_clean_channel_button_changed():
     text, keyboard = build_repost_campaign_vip_features_view(rule_id=10)
     callbacks = _callbacks_from_keyboard(keyboard)
 
-    assert "rule_repost_campaign_active_placements:10:0" in callbacks
+    assert "rule_repost_campaign_clean_channel:10" in callbacks
+    assert "rule_repost_campaign_active_placements:10:0" not in callbacks
     assert "ViMi удалит предыдущий активный рекламный пост" not in text
     assert "удалит предыдущий" not in text
 
