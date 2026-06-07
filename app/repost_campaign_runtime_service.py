@@ -944,7 +944,12 @@ class RepostCampaignRuntimeService:
             },
         )
 
-    def build_campaign_launch_readiness(self, *, rule_id: int) -> dict:
+    def build_campaign_launch_readiness(
+        self,
+        *,
+        rule_id: int,
+        include_active_placement_block: bool = True,
+    ) -> dict:
         rule = self.repo.get_rule(rule_id)
         if not rule:
             return {"ok": False, "rule_id": rule_id, "ready": False, "can_launch": False, "can_launch_ready_only": False, "block_reasons": ["Правило не найдено"], "warnings": []}
@@ -1053,12 +1058,13 @@ class RepostCampaignRuntimeService:
         next_available_at = (datetime.fromisoformat(active_delete_after_at) + timedelta(seconds=30)).isoformat() if active_delete_after_at else None
         active_placement = delete_pending > 0 or int(summary.get("delete_processing") or 0) > 0
         can_launch = saved_post_exists and show_seconds > 0 and main_target_ready and extra_active_problem == 0 and will_send_total > 0
-        if active_placement:
-            block_reasons.append("Предыдущая кампания ещё активна: публикации ожидают автоудаления.")
-            can_launch = False
-        if delete_failed > 0:
-            block_reasons.append("Есть проблемы удаления в предыдущем запуске.")
-            can_launch = False
+        if include_active_placement_block:
+            if active_placement:
+                block_reasons.append("Предыдущая кампания ещё активна: публикации ожидают автоудаления.")
+                can_launch = False
+            if delete_failed > 0:
+                block_reasons.append("Есть проблемы удаления в предыдущем запуске.")
+                can_launch = False
         can_launch_ready_only = saved_post_exists and show_seconds > 0 and main_target_ready and will_send_total > 0 and has_skipped
         result = {
             "ok": True,
