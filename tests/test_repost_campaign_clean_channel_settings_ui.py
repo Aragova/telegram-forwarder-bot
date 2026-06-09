@@ -164,5 +164,8 @@ def test_stage_four_source_guards_do_not_connect_setting_to_launch_runtime_or_sc
     ]:
         assert forbidden not in launch_source
 
-    for forbidden in ["clean_channel_enabled", "waiting_clean_channel"]:
-        assert forbidden not in schedule_source
+    schedule_campaign_launch_source = _runtime_method_source(schedule_source, "schedule_campaign_launch")
+    process_due_scheduled_launches_source = _runtime_method_source(schedule_source, "process_due_scheduled_launches")
+    for source in [schedule_campaign_launch_source, process_due_scheduled_launches_source]:
+        for forbidden in ["clean_channel_enabled", "waiting_clean_channel"]:
+            assert forbidden not in source

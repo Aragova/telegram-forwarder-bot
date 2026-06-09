@@ -13,7 +13,6 @@ CAMPAIGN_SCHEDULE_TIMEZONE_OFFSET_MINUTES = 180
 CAMPAIGN_SCHEDULE_TIMEZONE_LABEL = "UTC+3"
 CAMPAIGN_SCHEDULE_LOOP_INTERVAL_SECONDS = 15
 CAMPAIGN_SCHEDULE_STUCK_SECONDS = 300
-CLEAN_CHANNEL_ENABLED_RESULT_KEY = "clean_channel_" "enabled"
 
 
 def campaign_schedule_now_utc() -> datetime:
@@ -103,10 +102,9 @@ class RepostCampaignScheduleService:
 
         if not base_readiness.get("can_launch"):
             self.logger.info(
-                "REPOST_CAMPAIGN_SCHEDULE_POLICY | rule_id=%s | action=%s | clean_channel_%s=%s | active_placements=%s | delete_problem=%s",
+                "REPOST_CAMPAIGN_SCHEDULE_POLICY | rule_id=%s | action=%s | clean_channel_enabled=%s | active_placements=%s | delete_problem=%s",
                 rule_id,
                 "base_block",
-                "enabled",
                 True,
                 0,
                 0,
@@ -119,7 +117,7 @@ class RepostCampaignScheduleService:
                 "scheduled_at_text": scheduled_at_text,
                 "base_readiness": base_readiness,
                 "clean_channel_settings": None,
-                **{CLEAN_CHANNEL_ENABLED_RESULT_KEY: True},
+                "clean_channel_enabled": True,
                 "clean_channel_policy": None,
                 "state": "base_block",
                 "action": "base_block",
@@ -146,19 +144,24 @@ class RepostCampaignScheduleService:
         try:
             policy = placement_service.build_launch_policy_preview(
                 rule_id=rule_id,
-                **{CLEAN_CHANNEL_ENABLED_RESULT_KEY: enabled},
+                clean_channel_enabled=enabled,
                 launch_mode="scheduled",
                 basic_only=True,
             )
         except Exception as exc:
+            self.logger.info(
+                "REPOST_CAMPAIGN_SCHEDULE_POLICY_FAILED | rule_id=%s | error=%s",
+                rule_id,
+                exc,
+            )
             policy = {
                 "ok": False,
                 "rule_id": int(rule_id),
                 "launch_mode": "scheduled",
-                **{CLEAN_CHANNEL_ENABLED_RESULT_KEY: enabled},
+                "clean_channel_enabled": enabled,
                 "state": "unknown",
                 "action": "block",
-                "error_text": str(exc) or "Не удалось проверить активные размещения",
+                "error_text": "Не удалось проверить активные размещения",
                 "active_placements_total": 0,
                 "delete_problem_total": 0,
                 "placements": [],
@@ -179,7 +182,7 @@ class RepostCampaignScheduleService:
                 "scheduled_at_text": scheduled_at_text,
                 "base_readiness": base_readiness,
                 "clean_channel_settings": settings,
-                **{CLEAN_CHANNEL_ENABLED_RESULT_KEY: enabled},
+                "clean_channel_enabled": enabled,
                 "clean_channel_policy": policy,
                 "state": "unknown",
                 "action": "policy_error",
@@ -241,10 +244,9 @@ class RepostCampaignScheduleService:
             )
         else:
             self.logger.info(
-                "REPOST_CAMPAIGN_SCHEDULE_POLICY | rule_id=%s | action=%s | clean_channel_%s=%s | active_placements=%s | delete_problem=%s",
+                "REPOST_CAMPAIGN_SCHEDULE_POLICY | rule_id=%s | action=%s | clean_channel_enabled=%s | active_placements=%s | delete_problem=%s",
                 rule_id,
                 action,
-                "enabled",
                 enabled,
                 active_placements_total,
                 delete_problem_total,
@@ -258,7 +260,7 @@ class RepostCampaignScheduleService:
             "scheduled_at_text": scheduled_at_text,
             "base_readiness": base_readiness,
             "clean_channel_settings": settings,
-            **{CLEAN_CHANNEL_ENABLED_RESULT_KEY: enabled},
+            "clean_channel_enabled": enabled,
             "clean_channel_policy": policy,
             "state": state,
             "action": action,
