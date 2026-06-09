@@ -4,7 +4,9 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
+from app.repost_campaign_placement_service import RepostCampaignPlacementService
 from app.repost_campaign_runtime_service import RepostCampaignActionResult
 
 CAMPAIGN_SCHEDULE_TIMEZONE_OFFSET_MINUTES = 180
@@ -85,6 +87,194 @@ class RepostCampaignScheduleService:
             readiness["expected_delete_at_text"] = "—"
 
         return readiness
+
+    def build_scheduled_launch_policy_state(
+        self,
+        *,
+        rule_id: int,
+        scheduled_at_utc: datetime,
+    ) -> dict[str, Any]:
+        scheduled_at_text = format_campaign_schedule_datetime(scheduled_at_utc)
+        base_readiness = self.campaign_runtime.build_campaign_launch_readiness(
+            rule_id=rule_id,
+            include_active_placement_block=False,
+        )
+
+        if not base_readiness.get("can_launch"):
+            self.logger.info(
+                "REPOST_CAMPAIGN_SCHEDULE_POLICY | rule_id=%s | action=%s | clean_channel_enabled=%s | active_placements=%s | delete_problem=%s",
+                rule_id,
+                "base_block",
+                True,
+                0,
+                0,
+            )
+            return {
+                "ok": True,
+                "rule_id": int(rule_id),
+                "launch_mode": "scheduled",
+                "scheduled_at": scheduled_at_utc.isoformat(),
+                "scheduled_at_text": scheduled_at_text,
+                "base_readiness": base_readiness,
+                "clean_channel_settings": None,
+                "clean_channel_enabled": True,
+                "clean_channel_policy": None,
+                "state": "base_block",
+                "action": "base_block",
+                "can_schedule": False,
+                "can_launch_if_due_now": False,
+                "requires_confirmation": False,
+                "will_wait_if_busy": False,
+                "will_launch_over_active": False,
+                "blocking_text": "Кампания не готова к планированию",
+                "warning_text": None,
+                "active_placements_total": 0,
+                "delete_problem_total": 0,
+                "placements": [],
+            }
+
+        settings = self.repo.get_rule_repost_campaign_clean_channel_settings(rule_id) or {
+            "ok": False,
+            "rule_id": rule_id,
+            "enabled": True,
+        }
+        enabled = True if not settings.get("ok") else bool(settings.get("enabled", True))
+
+        placement_service = RepostCampaignPlacementService(self.repo, logger=self.logger)
+        try:
+            policy = placement_service.build_launch_policy_preview(
+                rule_id=rule_id,
+                clean_channel_enabled=enabled,
+                launch_mode="scheduled",
+                basic_only=True,
+            )
+        except Exception as exc:
+            self.logger.info(
+                "REPOST_CAMPAIGN_SCHEDULE_POLICY_FAILED | rule_id=%s | error=%s",
+                rule_id,
+                exc,
+            )
+            policy = {
+                "ok": False,
+                "rule_id": int(rule_id),
+                "launch_mode": "scheduled",
+                "clean_channel_enabled": enabled,
+                "state": "unknown",
+                "action": "block",
+                "error_text": "Не удалось проверить активные размещения",
+                "active_placements_total": 0,
+                "delete_problem_total": 0,
+                "placements": [],
+            }
+
+        if not policy.get("ok"):
+            error_text = policy.get("error_text") or "Не удалось проверить активные размещения"
+            self.logger.info(
+                "REPOST_CAMPAIGN_SCHEDULE_POLICY_FAILED | rule_id=%s | error=%s",
+                rule_id,
+                error_text,
+            )
+            return {
+                "ok": False,
+                "rule_id": int(rule_id),
+                "launch_mode": "scheduled",
+                "scheduled_at": scheduled_at_utc.isoformat(),
+                "scheduled_at_text": scheduled_at_text,
+                "base_readiness": base_readiness,
+                "clean_channel_settings": settings,
+                "clean_channel_enabled": enabled,
+                "clean_channel_policy": policy,
+                "state": "unknown",
+                "action": "policy_error",
+                "can_schedule": False,
+                "can_launch_if_due_now": False,
+                "requires_confirmation": False,
+                "will_wait_if_busy": False,
+                "will_launch_over_active": False,
+                "blocking_text": "Не удалось проверить активные размещения",
+                "warning_text": None,
+                "active_placements_total": 0,
+                "delete_problem_total": 0,
+                "placements": [],
+            }
+
+        policy_action = str(policy.get("action") or "block")
+        state = str(policy.get("state") or "unknown")
+        active_placements_total = int(policy.get("active_placements_total") or 0)
+        delete_problem_total = int(policy.get("delete_problem_total") or 0)
+        placements = policy.get("placements") or []
+        blocking_text = None
+        warning_text = None
+
+        if policy_action == "allow":
+            action = "allow"
+            can_launch_if_due_now = True
+            requires_confirmation = False
+            will_wait_if_busy = False
+            will_launch_over_active = False
+        elif enabled and policy_action == "block":
+            action = "schedule_with_clean_channel_wait"
+            can_launch_if_due_now = False
+            requires_confirmation = False
+            will_wait_if_busy = True
+            will_launch_over_active = False
+            warning_text = "Если к моменту запуска в канале будет активная реклама, ViMi подождёт и не опубликует новый рекламный пост поверх неё."
+        elif (not enabled) and policy_action == "allow_with_warning":
+            action = "schedule_with_overlap_warning"
+            can_launch_if_due_now = True
+            requires_confirmation = True
+            will_wait_if_busy = False
+            will_launch_over_active = True
+            warning_text = "Чистый канал выключен. Если к моменту запуска в канале уже будет активная реклама, новая реклама может быть опубликована поверх старой."
+        else:
+            action = "policy_error"
+            can_launch_if_due_now = False
+            requires_confirmation = False
+            will_wait_if_busy = False
+            will_launch_over_active = False
+            blocking_text = "Не удалось проверить активные размещения"
+
+        ok = action != "policy_error"
+        can_schedule = action in {"allow", "schedule_with_clean_channel_wait", "schedule_with_overlap_warning"}
+        if not ok:
+            self.logger.info(
+                "REPOST_CAMPAIGN_SCHEDULE_POLICY_FAILED | rule_id=%s | error=%s",
+                rule_id,
+                f"unexpected policy action: {policy_action}",
+            )
+        else:
+            self.logger.info(
+                "REPOST_CAMPAIGN_SCHEDULE_POLICY | rule_id=%s | action=%s | clean_channel_enabled=%s | active_placements=%s | delete_problem=%s",
+                rule_id,
+                action,
+                enabled,
+                active_placements_total,
+                delete_problem_total,
+            )
+
+        return {
+            "ok": ok,
+            "rule_id": int(rule_id),
+            "launch_mode": "scheduled",
+            "scheduled_at": scheduled_at_utc.isoformat(),
+            "scheduled_at_text": scheduled_at_text,
+            "base_readiness": base_readiness,
+            "clean_channel_settings": settings,
+            "clean_channel_enabled": enabled,
+            "clean_channel_policy": policy,
+            "state": state,
+            "action": action,
+            "can_schedule": can_schedule,
+            "can_launch_if_due_now": can_launch_if_due_now,
+            "requires_confirmation": requires_confirmation,
+            "will_wait_if_busy": will_wait_if_busy,
+            "will_launch_over_active": will_launch_over_active,
+            "blocking_text": blocking_text,
+            "warning_text": warning_text,
+            "active_placements_total": active_placements_total if ok else 0,
+            "delete_problem_total": delete_problem_total if ok else 0,
+            "placements": placements if ok else [],
+        }
 
     def schedule_campaign_launch(
         self,
