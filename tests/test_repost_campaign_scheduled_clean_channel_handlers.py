@@ -92,7 +92,9 @@ def test_confirm_rechecks_policy_and_blocks_errors_source_guard():
 
     assert "ctx.is_admin_callback" in method
     assert "repost_campaign_admin_test_enabled" in method
+    assert "Ошибка данных" in method
     assert "build_scheduled_launch_policy_state" in method
+    assert "REPOST_CAMPAIGN_SCHEDULE_CONFIRM_POLICY_FAILED" in method
     assert 'policy_state.get("ok") is False or not can_schedule' in method
     assert "scheduled_policy=policy_state" in method
     assert "schedule_campaign_launch(" in method

@@ -284,6 +284,7 @@ class RepostCampaignScheduleService:
         created_by: int | None = None,
         scheduled_policy: dict[str, Any] | None = None,
     ) -> RepostCampaignActionResult:
+        policy_blocked = False
         if scheduled_policy is None:
             readiness = self.build_schedule_readiness(rule_id=rule_id, scheduled_at_utc=scheduled_at_utc)
             if not readiness.get("can_launch"):
@@ -294,7 +295,6 @@ class RepostCampaignScheduleService:
                     error_text="Кампания не готова к запуску",
                     extra={"launch_readiness": readiness},
                 )
-            preview = readiness
         else:
             policy_action = scheduled_policy.get("action")
             can_schedule = scheduled_policy.get("can_schedule") is True
@@ -305,16 +305,29 @@ class RepostCampaignScheduleService:
                 policy_action,
                 can_schedule,
             )
-            if scheduled_policy.get("ok") is False or not can_schedule:
-                return RepostCampaignActionResult(
-                    ok=False,
-                    action="schedule_campaign_launch",
-                    rule_id=rule_id,
-                    error_text=scheduled_policy.get("blocking_text") or "Кампания не готова к запуску",
-                    extra={"launch_readiness": readiness, "scheduled_policy": scheduled_policy},
-                )
-            preview = {**readiness, "scheduled_policy": scheduled_policy}
+            policy_blocked = scheduled_policy.get("ok") is False or not can_schedule
 
+        if not readiness.get("expected_delete_at_text"):
+            show_seconds = int(readiness.get("show_seconds") or 0)
+            if show_seconds > 0:
+                expected_delete_at = scheduled_at_utc + timedelta(seconds=show_seconds)
+                readiness = {
+                    **readiness,
+                    "expected_delete_at_text": format_campaign_schedule_datetime(expected_delete_at),
+                }
+            else:
+                readiness = {**readiness, "expected_delete_at_text": "—"}
+
+        if scheduled_policy is not None and policy_blocked:
+            return RepostCampaignActionResult(
+                ok=False,
+                action="schedule_campaign_launch",
+                rule_id=rule_id,
+                error_text=scheduled_policy.get("blocking_text") or "Кампания не готова к запуску",
+                extra={"launch_readiness": readiness, "scheduled_policy": scheduled_policy},
+            )
+
+        preview = {**readiness, "scheduled_policy": scheduled_policy} if scheduled_policy is not None else readiness
         scheduled_launch_id = self.repo.create_campaign_scheduled_launch(
             rule_id=rule_id,
             saved_post_id=int(readiness.get("saved_post_id")),
