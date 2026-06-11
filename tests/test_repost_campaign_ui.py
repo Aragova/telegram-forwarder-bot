@@ -939,7 +939,7 @@ def test_schedule_menu_view_shows_scheduled_launches_block():
     from app.repost_campaign_ui import build_repost_campaign_schedule_menu_view
     launches = [{"id": 123, "status": "scheduled", "scheduled_at": "2026-05-09T15:00:00+00:00"}]
     text, kb = build_repost_campaign_schedule_menu_view(rule_id=7, scheduled_launches=launches)
-    assert "Ближайшие запланированные запуски:" in text
+    assert "Ближайшие запуски:" in text
     assert "ожидает запуска" in text
     labels = [b.text for row in kb.inline_keyboard for b in row]
     assert "📄 Открыть запуск #123" in labels
@@ -948,9 +948,9 @@ def test_schedule_menu_view_shows_scheduled_launches_block():
 def test_scheduled_detail_view_status_mapping_and_cancel_visibility():
     from app.repost_campaign_ui import build_repost_campaign_scheduled_launch_detail_view
     text, kb = build_repost_campaign_scheduled_launch_detail_view(rule_id=1, scheduled_launch={"id": 1, "status": "failed", "scheduled_at": "2026-05-09T15:00:00+00:00", "saved_post_id": 26, "show_seconds": 86400})
-    assert "❌ ошибка запуска" in text
+    assert "❌ Не запущен" in text
     labels = [b.text for row in kb.inline_keyboard for b in row]
-    assert "❌ Отменить запуск" not in labels
+    assert "🚫 Отменить запуск" not in labels
 
 
 def test_launch_mode_view_contains_now_and_schedule_actions():

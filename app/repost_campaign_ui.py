@@ -611,6 +611,70 @@ def _safe_positive_int(value, *, default: int) -> int:
         parsed = int(default)
     return max(1, parsed)
 
+
+def _scheduled_launch_status_text(status: str) -> str:
+    status = str(status or "").strip().lower()
+    if status == "scheduled":
+        return "🕒 Ожидает запуска"
+    if status == "waiting_clean_channel":
+        return "🧹 Ждёт чистый канал"
+    if status == "processing":
+        return "🚀 Запускается"
+    if status == "launched":
+        return "✅ Запущен"
+    if status == "failed":
+        return "❌ Не запущен"
+    if status == "needs_review":
+        return "⚠️ Требуется проверка"
+    if status == "cancelled":
+        return "🚫 Отменён"
+    return "ℹ️ Статус неизвестен"
+
+
+def _safe_scheduled_launch_wait_reason(value) -> str:
+    fallback = "Чистый канал занят активной рекламой"
+    reason = str(value or "").strip()
+    if not reason:
+        return fallback
+    forbidden_markers = [
+        "traceback",
+        "exception",
+        "runtime",
+        "db",
+        "json",
+        "clean_channel_policy",
+        "base_readiness",
+        "target_id",
+        "run_id",
+        "sent_message_id",
+    ]
+    lowered = reason.lower()
+    if any(marker in lowered for marker in forbidden_markers):
+        return fallback
+    return reason[:500].strip() or fallback
+
+
+def _format_scheduled_launch_datetime(value) -> str:
+    text = format_campaign_datetime_text(value, timezone_offset_hours=3)
+    if not text or text == "не указано":
+        return "—"
+    return f"{text} UTC+3"
+
+
+def _scheduled_launch_waiting_clean_channel_block(row: dict) -> str:
+    next_retry_text = _format_scheduled_launch_datetime(row.get("clean_channel_next_retry_at"))
+    last_wait_text = _format_scheduled_launch_datetime(row.get("clean_channel_last_wait_at"))
+    attempts = _safe_non_negative_int(row.get("clean_channel_wait_attempt_count"))
+    reason = _safe_scheduled_launch_wait_reason(row.get("clean_channel_last_reason"))
+    return (
+        "🧹 Чистый канал\n"
+        "Статус: ждёт, пока активная реклама освободит канал.\n"
+        f"Следующая проверка: {next_retry_text}\n"
+        f"Попыток ожидания: {attempts}\n"
+        f"Последняя проверка: {last_wait_text}\n"
+        f"Причина: {reason}"
+    )
+
 def build_repost_campaign_vip_coming_soon_view(*, rule_id: int, feature: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
     return (
         "💎 Скоро в VIP функциях\n\nЭта функция появится в следующих обновлениях ViMi.",
@@ -629,14 +693,22 @@ def build_repost_campaign_schedule_menu_view(*, rule_id: int, scheduled_launches
     launches = scheduled_launches or []
     pending_lines: list[str] = []
     for row in launches:
-        if str(row.get("status") or "") != "scheduled":
+        status = str(row.get("status") or "").strip().lower()
+        if status not in {"scheduled", "waiting_clean_channel"}:
             continue
-        pending_lines.append(
-            f"🕒 {format_campaign_datetime_text(row.get('scheduled_at'), timezone_offset_hours=3)} UTC+3 · ожидает запуска"
-        )
-        rows.append([InlineKeyboardButton(text=f"📄 Открыть запуск #{int(row.get('id') or 0)}", callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{int(row.get('id') or 0)}")])
+        launch_id = int(row.get('id') or 0)
+        scheduled_text = _format_scheduled_launch_datetime(row.get('scheduled_at'))
+        if status == "waiting_clean_channel":
+            pending_lines.extend([
+                f"🧹 {scheduled_text} · ждёт чистый канал",
+                f"Следующая проверка: {_format_scheduled_launch_datetime(row.get('clean_channel_next_retry_at'))}",
+                f"Попыток ожидания: {_safe_non_negative_int(row.get('clean_channel_wait_attempt_count'))}",
+            ])
+        else:
+            pending_lines.append(f"🕒 {scheduled_text} · ожидает запуска")
+        rows.append([InlineKeyboardButton(text=f"📄 Открыть запуск #{launch_id}", callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{launch_id}")])
     if pending_lines:
-        text = f"{text}\n\nБлижайшие запланированные запуски:\n" + "\n".join(pending_lines[:5])
+        text = f"{text}\n\nБлижайшие запуски:\n" + "\n".join(pending_lines[:15])
     rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_launch:{rule_id}')])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1731,24 +1803,48 @@ def build_repost_campaign_schedule_preview_view(
 
 def build_repost_campaign_scheduled_launch_detail_view(*, rule_id:int, scheduled_launch:dict) -> tuple[str, InlineKeyboardMarkup]:
     from app.repost_campaign_schedule_service import format_campaign_schedule_datetime
-    status = str(scheduled_launch.get("status") or "scheduled").lower()
+    status = str(scheduled_launch.get("status") or "scheduled").strip().lower()
+    launch_id = int(scheduled_launch.get("id") or 0)
     if status == "launched":
         return ("🕒 Запланированный запуск\n\n🚀 Запуск выполнен", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📄 Открыть размещение', callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{scheduled_launch.get('campaign_run_id')}")]]))
-    status_map = {
-        "scheduled": "🕒 ожидает запуска",
-        "processing": "🟡 запускается",
-        "failed": "❌ ошибка запуска",
-        "needs_review": "⚠️ Требуется проверка",
-        "cancelled": "⛔ отменён",
-        "expired": "⚪ просрочен",
-    }
+
+    if status == "waiting_clean_channel":
+        text = (
+            "🧹 Запуск ждёт чистый канал\n\n"
+            f"ID запуска: #{launch_id}\n"
+            f"Статус: {_scheduled_launch_status_text(status)}\n"
+            f"Время запуска: {_format_scheduled_launch_datetime(scheduled_launch.get('scheduled_at'))}\n"
+            f"Следующая проверка: {_format_scheduled_launch_datetime(scheduled_launch.get('clean_channel_next_retry_at'))}\n"
+            f"Попыток ожидания: {_safe_non_negative_int(scheduled_launch.get('clean_channel_wait_attempt_count'))}\n"
+            f"Последняя проверка: {_format_scheduled_launch_datetime(scheduled_launch.get('clean_channel_last_wait_at'))}\n"
+            f"Причина: {_safe_scheduled_launch_wait_reason(scheduled_launch.get('clean_channel_last_reason'))}\n\n"
+            "ViMi не публикует новый рекламный пост поверх активной рекламы, пока включён “Чистый канал”.\n"
+            "Когда канал освободится, запуск продолжится автоматически."
+        )
+        rows = [
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{launch_id}")],
+            [InlineKeyboardButton(text="🧹 Активные размещения", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")],
+            [InlineKeyboardButton(text="🚫 Отменить запуск", callback_data=f"rule_repost_campaign_scheduled_cancel_confirm:{rule_id}:{launch_id}")],
+            [InlineKeyboardButton(text="🕒 К расписанию", callback_data=f"rule_repost_campaign_schedule_current:{rule_id}")],
+            [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        ]
+        return trim_campaign_text_for_telegram(text), InlineKeyboardMarkup(inline_keyboard=rows)
+
+    scheduled_at = scheduled_launch.get('scheduled_at')
+    show_seconds = int(scheduled_launch.get('show_seconds') or 0)
+    expected_delete_text = "не указано"
+    try:
+        expected_delete = datetime.fromisoformat(str(scheduled_at).replace('Z','+00:00')) + timedelta(seconds=show_seconds)
+        expected_delete_text = format_campaign_schedule_datetime(expected_delete)
+    except Exception:
+        expected_delete_text = "не указано"
     text = (
         "🕒 Запланированный запуск\n\n"
-        f"Статус: {status_map.get(status, status)}\n"
-        f"Старт: {format_campaign_schedule_datetime(scheduled_launch.get('scheduled_at'))}\n"
+        f"Статус: {_scheduled_launch_status_text(status)}\n"
+        f"Старт: {format_campaign_schedule_datetime(scheduled_at)}\n"
         f"Пост: #{int(scheduled_launch.get('saved_post_id') or 0)}\n"
-        f"Срок размещения: {format_campaign_show_seconds_text(int(scheduled_launch.get('show_seconds') or 0))}\n"
-        f"Ожидаемое удаление: {format_campaign_schedule_datetime((datetime.fromisoformat(str(scheduled_launch.get('scheduled_at')).replace('Z','+00:00')) + timedelta(seconds=int(scheduled_launch.get('show_seconds') or 0))))}"
+        f"Срок размещения: {format_campaign_show_seconds_text(show_seconds)}\n"
+        f"Ожидаемое удаление: {expected_delete_text}"
     )
     if status == "needs_review":
         review_error = format_campaign_error_text(scheduled_launch.get("error_text"), limit=800)
@@ -1762,9 +1858,9 @@ def build_repost_campaign_scheduled_launch_detail_view(*, rule_id:int, scheduled
 
     rows = []
     if status == "scheduled":
-        rows.append([InlineKeyboardButton(text='❌ Отменить запуск', callback_data=f"rule_repost_campaign_scheduled_cancel_confirm:{rule_id}:{scheduled_launch.get('id')}")])
+        rows.append([InlineKeyboardButton(text='🚫 Отменить запуск', callback_data=f"rule_repost_campaign_scheduled_cancel_confirm:{rule_id}:{launch_id}")])
     if status == "needs_review":
-        rows.append([InlineKeyboardButton(text='🔄 Обновить', callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{scheduled_launch.get('id')}")])
+        rows.append([InlineKeyboardButton(text='🔄 Обновить', callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{launch_id}")])
         rows.append([InlineKeyboardButton(text='⬅️ Назад к кампании', callback_data=f'rule_repost_campaign_menu:{rule_id}')])
     else:
         rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data=f'rule_repost_campaign_schedule_menu:{rule_id}')])
@@ -1773,28 +1869,56 @@ def build_repost_campaign_scheduled_launch_detail_view(*, rule_id:int, scheduled
 
 def build_repost_campaign_schedule_result_view(*, rule_id: int, scheduled_launch: dict) -> tuple[str, InlineKeyboardMarkup]:
     from app.repost_campaign_schedule_service import format_campaign_schedule_datetime
+    status = str(scheduled_launch.get("status") or "scheduled").strip().lower()
+    launch_id = int(scheduled_launch.get('id') or 0)
+    if status == "waiting_clean_channel":
+        text = (
+            "🧹 Запуск ждёт чистый канал\n\n"
+            "Запуск уже поставлен в очередь ожидания.\n"
+            "ViMi проверит канал повторно и продолжит запуск автоматически, когда активная реклама освободит канал.\n\n"
+            f"Следующая проверка: {_format_scheduled_launch_datetime(scheduled_launch.get('clean_channel_next_retry_at'))}\n"
+            f"Попыток ожидания: {_safe_non_negative_int(scheduled_launch.get('clean_channel_wait_attempt_count'))}"
+        )
+        return trim_campaign_text_for_telegram(text), InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{launch_id}")],
+            [InlineKeyboardButton(text="🧹 Активные размещения", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")],
+            [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        ])
+
     dt = scheduled_launch.get("scheduled_at")
     show_seconds = int(scheduled_launch.get("show_seconds") or 0)
-    expected = datetime.fromisoformat(str(dt).replace("Z", "+00:00")) + timedelta(seconds=show_seconds)
+    try:
+        expected = datetime.fromisoformat(str(dt).replace("Z", "+00:00")) + timedelta(seconds=show_seconds)
+        expected_text = format_campaign_schedule_datetime(expected)
+    except Exception:
+        expected_text = "не указано"
     text = (
         "✅ Запуск запланирован\n\n"
         f"Старт: {format_campaign_schedule_datetime(dt)}\n"
-        f"Ожидаемое удаление: {format_campaign_schedule_datetime(expected)}\n\n"
+        f"Ожидаемое удаление: {expected_text}\n\n"
         "ViMi автоматически запустит кампанию в указанное время."
     )
     return text, InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📄 Открыть запланированный запуск", callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{scheduled_launch.get('id')}")],
+        [InlineKeyboardButton(text="📄 Открыть запланированный запуск", callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{launch_id}")],
         [InlineKeyboardButton(text="🕒 Запланировать ещё", callback_data=f"rule_repost_campaign_schedule_current:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
 
 
-def build_repost_campaign_scheduled_launch_cancel_confirm_view(*, rule_id: int, scheduled_launch_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    return ("❌ Отменить запланированный запуск?\n\nДействие нельзя отменить.", InlineKeyboardMarkup(inline_keyboard=[
+def build_repost_campaign_scheduled_launch_cancel_confirm_view(*, rule_id: int, scheduled_launch_id: int, scheduled_launch: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    status = str((scheduled_launch or {}).get("status") or "").strip().lower()
+    if status == "waiting_clean_channel":
+        text = (
+            "🚫 Отменить запуск, который ждёт чистый канал?\n\n"
+            "ViMi перестанет ждать освобождения канала и не запустит эту кампанию по расписанию.\n"
+            "Действие нельзя отменить."
+        )
+    else:
+        text = "🚫 Отменить запланированный запуск?\n\nДействие нельзя отменить."
+    return (text, InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Отменить запуск", callback_data=f"rule_repost_campaign_scheduled_cancel:{rule_id}:{scheduled_launch_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_scheduled_detail:{rule_id}:{scheduled_launch_id}")],
     ]))
-
 
 def build_repost_campaign_scheduled_launch_cancel_result_view(*, rule_id: int, ok: bool) -> tuple[str, InlineKeyboardMarkup]:
     return ("✅ Запланированный запуск отменён" if ok else "❌ Не удалось отменить запуск", InlineKeyboardMarkup(inline_keyboard=[
