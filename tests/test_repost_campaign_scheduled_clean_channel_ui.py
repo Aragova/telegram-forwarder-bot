@@ -6,7 +6,10 @@ from app.repost_campaign_ui import (
     build_repost_campaign_schedule_clean_channel_error_view,
     build_repost_campaign_schedule_clean_channel_notice_view,
     build_repost_campaign_schedule_clean_channel_warning_view,
+    build_repost_campaign_schedule_menu_view,
     build_repost_campaign_schedule_preview_view,
+    build_repost_campaign_schedule_result_view,
+    build_repost_campaign_scheduled_launch_detail_view,
 )
 
 SCHEDULED_AT = "2026-06-10T09:00:00+00:00"
@@ -224,3 +227,197 @@ def test_stage_six_two_source_guards_keep_ui_unwired():
         "build_repost_campaign_schedule_clean_channel_warning_view",
     ]:
         assert forbidden not in handlers
+
+
+
+def test_menu_shows_waiting_clean_channel_launch():
+    text, keyboard = build_repost_campaign_schedule_menu_view(
+        rule_id=10,
+        scheduled_launches=[
+            {
+                "id": 123,
+                "status": "waiting_clean_channel",
+                "scheduled_at": "2026-06-10T09:00:00+00:00",
+                "clean_channel_next_retry_at": "2026-06-10T09:05:00+00:00",
+                "clean_channel_wait_attempt_count": 2,
+            }
+        ],
+    )
+    callbacks = _callbacks_from_keyboard(keyboard)
+
+    assert "ждёт чистый канал" in text
+    assert "Следующая проверка" in text
+    assert "Попыток ожидания: 2" in text
+    assert "rule_repost_campaign_scheduled_detail:10:123" in callbacks
+
+
+def test_menu_still_shows_scheduled_launch_status():
+    text, keyboard = build_repost_campaign_schedule_menu_view(
+        rule_id=10,
+        scheduled_launches=[{"id": 124, "status": "scheduled", "scheduled_at": "2026-06-10T09:00:00+00:00"}],
+    )
+    callbacks = _callbacks_from_keyboard(keyboard)
+
+    assert "ожидает запуска" in text
+    assert "rule_repost_campaign_scheduled_detail:10:124" in callbacks
+
+
+def test_menu_skips_terminal_launches_in_nearest_block():
+    text, keyboard = build_repost_campaign_schedule_menu_view(
+        rule_id=10,
+        scheduled_launches=[
+            {"id": 201, "status": "launched", "scheduled_at": "2026-06-10T09:00:00+00:00"},
+            {"id": 202, "status": "failed", "scheduled_at": "2026-06-10T09:05:00+00:00"},
+            {"id": 203, "status": "cancelled", "scheduled_at": "2026-06-10T09:10:00+00:00"},
+        ],
+    )
+    callbacks = _callbacks_from_keyboard(keyboard)
+
+    assert "Ближайшие запуски" not in text
+    assert not any(callback and callback.startswith("rule_repost_campaign_scheduled_detail:10:20") for callback in callbacks)
+
+
+def test_detail_waiting_clean_channel():
+    text, keyboard = build_repost_campaign_scheduled_launch_detail_view(
+        rule_id=10,
+        scheduled_launch={
+            "id": 123,
+            "status": "waiting_clean_channel",
+            "scheduled_at": "2026-06-10T09:00:00+00:00",
+            "clean_channel_next_retry_at": "2026-06-10T09:05:00+00:00",
+            "clean_channel_last_wait_at": "2026-06-10T09:00:30+00:00",
+            "clean_channel_wait_attempt_count": 2,
+            "clean_channel_last_reason": "Чистый канал занят активной рекламой",
+            "clean_channel_policy_json": {"action": "schedule_with_clean_channel_wait"},
+        },
+    )
+    callbacks = _callbacks_from_keyboard(keyboard)
+
+    assert "Запуск ждёт чистый канал" in text
+    assert "Статус: 🧹 Ждёт чистый канал" in text
+    assert "Следующая проверка" in text
+    assert "Попыток ожидания: 2" in text
+    assert "Причина: Чистый канал занят активной рекламой" in text
+    assert "продолжится автоматически" in text
+    assert "rule_repost_campaign_scheduled_detail:10:123" in callbacks
+    assert "rule_repost_campaign_active_placements:10:0" in callbacks
+    assert "rule_repost_campaign_scheduled_cancel_confirm:10:123" in callbacks
+    assert "rule_repost_campaign_menu:10" in callbacks
+    assert "clean_channel_policy_json" not in text
+    assert "schedule_with_clean_channel_wait" not in text
+    assert "{'action'" not in text
+    assert '"action"' not in text
+
+
+def test_detail_waiting_reason_sanitizer():
+    text, _ = build_repost_campaign_scheduled_launch_detail_view(
+        rule_id=10,
+        scheduled_launch={
+            "id": 123,
+            "status": "waiting_clean_channel",
+            "scheduled_at": "2026-06-10T09:00:00+00:00",
+            "clean_channel_next_retry_at": "2026-06-10T09:05:00+00:00",
+            "clean_channel_last_wait_at": "2026-06-10T09:00:30+00:00",
+            "clean_channel_wait_attempt_count": 2,
+            "clean_channel_last_reason": "Traceback db runtime json clean_channel_policy",
+        },
+    )
+    lowered = text.lower()
+
+    assert "traceback" not in lowered
+    assert "db" not in lowered
+    assert "runtime" not in lowered
+    assert "json" not in lowered
+    assert "clean_channel_policy" not in lowered
+    assert "Чистый канал занят активной рекламой" in text
+
+
+def test_detail_scheduled_still_supports_cancel():
+    text, keyboard = build_repost_campaign_scheduled_launch_detail_view(
+        rule_id=10,
+        scheduled_launch={
+            "id": 123,
+            "status": "scheduled",
+            "scheduled_at": "2026-06-10T09:00:00+00:00",
+            "saved_post_id": 2,
+            "show_seconds": 3600,
+        },
+    )
+    callbacks = _callbacks_from_keyboard(keyboard)
+
+    assert "Запланированный запуск" in text
+    assert "Ожидает запуска" in text
+    assert "rule_repost_campaign_scheduled_cancel_confirm:10:123" in callbacks
+
+
+def test_detail_terminal_statuses_do_not_show_cancel_button():
+    for status in ["launched", "failed", "cancelled", "needs_review"]:
+        _, keyboard = build_repost_campaign_scheduled_launch_detail_view(
+            rule_id=10,
+            scheduled_launch={
+                "id": 123,
+                "status": status,
+                "scheduled_at": "2026-06-10T09:00:00+00:00",
+                "saved_post_id": 2,
+                "show_seconds": 3600,
+            },
+        )
+        callbacks = _callbacks_from_keyboard(keyboard)
+
+        assert "rule_repost_campaign_scheduled_cancel_confirm:10:123" not in callbacks
+
+
+def test_result_view_waiting_clean_channel():
+    text, keyboard = build_repost_campaign_schedule_result_view(
+        rule_id=10,
+        scheduled_launch={
+            "id": 123,
+            "status": "waiting_clean_channel",
+            "clean_channel_next_retry_at": "2026-06-10T09:05:00+00:00",
+            "clean_channel_wait_attempt_count": 2,
+        },
+    )
+    callbacks = _callbacks_from_keyboard(keyboard)
+
+    assert "ждёт чистый канал" in text
+    assert "Следующая проверка" in text
+    assert "Попыток ожидания: 2" in text
+    assert "rule_repost_campaign_active_placements:10:0" in callbacks
+
+
+def test_detail_long_wait_reason_is_trimmed():
+    text, _ = build_repost_campaign_scheduled_launch_detail_view(
+        rule_id=10,
+        scheduled_launch={
+            "id": 123,
+            "status": "waiting_clean_channel",
+            "scheduled_at": "2026-06-10T09:00:00+00:00",
+            "clean_channel_next_retry_at": "2026-06-10T09:05:00+00:00",
+            "clean_channel_last_wait_at": "2026-06-10T09:00:30+00:00",
+            "clean_channel_wait_attempt_count": 2,
+            "clean_channel_last_reason": "длинная причина " * 5000,
+        },
+    )
+
+    assert len(text) <= TG_TEXT_SAFE_LIMIT
+    assert "Причина: длинная причина" in text
+
+
+def test_stage_six_six_source_guards_keep_waiting_ui_only():
+    schedule_handlers = Path("app/repost_campaign_schedule_handlers.py").read_text(encoding="utf-8")
+    schedule_service = Path("app/repost_campaign_schedule_service.py").read_text(encoding="utf-8")
+    scheduled_post_service = Path("app/repost_campaign_scheduled_post_service.py").read_text(encoding="utf-8")
+    ui = Path("app/repost_campaign_ui.py").read_text(encoding="utf-8")
+
+    assert "Запуск ждёт чистый канал" not in schedule_service
+    assert "Следующая проверка" not in schedule_service
+    assert "clean_channel_next_retry_at" not in schedule_handlers
+    assert "clean_channel_wait_attempt_count" not in schedule_handlers
+    assert "clean_channel_last_reason" not in schedule_handlers
+    assert "waiting_clean_channel" not in scheduled_post_service
+    assert "clean_channel_next_retry_at" not in scheduled_post_service
+    assert "clean_channel_wait_attempt_count" not in scheduled_post_service
+    assert "waiting_clean_channel" in ui
+    assert "clean_channel_next_retry_at" in ui
+    assert "clean_channel_wait_attempt_count" in ui
+    assert "Ждёт чистый канал" in ui
