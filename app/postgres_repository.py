@@ -868,9 +868,6 @@ class PostgresRepository(RepositoryProtocol):
         );
         CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_due
         ON campaign_scheduled_launches(status, scheduled_at);
-        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_waiting_clean_channel_due
-        ON campaign_scheduled_launches (clean_channel_next_retry_at, id)
-        WHERE status = 'waiting_clean_channel';
         CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_rule_status
         ON campaign_scheduled_launches(rule_id, status, scheduled_at DESC);
         CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_campaign_run

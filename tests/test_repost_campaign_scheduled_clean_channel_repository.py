@@ -210,6 +210,22 @@ def test_returned_scheduled_launch_rows_include_clean_channel_fields_and_normali
     assert claimed[0]["clean_channel_policy_json"] == {"action": "schedule_with_clean_channel_wait"}
 
 
+def test_waiting_clean_channel_due_index_is_not_created_before_alter_columns():
+    source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+
+    execute_script_pos = source.index("self.client.execute_script(init_sql)")
+    early_source = source[:execute_script_pos]
+    late_source = source[execute_script_pos:]
+
+    alter_token = "ALTER TABLE campaign_scheduled_launches ADD COLUMN IF NOT EXISTS clean_channel_next_retry_at"
+    index_token = "idx_campaign_scheduled_launches_waiting_clean_channel_due"
+
+    assert index_token not in early_source
+    assert alter_token in late_source
+    assert index_token in late_source
+    assert late_source.index(alter_token) < late_source.index(index_token)
+
+
 def test_source_guards_worker_enforcement_stays_out_of_handlers_and_vip_posts():
     schedule_source = Path("app/repost_campaign_schedule_service.py").read_text(encoding="utf-8")
     process_due_source = _method_source(schedule_source, "process_due_scheduled_launches")
