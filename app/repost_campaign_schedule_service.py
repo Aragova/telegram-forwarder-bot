@@ -282,17 +282,52 @@ class RepostCampaignScheduleService:
         rule_id: int,
         scheduled_at_utc: datetime,
         created_by: int | None = None,
+        scheduled_policy: dict[str, Any] | None = None,
     ) -> RepostCampaignActionResult:
-        readiness = self.build_schedule_readiness(rule_id=rule_id, scheduled_at_utc=scheduled_at_utc)
-        if not readiness.get("can_launch"):
+        policy_blocked = False
+        if scheduled_policy is None:
+            readiness = self.build_schedule_readiness(rule_id=rule_id, scheduled_at_utc=scheduled_at_utc)
+            if not readiness.get("can_launch"):
+                return RepostCampaignActionResult(
+                    ok=False,
+                    action="schedule_campaign_launch",
+                    rule_id=rule_id,
+                    error_text="Кампания не готова к запуску",
+                    extra={"launch_readiness": readiness},
+                )
+        else:
+            policy_action = scheduled_policy.get("action")
+            can_schedule = scheduled_policy.get("can_schedule") is True
+            readiness = scheduled_policy.get("base_readiness") or self.build_schedule_readiness(rule_id=rule_id, scheduled_at_utc=scheduled_at_utc)
+            self.logger.info(
+                "REPOST_CAMPAIGN_SCHEDULE_CREATE_POLICY | rule_id=%s | action=%s | can_schedule=%s",
+                rule_id,
+                policy_action,
+                can_schedule,
+            )
+            policy_blocked = scheduled_policy.get("ok") is False or not can_schedule
+
+        if not readiness.get("expected_delete_at_text"):
+            show_seconds = int(readiness.get("show_seconds") or 0)
+            if show_seconds > 0:
+                expected_delete_at = scheduled_at_utc + timedelta(seconds=show_seconds)
+                readiness = {
+                    **readiness,
+                    "expected_delete_at_text": format_campaign_schedule_datetime(expected_delete_at),
+                }
+            else:
+                readiness = {**readiness, "expected_delete_at_text": "—"}
+
+        if scheduled_policy is not None and policy_blocked:
             return RepostCampaignActionResult(
                 ok=False,
                 action="schedule_campaign_launch",
                 rule_id=rule_id,
-                error_text="Кампания не готова к запуску",
-                extra={"launch_readiness": readiness},
+                error_text=scheduled_policy.get("blocking_text") or "Кампания не готова к запуску",
+                extra={"launch_readiness": readiness, "scheduled_policy": scheduled_policy},
             )
 
+        preview = {**readiness, "scheduled_policy": scheduled_policy} if scheduled_policy is not None else readiness
         scheduled_launch_id = self.repo.create_campaign_scheduled_launch(
             rule_id=rule_id,
             saved_post_id=int(readiness.get("saved_post_id")),
@@ -301,19 +336,22 @@ class RepostCampaignScheduleService:
             timezone_offset_minutes=CAMPAIGN_SCHEDULE_TIMEZONE_OFFSET_MINUTES,
             timezone_label=CAMPAIGN_SCHEDULE_TIMEZONE_LABEL,
             created_by=created_by,
-            preview=readiness,
+            preview=preview,
         )
+        extra = {
+            "scheduled_launch_id": scheduled_launch_id,
+            "scheduled_at": scheduled_at_utc.isoformat(),
+            "scheduled_at_text": format_campaign_schedule_datetime(scheduled_at_utc),
+            "expected_delete_at_text": readiness.get("expected_delete_at_text"),
+        }
+        if scheduled_policy is not None:
+            extra["scheduled_policy"] = scheduled_policy
         return RepostCampaignActionResult(
             ok=bool(scheduled_launch_id),
             action="schedule_campaign_launch",
             rule_id=rule_id,
             saved_post_id=int(readiness.get("saved_post_id")),
-            extra={
-                "scheduled_launch_id": scheduled_launch_id,
-                "scheduled_at": scheduled_at_utc.isoformat(),
-                "scheduled_at_text": format_campaign_schedule_datetime(scheduled_at_utc),
-                "expected_delete_at_text": readiness.get("expected_delete_at_text"),
-            },
+            extra=extra,
         )
 
     def cancel_scheduled_launch(self, *, scheduled_launch_id: int, cancelled_by: int | None = None) -> RepostCampaignActionResult:

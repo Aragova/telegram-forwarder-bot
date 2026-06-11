@@ -59,5 +59,7 @@ def test_manual_schedule_input_branch_builds_preview_and_returns():
     assert "if await handle_repost_campaign_stateful_private_input(campaign_handlers_ctx, message, state, text):" in source
     assert 'if state.get("state") != "repost_campaign_schedule_input":' in module_source
     assert "parsed = parse_campaign_schedule_input_to_utc(text)" in module_source
-    assert "text_preview, kb_preview = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=parsed)" in module_source
-    assert "ctx.reset_user_state(message.from_user.id if message.from_user else None)" in module_source
+    assert "build_scheduled_launch_policy_state" in module_source
+    assert "text_preview, kb_preview = build_repost_campaign_schedule_preview_view(" in module_source
+    assert "scheduled_policy=policy_state" in module_source
+    assert "schedule_policy_ack" in module_source

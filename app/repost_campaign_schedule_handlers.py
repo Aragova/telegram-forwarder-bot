@@ -26,6 +26,96 @@ REPOST_CAMPAIGN_SCHEDULED_CANCEL_CONFIRM_PREFIX = "rule_repost_campaign_" + "sch
 REPOST_CAMPAIGN_SCHEDULED_CANCEL_PREFIX = "rule_repost_campaign_" + "scheduled_cancel:"
 
 
+def _build_repost_campaign_schedule_service(ctx: RepostCampaignHandlersContext) -> RepostCampaignScheduleService:
+    return RepostCampaignScheduleService(
+        repo=ctx.db,
+        campaign_runtime=build_repost_campaign_runtime(ctx),
+        logger_=ctx.logger,
+    )
+
+
+def _schedule_policy_epoch(scheduled_at_utc: datetime) -> int:
+    return int(scheduled_at_utc.timestamp())
+
+
+def _schedule_policy_ack_key(rule_id: int, epoch: int) -> str:
+    return f"repost_campaign_schedule_policy_ack:{rule_id}:{epoch}"
+
+
+def _set_schedule_policy_ack(ctx: RepostCampaignHandlersContext, callback: CallbackQuery, *, rule_id: int, scheduled_at_utc: datetime, action: str) -> None:
+    if action != "schedule_with_overlap_warning":
+        return
+    user_id = callback.from_user.id if callback.from_user else None
+    if user_id is None:
+        return
+    epoch = _schedule_policy_epoch(scheduled_at_utc)
+    ctx.user_states.setdefault(user_id, {})["schedule_policy_ack"] = {
+        "key": _schedule_policy_ack_key(rule_id, epoch),
+        "action": action,
+    }
+
+
+def _has_schedule_policy_ack(ctx: RepostCampaignHandlersContext, callback: CallbackQuery, *, rule_id: int, scheduled_at_utc: datetime, action: str) -> bool:
+    if action != "schedule_with_overlap_warning":
+        return False
+    user_id = callback.from_user.id if callback.from_user else None
+    if user_id is None:
+        return False
+    epoch = _schedule_policy_epoch(scheduled_at_utc)
+    ack = ctx.user_states.get(user_id, {}).get("schedule_policy_ack") or {}
+    return ack.get("key") == _schedule_policy_ack_key(rule_id, epoch) and ack.get("action") == action
+
+
+def _clear_schedule_policy_ack(ctx: RepostCampaignHandlersContext, callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id if callback.from_user else None
+    if user_id is None:
+        return
+    ctx.user_states.get(user_id, {}).pop("schedule_policy_ack", None)
+
+
+async def _build_repost_campaign_schedule_policy_preview(
+    *,
+    ctx: RepostCampaignHandlersContext,
+    rule_id: int,
+    scheduled_at_utc: datetime,
+) -> tuple[str, InlineKeyboardMarkup, dict]:
+    service = _build_repost_campaign_schedule_service(ctx)
+    try:
+        policy_state = await ctx.run_db(
+            lambda: service.build_scheduled_launch_policy_state(
+                rule_id=rule_id,
+                scheduled_at_utc=scheduled_at_utc,
+            )
+        )
+    except Exception:
+        ctx.logger.warning(
+            "REPOST_CAMPAIGN_SCHEDULE_PREVIEW_POLICY_FAILED | rule_id=%s",
+            rule_id,
+            exc_info=True,
+        )
+        policy_state = {
+            "ok": False,
+            "action": "policy_error",
+            "can_schedule": False,
+            "scheduled_at": scheduled_at_utc.isoformat(),
+            "blocking_text": "Не удалось проверить Чистый канал",
+        }
+    readiness = policy_state.get("base_readiness") or {}
+    text, kb = build_repost_campaign_schedule_preview_view(
+        rule_id=rule_id,
+        readiness=readiness,
+        scheduled_at_utc=scheduled_at_utc,
+        scheduled_policy=policy_state,
+    )
+    ctx.logger.info(
+        "REPOST_CAMPAIGN_SCHEDULE_PREVIEW_POLICY_UI | rule_id=%s | action=%s | can_schedule=%s",
+        rule_id,
+        policy_state.get("action"),
+        policy_state.get("can_schedule") is True,
+    )
+    return text, kb, policy_state
+
+
 def register_repost_campaign_schedule_handlers(dp: Dispatcher, ctx: RepostCampaignHandlersContext) -> None:
     @dp.callback_query(lambda c: c.data.startswith(REPOST_CAMPAIGN_SCHEDULED_DETAIL_PREFIX))
     async def handle_rule_repost_campaign_scheduled_detail(callback: CallbackQuery):
@@ -70,7 +160,7 @@ def register_repost_campaign_schedule_handlers(dp: Dispatcher, ctx: RepostCampai
             return
         if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
-        runtime = RepostCampaignScheduleService(repo=ctx.db, campaign_runtime=build_repost_campaign_runtime(ctx), logger_=ctx.logger)
+        runtime = _build_repost_campaign_schedule_service(ctx)
         result = runtime.cancel_scheduled_launch(scheduled_launch_id=launch_id, cancelled_by=callback.from_user.id if callback.from_user else None)
         text, kb = build_repost_campaign_scheduled_launch_cancel_result_view(rule_id=rule_id, ok=result.ok)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
@@ -191,7 +281,19 @@ def register_repost_campaign_schedule_handlers(dp: Dispatcher, ctx: RepostCampai
         if int(readiness.get("show_seconds") or 0) <= 0:
             text, kb = build_repost_campaign_schedule_wizard_step3_view(rule_id=rule_id, readiness=readiness)
         else:
-            text, kb = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=scheduled_at_utc)
+            text, kb, policy_state = await _build_repost_campaign_schedule_policy_preview(
+                ctx=ctx,
+                rule_id=rule_id,
+                scheduled_at_utc=scheduled_at_utc,
+            )
+            _clear_schedule_policy_ack(ctx, callback)
+            _set_schedule_policy_ack(
+                ctx,
+                callback,
+                rule_id=rule_id,
+                scheduled_at_utc=scheduled_at_utc,
+                action=str(policy_state.get("action") or ""),
+            )
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_input:"))
@@ -210,20 +312,107 @@ def register_repost_campaign_schedule_handlers(dp: Dispatcher, ctx: RepostCampai
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_schedule_confirm:"))
     async def handle_rule_repost_campaign_schedule_confirm(callback: CallbackQuery):
-        _, rule_id_text, epoch_text = (callback.data or "").split(":", 2)
-        rule_id = int(rule_id_text)
+        try:
+            _, rule_id_text, epoch_text = (callback.data or "").split(":", 2)
+            rule_id = int(rule_id_text)
+            epoch = int(epoch_text)
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
         if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
         ctx.logger.info("REPOST_CAMPAIGN_SCHEDULE_CREATE_STARTED | rule_id=%s | admin_id=%s", rule_id, callback.from_user.id if callback.from_user else None)
-        scheduled_at_utc = datetime.fromtimestamp(int(epoch_text), tz=timezone.utc)
-        runtime = RepostCampaignScheduleService(repo=ctx.db, campaign_runtime=build_repost_campaign_runtime(ctx), logger_=ctx.logger)
-        result = runtime.schedule_campaign_launch(rule_id=rule_id, scheduled_at_utc=scheduled_at_utc, created_by=callback.from_user.id if callback.from_user else None)
+        scheduled_at_utc = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        service = _build_repost_campaign_schedule_service(ctx)
+        try:
+            policy_state = await ctx.run_db(
+                lambda: service.build_scheduled_launch_policy_state(rule_id=rule_id, scheduled_at_utc=scheduled_at_utc)
+            )
+        except Exception as exc:
+            ctx.logger.warning(
+                "REPOST_CAMPAIGN_SCHEDULE_CONFIRM_POLICY_FAILED | rule_id=%s | error=%s",
+                rule_id,
+                exc,
+                exc_info=True,
+            )
+            policy_state = {
+                "ok": False,
+                "action": "policy_error",
+                "can_schedule": False,
+                "scheduled_at": scheduled_at_utc.isoformat(),
+                "blocking_text": "Не удалось проверить Чистый канал",
+            }
+            text, kb = build_repost_campaign_schedule_preview_view(
+                rule_id=rule_id,
+                readiness={},
+                scheduled_at_utc=scheduled_at_utc,
+                scheduled_policy=policy_state,
+            )
+            await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+            await ctx.answer_callback_safe_once(callback)
+            return
+        action = str(policy_state.get("action") or "")
+        can_schedule = policy_state.get("can_schedule") is True
+        ctx.logger.info(
+            "REPOST_CAMPAIGN_SCHEDULE_CONFIRM_POLICY_UI | rule_id=%s | action=%s | can_schedule=%s",
+            rule_id,
+            action,
+            can_schedule,
+        )
+        if policy_state.get("ok") is False or not can_schedule:
+            text, kb = build_repost_campaign_schedule_preview_view(
+                rule_id=rule_id,
+                readiness=policy_state.get("base_readiness") or {},
+                scheduled_at_utc=scheduled_at_utc,
+                scheduled_policy=policy_state,
+            )
+            await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+            await ctx.answer_callback_safe_once(callback)
+            return
+        allowed_policy_actions = {"allow", "schedule_with_clean_channel_wait", "schedule_with_overlap_warning"}
+        if action not in allowed_policy_actions:
+            text, kb = build_repost_campaign_schedule_preview_view(
+                rule_id=rule_id,
+                readiness=policy_state.get("base_readiness") or {},
+                scheduled_at_utc=scheduled_at_utc,
+                scheduled_policy=policy_state,
+            )
+            await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+            await ctx.answer_callback_safe_once(callback)
+            return
+        if action == "schedule_with_overlap_warning":
+            if not _has_schedule_policy_ack(ctx, callback, rule_id=rule_id, scheduled_at_utc=scheduled_at_utc, action=action):
+                _set_schedule_policy_ack(ctx, callback, rule_id=rule_id, scheduled_at_utc=scheduled_at_utc, action=action)
+                ctx.logger.info("REPOST_CAMPAIGN_SCHEDULE_OVERLAP_WARNING_ACK_REQUIRED | rule_id=%s | epoch=%s", rule_id, epoch)
+                text, kb = build_repost_campaign_schedule_preview_view(
+                    rule_id=rule_id,
+                    readiness=policy_state.get("base_readiness") or {},
+                    scheduled_at_utc=scheduled_at_utc,
+                    scheduled_policy=policy_state,
+                )
+                await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+                await ctx.answer_callback_safe_once(callback)
+                return
+            ctx.logger.info("REPOST_CAMPAIGN_SCHEDULE_OVERLAP_WARNING_ACK_ACCEPTED | rule_id=%s | epoch=%s", rule_id, epoch)
+        result = service.schedule_campaign_launch(
+            rule_id=rule_id,
+            scheduled_at_utc=scheduled_at_utc,
+            created_by=callback.from_user.id if callback.from_user else None,
+            scheduled_policy=policy_state,
+        )
         if result.ok:
+            _clear_schedule_policy_ack(ctx, callback)
             row = await ctx.run_db(ctx.db.get_campaign_scheduled_launch, int((result.extra or {}).get("scheduled_launch_id")))
             text, kb = build_repost_campaign_schedule_result_view(rule_id=rule_id, scheduled_launch=row or {})
-            ctx.logger.info("REPOST_CAMPAIGN_SCHEDULE_CREATE_DONE | rule_id=%s", rule_id)
+            ctx.logger.info("REPOST_CAMPAIGN_SCHEDULE_CREATE_DONE | rule_id=%s | action=%s", rule_id, action)
         else:
-            readiness = (result.extra or {}).get("launch_readiness") or {}
-            text, kb = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=scheduled_at_utc)
-            ctx.logger.warning("REPOST_CAMPAIGN_SCHEDULE_CREATE_FAILED | rule_id=%s | error=%s", rule_id, result.error_text)
+            readiness = (result.extra or {}).get("launch_readiness") or policy_state.get("base_readiness") or {}
+            text, kb = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=scheduled_at_utc, scheduled_policy=policy_state)
+            ctx.logger.warning("REPOST_CAMPAIGN_SCHEDULE_CREATE_FAILED | rule_id=%s | action=%s | error=%s", rule_id, action, result.error_text)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+        await ctx.answer_callback_safe_once(callback)

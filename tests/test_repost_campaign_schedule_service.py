@@ -75,13 +75,18 @@ class FR:
 
 
 class RT:
-    def __init__(self, *, result=None, exc=None, callback_run_id=None):
+    def __init__(self, *, result=None, exc=None, callback_run_id=None, readiness=None):
         self.result = result
         self.exc = exc
         self.callback_run_id = callback_run_id
+        self.readiness = readiness
         self.launch_kwargs = []
+        self.readiness_kwargs = []
 
     def build_campaign_launch_readiness(self, **kw):
+        self.readiness_kwargs.append(kw)
+        if self.readiness is not None:
+            return dict(self.readiness)
         return {"can_launch": True, "saved_post_id": 10, "show_seconds": 3600}
 
     async def launch_campaign_now(self, **kw):
@@ -116,6 +121,87 @@ def test_schedule_campaign_launch_saves_row_not_launch_now():
     repo=FR(); rt=RT(); svc=RepostCampaignScheduleService(repo=repo,campaign_runtime=rt)
     res=svc.schedule_campaign_launch(rule_id=1, scheduled_at_utc=datetime(2026,5,9,15,0,tzinfo=timezone.utc), created_by=7)
     assert res.ok and repo.rows
+
+
+def test_schedule_campaign_launch_old_behavior_rejects_not_ready_without_policy():
+    repo=FR(); rt=RT(readiness={"can_launch": False, "saved_post_id": 10, "show_seconds": 3600})
+    svc=RepostCampaignScheduleService(repo=repo,campaign_runtime=rt)
+
+    res=svc.schedule_campaign_launch(rule_id=1, scheduled_at_utc=datetime(2026,5,9,15,0,tzinfo=timezone.utc), created_by=7)
+
+    assert not res.ok
+    assert res.error_text == "Кампания не готова к запуску"
+    assert len(rt.readiness_kwargs) == 1
+    assert repo.rows == []
+
+
+def test_schedule_campaign_launch_accepts_can_schedule_policy():
+    repo=FR(); rt=RT(readiness={"can_launch": False, "saved_post_id": 999, "show_seconds": 0})
+    svc=RepostCampaignScheduleService(repo=repo,campaign_runtime=rt)
+    policy = {
+        "ok": True,
+        "action": "schedule_with_clean_channel_wait",
+        "can_schedule": True,
+        "base_readiness": {"can_launch": False, "saved_post_id": 100, "show_seconds": 3600},
+    }
+
+    res=svc.schedule_campaign_launch(
+        rule_id=1,
+        scheduled_at_utc=datetime(2026,5,9,15,0,tzinfo=timezone.utc),
+        created_by=7,
+        scheduled_policy=policy,
+    )
+
+    assert res.ok and repo.rows
+    assert repo.rows[0]["saved_post_id"] == 100
+    assert repo.rows[0]["preview"]["scheduled_policy"] is policy
+    assert res.extra["scheduled_policy"]["action"] == "schedule_with_clean_channel_wait"
+
+
+def test_schedule_campaign_launch_with_policy_fills_expected_delete_text():
+    repo=FR(); rt=RT()
+    svc=RepostCampaignScheduleService(repo=repo,campaign_runtime=rt)
+    policy = {
+        "ok": True,
+        "action": "allow",
+        "can_schedule": True,
+        "base_readiness": {"can_launch": True, "saved_post_id": 100, "show_seconds": 3600},
+    }
+
+    res=svc.schedule_campaign_launch(
+        rule_id=1,
+        scheduled_at_utc=datetime(2026,5,9,15,0,tzinfo=timezone.utc),
+        scheduled_policy=policy,
+    )
+
+    assert res.ok
+    assert res.extra["expected_delete_at_text"] == "09.05 19:00 UTC+3"
+    assert repo.rows[0]["preview"]["expected_delete_at_text"] == "09.05 19:00 UTC+3"
+
+
+def test_schedule_campaign_launch_rejects_policy_error():
+    repo=FR(); rt=RT()
+    svc=RepostCampaignScheduleService(repo=repo,campaign_runtime=rt)
+    policy = {
+        "ok": False,
+        "action": "policy_error",
+        "can_schedule": False,
+        "blocking_text": "Не удалось проверить Чистый канал",
+        "base_readiness": {"can_launch": True, "saved_post_id": 100, "show_seconds": 3600},
+    }
+
+    res=svc.schedule_campaign_launch(
+        rule_id=1,
+        scheduled_at_utc=datetime(2026,5,9,15,0,tzinfo=timezone.utc),
+        created_by=7,
+        scheduled_policy=policy,
+    )
+
+    assert not res.ok
+    assert repo.rows == []
+    assert res.extra["scheduled_policy"] is policy
+    assert res.extra["launch_readiness"]["saved_post_id"] == policy["base_readiness"]["saved_post_id"]
+    assert res.extra["launch_readiness"]["expected_delete_at_text"] == "09.05 19:00 UTC+3"
 
 
 def test_campaign_run_id_saved_before_mark_launched():
