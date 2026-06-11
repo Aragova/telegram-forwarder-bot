@@ -486,7 +486,6 @@ def test_source_guards_keep_force_plumbing_out_of_schedule_layers():
     for forbidden in (
         "force_ignore_clean_channel",
         "build_manual_launch_policy_state",
-        "waiting_clean_channel",
     ):
         assert forbidden not in schedule_source
 

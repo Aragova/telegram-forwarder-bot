@@ -13,6 +13,8 @@ CAMPAIGN_SCHEDULE_TIMEZONE_OFFSET_MINUTES = 180
 CAMPAIGN_SCHEDULE_TIMEZONE_LABEL = "UTC+3"
 CAMPAIGN_SCHEDULE_LOOP_INTERVAL_SECONDS = 15
 CAMPAIGN_SCHEDULE_STUCK_SECONDS = 300
+CAMPAIGN_SCHEDULE_CLEAN_CHANNEL_RETRY_SECONDS = 300
+CAMPAIGN_SCHEDULE_CLEAN_CHANNEL_MAX_ATTEMPTS = 288
 
 
 def campaign_schedule_now_utc() -> datetime:
@@ -44,6 +46,42 @@ def parse_campaign_schedule_input_to_utc(
         return scheduled_utc
 
     return None
+
+
+def _coerce_schedule_datetime_utc(value) -> datetime:
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        elif isinstance(value, str):
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        else:
+            return campaign_schedule_now_utc()
+    except Exception:
+        return campaign_schedule_now_utc()
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _campaign_schedule_clean_channel_next_retry_at(now_utc: datetime | None = None) -> datetime:
+    now = now_utc or campaign_schedule_now_utc()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+    return now + timedelta(seconds=CAMPAIGN_SCHEDULE_CLEAN_CHANNEL_RETRY_SECONDS)
+
+
+def _campaign_schedule_clean_channel_attempt_count(row: dict | None) -> int:
+    try:
+        return max(0, int((row or {}).get("clean_channel_wait_attempt_count") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _campaign_schedule_clean_channel_wait_reason(policy_state: dict | None) -> str:
+    return "Чистый канал занят активной рекламой"
 
 
 def format_campaign_schedule_datetime(
@@ -377,10 +415,89 @@ class RepostCampaignScheduleService:
             rule_id = int(row["rule_id"])
             scheduled_launch_id = int(row["id"])
             created_by = row.get("created_by")
+            scheduled_at_utc = _coerce_schedule_datetime_utc(row.get("scheduled_at"))
+            policy_state = self.build_scheduled_launch_policy_state(
+                rule_id=rule_id,
+                scheduled_at_utc=scheduled_at_utc,
+            )
+            action = str(policy_state.get("action") or "")
+            self.logger.info(
+                "REPOST_CAMPAIGN_SCHEDULE_DUE_POLICY | scheduled_launch_id=%s | rule_id=%s | action=%s | can_schedule=%s | can_launch_if_due_now=%s",
+                scheduled_launch_id,
+                rule_id,
+                action,
+                policy_state.get("can_schedule"),
+                policy_state.get("can_launch_if_due_now"),
+            )
 
-            readiness = self.campaign_runtime.build_campaign_launch_readiness(rule_id=rule_id)
-            if (not readiness.get("can_launch")) or readiness.get("active_placement") or int(readiness.get("delete_failed") or 0) > 0:
-                self.repo.mark_campaign_scheduled_launch_failed(scheduled_launch_id, error_text="Кампания не готова к запуску в момент старта")
+            if policy_state.get("ok") is False or action == "policy_error":
+                self.repo.mark_campaign_scheduled_launch_needs_review(
+                    scheduled_launch_id,
+                    error_text="Не удалось проверить Чистый канал перед запуском",
+                    campaign_run_id=None,
+                )
+                self.logger.warning(
+                    "REPOST_CAMPAIGN_SCHEDULE_NEEDS_REVIEW | scheduled_launch_id=%s | rule_id=%s | reason=clean_channel_policy_error",
+                    scheduled_launch_id,
+                    rule_id,
+                )
+                continue
+
+            if action == "base_block" or policy_state.get("can_schedule") is not True:
+                self.repo.mark_campaign_scheduled_launch_failed(
+                    scheduled_launch_id,
+                    error_text="Кампания не готова к запуску в момент старта",
+                )
+                self.logger.warning(
+                    "REPOST_CAMPAIGN_SCHEDULE_FAILED_AT_START | scheduled_launch_id=%s | rule_id=%s | action=%s",
+                    scheduled_launch_id,
+                    rule_id,
+                    action,
+                )
+                continue
+
+            if action == "schedule_with_clean_channel_wait":
+                attempt_count = _campaign_schedule_clean_channel_attempt_count(row)
+                if attempt_count >= CAMPAIGN_SCHEDULE_CLEAN_CHANNEL_MAX_ATTEMPTS:
+                    self.repo.mark_campaign_scheduled_launch_needs_review(
+                        scheduled_launch_id,
+                        error_text="Запуск слишком долго ждёт чистый канал",
+                        campaign_run_id=None,
+                    )
+                    self.logger.warning(
+                        "REPOST_CAMPAIGN_SCHEDULE_NEEDS_REVIEW | scheduled_launch_id=%s | rule_id=%s | reason=clean_channel_wait_limit",
+                        scheduled_launch_id,
+                        rule_id,
+                    )
+                    continue
+
+                next_retry_at = _campaign_schedule_clean_channel_next_retry_at()
+                self.repo.mark_campaign_scheduled_launch_waiting_clean_channel(
+                    scheduled_launch_id,
+                    next_retry_at=next_retry_at.isoformat(),
+                    reason=_campaign_schedule_clean_channel_wait_reason(policy_state),
+                    policy_snapshot=policy_state,
+                )
+                self.logger.info(
+                    "REPOST_CAMPAIGN_SCHEDULE_WAITING_CLEAN_CHANNEL | scheduled_launch_id=%s | rule_id=%s | next_retry_at=%s | attempt=%s",
+                    scheduled_launch_id,
+                    rule_id,
+                    next_retry_at.isoformat(),
+                    attempt_count + 1,
+                )
+                continue
+
+            if action not in {"allow", "schedule_with_overlap_warning"}:
+                self.repo.mark_campaign_scheduled_launch_needs_review(
+                    scheduled_launch_id,
+                    error_text="Неизвестное состояние проверки Чистого канала",
+                    campaign_run_id=None,
+                )
+                self.logger.warning(
+                    "REPOST_CAMPAIGN_SCHEDULE_NEEDS_REVIEW | scheduled_launch_id=%s | rule_id=%s | reason=unknown_clean_channel_action",
+                    scheduled_launch_id,
+                    rule_id,
+                )
                 continue
 
             captured_run_id: int | None = None
@@ -399,6 +516,7 @@ class RepostCampaignScheduleService:
                     admin_id=created_by,
                     run_type="scheduled",
                     on_campaign_run_created=_remember_campaign_run,
+                    ignore_active_placement_block=(action == "schedule_with_overlap_warning"),
                 )
             except Exception as exc:
                 current = self.repo.get_campaign_scheduled_launch(scheduled_launch_id) or {}

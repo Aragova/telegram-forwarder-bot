@@ -210,16 +210,15 @@ def test_returned_scheduled_launch_rows_include_clean_channel_fields_and_normali
     assert claimed[0]["clean_channel_policy_json"] == {"action": "schedule_with_clean_channel_wait"}
 
 
-def test_source_guards_no_worker_enforcement_yet():
+def test_source_guards_worker_enforcement_stays_out_of_handlers_and_vip_posts():
     schedule_source = Path("app/repost_campaign_schedule_service.py").read_text(encoding="utf-8")
     process_due_source = _method_source(schedule_source, "process_due_scheduled_launches")
     for token in (
         "mark_campaign_scheduled_launch_waiting_clean_channel",
-        "waiting_clean_channel",
-        "clean_channel_next_retry_at",
         "schedule_with_clean_channel_wait",
+        "schedule_with_overlap_warning",
     ):
-        assert token not in process_due_source
+        assert token in process_due_source
 
     handlers_source = Path("app/repost_campaign_schedule_handlers.py").read_text(encoding="utf-8")
     for token in ("mark_campaign_scheduled_launch_waiting_clean_channel", "waiting_clean_channel"):

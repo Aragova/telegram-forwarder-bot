@@ -321,7 +321,6 @@ def test_scheduled_services_remain_untouched_by_manual_handler_wiring():
         "rule_repost_campaign_launch_confirm_force",
         "force_ignore_clean_channel",
         "build_manual_launch_policy_state",
-        "waiting_clean_channel",
     ):
         assert forbidden not in schedule_source
 

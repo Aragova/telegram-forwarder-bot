@@ -4,6 +4,8 @@ from pathlib import Path
 
 from app.repost_campaign_runtime_service import RepostCampaignActionResult
 from app.repost_campaign_schedule_service import (
+    CAMPAIGN_SCHEDULE_CLEAN_CHANNEL_MAX_ATTEMPTS,
+    CAMPAIGN_SCHEDULE_CLEAN_CHANNEL_RETRY_SECONDS,
     RepostCampaignScheduleService,
     format_campaign_schedule_datetime,
     parse_campaign_schedule_input_to_utc,
@@ -17,6 +19,8 @@ class FR:
         self.launches={}
         self.events=[]
         self.reset_result={"requeued": 0, "needs_review": 0}
+        self.clean_channel_enabled = True
+        self.placements = []
 
     def create_campaign_scheduled_launch(self, **kw):
         self.rows.append(kw)
@@ -73,6 +77,33 @@ class FR:
             row["campaign_run_id"] = int(campaign_run_id)
         return True
 
+    def mark_campaign_scheduled_launch_waiting_clean_channel(self, scheduled_launch_id, *, next_retry_at, reason=None, policy_snapshot=None):
+        self.events.append(("waiting_clean_channel", int(scheduled_launch_id), next_retry_at, reason, policy_snapshot))
+        row = self.launches.setdefault(int(scheduled_launch_id), {"id": int(scheduled_launch_id)})
+        row.update(
+            status="waiting_clean_channel",
+            clean_channel_next_retry_at=next_retry_at,
+            clean_channel_last_reason=reason,
+            clean_channel_policy_json=policy_snapshot,
+        )
+        return True
+
+    def get_rule_repost_campaign_clean_channel_settings(self, rule_id):
+        return {"ok": True, "rule_id": int(rule_id), "enabled": self.clean_channel_enabled}
+
+    def list_active_campaign_placements_for_rule(self, rule_id, *, limit=20, basic_only=True):
+        return self.placements[:limit]
+
+    def get_active_campaign_placements_summary_for_rule(self, rule_id, *, basic_only=True):
+        active_total = 0
+        delete_problem_total = 0
+        for placement in self.placements:
+            if int(placement.get("delete_pending") or 0) + int(placement.get("delete_processing") or 0) > 0:
+                active_total += 1
+            if int(placement.get("delete_failed") or 0) > 0:
+                delete_problem_total += 1
+        return {"placements_total": len(self.placements), "active_total": active_total, "delete_problem_total": delete_problem_total}
+
 
 class RT:
     def __init__(self, *, result=None, exc=None, callback_run_id=None, readiness=None):
@@ -100,7 +131,7 @@ class RT:
 
 def _repo_with_claim():
     repo=FR()
-    row={"id": 1, "rule_id": 7, "created_by": 99, "status": "processing"}
+    row={"id": 1, "rule_id": 7, "created_by": 99, "status": "processing", "scheduled_at": "2026-05-09T15:00:00+00:00"}
     repo.claim=[row]
     repo.launches[1]=dict(row)
     return repo
@@ -211,6 +242,7 @@ def test_campaign_run_id_saved_before_mark_launched():
     assert repo.launches[1]["campaign_run_id"] == 123
     assert repo.events[:2] == [("set_run_id", 1, 123), ("launched", 1, 123)]
     assert rt.launch_kwargs[0]["on_campaign_run_created"]
+    assert rt.launch_kwargs[0]["ignore_active_placement_block"] is False
 
 
 def test_exception_after_campaign_run_moves_to_needs_review():
@@ -263,3 +295,21 @@ def test_source_guard_for_scheduled_launch_idempotency():
     assert "on_campaign_run_created" in source
     assert "set_campaign_scheduled_launch_campaign_run_id" in source
     assert "mark_campaign_scheduled_launch_needs_review" in source
+
+
+def test_source_guard_for_due_worker_clean_channel_policy():
+    source = Path("app/repost_campaign_schedule_service.py").read_text(encoding="utf-8")
+    process_due_source = source.split("    async def process_due_scheduled_launches", 1)[1].split("\n\nasync def run_repost_campaign_scheduled_launch_loop", 1)[0]
+
+    assert "build_scheduled_launch_policy_state" in process_due_source
+    assert "mark_campaign_scheduled_launch_waiting_clean_channel" in process_due_source
+    assert "schedule_with_clean_channel_wait" in process_due_source
+    assert "schedule_with_overlap_warning" in process_due_source
+    assert "CAMPAIGN_SCHEDULE_CLEAN_CHANNEL_RETRY_SECONDS" in source
+    assert "CAMPAIGN_SCHEDULE_CLEAN_CHANNEL_MAX_ATTEMPTS" in process_due_source
+    assert CAMPAIGN_SCHEDULE_CLEAN_CHANNEL_RETRY_SECONDS == 300
+    assert CAMPAIGN_SCHEDULE_CLEAN_CHANNEL_MAX_ATTEMPTS == 288
+    assert "readiness.get(\"active_placement\")" not in process_due_source
+    assert "readiness.get(\'active_placement\')" not in process_due_source
+    assert "readiness.get(\"delete_failed\")" not in process_due_source
+    assert "readiness.get(\'delete_failed\')" not in process_due_source

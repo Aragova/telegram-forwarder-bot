@@ -56,7 +56,7 @@ def test_source_guards_handlers_wired_worker_and_vip_not_wired():
         "schedule_with_overlap_warning",
         "waiting_clean_channel",
     ):
-        assert token not in process_due_source
+        assert token in process_due_source
     for token in (
         "build_scheduled_launch_policy_state",
         "schedule_with_clean_channel_wait",
