@@ -362,6 +362,142 @@ def _campaign_policy_user_note(value) -> str:
     return note[:800].strip()
 
 
+def _schedule_policy_epoch(policy_state: dict) -> int:
+    value = (policy_state or {}).get("scheduled_at")
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)):
+        try:
+            epoch = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return epoch if epoch > 0 else 0
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return 0
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return 0
+    else:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        epoch = int(dt.timestamp())
+    except (TypeError, ValueError, OverflowError, OSError):
+        return 0
+    return epoch if epoch > 0 else 0
+
+
+def _schedule_policy_scheduled_at_text(policy_state: dict) -> str:
+    text = str((policy_state or {}).get("scheduled_at_text") or "").strip()
+    return text or "не выбрано"
+
+
+def _schedule_policy_rows(
+    *,
+    rule_id: int,
+    policy_state: dict,
+    confirm_text: str,
+) -> list[list[InlineKeyboardButton]]:
+    epoch = _schedule_policy_epoch(policy_state)
+    rows: list[list[InlineKeyboardButton]] = []
+    if epoch > 0:
+        rows.append([InlineKeyboardButton(text=confirm_text, callback_data=f"rule_repost_campaign_schedule_confirm:{rule_id}:{epoch}")])
+    rows.extend([
+        [InlineKeyboardButton(text="🧹 Активные размещения", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")],
+        [InlineKeyboardButton(text="⚙️ Настройки Чистого канала", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к выбору времени", callback_data=f"rule_repost_campaign_schedule_step4:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return rows
+
+
+def build_repost_campaign_schedule_clean_channel_notice_view(
+    *,
+    rule_id: int,
+    policy_state: dict,
+) -> tuple[str, InlineKeyboardMarkup]:
+    state = dict(policy_state or {})
+    active_total = _safe_non_negative_int(state.get("active_placements_total"))
+    delete_problem_total = _safe_non_negative_int(state.get("delete_problem_total"))
+    warning_text = _campaign_policy_user_note(state.get("warning_text"))
+
+    blocks = [
+        "🧹 Чистый канал включён",
+        "Запуск можно запланировать.",
+        "Если к моменту запуска в канале будет активная реклама, ViMi подождёт и не опубликует новый рекламный пост поверх неё.",
+        f"🕒 Время запуска: {_schedule_policy_scheduled_at_text(state)}",
+        f"Сейчас:\nАктивных размещений: {active_total}\nПроблем удаления: {delete_problem_total}",
+    ]
+    if warning_text:
+        blocks.append(f"Подсказка:\n{warning_text}")
+    blocks.append(
+        "Что можно сделать:\n"
+        "• оставить всё как есть — ViMi дождётся чистого канала;\n"
+        "• открыть активные размещения;\n"
+        "• изменить настройки Чистого канала."
+    )
+
+    rows = _schedule_policy_rows(rule_id=rule_id, policy_state=state, confirm_text="✅ Запланировать запуск")
+    return trim_campaign_text_for_telegram("\n\n".join(blocks)), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_schedule_clean_channel_warning_view(
+    *,
+    rule_id: int,
+    policy_state: dict,
+) -> tuple[str, InlineKeyboardMarkup]:
+    state = dict(policy_state or {})
+    active_total = _safe_non_negative_int(state.get("active_placements_total"))
+    delete_problem_total = _safe_non_negative_int(state.get("delete_problem_total"))
+    warning_text = _campaign_policy_user_note(state.get("warning_text"))
+
+    blocks = [
+        "⚠️ Чистый канал выключен",
+        "Запуск можно запланировать, но если к моменту старта в канале уже будет активная реклама, новая реклама может выйти поверх старой.",
+        f"🕒 Время запуска: {_schedule_policy_scheduled_at_text(state)}",
+        f"Сейчас:\nАктивных размещений: {active_total}\nПроблем удаления: {delete_problem_total}",
+        (
+            "Важно:\n"
+            "• автоудаление по времени продолжит работать для каждого запуска отдельно;\n"
+            "• каждое размещение можно будет открыть и посмотреть отчёт;\n"
+            "• если не хотите накладывать рекламу, включите “Чистый канал”."
+        ),
+    ]
+    if warning_text:
+        blocks.append(f"Подсказка:\n{warning_text}")
+    blocks.append("Продолжить планирование?")
+
+    rows = _schedule_policy_rows(rule_id=rule_id, policy_state=state, confirm_text="⚠️ Всё равно запланировать")
+    return trim_campaign_text_for_telegram("\n\n".join(blocks)), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_schedule_clean_channel_error_view(
+    *,
+    rule_id: int,
+    policy_state: dict,
+) -> tuple[str, InlineKeyboardMarkup]:
+    state = dict(policy_state or {})
+    blocking_text = _campaign_policy_user_note(state.get("blocking_text"))
+
+    blocks = [
+        "⚠️ Не удалось проверить Чистый канал",
+        "ViMi не смог проверить активные рекламные размещения.\nЧтобы не запланировать запуск с ошибкой, повторите проверку позже.",
+    ]
+    if blocking_text:
+        blocks.append(f"Причина:\n{blocking_text}")
+
+    rows = [
+        [InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"rule_repost_campaign_schedule_step4:{rule_id}")],
+        [InlineKeyboardButton(text="🧹 Активные размещения", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return trim_campaign_text_for_telegram("\n\n".join(blocks)), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def build_repost_campaign_launch_clean_channel_blocked_view(
     *,
     rule_id: int,
@@ -1541,7 +1677,24 @@ def build_repost_campaign_targets_check_result_view(*, rule_id: int, result: dic
     ])
     return "\n".join(lines), kb
 
-def build_repost_campaign_schedule_preview_view(*, rule_id: int, readiness: dict, scheduled_at_utc: datetime, timezone_offset_minutes: int = 180, timezone_label: str = "UTC+3") -> tuple[str, InlineKeyboardMarkup]:
+def build_repost_campaign_schedule_preview_view(
+    *,
+    rule_id: int,
+    readiness: dict,
+    scheduled_at_utc: datetime,
+    timezone_offset_minutes: int = 180,
+    timezone_label: str = "UTC+3",
+    scheduled_policy: dict | None = None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    if scheduled_policy is not None:
+        action = str((scheduled_policy or {}).get("action") or "").strip()
+        if action == "policy_error" or (scheduled_policy or {}).get("ok") is False:
+            return build_repost_campaign_schedule_clean_channel_error_view(rule_id=rule_id, policy_state=scheduled_policy)
+        if action == "schedule_with_clean_channel_wait":
+            return build_repost_campaign_schedule_clean_channel_notice_view(rule_id=rule_id, policy_state=scheduled_policy)
+        if action == "schedule_with_overlap_warning":
+            return build_repost_campaign_schedule_clean_channel_warning_view(rule_id=rule_id, policy_state=scheduled_policy)
+
     from app.repost_campaign_schedule_service import format_campaign_schedule_datetime
     show_seconds = int(readiness.get("show_seconds") or 0)
     expected_delete = scheduled_at_utc + timedelta(seconds=show_seconds) if show_seconds > 0 else None
