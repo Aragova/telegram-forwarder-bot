@@ -847,7 +847,7 @@ class PostgresRepository(RepositoryProtocol):
             timezone_offset_minutes INT NOT NULL DEFAULT 180,
             timezone_label TEXT NOT NULL DEFAULT 'UTC+3',
             status TEXT NOT NULL DEFAULT 'scheduled'
-                CHECK (status IN ('scheduled','processing','launched','failed','needs_review','cancelled','expired')),
+                CHECK (status IN ('scheduled','processing','waiting_clean_channel','launched','failed','needs_review','cancelled','expired')),
             campaign_run_id BIGINT NULL,
             created_by BIGINT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -859,10 +859,18 @@ class PostgresRepository(RepositoryProtocol):
             cancelled_by BIGINT NULL,
             failed_at TIMESTAMPTZ NULL,
             error_text TEXT NULL,
-            preview_json JSONB NULL
+            preview_json JSONB NULL,
+            clean_channel_next_retry_at TIMESTAMPTZ NULL,
+            clean_channel_wait_attempt_count INTEGER NOT NULL DEFAULT 0,
+            clean_channel_last_wait_at TIMESTAMPTZ NULL,
+            clean_channel_last_reason TEXT NULL,
+            clean_channel_policy_json JSONB NULL
         );
         CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_due
         ON campaign_scheduled_launches(status, scheduled_at);
+        CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_waiting_clean_channel_due
+        ON campaign_scheduled_launches (clean_channel_next_retry_at, id)
+        WHERE status = 'waiting_clean_channel';
         CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_rule_status
         ON campaign_scheduled_launches(rule_id, status, scheduled_at DESC);
         CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_campaign_run
@@ -1046,8 +1054,17 @@ class PostgresRepository(RepositoryProtocol):
 
                 cur.execute("ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS scheduled_post_id BIGINT NULL")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_campaign_runs_scheduled_post ON campaign_runs(scheduled_post_id)")
+                for _sql in [
+                    "ALTER TABLE campaign_scheduled_launches ADD COLUMN IF NOT EXISTS clean_channel_next_retry_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_scheduled_launches ADD COLUMN IF NOT EXISTS clean_channel_wait_attempt_count INTEGER NOT NULL DEFAULT 0",
+                    "ALTER TABLE campaign_scheduled_launches ADD COLUMN IF NOT EXISTS clean_channel_last_wait_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_scheduled_launches ADD COLUMN IF NOT EXISTS clean_channel_last_reason TEXT NULL",
+                    "ALTER TABLE campaign_scheduled_launches ADD COLUMN IF NOT EXISTS clean_channel_policy_json JSONB NULL",
+                ]:
+                    cur.execute(_sql)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_campaign_scheduled_launches_waiting_clean_channel_due ON campaign_scheduled_launches (clean_channel_next_retry_at, id) WHERE status = 'waiting_clean_channel'")
                 cur.execute("ALTER TABLE campaign_scheduled_launches DROP CONSTRAINT IF EXISTS campaign_scheduled_launches_status_check")
-                cur.execute("ALTER TABLE campaign_scheduled_launches ADD CONSTRAINT campaign_scheduled_launches_status_check CHECK (status IN ('scheduled','processing','launched','failed','needs_review','cancelled','expired'))")
+                cur.execute("ALTER TABLE campaign_scheduled_launches ADD CONSTRAINT campaign_scheduled_launches_status_check CHECK (status IN ('scheduled','processing','waiting_clean_channel','launched','failed','needs_review','cancelled','expired'))")
                 cur.execute("ALTER TABLE campaign_scheduled_posts DROP CONSTRAINT IF EXISTS campaign_scheduled_posts_status_check")
                 cur.execute("ALTER TABLE campaign_scheduled_posts ADD CONSTRAINT campaign_scheduled_posts_status_check CHECK (status IN ('draft','ready','scheduled','processing','launched','failed','needs_review','cancelled','expired'))")
                 for _sql in [
@@ -7946,12 +7963,19 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return int(row['id']) if row else None
 
+    def _normalize_campaign_scheduled_launch_row(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        d = dict(row)
+        d["preview_json"] = _safe_json_loads(d.get("preview_json"), {})
+        d["clean_channel_policy_json"] = _safe_json_loads(d.get("clean_channel_policy_json"), None)
+        return d
+
     def get_campaign_scheduled_launch(self, scheduled_launch_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM campaign_scheduled_launches WHERE id=%s", (int(scheduled_launch_id),))
-                row = cur.fetchone()
-                return dict(row) if row else None
+                return self._normalize_campaign_scheduled_launch_row(cur.fetchone())
 
     def list_rule_campaign_scheduled_launches(self, rule_id: int, *, statuses: list[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -7960,19 +7984,51 @@ class PostgresRepository(RepositoryProtocol):
                     cur.execute("SELECT * FROM campaign_scheduled_launches WHERE rule_id=%s AND status = ANY(%s) ORDER BY scheduled_at DESC, id DESC LIMIT %s", (int(rule_id), statuses, int(limit)))
                 else:
                     cur.execute("SELECT * FROM campaign_scheduled_launches WHERE rule_id=%s ORDER BY scheduled_at DESC, id DESC LIMIT %s", (int(rule_id), int(limit)))
-                return [dict(r) for r in (cur.fetchall() or [])]
+                return [self._normalize_campaign_scheduled_launch_row(r) for r in (cur.fetchall() or [])]
 
     def list_due_campaign_scheduled_launches(self, *, now_iso: str, limit: int = 10) -> list[dict[str, Any]]:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT * FROM campaign_scheduled_launches WHERE status='scheduled' AND scheduled_at<=%s ORDER BY scheduled_at ASC, id ASC LIMIT %s", (now_iso, int(limit)))
-                return [dict(r) for r in (cur.fetchall() or [])]
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM campaign_scheduled_launches
+                    WHERE (status = 'scheduled' AND scheduled_at <= %s)
+                       OR (status = 'waiting_clean_channel'
+                           AND COALESCE(clean_channel_next_retry_at, scheduled_at) <= %s
+                           AND campaign_run_id IS NULL)
+                    ORDER BY COALESCE(clean_channel_next_retry_at, scheduled_at) ASC, id ASC
+                    LIMIT %s
+                    """,
+                    (now_iso, now_iso, int(limit)),
+                )
+                return [self._normalize_campaign_scheduled_launch_row(r) for r in (cur.fetchall() or [])]
 
     def claim_due_campaign_scheduled_launches(self, *, now_iso: str, worker_id: str, limit: int = 5) -> list[dict[str, Any]]:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("""WITH picked AS (SELECT id FROM campaign_scheduled_launches WHERE status='scheduled' AND scheduled_at<=%s ORDER BY scheduled_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT %s) UPDATE campaign_scheduled_launches s SET status='processing', locked_at=NOW(), locked_by=%s, updated_at=NOW() FROM picked WHERE s.id=picked.id RETURNING s.*""", (now_iso, int(limit), worker_id))
-                rows=[dict(r) for r in (cur.fetchall() or [])]
+                cur.execute(
+                    """
+                    WITH picked AS (
+                        SELECT id
+                        FROM campaign_scheduled_launches
+                        WHERE (status = 'scheduled' AND scheduled_at <= %s)
+                           OR (status = 'waiting_clean_channel'
+                               AND COALESCE(clean_channel_next_retry_at, scheduled_at) <= %s
+                               AND campaign_run_id IS NULL)
+                        ORDER BY COALESCE(clean_channel_next_retry_at, scheduled_at) ASC, id ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT %s
+                    )
+                    UPDATE campaign_scheduled_launches s
+                    SET status = 'processing', locked_at = NOW(), locked_by = %s, updated_at = NOW()
+                    FROM picked
+                    WHERE s.id = picked.id
+                    RETURNING s.*
+                    """,
+                    (now_iso, now_iso, int(limit), worker_id),
+                )
+                rows = [self._normalize_campaign_scheduled_launch_row(r) for r in (cur.fetchall() or [])]
             conn.commit()
             return rows
 
@@ -8004,10 +8060,83 @@ class PostgresRepository(RepositoryProtocol):
                 ok=cur.rowcount>0
             conn.commit(); return ok
 
+    def _clean_channel_wait_reason(self, reason: str | None) -> str:
+        safe_reason = (reason or "").strip()
+        if not safe_reason or "Traceback" in safe_reason or "Traceback (most recent call last)" in safe_reason:
+            return "Чистый канал занят активной рекламой"
+        return safe_reason[:500]
+
+    def mark_campaign_scheduled_launch_waiting_clean_channel(
+        self,
+        scheduled_launch_id: int,
+        *,
+        next_retry_at: str,
+        reason: str | None = None,
+        policy_snapshot: dict[str, Any] | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_scheduled_launches
+                    SET status = 'waiting_clean_channel',
+                        clean_channel_next_retry_at = %s,
+                        clean_channel_wait_attempt_count = COALESCE(clean_channel_wait_attempt_count, 0) + 1,
+                        clean_channel_last_wait_at = NOW(),
+                        clean_channel_last_reason = %s,
+                        clean_channel_policy_json = %s::jsonb,
+                        updated_at = NOW(),
+                        locked_at = NULL,
+                        locked_by = NULL
+                    WHERE id = %s
+                      AND status IN ('scheduled', 'processing', 'waiting_clean_channel')
+                      AND campaign_run_id IS NULL
+                    RETURNING id
+                    """,
+                    (
+                        next_retry_at,
+                        self._clean_channel_wait_reason(reason),
+                        _json_dumps(policy_snapshot),
+                        int(scheduled_launch_id),
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return bool(row)
+
+    def mark_campaign_scheduled_launch_scheduled_again(
+        self,
+        scheduled_launch_id: int,
+        *,
+        next_retry_at: str | None = None,
+        reason: str | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_scheduled_launches
+                    SET status = 'scheduled',
+                        clean_channel_next_retry_at = %s,
+                        clean_channel_last_reason = %s,
+                        updated_at = NOW(),
+                        locked_at = NULL,
+                        locked_by = NULL
+                    WHERE id = %s
+                      AND status = 'waiting_clean_channel'
+                      AND campaign_run_id IS NULL
+                    RETURNING id
+                    """,
+                    (next_retry_at, self._clean_channel_wait_reason(reason) if reason is not None else None, int(scheduled_launch_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return bool(row)
+
     def cancel_campaign_scheduled_launch(self, scheduled_launch_id: int, *, cancelled_by: int | None = None) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE campaign_scheduled_launches SET status='cancelled', cancelled_at=NOW(), cancelled_by=%s, updated_at=NOW() WHERE id=%s AND status='scheduled'", (cancelled_by, int(scheduled_launch_id)))
+                cur.execute("UPDATE campaign_scheduled_launches SET status='cancelled', cancelled_at=NOW(), cancelled_by=%s, updated_at=NOW() WHERE id=%s AND status IN ('scheduled','waiting_clean_channel')", (cancelled_by, int(scheduled_launch_id)))
                 ok=cur.rowcount>0
             conn.commit(); return ok
 

@@ -1,5 +1,6 @@
 from app.postgres_repository import PostgresRepository
 from contextlib import contextmanager
+from pathlib import Path
 
 
 class _FakeCursor:
@@ -267,6 +268,26 @@ def test_campaign_schedule_repository_methods_exist():
     for name in [
         'create_campaign_scheduled_launch','get_campaign_scheduled_launch','list_rule_campaign_scheduled_launches',
         'list_due_campaign_scheduled_launches','claim_due_campaign_scheduled_launches','set_campaign_scheduled_launch_campaign_run_id','mark_campaign_scheduled_launch_launched',
-        'mark_campaign_scheduled_launch_failed','mark_campaign_scheduled_launch_needs_review','cancel_campaign_scheduled_launch','reset_stuck_campaign_scheduled_launches']:
+        'mark_campaign_scheduled_launch_failed','mark_campaign_scheduled_launch_needs_review',
+        'mark_campaign_scheduled_launch_waiting_clean_channel','mark_campaign_scheduled_launch_scheduled_again',
+        'cancel_campaign_scheduled_launch','reset_stuck_campaign_scheduled_launches']:
         assert hasattr(RepositoryProtocol, name)
         assert hasattr(PostgresRepository, name)
+
+
+def test_campaign_scheduled_launch_clean_channel_methods_exist():
+    repo = PostgresRepository()
+
+    assert hasattr(repo, "mark_campaign_scheduled_launch_waiting_clean_channel")
+    assert hasattr(repo, "mark_campaign_scheduled_launch_scheduled_again")
+
+
+def test_campaign_scheduled_launches_schema_contains_clean_channel_wait_columns():
+    sql = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+
+    assert "clean_channel_next_retry_at" in sql
+    assert "clean_channel_wait_attempt_count" in sql
+    assert "clean_channel_last_wait_at" in sql
+    assert "clean_channel_last_reason" in sql
+    assert "clean_channel_policy_json" in sql
+    assert "waiting_clean_channel" in sql
