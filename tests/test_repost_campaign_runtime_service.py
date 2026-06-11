@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.repost_campaign_runtime_service import RepostCampaignRuntimeService, build_telegram_message_url
@@ -1595,3 +1596,12 @@ def test_process_due_deletions_deletes_only_claimed_due_run_messages():
     assert repo._messages[0]["delete_status"] == "deleted"
     assert repo._messages[1]["delete_status"] == "pending"
     assert deleter.delete_message_calls[0]["target_id"] == "-1"
+
+
+def test_scheduled_overlap_ignore_active_placement_block_source_guard():
+    source = Path("app/repost_campaign_runtime_service.py").read_text(encoding="utf-8")
+    launch_source = source.split("    async def launch_campaign_now", 1)[1].split("\n    def build_manual_launch_policy_state", 1)[0]
+
+    assert "ignore_active_placement_block: bool = False" in launch_source
+    assert "not ignore_active_placement_block" in launch_source
+    assert "force_ignore_clean_channel" in launch_source

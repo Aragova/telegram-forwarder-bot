@@ -727,6 +727,7 @@ class RepostCampaignRuntimeService:
         run_type: str = "manual",
         on_campaign_run_created: Callable[[int], None] | None = None,
         force_ignore_clean_channel: bool = False,
+        ignore_active_placement_block: bool = False,
     ) -> RepostCampaignActionResult:
         manual_launch_policy: dict[str, Any] | None = None
         if run_type == "manual":
@@ -820,7 +821,7 @@ class RepostCampaignRuntimeService:
         else:
             readiness = self.build_campaign_launch_readiness(rule_id=rule_id)
 
-        if run_type != "manual" and (readiness.get("active_placement") or int(readiness.get("delete_failed") or 0) > 0):
+        if run_type != "manual" and not ignore_active_placement_block and (readiness.get("active_placement") or int(readiness.get("delete_failed") or 0) > 0):
             return RepostCampaignActionResult(
                 ok=False,
                 action="launch_campaign",

@@ -149,7 +149,6 @@ def test_stage_five_six_source_guards_keep_ui_wiring_manual_only():
         "build_repost_campaign_launch_clean_channel_warning_view",
         "build_manual_launch_policy_state",
         "force_ignore_clean_channel",
-        "waiting_clean_channel",
     ]:
         assert forbidden not in schedule_source
         assert forbidden not in scheduled_post_source

@@ -260,16 +260,9 @@ def test_method_is_read_only():
     assert repo.write_calls == []
 
 
-def test_source_guards_keep_scheduled_policy_disconnected_from_worker_runtime_and_vip_posts():
-    schedule_service = Path("app/repost_campaign_schedule_service.py").read_text(encoding="utf-8")
-    process_due_source = schedule_service.split("    async def process_due_scheduled_launches", 1)[1]
+def test_source_guards_keep_scheduled_policy_disconnected_from_vip_posts_and_runtime():
     scheduled_post_service = Path("app/repost_campaign_scheduled_post_service.py").read_text(encoding="utf-8")
     runtime_service = Path("app/repost_campaign_runtime_service.py").read_text(encoding="utf-8")
-
-    assert "build_scheduled_launch_policy_state" not in process_due_source
-    assert "schedule_with_clean_channel_wait" not in process_due_source
-    assert "schedule_with_overlap_warning" not in process_due_source
-    assert "waiting_clean_channel" not in process_due_source
 
     assert "build_scheduled_launch_policy_state" not in scheduled_post_service
     assert "RepostCampaignPlacementService" not in scheduled_post_service
