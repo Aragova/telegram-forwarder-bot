@@ -6,7 +6,10 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from app.repost_campaign_context import RepostCampaignHandlersContext
 from app.repost_campaign_context import build_repost_campaign_runtime
 from app.repost_campaign_context import build_repost_campaign_scheduled_post_service
-from app.repost_campaign_schedule_service import parse_campaign_schedule_input_to_utc
+from app.repost_campaign_schedule_service import (
+    RepostCampaignScheduleService,
+    parse_campaign_schedule_input_to_utc,
+)
 from app.repost_campaign_ui import (
     build_repost_campaign_targets_check_result_view,
     build_repost_campaign_schedule_preview_view,
@@ -426,8 +429,45 @@ async def handle_repost_campaign_stateful_private_input(ctx: RepostCampaignHandl
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
         await ctx.send_message_safe(chat_id=message.chat.id, text=text_step3, reply_markup=kb_step3)
         return True
-    text_preview, kb_preview = build_repost_campaign_schedule_preview_view(rule_id=rule_id, readiness=readiness, scheduled_at_utc=parsed)
-    ctx.reset_user_state(message.from_user.id if message.from_user else None)
+    try:
+        service = RepostCampaignScheduleService(
+            repo=ctx.db,
+            campaign_runtime=build_repost_campaign_runtime(ctx),
+            logger_=ctx.logger,
+        )
+        policy_state = await ctx.run_db(
+            lambda: service.build_scheduled_launch_policy_state(
+                rule_id=rule_id,
+                scheduled_at_utc=parsed,
+            )
+        )
+    except Exception as exc:
+        ctx.logger.warning("REPOST_CAMPAIGN_SCHEDULE_INPUT_POLICY_FAILED | rule_id=%s | error=%s", rule_id, exc)
+        await ctx.send_message_safe(
+            chat_id=message.chat.id,
+            text="⚠️ Не удалось проверить Чистый канал. Попробуйте выбрать время ещё раз.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к выбору времени", callback_data=f"rule_repost_campaign_schedule_step4:{rule_id}")]]
+            ),
+        )
+        return True
+    text_preview, kb_preview = build_repost_campaign_schedule_preview_view(
+        rule_id=rule_id,
+        readiness=policy_state.get("base_readiness") or readiness,
+        scheduled_at_utc=parsed,
+        scheduled_policy=policy_state,
+    )
+    user_id = message.from_user.id if message.from_user else None
+    if user_id is not None and policy_state.get("action") == "schedule_with_overlap_warning":
+        current_state = ctx.user_states.setdefault(user_id, {})
+        current_state["schedule_policy_ack"] = {
+            "key": f"repost_campaign_schedule_policy_ack:{rule_id}:{int(parsed.timestamp())}",
+            "action": "schedule_with_overlap_warning",
+        }
+        current_state.pop("state", None)
+        current_state.pop("rule_id", None)
+    else:
+        ctx.reset_user_state(user_id)
     await ctx.send_message_safe(chat_id=message.chat.id, text=text_preview, reply_markup=kb_preview)
     return True
 

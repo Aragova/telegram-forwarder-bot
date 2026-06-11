@@ -201,9 +201,9 @@ def test_stage_six_two_source_guards_keep_ui_unwired():
         "build_repost_campaign_schedule_clean_channel_notice_view",
         "build_repost_campaign_schedule_clean_channel_warning_view",
         "build_repost_campaign_schedule_clean_channel_error_view",
-        "scheduled_policy",
     ]:
         assert forbidden not in schedule_handlers
+    assert "scheduled_policy" in schedule_handlers
 
     for forbidden in [
         "build_repost_campaign_schedule_clean_channel_notice_view",
