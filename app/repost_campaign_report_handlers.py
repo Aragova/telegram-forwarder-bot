@@ -8,6 +8,7 @@ from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.repost_campaign_context import RepostCampaignHandlersContext, build_repost_campaign_runtime
+from app.repost_campaign_top_time_view_service import RepostCampaignTopTimeViewService
 from app.repost_campaign_export_service import (
     build_campaign_post_stats_csv,
     build_campaign_post_stats_txt,
@@ -85,6 +86,17 @@ def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaign
             ctx.logger.info("REPOST_CAMPAIGN_RUN_DETAILS_UI_OPENED | rule_id=%s | run_id=%s", rule_id, run_id)
             runtime = build_repost_campaign_runtime(ctx)
             details = await ctx.run_db(lambda: runtime.get_campaign_run_details(rule_id=rule_id, run_id=run_id))
+            if (details or {}).get("ok"):
+                run = (details or {}).get("run") or {}
+                service = RepostCampaignTopTimeViewService(ctx.db, logger=ctx.logger)
+                details = dict(details or {})
+                details["top_time_summary"] = await ctx.run_db(
+                    lambda: service.build_run_top_time_summary(
+                        run_id,
+                        top_time_enabled_snapshot=bool(run.get("top_time_enabled_snapshot")),
+                        top_time_seconds_snapshot=int(run.get("top_time_seconds_snapshot") or 0),
+                    )
+                )
             text, keyboard = build_repost_campaign_run_details_view(rule_id=rule_id, details=details)
             await ctx.answer_callback_safe_once(callback)
             if ctx.should_answer_new_message_for_callback(callback):

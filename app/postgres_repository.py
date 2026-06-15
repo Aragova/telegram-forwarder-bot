@@ -8944,6 +8944,29 @@ class PostgresRepository(RepositoryProtocol):
                 )
                 return [dict(row) for row in (cur.fetchall() or [])]
 
+    def list_campaign_top_time_pauses_for_run(self, campaign_run_id: int, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM campaign_top_time_pauses
+                    WHERE campaign_run_id = %s
+                    ORDER BY
+                        CASE status
+                            WHEN 'active' THEN 0
+                            WHEN 'completed' THEN 1
+                            WHEN 'cancelled' THEN 2
+                            ELSE 3
+                        END,
+                        ends_at DESC,
+                        id DESC
+                    LIMIT %s
+                    """,
+                    (int(campaign_run_id), int(limit)),
+                )
+                return [dict(row) for row in (cur.fetchall() or [])]
+
     def get_active_campaign_top_time_pause_for_target(
         self,
         *,

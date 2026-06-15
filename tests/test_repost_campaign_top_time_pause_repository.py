@@ -65,3 +65,16 @@ def test_mark_expired_campaign_top_time_pauses_completed_sql_uses_limited_cte():
     assert "LIMIT %s" in source
     assert "SET status = 'completed'" in source
     assert "RETURNING p.id" in source
+
+
+def test_list_campaign_top_time_pauses_for_run_returns_all_statuses():
+    source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+    assert "def list_campaign_top_time_pauses_for_run" in source
+    assert "WHERE campaign_run_id = %s" in source
+    assert "WHEN 'active' THEN 0" in source
+    assert "WHEN 'completed' THEN 1" in source
+    assert "WHEN 'cancelled' THEN 2" in source
+    assert "ends_at DESC" in source
+    assert "id DESC" in source
+    assert hasattr(RepositoryProtocol, "list_campaign_top_time_pauses_for_run")
+    assert hasattr(PostgresRepository, "list_campaign_top_time_pauses_for_run")

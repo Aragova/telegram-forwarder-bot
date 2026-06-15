@@ -65,6 +65,7 @@ class RepostCampaignPlacementService:
             }
 
         placements = [self._build_placement_view(dict(row or {}), rule_id=int(rule_id)) for row in (raw_placements or [])]
+        self._attach_top_time_summaries(placements)
 
         placements_total = _to_int(summary.get("placements_total"), default=len(placements))
         active_total = _to_int(summary.get("active_total"))
@@ -219,6 +220,29 @@ class RepostCampaignPlacementService:
             "delete_problem_total": _to_int(active.get("delete_problem_total")),
             "placements": active.get("placements") or [],
         }
+
+    def _attach_top_time_summaries(self, placements: list[dict[str, Any]]) -> None:
+        if not hasattr(self.repo, "list_campaign_top_time_pauses_for_run"):
+            return
+        for placement in placements:
+            run_id = _to_int((placement or {}).get("run_id"))
+            if run_id <= 0:
+                continue
+            try:
+                pauses = self.repo.list_campaign_top_time_pauses_for_run(run_id, limit=100)
+            except Exception:
+                self.logger.warning("Не удалось получить паузы Времени в топе для запуска %s", run_id, exc_info=True)
+                continue
+            active = [dict(row or {}) for row in (pauses or []) if str((row or {}).get("status") or "").lower() == "active"]
+            if not active:
+                continue
+            latest = max((_parse_dt(row.get("ends_at")) for row in active), default=None)
+            latest_text = _format_user_dt(latest, user_tz=self.user_tz) if latest else None
+            placement["top_time_active_count"] = len(active)
+            placement["top_time_latest_ends_at"] = latest.isoformat() if latest else None
+            placement["top_time_latest_ends_at_text"] = latest_text
+            suffix = f" · активных пауз: {len(active)}" if len(active) > 1 else ""
+            placement["top_time_summary_text"] = f"📌 В топе до {latest_text or '—'}{suffix}"
 
     def _build_placement_view(self, row: dict[str, Any], *, rule_id: int) -> dict[str, Any]:
         run_id = _to_int(row.get("run_id") or row.get("id"))
