@@ -31,8 +31,12 @@ from app.repost_campaign_ui import (
     build_repost_campaign_targets_check_result_view,
     build_repost_campaign_targets_list_view,
     build_repost_campaign_targets_menu_view,
+    build_repost_campaign_top_time_presets_view,
+    build_repost_campaign_top_time_settings_view,
     build_repost_campaign_vip_coming_soon_view,
     build_repost_campaign_vip_features_view,
+    DEFAULT_REPOST_CAMPAIGN_TOP_TIME_SECONDS,
+    REPOST_CAMPAIGN_TOP_TIME_PRESETS,
 )
 from app.saved_posts_service import get_saved_post_short_description
 
@@ -98,6 +102,8 @@ async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int, ct
             "targets_active": targets_active,
             "targets_ready": targets_ready,
             "saved_post_id": saved_post_id,
+            "top_time_enabled": bool(getattr(rule, "repost_campaign_top_time_enabled", False)),
+            "top_time_seconds": int(getattr(rule, "repost_campaign_top_time_seconds", 0) or 0),
         },
         saved_post_line=saved_post_line,
         readiness=readiness,
@@ -146,6 +152,8 @@ async def _render_repost_campaign_launch_wizard(
     summary_payload.update({
         "show_seconds": int(getattr(rule, "repost_campaign_show_seconds", 0) or summary_payload.get("show_seconds") or 0),
         "saved_post_id": saved_post_id,
+        "top_time_enabled": bool(getattr(rule, "repost_campaign_top_time_enabled", False)),
+        "top_time_seconds": int(getattr(rule, "repost_campaign_top_time_seconds", 0) or 0),
     })
     text, keyboard = build_repost_campaign_launch_wizard_view(
         rule_id=rule_id,
@@ -215,6 +223,58 @@ async def _render_repost_campaign_active_placements(
         await ctx.answer_callback_safe(callback, "Не удалось открыть активные размещения", show_alert=True)
         return False
 
+
+
+async def _render_repost_campaign_top_time_settings(
+    callback: CallbackQuery,
+    rule_id: int,
+    ctx: RepostCampaignHandlersContext,
+) -> bool:
+    if not await ctx.ensure_rule_callback_access(callback, rule_id):
+        return False
+    if not ctx.settings.repost_campaign_admin_test_enabled:
+        await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return False
+    try:
+        settings = await ctx.run_db(ctx.db.get_rule_repost_campaign_top_time_settings, rule_id)
+        text, keyboard = build_repost_campaign_top_time_settings_view(rule_id=rule_id, settings=settings or {})
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        ctx.logger.info(
+            "REPOST_CAMPAIGN_TOP_TIME_SETTINGS_OPENED | rule_id=%s | enabled=%s | seconds=%s",
+            rule_id,
+            (settings or {}).get("enabled"),
+            (settings or {}).get("seconds"),
+        )
+        return True
+    except Exception as exc:
+        ctx.logger.exception(
+            "REPOST_CAMPAIGN_TOP_TIME_SETTINGS_OPEN_FAILED | rule_id=%s | error=%s",
+            rule_id,
+            exc,
+        )
+        await ctx.answer_callback_safe(callback, "Не удалось открыть время в топе", show_alert=True)
+        return False
+
+
+async def _render_repost_campaign_top_time_presets(
+    callback: CallbackQuery,
+    rule_id: int,
+    ctx: RepostCampaignHandlersContext,
+) -> bool:
+    if not await ctx.ensure_rule_callback_access(callback, rule_id):
+        return False
+    if not ctx.settings.repost_campaign_admin_test_enabled:
+        await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return False
+    try:
+        settings = await ctx.run_db(ctx.db.get_rule_repost_campaign_top_time_settings, rule_id)
+        text, keyboard = build_repost_campaign_top_time_presets_view(rule_id=rule_id, settings=settings or {})
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        return True
+    except Exception as exc:
+        ctx.logger.exception("REPOST_CAMPAIGN_TOP_TIME_PRESETS_OPEN_FAILED | rule_id=%s | error=%s", rule_id, exc)
+        await ctx.answer_callback_safe(callback, "Не удалось открыть выбор времени", show_alert=True)
+        return False
 
 async def _render_repost_campaign_clean_channel_settings(
     callback: CallbackQuery,
@@ -1169,6 +1229,131 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
 
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_top_time:"))
+    async def handle_rule_repost_campaign_top_time(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            rule_id = int((callback.data or "").split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        rendered = await _render_repost_campaign_top_time_settings(callback, rule_id, ctx)
+        if rendered:
+            await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_top_time_toggle:"))
+    async def handle_rule_repost_campaign_top_time_toggle(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            parts = (callback.data or "").split(":")
+            rule_id = int(parts[1])
+            action = str(parts[2] or "").strip().lower()
+            if action not in {"on", "off"}:
+                raise ValueError("unknown top time action")
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
+            return
+        current = await ctx.run_db(ctx.db.get_rule_repost_campaign_top_time_settings, rule_id)
+        enabled = action == "on"
+        seconds = int((current or {}).get("seconds") or 0) if enabled else 0
+        if enabled and seconds <= 0:
+            seconds = DEFAULT_REPOST_CAMPAIGN_TOP_TIME_SECONDS
+        actor_id = callback.from_user.id if callback.from_user else ctx.settings.admin_id
+        try:
+            updated = await ctx.run_db(
+                ctx.db.set_rule_repost_campaign_top_time_settings,
+                rule_id,
+                enabled=enabled,
+                seconds=seconds,
+                actor_id=actor_id,
+            )
+        except Exception as exc:
+            ctx.logger.exception("REPOST_CAMPAIGN_TOP_TIME_TOGGLE_FAILED | rule_id=%s | enabled=%s | error=%s", rule_id, enabled, exc)
+            await ctx.answer_callback_safe(callback, "Не удалось сохранить настройку", show_alert=True)
+            return
+        if not updated:
+            await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+            return
+        ctx.invalidate_rule_card_cache(rule_id)
+        try:
+            await ctx.run_db(
+                ctx.db.log_rule_change,
+                event_type="repost_campaign_top_time_settings_changed",
+                rule_id=rule_id,
+                admin_id=actor_id,
+                old_value=current,
+                new_value={"enabled": enabled, "seconds": seconds},
+                extra={"source": "admin_ui"},
+            )
+        except Exception as exc:
+            ctx.logger.warning("Не удалось записать аудит времени в топе rule_id=%s: %s", rule_id, exc, exc_info=True)
+        rendered = await _render_repost_campaign_top_time_settings(callback, rule_id, ctx)
+        if rendered:
+            await ctx.answer_callback_safe_once(callback, "Время в топе включено" if enabled else "Время в топе выключено")
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_top_time_presets:"))
+    async def handle_rule_repost_campaign_top_time_presets(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            rule_id = int((callback.data or "").split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        rendered = await _render_repost_campaign_top_time_presets(callback, rule_id, ctx)
+        if rendered:
+            await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_top_time_set:"))
+    async def handle_rule_repost_campaign_top_time_set(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            parts = (callback.data or "").split(":")
+            rule_id = int(parts[1])
+            seconds = int(parts[2])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        allowed_seconds = {value for value, _ in REPOST_CAMPAIGN_TOP_TIME_PRESETS}
+        if seconds not in allowed_seconds:
+            await ctx.answer_callback_safe(callback, "Ошибка времени", show_alert=True)
+            return
+        if not await ctx.ensure_rule_callback_access(callback, rule_id):
+            return
+        actor_id = callback.from_user.id if callback.from_user else ctx.settings.admin_id
+        updated = await ctx.run_db(
+            ctx.db.set_rule_repost_campaign_top_time_settings,
+            rule_id,
+            enabled=True,
+            seconds=seconds,
+            actor_id=actor_id,
+        )
+        if not updated:
+            await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+            return
+        ctx.invalidate_rule_card_cache(rule_id)
+        try:
+            await ctx.run_db(
+                ctx.db.log_rule_change,
+                event_type="repost_campaign_top_time_settings_changed",
+                rule_id=rule_id,
+                admin_id=actor_id,
+                old_value=None,
+                new_value={"enabled": True, "seconds": seconds},
+                extra={"source": "admin_ui"},
+            )
+        except Exception as exc:
+            ctx.logger.warning("Не удалось записать аудит времени в топе rule_id=%s: %s", rule_id, exc, exc_info=True)
+        rendered = await _render_repost_campaign_top_time_settings(callback, rule_id, ctx)
+        if rendered:
+            await ctx.answer_callback_safe_once(callback, "Время в топе обновлено")
+
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_clean_channel:"))
     async def handle_rule_repost_campaign_clean_channel(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
@@ -1262,6 +1447,11 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             return
         if feature == "clean_channel":
             rendered = await _render_repost_campaign_clean_channel_settings(callback, rule_id, ctx)
+            if rendered:
+                await ctx.answer_callback_safe_once(callback)
+            return
+        if feature == "top_time":
+            rendered = await _render_repost_campaign_top_time_settings(callback, rule_id, ctx)
             if rendered:
                 await ctx.answer_callback_safe_once(callback)
             return

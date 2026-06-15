@@ -27,6 +27,39 @@ TG_TEXT_SAFE_LIMIT = 3800
 RUN_DETAILS_VISIBLE_MESSAGES_LIMIT = 10
 CAMPAIGN_TARGETS_PAGE_SIZE = 10
 ACTIVE_PLACEMENTS_PAGE_SIZE = 10
+REPOST_CAMPAIGN_TOP_TIME_PRESETS = [
+    (900, "15 минут"),
+    (1800, "30 минут"),
+    (3600, "1 час"),
+    (7200, "2 часа"),
+    (10800, "3 часа"),
+    (21600, "6 часов"),
+    (43200, "12 часов"),
+]
+DEFAULT_REPOST_CAMPAIGN_TOP_TIME_SECONDS = 7200
+
+
+def format_repost_campaign_top_time_seconds_text(seconds: int | None) -> str:
+    try:
+        value = int(seconds or 0)
+    except Exception:
+        value = 0
+    for preset_seconds, label in REPOST_CAMPAIGN_TOP_TIME_PRESETS:
+        if value == preset_seconds:
+            return label
+    return "не выбрано"
+
+
+def format_repost_campaign_top_time_status_text(settings: dict | None) -> str:
+    if settings is None or "enabled" not in settings:
+        return "🔒 доступно в VIP"
+    enabled = bool(settings.get("enabled"))
+    if not enabled:
+        return "🔴 выключено"
+    seconds_text = format_repost_campaign_top_time_seconds_text(settings.get("seconds"))
+    if seconds_text == "не выбрано":
+        return "🟡 включено · время не выбрано"
+    return f"🟢 {seconds_text}"
 
 
 def trim_campaign_text_for_telegram(text: str, *, limit: int = TG_TEXT_SAFE_LIMIT) -> str:
@@ -90,6 +123,16 @@ def _build_repost_campaign_setup_steps_summary(*, summary: dict, saved_post_line
     else:
         clean_channel_status = "💎 в VIP-функциях"
 
+    top_time_settings = None
+    for payload in (summary, readiness, control_center):
+        if "top_time_enabled" in payload or "top_time_seconds" in payload:
+            top_time_settings = {
+                "enabled": bool(payload.get("top_time_enabled")),
+                "seconds": int(payload.get("top_time_seconds") or 0),
+            }
+            break
+    top_time_status = format_repost_campaign_top_time_status_text(top_time_settings)
+
     launch_status = "готов" if has_post and targets_count > 0 and has_show_seconds else "⚠️ заполните настройки"
 
     return (
@@ -98,7 +141,7 @@ def _build_repost_campaign_setup_steps_summary(*, summary: dict, saved_post_line
         f"2. 📣 Каналы и группы — {targets_status}\n"
         f"3. 🕒 Срок показа — {show_seconds_status}\n"
         f"4. 🧹 Чистый канал — {clean_channel_status}\n"
-        "5. 📌 Время в топе — 🔒 доступно в VIP\n"
+        f"5. 📌 Время в топе — {top_time_status}\n"
         f"6. 🚀 Запуск — {launch_status}"
     )
 
@@ -174,7 +217,7 @@ def build_repost_campaign_launch_wizard_view(
             InlineKeyboardButton(text="3. Время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}"),
             InlineKeyboardButton(text="4. Чистый канал", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}"),
         ],
-        [InlineKeyboardButton(text="5. Время в топе", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:top_time")],
+        [InlineKeyboardButton(text="5. Время в топе", callback_data=f"rule_repost_campaign_top_time:{rule_id}")],
         [InlineKeyboardButton(text="⚡ Запустить сейчас", callback_data=f"rule_repost_campaign_launch_now_preview:{rule_id}")],
         [InlineKeyboardButton(text="🕒 Запланировать запуск", callback_data=f"rule_repost_campaign_schedule_current:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
@@ -248,7 +291,7 @@ def build_repost_campaign_vip_features_view(*, rule_id: int) -> tuple[str, Inlin
         "Будущая функция для сравнения двух вариантов рекламного поста.\n\n"
         "Выберите функцию:"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🕒 Запланированные посты", callback_data=f"rule_repost_campaign_scheduled_posts:{rule_id}")],[InlineKeyboardButton(text="🧹 Чистый канал", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],[InlineKeyboardButton(text="📌 Время в топе", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:top_time")],[InlineKeyboardButton(text="✨ A/B-тесты", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:ab_test")],[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🕒 Запланированные посты", callback_data=f"rule_repost_campaign_scheduled_posts:{rule_id}")],[InlineKeyboardButton(text="🧹 Чистый канал", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],[InlineKeyboardButton(text="📌 Время в топе", callback_data=f"rule_repost_campaign_top_time:{rule_id}")],[InlineKeyboardButton(text="✨ A/B-тесты", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:ab_test")],[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]])
     return text, kb
 
 
@@ -762,7 +805,7 @@ def build_repost_campaign_top_time_intro_view(*, rule_id: int) -> tuple[str, Inl
 
 def build_repost_campaign_vip_coming_soon_view(*, rule_id: int, feature: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
     if feature == "top_time":
-        return build_repost_campaign_top_time_intro_view(rule_id=rule_id)
+        return build_repost_campaign_top_time_settings_view(rule_id=rule_id, settings={"enabled": False, "seconds": 0})
 
     if feature == "ab_test":
         text = (
@@ -781,6 +824,80 @@ def build_repost_campaign_vip_coming_soon_view(*, rule_id: int, feature: str | N
             [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
         ]),
     )
+
+
+def build_repost_campaign_top_time_settings_view(
+    *,
+    rule_id: int,
+    settings: dict | None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    settings = settings or {}
+    enabled = bool(settings.get("enabled"))
+    seconds_text = format_repost_campaign_top_time_seconds_text(settings.get("seconds"))
+    status_text = "🟢 Включено" if enabled else "🔴 Выключено"
+    if enabled:
+        intro = "После публикации рекламного поста ViMi будет удерживать обычный автопостинг на выбранное время."
+    else:
+        intro = "Когда функция включена, ViMi после публикации рекламного поста будет временно удерживать только обычный автопостинг в выбранных каналах и группах."
+    text = (
+        "📌 Время в топе\n\n"
+        f"Статус: {status_text}\n"
+        f"Время: {seconds_text}\n\n"
+        f"{intro}\n\n"
+        "Будет удерживаться:\n"
+        "✅ автоматические репосты\n"
+        "✅ автоматические видеопосты\n"
+        "✅ публикации обычных правил по расписанию\n\n"
+        "Не блокируется:\n"
+        "ℹ️ “Отправить сейчас”\n"
+        "ℹ️ VIP “Запланированные посты”\n"
+        "ℹ️ ручные публикации владельца канала\n"
+        "ℹ️ другие рекламные кампании — для них есть “Чистый канал”\n\n"
+        "Срок показа — когда рекламный пост будет удалён.\n"
+        "Время в топе — сколько ViMi не будет сам публиковать обычные посты поверх рекламы."
+    )
+    toggle_action = "off" if enabled else "on"
+    toggle_text = "🔴 Выключить" if enabled else "🟢 Включить"
+    rows = [
+        [InlineKeyboardButton(text=toggle_text, callback_data=f"rule_repost_campaign_top_time_toggle:{rule_id}:{toggle_action}")],
+        [InlineKeyboardButton(text="⏱ Выбрать время", callback_data=f"rule_repost_campaign_top_time_presets:{rule_id}")],
+        [InlineKeyboardButton(text="💎 VIP-функции", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
+        [InlineKeyboardButton(text="🚀 Мастер запуска", callback_data=f"rule_repost_campaign_launch_wizard:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_top_time_presets_view(
+    *,
+    rule_id: int,
+    settings: dict | None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    settings = settings or {}
+    current_text = format_repost_campaign_top_time_seconds_text(settings.get("seconds"))
+    status_text = "🟢 включено" if settings.get("enabled") else "🔴 выключено"
+    text = (
+        "⏱ Время в топе\n\n"
+        "Выберите, сколько ViMi не будет сам публиковать обычные посты поверх рекламы после её выхода.\n\n"
+        f"Текущее значение: {current_text}\n"
+        f"Статус: {status_text}"
+    )
+    rows = []
+    presets = REPOST_CAMPAIGN_TOP_TIME_PRESETS
+    for index in range(0, len(presets), 2):
+        row = [
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"rule_repost_campaign_top_time_set:{rule_id}:{seconds}",
+            )
+            for seconds, label in presets[index:index + 2]
+        ]
+        rows.append(row)
+    rows.extend([
+        [InlineKeyboardButton(text="📌 К настройке времени в топе", callback_data=f"rule_repost_campaign_top_time:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 def build_repost_campaign_schedule_menu_view(*, rule_id: int, scheduled_launches: list[dict] | None = None, now: datetime | None = None) -> tuple[str, InlineKeyboardMarkup]:
     text = (
