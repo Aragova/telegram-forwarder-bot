@@ -7,7 +7,6 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.repost_campaign_view_model import (
     build_campaign_target_item_view,
-    build_campaign_control_center_view_model,
     build_campaign_run_message_view,
     build_campaign_launch_readiness_view_model,
     build_campaign_views_report_view_model,
@@ -59,6 +58,50 @@ def format_repost_campaign_readiness_block(readiness: dict | None) -> str:
     )
 
 
+def _build_repost_campaign_setup_steps_summary(*, summary: dict, saved_post_line: str, readiness: dict | None = None, control_center: dict | None = None) -> str:
+    summary = summary or {}
+    readiness = readiness or {}
+    control_center = control_center or {}
+
+    saved_post_id = summary.get("saved_post_id") or readiness.get("saved_post_id")
+    post_text = str(saved_post_line or "").lower()
+    has_post = bool(saved_post_id) and "не найден" not in post_text
+    post_status = "✅ выбран" if has_post else "⚠️ не выбран"
+
+    targets_count = int(summary.get("targets_active") or 0)
+    if targets_count <= 0:
+        targets_count = int(readiness.get("will_send_total") or 0) + int(readiness.get("will_skip_total") or 0)
+    targets_status = f"✅ выбрано: {targets_count}" if targets_count > 0 else "⚠️ не выбраны"
+
+    show_seconds_value = summary.get("show_seconds") or readiness.get("show_seconds")
+    show_seconds_text = format_campaign_show_seconds_text(show_seconds_value)
+    has_show_seconds = show_seconds_text != "не задан"
+    show_seconds_status = f"✅ {show_seconds_text}" if has_show_seconds else "⚠️ не задан"
+
+    clean_channel_enabled = None
+    for payload in (summary, readiness, control_center):
+        if "clean_channel_enabled" in payload:
+            clean_channel_enabled = payload.get("clean_channel_enabled")
+            break
+    if clean_channel_enabled is True:
+        clean_channel_status = "🟢 включён"
+    elif clean_channel_enabled is False:
+        clean_channel_status = "⚪ выключен"
+    else:
+        clean_channel_status = "💎 в VIP-функциях"
+
+    launch_status = "готов" if has_post and targets_count > 0 and has_show_seconds else "⚠️ заполните настройки"
+
+    return (
+        "Настройте запуск по шагам:\n\n"
+        f"1. 📝 Рекламный пост — {post_status}\n"
+        f"2. 📣 Каналы и группы — {targets_status}\n"
+        f"3. 🕒 Срок показа — {show_seconds_status}\n"
+        f"4. 🧹 Чистый канал — {clean_channel_status}\n"
+        "5. 📌 Время в топе — 🔒 доступно в VIP\n"
+        f"6. 🚀 Запуск — {launch_status}"
+    )
+
 def build_repost_campaign_menu_view(
     *,
     rule_id: int,
@@ -70,64 +113,27 @@ def build_repost_campaign_menu_view(
     cc_payload = control_center
     if cc_payload is None:
         cc_payload = {"ok": bool(readiness), "readiness": readiness, "last_run": None, "last_run_details": None, "issues": []}
-    vm = build_campaign_control_center_view_model(summary=summary, saved_post_line=saved_post_line, control_center=cc_payload)
-    next_step_line = vm.get("next_step_line")
-    last_run_lines = [
-        vm.get("last_run_title_line"),
-        vm.get("last_run_status_line"),
-        vm.get("last_run_time_line"),
-        vm.get("last_run_delete_line"),
-    ]
-    rendered_last_run_block = "\n".join([line for line in last_run_lines if line])
-    blocks = [
-        "💰 Рекламная кампания",
-        vm["title_status"],
-        f"{vm['creative_line']}\n{vm['creative_value_line']}",
-        vm["targets_line"],
-        vm["show_seconds_line"],
-        rendered_last_run_block,
-        next_step_line,
-    ]
-    text = "\n\n".join([block for block in blocks if block])
-    rows = []
-    primary_action = vm.get("primary_action")
-    if primary_action == "show_seconds":
-        rows.append([InlineKeyboardButton(text="⏳ Задать время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")])
-    elif primary_action == "creative":
-        rows.append([InlineKeyboardButton(text="📝 Выбрать рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")])
-    elif primary_action == "targets":
-        rows.append([InlineKeyboardButton(text="📣 Добавить каналы/группы", callback_data=f"rule_repost_campaign_targets:{rule_id}")])
-    elif primary_action == "launch":
-        rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
-    elif primary_action in {"open_last_run", "open_active_run", "open_problem_run"} and vm["last_run_id"]:
-        button_text = "📄 Открыть последний запуск"
-        if vm.get("screen_state") == "active_placement":
-            button_text = "📄 Открыть активное размещение"
-        elif vm.get("screen_state") == "delete_problem":
-            button_text = "📄 Открыть проблемный запуск"
-        rows.append([InlineKeyboardButton(text=button_text, callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{vm['last_run_id']}")])
-
-    rows.extend([
+    steps_summary = _build_repost_campaign_setup_steps_summary(
+        summary=summary,
+        saved_post_line=saved_post_line,
+        readiness=readiness,
+        control_center=cc_payload,
+    )
+    text = "\n\n".join(["💰 Рекламная кампания", steps_summary])
+    rows = [
+        [InlineKeyboardButton(text="🚀 Мастер запуска рекламной кампании", callback_data=f"rule_repost_campaign_launch:{rule_id}")],
         [
-            InlineKeyboardButton(text="📝 Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}"),
-            InlineKeyboardButton(text="⏳ Время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}"),
+            InlineKeyboardButton(text="1. Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}"),
+            InlineKeyboardButton(text="2. Каналы и группы", callback_data=f"rule_repost_campaign_targets:{rule_id}"),
         ],
         [
-            InlineKeyboardButton(text="📣 Каналы/Группы", callback_data=f"rule_repost_campaign_targets:{rule_id}"),
-            InlineKeyboardButton(text="📚 Библиотека", callback_data=f"rule_repost_campaign_history:{rule_id}"),
+            InlineKeyboardButton(text="3. Время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}"),
+            InlineKeyboardButton(text="4. Библиотека", callback_data=f"rule_repost_campaign_history:{rule_id}"),
         ],
-        [
-            InlineKeyboardButton(text="💎 VIP функции", callback_data=f"rule_repost_campaign_vip_features:{rule_id}"),
-        ],
-    ])
-    blocked_launch_states = {"active_placement", "delete_problem"}
-    if vm["can_launch"] and primary_action != "launch" and vm.get("screen_state") not in blocked_launch_states:
-        rows.append([InlineKeyboardButton(text="🚀 Запустить кампанию", callback_data=f"rule_repost_campaign_launch:{rule_id}")])
-    rows.extend([
+        [InlineKeyboardButton(text="5. 💎 VIP-функции", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")],
-    ])
+    ]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
-
 
 
 def build_repost_campaign_launch_mode_view(*, rule_id: int, readiness: dict) -> tuple[str, InlineKeyboardMarkup]:
