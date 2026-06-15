@@ -1022,10 +1022,13 @@ class PostgresRepository(RepositoryProtocol):
             ends_at TIMESTAMPTZ NOT NULL,
             status TEXT NOT NULL DEFAULT 'active',
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             completed_at TIMESTAMPTZ NULL,
             cancelled_at TIMESTAMPTZ NULL,
             cancel_reason TEXT NULL
         );
+        ALTER TABLE campaign_top_time_pauses
+        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
         CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_top_time_pauses_run_message_unique
         ON campaign_top_time_pauses (campaign_run_message_id);
         CREATE INDEX IF NOT EXISTS idx_campaign_top_time_pauses_active_target
@@ -8984,23 +8987,36 @@ class PostgresRepository(RepositoryProtocol):
         at_expr = at_iso or datetime.now(timezone.utc).isoformat()
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM campaign_top_time_pauses
-                    WHERE target_id = %s
-                      AND (
-                            (target_thread_id IS NULL AND %s IS NULL)
-                            OR target_thread_id = %s
-                          )
-                      AND status = 'active'
-                      AND starts_at <= %s
-                      AND ends_at > %s
-                    ORDER BY ends_at DESC, id DESC
-                    LIMIT 1
-                    """,
-                    (str(target_id), target_thread_id, target_thread_id, at_expr, at_expr),
-                )
+                if target_thread_id is None:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM campaign_top_time_pauses
+                        WHERE target_id = %s
+                          AND target_thread_id IS NULL
+                          AND status = 'active'
+                          AND starts_at <= %s::timestamptz
+                          AND ends_at > %s::timestamptz
+                        ORDER BY ends_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (str(target_id), at_expr, at_expr),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM campaign_top_time_pauses
+                        WHERE target_id = %s
+                          AND target_thread_id = %s
+                          AND status = 'active'
+                          AND starts_at <= %s::timestamptz
+                          AND ends_at > %s::timestamptz
+                        ORDER BY ends_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (str(target_id), int(target_thread_id), at_expr, at_expr),
+                    )
                 row = cur.fetchone()
                 return dict(row) if row else None
 
@@ -9020,6 +9036,7 @@ class PostgresRepository(RepositoryProtocol):
                     SET
                         status = 'cancelled',
                         cancelled_at = COALESCE(%s::timestamptz, NOW()),
+                        updated_at = NOW(),
                         cancel_reason = COALESCE(%s, 'manual_admin_cancel')
                     WHERE id = %s
                       AND status = 'active'
