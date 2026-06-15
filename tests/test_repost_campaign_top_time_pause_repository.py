@@ -19,7 +19,9 @@ def test_campaign_top_time_pause_schema_and_indexes_exist():
 def test_campaign_top_time_pause_repository_methods_exist():
     for name in [
         "create_campaign_top_time_pause",
+        "get_campaign_top_time_pause",
         "get_campaign_top_time_pause_by_run_message",
+        "cancel_campaign_top_time_pause",
         "list_active_campaign_top_time_pauses_for_rule",
         "get_active_campaign_top_time_pause_for_target",
     ]:
@@ -78,3 +80,26 @@ def test_list_campaign_top_time_pauses_for_run_returns_all_statuses():
     assert "id DESC" in source
     assert hasattr(RepositoryProtocol, "list_campaign_top_time_pauses_for_run")
     assert hasattr(PostgresRepository, "list_campaign_top_time_pauses_for_run")
+
+
+def test_get_campaign_top_time_pause_by_id_sql():
+    source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+    assert "def get_campaign_top_time_pause" in source
+    assert "SELECT * FROM campaign_top_time_pauses WHERE id = %s LIMIT 1" in source
+
+
+def test_cancel_campaign_top_time_pause_changes_active_to_cancelled_sql():
+    source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+    assert "def cancel_campaign_top_time_pause" in source
+    assert "status = 'cancelled'" in source
+    assert "cancelled_at = COALESCE(%s::timestamptz, NOW())" in source
+    assert "cancel_reason = COALESCE(%s, 'manual_admin_cancel')" in source
+    assert "AND status = 'active'" in source
+    assert "RETURNING id" in source
+
+
+def test_cancel_campaign_top_time_pause_does_not_cancel_completed_source_guard():
+    source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+    method = source.split("def cancel_campaign_top_time_pause", 1)[1].split("def mark_expired_campaign_top_time_pauses_completed", 1)[0]
+    assert "AND status = 'active'" in method
+    assert "status = 'completed'" not in method

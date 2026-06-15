@@ -17,6 +17,12 @@ class FakeRepo:
     def list_campaign_top_time_pauses_for_run(self, campaign_run_id, *, limit=100):
         return self.by_run[:limit]
 
+    def get_campaign_top_time_pause(self, pause_id):
+        for row in self.active + self.by_run:
+            if row.get("id") == pause_id:
+                return row
+        return None
+
 
 def test_build_active_pauses_for_rule_empty():
     state = RepostCampaignTopTimeViewService(FakeRepo()).build_active_pauses_for_rule(10)
@@ -57,3 +63,28 @@ def test_build_run_top_time_summary_disabled_snapshot():
     state = RepostCampaignTopTimeViewService(FakeRepo()).build_run_top_time_summary(154, top_time_enabled_snapshot=False)
     assert state["status_text"] == "🔴 выключено для этого запуска"
     assert state["active_count"] == 0
+
+
+def test_build_pause_detail_active():
+    state = RepostCampaignTopTimeViewService(FakeRepo(active=[{"id": 123, "rule_id": 10, "campaign_run_id": 154, "status": "active", "target_title": "Wikiboy’s"}])).build_pause_detail(123)
+    assert state["ok"] is True
+    assert state["pause"]["status_text"] == "🟢 Активна"
+    assert state["pause"]["can_cancel"] is True
+
+
+def test_build_pause_detail_completed():
+    state = RepostCampaignTopTimeViewService(FakeRepo(active=[{"id": 123, "rule_id": 10, "status": "completed"}])).build_pause_detail(123)
+    assert state["pause"]["can_cancel"] is False
+    assert state["pause"]["status_text"] == "✅ Завершена"
+
+
+def test_build_pause_detail_cancelled():
+    state = RepostCampaignTopTimeViewService(FakeRepo(active=[{"id": 123, "rule_id": 10, "status": "cancelled"}])).build_pause_detail(123)
+    assert state["pause"]["can_cancel"] is False
+    assert state["pause"]["status_text"] == "🚫 Завершена вручную"
+
+
+def test_build_pause_detail_missing():
+    state = RepostCampaignTopTimeViewService(FakeRepo()).build_pause_detail(123)
+    assert state["ok"] is False
+    assert state["error_text"] == "Пауза не найдена"
