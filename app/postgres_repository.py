@@ -18,6 +18,7 @@ from app.repository_models import (
 )
 from app.postgres_client import PostgresClient
 from app.repository import RepositoryProtocol
+from app.repost_campaign_top_time import normalize_repost_campaign_top_time_settings
 from app.tenant_repository import TenantRepository
 from app.subscription_repository import SubscriptionRepository
 from app.billing_repository import BillingRepository
@@ -836,6 +837,8 @@ class PostgresRepository(RepositoryProtocol):
             error_text TEXT NULL,
             report_json JSONB NULL,
             scheduled_post_id BIGINT NULL,
+            top_time_enabled_snapshot BOOLEAN NOT NULL DEFAULT FALSE,
+            top_time_seconds_snapshot INTEGER NOT NULL DEFAULT 0,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
@@ -871,6 +874,8 @@ class PostgresRepository(RepositoryProtocol):
             failed_at TIMESTAMPTZ NULL,
             error_text TEXT NULL,
             preview_json JSONB NULL,
+            top_time_enabled_snapshot BOOLEAN NOT NULL DEFAULT FALSE,
+            top_time_seconds_snapshot INTEGER NOT NULL DEFAULT 0,
             clean_channel_next_retry_at TIMESTAMPTZ NULL,
             clean_channel_wait_attempt_count INTEGER NOT NULL DEFAULT 0,
             clean_channel_last_wait_at TIMESTAMPTZ NULL,
@@ -1061,8 +1066,12 @@ class PostgresRepository(RepositoryProtocol):
                 )
 
                 cur.execute("ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS scheduled_post_id BIGINT NULL")
+                cur.execute("ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS top_time_enabled_snapshot BOOLEAN NOT NULL DEFAULT FALSE")
+                cur.execute("ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS top_time_seconds_snapshot INTEGER NOT NULL DEFAULT 0")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_campaign_runs_scheduled_post ON campaign_runs(scheduled_post_id)")
                 for _sql in [
+                    "ALTER TABLE campaign_scheduled_launches ADD COLUMN IF NOT EXISTS top_time_enabled_snapshot BOOLEAN NOT NULL DEFAULT FALSE",
+                    "ALTER TABLE campaign_scheduled_launches ADD COLUMN IF NOT EXISTS top_time_seconds_snapshot INTEGER NOT NULL DEFAULT 0",
                     "ALTER TABLE campaign_scheduled_launches ADD COLUMN IF NOT EXISTS clean_channel_next_retry_at TIMESTAMPTZ NULL",
                     "ALTER TABLE campaign_scheduled_launches ADD COLUMN IF NOT EXISTS clean_channel_wait_attempt_count INTEGER NOT NULL DEFAULT 0",
                     "ALTER TABLE campaign_scheduled_launches ADD COLUMN IF NOT EXISTS clean_channel_last_wait_at TIMESTAMPTZ NULL",
@@ -8003,29 +8012,37 @@ class PostgresRepository(RepositoryProtocol):
                 cur.execute("UPDATE routing SET repost_campaign_saved_post_id=%s WHERE id=%s", (saved_post_id, int(rule_id)))
                 return cur.rowcount > 0
 
-    def create_campaign_run(self, *, rule_id: int, saved_post_id: int, run_type: str, status: str, show_seconds: int, started_by: int | None, render_mode: str | None = None, targets_total: int = 0, scheduled_post_id: int | None = None) -> int | None:
+    def create_campaign_run(self, *, rule_id: int, saved_post_id: int, run_type: str, status: str, show_seconds: int, started_by: int | None, render_mode: str | None = None, targets_total: int = 0, scheduled_post_id: int | None = None, top_time_enabled_snapshot: bool = False, top_time_seconds_snapshot: int = 0) -> int | None:
+        top_time = normalize_repost_campaign_top_time_settings(
+            enabled=bool(top_time_enabled_snapshot),
+            seconds=int(top_time_seconds_snapshot or 0),
+        )
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO campaign_runs(tenant_id, rule_id, saved_post_id, run_type, status, render_mode, show_seconds, targets_total, started_by, scheduled_post_id)
-                    VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO campaign_runs(tenant_id, rule_id, saved_post_id, run_type, status, render_mode, show_seconds, targets_total, started_by, scheduled_post_id, top_time_enabled_snapshot, top_time_seconds_snapshot)
+                    VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (int(rule_id), int(saved_post_id), str(run_type), str(status), render_mode, int(show_seconds), int(targets_total), started_by, scheduled_post_id),
+                    (int(rule_id), int(saved_post_id), str(run_type), str(status), render_mode, int(show_seconds), int(targets_total), started_by, scheduled_post_id, bool(top_time["enabled"]), int(top_time["seconds"])),
                 )
                 row = cur.fetchone()
             conn.commit()
             return int(row["id"]) if row else None
 
-    def create_campaign_scheduled_launch(self, *, rule_id: int, saved_post_id: int, show_seconds: int, scheduled_at: str, timezone_offset_minutes: int = 180, timezone_label: str = "UTC+3", created_by: int | None = None, preview: dict[str, Any] | None = None) -> int | None:
+    def create_campaign_scheduled_launch(self, *, rule_id: int, saved_post_id: int, show_seconds: int, scheduled_at: str, timezone_offset_minutes: int = 180, timezone_label: str = "UTC+3", created_by: int | None = None, preview: dict[str, Any] | None = None, top_time_enabled_snapshot: bool = False, top_time_seconds_snapshot: int = 0) -> int | None:
+        top_time = normalize_repost_campaign_top_time_settings(
+            enabled=bool(top_time_enabled_snapshot),
+            seconds=int(top_time_seconds_snapshot or 0),
+        )
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""SELECT id FROM campaign_scheduled_launches WHERE rule_id=%s AND saved_post_id=%s AND scheduled_at=%s AND created_by IS NOT DISTINCT FROM %s AND status='scheduled' ORDER BY id DESC LIMIT 1""", (int(rule_id), int(saved_post_id), scheduled_at, created_by))
                 row = cur.fetchone()
                 if row:
                     return int(row['id'])
-                cur.execute("""INSERT INTO campaign_scheduled_launches(tenant_id,rule_id,saved_post_id,show_seconds,scheduled_at,timezone_offset_minutes,timezone_label,status,created_by,preview_json) VALUES (1,%s,%s,%s,%s,%s,%s,'scheduled',%s,%s::jsonb) RETURNING id""", (int(rule_id), int(saved_post_id), int(show_seconds), scheduled_at, int(timezone_offset_minutes), str(timezone_label), created_by, _json_dumps(preview)))
+                cur.execute("""INSERT INTO campaign_scheduled_launches(tenant_id,rule_id,saved_post_id,show_seconds,scheduled_at,timezone_offset_minutes,timezone_label,status,created_by,preview_json,top_time_enabled_snapshot,top_time_seconds_snapshot) VALUES (1,%s,%s,%s,%s,%s,%s,'scheduled',%s,%s::jsonb,%s,%s) RETURNING id""", (int(rule_id), int(saved_post_id), int(show_seconds), scheduled_at, int(timezone_offset_minutes), str(timezone_label), created_by, _json_dumps(preview), bool(top_time["enabled"]), int(top_time["seconds"])))
                 row = cur.fetchone()
             conn.commit()
             return int(row['id']) if row else None

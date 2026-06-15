@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from app.repost_campaign_placement_service import RepostCampaignPlacementService
 from app.repost_campaign_service import build_campaign_delete_after_iso, format_campaign_show_seconds_ru
+from app.repost_campaign_top_time import normalize_repost_campaign_top_time_settings
 from app.repost_campaign_view_model import format_campaign_error_text, format_campaign_datetime_text
 from app.saved_post_renderer import normalize_telethon_target
 from app.saved_posts_service import get_saved_post_short_description
@@ -81,6 +82,12 @@ class RepostCampaignRuntimeService:
         self.target_checker = target_checker
         self.telethon_client = telethon_client
         self.logger = logger_ or logging.getLogger("forwarder")
+
+    def _build_top_time_snapshot_from_rule(self, rule) -> dict[str, Any]:
+        return normalize_repost_campaign_top_time_settings(
+            enabled=bool(getattr(rule, "repost_campaign_top_time_enabled", False)),
+            seconds=int(getattr(rule, "repost_campaign_top_time_seconds", 0) or 0),
+        )
 
     def _get_repost_rule_and_saved_post(self, *, rule_id: int, action: str):
         rule = self.repo.get_rule(rule_id)
@@ -728,6 +735,7 @@ class RepostCampaignRuntimeService:
         on_campaign_run_created: Callable[[int], None] | None = None,
         force_ignore_clean_channel: bool = False,
         ignore_active_placement_block: bool = False,
+        top_time_snapshot: dict[str, Any] | None = None,
     ) -> RepostCampaignActionResult:
         manual_launch_policy: dict[str, Any] | None = None
         if run_type == "manual":
@@ -853,6 +861,13 @@ class RepostCampaignRuntimeService:
         rule, saved_post = loaded
         saved_post_id = int(getattr(rule, "repost_campaign_saved_post_id"))
         show_seconds = int(getattr(rule, "repost_campaign_show_seconds", 0) or 0)
+        if top_time_snapshot is None:
+            top_time_snapshot = self._build_top_time_snapshot_from_rule(rule)
+        else:
+            top_time_snapshot = normalize_repost_campaign_top_time_settings(
+                enabled=bool(top_time_snapshot.get("enabled")),
+                seconds=int(top_time_snapshot.get("seconds") or 0),
+            )
         if show_seconds <= 0:
             return RepostCampaignActionResult(
                 ok=False,
@@ -895,6 +910,8 @@ class RepostCampaignRuntimeService:
             show_seconds=show_seconds,
             started_by=admin_id,
             targets_total=len(targets),
+            top_time_enabled_snapshot=bool(top_time_snapshot["enabled"]),
+            top_time_seconds_snapshot=int(top_time_snapshot["seconds"]),
         )
         if run_id is None:
             return RepostCampaignActionResult(
@@ -908,8 +925,8 @@ class RepostCampaignRuntimeService:
             on_campaign_run_created(int(run_id))
 
         self.logger.info(
-            "REPOST_CAMPAIGN_LAUNCH_STARTED | rule_id=%s | saved_post_id=%s | targets=%s | run_id=%s | run_type=%s",
-            rule_id, saved_post_id, len(targets), run_id, run_type
+            "REPOST_CAMPAIGN_LAUNCH_STARTED | rule_id=%s | saved_post_id=%s | targets=%s | run_id=%s | run_type=%s | top_time_enabled=%s | top_time_seconds=%s",
+            rule_id, saved_post_id, len(targets), run_id, run_type, bool(top_time_snapshot["enabled"]), int(top_time_snapshot["seconds"])
         )
         content = saved_post.get("content_json") or saved_post.get("content") or {}
         methods: set[str] = set()
@@ -1030,6 +1047,7 @@ class RepostCampaignRuntimeService:
                 "show_seconds": show_seconds,
                 "extra_targets": len(targets) - 1,
                 "launch_readiness": readiness,
+                "top_time_snapshot": top_time_snapshot,
                 "will_send_total": readiness.get("will_send_total"),
                 "will_skip_total": readiness.get("will_skip_total"),
                 "extra_ready": readiness.get("extra_ready"),

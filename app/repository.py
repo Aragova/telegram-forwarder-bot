@@ -398,6 +398,8 @@ class RepositoryProtocol(Protocol):
         render_mode: str | None = None,
         targets_total: int = 0,
         scheduled_post_id: int | None = None,
+        top_time_enabled_snapshot: bool = False,
+        top_time_seconds_snapshot: int = 0,
     ) -> int | None: ...
     
     def create_campaign_scheduled_launch(
@@ -411,6 +413,8 @@ class RepositoryProtocol(Protocol):
         timezone_label: str = "UTC+3",
         created_by: int | None = None,
         preview: dict[str, Any] | None = None,
+        top_time_enabled_snapshot: bool = False,
+        top_time_seconds_snapshot: int = 0,
     ) -> int | None: ...
     def get_campaign_scheduled_launch(self, scheduled_launch_id: int) -> dict[str, Any] | None: ...
     def list_rule_campaign_scheduled_launches(self, rule_id: int, *, statuses: list[str] | None = None, limit: int = 20) -> list[dict[str, Any]]: ...

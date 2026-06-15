@@ -8,6 +8,7 @@ from typing import Any
 
 from app.repost_campaign_placement_service import RepostCampaignPlacementService
 from app.repost_campaign_runtime_service import RepostCampaignActionResult
+from app.repost_campaign_top_time import normalize_repost_campaign_top_time_settings
 
 CAMPAIGN_SCHEDULE_TIMEZONE_OFFSET_MINUTES = 180
 CAMPAIGN_SCHEDULE_TIMEZONE_LABEL = "UTC+3"
@@ -365,7 +366,13 @@ class RepostCampaignScheduleService:
                 extra={"launch_readiness": readiness, "scheduled_policy": scheduled_policy},
             )
 
-        preview = {**readiness, "scheduled_policy": scheduled_policy} if scheduled_policy is not None else readiness
+        rule = self.repo.get_rule(rule_id)
+        top_time_snapshot = normalize_repost_campaign_top_time_settings(
+            enabled=bool(getattr(rule, "repost_campaign_top_time_enabled", False)),
+            seconds=int(getattr(rule, "repost_campaign_top_time_seconds", 0) or 0),
+        )
+        preview = {**readiness, "scheduled_policy": scheduled_policy} if scheduled_policy is not None else dict(readiness)
+        preview["top_time_snapshot"] = top_time_snapshot
         scheduled_launch_id = self.repo.create_campaign_scheduled_launch(
             rule_id=rule_id,
             saved_post_id=int(readiness.get("saved_post_id")),
@@ -375,6 +382,8 @@ class RepostCampaignScheduleService:
             timezone_label=CAMPAIGN_SCHEDULE_TIMEZONE_LABEL,
             created_by=created_by,
             preview=preview,
+            top_time_enabled_snapshot=bool(top_time_snapshot["enabled"]),
+            top_time_seconds_snapshot=int(top_time_snapshot["seconds"]),
         )
         extra = {
             "scheduled_launch_id": scheduled_launch_id,
@@ -500,6 +509,10 @@ class RepostCampaignScheduleService:
                 )
                 continue
 
+            top_time_snapshot = {
+                "enabled": bool(row.get("top_time_enabled_snapshot") or False),
+                "seconds": int(row.get("top_time_seconds_snapshot") or 0),
+            }
             captured_run_id: int | None = None
 
             def _remember_campaign_run(campaign_run_id: int) -> None:
@@ -517,6 +530,7 @@ class RepostCampaignScheduleService:
                     run_type="scheduled",
                     on_campaign_run_created=_remember_campaign_run,
                     ignore_active_placement_block=(action == "schedule_with_overlap_warning"),
+                    top_time_snapshot=top_time_snapshot,
                 )
             except Exception as exc:
                 current = self.repo.get_campaign_scheduled_launch(scheduled_launch_id) or {}
