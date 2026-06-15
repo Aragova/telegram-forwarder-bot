@@ -537,6 +537,12 @@ class RepositoryProtocol(Protocol):
         target_thread_id: int | None = None,
         at_iso: str | None = None,
     ) -> dict[str, Any] | None: ...
+    def mark_expired_campaign_top_time_pauses_completed(
+        self,
+        *,
+        now_iso: str | None = None,
+        limit: int = 500,
+    ) -> int: ...
     def mark_campaign_run_message_failed(
         self,
         message_id: int,

@@ -3,6 +3,7 @@ import asyncio
 import html
 import logging, mimetypes, random, re, time
 import json
+from datetime import datetime, timezone, timedelta
 from typing import Any
 from telethon.tl import types as tl_types
 from pathlib import Path
@@ -11,11 +12,12 @@ from aiogram.types import MessageEntity
 from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo
 from telethon import functions, types
 from .config import settings
-from .repository_models import utc_now_iso
+from .repository_models import GLOBAL_INTERVAL_GAP_SECONDS, utc_now_iso
 from .telegram_client import ReactionClientInfo
 from .video_processor import VideoProcessor
 from .scheduler_service import SchedulerService
 from .reaction_runtime_resolver import ReactionRuntimeResolver
+from .top_time_guard_service import TopTimeGuardService
 from .delivery_idempotency import build_delivery_idempotency_key, extract_sent_message_ids_from_attempt, normalize_valid_sent_message_ids
 from .telegram_send_result import telegram_send_result_from_raw
 from telethon.tl.types import (
@@ -2842,6 +2844,43 @@ class SenderService:
 
     async def process_rule_once(self, rule):
         schedule_mode = getattr(rule, "schedule_mode", "interval") or "interval"
+
+        decision = TopTimeGuardService(self.db, logger=logger).build_guard_decision(rule, at_iso=utc_now_iso())
+        if decision.get("blocked") is True and decision.get("resume_at"):
+            resume_at = str(decision["resume_at"])
+            resume_dt = datetime.fromisoformat(resume_at)
+            if resume_dt.tzinfo is None:
+                resume_dt = resume_dt.replace(tzinfo=timezone.utc)
+            next_run_at = (resume_dt.astimezone(timezone.utc) + timedelta(seconds=GLOBAL_INTERVAL_GAP_SECONDS)).isoformat()
+            await run_db(self.scheduler_service.set_next_run, int(rule.id), next_run_at)
+            pause = decision.get("pause") or {}
+            logger.info(
+                "TOP_TIME_GUARD_BLOCKED_AUTO_POST | rule_id=%s | target_id=%s | target_thread_id=%s | pause_id=%s | resume_at=%s | next_run_at=%s",
+                int(rule.id),
+                str(getattr(rule, "target_id", "") or ""),
+                getattr(rule, "target_thread_id", None),
+                pause.get("id"),
+                resume_at,
+                next_run_at,
+            )
+            if hasattr(self.db, "log_event"):
+                await run_db(
+                    self.db.log_event,
+                    event_type="top_time_auto_postponed",
+                    rule_id=int(rule.id),
+                    target_id=str(getattr(rule, "target_id", "") or ""),
+                    target_thread_id=getattr(rule, "target_thread_id", None),
+                    status="postponed",
+                    extra={
+                        "pause_id": pause.get("id"),
+                        "target_id": str(getattr(rule, "target_id", "") or ""),
+                        "target_thread_id": getattr(rule, "target_thread_id", None),
+                        "resume_at": resume_at,
+                        "next_run_at": next_run_at,
+                        "reason": "top_time_pause",
+                    },
+                )
+            return False
 
         taken = await run_db(self._take_due_delivery_sync, rule.id, schedule_mode)
         if not taken:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Callable
 
 from app.job_service import (
@@ -13,15 +13,55 @@ from app.job_service import (
     enqueue_repost_single,
     enqueue_video_delivery,
 )
-from app.repository_models import utc_now_iso
+from app.repository_models import GLOBAL_INTERVAL_GAP_SECONDS, utc_now_iso
 from app.limit_service import LimitService
 from app.subscription_service import SubscriptionService
 from app.usage_service import UsageService
 from app.worker_load_service import build_worker_load_snapshot
 from app.worker_resource_policy import POLICY
 from app.tenant_fairness_service import TenantFairnessService
+from app.top_time_guard_service import TopTimeGuardService
 
 logger = logging.getLogger("forwarder")
+
+
+def _top_time_resume_next_run_iso(resume_at: str) -> str:
+    resume_dt = datetime.fromisoformat(str(resume_at))
+    if resume_dt.tzinfo is None:
+        resume_dt = resume_dt.replace(tzinfo=timezone.utc)
+    return (resume_dt.astimezone(timezone.utc) + timedelta(seconds=GLOBAL_INTERVAL_GAP_SECONDS)).isoformat()
+
+
+def _log_top_time_auto_postponed(repo, *, rule, pause: dict, resume_at: str, next_run_at: str) -> None:
+    target_id = str(getattr(rule, "target_id", "") or "")
+    target_thread_id = getattr(rule, "target_thread_id", None)
+    pause_id = pause.get("id")
+    logger.info(
+        "TOP_TIME_GUARD_BLOCKED_AUTO_POST | rule_id=%s | target_id=%s | target_thread_id=%s | pause_id=%s | resume_at=%s | next_run_at=%s",
+        int(rule.id),
+        target_id,
+        target_thread_id,
+        pause_id,
+        resume_at,
+        next_run_at,
+    )
+    if hasattr(repo, "log_event"):
+        repo.log_event(
+            event_type="top_time_auto_postponed",
+            rule_id=int(rule.id),
+            target_id=target_id,
+            target_thread_id=target_thread_id,
+            status="postponed",
+            extra={
+                "pause_id": pause_id,
+                "target_id": target_id,
+                "target_thread_id": target_thread_id,
+                "resume_at": resume_at,
+                "next_run_at": next_run_at,
+                "reason": "top_time_pause",
+            },
+        )
+
 _last_usage_reset_day: str | None = None
 
 
@@ -38,6 +78,12 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
     limit_service = LimitService(repo, subscription_service, usage_service)
     fairness_service = TenantFairnessService(repo)
 
+    if hasattr(repo, "mark_expired_campaign_top_time_pauses_completed"):
+        completed_count = await asyncio.to_thread(repo.mark_expired_campaign_top_time_pauses_completed, limit=500)
+        if completed_count > 0:
+            logger.info("TOP_TIME_PAUSES_COMPLETED | count=%s", completed_count)
+
+    top_time_guard = TopTimeGuardService(repo, logger=logger)
     rules = await asyncio.to_thread(repo.get_all_rules)
 
     for rule in rules:
@@ -71,6 +117,22 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
             due = await asyncio.to_thread(repo.take_due_delivery, int(rule.id), due_iso)
         if not due:
             continue
+
+        decision = top_time_guard.build_guard_decision(rule, at_iso=due_iso)
+        if decision.get("blocked") is True:
+            resume_at = decision.get("resume_at")
+            if resume_at:
+                next_run_at = _top_time_resume_next_run_iso(str(resume_at))
+                await asyncio.to_thread(repo.update_rule_next_run_at, int(rule.id), next_run_at)
+                _log_top_time_auto_postponed(
+                    repo,
+                    rule=rule,
+                    pause=decision.get("pause") or {},
+                    resume_at=str(resume_at),
+                    next_run_at=next_run_at,
+                )
+            continue
+
         tenant_id = int(due.get("tenant_id") or getattr(repo, "get_rule_tenant_id", lambda _x: 1)(int(rule.id)) or 1)
 
         can_enqueue, enqueue_reason = limit_service.can_enqueue_job(tenant_id)

@@ -6448,6 +6448,11 @@ class PostgresRepository(RepositoryProtocol):
             logical_faulty = logical_summary["faulty"]
             logical_current_position = logical_summary["current_position"]
 
+            active_top_time_pause = self.get_active_campaign_top_time_pause_for_target(
+                target_id=str(rule.target_id),
+                target_thread_id=rule.target_thread_id,
+            ) if rule.target_id else None
+
             snapshot = {
                 "id": rule.id,
                 "source_id": rule.source_id,
@@ -6484,6 +6489,8 @@ class PostgresRepository(RepositoryProtocol):
                 "logical_faulty": logical_faulty,
                 "logical_total": logical_total,
                 "logical_current_position": logical_current_position,
+                "active_top_time_pause": active_top_time_pause,
+                "top_time_pause_ends_at": (active_top_time_pause or {}).get("ends_at"),
             }
 
             logger.info(
@@ -8966,6 +8973,40 @@ class PostgresRepository(RepositoryProtocol):
                 )
                 row = cur.fetchone()
                 return dict(row) if row else None
+
+
+    def mark_expired_campaign_top_time_pauses_completed(
+        self,
+        *,
+        now_iso: str | None = None,
+        limit: int = 500,
+    ) -> int:
+        safe_limit = max(1, min(int(limit or 500), 5000))
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH due AS (
+                        SELECT id
+                        FROM campaign_top_time_pauses
+                        WHERE status = 'active'
+                          AND ends_at <= COALESCE(%s::timestamptz, NOW())
+                        ORDER BY ends_at ASC, id ASC
+                        LIMIT %s
+                    )
+                    UPDATE campaign_top_time_pauses p
+                    SET status = 'completed',
+                        completed_at = COALESCE(%s::timestamptz, NOW()),
+                        updated_at = NOW()
+                    FROM due
+                    WHERE p.id = due.id
+                    RETURNING p.id
+                    """,
+                    (now_iso, safe_limit, now_iso),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+            return len(rows)
 
     def get_campaign_run(self, run_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:

@@ -54,3 +54,14 @@ def test_get_active_campaign_top_time_pause_for_target_sql_returns_latest_end_an
     assert "AND starts_at <= %s" in source
     assert "AND ends_at > %s" in source
     assert "ORDER BY ends_at DESC, id DESC" in source
+
+
+def test_mark_expired_campaign_top_time_pauses_completed_sql_uses_limited_cte():
+    source = Path("app/postgres_repository.py").read_text()
+    assert "def mark_expired_campaign_top_time_pauses_completed" in source
+    assert "WITH due AS" in source
+    assert "WHERE status = 'active'" in source
+    assert "ends_at <= COALESCE(%s::timestamptz, NOW())" in source
+    assert "LIMIT %s" in source
+    assert "SET status = 'completed'" in source
+    assert "RETURNING p.id" in source
