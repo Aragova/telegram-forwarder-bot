@@ -18,6 +18,9 @@ from app.repost_campaign_ui import (
     build_repost_campaign_vip_features_view,
     build_repost_campaign_vip_coming_soon_view,
     build_repost_campaign_top_time_intro_view,
+    build_repost_campaign_top_time_presets_view,
+    build_repost_campaign_top_time_settings_view,
+    format_repost_campaign_top_time_status_text,
     build_repost_campaign_schedule_current_view,
     build_repost_campaign_run_details_view,
     build_repost_campaign_run_delete_confirm_view,
@@ -926,7 +929,7 @@ def test_vip_features_menu_keeps_callbacks():
     assert _callbacks_from_keyboard(keyboard) == [
         "rule_repost_campaign_scheduled_posts:73",
         "rule_repost_campaign_clean_channel:73",
-        "rule_repost_campaign_vip_coming_soon:73:top_time",
+        "rule_repost_campaign_top_time:73",
         "rule_repost_campaign_vip_coming_soon:73:ab_test",
         "rule_repost_campaign_menu:73",
     ]
@@ -996,12 +999,8 @@ def test_repost_campaign_top_time_stage_seven_three_does_not_touch_runtime_layer
         "app/repost_campaign_scheduled_post_service.py",
         "app/repost_campaign_launch_job_service.py",
         "app/repost_campaign_placement_service.py",
-        "app/postgres_repository.py",
-        "app/repository.py",
     ]
     forbidden_markers = [
-        "Время в топе",
-        "top_time",
         "top_time_pause",
         "target_top_pause",
     ]
@@ -2420,7 +2419,7 @@ def test_launch_wizard_buttons_have_expected_callbacks():
         "rule_repost_campaign_targets:7",
         "rule_repost_campaign_show_menu:7",
         "rule_repost_campaign_clean_channel:7",
-        "rule_repost_campaign_vip_coming_soon:7:top_time",
+        "rule_repost_campaign_top_time:7",
         "rule_repost_campaign_launch_now_preview:7",
         "rule_repost_campaign_schedule_current:7",
         "rule_repost_campaign_menu:7",
@@ -2471,9 +2470,97 @@ def test_repost_campaign_launch_wizard_stage_seven_two_does_not_touch_runtime_la
         "app/repost_campaign_scheduled_post_service.py",
         "app/repost_campaign_launch_job_service.py",
         "app/repost_campaign_placement_service.py",
-        "app/postgres_repository.py",
-        "app/repository.py",
     ]:
         source = Path(path).read_text(encoding="utf-8")
         assert "Мастер запуска рекламной кампании" not in source
         assert "rule_repost_campaign_launch_wizard" not in source
+
+
+def test_top_time_status_formatter():
+    assert format_repost_campaign_top_time_status_text({"enabled": False, "seconds": 0}) == "🔴 выключено"
+    assert format_repost_campaign_top_time_status_text({"enabled": True, "seconds": 7200}) == "🟢 2 часа"
+    assert format_repost_campaign_top_time_status_text({"enabled": True, "seconds": 0}) == "🟡 включено · время не выбрано"
+    assert format_repost_campaign_top_time_status_text(None) == "🔒 доступно в VIP"
+
+
+def test_menu_summary_uses_top_time_settings():
+    payload = _campaign_menu_ready_payload()
+    payload["summary"] = dict(payload["summary"], top_time_enabled=False, top_time_seconds=0)
+    text, _ = build_repost_campaign_menu_view(rule_id=7, **payload)
+    assert "5. 📌 Время в топе — 🔴 выключено" in text
+
+    payload["summary"] = dict(payload["summary"], top_time_enabled=True, top_time_seconds=7200)
+    text, _ = build_repost_campaign_menu_view(rule_id=7, **payload)
+    assert "5. 📌 Время в топе — 🟢 2 часа" in text
+
+
+def test_launch_wizard_uses_top_time_settings():
+    payload = _campaign_menu_ready_payload()
+    payload["summary"] = dict(payload["summary"], top_time_enabled=False, top_time_seconds=0)
+    text, _ = build_repost_campaign_launch_wizard_view(rule_id=7, **payload)
+    assert "5. 📌 Время в топе — 🔴 выключено" in text
+
+    payload["summary"] = dict(payload["summary"], top_time_enabled=True, top_time_seconds=7200)
+    text, _ = build_repost_campaign_launch_wizard_view(rule_id=7, **payload)
+    assert "5. 📌 Время в топе — 🟢 2 часа" in text
+
+
+def test_top_time_settings_view_disabled():
+    text, keyboard = build_repost_campaign_top_time_settings_view(rule_id=10, settings={"enabled": False, "seconds": 0})
+    assert "📌 Время в топе" in text
+    assert "Статус: 🔴 Выключено" in text
+    assert "Время: не выбрано" in text
+    assert _texts_from_keyboard(keyboard) == ["🟢 Включить", "⏱ Выбрать время", "💎 VIP-функции", "🚀 Мастер запуска", "💰 К кампании"]
+
+
+def test_top_time_settings_view_enabled():
+    text, keyboard = build_repost_campaign_top_time_settings_view(rule_id=10, settings={"enabled": True, "seconds": 7200})
+    assert "Статус: 🟢 Включено" in text
+    assert "Время: 2 часа" in text
+    assert "🔴 Выключить" in _texts_from_keyboard(keyboard)
+
+
+def test_top_time_presets_view():
+    _, keyboard = build_repost_campaign_top_time_presets_view(rule_id=10, settings={"enabled": True, "seconds": 7200})
+    texts = _texts_from_keyboard(keyboard)
+    callbacks = _callbacks_from_keyboard(keyboard)
+    for label in ["15 минут", "30 минут", "1 час", "2 часа", "3 часа", "6 часов", "12 часов"]:
+        assert label in texts
+    for seconds in [900, 1800, 3600, 7200, 10800, 21600, 43200]:
+        assert f"rule_repost_campaign_top_time_set:10:{seconds}" in callbacks
+
+
+def test_vip_features_top_time_callback_points_to_settings():
+    _, keyboard = build_repost_campaign_vip_features_view(rule_id=10)
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_top_time:10" in callbacks
+    assert "rule_repost_campaign_vip_coming_soon:10:top_time" not in callbacks
+
+
+def test_launch_wizard_top_time_callback_points_to_settings():
+    payload = _campaign_menu_ready_payload()
+    _, keyboard = build_repost_campaign_launch_wizard_view(rule_id=10, **payload)
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_top_time:10" in callbacks
+    assert "rule_repost_campaign_vip_coming_soon:10:top_time" not in callbacks
+
+
+def test_top_time_handlers_exist_and_runtime_layers_do_not_implement_pause():
+    handlers_source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
+    for callback in [
+        "rule_repost_campaign_top_time:",
+        "rule_repost_campaign_top_time_toggle:",
+        "rule_repost_campaign_top_time_presets:",
+        "rule_repost_campaign_top_time_set:",
+    ]:
+        assert callback in handlers_source
+    for path in [
+        "app/repost_campaign_runtime_service.py",
+        "app/repost_campaign_launch_job_service.py",
+        "app/repost_campaign_schedule_service.py",
+        "app/repost_campaign_schedule_handlers.py",
+        "app/repost_campaign_message_handlers.py",
+    ]:
+        source = Path(path).read_text(encoding="utf-8")
+        assert "top_time_pause" not in source
+        assert "target_top_pause" not in source

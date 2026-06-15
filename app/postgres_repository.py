@@ -151,6 +151,8 @@ class PostgresRepository(RepositoryProtocol):
                 if data.get("repost_campaign_clean_channel_enabled") is not None
                 else True
             ),
+            repost_campaign_top_time_enabled=bool(data.get("repost_campaign_top_time_enabled") or False),
+            repost_campaign_top_time_seconds=int(data.get("repost_campaign_top_time_seconds") or 0),
             repost_campaign_show_seconds=int(data.get("repost_campaign_show_seconds") or 0),
             repost_campaign_saved_post_id=(int(data.get("repost_campaign_saved_post_id")) if data.get("repost_campaign_saved_post_id") is not None else None),
         )
@@ -381,7 +383,14 @@ class PostgresRepository(RepositoryProtocol):
             last_sent_at TEXT NULL,
 
             video_intro_horizontal_id BIGINT NULL,
-            video_intro_vertical_id BIGINT NULL
+            video_intro_vertical_id BIGINT NULL,
+
+            repost_campaign_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+            repost_campaign_clean_channel_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            repost_campaign_top_time_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+            repost_campaign_top_time_seconds INTEGER NOT NULL DEFAULT 0,
+            repost_campaign_show_seconds BIGINT NOT NULL DEFAULT 0,
+            repost_campaign_saved_post_id BIGINT NULL
         );
 
         CREATE TABLE IF NOT EXISTS problem_state(
@@ -712,6 +721,8 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_vertical_id BIGINT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_enabled BOOLEAN NOT NULL DEFAULT FALSE;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_clean_channel_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_top_time_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_top_time_seconds INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_show_seconds BIGINT NOT NULL DEFAULT 0;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_campaign_saved_post_id BIGINT NULL;
         ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dedup_key TEXT NULL;
@@ -7877,6 +7888,65 @@ class PostgresRepository(RepositoryProtocol):
                 cur.execute("UPDATE saved_posts SET archived_at=NOW(), status='archived', updated_at=NOW() WHERE id=%s", (int(saved_post_id),))
                 return cur.rowcount > 0
 
+
+    def get_rule_repost_campaign_top_time_settings(self, rule_id: int) -> dict[str, Any]:
+        default = {"rule_id": int(rule_id), "enabled": False, "seconds": 0}
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT id, repost_campaign_top_time_enabled, repost_campaign_top_time_seconds
+                        FROM routing
+                        WHERE id = %s
+                        LIMIT 1
+                        """,
+                        (int(rule_id),),
+                    )
+                    row = cur.fetchone()
+            if not row:
+                return default
+            data = dict(row)
+            return {
+                "rule_id": int(data.get("id") or rule_id),
+                "enabled": bool(data.get("repost_campaign_top_time_enabled") or False),
+                "seconds": int(data.get("repost_campaign_top_time_seconds") or 0),
+            }
+        except Exception as exc:
+            logger.exception("REPOST_CAMPAIGN_TOP_TIME_SETTINGS_GET_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            return default
+
+    def set_rule_repost_campaign_top_time_settings(
+        self,
+        rule_id: int,
+        *,
+        enabled: bool,
+        seconds: int,
+        actor_id: int | None = None,
+    ) -> bool:
+        allowed_seconds = {900, 1800, 3600, 7200, 10800, 21600, 43200}
+        normalized_enabled = bool(enabled)
+        normalized_seconds = int(seconds or 0)
+        if not normalized_enabled:
+            normalized_seconds = 0
+        elif normalized_seconds not in allowed_seconds:
+            normalized_seconds = 7200
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET
+                        repost_campaign_top_time_enabled = %s,
+                        repost_campaign_top_time_seconds = %s
+                    WHERE id = %s
+                    """,
+                    (normalized_enabled, normalized_seconds, int(rule_id)),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+            return updated
+
     def get_rule_repost_campaign_clean_channel_settings(self, rule_id: int) -> dict[str, Any]:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -9110,6 +9180,8 @@ class PostgresRepository(RepositoryProtocol):
         default = {
             "enabled": False,
             "show_seconds": 0,
+            "top_time_enabled": False,
+            "top_time_seconds": 0,
             "targets_total": 0,
             "targets_active": 0,
             "targets_ready": 0,
@@ -9122,7 +9194,9 @@ class PostgresRepository(RepositoryProtocol):
                         """
                         SELECT
                             COALESCE(repost_campaign_enabled, FALSE) AS enabled,
-                            COALESCE(repost_campaign_show_seconds, 0) AS show_seconds
+                            COALESCE(repost_campaign_show_seconds, 0) AS show_seconds,
+                            COALESCE(repost_campaign_top_time_enabled, FALSE) AS top_time_enabled,
+                            COALESCE(repost_campaign_top_time_seconds, 0) AS top_time_seconds
                         FROM routing
                         WHERE id = %s
                         LIMIT 1
@@ -9160,6 +9234,8 @@ class PostgresRepository(RepositoryProtocol):
             return {
                 "enabled": bool(rule_row["enabled"]),
                 "show_seconds": int(rule_row["show_seconds"] or 0),
+                "top_time_enabled": bool(rule_row.get("top_time_enabled")),
+                "top_time_seconds": int(rule_row.get("top_time_seconds") or 0),
                 "targets_total": int(targets_row.get("targets_total") or 0),
                 "targets_active": int(targets_row.get("targets_active") or 0),
                 "targets_ready": int(targets_row.get("targets_ready") or 0),
