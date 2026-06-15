@@ -990,9 +990,8 @@ def test_vip_coming_soon_ab_test_remains_generic():
     ]
 
 
-def test_repost_campaign_top_time_stage_seven_three_does_not_touch_runtime_layers():
+def test_repost_campaign_top_time_stage_seven_six_does_not_touch_non_runtime_layers():
     forbidden_paths = [
-        "app/repost_campaign_runtime_service.py",
         "app/repost_campaign_schedule_service.py",
         "app/repost_campaign_schedule_handlers.py",
         "app/repost_campaign_message_handlers.py",
@@ -2555,7 +2554,6 @@ def test_top_time_handlers_exist_and_runtime_layers_do_not_implement_pause():
     ]:
         assert callback in handlers_source
     for path in [
-        "app/repost_campaign_runtime_service.py",
         "app/repost_campaign_launch_job_service.py",
         "app/repost_campaign_schedule_service.py",
         "app/repost_campaign_schedule_handlers.py",

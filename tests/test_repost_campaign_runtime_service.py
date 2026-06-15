@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +40,9 @@ class _FakeRepo:
         self.update_target_check_calls = []
         self.update_target_check_result = True
         self.set_target_active_result = True
+        self.create_campaign_top_time_pause_calls = []
+        self.create_campaign_top_time_pause_result = 501
+        self.create_campaign_top_time_pause_raises = None
 
     def get_rule(self, rule_id):
         return self._rule
@@ -93,6 +97,12 @@ class _FakeRepo:
     def mark_campaign_run_message_failed(self, message_id, **kwargs):
         self.mark_campaign_run_message_failed_calls.append((message_id, kwargs))
         return True
+
+    def create_campaign_top_time_pause(self, **kwargs):
+        self.create_campaign_top_time_pause_calls.append(kwargs)
+        if self.create_campaign_top_time_pause_raises is not None:
+            raise self.create_campaign_top_time_pause_raises
+        return self.create_campaign_top_time_pause_result
 
     def list_campaign_runs_for_rule(self, rule_id, limit=10):
         return self._runs[:limit]
@@ -1660,3 +1670,129 @@ def test_launch_campaign_from_snapshot_does_not_add_top_time_pause_guard():
     launch_from_snapshot_source = source.split("    async def launch_campaign_from_snapshot", 1)[1].split("\n    async def launch_campaign_now", 1)[0]
     assert "target_top_pause" not in launch_from_snapshot_source
     assert "top_time_pause" not in launch_from_snapshot_source
+
+
+def _top_time_rule(*, enabled=True, seconds=7200):
+    return SimpleNamespace(
+        mode="repost",
+        repost_campaign_saved_post_id=55,
+        target_id="-1001",
+        target_thread_id=None,
+        target_title="Main",
+        repost_campaign_show_seconds=300,
+        repost_campaign_top_time_enabled=enabled,
+        repost_campaign_top_time_seconds=seconds,
+    )
+
+
+def test_launch_campaign_now_creates_top_time_pause_for_successful_send():
+    repo = _FakeRepo(rule=_top_time_rule(), saved_post={"content_json": {"kind": "text"}}, summary={"can_launch": True})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", message_id=123)))
+
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+
+    assert result.ok is True
+    assert len(repo.create_campaign_top_time_pause_calls) == 1
+    call = repo.create_campaign_top_time_pause_calls[0]
+    assert call["campaign_run_message_id"] == repo.next_run_message_id
+    assert call["target_id"] == "-1001"
+    starts_at = datetime.fromisoformat(call["starts_at"])
+    ends_at = datetime.fromisoformat(call["ends_at"])
+    assert int((ends_at - starts_at).total_seconds()) == 7200
+    assert len(result.extra["top_time_pauses_created"]) == 1
+    assert repo.update_campaign_run_status_calls[-1][1]["report"]["top_time_pauses_created"] == 1
+
+
+def test_launch_campaign_now_does_not_create_pause_when_snapshot_disabled():
+    repo = _FakeRepo(rule=_top_time_rule(enabled=False, seconds=0), saved_post={"content_json": {"kind": "text"}}, summary={"can_launch": True})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", message_id=123)))
+
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1, top_time_snapshot={"enabled": False, "seconds": 0}))
+
+    assert result.ok is True
+    assert repo.create_campaign_top_time_pause_calls == []
+    assert result.extra["top_time_pauses_created"] == []
+
+
+def test_launch_campaign_now_does_not_create_pause_for_failed_send():
+    repo = _FakeRepo(rule=_top_time_rule(), saved_post={"content_json": {"kind": "text"}}, summary={"can_launch": True})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(SavedPostRenderResult(ok=False, method="bot_api", kind="text", error_text="x")))
+
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+
+    assert result.ok is False
+    assert repo.create_campaign_top_time_pause_calls == []
+
+
+def test_launch_campaign_now_partial_success_creates_pause_only_for_successful_targets():
+    repo = _FakeRepo(rule=_top_time_rule(), saved_post={"content_json": {"kind": "text"}}, summary={"can_launch": True})
+    repo._targets = [{"target_id": "-1002", "target_thread_id": None, "title": "Extra", "is_active": True, "can_post": True}]
+    repo.next_run_message_ids = [1001, 1002]
+    renderer = _FakeRenderer([
+        SavedPostRenderResult(ok=True, method="bot_api", kind="text", message_id=1),
+        SavedPostRenderResult(ok=False, method="bot_api", kind="text", error_text="x"),
+    ])
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+
+    assert result.ok is True
+    assert result.extra["final_status"] == "partial"
+    assert len(repo.create_campaign_top_time_pause_calls) == 1
+    assert repo.create_campaign_top_time_pause_calls[0]["target_id"] == "-1001"
+
+
+def test_launch_campaign_now_continues_if_pause_creation_fails():
+    repo = _FakeRepo(rule=_top_time_rule(), saved_post={"content_json": {"kind": "text"}}, summary={"can_launch": True})
+    repo.create_campaign_top_time_pause_raises = RuntimeError("pause boom")
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", message_id=123)))
+
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+
+    assert result.ok is True
+    assert result.extra["final_status"] == "sent"
+    assert result.extra["top_time_pauses_created"] == []
+
+
+def test_scheduled_launch_now_uses_passed_snapshot_for_pause():
+    repo = _FakeRepo(rule=_top_time_rule(enabled=False, seconds=0), saved_post={"content_json": {"kind": "text"}}, summary={"can_launch": True})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", message_id=123)))
+
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1, run_type="scheduled", top_time_snapshot={"enabled": True, "seconds": 3600}))
+
+    assert result.ok is True
+    call = repo.create_campaign_top_time_pause_calls[0]
+    starts_at = datetime.fromisoformat(call["starts_at"])
+    ends_at = datetime.fromisoformat(call["ends_at"])
+    assert int((ends_at - starts_at).total_seconds()) == 3600
+
+
+def test_launch_campaign_from_snapshot_does_not_create_top_time_pause_runtime():
+    repo = _FakeRepo(rule=_top_time_rule(), saved_post={"content_json": {"kind": "text"}}, summary={"can_launch": True})
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="text", message_id=123)))
+
+    result = asyncio.run(runtime.launch_campaign_from_snapshot(rule_id=1, saved_post_id=55, targets_snapshot=[{"target_id": "-1001", "target_thread_id": None, "target_title": "Main"}], scheduled_post_id=77, show_seconds=300))
+
+    assert result.ok is True
+    assert repo.create_campaign_top_time_pause_calls == []
+
+
+def test_top_time_pause_stage_seven_six_does_not_add_worker_guard():
+    forbidden_paths = [
+        "app/repost_worker.py",
+        "app/video_worker.py",
+        "app/scheduler.py",
+        "app/job_service.py",
+    ]
+    forbidden_markers = [
+        "get_active_campaign_top_time_pause_for_target",
+        "campaign_top_time_pauses",
+        "top_time_pause",
+        "target_top_pause",
+    ]
+    for path in forbidden_paths:
+        if not Path(path).exists():
+            continue
+        source = Path(path).read_text(encoding="utf-8")
+        for marker in forbidden_markers:
+            assert marker not in source

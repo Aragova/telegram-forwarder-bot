@@ -1010,6 +1010,30 @@ class PostgresRepository(RepositoryProtocol):
         ON campaign_run_messages(run_id, target_kind, target_id, COALESCE(target_thread_id, -1));
         CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_run_messages_unique_target_per_run
         ON campaign_run_messages(run_id, target_id, COALESCE(target_thread_id, -1));
+        CREATE TABLE IF NOT EXISTS campaign_top_time_pauses (
+            id BIGSERIAL PRIMARY KEY,
+            rule_id BIGINT NOT NULL,
+            campaign_run_id BIGINT NOT NULL,
+            campaign_run_message_id BIGINT NOT NULL,
+            target_id TEXT NOT NULL,
+            target_thread_id BIGINT NULL,
+            target_title TEXT NULL,
+            starts_at TIMESTAMPTZ NOT NULL,
+            ends_at TIMESTAMPTZ NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            completed_at TIMESTAMPTZ NULL,
+            cancelled_at TIMESTAMPTZ NULL,
+            cancel_reason TEXT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_top_time_pauses_run_message_unique
+        ON campaign_top_time_pauses (campaign_run_message_id);
+        CREATE INDEX IF NOT EXISTS idx_campaign_top_time_pauses_active_target
+        ON campaign_top_time_pauses (target_id, target_thread_id, ends_at)
+        WHERE status = 'active';
+        CREATE INDEX IF NOT EXISTS idx_campaign_top_time_pauses_active_due
+        ON campaign_top_time_pauses (ends_at)
+        WHERE status = 'active';
 
         """
 
@@ -8850,6 +8874,98 @@ class PostgresRepository(RepositoryProtocol):
                 )
             conn.commit()
             return True
+
+    def create_campaign_top_time_pause(
+        self,
+        *,
+        rule_id: int,
+        campaign_run_id: int,
+        campaign_run_message_id: int,
+        target_id: str,
+        target_thread_id: int | None,
+        target_title: str | None,
+        starts_at: str,
+        ends_at: str,
+    ) -> int | None:
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO campaign_top_time_pauses (
+                            rule_id, campaign_run_id, campaign_run_message_id, target_id,
+                            target_thread_id, target_title, starts_at, ends_at, status
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active')
+                        ON CONFLICT (campaign_run_message_id)
+                        DO UPDATE SET campaign_run_message_id = EXCLUDED.campaign_run_message_id
+                        RETURNING id
+                        """,
+                        (
+                            int(rule_id), int(campaign_run_id), int(campaign_run_message_id),
+                            str(target_id), target_thread_id, target_title, starts_at, ends_at,
+                        ),
+                    )
+                    row = cur.fetchone()
+                conn.commit()
+                return int(row["id"]) if row else None
+        except Exception:
+            logger.exception("Failed to create campaign top-time pause")
+            return None
+
+    def get_campaign_top_time_pause_by_run_message(self, campaign_run_message_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_top_time_pauses WHERE campaign_run_message_id=%s LIMIT 1", (int(campaign_run_message_id),))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def list_active_campaign_top_time_pauses_for_rule(self, rule_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM campaign_top_time_pauses
+                    WHERE rule_id = %s
+                      AND status = 'active'
+                      AND ends_at > NOW()
+                    ORDER BY ends_at ASC, id ASC
+                    LIMIT %s
+                    """,
+                    (int(rule_id), int(limit)),
+                )
+                return [dict(row) for row in (cur.fetchall() or [])]
+
+    def get_active_campaign_top_time_pause_for_target(
+        self,
+        *,
+        target_id: str,
+        target_thread_id: int | None = None,
+        at_iso: str | None = None,
+    ) -> dict[str, Any] | None:
+        at_expr = at_iso or datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM campaign_top_time_pauses
+                    WHERE target_id = %s
+                      AND (
+                            (target_thread_id IS NULL AND %s IS NULL)
+                            OR target_thread_id = %s
+                          )
+                      AND status = 'active'
+                      AND starts_at <= %s
+                      AND ends_at > %s
+                    ORDER BY ends_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (str(target_id), target_thread_id, target_thread_id, at_expr, at_expr),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
 
     def get_campaign_run(self, run_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
