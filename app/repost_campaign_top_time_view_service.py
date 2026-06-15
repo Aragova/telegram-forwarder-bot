@@ -131,12 +131,36 @@ class RepostCampaignTopTimeViewService:
                 "error_text": "Не удалось получить данные Времени в топе",
             }
 
+    def build_pause_detail(self, pause_id: int) -> dict[str, Any]:
+        try:
+            row = self.repo.get_campaign_top_time_pause(pause_id)
+        except Exception:
+            self.logger.exception("Не удалось получить паузу Времени в топе pause_id=%s", pause_id)
+            return {"ok": False, "error_text": "Не удалось получить паузу"}
+        if not row:
+            return {"ok": False, "error_text": "Пауза не найдена"}
+        pause = self._build_pause(row, rule_id=int(row.get("rule_id") or 0))
+        return {"ok": True, "pause": pause}
+
     def _build_pause(self, row: dict[str, Any], *, rule_id: int) -> dict[str, Any]:
         pause = dict(row or {})
         run_id = int(pause.get("campaign_run_id") or 0)
         title = str(pause.get("target_title") or pause.get("target_id") or "Канал/Группа").strip()
+        status = str(pause.get("status") or "").strip().lower()
+        status_texts = {
+            "active": "🟢 Активна",
+            "completed": "✅ Завершена",
+            "cancelled": "🚫 Завершена вручную",
+        }
+        pause["status"] = status
         pause["title_text"] = title or "Канал/Группа"
+        pause["target_text"] = pause["title_text"]
+        pause["status_text"] = status_texts.get(status, "⚪ Неизвестный статус")
+        pause["starts_at_text"] = _format_end_text(pause.get("starts_at"))
         pause["ends_at_text"] = _format_end_text(pause.get("ends_at"))
+        pause["completed_at_text"] = _format_end_text(pause.get("completed_at"))
+        pause["cancelled_at_text"] = _format_end_text(pause.get("cancelled_at"))
         pause["remaining_text"] = _format_remaining(pause.get("ends_at"))
+        pause["can_cancel"] = status == "active"
         pause["open_run_callback"] = f"rule_repost_campaign_history_detail:{rule_id}:{run_id}"
         return pause

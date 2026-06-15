@@ -33,6 +33,8 @@ from app.repost_campaign_ui import (
     build_repost_campaign_targets_list_view,
     build_repost_campaign_targets_menu_view,
     build_repost_campaign_top_time_active_pauses_view,
+    build_repost_campaign_top_time_pause_cancel_confirm_view,
+    build_repost_campaign_top_time_pause_detail_view,
     build_repost_campaign_top_time_presets_view,
     build_repost_campaign_top_time_settings_view,
     build_repost_campaign_vip_coming_soon_view,
@@ -253,6 +255,27 @@ async def _render_repost_campaign_top_time_active_pauses(
         ctx.logger.exception("REPOST_CAMPAIGN_TOP_TIME_ACTIVE_PAUSES_FAILED | rule_id=%s | error=%s", rule_id, exc)
         await ctx.answer_callback_safe(callback, "Не удалось открыть активные паузы", show_alert=True)
         return False
+
+
+async def _render_repost_campaign_top_time_pause_detail(
+    callback: CallbackQuery,
+    rule_id: int,
+    pause_id: int,
+    ctx: RepostCampaignHandlersContext,
+) -> dict | None:
+    if not await ctx.ensure_rule_callback_access(callback, rule_id):
+        return None
+    if not ctx.settings.repost_campaign_admin_test_enabled:
+        await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return None
+    service = RepostCampaignTopTimeViewService(ctx.db, logger=ctx.logger)
+    state = await ctx.run_db(service.build_pause_detail, pause_id)
+    pause = (state or {}).get("pause") or {}
+    if not (state or {}).get("ok") or int(pause.get("rule_id") or 0) != int(rule_id):
+        state = {"ok": False, "error_text": "Пауза не найдена"}
+    text, keyboard = build_repost_campaign_top_time_pause_detail_view(rule_id=rule_id, pause_id=pause_id, state=state)
+    await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    return state
 
 async def _render_repost_campaign_top_time_settings(
     callback: CallbackQuery,
@@ -1257,6 +1280,103 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         text, kb = build_repost_campaign_vip_features_view(rule_id=rule_id)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
+
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_top_time_pause_cancel_now:"))
+    async def handle_rule_repost_campaign_top_time_pause_cancel_now(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            _, rule_id_raw, pause_id_raw = (callback.data or "").split(":")
+            rule_id = int(rule_id_raw)
+            pause_id = int(pause_id_raw)
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        state = await _render_repost_campaign_top_time_pause_detail(callback, rule_id, pause_id, ctx)
+        if not state or not state.get("ok"):
+            await ctx.answer_callback_safe(callback, "Пауза не найдена", show_alert=True)
+            return
+        pause = state.get("pause") or {}
+        if pause.get("status") != "active":
+            ctx.logger.info("REPOST_CAMPAIGN_TOP_TIME_PAUSE_CANCEL_SKIPPED | pause_id=%s | status=%s", pause_id, pause.get("status"))
+            await ctx.answer_callback_safe(callback, "Пауза уже не активна", show_alert=True)
+            return
+        cancelled = await ctx.run_db(
+            ctx.db.cancel_campaign_top_time_pause,
+            pause_id,
+            cancel_reason="manual_admin_cancel",
+            actor_id=callback.from_user.id if callback.from_user else None,
+        )
+        if not cancelled:
+            ctx.logger.info("REPOST_CAMPAIGN_TOP_TIME_PAUSE_CANCEL_SKIPPED | pause_id=%s | status=%s", pause_id, pause.get("status"))
+            await _render_repost_campaign_top_time_pause_detail(callback, rule_id, pause_id, ctx)
+            await ctx.answer_callback_safe(callback, "Пауза уже не активна", show_alert=True)
+            return
+        try:
+            await ctx.run_db(
+                ctx.db.log_rule_change,
+                event_type="campaign_top_time_pause_cancelled",
+                rule_id=rule_id,
+                admin_id=callback.from_user.id if callback.from_user else ctx.settings.admin_id,
+                old_value=None,
+                new_value={"status": "cancelled"},
+                extra={
+                    "pause_id": pause_id,
+                    "campaign_run_id": pause.get("campaign_run_id"),
+                    "campaign_run_message_id": pause.get("campaign_run_message_id"),
+                    "target_id": pause.get("target_id"),
+                    "target_thread_id": pause.get("target_thread_id"),
+                    "cancel_reason": "manual_admin_cancel",
+                },
+            )
+        except Exception as exc:
+            ctx.logger.warning("Не удалось записать аудит завершения паузы rule_id=%s pause_id=%s: %s", rule_id, pause_id, exc, exc_info=True)
+        ctx.logger.info(
+            "REPOST_CAMPAIGN_TOP_TIME_PAUSE_CANCELLED | rule_id=%s | pause_id=%s | campaign_run_id=%s | actor_id=%s",
+            rule_id, pause_id, pause.get("campaign_run_id"), callback.from_user.id if callback.from_user else None,
+        )
+        await _render_repost_campaign_top_time_pause_detail(callback, rule_id, pause_id, ctx)
+        await ctx.answer_callback_safe(callback, "Пауза завершена")
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_top_time_pause_cancel_confirm:"))
+    async def handle_rule_repost_campaign_top_time_pause_cancel_confirm(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            _, rule_id_raw, pause_id_raw = (callback.data or "").split(":")
+            rule_id = int(rule_id_raw)
+            pause_id = int(pause_id_raw)
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        state = await _render_repost_campaign_top_time_pause_detail(callback, rule_id, pause_id, ctx)
+        if not state or not state.get("ok"):
+            await ctx.answer_callback_safe(callback, "Пауза не найдена", show_alert=True)
+            return
+        if ((state.get("pause") or {}).get("status") != "active"):
+            await ctx.answer_callback_safe(callback, "Пауза уже не активна", show_alert=True)
+            return
+        text, keyboard = build_repost_campaign_top_time_pause_cancel_confirm_view(rule_id=rule_id, pause_id=pause_id, state=state)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_top_time_pause:"))
+    async def handle_rule_repost_campaign_top_time_pause(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            _, rule_id_raw, pause_id_raw = (callback.data or "").split(":")
+            rule_id = int(rule_id_raw)
+            pause_id = int(pause_id_raw)
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        state = await _render_repost_campaign_top_time_pause_detail(callback, rule_id, pause_id, ctx)
+        if state and state.get("ok"):
+            await ctx.answer_callback_safe_once(callback)
+        else:
+            await ctx.answer_callback_safe(callback, "Пауза не найдена", show_alert=True)
 
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_top_time_active_pauses:"))

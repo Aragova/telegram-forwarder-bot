@@ -8920,6 +8920,13 @@ class PostgresRepository(RepositoryProtocol):
             logger.exception("Failed to create campaign top-time pause")
             return None
 
+    def get_campaign_top_time_pause(self, pause_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_top_time_pauses WHERE id = %s LIMIT 1", (int(pause_id),))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
     def get_campaign_top_time_pause_by_run_message(self, campaign_run_message_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -8996,6 +9003,33 @@ class PostgresRepository(RepositoryProtocol):
                 )
                 row = cur.fetchone()
                 return dict(row) if row else None
+
+    def cancel_campaign_top_time_pause(
+        self,
+        pause_id: int,
+        *,
+        cancelled_at: str | None = None,
+        cancel_reason: str | None = None,
+        actor_id: int | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_top_time_pauses
+                    SET
+                        status = 'cancelled',
+                        cancelled_at = COALESCE(%s::timestamptz, NOW()),
+                        cancel_reason = COALESCE(%s, 'manual_admin_cancel')
+                    WHERE id = %s
+                      AND status = 'active'
+                    RETURNING id
+                    """,
+                    (cancelled_at, cancel_reason, int(pause_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return bool(row)
 
 
     def mark_expired_campaign_top_time_pauses_completed(

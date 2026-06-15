@@ -520,6 +520,10 @@ class RepositoryProtocol(Protocol):
         starts_at: str,
         ends_at: str,
     ) -> int | None: ...
+    def get_campaign_top_time_pause(
+        self,
+        pause_id: int,
+    ) -> dict[str, Any] | None: ...
     def get_campaign_top_time_pause_by_run_message(
         self,
         campaign_run_message_id: int,
@@ -543,6 +547,14 @@ class RepositoryProtocol(Protocol):
         target_thread_id: int | None = None,
         at_iso: str | None = None,
     ) -> dict[str, Any] | None: ...
+    def cancel_campaign_top_time_pause(
+        self,
+        pause_id: int,
+        *,
+        cancelled_at: str | None = None,
+        cancel_reason: str | None = None,
+        actor_id: int | None = None,
+    ) -> bool: ...
     def mark_expired_campaign_top_time_pauses_completed(
         self,
         *,

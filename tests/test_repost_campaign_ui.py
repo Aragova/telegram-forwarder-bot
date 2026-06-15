@@ -20,6 +20,8 @@ from app.repost_campaign_ui import (
     build_repost_campaign_vip_coming_soon_view,
     build_repost_campaign_top_time_intro_view,
     build_repost_campaign_top_time_active_pauses_view,
+    build_repost_campaign_top_time_pause_cancel_confirm_view,
+    build_repost_campaign_top_time_pause_detail_view,
     build_repost_campaign_top_time_presets_view,
     build_repost_campaign_top_time_settings_view,
     format_repost_campaign_top_time_status_text,
@@ -2587,6 +2589,7 @@ def test_active_pauses_view_with_items():
                 "title_text": "Wikiboy’s",
                 "remaining_text": "01:12:33",
                 "ends_at_text": "22:00",
+                "id": 123,
                 "open_run_callback": "rule_repost_campaign_history_detail:10:154",
             }],
         },
@@ -2595,13 +2598,63 @@ def test_active_pauses_view_with_items():
     assert "До окончания" in text
     assert "До времени" in text
     assert "Рекламный запуск #154" in text
-    assert "rule_repost_campaign_history_detail:10:154" in _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_top_time_pause:10:123" in _callbacks_from_keyboard(keyboard)
 
 
 def test_active_pauses_view_error():
     text, _ = build_repost_campaign_top_time_active_pauses_view(rule_id=10, state={"ok": False})
     assert "Не удалось получить активные паузы" in text
 
+
+
+def _pause_state(status="active"):
+    return {"ok": True, "pause": {"id": 123, "rule_id": 10, "campaign_run_id": 154, "target_text": "Wikiboy’s", "starts_at_text": "20:00", "ends_at_text": "22:00", "remaining_text": "01:12:33", "status": status, "status_text": {"active": "🟢 Активна", "completed": "✅ Завершена", "cancelled": "🚫 Завершена вручную"}[status], "can_cancel": status == "active", "cancelled_at_text": "21:10", "cancel_reason": "manual_admin_cancel"}}
+
+
+def test_top_time_pause_detail_active_view():
+    text, keyboard = build_repost_campaign_top_time_pause_detail_view(rule_id=10, pause_id=123, state=_pause_state("active"))
+    assert "📌 Пауза “Время в топе”" in text
+    assert "Статус: 🟢 Активна" in text
+    assert "До окончания" in text
+    assert "“Отправить сейчас”" in text
+    assert "VIP “Запланированные посты”" in text
+    assert "🚫 Завершить паузу" in _texts_from_keyboard(keyboard)
+    assert "rule_repost_campaign_top_time_pause_cancel_confirm:10:123" in _callbacks_from_keyboard(keyboard)
+
+
+def test_top_time_pause_detail_completed_has_no_cancel_button():
+    text, keyboard = build_repost_campaign_top_time_pause_detail_view(rule_id=10, pause_id=123, state=_pause_state("completed"))
+    assert "Статус: ✅ Завершена" in text
+    assert "🚫 Завершить паузу" not in _texts_from_keyboard(keyboard)
+
+
+def test_top_time_pause_detail_cancelled_has_no_cancel_button():
+    text, keyboard = build_repost_campaign_top_time_pause_detail_view(rule_id=10, pause_id=123, state=_pause_state("cancelled"))
+    assert "Статус: 🚫 Завершена вручную" in text
+    assert "🚫 Завершить паузу" not in _texts_from_keyboard(keyboard)
+
+
+def test_top_time_pause_cancel_confirm_view():
+    text, keyboard = build_repost_campaign_top_time_pause_cancel_confirm_view(rule_id=10, pause_id=123, state=_pause_state("active"))
+    assert "🚫 Завершить паузу?" in text
+    assert "Уже перенесённые правила не будут автоматически пересчитаны" in text
+    assert "🚫 Да, завершить паузу" in _texts_from_keyboard(keyboard)
+    assert "⬅️ Не завершать" in _texts_from_keyboard(keyboard)
+    assert "rule_repost_campaign_top_time_pause_cancel_now:10:123" in _callbacks_from_keyboard(keyboard)
+
+
+def test_top_time_pause_handlers_and_runtime_boundary_source_guard():
+    handlers_source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
+    assert "rule_repost_campaign_top_time_pause:" in handlers_source
+    assert "rule_repost_campaign_top_time_pause_cancel_confirm:" in handlers_source
+    assert "rule_repost_campaign_top_time_pause_cancel_now:" in handlers_source
+    assert "cancel_campaign_top_time_pause" in handlers_source
+    assert "campaign_top_time_pause_cancelled" in handlers_source
+    for path in ["app/scheduler_runtime.py", "app/scheduler_service.py", "app/sender.py", "app/top_time_guard_service.py", "app/repost_campaign_runtime_service.py", "app/repost_campaign_schedule_service.py", "app/repost_campaign_scheduled_post_service.py"]:
+        source = Path(path).read_text(encoding="utf-8")
+        assert "rule_repost_campaign_top_time_pause_cancel" not in source
+        assert "cancel_campaign_top_time_pause" not in source
+        assert "campaign_top_time_pause_cancelled" not in source
 
 def test_active_placements_view_shows_top_time_summary():
     text, _ = build_repost_campaign_active_placements_view(rule_id=10, state={

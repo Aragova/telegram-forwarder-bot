@@ -902,9 +902,9 @@ def build_repost_campaign_top_time_active_pauses_view(
             "Обычный автопостинг ViMi временно удерживается в этих каналах и группах:",
             "",
         ]
-        seen_run_ids: set[int] = set()
         for idx, pause in enumerate(pauses, 1):
             run_id = _safe_non_negative_int((pause or {}).get("campaign_run_id"))
+            pause_id = _safe_non_negative_int((pause or {}).get("id"))
             lines.extend([
                 f"{idx}. {str((pause or {}).get('title_text') or 'Канал/Группа')}",
                 f"   До окончания: {str((pause or {}).get('remaining_text') or '—')}",
@@ -912,9 +912,8 @@ def build_repost_campaign_top_time_active_pauses_view(
                 f"   Рекламный запуск #{run_id}",
                 "",
             ])
-            if run_id > 0 and run_id not in seen_run_ids and len(seen_run_ids) < 10:
-                seen_run_ids.add(run_id)
-                rows.append([InlineKeyboardButton(text=f"🧾 Запуск #{run_id}", callback_data=str((pause or {}).get("open_run_callback") or f"rule_repost_campaign_history_detail:{rule_id}:{run_id}"))])
+            if pause_id > 0:
+                rows.append([InlineKeyboardButton(text=f"📌 Пауза #{pause_id}", callback_data=f"rule_repost_campaign_top_time_pause:{rule_id}:{pause_id}")])
         lines.append("“Отправить сейчас”, VIP “Запланированные посты” и ручные публикации владельца не блокируются.")
         text = "\n".join(lines).rstrip()
     rows.extend([
@@ -924,6 +923,83 @@ def build_repost_campaign_top_time_active_pauses_view(
     ])
     return trim_campaign_text_for_telegram(text), InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+
+def build_repost_campaign_top_time_pause_detail_view(
+    *,
+    rule_id: int,
+    pause_id: int,
+    state: dict,
+) -> tuple[str, InlineKeyboardMarkup]:
+    state = dict(state or {})
+    pause = dict(state.get("pause") or {})
+    if not state.get("ok", True) or not pause:
+        text = f"📌 Пауза “Время в топе”\n\n{state.get('error_text') or 'Пауза не найдена'}"
+        rows = [[InlineKeyboardButton(text="📋 Активные паузы", callback_data=f"rule_repost_campaign_top_time_active_pauses:{rule_id}")]]
+        return trim_campaign_text_for_telegram(text), InlineKeyboardMarkup(inline_keyboard=rows)
+
+    status = str(pause.get("status") or "")
+    run_id = _safe_non_negative_int(pause.get("campaign_run_id"))
+    target = str(pause.get("target_text") or pause.get("title_text") or "Канал/Группа")
+    starts = str(pause.get("starts_at_text") or "—")
+    ends = str(pause.get("ends_at_text") or "—")
+    status_text = str(pause.get("status_text") or "⚪ Неизвестный статус")
+    lines = [
+        "📌 Пауза “Время в топе”",
+        "",
+        f"Статус: {status_text}",
+        f"Канал/группа: {target}",
+        f"Рекламный запуск: #{run_id}",
+        "",
+        f"Начало: {starts}",
+    ]
+    if status == "cancelled":
+        lines.extend([f"Плановое окончание: {ends}", f"Завершена: {pause.get('cancelled_at_text') or '—'}", "", f"Причина: {pause.get('cancel_reason') or '—'}"])
+    else:
+        lines.append(f"Окончание: {ends}")
+        if status == "active":
+            lines.extend([f"До окончания: {pause.get('remaining_text') or '—'}", "", "Пока пауза активна, обычный автопостинг ViMi не публикует посты поверх рекламы в этом канале или топике.", "", "“Отправить сейчас”, VIP “Запланированные посты” и ручные публикации владельца не блокируются."])
+        elif status == "completed":
+            lines.extend(["", "Обычный автопостинг снова разрешён."])
+    rows: list[list[InlineKeyboardButton]] = []
+    if pause.get("can_cancel"):
+        rows.append([InlineKeyboardButton(text="🚫 Завершить паузу", callback_data=f"rule_repost_campaign_top_time_pause_cancel_confirm:{rule_id}:{pause_id}")])
+    if run_id > 0:
+        rows.append([InlineKeyboardButton(text="🧾 Открыть запуск", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run_id}")])
+    rows.extend([
+        [InlineKeyboardButton(text="📋 Активные паузы", callback_data=f"rule_repost_campaign_top_time_active_pauses:{rule_id}")],
+        [InlineKeyboardButton(text="📌 К настройке времени в топе", callback_data=f"rule_repost_campaign_top_time:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return trim_campaign_text_for_telegram("\n".join(lines).rstrip()), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_top_time_pause_cancel_confirm_view(
+    *,
+    rule_id: int,
+    pause_id: int,
+    state: dict,
+) -> tuple[str, InlineKeyboardMarkup]:
+    pause = dict((state or {}).get("pause") or {})
+    run_id = _safe_non_negative_int(pause.get("campaign_run_id"))
+    target = str(pause.get("target_text") or pause.get("title_text") or "Канал/Группа")
+    ends = str(pause.get("ends_at_text") or "—")
+    text = (
+        "🚫 Завершить паузу?\n\n"
+        "Вы собираетесь вручную завершить паузу “Время в топе”.\n\n"
+        f"Канал/группа: {target}\n"
+        f"Рекламный запуск: #{run_id}\n"
+        f"Плановое окончание: {ends}\n\n"
+        "После завершения ViMi больше не будет удерживать обычный автопостинг по этой паузе.\n\n"
+        "Важно:\n"
+        "Уже перенесённые правила не будут автоматически пересчитаны в этом действии.\n\n"
+        "Продолжить?"
+    )
+    rows = [
+        [InlineKeyboardButton(text="🚫 Да, завершить паузу", callback_data=f"rule_repost_campaign_top_time_pause_cancel_now:{rule_id}:{pause_id}")],
+        [InlineKeyboardButton(text="⬅️ Не завершать", callback_data=f"rule_repost_campaign_top_time_pause:{rule_id}:{pause_id}")],
+    ]
+    return trim_campaign_text_for_telegram(text), InlineKeyboardMarkup(inline_keyboard=rows)
 
 def build_repost_campaign_top_time_presets_view(
     *,
