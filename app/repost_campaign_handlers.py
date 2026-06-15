@@ -14,6 +14,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_launch_clean_channel_blocked_view,
     build_repost_campaign_launch_clean_channel_warning_view,
     build_repost_campaign_launch_mode_view,
+    build_repost_campaign_launch_wizard_view,
     build_repost_campaign_launch_job_status_view,
     build_repost_campaign_launch_queued_view,
     build_repost_campaign_launch_readiness_view,
@@ -36,6 +37,26 @@ from app.repost_campaign_ui import (
 from app.saved_posts_service import get_saved_post_short_description
 
 
+async def _get_repost_campaign_saved_post_line(rule, rule_id: int, ctx: RepostCampaignHandlersContext) -> str:
+    saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None)
+    if saved_post_id:
+        try:
+            saved_post = await ctx.run_db(ctx.db.get_saved_post, int(saved_post_id))
+        except Exception as exc:
+            ctx.logger.warning("Не удалось получить рекламный пост кампании rule_id=%s saved_post_id=%s: %s", rule_id, saved_post_id, exc, exc_info=True)
+            saved_post = None
+
+        if saved_post:
+            try:
+                content = saved_post.get("content_json") or saved_post.get("content") or {}
+                saved_post_description = get_saved_post_short_description(content)
+            except Exception:
+                saved_post_description = "пост"
+            return f"📝 Рекламный пост: #{saved_post_id} · {saved_post_description}\n"
+        return "📝 Рекламный пост: не найден\n"
+    return "📝 Рекламный пост: не выбран\n"
+
+
 async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int, ctx: RepostCampaignHandlersContext) -> bool:
     rule = await ctx.run_db(ctx.db.get_rule, rule_id)
     if not rule:
@@ -53,24 +74,7 @@ async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int, ct
     targets_active = int((summary or {}).get("targets_active") or 0)
     targets_ready = int((summary or {}).get("targets_ready") or 0)
     saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None)
-    if saved_post_id:
-        try:
-            saved_post = await ctx.run_db(ctx.db.get_saved_post, int(saved_post_id))
-        except Exception as exc:
-            ctx.logger.warning("Не удалось получить рекламный пост кампании rule_id=%s saved_post_id=%s: %s", rule_id, saved_post_id, exc, exc_info=True)
-            saved_post = None
-
-        if saved_post:
-            try:
-                content = saved_post.get("content_json") or saved_post.get("content") or {}
-                saved_post_description = get_saved_post_short_description(content)
-            except Exception:
-                saved_post_description = "пост"
-            saved_post_line = f"📝 Рекламный пост: #{saved_post_id} · {saved_post_description}\n"
-        else:
-            saved_post_line = "📝 Рекламный пост: не найден\n"
-    else:
-        saved_post_line = "📝 Рекламный пост: не выбран\n"
+    saved_post_line = await _get_repost_campaign_saved_post_line(rule, rule_id, ctx)
 
     runtime = build_repost_campaign_runtime(ctx)
     readiness = None
@@ -103,6 +107,67 @@ async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int, ct
     return True
 
 
+async def _render_repost_campaign_launch_wizard(
+    callback: CallbackQuery,
+    rule_id: int,
+    ctx: RepostCampaignHandlersContext,
+) -> bool:
+    rule = await ctx.run_db(ctx.db.get_rule, rule_id)
+    if not rule:
+        await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return False
+    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "repost":
+        await ctx.answer_callback_safe(callback, "Рекламная кампания доступна только для режима репоста", show_alert=True)
+        return False
+    if not ctx.settings.repost_campaign_admin_test_enabled:
+        await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return False
+    try:
+        summary = await ctx.run_db(ctx.db.get_rule_repost_campaign_summary, rule_id)
+    except Exception:
+        ctx.logger.exception("Не удалось открыть мастер запуска рекламной кампании, rule_id=%s", rule_id)
+        summary = {}
+
+    saved_post_id = getattr(rule, "repost_campaign_saved_post_id", None)
+    saved_post_line = await _get_repost_campaign_saved_post_line(rule, rule_id, ctx)
+    runtime = build_repost_campaign_runtime(ctx)
+    readiness = None
+    try:
+        readiness = await ctx.run_db(lambda: runtime.get_campaign_readiness(rule_id=rule_id))
+    except Exception as exc:
+        ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_WIZARD_READINESS_FAILED | rule_id=%s | error=%s", rule_id, exc)
+    control_center = None
+    try:
+        control_center = await ctx.run_db(lambda: runtime.get_campaign_control_center(rule_id=rule_id))
+    except Exception as exc:
+        ctx.logger.warning("REPOST_CAMPAIGN_LAUNCH_WIZARD_CONTROL_CENTER_FAILED | rule_id=%s | error=%s", rule_id, exc, exc_info=True)
+
+    summary_payload = dict(summary or {})
+    summary_payload.update({
+        "show_seconds": int(getattr(rule, "repost_campaign_show_seconds", 0) or summary_payload.get("show_seconds") or 0),
+        "saved_post_id": saved_post_id,
+    })
+    text, keyboard = build_repost_campaign_launch_wizard_view(
+        rule_id=rule_id,
+        summary=summary_payload,
+        saved_post_line=saved_post_line,
+        readiness=readiness,
+        control_center=control_center,
+    )
+    if ctx.should_answer_new_message_for_callback(callback):
+        await ctx.send_message_safe(chat_id=callback.message.chat.id, text=text, reply_markup=keyboard)
+    else:
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    readiness_payload = readiness or {}
+    targets_count = int(summary_payload.get("targets_active") or readiness_payload.get("will_send_total") or 0)
+    ctx.logger.info(
+        "REPOST_CAMPAIGN_LAUNCH_WIZARD_OPENED | rule_id=%s | ready=%s | can_launch=%s | targets_count=%s",
+        rule_id,
+        readiness_payload.get("ready"),
+        readiness_payload.get("can_launch"),
+        targets_count,
+    )
+    return True
 
 
 async def _render_repost_campaign_active_placements(
@@ -535,7 +600,24 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await ctx.answer_callback_safe_once(callback)
 
-    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch:"))
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_wizard:"))
+    async def handle_rule_repost_campaign_launch_wizard(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            rule_id = int(callback.data.split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await _render_repost_campaign_launch_wizard(callback, rule_id, ctx):
+            return
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch:") and not c.data.startswith("rule_repost_campaign_launch_wizard:"))
     async def handle_rule_repost_campaign_launch(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
             return

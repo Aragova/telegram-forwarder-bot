@@ -121,7 +121,7 @@ def build_repost_campaign_menu_view(
     )
     text = "\n\n".join(["💰 Рекламная кампания", steps_summary])
     rows = [
-        [InlineKeyboardButton(text="🚀 Мастер запуска рекламной кампании", callback_data=f"rule_repost_campaign_launch:{rule_id}")],
+        [InlineKeyboardButton(text="🚀 Мастер запуска рекламной кампании", callback_data=f"rule_repost_campaign_launch_wizard:{rule_id}")],
         [
             InlineKeyboardButton(text="1. Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}"),
             InlineKeyboardButton(text="2. Каналы и группы", callback_data=f"rule_repost_campaign_targets:{rule_id}"),
@@ -132,6 +132,52 @@ def build_repost_campaign_menu_view(
         ],
         [InlineKeyboardButton(text="5. 💎 VIP-функции", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_launch_wizard_view(
+    *,
+    rule_id: int,
+    summary: dict,
+    saved_post_line: str,
+    readiness: dict | None = None,
+    control_center: dict | None = None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    steps_summary = _build_repost_campaign_setup_steps_summary(
+        summary=summary,
+        saved_post_line=saved_post_line,
+        readiness=readiness,
+        control_center=control_center,
+    )
+    steps_summary = steps_summary.replace("Настройте запуск по шагам:", "Проверьте настройки перед запуском:", 1)
+    launch_ready = "6. 🚀 Запуск — готов" in steps_summary
+    lines = [
+        "🚀 Мастер запуска рекламной кампании",
+        steps_summary,
+        (
+            "Что можно сделать:\n"
+            "• открыть нужный шаг и исправить настройки;\n"
+            "• запустить кампанию сейчас;\n"
+            "• запланировать запуск на нужное время."
+        ),
+    ]
+    if not launch_ready:
+        lines.append("Запуск станет доступен после выбора рекламного поста, каналов и срока показа.")
+    text = "\n\n".join(lines)
+    rows = [
+        [
+            InlineKeyboardButton(text="1. Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}"),
+            InlineKeyboardButton(text="2. Каналы и группы", callback_data=f"rule_repost_campaign_targets:{rule_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="3. Время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}"),
+            InlineKeyboardButton(text="4. Чистый канал", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}"),
+        ],
+        [InlineKeyboardButton(text="5. Время в топе", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:top_time")],
+        [InlineKeyboardButton(text="⚡ Запустить сейчас", callback_data=f"rule_repost_campaign_launch_now_preview:{rule_id}")],
+        [InlineKeyboardButton(text="🕒 Запланировать запуск", callback_data=f"rule_repost_campaign_schedule_current:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
