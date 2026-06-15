@@ -117,6 +117,7 @@ async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int, ct
             "targets_active": targets_active,
             "targets_ready": targets_ready,
             "saved_post_id": saved_post_id,
+            "clean_channel_enabled": bool(getattr(rule, "repost_campaign_clean_channel_enabled", True)),
             "top_time_enabled": bool(getattr(rule, "repost_campaign_top_time_enabled", False)),
             "top_time_seconds": int(getattr(rule, "repost_campaign_top_time_seconds", 0) or 0),
         },
@@ -202,6 +203,7 @@ async def _render_repost_campaign_launch_wizard(
     summary_payload.update({
         "show_seconds": int(getattr(rule, "repost_campaign_show_seconds", 0) or summary_payload.get("show_seconds") or 0),
         "saved_post_id": saved_post_id,
+        "clean_channel_enabled": bool(getattr(rule, "repost_campaign_clean_channel_enabled", True)),
         "top_time_enabled": bool(getattr(rule, "repost_campaign_top_time_enabled", False)),
         "top_time_seconds": int(getattr(rule, "repost_campaign_top_time_seconds", 0) or 0),
     })

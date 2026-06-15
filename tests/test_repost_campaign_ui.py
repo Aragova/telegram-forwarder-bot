@@ -2333,6 +2333,47 @@ def test_repost_campaign_menu_contains_steps_summary():
     assert "6. 🚀 Запуск" in text
 
 
+def test_campaign_menu_shows_clean_channel_enabled():
+    payload = _campaign_menu_ready_payload()
+    payload["summary"] = dict(payload["summary"], clean_channel_enabled=True)
+
+    text, _ = build_repost_campaign_menu_view(rule_id=7, **payload)
+
+    assert "4. 🧹 Чистый канал — 🟢 включён" in text
+
+
+def test_campaign_menu_shows_clean_channel_disabled():
+    payload = _campaign_menu_ready_payload()
+    payload["summary"] = dict(payload["summary"], clean_channel_enabled=False)
+
+    text, _ = build_repost_campaign_menu_view(rule_id=7, **payload)
+
+    assert "4. 🧹 Чистый канал — ⚪ выключен" in text
+
+
+def test_campaign_menu_does_not_show_clean_channel_as_vip():
+    payload = _campaign_menu_ready_payload()
+    text, _ = build_repost_campaign_menu_view(rule_id=7, **payload)
+
+    assert "Чистый канал — 💎 в VIP-функциях" not in text
+    assert "4. 🧹 Чистый канал — ⚠️ статус недоступен" in text
+
+
+def test_launch_wizard_passes_clean_channel_status():
+    payload = _campaign_menu_ready_payload()
+    payload["summary"] = dict(payload["summary"], clean_channel_enabled=True)
+    text, _ = build_repost_campaign_wizard_clean_channel_step_view(rule_id=7, **payload)
+    assert "Статус: 🟢 включён" in text
+    assert "Статус: 💎 в VIP-функциях" not in text
+
+    payload["summary"] = dict(payload["summary"], clean_channel_enabled=False)
+    text, _ = build_repost_campaign_wizard_clean_channel_step_view(rule_id=7, **payload)
+    assert "Статус: ⚪ выключен" in text
+    assert "Статус: 💎 в VIP-функциях" not in text
+
+    handlers_source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
+    assert '"clean_channel_enabled": bool(getattr(rule, "repost_campaign_clean_channel_enabled", True))' in handlers_source
+
 def test_repost_campaign_menu_keeps_compact_buttons():
     payload = _campaign_menu_ready_payload()
     _, keyboard = build_repost_campaign_menu_view(rule_id=7, **payload)
