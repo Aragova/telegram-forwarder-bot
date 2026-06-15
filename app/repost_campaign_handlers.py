@@ -6,6 +6,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from app.repost_campaign_context import RepostCampaignHandlersContext, build_repost_campaign_runtime
 from app.repost_campaign_launch_job_service import RepostCampaignLaunchJobService
 from app.repost_campaign_placement_service import RepostCampaignPlacementService
+from app.repost_campaign_top_time_view_service import RepostCampaignTopTimeViewService
 from app.repost_campaign_service import format_campaign_show_seconds_ru, normalize_campaign_show_seconds
 from app.repost_campaign_ui import (
     ACTIVE_PLACEMENTS_PAGE_SIZE,
@@ -31,6 +32,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_targets_check_result_view,
     build_repost_campaign_targets_list_view,
     build_repost_campaign_targets_menu_view,
+    build_repost_campaign_top_time_active_pauses_view,
     build_repost_campaign_top_time_presets_view,
     build_repost_campaign_top_time_settings_view,
     build_repost_campaign_vip_coming_soon_view,
@@ -224,6 +226,33 @@ async def _render_repost_campaign_active_placements(
         return False
 
 
+
+
+async def _render_repost_campaign_top_time_active_pauses(
+    callback: CallbackQuery,
+    rule_id: int,
+    ctx: RepostCampaignHandlersContext,
+) -> bool:
+    if not await ctx.ensure_rule_callback_access(callback, rule_id):
+        return False
+    if not ctx.settings.repost_campaign_admin_test_enabled:
+        await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return False
+    try:
+        service = RepostCampaignTopTimeViewService(ctx.db, logger=ctx.logger)
+        state = await ctx.run_db(service.build_active_pauses_for_rule, rule_id)
+        text, keyboard = build_repost_campaign_top_time_active_pauses_view(rule_id=rule_id, state=state)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        ctx.logger.info(
+            "REPOST_CAMPAIGN_TOP_TIME_ACTIVE_PAUSES_OPENED | rule_id=%s | total=%s",
+            rule_id,
+            (state or {}).get("total"),
+        )
+        return True
+    except Exception as exc:
+        ctx.logger.exception("REPOST_CAMPAIGN_TOP_TIME_ACTIVE_PAUSES_FAILED | rule_id=%s | error=%s", rule_id, exc)
+        await ctx.answer_callback_safe(callback, "Не удалось открыть активные паузы", show_alert=True)
+        return False
 
 async def _render_repost_campaign_top_time_settings(
     callback: CallbackQuery,
@@ -1228,6 +1257,20 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         text, kb = build_repost_campaign_vip_features_view(rule_id=rule_id)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
+
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_top_time_active_pauses:"))
+    async def handle_rule_repost_campaign_top_time_active_pauses(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            rule_id = int((callback.data or "").split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        rendered = await _render_repost_campaign_top_time_active_pauses(callback, rule_id, ctx)
+        if rendered:
+            await ctx.answer_callback_safe_once(callback)
 
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_top_time:"))

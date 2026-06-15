@@ -401,6 +401,9 @@ def build_repost_campaign_active_placements_view(
             run_id = _safe_non_negative_int((placement or {}).get("run_id"))
             run_type_text = str((placement or {}).get("run_type_text") or "Запуск кампании").strip()
             summary_text = f"#{run_id} · {run_type_text}" if run_id else run_type_text
+        top_time_summary_text = str((placement or {}).get("top_time_summary_text") or "").strip()
+        if top_time_summary_text and top_time_summary_text not in summary_text:
+            summary_text = f"{summary_text}\n{top_time_summary_text}"
         blocks.append(summary_text)
 
     if placements and not visible_placements:
@@ -861,11 +864,65 @@ def build_repost_campaign_top_time_settings_view(
     rows = [
         [InlineKeyboardButton(text=toggle_text, callback_data=f"rule_repost_campaign_top_time_toggle:{rule_id}:{toggle_action}")],
         [InlineKeyboardButton(text="⏱ Выбрать время", callback_data=f"rule_repost_campaign_top_time_presets:{rule_id}")],
+        [InlineKeyboardButton(text="📋 Активные паузы", callback_data=f"rule_repost_campaign_top_time_active_pauses:{rule_id}")],
         [InlineKeyboardButton(text="💎 VIP-функции", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
         [InlineKeyboardButton(text="🚀 Мастер запуска", callback_data=f"rule_repost_campaign_launch_wizard:{rule_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+
+def build_repost_campaign_top_time_active_pauses_view(
+    *,
+    rule_id: int,
+    state: dict,
+) -> tuple[str, InlineKeyboardMarkup]:
+    state = dict(state or {})
+    pauses = list(state.get("pauses") or [])
+    rows: list[list[InlineKeyboardButton]] = []
+    if not state.get("ok", True):
+        text = (
+            "📋 Активные паузы\n\n"
+            "Не удалось получить активные паузы.\n\n"
+            "Попробуйте обновить экран."
+        )
+    elif not pauses:
+        text = (
+            "📋 Активные паузы\n\n"
+            "Сейчас нет активных пауз “Время в топе”.\n\n"
+            "Когда рекламный пост выйдет с включённым “Временем в топе”, ViMi покажет здесь каналы и группы, "
+            "где обычный автопостинг временно удерживается.\n\n"
+            "Обычные автоматические публикации продолжатся сами после окончания паузы."
+        )
+    else:
+        lines = [
+            "📋 Активные паузы",
+            "",
+            "Обычный автопостинг ViMi временно удерживается в этих каналах и группах:",
+            "",
+        ]
+        seen_run_ids: set[int] = set()
+        for idx, pause in enumerate(pauses, 1):
+            run_id = _safe_non_negative_int((pause or {}).get("campaign_run_id"))
+            lines.extend([
+                f"{idx}. {str((pause or {}).get('title_text') or 'Канал/Группа')}",
+                f"   До окончания: {str((pause or {}).get('remaining_text') or '—')}",
+                f"   До времени: {str((pause or {}).get('ends_at_text') or '—')}",
+                f"   Рекламный запуск #{run_id}",
+                "",
+            ])
+            if run_id > 0 and run_id not in seen_run_ids and len(seen_run_ids) < 10:
+                seen_run_ids.add(run_id)
+                rows.append([InlineKeyboardButton(text=f"🧾 Запуск #{run_id}", callback_data=str((pause or {}).get("open_run_callback") or f"rule_repost_campaign_history_detail:{rule_id}:{run_id}"))])
+        lines.append("“Отправить сейчас”, VIP “Запланированные посты” и ручные публикации владельца не блокируются.")
+        text = "\n".join(lines).rstrip()
+    rows.extend([
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_top_time_active_pauses:{rule_id}")],
+        [InlineKeyboardButton(text="📌 К настройке времени в топе", callback_data=f"rule_repost_campaign_top_time:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return trim_campaign_text_for_telegram(text), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_repost_campaign_top_time_presets_view(
@@ -1657,6 +1714,9 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
             lines.append("")
         if len(messages) > RUN_DETAILS_VISIBLE_MESSAGES_LIMIT:
             lines.extend([f"Показаны первые {RUN_DETAILS_VISIBLE_MESSAGES_LIMIT} из {len(messages)}.", ""])
+    top_time_block = _format_repost_campaign_run_top_time_block(details.get("top_time_summary"))
+    if top_time_block:
+        lines.extend(["", top_time_block, ""])
     kb_rows = []
     if is_active_placement:
         kb_rows.append([InlineKeyboardButton(text="🧹 Удалить сейчас", callback_data=f"rule_repost_campaign_run_delete_confirm:{rule_id}:{run.get('id') or run_id}")])
@@ -1664,12 +1724,55 @@ def build_repost_campaign_run_details_view(*, rule_id: int, details: dict) -> tu
         kb_rows.append([InlineKeyboardButton(text="🔁 Повторить удаление", callback_data=f"rule_repost_campaign_run_delete_confirm:{rule_id}:{run.get('id') or run_id}")])
     kb_rows.extend([
         [InlineKeyboardButton(text="📊 Отчёт просмотров", callback_data=f"rule_repost_campaign_views_report:{rule_id}:{run.get('id') or run_id}")],
+        [InlineKeyboardButton(text="📋 Активные паузы", callback_data=f"rule_repost_campaign_top_time_active_pauses:{rule_id}")],
         [InlineKeyboardButton(text="📣 Каналы/Группы", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
         [InlineKeyboardButton(text="🔄 Обновить статус", callback_data=f"rule_repost_campaign_history_detail:{rule_id}:{run.get('id') or run_id}")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     return trim_campaign_text_for_telegram("\n".join(lines).rstrip()), kb
+
+
+
+def _format_repost_campaign_run_top_time_block(summary: dict | None) -> str:
+    if summary is None:
+        return ""
+    if not summary.get("ok", True):
+        return "📌 Время в топе\n\nСтатус: ⚠️ данные временно недоступны"
+    seconds_text = str(summary.get("seconds_text") or format_repost_campaign_top_time_seconds_text(summary.get("seconds_snapshot"))).strip()
+    if not summary.get("enabled_snapshot"):
+        return "📌 Время в топе\n\nСтатус: 🔴 выключено для этого запуска"
+    active_count = _safe_non_negative_int(summary.get("active_count"))
+    pauses_total = _safe_non_negative_int(summary.get("pauses_total"))
+    completed_count = _safe_non_negative_int(summary.get("completed_count"))
+    if active_count > 0:
+        lines = [
+            "📌 Время в топе",
+            "",
+            "Статус: 🟢 активно",
+            f"Время в топе: {seconds_text}",
+            f"Активных пауз: {active_count}",
+        ]
+        if summary.get("latest_ends_at_text"):
+            lines.append(f"До окончания: {summary.get('latest_ends_at_text')}")
+        lines.extend(["", "Обычный автопостинг ViMi временно удерживается в каналах, где реклама вышла успешно."])
+        return "\n".join(lines)
+    if completed_count > 0 or pauses_total > 0:
+        return "\n".join([
+            "📌 Время в топе",
+            "",
+            "Статус: ✅ завершено",
+            f"Время в топе: {seconds_text}",
+            "Обычный автопостинг снова разрешён.",
+        ])
+    return "\n".join([
+        "📌 Время в топе",
+        "",
+        "Статус: ⚪ паузы не создавались",
+        f"Время в топе: {seconds_text}",
+        "",
+        "Возможно, рекламный пост не был успешно опубликован в выбранные каналы.",
+    ])
 
 
 def build_repost_campaign_run_delete_confirm_view(*, rule_id: int, run_id: int, details: dict) -> tuple[str, InlineKeyboardMarkup]:

@@ -530,6 +530,12 @@ class RepositoryProtocol(Protocol):
         *,
         limit: int = 50,
     ) -> list[dict[str, Any]]: ...
+    def list_campaign_top_time_pauses_for_run(
+        self,
+        campaign_run_id: int,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]: ...
     def get_active_campaign_top_time_pause_for_target(
         self,
         *,

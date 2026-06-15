@@ -3,6 +3,7 @@ import ast
 import re
 
 from app.repost_campaign_ui import (
+    build_repost_campaign_active_placements_view,
     build_repost_campaign_delete_result_view,
     build_repost_campaign_launch_result_view,
     build_repost_campaign_launch_mode_view,
@@ -18,6 +19,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_vip_features_view,
     build_repost_campaign_vip_coming_soon_view,
     build_repost_campaign_top_time_intro_view,
+    build_repost_campaign_top_time_active_pauses_view,
     build_repost_campaign_top_time_presets_view,
     build_repost_campaign_top_time_settings_view,
     format_repost_campaign_top_time_status_text,
@@ -997,7 +999,6 @@ def test_repost_campaign_top_time_stage_seven_six_does_not_touch_non_runtime_lay
         "app/repost_campaign_message_handlers.py",
         "app/repost_campaign_scheduled_post_service.py",
         "app/repost_campaign_launch_job_service.py",
-        "app/repost_campaign_placement_service.py",
     ]
     forbidden_markers = [
         "top_time_pause",
@@ -2468,7 +2469,6 @@ def test_repost_campaign_launch_wizard_stage_seven_two_does_not_touch_runtime_la
         "app/repost_campaign_message_handlers.py",
         "app/repost_campaign_scheduled_post_service.py",
         "app/repost_campaign_launch_job_service.py",
-        "app/repost_campaign_placement_service.py",
     ]:
         source = Path(path).read_text(encoding="utf-8")
         assert "Мастер запуска рекламной кампании" not in source
@@ -2509,7 +2509,7 @@ def test_top_time_settings_view_disabled():
     assert "📌 Время в топе" in text
     assert "Статус: 🔴 Выключено" in text
     assert "Время: не выбрано" in text
-    assert _texts_from_keyboard(keyboard) == ["🟢 Включить", "⏱ Выбрать время", "💎 VIP-функции", "🚀 Мастер запуска", "💰 К кампании"]
+    assert _texts_from_keyboard(keyboard) == ["🟢 Включить", "⏱ Выбрать время", "📋 Активные паузы", "💎 VIP-функции", "🚀 Мастер запуска", "💰 К кампании"]
 
 
 def test_top_time_settings_view_enabled():
@@ -2562,3 +2562,94 @@ def test_top_time_handlers_exist_and_runtime_layers_do_not_implement_pause():
         source = Path(path).read_text(encoding="utf-8")
         assert "top_time_pause" not in source
         assert "target_top_pause" not in source
+
+
+def test_top_time_settings_view_has_active_pauses_button():
+    _, keyboard = build_repost_campaign_top_time_settings_view(rule_id=10, settings={"enabled": True, "seconds": 7200})
+    assert "📋 Активные паузы" in _texts_from_keyboard(keyboard)
+    assert "rule_repost_campaign_top_time_active_pauses:10" in _callbacks_from_keyboard(keyboard)
+
+
+def test_active_pauses_view_empty():
+    text, keyboard = build_repost_campaign_top_time_active_pauses_view(rule_id=10, state={"ok": True, "pauses": [], "total": 0})
+    assert "📋 Активные паузы" in text
+    assert "Сейчас нет активных пауз" in text
+    assert "rule_repost_campaign_top_time_active_pauses:10" in _callbacks_from_keyboard(keyboard)
+
+
+def test_active_pauses_view_with_items():
+    text, keyboard = build_repost_campaign_top_time_active_pauses_view(
+        rule_id=10,
+        state={
+            "ok": True,
+            "pauses": [{
+                "campaign_run_id": 154,
+                "title_text": "Wikiboy’s",
+                "remaining_text": "01:12:33",
+                "ends_at_text": "22:00",
+                "open_run_callback": "rule_repost_campaign_history_detail:10:154",
+            }],
+        },
+    )
+    assert "Wikiboy’s" in text
+    assert "До окончания" in text
+    assert "До времени" in text
+    assert "Рекламный запуск #154" in text
+    assert "rule_repost_campaign_history_detail:10:154" in _callbacks_from_keyboard(keyboard)
+
+
+def test_active_pauses_view_error():
+    text, _ = build_repost_campaign_top_time_active_pauses_view(rule_id=10, state={"ok": False})
+    assert "Не удалось получить активные паузы" in text
+
+
+def test_active_placements_view_shows_top_time_summary():
+    text, _ = build_repost_campaign_active_placements_view(rule_id=10, state={
+        "ok": True, "state": "active", "placements_total": 1, "active_total": 1, "delete_problem_total": 0,
+        "placements": [{"run_id": 154, "summary_text": "#154 · Запуск сейчас", "top_time_summary_text": "📌 В топе до 22:00 · активных пауз: 3"}],
+    })
+    assert "📌 В топе до 22:00 · активных пауз: 3" in text
+
+
+def test_campaign_run_detail_shows_top_time_active_block():
+    text, _ = build_repost_campaign_run_details_view(rule_id=10, details={
+        "ok": True, "run_id": 154, "run": {"id": 154, "show_seconds": 3600, "started_at": "2026-01-01T10:00:00+00:00"},
+        "messages": [], "summary": {"sent": 1, "total": 1, "failed": 0},
+        "top_time_summary": {"ok": True, "enabled_snapshot": True, "seconds_text": "2 часа", "active_count": 3, "pauses_total": 3, "latest_ends_at_text": "22:00"},
+    })
+    assert "📌 Время в топе" in text
+    assert "Статус: 🟢 активно" in text
+    assert "Активных пауз: 3" in text
+
+
+def test_campaign_run_detail_shows_top_time_completed_block():
+    text, _ = build_repost_campaign_run_details_view(rule_id=10, details={
+        "ok": True, "run_id": 154, "run": {"id": 154}, "messages": [], "summary": {},
+        "top_time_summary": {"ok": True, "enabled_snapshot": True, "seconds_text": "2 часа", "active_count": 0, "pauses_total": 1, "completed_count": 1},
+    })
+    assert "Статус: ✅ завершено" in text
+
+
+def test_campaign_run_detail_shows_top_time_disabled_block():
+    text, _ = build_repost_campaign_run_details_view(rule_id=10, details={
+        "ok": True, "run_id": 154, "run": {"id": 154}, "messages": [], "summary": {},
+        "top_time_summary": {"ok": True, "enabled_snapshot": False},
+    })
+    assert "Статус: 🔴 выключено для этого запуска" in text
+
+
+def test_top_time_active_pauses_handler_source_exists_and_runtime_untouched():
+    handlers_source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
+    assert "rule_repost_campaign_top_time_active_pauses:" in handlers_source
+    assert "build_repost_campaign_top_time_active_pauses_view" in handlers_source
+    assert "RepostCampaignTopTimeViewService" in handlers_source
+    for path in [
+        "app/scheduler_runtime.py",
+        "app/scheduler_service.py",
+        "app/sender.py",
+        "app/top_time_guard_service.py",
+        "app/repost_campaign_runtime_service.py",
+    ]:
+        source = Path(path).read_text(encoding="utf-8")
+        assert "top_time_active_pauses" not in source
+        assert "build_repost_campaign_top_time_active_pauses_view" not in source
