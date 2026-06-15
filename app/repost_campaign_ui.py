@@ -145,6 +145,183 @@ def _build_repost_campaign_setup_steps_summary(*, summary: dict, saved_post_line
         f"6. 🚀 Запуск — {launch_status}"
     )
 
+
+
+def _wizard_status_parts(*, summary: dict, saved_post_line: str, readiness: dict | None = None, control_center: dict | None = None) -> dict:
+    summary = summary or {}
+    readiness = readiness or {}
+    control_center = control_center or {}
+    saved_post_id = summary.get("saved_post_id") or readiness.get("saved_post_id")
+    post_text = str(saved_post_line or "").strip()
+    has_post = bool(saved_post_id) and "не найден" not in post_text.lower()
+    post_description = post_text.replace("📝 Рекламный пост:", "", 1).strip() if post_text else "не выбран"
+    if has_post and not post_description.startswith("#"):
+        post_description = f"#{saved_post_id}"
+
+    targets_selected = int(summary.get("targets_active") or 0)
+    targets_ready = int(summary.get("targets_ready") or readiness.get("will_send_total") or 0)
+    targets_problem = int(readiness.get("will_skip_total") or 0)
+    if targets_selected <= 0:
+        targets_selected = targets_ready + targets_problem
+
+    show_seconds = int(summary.get("show_seconds") or readiness.get("show_seconds") or 0)
+    show_seconds_text = format_campaign_show_seconds_text(show_seconds)
+
+    clean_channel_enabled = None
+    for payload in (summary, readiness, control_center):
+        if "clean_channel_enabled" in payload:
+            clean_channel_enabled = payload.get("clean_channel_enabled")
+            break
+    if clean_channel_enabled is True:
+        clean_channel_status = "🟢 включён"
+    elif clean_channel_enabled is False:
+        clean_channel_status = "⚪ выключен"
+    else:
+        clean_channel_status = "💎 в VIP-функциях"
+
+    top_time_settings = None
+    for payload in (summary, readiness, control_center):
+        if "top_time_enabled" in payload or "top_time_seconds" in payload:
+            top_time_settings = {"enabled": bool(payload.get("top_time_enabled")), "seconds": int(payload.get("top_time_seconds") or 0)}
+            break
+    top_time_status = format_repost_campaign_top_time_status_text(top_time_settings)
+
+    return {
+        "saved_post_id": saved_post_id,
+        "has_post": has_post,
+        "post_description": post_description,
+        "targets_selected": targets_selected,
+        "targets_ready": targets_ready,
+        "targets_problem": targets_problem,
+        "show_seconds": show_seconds,
+        "show_seconds_text": show_seconds_text,
+        "has_show_seconds": show_seconds_text != "не задан",
+        "clean_channel_status": clean_channel_status,
+        "top_time_status": top_time_status,
+        "launch_ready": has_post and targets_selected > 0 and show_seconds_text != "не задан",
+    }
+
+
+def _wizard_step_callback(rule_id: int, step: str) -> str:
+    return f"rule_repost_campaign_wizard_step:{rule_id}:{step}"
+
+
+def build_repost_campaign_wizard_post_step_view(*, rule_id: int, summary: dict, saved_post_line: str, readiness: dict | None = None, control_center: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    status = _wizard_status_parts(summary=summary, saved_post_line=saved_post_line, readiness=readiness, control_center=control_center)
+    current = f"✅ {status['post_description']}" if status["has_post"] else "⚠️ не выбран"
+    text = (
+        "🚀 Мастер запуска\n"
+        "Шаг 1 из 6 — Рекламный пост\n\n"
+        "Выберите рекламный пост, который ViMi опубликует в выбранные каналы и группы.\n\n"
+        f"Текущий пост:\n{current}"
+    )
+    rows = [
+        [InlineKeyboardButton(text="📝 Выбрать / заменить пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}")],
+        [InlineKeyboardButton(text="📚 Открыть библиотеку", callback_data=f"rule_repost_campaign_history:{rule_id}")],
+        [InlineKeyboardButton(text="➡️ Далее", callback_data=_wizard_step_callback(rule_id, "targets"))],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_wizard_targets_step_view(*, rule_id: int, summary: dict, saved_post_line: str = "", readiness: dict | None = None, control_center: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    status = _wizard_status_parts(summary=summary, saved_post_line=saved_post_line, readiness=readiness, control_center=control_center)
+    text = (
+        "🚀 Мастер запуска\n"
+        "Шаг 2 из 6 — Каналы и группы\n\n"
+        "Выберите, куда публиковать рекламный пост.\n\n"
+        f"Выбрано: {status['targets_selected']}\n"
+        f"Готово к публикации: {status['targets_ready']}\n"
+        f"Требуют внимания: {status['targets_problem']}"
+    )
+    rows = [
+        [InlineKeyboardButton(text="📣 Управлять каналами и группами", callback_data=f"rule_repost_campaign_targets:{rule_id}")],
+        [InlineKeyboardButton(text="🔎 Проверить права", callback_data=f"rule_repost_campaign_check:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=_wizard_step_callback(rule_id, "post"))],
+        [InlineKeyboardButton(text="➡️ Далее", callback_data=_wizard_step_callback(rule_id, "show_time"))],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_wizard_show_time_step_view(*, rule_id: int, summary: dict, saved_post_line: str = "", readiness: dict | None = None, control_center: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    status = _wizard_status_parts(summary=summary, saved_post_line=saved_post_line, readiness=readiness, control_center=control_center)
+    text = (
+        "🚀 Мастер запуска\n"
+        "Шаг 3 из 6 — Срок показа\n\n"
+        "Срок показа — когда ViMi удалит рекламный пост.\n\n"
+        f"Текущий срок: {status['show_seconds_text']}"
+    )
+    rows = [
+        [InlineKeyboardButton(text="3 часа", callback_data=f"rule_repost_campaign_show_set:{rule_id}:10800"), InlineKeyboardButton(text="6 часов", callback_data=f"rule_repost_campaign_show_set:{rule_id}:21600")],
+        [InlineKeyboardButton(text="12 часов", callback_data=f"rule_repost_campaign_show_set:{rule_id}:43200"), InlineKeyboardButton(text="24 часа", callback_data=f"rule_repost_campaign_show_set:{rule_id}:86400")],
+        [InlineKeyboardButton(text="48 часов", callback_data=f"rule_repost_campaign_show_set:{rule_id}:172800")],
+        [InlineKeyboardButton(text="Ввести вручную", callback_data=f"rule_repost_campaign_show_menu:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=_wizard_step_callback(rule_id, "targets"))],
+        [InlineKeyboardButton(text="➡️ Далее", callback_data=_wizard_step_callback(rule_id, "clean_channel"))],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_wizard_clean_channel_step_view(*, rule_id: int, summary: dict, saved_post_line: str = "", readiness: dict | None = None, control_center: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    status = _wizard_status_parts(summary=summary, saved_post_line=saved_post_line, readiness=readiness, control_center=control_center)
+    text = (
+        "🚀 Мастер запуска\n"
+        "Шаг 4 из 6 — Чистый канал\n\n"
+        "Чистый канал защищает от запуска новой рекламы поверх активной рекламы.\n\n"
+        f"Статус: {status['clean_channel_status']}"
+    )
+    rows = [
+        [InlineKeyboardButton(text="🧹 Настроить Чистый канал", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],
+        [InlineKeyboardButton(text="📋 Активные размещения", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=_wizard_step_callback(rule_id, "show_time"))],
+        [InlineKeyboardButton(text="➡️ Далее", callback_data=_wizard_step_callback(rule_id, "top_time"))],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_wizard_top_time_step_view(*, rule_id: int, summary: dict, saved_post_line: str = "", readiness: dict | None = None, control_center: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    status = _wizard_status_parts(summary=summary, saved_post_line=saved_post_line, readiness=readiness, control_center=control_center)
+    text = (
+        "🚀 Мастер запуска\n"
+        "Шаг 5 из 6 — Время в топе\n\n"
+        "Время в топе удерживает обычный автопостинг ViMi, чтобы он не публиковал посты поверх рекламы.\n\n"
+        f"Статус: {status['top_time_status']}"
+    )
+    rows = [
+        [InlineKeyboardButton(text="📌 Настроить время в топе", callback_data=f"rule_repost_campaign_top_time:{rule_id}")],
+        [InlineKeyboardButton(text="📋 Активные паузы", callback_data=f"rule_repost_campaign_top_time_active_pauses:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=_wizard_step_callback(rule_id, "clean_channel"))],
+        [InlineKeyboardButton(text="➡️ Далее", callback_data=_wizard_step_callback(rule_id, "review"))],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_wizard_review_step_view(*, rule_id: int, summary: dict, saved_post_line: str, readiness: dict | None = None, control_center: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    status = _wizard_status_parts(summary=summary, saved_post_line=saved_post_line, readiness=readiness, control_center=control_center)
+    launch_line = "Запуск готов." if status["launch_ready"] else "Запуск станет доступен после выбора рекламного поста, каналов и срока показа."
+    text = (
+        "🚀 Мастер запуска\n"
+        "Шаг 6 из 6 — Проверка и запуск\n\n"
+        "Проверьте настройки:\n\n"
+        f"1. 📝 Рекламный пост — {'✅ выбран' if status['has_post'] else '⚠️ не выбран'}\n"
+        f"2. 📣 Каналы и группы — {'✅ выбрано: ' + str(status['targets_selected']) if status['targets_selected'] > 0 else '⚠️ не выбраны'}\n"
+        f"3. 🕒 Срок показа — {'✅ ' + status['show_seconds_text'] if status['has_show_seconds'] else '⚠️ не задан'}\n"
+        f"4. 🧹 Чистый канал — {status['clean_channel_status']}\n"
+        f"5. 📌 Время в топе — {status['top_time_status']}\n\n"
+        f"{launch_line}"
+    )
+    rows = [
+        [InlineKeyboardButton(text="⚡ Запустить сейчас", callback_data=f"rule_repost_campaign_launch_now_preview:{rule_id}")],
+        [InlineKeyboardButton(text="🕒 Запланировать запуск", callback_data=f"rule_repost_campaign_schedule_current:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=_wizard_step_callback(rule_id, "top_time"))],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
 def build_repost_campaign_menu_view(
     *,
     rule_id: int,
@@ -190,45 +367,13 @@ def build_repost_campaign_launch_wizard_view(
     readiness: dict | None = None,
     control_center: dict | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    steps_summary = _build_repost_campaign_setup_steps_summary(
+    return build_repost_campaign_wizard_post_step_view(
+        rule_id=rule_id,
         summary=summary,
         saved_post_line=saved_post_line,
         readiness=readiness,
         control_center=control_center,
     )
-    launch_ready = "6. 🚀 Запуск — готов" in steps_summary
-    lines = [
-        "🚀 Мастер запуска рекламной кампании",
-        "Шаг 1 из 6 — Рекламный пост\n"
-        "Шаг 2 из 6 — Каналы и группы\n"
-        "Шаг 3 из 6 — Срок показа\n"
-        "Шаг 4 из 6 — Чистый канал\n"
-        "Шаг 5 из 6 — Время в топе\n"
-        "Шаг 6 из 6 — Проверка и запуск",
-        "Текущий статус:\n" + "\n".join(steps_summary.splitlines()[2:]),
-        (
-            "Откройте нужный шаг, чтобы проверить или исправить настройки. "
-            "На последнем шаге можно запустить кампанию сейчас или запланировать запуск."
-        ),
-    ]
-    if not launch_ready:
-        lines.append("Запуск станет доступен после выбора рекламного поста, каналов и срока показа.")
-    text = "\n\n".join(lines)
-    rows = [
-        [
-            InlineKeyboardButton(text="1. Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}"),
-            InlineKeyboardButton(text="2. Каналы и группы", callback_data=f"rule_repost_campaign_targets:{rule_id}"),
-        ],
-        [
-            InlineKeyboardButton(text="3. Время показа", callback_data=f"rule_repost_campaign_show_menu:{rule_id}"),
-            InlineKeyboardButton(text="4. Чистый канал", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}"),
-        ],
-        [InlineKeyboardButton(text="5. Время в топе", callback_data=f"rule_repost_campaign_top_time:{rule_id}")],
-        [InlineKeyboardButton(text="⚡ Запустить сейчас", callback_data=f"rule_repost_campaign_launch_now_preview:{rule_id}")],
-        [InlineKeyboardButton(text="🕒 Запланировать запуск", callback_data=f"rule_repost_campaign_schedule_current:{rule_id}")],
-        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
-    ]
-    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_repost_campaign_active_campaign_view(*, rule_id: int, active_campaign: dict) -> tuple[str, InlineKeyboardMarkup]:

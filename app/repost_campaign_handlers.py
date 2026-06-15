@@ -17,6 +17,12 @@ from app.repost_campaign_ui import (
     build_repost_campaign_launch_clean_channel_warning_view,
     build_repost_campaign_launch_mode_view,
     build_repost_campaign_launch_wizard_view,
+    build_repost_campaign_wizard_clean_channel_step_view,
+    build_repost_campaign_wizard_post_step_view,
+    build_repost_campaign_wizard_review_step_view,
+    build_repost_campaign_wizard_show_time_step_view,
+    build_repost_campaign_wizard_targets_step_view,
+    build_repost_campaign_wizard_top_time_step_view,
     build_repost_campaign_launch_job_status_view,
     build_repost_campaign_launch_queued_view,
     build_repost_campaign_launch_readiness_view,
@@ -122,10 +128,45 @@ async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int, ct
     return True
 
 
+WIZARD_STEPS = {"post", "targets", "show_time", "clean_channel", "top_time", "review"}
+
+
+def _select_repost_campaign_wizard_step(*, summary: dict, readiness: dict | None) -> str:
+    payload = summary or {}
+    readiness = readiness or {}
+    if not payload.get("saved_post_id") and not readiness.get("saved_post_id"):
+        return "post"
+    targets_count = int(payload.get("targets_active") or 0)
+    if targets_count <= 0:
+        targets_count = int(readiness.get("will_send_total") or 0) + int(readiness.get("will_skip_total") or 0)
+    if targets_count <= 0:
+        return "targets"
+    show_seconds = int(payload.get("show_seconds") or readiness.get("show_seconds") or 0)
+    if show_seconds <= 0:
+        return "show_time"
+    return "review"
+
+
+def _build_repost_campaign_wizard_step_view(*, step: str, rule_id: int, summary: dict, saved_post_line: str, readiness: dict | None, control_center: dict | None):
+    if step == "post":
+        return build_repost_campaign_wizard_post_step_view(rule_id=rule_id, summary=summary, saved_post_line=saved_post_line, readiness=readiness, control_center=control_center)
+    if step == "targets":
+        return build_repost_campaign_wizard_targets_step_view(rule_id=rule_id, summary=summary, saved_post_line=saved_post_line, readiness=readiness, control_center=control_center)
+    if step == "show_time":
+        return build_repost_campaign_wizard_show_time_step_view(rule_id=rule_id, summary=summary, saved_post_line=saved_post_line, readiness=readiness, control_center=control_center)
+    if step == "clean_channel":
+        return build_repost_campaign_wizard_clean_channel_step_view(rule_id=rule_id, summary=summary, saved_post_line=saved_post_line, readiness=readiness, control_center=control_center)
+    if step == "top_time":
+        return build_repost_campaign_wizard_top_time_step_view(rule_id=rule_id, summary=summary, saved_post_line=saved_post_line, readiness=readiness, control_center=control_center)
+    return build_repost_campaign_wizard_review_step_view(rule_id=rule_id, summary=summary, saved_post_line=saved_post_line, readiness=readiness, control_center=control_center)
+
+
 async def _render_repost_campaign_launch_wizard(
     callback: CallbackQuery,
     rule_id: int,
     ctx: RepostCampaignHandlersContext,
+    *,
+    requested_step: str | None = None,
 ) -> bool:
     rule = await ctx.run_db(ctx.db.get_rule, rule_id)
     if not rule:
@@ -164,7 +205,9 @@ async def _render_repost_campaign_launch_wizard(
         "top_time_enabled": bool(getattr(rule, "repost_campaign_top_time_enabled", False)),
         "top_time_seconds": int(getattr(rule, "repost_campaign_top_time_seconds", 0) or 0),
     })
-    text, keyboard = build_repost_campaign_launch_wizard_view(
+    step = requested_step if requested_step in WIZARD_STEPS else _select_repost_campaign_wizard_step(summary=summary_payload, readiness=readiness)
+    text, keyboard = _build_repost_campaign_wizard_step_view(
+        step=step,
         rule_id=rule_id,
         summary=summary_payload,
         saved_post_line=saved_post_line,
@@ -178,8 +221,9 @@ async def _render_repost_campaign_launch_wizard(
     readiness_payload = readiness or {}
     targets_count = int(summary_payload.get("targets_active") or readiness_payload.get("will_send_total") or 0)
     ctx.logger.info(
-        "REPOST_CAMPAIGN_LAUNCH_WIZARD_OPENED | rule_id=%s | ready=%s | can_launch=%s | targets_count=%s",
+        "REPOST_CAMPAIGN_LAUNCH_WIZARD_OPENED | rule_id=%s | step=%s | ready=%s | can_launch=%s | targets_count=%s",
         rule_id,
+        step,
         readiness_payload.get("ready"),
         readiness_payload.get("can_launch"),
         targets_count,
@@ -768,6 +812,26 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         rendered = await _render_repost_campaign_active_campaign(callback, rule_id, ctx)
         if rendered:
             await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_wizard_step:"))
+    async def handle_rule_repost_campaign_wizard_step(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            _, rule_id_raw, step = (callback.data or "").split(":", 2)
+            rule_id = int(rule_id_raw)
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if step not in WIZARD_STEPS:
+            await ctx.answer_callback_safe(callback, "Ошибка шага", show_alert=True)
+            return
+        if not await _render_repost_campaign_launch_wizard(callback, rule_id, ctx, requested_step=step):
+            return
+        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_wizard:"))
     async def handle_rule_repost_campaign_launch_wizard(callback: CallbackQuery):

@@ -9,6 +9,12 @@ from app.repost_campaign_ui import (
     build_repost_campaign_launch_result_view,
     build_repost_campaign_launch_mode_view,
     build_repost_campaign_launch_wizard_view,
+    build_repost_campaign_wizard_clean_channel_step_view,
+    build_repost_campaign_wizard_post_step_view,
+    build_repost_campaign_wizard_review_step_view,
+    build_repost_campaign_wizard_show_time_step_view,
+    build_repost_campaign_wizard_targets_step_view,
+    build_repost_campaign_wizard_top_time_step_view,
     build_repost_campaign_launch_readiness_view,
     build_repost_campaign_launch_queued_view,
     build_repost_campaign_launch_job_status_view,
@@ -2416,49 +2422,105 @@ def test_repost_campaign_menu_stage_seven_one_does_not_touch_runtime_layers():
         assert "Настройте запуск по шагам" not in source
 
 
-def test_launch_wizard_view_contains_steps():
+def test_launch_wizard_post_step_view_contains_callbacks():
     payload = _campaign_menu_ready_payload()
-    text, _ = build_repost_campaign_launch_wizard_view(rule_id=7, **payload)
+    text, keyboard = build_repost_campaign_wizard_post_step_view(rule_id=7, **payload)
 
-    assert "🚀 Мастер запуска рекламной кампании" in text
+    assert "🚀 Мастер запуска" in text
     assert "Шаг 1 из 6 — Рекламный пост" in text
-    assert "Шаг 2 из 6 — Каналы и группы" in text
-    assert "Шаг 3 из 6 — Срок показа" in text
-    assert "Шаг 4 из 6 — Чистый канал" in text
-    assert "Шаг 5 из 6 — Время в топе" in text
-    assert "Шаг 6 из 6 — Проверка и запуск" in text
-
-
-def test_launch_wizard_view_contains_navigation_buttons():
-    payload = _campaign_menu_ready_payload()
-    _, keyboard = build_repost_campaign_launch_wizard_view(rule_id=7, **payload)
-
-    assert _texts_from_keyboard(keyboard) == [
-        "1. Рекламный пост",
-        "2. Каналы и группы",
-        "3. Время показа",
-        "4. Чистый канал",
-        "5. Время в топе",
-        "⚡ Запустить сейчас",
-        "🕒 Запланировать запуск",
-        "💰 К кампании",
-    ]
-
-
-def test_launch_wizard_buttons_have_expected_callbacks():
-    payload = _campaign_menu_ready_payload()
-    _, keyboard = build_repost_campaign_launch_wizard_view(rule_id=7, **payload)
-
+    assert "Текущий пост:" in text
+    assert _texts_from_keyboard(keyboard) == ["📝 Выбрать / заменить пост", "📚 Открыть библиотеку", "➡️ Далее", "💰 К кампании"]
     assert _callbacks_from_keyboard(keyboard) == [
         "rule_repost_campaign_post_menu:7",
-        "rule_repost_campaign_targets:7",
-        "rule_repost_campaign_show_menu:7",
-        "rule_repost_campaign_clean_channel:7",
-        "rule_repost_campaign_top_time:7",
-        "rule_repost_campaign_launch_now_preview:7",
-        "rule_repost_campaign_schedule_current:7",
+        "rule_repost_campaign_history:7",
+        "rule_repost_campaign_wizard_step:7:targets",
         "rule_repost_campaign_menu:7",
     ]
+
+
+def test_launch_wizard_targets_step_view_contains_callbacks():
+    payload = _campaign_menu_ready_payload()
+    text, keyboard = build_repost_campaign_wizard_targets_step_view(rule_id=7, **payload)
+
+    assert "Шаг 2 из 6 — Каналы и группы" in text
+    assert "Выбрано:" in text
+    assert _callbacks_from_keyboard(keyboard) == [
+        "rule_repost_campaign_targets:7",
+        "rule_repost_campaign_check:7",
+        "rule_repost_campaign_wizard_step:7:post",
+        "rule_repost_campaign_wizard_step:7:show_time",
+        "rule_repost_campaign_menu:7",
+    ]
+
+
+def test_launch_wizard_show_time_step_view_contains_callbacks():
+    payload = _campaign_menu_ready_payload()
+    text, keyboard = build_repost_campaign_wizard_show_time_step_view(rule_id=7, **payload)
+
+    assert "Шаг 3 из 6 — Срок показа" in text
+    assert "Текущий срок:" in text
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_show_set:7:10800" in callbacks
+    assert "rule_repost_campaign_show_set:7:21600" in callbacks
+    assert "rule_repost_campaign_show_set:7:43200" in callbacks
+    assert "rule_repost_campaign_show_set:7:86400" in callbacks
+    assert "rule_repost_campaign_show_set:7:172800" in callbacks
+    assert "rule_repost_campaign_show_menu:7" in callbacks
+    assert "rule_repost_campaign_wizard_step:7:targets" in callbacks
+    assert "rule_repost_campaign_wizard_step:7:clean_channel" in callbacks
+
+
+def test_launch_wizard_clean_channel_step_view_contains_callbacks():
+    payload = _campaign_menu_ready_payload()
+    text, keyboard = build_repost_campaign_wizard_clean_channel_step_view(rule_id=7, **payload)
+
+    assert "Шаг 4 из 6 — Чистый канал" in text
+    assert "Статус:" in text
+    assert _callbacks_from_keyboard(keyboard) == [
+        "rule_repost_campaign_clean_channel:7",
+        "rule_repost_campaign_active_placements:7:0",
+        "rule_repost_campaign_wizard_step:7:show_time",
+        "rule_repost_campaign_wizard_step:7:top_time",
+        "rule_repost_campaign_menu:7",
+    ]
+
+
+def test_launch_wizard_top_time_step_view_contains_callbacks():
+    payload = _campaign_menu_ready_payload()
+    text, keyboard = build_repost_campaign_wizard_top_time_step_view(rule_id=7, **payload)
+
+    assert "Шаг 5 из 6 — Время в топе" in text
+    assert "Статус:" in text
+    assert _callbacks_from_keyboard(keyboard) == [
+        "rule_repost_campaign_top_time:7",
+        "rule_repost_campaign_top_time_active_pauses:7",
+        "rule_repost_campaign_wizard_step:7:clean_channel",
+        "rule_repost_campaign_wizard_step:7:review",
+        "rule_repost_campaign_menu:7",
+    ]
+
+
+def test_launch_wizard_review_step_view_contains_callbacks():
+    payload = _campaign_menu_ready_payload()
+    text, keyboard = build_repost_campaign_wizard_review_step_view(rule_id=7, **payload)
+
+    assert "Шаг 6 из 6 — Проверка и запуск" in text
+    assert "Проверьте настройки:" in text
+    assert "Запуск готов." in text
+    assert _callbacks_from_keyboard(keyboard) == [
+        "rule_repost_campaign_launch_now_preview:7",
+        "rule_repost_campaign_schedule_current:7",
+        "rule_repost_campaign_wizard_step:7:top_time",
+        "rule_repost_campaign_menu:7",
+    ]
+
+
+def test_launch_wizard_legacy_view_opens_post_step():
+    payload = _campaign_menu_ready_payload()
+    text, keyboard = build_repost_campaign_launch_wizard_view(rule_id=7, **payload)
+
+    assert "Шаг 1 из 6 — Рекламный пост" in text
+    assert "rule_repost_campaign_wizard_step:7:targets" in _callbacks_from_keyboard(keyboard)
 
 
 def test_main_menu_master_button_opens_launch_wizard():
@@ -2531,12 +2593,12 @@ def test_menu_summary_uses_top_time_settings():
 def test_launch_wizard_uses_top_time_settings():
     payload = _campaign_menu_ready_payload()
     payload["summary"] = dict(payload["summary"], top_time_enabled=False, top_time_seconds=0)
-    text, _ = build_repost_campaign_launch_wizard_view(rule_id=7, **payload)
-    assert "5. 📌 Время в топе — 🔴 выключено" in text
+    text, _ = build_repost_campaign_wizard_top_time_step_view(rule_id=7, **payload)
+    assert "Статус: 🔴 выключено" in text
 
     payload["summary"] = dict(payload["summary"], top_time_enabled=True, top_time_seconds=7200)
-    text, _ = build_repost_campaign_launch_wizard_view(rule_id=7, **payload)
-    assert "5. 📌 Время в топе — 🟢 2 часа" in text
+    text, _ = build_repost_campaign_wizard_top_time_step_view(rule_id=7, **payload)
+    assert "Статус: 🟢 2 часа" in text
 
 
 def test_top_time_settings_view_disabled():
@@ -2573,7 +2635,7 @@ def test_vip_features_top_time_callback_points_to_settings():
 
 def test_launch_wizard_top_time_callback_points_to_settings():
     payload = _campaign_menu_ready_payload()
-    _, keyboard = build_repost_campaign_launch_wizard_view(rule_id=10, **payload)
+    _, keyboard = build_repost_campaign_wizard_top_time_step_view(rule_id=10, **payload)
     callbacks = _callbacks_from_keyboard(keyboard)
     assert "rule_repost_campaign_top_time:10" in callbacks
     assert "rule_repost_campaign_vip_coming_soon:10:top_time" not in callbacks
