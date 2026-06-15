@@ -121,7 +121,7 @@ def _build_repost_campaign_setup_steps_summary(*, summary: dict, saved_post_line
     elif clean_channel_enabled is False:
         clean_channel_status = "⚪ выключен"
     else:
-        clean_channel_status = "💎 в VIP-функциях"
+        clean_channel_status = "⚠️ статус недоступен"
 
     top_time_settings = None
     for payload in (summary, readiness, control_center):
@@ -177,7 +177,7 @@ def _wizard_status_parts(*, summary: dict, saved_post_line: str, readiness: dict
     elif clean_channel_enabled is False:
         clean_channel_status = "⚪ выключен"
     else:
-        clean_channel_status = "💎 в VIP-функциях"
+        clean_channel_status = "⚠️ статус недоступен"
 
     top_time_settings = None
     for payload in (summary, readiness, control_center):
