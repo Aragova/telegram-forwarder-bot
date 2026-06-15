@@ -88,6 +88,76 @@ class RepostCampaignRuntimeService:
             enabled=bool(getattr(rule, "repost_campaign_top_time_enabled", False)),
             seconds=int(getattr(rule, "repost_campaign_top_time_seconds", 0) or 0),
         )
+    def _build_top_time_pause_window(
+        self,
+        *,
+        top_time_snapshot: dict[str, Any],
+        base_dt: datetime | None = None,
+    ) -> tuple[str, str] | None:
+        snapshot = normalize_repost_campaign_top_time_settings(
+            enabled=bool((top_time_snapshot or {}).get("enabled")),
+            seconds=int((top_time_snapshot or {}).get("seconds") or 0),
+        )
+        if not snapshot["enabled"] or int(snapshot["seconds"]) <= 0:
+            return None
+        starts_dt = base_dt or datetime.now(timezone.utc)
+        if starts_dt.tzinfo is None:
+            starts_dt = starts_dt.replace(tzinfo=timezone.utc)
+        starts_dt = starts_dt.astimezone(timezone.utc)
+        ends_dt = starts_dt + timedelta(seconds=int(snapshot["seconds"]))
+        return starts_dt.isoformat(), ends_dt.isoformat()
+
+    def _create_top_time_pause_after_successful_send(
+        self,
+        *,
+        run_id: int,
+        rule_id: int,
+        run_message_id: int,
+        target: dict[str, Any],
+        top_time_snapshot: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        window = self._build_top_time_pause_window(top_time_snapshot=top_time_snapshot)
+        if window is None:
+            return None
+        starts_at, ends_at = window
+        target_id = str(target.get("target_id") or "")
+        target_thread_id = target.get("target_thread_id")
+        try:
+            pause_id = self.repo.create_campaign_top_time_pause(
+                rule_id=int(rule_id),
+                campaign_run_id=int(run_id),
+                campaign_run_message_id=int(run_message_id),
+                target_id=target_id,
+                target_thread_id=target_thread_id,
+                target_title=target.get("target_title"),
+                starts_at=starts_at,
+                ends_at=ends_at,
+            )
+            if pause_id is None:
+                self.logger.error(
+                    "REPOST_CAMPAIGN_TOP_TIME_PAUSE_CREATE_FAILED | run_id=%s | run_message_id=%s | target_id=%s | error=%s",
+                    run_id, run_message_id, target_id, "repo returned None",
+                )
+                return None
+            self.logger.info(
+                "REPOST_CAMPAIGN_TOP_TIME_PAUSE_CREATED | run_id=%s | run_message_id=%s | rule_id=%s | target_id=%s | target_thread_id=%s | starts_at=%s | ends_at=%s",
+                run_id, run_message_id, rule_id, target_id, target_thread_id, starts_at, ends_at,
+            )
+            return {
+                "pause_id": int(pause_id),
+                "run_message_id": int(run_message_id),
+                "target_id": target_id,
+                "target_thread_id": target_thread_id,
+                "starts_at": starts_at,
+                "ends_at": ends_at,
+            }
+        except Exception as exc:
+            self.logger.exception(
+                "REPOST_CAMPAIGN_TOP_TIME_PAUSE_CREATE_FAILED | run_id=%s | run_message_id=%s | target_id=%s | error=%s",
+                run_id, run_message_id, target_id, exc,
+            )
+            return None
+
 
     def _get_repost_rule_and_saved_post(self, *, rule_id: int, action: str):
         rule = self.repo.get_rule(rule_id)
@@ -934,6 +1004,7 @@ class RepostCampaignRuntimeService:
         failed_count = 0
         first_error_text = None
         any_premium_required = False
+        top_time_pauses_created: list[dict[str, Any]] = []
         for target in targets:
             delete_after_at = build_campaign_delete_after_iso(show_seconds) if show_seconds > 0 else None
             run_message_id = self.repo.create_campaign_run_message(
@@ -977,6 +1048,17 @@ class RepostCampaignRuntimeService:
                     render_mode=render_result.method,
                 )
                 success_count += 1
+                has_confirmed_sent_ids = bool(render_result.message_id or album_ids)
+                if has_confirmed_sent_ids:
+                    pause_info = self._create_top_time_pause_after_successful_send(
+                        run_id=int(run_id),
+                        rule_id=int(rule_id),
+                        run_message_id=int(run_message_id),
+                        target=target,
+                        top_time_snapshot=top_time_snapshot,
+                    )
+                    if pause_info is not None:
+                        top_time_pauses_created.append(pause_info)
                 if render_result.method:
                     methods.add(render_result.method)
                 self.logger.info(
@@ -1015,6 +1097,7 @@ class RepostCampaignRuntimeService:
             "methods": sorted(list(methods)),
             "main_target_id": str(getattr(rule, "target_id", "")),
             "extra_targets": len(targets) - 1,
+            "top_time_pauses_created": len(top_time_pauses_created),
         }
         self.repo.update_campaign_run_status(
             run_id,
@@ -1048,6 +1131,7 @@ class RepostCampaignRuntimeService:
                 "extra_targets": len(targets) - 1,
                 "launch_readiness": readiness,
                 "top_time_snapshot": top_time_snapshot,
+                "top_time_pauses_created": top_time_pauses_created,
                 "will_send_total": readiness.get("will_send_total"),
                 "will_skip_total": readiness.get("will_skip_total"),
                 "extra_ready": readiness.get("extra_ready"),

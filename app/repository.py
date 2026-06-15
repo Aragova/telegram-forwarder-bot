@@ -508,6 +508,35 @@ class RepositoryProtocol(Protocol):
         sent_message_ids: list[int] | None = None,
         render_mode: str | None = None,
     ) -> bool: ...
+    def create_campaign_top_time_pause(
+        self,
+        *,
+        rule_id: int,
+        campaign_run_id: int,
+        campaign_run_message_id: int,
+        target_id: str,
+        target_thread_id: int | None,
+        target_title: str | None,
+        starts_at: str,
+        ends_at: str,
+    ) -> int | None: ...
+    def get_campaign_top_time_pause_by_run_message(
+        self,
+        campaign_run_message_id: int,
+    ) -> dict[str, Any] | None: ...
+    def list_active_campaign_top_time_pauses_for_rule(
+        self,
+        rule_id: int,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]: ...
+    def get_active_campaign_top_time_pause_for_target(
+        self,
+        *,
+        target_id: str,
+        target_thread_id: int | None = None,
+        at_iso: str | None = None,
+    ) -> dict[str, Any] | None: ...
     def mark_campaign_run_message_failed(
         self,
         message_id: int,
