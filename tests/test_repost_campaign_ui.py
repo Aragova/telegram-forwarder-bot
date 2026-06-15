@@ -2170,3 +2170,86 @@ def test_schedule_cancel_result_view_uses_regular_campaign_navigation():
     assert "💎 К " + "VIP функциям" not in labels
     assert "rule_repost_campaign_schedule_current:1" in callbacks
     assert "rule_repost_campaign_menu:1" in callbacks
+
+
+def _campaign_menu_ready_payload():
+    return {
+        "summary": {
+            "show_seconds_text": "24 часа",
+            "show_seconds": 86400,
+            "targets_active": 8,
+            "targets_ready": 8,
+            "saved_post_id": 42,
+        },
+        "saved_post_line": "📝 Рекламный пост: выбран",
+        "readiness": {"ready": True, "saved_post_id": 42, "show_seconds": 86400},
+    }
+
+
+def test_repost_campaign_menu_contains_steps_summary():
+    payload = _campaign_menu_ready_payload()
+    text, _ = build_repost_campaign_menu_view(rule_id=7, **payload)
+
+    assert "Настройте запуск по шагам:" in text
+    assert "1. 📝 Рекламный пост" in text
+    assert "2. 📣 Каналы и группы" in text
+    assert "3. 🕒 Срок показа" in text
+    assert "4. 🧹 Чистый канал" in text
+    assert "5. 📌 Время в топе" in text
+    assert "6. 🚀 Запуск" in text
+
+
+def test_repost_campaign_menu_keeps_compact_buttons():
+    payload = _campaign_menu_ready_payload()
+    _, keyboard = build_repost_campaign_menu_view(rule_id=7, **payload)
+
+    assert _texts_from_keyboard(keyboard) == [
+        "🚀 Мастер запуска рекламной кампании",
+        "1. Рекламный пост",
+        "2. Каналы и группы",
+        "3. Время показа",
+        "4. Библиотека",
+        "5. 💎 VIP-функции",
+        "⬅️ Назад к правилу",
+    ]
+
+
+def test_repost_campaign_menu_does_not_duplicate_vip_features_as_buttons():
+    payload = _campaign_menu_ready_payload()
+    _, keyboard = build_repost_campaign_menu_view(rule_id=7, **payload)
+    labels = _texts_from_keyboard(keyboard)
+
+    assert "🧹 Чистый канал" not in labels
+    assert "📌 Время в топе" not in labels
+    assert "🕒 Запланированные посты" not in labels
+    assert "✨ A/B-тесты" not in labels
+
+
+def test_repost_campaign_menu_top_time_is_summary_only():
+    payload = _campaign_menu_ready_payload()
+    text, keyboard = build_repost_campaign_menu_view(rule_id=7, **payload)
+
+    assert "5. 📌 Время в топе" in text
+    assert "📌 Время в топе" not in _texts_from_keyboard(keyboard)
+
+
+def test_repost_campaign_menu_library_is_present():
+    payload = _campaign_menu_ready_payload()
+    _, keyboard = build_repost_campaign_menu_view(rule_id=7, **payload)
+
+    assert "4. Библиотека" in _texts_from_keyboard(keyboard)
+
+
+def test_repost_campaign_menu_stage_seven_one_does_not_touch_runtime_layers():
+    for path in [
+        "app/repost_campaign_runtime_service.py",
+        "app/repost_campaign_schedule_service.py",
+        "app/repost_campaign_schedule_handlers.py",
+        "app/repost_campaign_message_handlers.py",
+        "app/repost_campaign_scheduled_post_service.py",
+        "app/postgres_repository.py",
+        "app/repository.py",
+    ]:
+        source = Path(path).read_text(encoding="utf-8")
+        assert "Мастер запуска рекламной кампании" not in source
+        assert "Настройте запуск по шагам" not in source
