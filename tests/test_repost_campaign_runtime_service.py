@@ -1605,3 +1605,58 @@ def test_scheduled_overlap_ignore_active_placement_block_source_guard():
     assert "ignore_active_placement_block: bool = False" in launch_source
     assert "not ignore_active_placement_block" in launch_source
     assert "force_ignore_clean_channel" in launch_source
+
+
+def test_launch_campaign_now_stores_rule_top_time_snapshot():
+    rule = SimpleNamespace(
+        mode="repost",
+        repost_campaign_saved_post_id=55,
+        target_id="-1001",
+        target_thread_id=None,
+        target_title="Main",
+        repost_campaign_show_seconds=300,
+        repost_campaign_top_time_enabled=True,
+        repost_campaign_top_time_seconds=7200,
+    )
+    saved_post = {"content_json": {"kind": "photo"}}
+    repo = _FakeRepo(rule=rule, saved_post=saved_post)
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="photo", chat_id="-1001", message_id=123))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1))
+
+    assert result.ok is True
+    assert repo.create_campaign_run_calls[0]["top_time_enabled_snapshot"] is True
+    assert repo.create_campaign_run_calls[0]["top_time_seconds_snapshot"] == 7200
+    assert result.extra["top_time_snapshot"] == {"enabled": True, "seconds": 7200}
+
+
+def test_launch_campaign_now_uses_provided_top_time_snapshot_for_scheduled():
+    rule = SimpleNamespace(
+        mode="repost",
+        repost_campaign_saved_post_id=55,
+        target_id="-1001",
+        target_thread_id=None,
+        target_title="Main",
+        repost_campaign_show_seconds=300,
+        repost_campaign_top_time_enabled=True,
+        repost_campaign_top_time_seconds=7200,
+    )
+    saved_post = {"content_json": {"kind": "photo"}}
+    repo = _FakeRepo(rule=rule, saved_post=saved_post)
+    renderer = _FakeRenderer(SavedPostRenderResult(ok=True, method="bot_api", kind="photo", chat_id="-1001", message_id=123))
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+
+    result = asyncio.run(runtime.launch_campaign_now(rule_id=1, run_type="scheduled", top_time_snapshot={"enabled": True, "seconds": 3600}))
+
+    assert result.ok is True
+    assert repo.create_campaign_run_calls[0]["top_time_enabled_snapshot"] is True
+    assert repo.create_campaign_run_calls[0]["top_time_seconds_snapshot"] == 3600
+    assert result.extra["top_time_snapshot"] == {"enabled": True, "seconds": 3600}
+
+
+def test_launch_campaign_from_snapshot_does_not_add_top_time_pause_guard():
+    source = Path("app/repost_campaign_runtime_service.py").read_text(encoding="utf-8")
+    launch_from_snapshot_source = source.split("    async def launch_campaign_from_snapshot", 1)[1].split("\n    async def launch_campaign_now", 1)[0]
+    assert "target_top_pause" not in launch_from_snapshot_source
+    assert "top_time_pause" not in launch_from_snapshot_source

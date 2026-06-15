@@ -15,6 +15,7 @@ from app.repost_campaign_schedule_service import (
 class FR:
     def __init__(self):
         self.rows=[]
+        self.rule=type("Rule", (), {"repost_campaign_top_time_enabled": True, "repost_campaign_top_time_seconds": 7200})()
         self.claim=[]
         self.launches={}
         self.events=[]
@@ -25,6 +26,9 @@ class FR:
     def create_campaign_scheduled_launch(self, **kw):
         self.rows.append(kw)
         return 1
+
+    def get_rule(self, rule_id):
+        return self.rule
 
     def reset_stuck_campaign_scheduled_launches(self, **kw):
         now=datetime.now(timezone.utc)
@@ -313,3 +317,43 @@ def test_source_guard_for_due_worker_clean_channel_policy():
     assert "readiness.get(\'active_placement\')" not in process_due_source
     assert "readiness.get(\"delete_failed\")" not in process_due_source
     assert "readiness.get(\'delete_failed\')" not in process_due_source
+
+
+def test_schedule_campaign_launch_snapshots_current_rule_top_time_settings():
+    repo = FR(); rt = RT(); svc = RepostCampaignScheduleService(repo=repo, campaign_runtime=rt)
+    repo.rule.repost_campaign_top_time_enabled = True
+    repo.rule.repost_campaign_top_time_seconds = 7200
+
+    res = svc.schedule_campaign_launch(rule_id=1, scheduled_at_utc=datetime(2026, 5, 9, 15, 0, tzinfo=timezone.utc), created_by=7)
+    repo.rule.repost_campaign_top_time_seconds = 43200
+
+    assert res.ok is True
+    assert repo.rows[0]["top_time_enabled_snapshot"] is True
+    assert repo.rows[0]["top_time_seconds_snapshot"] == 7200
+    assert repo.rows[0]["preview"]["top_time_snapshot"] == {"enabled": True, "seconds": 7200}
+
+
+def test_due_worker_passes_scheduled_top_time_snapshot_to_runtime():
+    repo = _repo_with_claim(); rt = RT(callback_run_id=55); svc = RepostCampaignScheduleService(repo=repo, campaign_runtime=rt)
+    repo.claim[0]["top_time_enabled_snapshot"] = True
+    repo.claim[0]["top_time_seconds_snapshot"] = 3600
+
+    asyncio.run(svc.process_due_scheduled_launches(worker_id="w"))
+
+    assert rt.launch_kwargs[0]["top_time_snapshot"] == {"enabled": True, "seconds": 3600}
+
+
+def test_top_time_snapshot_source_guard_does_not_add_pause_or_worker_guard():
+    for path in [
+        "app/repost_worker.py",
+        "app/video_worker.py",
+        "app/scheduler.py",
+        "app/repost_campaign_launch_job_service.py",
+    ]:
+        file_path = Path(path)
+        if not file_path.exists():
+            continue
+        source = file_path.read_text(encoding="utf-8")
+        assert "target_top_pause" not in source
+        assert "top_time_pause" not in source
+        assert "next_run_at = pause" not in source
