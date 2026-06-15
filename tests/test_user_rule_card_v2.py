@@ -268,3 +268,25 @@ def test_rule_callbacks_with_rule_id_are_not_admin_only_for_user_flows():
         assert idx >= 0
         block = source[idx: idx + 800]
         assert "ensure_rule_callback_access(callback, rule_id)" in block
+
+
+def test_user_rule_card_shows_active_top_time_pause():
+    snapshot = {
+        "id": 1,
+        "mode": "repost",
+        "target_title": "Канал",
+        "is_active": True,
+        "next_run_at": "2026-04-28T14:54:00+00:00",
+        "top_time_pause_ends_at": "2026-04-28T15:30:00+00:00",
+        "logical_pending": 1,
+        "logical_processing": 0,
+        "logical_completed": 0,
+        "logical_faulty": 0,
+        "logical_total": 1,
+        "logical_current_position": 1,
+    }
+
+    text = user_ui.build_user_rule_card_text(snapshot)
+
+    assert "📌 Пауза до" in text
+    assert "— рекламный пост в топе" in text

@@ -871,6 +871,7 @@ def build_user_rule_card_text(snapshot: dict[str, Any]) -> str:
         int(snapshot.get("logical_faulty") or snapshot.get("faulty") or 0),
     )
     wait_to = _format_user_rule_wait(snapshot.get("next_run_at"))
+    top_time_pause_to = _format_user_rule_wait(snapshot.get("top_time_pause_ends_at") or (snapshot.get("active_top_time_pause") or {}).get("ends_at"))
     pending_count = int(snapshot.get("logical_pending") or 0)
     processing_count = int(snapshot.get("logical_processing") or snapshot.get("processing") or 0)
     sent_count = int(snapshot.get("logical_completed") or 0)
@@ -887,6 +888,7 @@ def build_user_rule_card_text(snapshot: dict[str, Any]) -> str:
         "──────────────",
         "",
         f"🕒 Ждёт до {wait_to}",
+        *([f"📌 Пауза до {top_time_pause_to} — рекламный пост в топе"] if top_time_pause_to != "—" else []),
         "",
         f"📦 В очереди: {pending_count}",
         f"⏳ В обработке: {processing_count}",
