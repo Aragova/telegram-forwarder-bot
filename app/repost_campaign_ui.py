@@ -233,18 +233,19 @@ def build_repost_campaign_schedule_current_view(*, rule_id: int, readiness: dict
 
 def build_repost_campaign_vip_features_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
     text = (
-        "💎 VIP функции\n\n"
-        "Продвинутые сценарии публикации для рекламных постов.\n\n"
+        "💎 VIP-функции\n\n"
+        "Дополнительные возможности для аккуратного запуска рекламных постов.\n\n"
         "🕒 Запланированные посты\n"
-        "Создавайте несколько будущих рекламных постов с разными материалами, сроками показа и временем запуска.\n"
-        "⚠️ Сейчас доступна черновая версия сценария.\n\n"
+        "Планируйте отдельные рекламные посты заранее. "
+        "Пользователь сам выбирает материал, время запуска и срок показа.\n\n"
         "🧹 Чистый канал\n"
-        "Включайте режим контроля активных рекламных размещений. "
-        "Смотрите, что сейчас опубликовано, удаляйте размещения и открывайте отчёты.\n\n"
+        "Помогает не запускать новую базовую рекламу поверх активной рекламы. "
+        "Если включён, запланированный запуск может подождать освобождения канала.\n\n"
         "📌 Время в топе\n"
-        "ViMi не будет публиковать обычные посты поверх рекламы в первые часы показа.\n\n"
+        "Будет удерживать обычный автопостинг ViMi после публикации рекламного поста, "
+        "чтобы автоматические репосты и видеопосты не выходили поверх рекламы.\n\n"
         "✨ A/B-тесты\n"
-        "Сравнивайте два варианта рекламного поста по просмотрам.\n\n"
+        "Будущая функция для сравнения двух вариантов рекламного поста.\n\n"
         "Выберите функцию:"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🕒 Запланированные посты", callback_data=f"rule_repost_campaign_scheduled_posts:{rule_id}")],[InlineKeyboardButton(text="🧹 Чистый канал", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],[InlineKeyboardButton(text="📌 Время в топе", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:top_time")],[InlineKeyboardButton(text="✨ A/B-тесты", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:ab_test")],[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]])
@@ -727,10 +728,58 @@ def _scheduled_launch_waiting_clean_channel_block(row: dict) -> str:
         f"Причина: {reason}"
     )
 
+def build_repost_campaign_top_time_intro_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "📌 Время в топе\n\n"
+        "Будущая VIP-функция для рекламной кампании.\n\n"
+        "После публикации рекламного поста ViMi сможет временно удерживать обычный автопостинг "
+        "в выбранных каналах и группах.\n\n"
+        "Что будет удерживаться:\n"
+        "✅ автоматические репосты\n"
+        "✅ автоматические видеопосты\n"
+        "✅ публикации обычных правил по расписанию\n\n"
+        "Что не будет блокироваться:\n"
+        "ℹ️ “Отправить сейчас”\n"
+        "ℹ️ VIP “Запланированные посты”\n"
+        "ℹ️ ручные публикации владельца канала\n"
+        "ℹ️ другие рекламные кампании — для них есть “Чистый канал”\n\n"
+        "Как это будет работать:\n"
+        "1. Рекламный пост публикуется в выбранные каналы.\n"
+        "2. Если “Время в топе” включено, ViMi создаёт паузу обычного автопостинга.\n"
+        "3. После окончания паузы обычный постинг продолжится сам.\n\n"
+        "Важно:\n"
+        "Срок показа — когда рекламный пост будет удалён.\n"
+        "Время в топе — сколько ViMi не будет сам публиковать обычные посты поверх рекламы.\n\n"
+        "Статус: скоро будет доступно."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 VIP-функции", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
+        [InlineKeyboardButton(text="🚀 Мастер запуска", callback_data=f"rule_repost_campaign_launch_wizard:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return text, kb
+
+
 def build_repost_campaign_vip_coming_soon_view(*, rule_id: int, feature: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    if feature == "top_time":
+        return build_repost_campaign_top_time_intro_view(rule_id=rule_id)
+
+    if feature == "ab_test":
+        text = (
+            "✨ A/B-тесты\n\n"
+            "Функция скоро будет доступна.\n\n"
+            "Она поможет сравнивать два варианта рекламного поста и смотреть, "
+            "какой вариант набирает больше просмотров."
+        )
+    else:
+        text = "💎 Скоро в VIP-функциях\n\nЭта функция появится в следующих обновлениях ViMi."
+
     return (
-        "💎 Скоро в VIP функциях\n\nЭта функция появится в следующих обновлениях ViMi.",
-        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к VIP функциям", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")]]),
+        text,
+        InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💎 VIP-функции", callback_data=f"rule_repost_campaign_vip_features:{rule_id}")],
+            [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+        ]),
     )
 
 def build_repost_campaign_schedule_menu_view(*, rule_id: int, scheduled_launches: list[dict] | None = None, now: datetime | None = None) -> tuple[str, InlineKeyboardMarkup]:

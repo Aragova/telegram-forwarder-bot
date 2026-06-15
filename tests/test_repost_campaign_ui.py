@@ -16,6 +16,8 @@ from app.repost_campaign_ui import (
     build_repost_campaign_views_report_loading_view,
     build_repost_campaign_views_report_error_view,
     build_repost_campaign_vip_features_view,
+    build_repost_campaign_vip_coming_soon_view,
+    build_repost_campaign_top_time_intro_view,
     build_repost_campaign_schedule_current_view,
     build_repost_campaign_run_details_view,
     build_repost_campaign_run_delete_confirm_view,
@@ -534,7 +536,7 @@ def test_post_stats_loading_view():
 
 def test_vip_features_view_contains_placeholder_text():
     text, keyboard = build_repost_campaign_vip_features_view(rule_id=5)
-    assert "💎 VIP функции" in text
+    assert "💎 VIP-функции" in text
     assert "A/B-тесты" in text
     assert "⬅️ Назад" in _texts_from_keyboard(keyboard)
 
@@ -883,7 +885,130 @@ def test_schedule_step4_view_has_time_presets():
 def test_vip_coming_soon_view():
     from app.repost_campaign_ui import build_repost_campaign_vip_coming_soon_view
     text,_=build_repost_campaign_vip_coming_soon_view(rule_id=1, feature='x')
-    assert 'Скоро в VIP функциях' in text
+    assert 'Скоро в VIP-функциях' in text
+
+
+
+def test_vip_features_menu_uses_approved_copy():
+    text, _ = build_repost_campaign_vip_features_view(rule_id=73)
+
+    for expected in [
+        "💎 VIP-функции",
+        "Дополнительные возможности",
+        "🕒 Запланированные посты",
+        "Пользователь сам выбирает материал",
+        "🧹 Чистый канал",
+        "не запускать новую базовую рекламу поверх активной рекламы",
+        "📌 Время в топе",
+        "обычный автопостинг ViMi",
+        "автоматические репосты",
+        "видеопосты",
+        "✨ A/B-тесты",
+    ]:
+        assert expected in text
+
+    for forbidden in [
+        "рекламные слоты",
+        "клиенты",
+        "рекламодатели",
+        "доходы",
+        "расходы",
+        "CPM",
+        "сегменты аудитории",
+        "invite links",
+        "AI-рекомендации",
+    ]:
+        assert forbidden not in text
+
+
+def test_vip_features_menu_keeps_callbacks():
+    _, keyboard = build_repost_campaign_vip_features_view(rule_id=73)
+    assert _callbacks_from_keyboard(keyboard) == [
+        "rule_repost_campaign_scheduled_posts:73",
+        "rule_repost_campaign_clean_channel:73",
+        "rule_repost_campaign_vip_coming_soon:73:top_time",
+        "rule_repost_campaign_vip_coming_soon:73:ab_test",
+        "rule_repost_campaign_menu:73",
+    ]
+
+
+def test_top_time_intro_view_explains_actual_behavior():
+    text, _ = build_repost_campaign_top_time_intro_view(rule_id=73)
+
+    for expected in [
+        "📌 Время в топе",
+        "Будущая VIP-функция",
+        "обычный автопостинг",
+        "автоматические репосты",
+        "автоматические видеопосты",
+        "публикации обычных правил по расписанию",
+        "“Отправить сейчас”",
+        "VIP “Запланированные посты”",
+        "ручные публикации владельца канала",
+        "другие рекламные кампании",
+        "Чистый канал",
+        "Срок показа",
+        "Время в топе",
+        "Статус: скоро будет доступно",
+    ]:
+        assert expected in text
+
+
+def test_top_time_intro_view_keyboard():
+    _, keyboard = build_repost_campaign_top_time_intro_view(rule_id=73)
+    assert [(button.text, button.callback_data) for row in keyboard.inline_keyboard for button in row] == [
+        ("💎 VIP-функции", "rule_repost_campaign_vip_features:73"),
+        ("🚀 Мастер запуска", "rule_repost_campaign_launch_wizard:73"),
+        ("💰 К кампании", "rule_repost_campaign_menu:73"),
+    ]
+
+
+def test_vip_coming_soon_routes_top_time_to_specific_view():
+    text, keyboard = build_repost_campaign_vip_coming_soon_view(rule_id=73, feature="top_time")
+
+    assert "📌 Время в топе" in text
+    assert "обычный автопостинг" in text
+    assert "“Отправить сейчас”" in text
+    assert "VIP “Запланированные посты”" in text
+    assert "💎 Скоро в VIP" not in text
+    assert "rule_repost_campaign_launch_wizard:73" in _callbacks_from_keyboard(keyboard)
+
+
+def test_vip_coming_soon_ab_test_remains_generic():
+    text, keyboard = build_repost_campaign_vip_coming_soon_view(rule_id=73, feature="ab_test")
+
+    assert "✨ A/B-тесты" in text
+    assert "скоро будет доступна" in text
+    assert "Время в топе" not in text
+    assert "обычный автопостинг" not in text
+    assert _callbacks_from_keyboard(keyboard) == [
+        "rule_repost_campaign_vip_features:73",
+        "rule_repost_campaign_menu:73",
+    ]
+
+
+def test_repost_campaign_top_time_stage_seven_three_does_not_touch_runtime_layers():
+    forbidden_paths = [
+        "app/repost_campaign_runtime_service.py",
+        "app/repost_campaign_schedule_service.py",
+        "app/repost_campaign_schedule_handlers.py",
+        "app/repost_campaign_message_handlers.py",
+        "app/repost_campaign_scheduled_post_service.py",
+        "app/repost_campaign_launch_job_service.py",
+        "app/repost_campaign_placement_service.py",
+        "app/postgres_repository.py",
+        "app/repository.py",
+    ]
+    forbidden_markers = [
+        "Время в топе",
+        "top_time",
+        "top_time_pause",
+        "target_top_pause",
+    ]
+    for path in forbidden_paths:
+        source = Path(path).read_text(encoding="utf-8")
+        for marker in forbidden_markers:
+            assert marker not in source
 
 def test_schedule_preview_view_contains_full_sections():
     from datetime import datetime, timezone
