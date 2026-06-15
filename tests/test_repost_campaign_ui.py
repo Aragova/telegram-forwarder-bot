@@ -6,6 +6,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_delete_result_view,
     build_repost_campaign_launch_result_view,
     build_repost_campaign_launch_mode_view,
+    build_repost_campaign_launch_wizard_view,
     build_repost_campaign_launch_readiness_view,
     build_repost_campaign_launch_queued_view,
     build_repost_campaign_launch_job_status_view,
@@ -2253,3 +2254,101 @@ def test_repost_campaign_menu_stage_seven_one_does_not_touch_runtime_layers():
         source = Path(path).read_text(encoding="utf-8")
         assert "Мастер запуска рекламной кампании" not in source
         assert "Настройте запуск по шагам" not in source
+
+
+def test_launch_wizard_view_contains_steps():
+    payload = _campaign_menu_ready_payload()
+    text, _ = build_repost_campaign_launch_wizard_view(rule_id=7, **payload)
+
+    assert "🚀 Мастер запуска рекламной кампании" in text
+    assert "Проверьте настройки перед запуском" in text
+    assert "1. 📝 Рекламный пост" in text
+    assert "2. 📣 Каналы и группы" in text
+    assert "3. 🕒 Срок показа" in text
+    assert "4. 🧹 Чистый канал" in text
+    assert "5. 📌 Время в топе" in text
+    assert "6. 🚀 Запуск" in text
+
+
+def test_launch_wizard_view_contains_navigation_buttons():
+    payload = _campaign_menu_ready_payload()
+    _, keyboard = build_repost_campaign_launch_wizard_view(rule_id=7, **payload)
+
+    assert _texts_from_keyboard(keyboard) == [
+        "1. Рекламный пост",
+        "2. Каналы и группы",
+        "3. Время показа",
+        "4. Чистый канал",
+        "5. Время в топе",
+        "⚡ Запустить сейчас",
+        "🕒 Запланировать запуск",
+        "💰 К кампании",
+    ]
+
+
+def test_launch_wizard_buttons_have_expected_callbacks():
+    payload = _campaign_menu_ready_payload()
+    _, keyboard = build_repost_campaign_launch_wizard_view(rule_id=7, **payload)
+
+    assert _callbacks_from_keyboard(keyboard) == [
+        "rule_repost_campaign_post_menu:7",
+        "rule_repost_campaign_targets:7",
+        "rule_repost_campaign_show_menu:7",
+        "rule_repost_campaign_clean_channel:7",
+        "rule_repost_campaign_vip_coming_soon:7:top_time",
+        "rule_repost_campaign_launch_now_preview:7",
+        "rule_repost_campaign_schedule_current:7",
+        "rule_repost_campaign_menu:7",
+    ]
+
+
+def test_main_menu_master_button_opens_launch_wizard():
+    payload = _campaign_menu_ready_payload()
+    _, keyboard = build_repost_campaign_menu_view(rule_id=7, **payload)
+    callbacks = _callbacks_from_keyboard(keyboard)
+
+    assert "rule_repost_campaign_launch_wizard:7" in callbacks
+    assert "rule_repost_campaign_launch:7" not in callbacks
+
+
+def test_main_menu_still_keeps_compact_buttons():
+    payload = _campaign_menu_ready_payload()
+    _, keyboard = build_repost_campaign_menu_view(rule_id=7, **payload)
+    labels = _texts_from_keyboard(keyboard)
+
+    assert "4. Библиотека" in labels
+    assert "5. 💎 VIP-функции" in labels
+    assert "🧹 Чистый канал" not in labels
+    assert "📌 Время в топе" not in labels
+    assert "🕒 Запланированные посты" not in labels
+
+
+def test_launch_wizard_handler_is_registered_before_legacy_launch_handler():
+    source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
+
+    wizard_pos = source.index("handle_rule_repost_campaign_launch_wizard")
+    legacy_pos = source.index("handle_rule_repost_campaign_launch(callback")
+    assert wizard_pos < legacy_pos
+
+
+def test_legacy_launch_handler_does_not_catch_wizard_callback():
+    source = Path("app/repost_campaign_handlers.py").read_text(encoding="utf-8")
+
+    assert 'not c.data.startswith("rule_repost_campaign_launch_wizard:")' in source
+
+
+def test_repost_campaign_launch_wizard_stage_seven_two_does_not_touch_runtime_layers():
+    for path in [
+        "app/repost_campaign_runtime_service.py",
+        "app/repost_campaign_schedule_service.py",
+        "app/repost_campaign_schedule_handlers.py",
+        "app/repost_campaign_message_handlers.py",
+        "app/repost_campaign_scheduled_post_service.py",
+        "app/repost_campaign_launch_job_service.py",
+        "app/repost_campaign_placement_service.py",
+        "app/postgres_repository.py",
+        "app/repository.py",
+    ]:
+        source = Path(path).read_text(encoding="utf-8")
+        assert "Мастер запуска рекламной кампании" not in source
+        assert "rule_repost_campaign_launch_wizard" not in source
