@@ -163,8 +163,11 @@ def build_repost_campaign_menu_view(
         control_center=cc_payload,
     )
     text = "\n\n".join(["💰 Рекламная кампания", steps_summary])
+    has_active_campaign = bool((control_center or {}).get("active_campaign"))
+    first_button_text = "🟢 Активная рекламная кампания" if has_active_campaign else "🚀 Мастер запуска рекламной кампании"
+    first_button_callback = f"rule_repost_campaign_active_campaign:{rule_id}" if has_active_campaign else f"rule_repost_campaign_launch_wizard:{rule_id}"
     rows = [
-        [InlineKeyboardButton(text="🚀 Мастер запуска рекламной кампании", callback_data=f"rule_repost_campaign_launch_wizard:{rule_id}")],
+        [InlineKeyboardButton(text=first_button_text, callback_data=first_button_callback)],
         [
             InlineKeyboardButton(text="1. Рекламный пост", callback_data=f"rule_repost_campaign_post_menu:{rule_id}"),
             InlineKeyboardButton(text="2. Каналы и группы", callback_data=f"rule_repost_campaign_targets:{rule_id}"),
@@ -193,16 +196,19 @@ def build_repost_campaign_launch_wizard_view(
         readiness=readiness,
         control_center=control_center,
     )
-    steps_summary = steps_summary.replace("Настройте запуск по шагам:", "Проверьте настройки перед запуском:", 1)
     launch_ready = "6. 🚀 Запуск — готов" in steps_summary
     lines = [
         "🚀 Мастер запуска рекламной кампании",
-        steps_summary,
+        "Шаг 1 из 6 — Рекламный пост\n"
+        "Шаг 2 из 6 — Каналы и группы\n"
+        "Шаг 3 из 6 — Срок показа\n"
+        "Шаг 4 из 6 — Чистый канал\n"
+        "Шаг 5 из 6 — Время в топе\n"
+        "Шаг 6 из 6 — Проверка и запуск",
+        "Текущий статус:\n" + "\n".join(steps_summary.splitlines()[2:]),
         (
-            "Что можно сделать:\n"
-            "• открыть нужный шаг и исправить настройки;\n"
-            "• запустить кампанию сейчас;\n"
-            "• запланировать запуск на нужное время."
+            "Откройте нужный шаг, чтобы проверить или исправить настройки. "
+            "На последнем шаге можно запустить кампанию сейчас или запланировать запуск."
         ),
     ]
     if not launch_ready:
@@ -223,6 +229,34 @@ def build_repost_campaign_launch_wizard_view(
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_active_campaign_view(*, rule_id: int, active_campaign: dict) -> tuple[str, InlineKeyboardMarkup]:
+    placement = dict(active_campaign or {})
+    run_id = int(placement.get("run_id") or 0)
+    published = int(placement.get("targets_success") or placement.get("active_messages_total") or 0)
+    total = int(placement.get("targets_total") or published)
+    delete_after = placement.get("delete_after_text") or "—"
+    lines = [
+        "🟢 Активная рекламная кампания",
+        f"Рекламный запуск #{run_id}" if run_id else "Рекламный запуск",
+        f"Опубликовано: {published} / {total}",
+        f"Срок показа: до {delete_after}",
+    ]
+    top_time_text = str(placement.get("top_time_latest_ends_at_text") or "").strip()
+    if top_time_text:
+        lines.append(f"📌 Время в топе: активно до {top_time_text}")
+    has_problems = int(placement.get("targets_failed") or 0) > 0 or int(placement.get("delete_failed") or 0) > 0 or str(placement.get("placement_status") or "") in {"delete_problem", "mixed"}
+    if has_problems:
+        lines.extend(["", "⚠️ Есть проблемы в активной рекламе"])
+
+    rows = [[InlineKeyboardButton(text="📋 Активные размещения", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")]]
+    if run_id and placement.get("can_open_report", True):
+        rows.append([InlineKeyboardButton(text="📊 Отчёт просмотров", callback_data=f"rule_repost_campaign_views_report:{rule_id}:{run_id}")])
+    if run_id:
+        rows.append([InlineKeyboardButton(text="🗑 Удалить рекламный запуск", callback_data=f"rule_repost_campaign_run_delete_confirm:{rule_id}:{run_id}")])
+    rows.append([InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")])
+    return "\n\n".join([lines[0], "\n".join(lines[1:])]), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_repost_campaign_launch_mode_view(*, rule_id: int, readiness: dict) -> tuple[str, InlineKeyboardMarkup]:

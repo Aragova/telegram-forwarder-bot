@@ -3,6 +3,7 @@ import ast
 import re
 
 from app.repost_campaign_ui import (
+    build_repost_campaign_active_campaign_view,
     build_repost_campaign_active_placements_view,
     build_repost_campaign_delete_result_view,
     build_repost_campaign_launch_result_view,
@@ -2341,6 +2342,39 @@ def test_repost_campaign_menu_keeps_compact_buttons():
     ]
 
 
+def test_repost_campaign_menu_replaces_wizard_button_when_campaign_active():
+    payload = _campaign_menu_ready_payload()
+    payload["control_center"] = {"active_campaign": {"run_id": 154}}
+    _, keyboard = build_repost_campaign_menu_view(rule_id=7, **payload)
+
+    assert _texts_from_keyboard(keyboard)[0] == "🟢 Активная рекламная кампания"
+    assert _callbacks_from_keyboard(keyboard)[0] == "rule_repost_campaign_active_campaign:7"
+    assert "🧾 Активная кампания" not in _texts_from_keyboard(keyboard)
+    assert "📊 Отчёт" not in _texts_from_keyboard(keyboard)
+
+
+def test_active_campaign_view_contains_summary_and_actions():
+    text, keyboard = build_repost_campaign_active_campaign_view(
+        rule_id=7,
+        active_campaign={
+            "run_id": 154,
+            "targets_success": 45,
+            "targets_total": 45,
+            "delete_after_text": "22:18",
+            "top_time_latest_ends_at_text": "00:18",
+            "delete_failed": 1,
+        },
+    )
+
+    assert "🟢 Активная рекламная кампания" in text
+    assert "Рекламный запуск #154" in text
+    assert "Опубликовано: 45 / 45" in text
+    assert "Срок показа: до 22:18" in text
+    assert "📌 Время в топе: активно до 00:18" in text
+    assert "⚠️ Есть проблемы в активной рекламе" in text
+    assert _texts_from_keyboard(keyboard) == ["📋 Активные размещения", "📊 Отчёт просмотров", "🗑 Удалить рекламный запуск", "💰 К кампании"]
+
+
 def test_repost_campaign_menu_does_not_duplicate_vip_features_as_buttons():
     payload = _campaign_menu_ready_payload()
     _, keyboard = build_repost_campaign_menu_view(rule_id=7, **payload)
@@ -2387,13 +2421,12 @@ def test_launch_wizard_view_contains_steps():
     text, _ = build_repost_campaign_launch_wizard_view(rule_id=7, **payload)
 
     assert "🚀 Мастер запуска рекламной кампании" in text
-    assert "Проверьте настройки перед запуском" in text
-    assert "1. 📝 Рекламный пост" in text
-    assert "2. 📣 Каналы и группы" in text
-    assert "3. 🕒 Срок показа" in text
-    assert "4. 🧹 Чистый канал" in text
-    assert "5. 📌 Время в топе" in text
-    assert "6. 🚀 Запуск" in text
+    assert "Шаг 1 из 6 — Рекламный пост" in text
+    assert "Шаг 2 из 6 — Каналы и группы" in text
+    assert "Шаг 3 из 6 — Срок показа" in text
+    assert "Шаг 4 из 6 — Чистый канал" in text
+    assert "Шаг 5 из 6 — Время в топе" in text
+    assert "Шаг 6 из 6 — Проверка и запуск" in text
 
 
 def test_launch_wizard_view_contains_navigation_buttons():

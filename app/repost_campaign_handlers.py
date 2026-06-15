@@ -10,6 +10,7 @@ from app.repost_campaign_top_time_view_service import RepostCampaignTopTimeViewS
 from app.repost_campaign_service import format_campaign_show_seconds_ru, normalize_campaign_show_seconds
 from app.repost_campaign_ui import (
     ACTIVE_PLACEMENTS_PAGE_SIZE,
+    build_repost_campaign_active_campaign_view,
     build_repost_campaign_active_placements_view,
     build_repost_campaign_clean_channel_settings_view,
     build_repost_campaign_launch_clean_channel_blocked_view,
@@ -95,6 +96,10 @@ async def _render_repost_campaign_menu(callback: CallbackQuery, rule_id: int, ct
     control_center = None
     try:
         control_center = await ctx.run_db(lambda: runtime.get_campaign_control_center(rule_id=rule_id))
+        active_campaign = await _get_repost_campaign_active_campaign(rule_id, ctx)
+        if active_campaign:
+            control_center = dict(control_center or {})
+            control_center["active_campaign"] = active_campaign
     except Exception as exc:
         ctx.logger.warning("REPOST_CAMPAIGN_CONTROL_CENTER_UI_FAILED | rule_id=%s | error=%s", rule_id, exc, exc_info=True)
 
@@ -327,6 +332,41 @@ async def _render_repost_campaign_top_time_presets(
         ctx.logger.exception("REPOST_CAMPAIGN_TOP_TIME_PRESETS_OPEN_FAILED | rule_id=%s | error=%s", rule_id, exc)
         await ctx.answer_callback_safe(callback, "Не удалось открыть выбор времени", show_alert=True)
         return False
+
+async def _get_repost_campaign_active_campaign(rule_id: int, ctx: RepostCampaignHandlersContext) -> dict | None:
+    service = RepostCampaignPlacementService(ctx.db, logger=ctx.logger)
+    state = await ctx.run_db(lambda: service.build_active_placements(rule_id=rule_id, basic_only=True, limit=1))
+    if not state.get("ok") or not state.get("has_active"):
+        return None
+    placements = state.get("placements") or []
+    return dict(placements[0]) if placements else None
+
+
+async def _render_repost_campaign_active_campaign(callback: CallbackQuery, rule_id: int, ctx: RepostCampaignHandlersContext) -> bool:
+    if not await ctx.ensure_rule_callback_access(callback, rule_id):
+        return False
+    rule = await ctx.run_db(ctx.db.get_rule, rule_id)
+    if not rule:
+        await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return False
+    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "repost":
+        await ctx.answer_callback_safe(callback, "Рекламная кампания доступна только для режима репоста", show_alert=True)
+        return False
+    try:
+        runtime = build_repost_campaign_runtime(ctx)
+        await ctx.run_db(lambda: runtime.get_campaign_control_center(rule_id=rule_id))
+        active_campaign = await _get_repost_campaign_active_campaign(rule_id, ctx)
+    except Exception as exc:
+        ctx.logger.warning("REPOST_CAMPAIGN_ACTIVE_CAMPAIGN_UI_FAILED | rule_id=%s | error=%s", rule_id, exc, exc_info=True)
+        active_campaign = None
+    if not active_campaign:
+        await _render_repost_campaign_menu(callback, rule_id, ctx)
+        await ctx.answer_callback_safe(callback, "Активная кампания уже завершена")
+        return False
+    text, keyboard = build_repost_campaign_active_campaign_view(rule_id=rule_id, active_campaign=active_campaign)
+    await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+    return True
+
 
 async def _render_repost_campaign_clean_channel_settings(
     callback: CallbackQuery,
@@ -712,6 +752,22 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await ctx.answer_callback_safe_once(callback)
 
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_active_campaign:"))
+    async def handle_rule_repost_campaign_active_campaign(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if not ctx.settings.repost_campaign_admin_test_enabled:
+            await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+            return
+        try:
+            rule_id = int(callback.data.split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        rendered = await _render_repost_campaign_active_campaign(callback, rule_id, ctx)
+        if rendered:
+            await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_launch_wizard:"))
     async def handle_rule_repost_campaign_launch_wizard(callback: CallbackQuery):
