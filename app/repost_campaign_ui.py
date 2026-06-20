@@ -453,7 +453,62 @@ def build_repost_campaign_schedule_current_view(*, rule_id: int, readiness: dict
     ]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
-def build_repost_campaign_vip_features_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+def _format_invite_links_vip_status(settings: dict | None) -> str:
+    if settings is None:
+        return "⚠️ статус недоступен"
+    return "🟢 включено" if bool(settings.get("enabled")) else "🔴 выключено"
+
+
+def _format_invite_links_status(settings: dict | None) -> str:
+    if settings is None:
+        return "⚠️ статус недоступен"
+    return "🟢 включено" if bool(settings.get("enabled")) else "🔴 выключено"
+
+
+def _format_invite_links_destination(settings: dict | None) -> str:
+    settings = settings or {}
+    title = str(settings.get("destination_chat_title") or "").strip()
+    if title:
+        return f"👉 {title}"
+    chat_id = settings.get("destination_chat_id")
+    if chat_id:
+        return f"👉 {chat_id}"
+    return "не выбран"
+
+
+def _format_invite_links_link_mode(settings: dict | None) -> str:
+    value = str((settings or {}).get("link_mode") or "").strip()
+    if value == "join_request":
+        return "📥 с заявкой"
+    if value == "direct_join":
+        return "✅ обычное вступление"
+    return "⚠️ режим недоступен"
+
+
+def _format_invite_links_injection_mode(settings: dict | None) -> str:
+    value = str((settings or {}).get("injection_mode") or "").strip()
+    if value == "placeholder":
+        return "{invite_link}"
+    if value == "append_footer":
+        return "добавить в конец"
+    if value == "disabled":
+        return "выключена"
+    return "⚠️ режим недоступен"
+
+
+def _format_invite_links_per_target(settings: dict | None) -> str:
+    return "🟢 отдельная ссылка для каждого рекламного канала" if bool((settings or {}).get("per_target_links_enabled")) else "⚪ одна ссылка на весь рекламный запуск"
+
+
+def _format_invite_links_preview(settings: dict | None) -> str:
+    settings = settings or {}
+    if settings.get("preview_checked_at"):
+        return "✅ проверен"
+    return "обязателен" if bool(settings.get("preview_required")) else "не обязателен"
+
+
+def build_repost_campaign_vip_features_view(*, rule_id: int, invite_links_settings: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    invite_links_status = _format_invite_links_vip_status(invite_links_settings)
     text = (
         "💎 VIP-функции\n\n"
         "Дополнительные возможности для аккуратного запуска рекламных постов.\n\n"
@@ -466,12 +521,68 @@ def build_repost_campaign_vip_features_view(*, rule_id: int) -> tuple[str, Inlin
         "📌 Время в топе\n"
         "Будет удерживать обычный автопостинг ViMi после публикации рекламного поста, "
         "чтобы автоматические репосты и видеопосты не выходили поверх рекламы.\n\n"
+        f"📥 Заявки и вступления — {invite_links_status}\n"
+        "ViMi будет создавать Telegram-ссылки для рекламных постов и считать заявки, вступления и конверсию.\n\n"
         "✨ A/B-тесты\n"
         "Будущая функция для сравнения двух вариантов рекламного поста.\n\n"
         "Выберите функцию:"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🕒 Запланированные посты", callback_data=f"rule_repost_campaign_scheduled_posts:{rule_id}")],[InlineKeyboardButton(text="🧹 Чистый канал", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],[InlineKeyboardButton(text="📌 Время в топе", callback_data=f"rule_repost_campaign_top_time:{rule_id}")],[InlineKeyboardButton(text="✨ A/B-тесты", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:ab_test")],[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🕒 Запланированные посты", callback_data=f"rule_repost_campaign_scheduled_posts:{rule_id}")],
+        [InlineKeyboardButton(text="🧹 Чистый канал", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],
+        [InlineKeyboardButton(text="📌 Время в топе", callback_data=f"rule_repost_campaign_top_time:{rule_id}")],
+        [InlineKeyboardButton(text=f"📥 Заявки и вступления — {invite_links_status}", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")],
+        [InlineKeyboardButton(text="✨ A/B-тесты", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:ab_test")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
     return text, kb
+
+
+def build_repost_campaign_invite_links_view(*, rule_id: int, settings: dict | None) -> tuple[str, InlineKeyboardMarkup]:
+    toggle_text = "🔴 Выключить" if bool((settings or {}).get("enabled")) else "🟢 Включить"
+    text = (
+        "📥 Заявки и вступления\n\n"
+        "ViMi будет создавать Telegram-ссылки для рекламных постов и считать результат рекламы:\n\n"
+        "📥 заявки\n"
+        "✅ вступления\n"
+        "📊 конверсию\n\n"
+        "ViMi не принимает и не отклоняет заявки.\n"
+        "Если у вас уже есть бот автоприёма, он продолжит работать как раньше.\n\n"
+        f"Статус: {_format_invite_links_status(settings)}\n\n"
+        "Канал для вступления:\n"
+        f"{_format_invite_links_destination(settings)}\n\n"
+        "Режим ссылки:\n"
+        f"{_format_invite_links_link_mode(settings)}\n\n"
+        "Автоподстановка:\n"
+        f"{_format_invite_links_injection_mode(settings)}\n\n"
+        "Ссылки по каналам:\n"
+        f"{_format_invite_links_per_target(settings)}\n\n"
+        "Предпросмотр:\n"
+        f"{_format_invite_links_preview(settings)}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=toggle_text, callback_data=f"rule_repost_campaign_invite_links_toggle:{rule_id}")],
+        [InlineKeyboardButton(text="📥 Канал для вступления", callback_data=f"rule_repost_campaign_invite_links_destination:{rule_id}")],
+        [InlineKeyboardButton(text="🔗 Рекламные ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")],
+        [InlineKeyboardButton(text="⚙️ Автоподстановка", callback_data=f"rule_repost_campaign_invite_links_injection:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign:{rule_id}")],
+    ])
+    return text, kb
+
+
+def build_repost_campaign_invite_links_destination_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = "📥 Канал для вступления\n\nЗдесь будет выбран канал, куда должны вступать люди по рекламной ссылке.\n\nНа следующем этапе ViMi будет проверять права бота и создавать Telegram-ссылку для этого канала."
+    return text, InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")]])
+
+
+def build_repost_campaign_invite_links_list_view(*, rule_id: int, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+    text = "🔗 Рекламные ссылки\n\nЗдесь будет список Telegram-ссылок, созданных для рекламных постов.\n\nViMi будет показывать:\n📥 заявки\n✅ вступления\n📊 конверсию\n\nСоздание ссылок будет добавлено следующим этапом."
+    return text, InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")]])
+
+
+def build_repost_campaign_invite_links_injection_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = "⚙️ Автоподстановка\n\nВ будущем ViMi сможет подставлять ссылку в рекламный пост:\n\n1. вместо метки {invite_link}\n2. или отдельной строкой в конце поста\n\nПеред запуском будет доступен предпросмотр итогового поста."
+    return text, InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")]])
 
 
 
