@@ -562,6 +562,7 @@ def build_repost_campaign_invite_links_view(*, rule_id: int, settings: dict | No
         [InlineKeyboardButton(text="📥 Канал для вступления", callback_data=f"rule_repost_campaign_invite_links_destination:{rule_id}"), InlineKeyboardButton(text="🔗 Режим ссылки", callback_data=f"rule_repost_campaign_invite_links_mode:{rule_id}")],
         [InlineKeyboardButton(text="⚙️ Автоподстановка", callback_data=f"rule_repost_campaign_invite_links_injection:{rule_id}"), InlineKeyboardButton(text="📣 Ссылки по каналам", callback_data=f"rule_repost_campaign_invite_links_per_target:{rule_id}")],
         [InlineKeyboardButton(text="👁 Предпросмотр", callback_data=f"rule_repost_campaign_invite_links_preview:{rule_id}")],
+        [InlineKeyboardButton(text="🔗 Рекламные ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return text, kb
@@ -591,9 +592,164 @@ def build_repost_campaign_invite_links_destination_view(*, rule_id: int, setting
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_repost_campaign_invite_links_list_view(*, rule_id: int, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
-    text = "🔗 Рекламные ссылки\n\nЗдесь будет список Telegram-ссылок, созданных для рекламных постов.\n\nViMi будет показывать:\n📥 заявки\n✅ вступления\n📊 конверсию\n\nСоздание ссылок будет добавлено следующим этапом."
-    return text, InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")]])
+def _format_campaign_invite_link_status(status: str | None) -> str:
+    value = str(status or "").strip()
+    return {
+        "active": "🟢 active",
+        "revoked": "🚫 revoked",
+        "archived": "⚪ archived",
+        "created_not_sent": "🟡 создана",
+        "failed": "🔴 ошибка",
+    }.get(value, "⚠️ unknown")
+
+
+def _format_campaign_invite_link_mode(link_mode: str | None) -> str:
+    if link_mode == "join_request":
+        return "📥 с заявкой"
+    if link_mode == "direct_join":
+        return "✅ обычное вступление"
+    return "⚠️ режим недоступен"
+
+
+def _format_campaign_invite_link_created_at(value) -> str:
+    if value is None:
+        return "неизвестно"
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except Exception:
+            return value[:16]
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone(timedelta(hours=3))).strftime("%d.%m.%Y %H:%M")
+    return str(value)
+
+
+def _campaign_invite_link_id(link: dict) -> int | None:
+    raw = link.get("id") or link.get("invite_link_id")
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def build_repost_campaign_invite_links_list_view(*, rule_id: int, page: int = 0, settings: dict | None = None, links: list[dict] | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    links = list(links or [])
+    rows = [[InlineKeyboardButton(text="➕ Создать Telegram-ссылку", callback_data=f"rule_repost_campaign_invite_links_create:{rule_id}")]]
+    if not links:
+        text = (
+            "🔗 Рекламные ссылки\n\n"
+            "Пока нет созданных Telegram-ссылок.\n\n"
+            "Создайте первую ссылку, чтобы ViMi мог использовать её в рекламном посте и затем считать заявки, вступления и 📊 конверсию.\n\n"
+            "Текущий канал для вступления:\n"
+            f"{_format_invite_links_destination(settings)}\n\n"
+            "Текущий режим ссылки:\n"
+            f"{_format_invite_links_link_mode(settings)}"
+        )
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")])
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    lines = ["🔗 Рекламные ссылки", "", f"Создано ссылок: {len(links)}", ""]
+    for index, link in enumerate(links[:10], start=1):
+        title = str(link.get("destination_chat_title") or link.get("destination_chat_id") or "Канал")
+        lines.extend([
+            f"{index}. {_format_campaign_invite_link_status(link.get('status'))} · {_format_campaign_invite_link_mode(link.get('link_mode'))}",
+            f"Канал: {title}",
+            f"Создана: {_format_campaign_invite_link_created_at(link.get('created_at'))}",
+            f"Ссылка: {link.get('invite_link') or 'не сохранена'}",
+            "",
+        ])
+    for link in links[:5]:
+        invite_link_id = _campaign_invite_link_id(link)
+        if invite_link_id is not None:
+            rows.append([InlineKeyboardButton(text=f"🔎 Ссылка #{invite_link_id}", callback_data=f"rule_repost_campaign_invite_link_view:{rule_id}:{invite_link_id}")])
+    rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:{page}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")])
+    return "\n".join(lines).rstrip(), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_invite_links_no_destination_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = "⚠️ Канал для вступления не выбран\n\nСначала выберите канал, куда должны вступать люди по рекламной ссылке."
+    return text, InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📥 Выбрать канал", callback_data=f"rule_repost_campaign_invite_links_destination:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")],
+    ])
+
+
+def build_repost_campaign_invite_links_invalid_mode_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = "⚠️ Некорректный режим ссылки\n\nОткройте настройку «Режим ссылки» и выберите:\n📥 с заявкой\nили\n✅ обычное вступление"
+    return text, InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Режим ссылки", callback_data=f"rule_repost_campaign_invite_links_mode:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")],
+    ])
+
+
+def build_repost_campaign_invite_link_create_success_view(*, rule_id: int, settings: dict | None, result: dict) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "✅ Telegram-ссылка создана\n\n"
+        "Канал:\n"
+        f"{_format_invite_links_destination(settings)}\n\n"
+        "Режим:\n"
+        f"{_format_campaign_invite_link_mode((settings or {}).get('link_mode'))}\n\n"
+        "Ссылка:\n"
+        f"{result.get('invite_link') or 'не сохранена'}\n\n"
+        "Теперь её можно использовать в рекламном посте.\n\n"
+        "На следующих этапах ViMi сможет автоматически подставлять ссылку в пост и считать заявки/вступления."
+    )
+    return text, InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Все ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")],
+        [InlineKeyboardButton(text="⬅️ К функции", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")],
+    ])
+
+
+def build_repost_campaign_invite_link_create_error_view(*, rule_id: int, error_text: str) -> tuple[str, InlineKeyboardMarkup]:
+    text = f"⚠️ Не удалось создать Telegram-ссылку\n\n{error_text or 'Попробуйте ещё раз.'}"
+    return text, InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Попробовать ещё раз", callback_data=f"rule_repost_campaign_invite_links_create:{rule_id}")],
+        [InlineKeyboardButton(text="📥 Заявки и вступления", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")],
+    ])
+
+
+def build_repost_campaign_invite_link_not_found_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    return "⚠️ Рекламная ссылка не найдена.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Все ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")]])
+
+
+def build_repost_campaign_invite_link_view(*, rule_id: int, link: dict) -> tuple[str, InlineKeyboardMarkup]:
+    invite_link_id = _campaign_invite_link_id(link) or 0
+    title = str(link.get("destination_chat_title") or link.get("destination_chat_id") or "Канал")
+    text = (
+        f"🔗 Рекламная Telegram-ссылка #{invite_link_id}\n\n"
+        f"Статус: {_format_campaign_invite_link_status(link.get('status'))}\n"
+        f"Канал: 👉 {title}\n"
+        f"Режим: {_format_campaign_invite_link_mode(link.get('link_mode'))}\n"
+        f"Создана: {_format_campaign_invite_link_created_at(link.get('created_at'))}\n\n"
+        "Ссылка:\n"
+        f"{link.get('invite_link') or 'не сохранена'}\n\n"
+        "Заявки и вступления будут считаться на следующих этапах."
+    )
+    rows = []
+    if link.get("status") != "revoked":
+        rows.append([InlineKeyboardButton(text="🚫 Отозвать ссылку", callback_data=f"rule_repost_campaign_invite_link_revoke:{rule_id}:{invite_link_id}")])
+    rows.append([InlineKeyboardButton(text="🔗 Все ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")])
+    rows.append([InlineKeyboardButton(text="⬅️ К функции", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_invite_link_revoke_success_view(*, rule_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    text = "🚫 Telegram-ссылка отозвана\n\nСсылка больше не будет работать для новых вступлений."
+    return text, InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Все ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")],
+        [InlineKeyboardButton(text="⬅️ К функции", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")],
+    ])
+
+
+def build_repost_campaign_invite_link_revoke_error_view(*, rule_id: int, invite_link_id: int, error_text: str) -> tuple[str, InlineKeyboardMarkup]:
+    text = f"⚠️ Не удалось отозвать Telegram-ссылку\n\n{error_text or 'Попробуйте ещё раз.'}"
+    return text, InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Попробовать ещё раз", callback_data=f"rule_repost_campaign_invite_link_revoke:{rule_id}:{invite_link_id}")],
+        [InlineKeyboardButton(text="🔗 Все ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")],
+    ])
 
 
 def build_repost_campaign_invite_links_mode_view(*, rule_id: int, settings: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:

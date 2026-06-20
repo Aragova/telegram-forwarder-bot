@@ -24,6 +24,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_views_report_loading_view,
     build_repost_campaign_views_report_error_view,
     build_repost_campaign_vip_features_view,
+    build_repost_campaign_invite_link_view,
     build_repost_campaign_invite_links_destination_view,
     build_repost_campaign_invite_links_injection_view,
     build_repost_campaign_invite_links_list_view,
@@ -2944,8 +2945,35 @@ def test_invite_links_info_views():
 
     text, keyboard = build_repost_campaign_invite_links_list_view(rule_id=10)
     assert "🔗 Рекламные ссылки" in text
+    assert "Пока нет созданных Telegram-ссылок" in text
     assert "📊 конверсию" in text
+    assert "➕ Создать Telegram-ссылку" in _texts_from_keyboard(keyboard)
+    assert "rule_repost_campaign_invite_links_create:10" in _callbacks_from_keyboard(keyboard)
     assert "⬅️ Назад" in _texts_from_keyboard(keyboard)
+
+    text, keyboard = build_repost_campaign_invite_links_list_view(
+        rule_id=10,
+        links=[
+            {"id": 123, "rule_id": 10, "status": "active", "link_mode": "join_request", "destination_chat_title": "Канал", "invite_link": "https://t.me/+abc", "created_at": "2026-06-20T11:32:00+00:00"},
+            {"id": 124, "rule_id": 10, "status": "revoked", "link_mode": "direct_join", "destination_chat_title": "Канал", "invite_link": "https://t.me/+def", "created_at": "2026-06-20T10:10:00+00:00"},
+        ],
+    )
+    assert "Создано ссылок" in text
+    assert "https://t.me/+" in text
+    assert "📥 с заявкой" in text
+    assert "✅ обычное вступление" in text
+    assert "rule_repost_campaign_invite_link_view:10:123" in _callbacks_from_keyboard(keyboard)
+
+    text, keyboard = build_repost_campaign_invite_link_view(rule_id=10, link={"id": 123, "rule_id": 10, "status": "active", "link_mode": "join_request", "destination_chat_title": "Канал", "invite_link": "https://t.me/+abc", "created_at": "2026-06-20T11:32:00+00:00"})
+    assert "🔗 Рекламная Telegram-ссылка" in text
+    assert "Статус" in text
+    assert "Канал" in text
+    assert "Режим" in text
+    assert "Ссылка" in text
+    assert "🚫 Отозвать ссылку" in _texts_from_keyboard(keyboard)
+
+    text, keyboard = build_repost_campaign_invite_link_view(rule_id=10, link={"id": 123, "rule_id": 10, "status": "revoked", "link_mode": "join_request", "destination_chat_title": "Канал", "invite_link": "https://t.me/+abc"})
+    assert "🚫 Отозвать ссылку" not in _texts_from_keyboard(keyboard)
 
     text, keyboard = build_repost_campaign_invite_links_mode_view(rule_id=10, settings={"link_mode": "join_request"})
     assert "📥 С заявкой" in text
