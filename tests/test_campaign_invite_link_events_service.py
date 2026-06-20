@@ -19,6 +19,8 @@ class RepoStub:
         self.link = link
         self.hashes = []
         self.events = []
+        self.last_event = None
+        self.latest_event_lookups = []
 
     def get_campaign_invite_link_by_hash(self, invite_link_hash):
         self.hashes.append(invite_link_hash)
@@ -29,6 +31,10 @@ class RepoStub:
     def create_campaign_invite_link_event(self, **kwargs):
         self.events.append(kwargs)
         return len(self.events)
+
+    def get_latest_campaign_invite_link_event_for_user(self, **kwargs):
+        self.latest_event_lookups.append(kwargs)
+        return self.last_event
 
 
 def link(status="active"):
@@ -130,3 +136,58 @@ def test_dedup_is_repository_owned_and_repeated_calls_do_not_fail():
     second = asyncio.run(service.handle_chat_member_updated(member_update()))
     assert first["ok"] is True
     assert second["ok"] is True
+
+
+def last_event():
+    return {
+        "id": 99,
+        "invite_link_id": 8,
+        "rule_id": 11,
+        "campaign_run_id": 12,
+        "campaign_run_message_id": 13,
+        "destination_chat_id": "-100",
+        "ad_target_id": "target",
+        "ad_target_thread_id": 14,
+        "event_type": "member_joined",
+        "telegram_user_id_hash": build_telegram_user_id_hash(123),
+        "event_at": None,
+    }
+
+
+def test_chat_member_left_without_invite_link_resolves_by_latest_user_event():
+    repo = RepoStub(link())
+    repo.last_event = last_event()
+    result = asyncio.run(CampaignInviteLinkEventsService(repo=repo).handle_chat_member_updated(member_update("member", "left", invite=None)))
+    assert result["ok"] is True
+    assert result["event_type"] == "member_left"
+    assert result["resolved_by"] == "latest_user_event"
+    assert result["invite_link_id"] == 8
+    assert repo.events[0]["invite_link_id"] == 8
+    assert repo.events[0]["event_type"] == "member_left"
+    assert repo.latest_event_lookups[0]["telegram_user_id_hash"] == build_telegram_user_id_hash(123)
+    assert repo.latest_event_lookups[0]["event_types"] == ["member_joined", "join_request_created"]
+
+
+def test_chat_member_kicked_without_invite_link_resolves_by_latest_user_event():
+    repo = RepoStub(link())
+    repo.last_event = last_event()
+    result = asyncio.run(CampaignInviteLinkEventsService(repo=repo).handle_chat_member_updated(member_update("member", "kicked", invite=None)))
+    assert result["ok"] is True
+    assert result["event_type"] == "member_kicked"
+    assert result["resolved_by"] == "latest_user_event"
+    assert repo.events[0]["invite_link_id"] == 8
+    assert repo.events[0]["event_type"] == "member_kicked"
+
+
+def test_chat_member_left_without_invite_link_and_without_last_event_skips():
+    repo = RepoStub(link())
+    result = asyncio.run(CampaignInviteLinkEventsService(repo=repo).handle_chat_member_updated(member_update("member", "left", invite=None)))
+    assert result["reason"] == "tracked_user_event_not_found"
+    assert repo.events == []
+
+
+def test_chat_member_joined_without_invite_link_still_skips():
+    repo = RepoStub(link())
+    result = asyncio.run(CampaignInviteLinkEventsService(repo=repo).handle_chat_member_updated(member_update("left", "member", invite=None)))
+    assert result["reason"] == "missing_invite_link"
+    assert repo.events == []

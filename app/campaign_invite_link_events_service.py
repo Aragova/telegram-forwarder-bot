@@ -112,15 +112,29 @@ class CampaignInviteLinkEventsService:
         )
         return {"ok": True, "event_type": "join_request_created", "invite_link_id": link["id"], "rule_id": link["rule_id"]}
 
+    def _create_event_from_link(self, *, link: dict, event_type: str, telegram_user_id_hash: str, update_obj, user) -> None:
+        self.repo.create_campaign_invite_link_event(
+            invite_link_id=link["id"], rule_id=link["rule_id"], campaign_run_id=link.get("campaign_run_id"),
+            campaign_run_message_id=link.get("campaign_run_message_id"), destination_chat_id=link["destination_chat_id"],
+            ad_target_id=link.get("ad_target_id"), ad_target_thread_id=link.get("ad_target_thread_id"),
+            event_type=event_type, telegram_user_id_hash=telegram_user_id_hash,
+            telegram_update_id=_get_field(update_obj, "update_id"),
+            telegram_user_payload_json=sanitize_telegram_user_payload(user), raw_update_json=sanitize_update_payload(update_obj),
+            event_at=_get_field(update_obj, "date"),
+        )
+
+    def _create_event_from_latest_user_event(self, *, last_event: dict, event_type: str, telegram_user_id_hash: str, update_obj, user) -> None:
+        self.repo.create_campaign_invite_link_event(
+            invite_link_id=last_event["invite_link_id"], rule_id=last_event["rule_id"],
+            campaign_run_id=last_event.get("campaign_run_id"), campaign_run_message_id=last_event.get("campaign_run_message_id"),
+            destination_chat_id=last_event["destination_chat_id"], ad_target_id=last_event.get("ad_target_id"),
+            ad_target_thread_id=last_event.get("ad_target_thread_id"), event_type=event_type,
+            telegram_user_id_hash=telegram_user_id_hash, telegram_update_id=_get_field(update_obj, "update_id"),
+            telegram_user_payload_json=sanitize_telegram_user_payload(user), raw_update_json=sanitize_update_payload(update_obj),
+            event_at=_get_field(update_obj, "date"),
+        )
+
     async def handle_chat_member_updated(self, member_update) -> dict:
-        invite_link_text = extract_invite_link_text(_get_field(member_update, "invite_link"))
-        if not invite_link_text:
-            return {"ok": False, "skipped": True, "reason": "missing_invite_link"}
-        link = self.repo.get_campaign_invite_link_by_hash(build_invite_link_hash(invite_link_text))
-        if not link:
-            return {"ok": False, "skipped": True, "reason": "invite_link_not_tracked"}
-        if link.get("status") != ACTIVE_INVITE_LINK_STATUS:
-            return {"ok": False, "skipped": True, "reason": "invite_link_not_active"}
         old_chat_member = _get_field(member_update, "old_chat_member")
         new_chat_member = _get_field(member_update, "new_chat_member")
         user = _get_field(new_chat_member, "user") or _get_field(old_chat_member, "user")
@@ -129,13 +143,41 @@ class CampaignInviteLinkEventsService:
         old_status = _status_to_str(_get_field(old_chat_member, "status"))
         new_status = _status_to_str(_get_field(new_chat_member, "status"))
         event_type = _resolve_member_event_type(old_status, new_status)
-        self.repo.create_campaign_invite_link_event(
-            invite_link_id=link["id"], rule_id=link["rule_id"], campaign_run_id=link.get("campaign_run_id"),
-            campaign_run_message_id=link.get("campaign_run_message_id"), destination_chat_id=link["destination_chat_id"],
-            ad_target_id=link.get("ad_target_id"), ad_target_thread_id=link.get("ad_target_thread_id"),
-            event_type=event_type, telegram_user_id_hash=build_telegram_user_id_hash(_get_field(user, "id")),
-            telegram_update_id=_get_field(member_update, "update_id"),
-            telegram_user_payload_json=sanitize_telegram_user_payload(user), raw_update_json=sanitize_update_payload(member_update),
-            event_at=_get_field(member_update, "date"),
+        telegram_user_id_hash = build_telegram_user_id_hash(_get_field(user, "id"))
+
+        invite_link_text = extract_invite_link_text(_get_field(member_update, "invite_link"))
+        if invite_link_text:
+            link = self.repo.get_campaign_invite_link_by_hash(build_invite_link_hash(invite_link_text))
+            if not link:
+                return {"ok": False, "skipped": True, "reason": "invite_link_not_tracked"}
+            if link.get("status") != ACTIVE_INVITE_LINK_STATUS:
+                return {"ok": False, "skipped": True, "reason": "invite_link_not_active"}
+            self._create_event_from_link(
+                link=link, event_type=event_type, telegram_user_id_hash=telegram_user_id_hash, update_obj=member_update, user=user
+            )
+            return {"ok": True, "event_type": event_type, "invite_link_id": link["id"], "rule_id": link["rule_id"]}
+
+        if event_type not in {"member_left", "member_kicked"}:
+            return {"ok": False, "skipped": True, "reason": "missing_invite_link"}
+
+        chat = _get_field(member_update, "chat")
+        destination_chat_id = _get_field(chat, "id")
+        if destination_chat_id is None:
+            return {"ok": False, "skipped": True, "reason": "missing_destination_chat"}
+        last_event = self.repo.get_latest_campaign_invite_link_event_for_user(
+            destination_chat_id=str(destination_chat_id),
+            telegram_user_id_hash=telegram_user_id_hash,
+            event_types=["member_joined", "join_request_created"],
         )
-        return {"ok": True, "event_type": event_type, "invite_link_id": link["id"], "rule_id": link["rule_id"]}
+        if not last_event:
+            return {"ok": False, "skipped": True, "reason": "tracked_user_event_not_found"}
+        self._create_event_from_latest_user_event(
+            last_event=last_event, event_type=event_type, telegram_user_id_hash=telegram_user_id_hash, update_obj=member_update, user=user
+        )
+        return {
+            "ok": True,
+            "event_type": event_type,
+            "invite_link_id": last_event["invite_link_id"],
+            "rule_id": last_event["rule_id"],
+            "resolved_by": "latest_user_event",
+        }

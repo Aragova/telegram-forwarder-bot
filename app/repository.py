@@ -446,6 +446,13 @@ class RepositoryProtocol(Protocol):
         campaign_run_message_id: int,
         campaign_run_id: int,
     ) -> bool: ...
+    def get_latest_campaign_invite_link_event_for_user(
+        self,
+        *,
+        destination_chat_id: str,
+        telegram_user_id_hash: str,
+        event_types: list[str] | None = None,
+    ) -> dict | None: ...
     def create_campaign_invite_link_event(
         self,
         *,

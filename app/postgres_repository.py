@@ -8431,6 +8431,48 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
         return updated
 
+    def get_latest_campaign_invite_link_event_for_user(
+        self,
+        *,
+        destination_chat_id: str,
+        telegram_user_id_hash: str,
+        event_types: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if event_types is None:
+                    cur.execute(
+                        """
+                        SELECT
+                            id, invite_link_id, rule_id, campaign_run_id, campaign_run_message_id,
+                            destination_chat_id, ad_target_id, ad_target_thread_id, event_type,
+                            telegram_user_id_hash, event_at
+                        FROM campaign_invite_link_events
+                        WHERE destination_chat_id = %s AND telegram_user_id_hash = %s
+                        ORDER BY event_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (str(destination_chat_id), telegram_user_id_hash),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT
+                            id, invite_link_id, rule_id, campaign_run_id, campaign_run_message_id,
+                            destination_chat_id, ad_target_id, ad_target_thread_id, event_type,
+                            telegram_user_id_hash, event_at
+                        FROM campaign_invite_link_events
+                        WHERE destination_chat_id = %s
+                          AND telegram_user_id_hash = %s
+                          AND event_type = ANY(%s)
+                        ORDER BY event_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (str(destination_chat_id), telegram_user_id_hash, list(event_types)),
+                    )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
     def create_campaign_invite_link_event(
         self,
         *,
