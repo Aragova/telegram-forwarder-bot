@@ -89,6 +89,26 @@ def _safe_json_loads(raw: Any, default: Any) -> Any:
 
 _JOB_TENANT_SQL = "COALESCE(NULLIF(j.payload_json->>'tenant_id', '')::BIGINT, 1)"
 
+CAMPAIGN_INVITE_LINK_DEFAULT_APPEND_TEMPLATE = "👉 Подписаться: {invite_link}"
+CAMPAIGN_INVITE_LINK_ALLOWED_LINK_MODES = {"join_request", "direct_join"}
+CAMPAIGN_INVITE_LINK_ALLOWED_INJECTION_MODES = {"placeholder", "append_footer", "disabled"}
+
+
+def _default_campaign_invite_link_settings(rule_id: int) -> dict[str, Any]:
+    return {
+        "rule_id": int(rule_id),
+        "enabled": False,
+        "destination_chat_id": None,
+        "destination_chat_title": None,
+        "link_mode": "join_request",
+        "injection_mode": "placeholder",
+        "append_template": CAMPAIGN_INVITE_LINK_DEFAULT_APPEND_TEMPLATE,
+        "per_target_links_enabled": True,
+        "preview_required": True,
+        "preview_checked_at": None,
+        "preview_checked_by": None,
+    }
+
 
 class PostgresRepository(RepositoryProtocol):
     def __init__(self) -> None:
@@ -922,6 +942,22 @@ class PostgresRepository(RepositoryProtocol):
         ON repost_campaign_launch_jobs(rule_id)
         WHERE status IN ('pending','processing');
 
+        CREATE TABLE IF NOT EXISTS campaign_invite_link_settings (
+            rule_id BIGINT PRIMARY KEY,
+            enabled BOOLEAN NOT NULL DEFAULT FALSE,
+            destination_chat_id TEXT,
+            destination_chat_title TEXT,
+            link_mode TEXT NOT NULL DEFAULT 'join_request',
+            injection_mode TEXT NOT NULL DEFAULT 'placeholder',
+            append_template TEXT NOT NULL DEFAULT '👉 Подписаться: {invite_link}',
+            per_target_links_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            preview_required BOOLEAN NOT NULL DEFAULT TRUE,
+            preview_checked_at TIMESTAMPTZ,
+            preview_checked_by BIGINT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
         CREATE TABLE IF NOT EXISTS campaign_scheduled_posts (
             id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL DEFAULT 1, rule_id BIGINT NOT NULL, saved_post_id BIGINT NULL, title TEXT NULL,
             status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','ready','scheduled','processing','launched','failed','needs_review','cancelled','expired')),
@@ -1060,6 +1096,22 @@ class PostgresRepository(RepositoryProtocol):
                 cur.execute("ALTER TABLE intros DROP CONSTRAINT IF EXISTS intros_display_name_key")
                 cur.execute("ALTER TABLE intros DROP CONSTRAINT IF EXISTS intros_bank_check")
                 cur.execute("ALTER TABLE intros ADD CONSTRAINT intros_bank_check CHECK (bank IS NULL OR bank IN ('horizontal', 'vertical'))")
+
+                for _sql in [
+                    "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT FALSE",
+                    "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS destination_chat_id TEXT NULL",
+                    "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS destination_chat_title TEXT NULL",
+                    "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS link_mode TEXT NOT NULL DEFAULT 'join_request'",
+                    "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS injection_mode TEXT NOT NULL DEFAULT 'placeholder'",
+                    "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS append_template TEXT NOT NULL DEFAULT '👉 Подписаться: {invite_link}'",
+                    "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS per_target_links_enabled BOOLEAN NOT NULL DEFAULT TRUE",
+                    "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS preview_required BOOLEAN NOT NULL DEFAULT TRUE",
+                    "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS preview_checked_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS preview_checked_by BIGINT NULL",
+                    "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                    "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ]:
+                    cur.execute(_sql)
 
                 cur.execute(
                     """
@@ -7989,6 +8041,123 @@ class PostgresRepository(RepositoryProtocol):
                 updated = int(cur.rowcount or 0) > 0
             conn.commit()
             return updated
+
+    def get_campaign_invite_link_settings(self, rule_id: int) -> dict[str, Any]:
+        default = _default_campaign_invite_link_settings(rule_id)
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM campaign_invite_link_settings
+                    WHERE rule_id = %s
+                    LIMIT 1
+                    """,
+                    (int(rule_id),),
+                )
+                row = cur.fetchone()
+        if not row:
+            return default
+
+        data = dict(row)
+        result = {**default, **data}
+        result["rule_id"] = int(result.get("rule_id") or rule_id)
+        result["enabled"] = bool(result.get("enabled"))
+        result["per_target_links_enabled"] = bool(result.get("per_target_links_enabled"))
+        result["preview_required"] = bool(result.get("preview_required"))
+        return result
+
+    def set_campaign_invite_link_settings(
+        self,
+        rule_id: int,
+        *,
+        enabled: bool | None = None,
+        destination_chat_id: str | None = None,
+        destination_chat_title: str | None = None,
+        link_mode: str | None = None,
+        injection_mode: str | None = None,
+        append_template: str | None = None,
+        per_target_links_enabled: bool | None = None,
+        preview_required: bool | None = None,
+        actor_id: int | None = None,
+    ) -> bool:
+        if link_mode is not None and link_mode not in CAMPAIGN_INVITE_LINK_ALLOWED_LINK_MODES:
+            return False
+        if injection_mode is not None and injection_mode not in CAMPAIGN_INVITE_LINK_ALLOWED_INJECTION_MODES:
+            return False
+
+        reset_preview = any(
+            value is not None
+            for value in (destination_chat_id, destination_chat_title, link_mode, injection_mode, append_template)
+        )
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_invite_link_settings(rule_id)
+                    VALUES (%s)
+                    ON CONFLICT (rule_id) DO NOTHING
+                    """,
+                    (int(rule_id),),
+                )
+                cur.execute(
+                    """
+                    UPDATE campaign_invite_link_settings
+                    SET
+                        enabled = COALESCE(%s, enabled),
+                        destination_chat_id = COALESCE(%s, destination_chat_id),
+                        destination_chat_title = COALESCE(%s, destination_chat_title),
+                        link_mode = COALESCE(%s, link_mode),
+                        injection_mode = COALESCE(%s, injection_mode),
+                        append_template = COALESCE(%s, append_template),
+                        per_target_links_enabled = COALESCE(%s, per_target_links_enabled),
+                        preview_required = COALESCE(%s, preview_required),
+                        preview_checked_at = CASE WHEN %s THEN NULL ELSE preview_checked_at END,
+                        preview_checked_by = CASE WHEN %s THEN NULL ELSE preview_checked_by END,
+                        updated_at = NOW()
+                    WHERE rule_id = %s
+                    """,
+                    (
+                        enabled,
+                        destination_chat_id,
+                        destination_chat_title,
+                        link_mode,
+                        injection_mode,
+                        append_template,
+                        per_target_links_enabled,
+                        preview_required,
+                        reset_preview,
+                        reset_preview,
+                        int(rule_id),
+                    ),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
+
+    def mark_campaign_invite_link_preview_checked(
+        self,
+        rule_id: int,
+        *,
+        actor_id: int | None = None,
+        checked_at: datetime | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_invite_link_settings(rule_id, preview_checked_at, preview_checked_by)
+                    VALUES (%s, COALESCE(%s, NOW()), %s)
+                    ON CONFLICT (rule_id) DO UPDATE SET
+                        preview_checked_at = COALESCE(EXCLUDED.preview_checked_at, NOW()),
+                        preview_checked_by = EXCLUDED.preview_checked_by,
+                        updated_at = NOW()
+                    """,
+                    (int(rule_id), checked_at, actor_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
 
     def get_rule_repost_campaign_clean_channel_settings(self, rule_id: int) -> dict[str, Any]:
         with self.connect() as conn:
