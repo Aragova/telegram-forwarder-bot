@@ -10,6 +10,9 @@ def test_invite_links_callbacks_are_registered():
         "rule_repost_campaign_invite_links_toggle:",
         "rule_repost_campaign_invite_links_destination:",
         "rule_repost_campaign_invite_links_list:",
+        "rule_repost_campaign_invite_links_create:",
+        "rule_repost_campaign_invite_link_view:",
+        "rule_repost_campaign_invite_link_revoke:",
         "rule_repost_campaign_invite_links_injection:",
         "rule_repost_campaign_invite_links_mode:",
         "rule_repost_campaign_invite_links_mode_set:",
@@ -73,3 +76,33 @@ def test_invite_links_set_callbacks_are_guarded_before_repository_update():
     destination_end = HANDLERS_SOURCE.index("@dp.callback_query", destination_start + 1)
     destination_source = HANDLERS_SOURCE[destination_start:destination_end]
     assert destination_source.index("_ensure_repost_campaign_rule_available") < destination_source.index("ctx.db.list_rule_repost_campaign_targets")
+
+
+def test_invite_links_create_list_view_revoke_use_service_repository_and_guards():
+    for snippet in [
+        "CampaignInviteLinksService(repo=ctx.db, bot=ctx.get_bot(), logger=ctx.logger)",
+        "ctx.db.list_campaign_invite_links_for_rule, rule_id, statuses=None, limit=50",
+        "ctx.db.get_campaign_invite_link, invite_link_id",
+        "service.create_invite_link(",
+        "destination_chat_id=str(settings[\"destination_chat_id\"])",
+        "service.revoke_invite_link(invite_link_id=invite_link_id, actor_id=admin_id)",
+    ]:
+        assert snippet in HANDLERS_SOURCE
+    for log_key in [
+        "REPOST_CAMPAIGN_INVITE_LINK_CREATE_REQUESTED",
+        "REPOST_CAMPAIGN_INVITE_LINK_CREATE_SUCCEEDED",
+        "REPOST_CAMPAIGN_INVITE_LINK_CREATE_FAILED",
+        "REPOST_CAMPAIGN_INVITE_LINK_REVOKE_REQUESTED",
+        "REPOST_CAMPAIGN_INVITE_LINK_REVOKE_SUCCEEDED",
+        "REPOST_CAMPAIGN_INVITE_LINK_REVOKE_FAILED",
+    ]:
+        assert log_key in HANDLERS_SOURCE
+    for handler_name in [
+        "handle_rule_repost_campaign_invite_links_create",
+        "handle_rule_repost_campaign_invite_link_view",
+        "handle_rule_repost_campaign_invite_link_revoke",
+    ]:
+        start = HANDLERS_SOURCE.index(f"async def {handler_name}")
+        end = HANDLERS_SOURCE.index("@dp.callback_query", start + 1)
+        source = HANDLERS_SOURCE[start:end]
+        assert "_ensure_repost_campaign_rule_available" in source

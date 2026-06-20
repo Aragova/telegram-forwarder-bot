@@ -3,6 +3,8 @@ from __future__ import annotations
 from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.campaign_invite_links_service import CampaignInviteLinksService
+
 from app.repost_campaign_context import RepostCampaignHandlersContext, build_repost_campaign_runtime
 from app.repost_campaign_launch_job_service import RepostCampaignLaunchJobService
 from app.repost_campaign_placement_service import RepostCampaignPlacementService
@@ -15,7 +17,15 @@ from app.repost_campaign_ui import (
     build_repost_campaign_clean_channel_settings_view,
     build_repost_campaign_invite_links_destination_view,
     build_repost_campaign_invite_links_injection_view,
+    build_repost_campaign_invite_link_create_error_view,
+    build_repost_campaign_invite_link_create_success_view,
+    build_repost_campaign_invite_link_not_found_view,
+    build_repost_campaign_invite_link_revoke_error_view,
+    build_repost_campaign_invite_link_revoke_success_view,
+    build_repost_campaign_invite_link_view,
+    build_repost_campaign_invite_links_invalid_mode_view,
     build_repost_campaign_invite_links_list_view,
+    build_repost_campaign_invite_links_no_destination_view,
     build_repost_campaign_invite_links_mode_view,
     build_repost_campaign_invite_links_per_target_view,
     build_repost_campaign_invite_links_preview_view,
@@ -1615,7 +1625,106 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             return
         if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
             return
-        text, keyboard = build_repost_campaign_invite_links_list_view(rule_id=rule_id, page=page)
+        settings = await _get_invite_link_settings_for_ui(rule_id, ctx)
+        try:
+            links = await ctx.run_db(ctx.db.list_campaign_invite_links_for_rule, rule_id, statuses=None, limit=50)
+        except Exception as exc:
+            ctx.logger.exception("REPOST_CAMPAIGN_INVITE_LINKS_LIST_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            links = []
+        text, keyboard = build_repost_campaign_invite_links_list_view(rule_id=rule_id, page=page, settings=settings, links=links or [])
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_links_create:"))
+    async def handle_rule_repost_campaign_invite_links_create(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            rule_id = int((callback.data or "").split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
+            return
+        admin_id = callback.from_user.id if callback.from_user else ctx.settings.admin_id
+        ctx.logger.info("REPOST_CAMPAIGN_INVITE_LINK_CREATE_REQUESTED | rule_id=%s | admin_id=%s", rule_id, admin_id)
+        settings = await _get_invite_link_settings_for_ui(rule_id, ctx) or {}
+        if not str(settings.get("destination_chat_id") or "").strip():
+            text, keyboard = build_repost_campaign_invite_links_no_destination_view(rule_id=rule_id)
+            await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+            await ctx.answer_callback_safe_once(callback)
+            return
+        link_mode = str(settings.get("link_mode") or "").strip()
+        if link_mode not in {"join_request", "direct_join"}:
+            text, keyboard = build_repost_campaign_invite_links_invalid_mode_view(rule_id=rule_id)
+            await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+            await ctx.answer_callback_safe_once(callback)
+            return
+        service = CampaignInviteLinksService(repo=ctx.db, bot=ctx.get_bot(), logger=ctx.logger)
+        result = await service.create_invite_link(
+            rule_id=rule_id,
+            destination_chat_id=str(settings["destination_chat_id"]),
+            destination_chat_title=settings.get("destination_chat_title"),
+            link_mode=link_mode,
+            created_by=admin_id,
+        )
+        if result.get("ok"):
+            ctx.logger.info("REPOST_CAMPAIGN_INVITE_LINK_CREATE_SUCCEEDED | rule_id=%s | invite_link_id=%s", rule_id, result.get("invite_link_id"))
+            text, keyboard = build_repost_campaign_invite_link_create_success_view(rule_id=rule_id, settings=settings, result=result)
+        else:
+            ctx.logger.warning("REPOST_CAMPAIGN_INVITE_LINK_CREATE_FAILED | rule_id=%s | error_code=%s", rule_id, result.get("error_code"))
+            text, keyboard = build_repost_campaign_invite_link_create_error_view(rule_id=rule_id, error_text=result.get("error_text") or "Попробуйте ещё раз.")
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_link_view:"))
+    async def handle_rule_repost_campaign_invite_link_view(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            parts = (callback.data or "").split(":")
+            rule_id = int(parts[1]); invite_link_id = int(parts[2])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
+            return
+        link = await ctx.run_db(ctx.db.get_campaign_invite_link, invite_link_id)
+        if not link or int(link.get("rule_id") or 0) != int(rule_id):
+            text, keyboard = build_repost_campaign_invite_link_not_found_view(rule_id=rule_id)
+        else:
+            text, keyboard = build_repost_campaign_invite_link_view(rule_id=rule_id, link=link)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_link_revoke:"))
+    async def handle_rule_repost_campaign_invite_link_revoke(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            parts = (callback.data or "").split(":")
+            rule_id = int(parts[1]); invite_link_id = int(parts[2])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
+            return
+        link = await ctx.run_db(ctx.db.get_campaign_invite_link, invite_link_id)
+        if not link or int(link.get("rule_id") or 0) != int(rule_id):
+            text, keyboard = build_repost_campaign_invite_link_not_found_view(rule_id=rule_id)
+            await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+            await ctx.answer_callback_safe_once(callback)
+            return
+        admin_id = callback.from_user.id if callback.from_user else ctx.settings.admin_id
+        ctx.logger.info("REPOST_CAMPAIGN_INVITE_LINK_REVOKE_REQUESTED | rule_id=%s | invite_link_id=%s | admin_id=%s", rule_id, invite_link_id, admin_id)
+        service = CampaignInviteLinksService(repo=ctx.db, bot=ctx.get_bot(), logger=ctx.logger)
+        result = await service.revoke_invite_link(invite_link_id=invite_link_id, actor_id=admin_id)
+        if result.get("ok"):
+            ctx.logger.info("REPOST_CAMPAIGN_INVITE_LINK_REVOKE_SUCCEEDED | rule_id=%s | invite_link_id=%s", rule_id, invite_link_id)
+            text, keyboard = build_repost_campaign_invite_link_revoke_success_view(rule_id=rule_id)
+        else:
+            ctx.logger.warning("REPOST_CAMPAIGN_INVITE_LINK_REVOKE_FAILED | rule_id=%s | invite_link_id=%s | error_code=%s", rule_id, invite_link_id, result.get("error_code"))
+            text, keyboard = build_repost_campaign_invite_link_revoke_error_view(rule_id=rule_id, invite_link_id=invite_link_id, error_text=result.get("error_text") or "Попробуйте ещё раз.")
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await ctx.answer_callback_safe_once(callback)
 
