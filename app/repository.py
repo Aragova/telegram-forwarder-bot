@@ -401,6 +401,69 @@ class RepositoryProtocol(Protocol):
         actor_id: int | None = None,
         checked_at: datetime | None = None,
     ) -> bool: ...
+    def create_campaign_invite_link_record(
+        self,
+        *,
+        rule_id: int,
+        destination_chat_id: str,
+        invite_link: str,
+        invite_link_hash: str,
+        link_mode: str,
+        creates_join_request: bool,
+        destination_chat_title: str | None = None,
+        campaign_run_id: int | None = None,
+        campaign_run_message_id: int | None = None,
+        saved_post_id: int | None = None,
+        ad_target_id: str | None = None,
+        ad_target_thread_id: int | None = None,
+        ad_target_title: str | None = None,
+        invite_link_name: str | None = None,
+        telegram_payload_json: dict | None = None,
+        created_by: int | None = None,
+        status: str = "active",
+    ) -> int | None: ...
+    def get_campaign_invite_link(self, invite_link_id: int) -> dict | None: ...
+    def get_campaign_invite_link_by_hash(self, invite_link_hash: str) -> dict | None: ...
+    def list_campaign_invite_links_for_rule(
+        self,
+        rule_id: int,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict]: ...
+    def archive_campaign_invite_link(self, invite_link_id: int, *, actor_id: int | None = None) -> bool: ...
+    def mark_campaign_invite_link_revoked(
+        self,
+        invite_link_id: int,
+        *,
+        revoked_at: datetime | None = None,
+        telegram_payload_json: dict | None = None,
+    ) -> bool: ...
+    def bind_campaign_invite_link_to_run_message(
+        self,
+        invite_link_id: int,
+        *,
+        campaign_run_message_id: int,
+        campaign_run_id: int,
+    ) -> bool: ...
+    def create_campaign_invite_link_event(
+        self,
+        *,
+        invite_link_id: int,
+        rule_id: int,
+        destination_chat_id: str,
+        event_type: str,
+        telegram_user_id_hash: str,
+        campaign_run_id: int | None = None,
+        campaign_run_message_id: int | None = None,
+        ad_target_id: str | None = None,
+        ad_target_thread_id: int | None = None,
+        telegram_update_id: int | None = None,
+        telegram_user_payload_json: dict | None = None,
+        raw_update_json: dict | None = None,
+        event_at: datetime | None = None,
+    ) -> int | None: ...
+    def get_campaign_invite_link_stats_for_rule(self, rule_id: int) -> dict: ...
     def get_rule_repost_campaign_clean_channel_settings(self, rule_id: int) -> dict[str, Any]: ...
     def set_rule_repost_campaign_clean_channel_enabled(
         self,

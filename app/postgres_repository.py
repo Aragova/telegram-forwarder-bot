@@ -92,6 +92,14 @@ _JOB_TENANT_SQL = "COALESCE(NULLIF(j.payload_json->>'tenant_id', '')::BIGINT, 1)
 CAMPAIGN_INVITE_LINK_DEFAULT_APPEND_TEMPLATE = "👉 Подписаться: {invite_link}"
 CAMPAIGN_INVITE_LINK_ALLOWED_LINK_MODES = {"join_request", "direct_join"}
 CAMPAIGN_INVITE_LINK_ALLOWED_INJECTION_MODES = {"placeholder", "append_footer", "disabled"}
+CAMPAIGN_INVITE_LINK_ALLOWED_STATUSES = {"active", "archived", "revoked", "created_not_sent", "failed"}
+CAMPAIGN_INVITE_LINK_ALLOWED_EVENT_TYPES = {
+    "join_request_created",
+    "member_joined",
+    "member_left",
+    "member_kicked",
+    "member_unknown",
+}
 
 
 def _default_campaign_invite_link_settings(rule_id: int) -> dict[str, Any]:
@@ -958,6 +966,67 @@ class PostgresRepository(RepositoryProtocol):
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS campaign_invite_links (
+            id BIGSERIAL PRIMARY KEY,
+            rule_id BIGINT NOT NULL,
+            campaign_run_id BIGINT,
+            campaign_run_message_id BIGINT,
+            saved_post_id BIGINT,
+            destination_chat_id TEXT NOT NULL,
+            destination_chat_title TEXT,
+            ad_target_id TEXT,
+            ad_target_thread_id BIGINT,
+            ad_target_title TEXT,
+            link_mode TEXT NOT NULL,
+            invite_link TEXT NOT NULL,
+            invite_link_name TEXT,
+            invite_link_hash TEXT NOT NULL,
+            creates_join_request BOOLEAN NOT NULL DEFAULT TRUE,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_by BIGINT,
+            telegram_payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            revoked_at TIMESTAMPTZ,
+            archived_at TIMESTAMPTZ
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_invite_links_hash
+        ON campaign_invite_links(invite_link_hash);
+        CREATE INDEX IF NOT EXISTS idx_campaign_invite_links_rule
+        ON campaign_invite_links(rule_id, status);
+        CREATE INDEX IF NOT EXISTS idx_campaign_invite_links_run
+        ON campaign_invite_links(campaign_run_id);
+        CREATE INDEX IF NOT EXISTS idx_campaign_invite_links_run_message
+        ON campaign_invite_links(campaign_run_message_id);
+        CREATE INDEX IF NOT EXISTS idx_campaign_invite_links_ad_target
+        ON campaign_invite_links(rule_id, ad_target_id, ad_target_thread_id);
+
+        CREATE TABLE IF NOT EXISTS campaign_invite_link_events (
+            id BIGSERIAL PRIMARY KEY,
+            invite_link_id BIGINT NOT NULL,
+            rule_id BIGINT NOT NULL,
+            campaign_run_id BIGINT,
+            campaign_run_message_id BIGINT,
+            destination_chat_id TEXT NOT NULL,
+            ad_target_id TEXT,
+            ad_target_thread_id BIGINT,
+            event_type TEXT NOT NULL,
+            telegram_user_id_hash TEXT NOT NULL,
+            telegram_user_payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            telegram_update_id BIGINT,
+            event_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            raw_update_json JSONB NOT NULL DEFAULT '{}'::jsonb
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_invite_link_events_dedup
+        ON campaign_invite_link_events(invite_link_id, event_type, telegram_user_id_hash);
+        CREATE INDEX IF NOT EXISTS idx_campaign_invite_link_events_rule
+        ON campaign_invite_link_events(rule_id, event_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_campaign_invite_link_events_run
+        ON campaign_invite_link_events(campaign_run_id, event_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_campaign_invite_link_events_link
+        ON campaign_invite_link_events(invite_link_id, event_at DESC);
+
         CREATE TABLE IF NOT EXISTS campaign_scheduled_posts (
             id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL DEFAULT 1, rule_id BIGINT NOT NULL, saved_post_id BIGINT NULL, title TEXT NULL,
             status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','ready','scheduled','processing','launched','failed','needs_review','cancelled','expired')),
@@ -1110,6 +1179,45 @@ class PostgresRepository(RepositoryProtocol):
                     "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS preview_checked_by BIGINT NULL",
                     "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
                     "ALTER TABLE campaign_invite_link_settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ]:
+                    cur.execute(_sql)
+
+                for _sql in [
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS rule_id BIGINT NOT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS campaign_run_id BIGINT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS campaign_run_message_id BIGINT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS saved_post_id BIGINT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS destination_chat_id TEXT NOT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS destination_chat_title TEXT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS ad_target_id TEXT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS ad_target_thread_id BIGINT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS ad_target_title TEXT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS link_mode TEXT NOT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS invite_link TEXT NOT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS invite_link_name TEXT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS invite_link_hash TEXT NOT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS creates_join_request BOOLEAN NOT NULL DEFAULT TRUE",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS created_by BIGINT NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS telegram_payload_json JSONB NOT NULL DEFAULT '{}'::jsonb",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_invite_links ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS invite_link_id BIGINT NOT NULL",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS rule_id BIGINT NOT NULL",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS campaign_run_id BIGINT NULL",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS campaign_run_message_id BIGINT NULL",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS destination_chat_id TEXT NOT NULL",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS ad_target_id TEXT NULL",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS ad_target_thread_id BIGINT NULL",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS telegram_user_id_hash TEXT NOT NULL",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS telegram_user_payload_json JSONB NOT NULL DEFAULT '{}'::jsonb",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS telegram_update_id BIGINT NULL",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS event_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                    "ALTER TABLE campaign_invite_link_events ADD COLUMN IF NOT EXISTS raw_update_json JSONB NOT NULL DEFAULT '{}'::jsonb",
                 ]:
                     cur.execute(_sql)
 
@@ -8158,6 +8266,262 @@ class PostgresRepository(RepositoryProtocol):
                 updated = cur.rowcount > 0
             conn.commit()
         return updated
+
+    def create_campaign_invite_link_record(
+        self,
+        *,
+        rule_id: int,
+        destination_chat_id: str,
+        invite_link: str,
+        invite_link_hash: str,
+        link_mode: str,
+        creates_join_request: bool,
+        destination_chat_title: str | None = None,
+        campaign_run_id: int | None = None,
+        campaign_run_message_id: int | None = None,
+        saved_post_id: int | None = None,
+        ad_target_id: str | None = None,
+        ad_target_thread_id: int | None = None,
+        ad_target_title: str | None = None,
+        invite_link_name: str | None = None,
+        telegram_payload_json: dict | None = None,
+        created_by: int | None = None,
+        status: str = "active",
+    ) -> int | None:
+        if link_mode not in CAMPAIGN_INVITE_LINK_ALLOWED_LINK_MODES:
+            return None
+        if status not in CAMPAIGN_INVITE_LINK_ALLOWED_STATUSES:
+            return None
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_invite_links(
+                        rule_id, campaign_run_id, campaign_run_message_id, saved_post_id,
+                        destination_chat_id, destination_chat_title, ad_target_id, ad_target_thread_id,
+                        ad_target_title, link_mode, invite_link, invite_link_name, invite_link_hash,
+                        creates_join_request, status, created_by, telegram_payload_json
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    ON CONFLICT (invite_link_hash) DO UPDATE SET invite_link_hash = EXCLUDED.invite_link_hash
+                    RETURNING id
+                    """,
+                    (
+                        int(rule_id), campaign_run_id, campaign_run_message_id, saved_post_id,
+                        str(destination_chat_id), destination_chat_title, ad_target_id, ad_target_thread_id,
+                        ad_target_title, link_mode, invite_link, invite_link_name, invite_link_hash,
+                        bool(creates_join_request), status, created_by, _json_dumps(telegram_payload_json or {}),
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return int(row["id"]) if row else None
+
+    def get_campaign_invite_link(self, invite_link_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_invite_links WHERE id = %s LIMIT 1", (int(invite_link_id),))
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_campaign_invite_link_by_hash(self, invite_link_hash: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_invite_links WHERE invite_link_hash = %s LIMIT 1", (invite_link_hash,))
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def list_campaign_invite_links_for_rule(
+        self,
+        rule_id: int,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit or 50), 100))
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if statuses is None:
+                    cur.execute(
+                        """
+                        SELECT * FROM campaign_invite_links
+                        WHERE rule_id = %s
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT %s
+                        """,
+                        (int(rule_id), safe_limit),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT * FROM campaign_invite_links
+                        WHERE rule_id = %s AND status = ANY(%s)
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT %s
+                        """,
+                        (int(rule_id), list(statuses), safe_limit),
+                    )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def archive_campaign_invite_link(self, invite_link_id: int, *, actor_id: int | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_invite_links
+                    SET status = 'archived', archived_at = NOW(), updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (int(invite_link_id),),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+        return updated
+
+    def mark_campaign_invite_link_revoked(
+        self,
+        invite_link_id: int,
+        *,
+        revoked_at: datetime | None = None,
+        telegram_payload_json: dict | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if telegram_payload_json is None:
+                    cur.execute(
+                        """
+                        UPDATE campaign_invite_links
+                        SET status = 'revoked', revoked_at = COALESCE(%s, NOW()), updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (revoked_at, int(invite_link_id)),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE campaign_invite_links
+                        SET status = 'revoked', revoked_at = COALESCE(%s, NOW()), updated_at = NOW(),
+                            telegram_payload_json = %s::jsonb
+                        WHERE id = %s
+                        """,
+                        (revoked_at, _json_dumps(telegram_payload_json), int(invite_link_id)),
+                    )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+        return updated
+
+    def bind_campaign_invite_link_to_run_message(
+        self,
+        invite_link_id: int,
+        *,
+        campaign_run_message_id: int,
+        campaign_run_id: int,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_invite_links
+                    SET campaign_run_message_id = %s, campaign_run_id = %s, updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (int(campaign_run_message_id), int(campaign_run_id), int(invite_link_id)),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+        return updated
+
+    def create_campaign_invite_link_event(
+        self,
+        *,
+        invite_link_id: int,
+        rule_id: int,
+        destination_chat_id: str,
+        event_type: str,
+        telegram_user_id_hash: str,
+        campaign_run_id: int | None = None,
+        campaign_run_message_id: int | None = None,
+        ad_target_id: str | None = None,
+        ad_target_thread_id: int | None = None,
+        telegram_update_id: int | None = None,
+        telegram_user_payload_json: dict | None = None,
+        raw_update_json: dict | None = None,
+        event_at: datetime | None = None,
+    ) -> int | None:
+        if event_type not in CAMPAIGN_INVITE_LINK_ALLOWED_EVENT_TYPES:
+            return None
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_invite_link_events(
+                        invite_link_id, rule_id, campaign_run_id, campaign_run_message_id,
+                        destination_chat_id, ad_target_id, ad_target_thread_id, event_type,
+                        telegram_user_id_hash, telegram_user_payload_json, telegram_update_id,
+                        event_at, raw_update_json
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, COALESCE(%s, NOW()), %s::jsonb)
+                    ON CONFLICT (invite_link_id, event_type, telegram_user_id_hash) DO UPDATE
+                    SET telegram_user_id_hash = EXCLUDED.telegram_user_id_hash
+                    RETURNING id
+                    """,
+                    (
+                        int(invite_link_id), int(rule_id), campaign_run_id, campaign_run_message_id,
+                        str(destination_chat_id), ad_target_id, ad_target_thread_id, event_type,
+                        telegram_user_id_hash, _json_dumps(telegram_user_payload_json or {}), telegram_update_id,
+                        event_at, _json_dumps(raw_update_json or {}),
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return int(row["id"]) if row else None
+
+    def get_campaign_invite_link_stats_for_rule(self, rule_id: int) -> dict[str, Any]:
+        result = {
+            "rule_id": int(rule_id),
+            "links_total": 0,
+            "links_active": 0,
+            "join_requests_total": 0,
+            "joins_total": 0,
+            "left_total": 0,
+            "kicked_total": 0,
+            "unknown_total": 0,
+            "unique_users_total": 0,
+        }
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS links_total,
+                        COUNT(*) FILTER (WHERE status = 'active') AS links_active
+                    FROM campaign_invite_links
+                    WHERE rule_id = %s
+                    """,
+                    (int(rule_id),),
+                )
+                link_row = cur.fetchone() or {}
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE event_type = 'join_request_created') AS join_requests_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_joined') AS joins_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_left') AS left_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_kicked') AS kicked_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_unknown') AS unknown_total,
+                        COUNT(DISTINCT telegram_user_id_hash) AS unique_users_total
+                    FROM campaign_invite_link_events
+                    WHERE rule_id = %s
+                    """,
+                    (int(rule_id),),
+                )
+                event_row = cur.fetchone() or {}
+        for key in result:
+            if key in link_row:
+                result[key] = int(link_row.get(key) or 0)
+            if key in event_row:
+                result[key] = int(event_row.get(key) or 0)
+        return result
+
 
     def get_rule_repost_campaign_clean_channel_settings(self, rule_id: int) -> dict[str, Any]:
         with self.connect() as conn:
