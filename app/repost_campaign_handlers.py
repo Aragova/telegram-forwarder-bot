@@ -16,6 +16,9 @@ from app.repost_campaign_ui import (
     build_repost_campaign_invite_links_destination_view,
     build_repost_campaign_invite_links_injection_view,
     build_repost_campaign_invite_links_list_view,
+    build_repost_campaign_invite_links_mode_view,
+    build_repost_campaign_invite_links_per_target_view,
+    build_repost_campaign_invite_links_preview_view,
     build_repost_campaign_invite_links_view,
     build_repost_campaign_launch_clean_channel_blocked_view,
     build_repost_campaign_launch_clean_channel_warning_view,
@@ -363,6 +366,25 @@ async def _render_repost_campaign_invite_links(callback: CallbackQuery, rule_id:
     text, keyboard = build_repost_campaign_invite_links_view(rule_id=rule_id, settings=settings)
     await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
     return True
+
+
+async def _save_invite_link_setting(callback: CallbackQuery, rule_id: int, ctx: RepostCampaignHandlersContext, **updates) -> bool:
+    if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
+        return False
+    actor_id = callback.from_user.id if callback.from_user else ctx.settings.admin_id
+    try:
+        updated = await ctx.run_db(ctx.db.set_campaign_invite_link_settings, rule_id, actor_id=actor_id, **updates)
+    except Exception as exc:
+        ctx.logger.exception("REPOST_CAMPAIGN_INVITE_LINK_SETTINGS_UPDATE_FAILED | rule_id=%s | updates=%s | error=%s", rule_id, updates, exc)
+        await ctx.answer_callback_safe(callback, "⚠️ Не удалось сохранить настройку. Попробуйте ещё раз.", show_alert=True)
+        return False
+    if not updated:
+        await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return False
+    rendered = await _render_repost_campaign_invite_links(callback, rule_id, ctx)
+    if rendered:
+        await ctx.answer_callback_safe_once(callback)
+    return rendered
 
 
 async def _render_repost_campaign_top_time_settings(
@@ -1468,6 +1490,97 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         if rendered:
             await ctx.answer_callback_safe_once(callback)
 
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_links_destination_set:"))
+    async def handle_rule_repost_campaign_invite_links_destination_set(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            parts = (callback.data or "").split(":")
+            rule_id = int(parts[1])
+            target_row_id = int(parts[2])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
+            return
+        try:
+            targets = await ctx.run_db(ctx.db.list_rule_repost_campaign_targets, rule_id, active_only=False)
+        except Exception as exc:
+            ctx.logger.exception("REPOST_CAMPAIGN_INVITE_LINK_TARGETS_LOOKUP_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            await ctx.answer_callback_safe(callback, "⚠️ Не удалось получить список каналов.", show_alert=True)
+            return
+        target = next((item for item in targets or [] if int(item.get("id") or item.get("row_id") or 0) == target_row_id), None)
+        if not target:
+            await ctx.answer_callback_safe(callback, "Канал не найден", show_alert=True)
+            return
+        chat_id = target.get("target_id")
+        title = str(target.get("title") or target.get("target_title") or chat_id or "Канал")
+        await _save_invite_link_setting(callback, rule_id, ctx, destination_chat_id=str(chat_id), destination_chat_title=title)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_links_mode_set:"))
+    async def handle_rule_repost_campaign_invite_links_mode_set(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            parts = (callback.data or "").split(":")
+            rule_id = int(parts[1])
+            mode = parts[2]
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if mode not in {"join_request", "direct_join"}:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        await _save_invite_link_setting(callback, rule_id, ctx, link_mode=mode)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_links_injection_set:"))
+    async def handle_rule_repost_campaign_invite_links_injection_set(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            parts = (callback.data or "").split(":")
+            rule_id = int(parts[1])
+            mode = parts[2]
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if mode not in {"placeholder", "append_footer", "disabled"}:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        await _save_invite_link_setting(callback, rule_id, ctx, injection_mode=mode)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_links_per_target_set:"))
+    async def handle_rule_repost_campaign_invite_links_per_target_set(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            parts = (callback.data or "").split(":")
+            rule_id = int(parts[1])
+            value = parts[2]
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if value not in {"on", "off"}:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        await _save_invite_link_setting(callback, rule_id, ctx, per_target_links_enabled=(value == "on"))
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_links_preview_set:"))
+    async def handle_rule_repost_campaign_invite_links_preview_set(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            parts = (callback.data or "").split(":")
+            rule_id = int(parts[1])
+            value = parts[2]
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if value not in {"required", "optional"}:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        await _save_invite_link_setting(callback, rule_id, ctx, preview_required=(value == "required"))
+
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_links_destination:"))
     async def handle_rule_repost_campaign_invite_links_destination(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
@@ -1479,7 +1592,13 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             return
         if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
             return
-        text, keyboard = build_repost_campaign_invite_links_destination_view(rule_id=rule_id)
+        settings = await _get_invite_link_settings_for_ui(rule_id, ctx)
+        try:
+            targets = await ctx.run_db(ctx.db.list_rule_repost_campaign_targets, rule_id, active_only=False)
+            text, keyboard = build_repost_campaign_invite_links_destination_view(rule_id=rule_id, settings=settings, targets=targets or [])
+        except Exception as exc:
+            ctx.logger.exception("REPOST_CAMPAIGN_INVITE_LINK_TARGETS_LOOKUP_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            text, keyboard = build_repost_campaign_invite_links_destination_view(rule_id=rule_id, settings=settings, error=True)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await ctx.answer_callback_safe_once(callback)
 
@@ -1500,6 +1619,22 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await ctx.answer_callback_safe_once(callback)
 
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_links_mode:"))
+    async def handle_rule_repost_campaign_invite_links_mode(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            rule_id = int((callback.data or "").split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
+            return
+        settings = await _get_invite_link_settings_for_ui(rule_id, ctx)
+        text, keyboard = build_repost_campaign_invite_links_mode_view(rule_id=rule_id, settings=settings)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
     @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_links_injection:"))
     async def handle_rule_repost_campaign_invite_links_injection(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
@@ -1511,7 +1646,40 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             return
         if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
             return
-        text, keyboard = build_repost_campaign_invite_links_injection_view(rule_id=rule_id)
+        settings = await _get_invite_link_settings_for_ui(rule_id, ctx)
+        text, keyboard = build_repost_campaign_invite_links_injection_view(rule_id=rule_id, settings=settings)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_links_per_target:"))
+    async def handle_rule_repost_campaign_invite_links_per_target(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            rule_id = int((callback.data or "").split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
+            return
+        settings = await _get_invite_link_settings_for_ui(rule_id, ctx)
+        text, keyboard = build_repost_campaign_invite_links_per_target_view(rule_id=rule_id, settings=settings)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_links_preview:"))
+    async def handle_rule_repost_campaign_invite_links_preview(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            rule_id = int((callback.data or "").split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
+            return
+        settings = await _get_invite_link_settings_for_ui(rule_id, ctx)
+        text, keyboard = build_repost_campaign_invite_links_preview_view(rule_id=rule_id, settings=settings)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await ctx.answer_callback_safe_once(callback)
 

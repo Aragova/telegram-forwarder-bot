@@ -27,6 +27,9 @@ from app.repost_campaign_ui import (
     build_repost_campaign_invite_links_destination_view,
     build_repost_campaign_invite_links_injection_view,
     build_repost_campaign_invite_links_list_view,
+    build_repost_campaign_invite_links_mode_view,
+    build_repost_campaign_invite_links_per_target_view,
+    build_repost_campaign_invite_links_preview_view,
     build_repost_campaign_invite_links_view,
     build_repost_campaign_vip_coming_soon_view,
     build_repost_campaign_top_time_intro_view,
@@ -2896,7 +2899,13 @@ def test_invite_links_main_view_content_and_toggle_buttons():
     assert "🟢 отдельная ссылка для каждого рекламного канала" in text
     assert "Предпросмотр" in text
     assert "обязателен" in text
-    assert "🟢 Включить" in _texts_from_keyboard(keyboard)
+    texts = _texts_from_keyboard(keyboard)
+    assert "🟢 Включить" in texts
+    assert "📥 Канал для вступления" in texts
+    assert "🔗 Режим ссылки" in texts
+    assert "⚙️ Автоподстановка" in texts
+    assert "📣 Ссылки по каналам" in texts
+    assert "👁 Предпросмотр" in texts
     callbacks = _callbacks_from_keyboard(keyboard)
     assert "rule_repost_campaign_menu:10" in callbacks
     assert "rule_repost_campaign:10" not in callbacks
@@ -2921,9 +2930,16 @@ def test_invite_links_modes_rendering():
 
 
 def test_invite_links_info_views():
-    text, keyboard = build_repost_campaign_invite_links_destination_view(rule_id=10)
+    text, keyboard = build_repost_campaign_invite_links_destination_view(
+        rule_id=10,
+        settings={"destination_chat_title": "Главный канал"},
+        targets=[{"id": 7, "target_id": "-1001", "title": "Канал 1"}],
+    )
     assert "📥 Канал для вступления" in text
-    assert "права бота" in text
+    assert "Выберите канал, куда должны вступать люди" in text
+    assert "👉 Главный канал" in text
+    assert "Канал 1" in _texts_from_keyboard(keyboard)
+    assert "rule_repost_campaign_invite_links_destination_set:10:7" in _callbacks_from_keyboard(keyboard)
     assert "⬅️ Назад" in _texts_from_keyboard(keyboard)
 
     text, keyboard = build_repost_campaign_invite_links_list_view(rule_id=10)
@@ -2931,7 +2947,33 @@ def test_invite_links_info_views():
     assert "📊 конверсию" in text
     assert "⬅️ Назад" in _texts_from_keyboard(keyboard)
 
-    text, keyboard = build_repost_campaign_invite_links_injection_view(rule_id=10)
+    text, keyboard = build_repost_campaign_invite_links_mode_view(rule_id=10, settings={"link_mode": "join_request"})
+    assert "📥 С заявкой" in text
+    assert "✅ Обычное вступление" in text
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_invite_links_mode_set:10:join_request" in callbacks
+    assert "rule_repost_campaign_invite_links_mode_set:10:direct_join" in callbacks
+
+    text, keyboard = build_repost_campaign_invite_links_injection_view(rule_id=10, settings={"injection_mode": "disabled"})
     assert "⚙️ Автоподстановка" in text
     assert "{invite_link}" in text
-    assert "⬅️ Назад" in _texts_from_keyboard(keyboard)
+    assert "Добавить в конец" in text
+    assert "Выключена" in text
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_invite_links_injection_set:10:placeholder" in callbacks
+    assert "rule_repost_campaign_invite_links_injection_set:10:append_footer" in callbacks
+    assert "rule_repost_campaign_invite_links_injection_set:10:disabled" in callbacks
+
+    text, keyboard = build_repost_campaign_invite_links_per_target_view(rule_id=10, settings={"per_target_links_enabled": True})
+    assert "Отдельная ссылка для каждого рекламного канала" in text
+    assert "Одна ссылка на весь рекламный запуск" in text
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_invite_links_per_target_set:10:on" in callbacks
+    assert "rule_repost_campaign_invite_links_per_target_set:10:off" in callbacks
+
+    text, keyboard = build_repost_campaign_invite_links_preview_view(rule_id=10, settings={"preview_required": True})
+    assert "предпросмотр обязателен" in text
+    assert any("Не требовать предпросмотр" in item for item in _texts_from_keyboard(keyboard))
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_invite_links_preview_set:10:required" in callbacks
+    assert "rule_repost_campaign_invite_links_preview_set:10:optional" in callbacks
