@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Protocol
 
 from app.repository_models import IntroItem
@@ -377,6 +378,28 @@ class RepositoryProtocol(Protocol):
         enabled: bool,
         seconds: int,
         actor_id: int | None = None,
+    ) -> bool: ...
+    def get_campaign_invite_link_settings(self, rule_id: int) -> dict[str, Any]: ...
+    def set_campaign_invite_link_settings(
+        self,
+        rule_id: int,
+        *,
+        enabled: bool | None = None,
+        destination_chat_id: str | None = None,
+        destination_chat_title: str | None = None,
+        link_mode: str | None = None,
+        injection_mode: str | None = None,
+        append_template: str | None = None,
+        per_target_links_enabled: bool | None = None,
+        preview_required: bool | None = None,
+        actor_id: int | None = None,
+    ) -> bool: ...
+    def mark_campaign_invite_link_preview_checked(
+        self,
+        rule_id: int,
+        *,
+        actor_id: int | None = None,
+        checked_at: datetime | None = None,
     ) -> bool: ...
     def get_rule_repost_campaign_clean_channel_settings(self, rule_id: int) -> dict[str, Any]: ...
     def set_rule_repost_campaign_clean_channel_enabled(
