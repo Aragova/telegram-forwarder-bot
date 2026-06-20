@@ -335,6 +335,9 @@ async def _render_repost_campaign_top_time_pause_detail(
 async def _ensure_repost_campaign_rule_available(callback: CallbackQuery, rule_id: int, ctx: RepostCampaignHandlersContext) -> bool:
     if not await ctx.ensure_rule_callback_access(callback, rule_id):
         return False
+    if not ctx.settings.repost_campaign_admin_test_enabled:
+        await ctx.answer_callback_safe(callback, "Функция пока выключена", show_alert=True)
+        return False
     rule = await ctx.run_db(ctx.db.get_rule, rule_id)
     if not rule:
         await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)

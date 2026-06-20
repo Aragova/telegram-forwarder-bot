@@ -2897,6 +2897,9 @@ def test_invite_links_main_view_content_and_toggle_buttons():
     assert "Предпросмотр" in text
     assert "обязателен" in text
     assert "🟢 Включить" in _texts_from_keyboard(keyboard)
+    callbacks = _callbacks_from_keyboard(keyboard)
+    assert "rule_repost_campaign_menu:10" in callbacks
+    assert "rule_repost_campaign:10" not in callbacks
 
     text, keyboard = build_repost_campaign_invite_links_view(rule_id=10, settings={"enabled": True})
     assert "Статус: 🟢 включено" in text

@@ -562,7 +562,7 @@ def build_repost_campaign_invite_links_view(*, rule_id: int, settings: dict | No
         [InlineKeyboardButton(text="📥 Канал для вступления", callback_data=f"rule_repost_campaign_invite_links_destination:{rule_id}")],
         [InlineKeyboardButton(text="🔗 Рекламные ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")],
         [InlineKeyboardButton(text="⚙️ Автоподстановка", callback_data=f"rule_repost_campaign_invite_links_injection:{rule_id}")],
-        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign:{rule_id}")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return text, kb
 
