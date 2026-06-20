@@ -482,7 +482,7 @@ def _format_invite_links_link_mode(settings: dict | None) -> str:
         return "📥 с заявкой"
     if value == "direct_join":
         return "✅ обычное вступление"
-    return "⚠️ режим недоступен"
+    return "⚠️ неизвестный режим"
 
 
 def _format_invite_links_injection_mode(settings: dict | None) -> str:
@@ -493,7 +493,7 @@ def _format_invite_links_injection_mode(settings: dict | None) -> str:
         return "добавить в конец"
     if value == "disabled":
         return "выключена"
-    return "⚠️ режим недоступен"
+    return "⚠️ неизвестный режим"
 
 
 def _format_invite_links_per_target(settings: dict | None) -> str:
@@ -535,7 +535,7 @@ def build_repost_campaign_vip_features_view(*, rule_id: int, invite_links_settin
     return text, kb
 
 
-def build_repost_campaign_invite_links_view(*, rule_id: int, settings: dict | None) -> tuple[str, InlineKeyboardMarkup]:
+def build_repost_campaign_invite_links_view(*, rule_id: int, settings: dict | None, stats: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
     toggle_text = "🔴 Выключить" if bool((settings or {}).get("enabled")) else "🟢 Включить"
     text = (
         "📥 Заявки и вступления\n\n"
@@ -555,14 +555,15 @@ def build_repost_campaign_invite_links_view(*, rule_id: int, settings: dict | No
         "Ссылки по каналам:\n"
         f"{_format_invite_links_per_target(settings)}\n\n"
         "Предпросмотр:\n"
-        f"{_format_invite_links_preview(settings)}"
+        f"{_format_invite_links_preview(settings)}\n\n"
+        f"{_format_invite_links_rule_stats(stats)}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=toggle_text, callback_data=f"rule_repost_campaign_invite_links_toggle:{rule_id}")],
         [InlineKeyboardButton(text="📥 Канал для вступления", callback_data=f"rule_repost_campaign_invite_links_destination:{rule_id}"), InlineKeyboardButton(text="🔗 Режим ссылки", callback_data=f"rule_repost_campaign_invite_links_mode:{rule_id}")],
         [InlineKeyboardButton(text="⚙️ Автоподстановка", callback_data=f"rule_repost_campaign_invite_links_injection:{rule_id}"), InlineKeyboardButton(text="📣 Ссылки по каналам", callback_data=f"rule_repost_campaign_invite_links_per_target:{rule_id}")],
         [InlineKeyboardButton(text="👁 Предпросмотр", callback_data=f"rule_repost_campaign_invite_links_preview:{rule_id}")],
-        [InlineKeyboardButton(text="🔗 Рекламные ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data=f"rule_repost_campaign_invite_links_stats:{rule_id}"), InlineKeyboardButton(text="🔗 Рекламные ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")],
         [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return text, kb
@@ -592,7 +593,7 @@ def build_repost_campaign_invite_links_destination_view(*, rule_id: int, setting
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _format_campaign_invite_link_status(status: str | None) -> str:
+def format_invite_link_status(status: str | None) -> str:
     value = str(status or "").strip()
     return {
         "active": "🟢 active",
@@ -603,13 +604,47 @@ def _format_campaign_invite_link_status(status: str | None) -> str:
     }.get(value, "⚠️ unknown")
 
 
-def _format_campaign_invite_link_mode(link_mode: str | None) -> str:
+def format_invite_link_mode(link_mode: str | None) -> str:
     if link_mode == "join_request":
         return "📥 с заявкой"
     if link_mode == "direct_join":
         return "✅ обычное вступление"
-    return "⚠️ режим недоступен"
+    return "⚠️ неизвестный режим"
 
+
+
+def format_invite_link_stats(stats: dict | None) -> str:
+    if not stats:
+        return "⚠️ статистика временно недоступна"
+    return (
+        f"📥 Заявки: {int(stats.get('join_requests_total') or 0)}\n"
+        f"✅ Вступления: {int(stats.get('joins_total') or 0)}\n"
+        f"🚪 Выходы: {int(stats.get('left_total') or 0)}\n"
+        f"⛔ Исключены: {int(stats.get('kicked_total') or 0)}\n"
+        f"❔ Неизвестные события: {int(stats.get('unknown_total') or 0)}\n"
+        f"👤 Уникальных пользователей: {int(stats.get('unique_users_total') or 0)}"
+    )
+
+
+def format_invite_link_acceptance_rate(stats: dict | None, link_mode: str | None = None) -> str:
+    if link_mode == "direct_join":
+        return f"Вступления:\n{int((stats or {}).get('joins_total') or 0)}"
+    join_requests = int((stats or {}).get('join_requests_total') or 0)
+    if join_requests <= 0:
+        return "Принятие:\nпока нет данных"
+    joins = int((stats or {}).get('joins_total') or 0)
+    return f"Принятие:\n{(joins / join_requests * 100):.1f}%"
+
+
+def _format_invite_links_rule_stats(stats: dict | None) -> str:
+    if not stats:
+        return "📊 Статистика:\n⚠️ временно недоступна"
+    return (
+        "📊 Статистика:\n"
+        f"🔗 Ссылок всего: {int(stats.get('links_total') or 0)}\n"
+        f"🟢 Активных ссылок: {int(stats.get('links_active') or 0)}\n"
+        f"{format_invite_link_stats(stats)}"
+    )
 
 def _format_campaign_invite_link_created_at(value) -> str:
     if value is None:
@@ -634,8 +669,9 @@ def _campaign_invite_link_id(link: dict) -> int | None:
         return None
 
 
-def build_repost_campaign_invite_links_list_view(*, rule_id: int, page: int = 0, settings: dict | None = None, links: list[dict] | None = None) -> tuple[str, InlineKeyboardMarkup]:
-    links = list(links or [])
+def build_repost_campaign_invite_links_list_view(*, rule_id: int, page: int = 0, settings: dict | None = None, links: list[dict] | None = None, link_stats: dict[int, dict | None] | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    links = list(links or [])[:10]
+    link_stats = link_stats or {}
     rows = [[InlineKeyboardButton(text="➕ Создать Telegram-ссылку", callback_data=f"rule_repost_campaign_invite_links_create:{rule_id}")]]
     if not links:
         text = (
@@ -654,9 +690,20 @@ def build_repost_campaign_invite_links_list_view(*, rule_id: int, page: int = 0,
     for index, link in enumerate(links[:10], start=1):
         title = str(link.get("destination_chat_title") or link.get("destination_chat_id") or "Канал")
         lines.extend([
-            f"{index}. {_format_campaign_invite_link_status(link.get('status'))} · {_format_campaign_invite_link_mode(link.get('link_mode'))}",
+            f"{index}. {format_invite_link_status(link.get('status'))} · {format_invite_link_mode(link.get('link_mode'))}",
             f"Канал: {title}",
             f"Создана: {_format_campaign_invite_link_created_at(link.get('created_at'))}",
+        ])
+        invite_link_id = _campaign_invite_link_id(link)
+        stats_for_link = link_stats.get(invite_link_id) if invite_link_id is not None else None
+        if stats_for_link is None:
+            lines.append("📊 Статистика: ⚠️ недоступна")
+        else:
+            lines.extend([
+                f"📥 Заявки: {int(stats_for_link.get('join_requests_total') or 0)} · ✅ Вступления: {int(stats_for_link.get('joins_total') or 0)}",
+                f"🚪 Выходы: {int(stats_for_link.get('left_total') or 0)} · ⛔ Исключены: {int(stats_for_link.get('kicked_total') or 0)}",
+            ])
+        lines.extend([
             f"Ссылка: {link.get('invite_link') or 'не сохранена'}",
             "",
         ])
@@ -691,7 +738,7 @@ def build_repost_campaign_invite_link_create_success_view(*, rule_id: int, setti
         "Канал:\n"
         f"{_format_invite_links_destination(settings)}\n\n"
         "Режим:\n"
-        f"{_format_campaign_invite_link_mode((settings or {}).get('link_mode'))}\n\n"
+        f"{format_invite_link_mode((settings or {}).get('link_mode'))}\n\n"
         "Ссылка:\n"
         f"{result.get('invite_link') or 'не сохранена'}\n\n"
         "Теперь её можно использовать в рекламном посте.\n\n"
@@ -715,18 +762,20 @@ def build_repost_campaign_invite_link_not_found_view(*, rule_id: int) -> tuple[s
     return "⚠️ Рекламная ссылка не найдена.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Все ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")]])
 
 
-def build_repost_campaign_invite_link_view(*, rule_id: int, link: dict) -> tuple[str, InlineKeyboardMarkup]:
+def build_repost_campaign_invite_link_view(*, rule_id: int, link: dict, stats: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
     invite_link_id = _campaign_invite_link_id(link) or 0
     title = str(link.get("destination_chat_title") or link.get("destination_chat_id") or "Канал")
     text = (
         f"🔗 Рекламная Telegram-ссылка #{invite_link_id}\n\n"
-        f"Статус: {_format_campaign_invite_link_status(link.get('status'))}\n"
+        f"Статус: {format_invite_link_status(link.get('status'))}\n"
         f"Канал: 👉 {title}\n"
-        f"Режим: {_format_campaign_invite_link_mode(link.get('link_mode'))}\n"
+        f"Режим: {format_invite_link_mode(link.get('link_mode'))}\n"
         f"Создана: {_format_campaign_invite_link_created_at(link.get('created_at'))}\n\n"
         "Ссылка:\n"
         f"{link.get('invite_link') or 'не сохранена'}\n\n"
-        "Заявки и вступления будут считаться на следующих этапах."
+        "📊 Статистика:\n"
+        f"{format_invite_link_stats(stats)}\n\n"
+        f"{format_invite_link_acceptance_rate(stats, link.get('link_mode'))}"
     )
     rows = []
     if link.get("status") != "revoked":
@@ -751,6 +800,29 @@ def build_repost_campaign_invite_link_revoke_error_view(*, rule_id: int, invite_
         [InlineKeyboardButton(text="🔗 Все ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")],
     ])
 
+
+
+def build_repost_campaign_invite_links_stats_view(*, rule_id: int, stats: dict | None) -> tuple[str, InlineKeyboardMarkup]:
+    if stats:
+        join_requests = int(stats.get("join_requests_total") or 0)
+        acceptance = "пока нет данных" if join_requests <= 0 else f"{(int(stats.get('joins_total') or 0) / join_requests * 100):.1f}%"
+        text = (
+            "📊 Статистика заявок и вступлений\n\n"
+            f"Правило #{rule_id}\n\n"
+            "🔗 Ссылки:\n"
+            f"Всего: {int(stats.get('links_total') or 0)}\n"
+            f"Активные: {int(stats.get('links_active') or 0)}\n\n"
+            "👥 Люди:\n"
+            f"{format_invite_link_stats(stats)}\n\n"
+            "Принятие заявок:\n"
+            f"{acceptance}"
+        )
+    else:
+        text = "📊 Статистика заявок и вступлений\n\n⚠️ статистика временно недоступна"
+    return text, InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Все ссылки", callback_data=f"rule_repost_campaign_invite_links_list:{rule_id}:0")],
+        [InlineKeyboardButton(text="⬅️ К функции", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")],
+    ])
 
 def build_repost_campaign_invite_links_mode_view(*, rule_id: int, settings: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
     text = ("🔗 Режим ссылки\n\nВыберите, как человек будет попадать в канал.\n\n📥 С заявкой\nПользователь отправляет заявку. ViMi считает заявку, но не принимает и не отклоняет её.\n\n✅ Обычное вступление\nПользователь вступает сразу. ViMi считает вступление.\n\nТекущий режим:\n" f"{_format_invite_links_link_mode(settings)}")

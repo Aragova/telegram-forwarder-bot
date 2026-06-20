@@ -8565,6 +8565,38 @@ class PostgresRepository(RepositoryProtocol):
         return result
 
 
+    def get_campaign_invite_link_stats(self, invite_link_id: int) -> dict[str, Any]:
+        result = {
+            "invite_link_id": int(invite_link_id),
+            "join_requests_total": 0,
+            "joins_total": 0,
+            "left_total": 0,
+            "kicked_total": 0,
+            "unknown_total": 0,
+            "unique_users_total": 0,
+        }
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE event_type = 'join_request_created') AS join_requests_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_joined') AS joins_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_left') AS left_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_kicked') AS kicked_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_unknown') AS unknown_total,
+                        COUNT(DISTINCT telegram_user_id_hash) AS unique_users_total
+                    FROM campaign_invite_link_events
+                    WHERE invite_link_id = %s
+                    """,
+                    (int(invite_link_id),),
+                )
+                row = cur.fetchone() or {}
+        for key in result:
+            if key in row:
+                result[key] = int(row.get(key) or 0)
+        return result
+
     def get_rule_repost_campaign_clean_channel_settings(self, rule_id: int) -> dict[str, Any]:
         with self.connect() as conn:
             with conn.cursor() as cur:

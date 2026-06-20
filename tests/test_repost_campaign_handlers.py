@@ -11,6 +11,7 @@ def test_invite_links_callbacks_are_registered():
         "rule_repost_campaign_invite_links_destination:",
         "rule_repost_campaign_invite_links_list:",
         "rule_repost_campaign_invite_links_create:",
+        "rule_repost_campaign_invite_links_stats:",
         "rule_repost_campaign_invite_link_view:",
         "rule_repost_campaign_invite_link_revoke:",
         "rule_repost_campaign_invite_links_injection:",
@@ -81,7 +82,7 @@ def test_invite_links_set_callbacks_are_guarded_before_repository_update():
 def test_invite_links_create_list_view_revoke_use_service_repository_and_guards():
     for snippet in [
         "CampaignInviteLinksService(repo=ctx.db, bot=ctx.get_bot(), logger=ctx.logger)",
-        "ctx.db.list_campaign_invite_links_for_rule, rule_id, statuses=None, limit=50",
+        "ctx.db.list_campaign_invite_links_for_rule, rule_id, statuses=None, limit=10",
         "ctx.db.get_campaign_invite_link, invite_link_id",
         "service.create_invite_link(",
         "destination_chat_id=str(settings[\"destination_chat_id\"])",
@@ -106,3 +107,19 @@ def test_invite_links_create_list_view_revoke_use_service_repository_and_guards(
         end = HANDLERS_SOURCE.index("@dp.callback_query", start + 1)
         source = HANDLERS_SOURCE[start:end]
         assert "_ensure_repost_campaign_rule_available" in source
+
+
+def test_invite_links_stats_are_loaded_for_main_stats_list_and_card():
+    assert "ctx.db.get_campaign_invite_link_stats_for_rule, rule_id" in HANDLERS_SOURCE
+    assert "build_repost_campaign_invite_links_view(rule_id=rule_id, settings=settings, stats=stats)" in HANDLERS_SOURCE
+    assert "async def handle_rule_repost_campaign_invite_links_stats" in HANDLERS_SOURCE
+    stats_start = HANDLERS_SOURCE.index("async def handle_rule_repost_campaign_invite_links_stats")
+    stats_end = HANDLERS_SOURCE.index("@dp.callback_query", stats_start + 1)
+    stats_source = HANDLERS_SOURCE[stats_start:stats_end]
+    assert "_ensure_repost_campaign_rule_available" in stats_source
+    assert "_get_invite_link_stats_for_ui(rule_id, ctx)" in stats_source
+    assert "build_repost_campaign_invite_links_stats_view" in stats_source
+    assert "ctx.db.get_campaign_invite_link_stats, invite_link_id" in HANDLERS_SOURCE
+    assert "link_stats[int(invite_link_id)]" in HANDLERS_SOURCE
+    assert "build_repost_campaign_invite_link_view(rule_id=rule_id, link=link, stats=stats)" in HANDLERS_SOURCE
+    assert "REPOST_CAMPAIGN_INVITE_LINK_STATS_LOAD_FAILED" in HANDLERS_SOURCE
