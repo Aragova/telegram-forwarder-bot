@@ -81,6 +81,18 @@ class _Cursor:
             row.update({"id": row_id, "event_at": row["event_at"] or now, "created_at": now})
             self.store["events"][row_id] = row
             self._row = {"id": row_id}; self.rowcount = 1; return
+        if normalized.startswith("SELECT id, invite_link_id, rule_id, campaign_run_id"):
+            rows = [
+                r for r in self.store["events"].values()
+                if r["destination_chat_id"] == str(params[0]) and r["telegram_user_id_hash"] == params[1]
+            ]
+            if "event_type = ANY" in normalized:
+                allowed = set(params[2])
+                rows = [r for r in rows if r["event_type"] in allowed]
+            rows = sorted(rows, key=lambda r: (r["event_at"], r["id"]), reverse=True)
+            self._row = rows[0] if rows else None
+            self.rowcount = 1 if self._row else 0
+            return
         if normalized.startswith("SELECT COUNT(*) AS links_total"):
             rows = [r for r in self.store["links"].values() if r["rule_id"] == int(params[0])]
             self._row = {"links_total": len(rows), "links_active": sum(r["status"] == "active" for r in rows)}; return
@@ -213,3 +225,30 @@ def test_invalid_values_are_rejected():
     assert repo.create_campaign_invite_link_event(invite_link_id=1, rule_id=10, destination_chat_id="-100", event_type="bad", telegram_user_id_hash="u") is None
     assert store["links"] == {}
     assert store["events"] == {}
+
+
+def test_get_latest_campaign_invite_link_event_for_user():
+    repo, _ = _repo()
+    link_id = _create(repo)
+    other_link_id = _create(repo, link_hash="other")
+    old = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    newer = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    newest = datetime(2024, 1, 3, tzinfo=timezone.utc)
+    repo.create_campaign_invite_link_event(invite_link_id=link_id, rule_id=10, destination_chat_id="-100", event_type="join_request_created", telegram_user_id_hash="u1", event_at=old)
+    joined_id = repo.create_campaign_invite_link_event(invite_link_id=link_id, rule_id=10, destination_chat_id="-100", event_type="member_joined", telegram_user_id_hash="u1", event_at=newer)
+    repo.create_campaign_invite_link_event(invite_link_id=link_id, rule_id=10, destination_chat_id="-100", event_type="member_left", telegram_user_id_hash="u1", event_at=newest)
+    repo.create_campaign_invite_link_event(invite_link_id=other_link_id, rule_id=10, destination_chat_id="-200", event_type="member_joined", telegram_user_id_hash="u1", event_at=newest)
+    repo.create_campaign_invite_link_event(invite_link_id=link_id, rule_id=10, destination_chat_id="-100", event_type="member_joined", telegram_user_id_hash="u2", event_at=newest)
+
+    row = repo.get_latest_campaign_invite_link_event_for_user(
+        destination_chat_id="-100",
+        telegram_user_id_hash="u1",
+        event_types=["member_joined", "join_request_created"],
+    )
+    assert row["id"] == joined_id
+    assert row["event_type"] == "member_joined"
+    assert row["telegram_user_id_hash"] == "u1"
+    assert row["destination_chat_id"] == "-100"
+
+    any_event = repo.get_latest_campaign_invite_link_event_for_user(destination_chat_id="-100", telegram_user_id_hash="u1")
+    assert any_event["event_type"] == "member_left"
