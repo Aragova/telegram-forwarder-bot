@@ -18,9 +18,9 @@ async def handle_campaign_invite_link_chat_join_request(
     chat_join_request: ChatJoinRequest,
     campaign_invite_link_repo=None,
 ):
-    logger.info("CAMPAIGN_INVITE_LINK_JOIN_REQUEST_RECEIVED")
+    logger.debug("CAMPAIGN_INVITE_LINK_JOIN_REQUEST_RECEIVED")
     if campaign_invite_link_repo is None:
-        logger.warning("CAMPAIGN_INVITE_LINK_JOIN_REQUEST_SKIPPED reason=missing_repo")
+        logger.debug("CAMPAIGN_INVITE_LINK_JOIN_REQUEST_SKIPPED reason=missing_repo")
         return
     try:
         service = CampaignInviteLinkEventsService(repo=campaign_invite_link_repo, logger=logger)
@@ -28,7 +28,7 @@ async def handle_campaign_invite_link_chat_join_request(
         if result.get("ok"):
             logger.info("CAMPAIGN_INVITE_LINK_JOIN_REQUEST_RECORDED invite_link_id=%s rule_id=%s", result.get("invite_link_id"), result.get("rule_id"))
         else:
-            logger.info("CAMPAIGN_INVITE_LINK_JOIN_REQUEST_SKIPPED reason=%s", result.get("reason"))
+            logger.debug("CAMPAIGN_INVITE_LINK_JOIN_REQUEST_SKIPPED reason=%s", result.get("reason"))
     except Exception as exc:
         logger.warning("CAMPAIGN_INVITE_LINK_JOIN_REQUEST_FAILED error=%s", exc)
 
@@ -38,9 +38,9 @@ async def handle_campaign_invite_link_chat_member(
     chat_member: ChatMemberUpdated,
     campaign_invite_link_repo=None,
 ):
-    logger.info("CAMPAIGN_INVITE_LINK_CHAT_MEMBER_RECEIVED")
+    logger.debug("CAMPAIGN_INVITE_LINK_CHAT_MEMBER_RECEIVED")
     if campaign_invite_link_repo is None:
-        logger.warning("CAMPAIGN_INVITE_LINK_CHAT_MEMBER_SKIPPED reason=missing_repo")
+        logger.debug("CAMPAIGN_INVITE_LINK_CHAT_MEMBER_SKIPPED reason=missing_repo")
         return
     try:
         service = CampaignInviteLinkEventsService(repo=campaign_invite_link_repo, logger=logger)
@@ -48,6 +48,6 @@ async def handle_campaign_invite_link_chat_member(
         if result.get("ok"):
             logger.info("CAMPAIGN_INVITE_LINK_CHAT_MEMBER_RECORDED event_type=%s invite_link_id=%s rule_id=%s", result.get("event_type"), result.get("invite_link_id"), result.get("rule_id"))
         else:
-            logger.info("CAMPAIGN_INVITE_LINK_CHAT_MEMBER_SKIPPED reason=%s", result.get("reason"))
+            logger.debug("CAMPAIGN_INVITE_LINK_CHAT_MEMBER_SKIPPED reason=%s", result.get("reason"))
     except Exception as exc:
         logger.warning("CAMPAIGN_INVITE_LINK_CHAT_MEMBER_FAILED error=%s", exc)
