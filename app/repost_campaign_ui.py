@@ -523,8 +523,6 @@ def build_repost_campaign_vip_features_view(*, rule_id: int, invite_links_settin
         "чтобы автоматические репосты и видеопосты не выходили поверх рекламы.\n\n"
         f"📥 Заявки и вступления — {invite_links_status}\n"
         "ViMi будет создавать Telegram-ссылки для рекламных постов и считать заявки, вступления и конверсию.\n\n"
-        "✨ A/B-тесты\n"
-        "Будущая функция для сравнения двух вариантов рекламного поста.\n\n"
         "Выберите функцию:"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -532,7 +530,6 @@ def build_repost_campaign_vip_features_view(*, rule_id: int, invite_links_settin
         [InlineKeyboardButton(text="🧹 Чистый канал", callback_data=f"rule_repost_campaign_clean_channel:{rule_id}")],
         [InlineKeyboardButton(text="📌 Время в топе", callback_data=f"rule_repost_campaign_top_time:{rule_id}")],
         [InlineKeyboardButton(text=f"📥 Заявки и вступления — {invite_links_status}", callback_data=f"rule_repost_campaign_invite_links:{rule_id}")],
-        [InlineKeyboardButton(text="✨ A/B-тесты", callback_data=f"rule_repost_campaign_vip_coming_soon:{rule_id}:ab_test")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
     ])
     return text, kb

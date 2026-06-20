@@ -555,7 +555,8 @@ def test_post_stats_loading_view():
 def test_vip_features_view_contains_placeholder_text():
     text, keyboard = build_repost_campaign_vip_features_view(rule_id=5)
     assert "💎 VIP-функции" in text
-    assert "A/B-тесты" in text
+    assert "📥 Заявки и вступления" in text
+    assert "A/B-тесты" not in text
     assert "⬅️ Назад" in _texts_from_keyboard(keyboard)
 
 
@@ -921,7 +922,7 @@ def test_vip_features_menu_uses_approved_copy():
         "обычный автопостинг ViMi",
         "автоматические репосты",
         "видеопосты",
-        "✨ A/B-тесты",
+        "📥 Заявки и вступления",
     ]:
         assert expected in text
 
@@ -935,6 +936,8 @@ def test_vip_features_menu_uses_approved_copy():
         "сегменты аудитории",
         "invite links",
         "AI-рекомендации",
+        "✨ A/B-тесты",
+        "Будущая функция для сравнения двух вариантов рекламного поста",
     ]:
         assert forbidden not in text
 
@@ -946,9 +949,10 @@ def test_vip_features_menu_keeps_callbacks():
         "rule_repost_campaign_clean_channel:73",
         "rule_repost_campaign_top_time:73",
         "rule_repost_campaign_invite_links:73",
-        "rule_repost_campaign_vip_coming_soon:73:ab_test",
         "rule_repost_campaign_menu:73",
     ]
+    assert "rule_repost_campaign_vip_coming_soon:73:ab_test" not in _callbacks_from_keyboard(keyboard)
+    assert "✨ A/B-тесты" not in _texts_from_keyboard(keyboard)
 
 
 def test_top_time_intro_view_explains_actual_behavior():
