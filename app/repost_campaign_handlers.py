@@ -29,6 +29,7 @@ from app.repost_campaign_ui import (
     build_repost_campaign_invite_links_mode_view,
     build_repost_campaign_invite_links_per_target_view,
     build_repost_campaign_invite_links_preview_view,
+    build_repost_campaign_invite_links_stats_view,
     build_repost_campaign_invite_links_view,
     build_repost_campaign_launch_clean_channel_blocked_view,
     build_repost_campaign_launch_clean_channel_warning_view,
@@ -369,11 +370,28 @@ async def _get_invite_link_settings_for_ui(rule_id: int, ctx: RepostCampaignHand
         return None
 
 
+async def _get_invite_link_stats_for_ui(rule_id: int, ctx: RepostCampaignHandlersContext) -> dict | None:
+    try:
+        return await ctx.run_db(ctx.db.get_campaign_invite_link_stats_for_rule, rule_id)
+    except Exception as exc:
+        ctx.logger.exception("REPOST_CAMPAIGN_INVITE_LINK_STATS_LOAD_FAILED | rule_id=%s | error=%s", rule_id, exc)
+        return None
+
+
+async def _get_invite_link_stats_by_link_for_ui(invite_link_id: int, ctx: RepostCampaignHandlersContext) -> dict | None:
+    try:
+        return await ctx.run_db(ctx.db.get_campaign_invite_link_stats, invite_link_id)
+    except Exception as exc:
+        ctx.logger.exception("REPOST_CAMPAIGN_INVITE_LINK_STATS_LOAD_FAILED | invite_link_id=%s | error=%s", invite_link_id, exc)
+        return None
+
+
 async def _render_repost_campaign_invite_links(callback: CallbackQuery, rule_id: int, ctx: RepostCampaignHandlersContext) -> bool:
     if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
         return False
     settings = await _get_invite_link_settings_for_ui(rule_id, ctx)
-    text, keyboard = build_repost_campaign_invite_links_view(rule_id=rule_id, settings=settings)
+    stats = await _get_invite_link_stats_for_ui(rule_id, ctx)
+    text, keyboard = build_repost_campaign_invite_links_view(rule_id=rule_id, settings=settings, stats=stats)
     await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
     return True
 
@@ -1627,11 +1645,33 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
             return
         settings = await _get_invite_link_settings_for_ui(rule_id, ctx)
         try:
-            links = await ctx.run_db(ctx.db.list_campaign_invite_links_for_rule, rule_id, statuses=None, limit=50)
+            links = await ctx.run_db(ctx.db.list_campaign_invite_links_for_rule, rule_id, statuses=None, limit=10)
         except Exception as exc:
             ctx.logger.exception("REPOST_CAMPAIGN_INVITE_LINKS_LIST_FAILED | rule_id=%s | error=%s", rule_id, exc)
             links = []
-        text, keyboard = build_repost_campaign_invite_links_list_view(rule_id=rule_id, page=page, settings=settings, links=links or [])
+        link_stats = {}
+        for link in (links or [])[:10]:
+            invite_link_id = link.get("id") or link.get("invite_link_id")
+            if invite_link_id is None:
+                continue
+            link_stats[int(invite_link_id)] = await _get_invite_link_stats_by_link_for_ui(int(invite_link_id), ctx)
+        text, keyboard = build_repost_campaign_invite_links_list_view(rule_id=rule_id, page=page, settings=settings, links=links or [], link_stats=link_stats)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
+        await ctx.answer_callback_safe_once(callback)
+
+    @dp.callback_query(lambda c: c.data.startswith("rule_repost_campaign_invite_links_stats:"))
+    async def handle_rule_repost_campaign_invite_links_stats(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            rule_id = int((callback.data or "").split(":")[1])
+        except Exception:
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if not await _ensure_repost_campaign_rule_available(callback, rule_id, ctx):
+            return
+        stats = await _get_invite_link_stats_for_ui(rule_id, ctx)
+        text, keyboard = build_repost_campaign_invite_links_stats_view(rule_id=rule_id, stats=stats)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await ctx.answer_callback_safe_once(callback)
 
@@ -1693,7 +1733,8 @@ def register_repost_campaign_handlers(dp: Dispatcher, ctx: RepostCampaignHandler
         if not link or int(link.get("rule_id") or 0) != int(rule_id):
             text, keyboard = build_repost_campaign_invite_link_not_found_view(rule_id=rule_id)
         else:
-            text, keyboard = build_repost_campaign_invite_link_view(rule_id=rule_id, link=link)
+            stats = await _get_invite_link_stats_by_link_for_ui(invite_link_id, ctx)
+            text, keyboard = build_repost_campaign_invite_link_view(rule_id=rule_id, link=link, stats=stats)
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=keyboard)
         await ctx.answer_callback_safe_once(callback)
 

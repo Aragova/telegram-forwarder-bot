@@ -97,7 +97,10 @@ class _Cursor:
             rows = [r for r in self.store["links"].values() if r["rule_id"] == int(params[0])]
             self._row = {"links_total": len(rows), "links_active": sum(r["status"] == "active" for r in rows)}; return
         if normalized.startswith("SELECT COUNT(*) FILTER (WHERE event_type"):
-            rows = [r for r in self.store["events"].values() if r["rule_id"] == int(params[0])]
+            if "WHERE invite_link_id" in normalized:
+                rows = [r for r in self.store["events"].values() if r["invite_link_id"] == int(params[0])]
+            else:
+                rows = [r for r in self.store["events"].values() if r["rule_id"] == int(params[0])]
             self._row = {
                 "join_requests_total": sum(r["event_type"] == "join_request_created" for r in rows),
                 "joins_total": sum(r["event_type"] == "member_joined" for r in rows),
@@ -217,6 +220,38 @@ def test_stats_for_rule():
     stats = repo.get_campaign_invite_link_stats_for_rule(10)
     assert stats == {"rule_id": 10, "links_total": 2, "links_active": 2, "join_requests_total": 3, "joins_total": 2, "left_total": 1, "kicked_total": 1, "unknown_total": 0, "unique_users_total": 7}
 
+
+
+def test_stats_for_invite_link_empty_and_missing_returns_zeroes():
+    repo, _ = _repo()
+    assert repo.get_campaign_invite_link_stats(999) == {
+        "invite_link_id": 999,
+        "join_requests_total": 0,
+        "joins_total": 0,
+        "left_total": 0,
+        "kicked_total": 0,
+        "unknown_total": 0,
+        "unique_users_total": 0,
+    }
+
+
+def test_stats_for_invite_link_counts_only_link_events_and_unique_users():
+    repo, _ = _repo(); a = _create(repo, 10, "a"); b = _create(repo, 10, "b")
+    repo.create_campaign_invite_link_event(invite_link_id=a, rule_id=10, destination_chat_id="-100", event_type="join_request_created", telegram_user_id_hash="u1")
+    repo.create_campaign_invite_link_event(invite_link_id=a, rule_id=10, destination_chat_id="-100", event_type="member_joined", telegram_user_id_hash="u1")
+    repo.create_campaign_invite_link_event(invite_link_id=a, rule_id=10, destination_chat_id="-100", event_type="member_left", telegram_user_id_hash="u2")
+    repo.create_campaign_invite_link_event(invite_link_id=a, rule_id=10, destination_chat_id="-100", event_type="member_kicked", telegram_user_id_hash="u3")
+    repo.create_campaign_invite_link_event(invite_link_id=a, rule_id=10, destination_chat_id="-100", event_type="member_unknown", telegram_user_id_hash="u4")
+    repo.create_campaign_invite_link_event(invite_link_id=b, rule_id=10, destination_chat_id="-100", event_type="join_request_created", telegram_user_id_hash="u9")
+    assert repo.get_campaign_invite_link_stats(a) == {
+        "invite_link_id": a,
+        "join_requests_total": 1,
+        "joins_total": 1,
+        "left_total": 1,
+        "kicked_total": 1,
+        "unknown_total": 1,
+        "unique_users_total": 4,
+    }
 
 def test_invalid_values_are_rejected():
     repo, store = _repo()
