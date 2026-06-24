@@ -205,3 +205,10 @@ def test_policy_builders_return_usable_transport_policies():
     assert build_sender_bot_policy().max_attempts == 2
     assert sender_telethon_policy._semaphore._value == 1
     assert build_reaction_policy().max_attempts == 1
+
+
+def test_policy_classifies_transport_operations_without_changing_execute_api():
+    policy = TransportPolicy(max_attempts=1)
+
+    assert policy.classify_operation(backend="bot", op_name="copy_message") == "non_idempotent_write"
+    assert policy.classify_operation(backend="telethon", op_name="get_messages") == "safe_read"
