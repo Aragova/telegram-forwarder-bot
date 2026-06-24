@@ -13,6 +13,25 @@ from app.transport_operation import TransportOperationKind, classify_transport_o
 logger = logging.getLogger("forwarder.transport")
 
 
+def _transport_label_from_key(key: str, op_name: str) -> str:
+    suffix = f".{op_name}"
+    if key.endswith(suffix):
+        return key[: -len(suffix)] or key
+    return key
+
+
+def _safe_error_text(exc: Exception, *, max_len: int = 160) -> str:
+    text = str(exc).replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_len:
+        return f"{text[: max_len - 3]}..."
+    return text
+
+
+def _format_transport_log_context(**fields) -> str:
+    return " | ".join(f"{name}={value}" for name, value in fields.items() if value is not None)
+
+
 @dataclass(slots=True)
 class RetryDecision:
     should_retry: bool
@@ -100,24 +119,30 @@ class TransportPolicy:
             op_name=op_name,
             explicit_kind=operation_kind,
         )
+        label = _transport_label_from_key(key, op_name)
         last_error = None
 
         for attempt in range(1, self.max_attempts + 1):
+            attempt_started_at = time.monotonic()
             try:
                 async with self._semaphore:
                     await self._wait_rate_slot(key)
 
-                    started_at = time.monotonic()
                     result = await func()
-                    elapsed = time.monotonic() - started_at
+                    elapsed_ms = int((time.monotonic() - attempt_started_at) * 1000)
 
                     logger.debug(
-                        "TRANSPORT | OK | backend=%s | op=%s | key=%s | attempt=%s | elapsed=%.3f",
-                        backend,
-                        op_name,
-                        key,
-                        attempt,
-                        elapsed,
+                        "TRANSPORT | CALL_OK | %s",
+                        _format_transport_log_context(
+                            backend=backend,
+                            label=label,
+                            op=op_name,
+                            operation_kind=_operation_kind.value,
+                            attempt=attempt,
+                            max_attempts=self.max_attempts,
+                            elapsed_ms=elapsed_ms,
+                            decision="success",
+                        ),
                     )
                     return result
 
@@ -125,11 +150,15 @@ class TransportPolicy:
                 raise
             except Exception as exc:
                 last_error = exc
+                elapsed_ms = int((time.monotonic() - attempt_started_at) * 1000)
                 decision = self._classify_error(
                     backend=backend,
+                    label=label,
                     op_name=op_name,
                     key=key,
+                    operation_kind=_operation_kind,
                     attempt=attempt,
+                    elapsed_ms=elapsed_ms,
                     exc=exc,
                 )
 
@@ -138,18 +167,31 @@ class TransportPolicy:
                     decision=decision,
                 )
 
+                decision_name = self._failure_decision_name(
+                    operation_kind=_operation_kind,
+                    decision=decision,
+                    attempt=attempt,
+                )
+                event = self._failure_event_name(decision_name=decision_name, decision=decision, attempt=attempt)
+
                 logger.warning(
-                    "TRANSPORT | ERROR | backend=%s | op=%s | kind=%s | key=%s | attempt=%s/%s | retry=%s | delay=%.2f | reason=%s | error=%s",
-                    backend,
-                    op_name,
-                    _operation_kind.value,
-                    key,
-                    attempt,
-                    self.max_attempts,
-                    decision.should_retry,
-                    decision.delay,
-                    decision.reason,
-                    exc,
+                    "TRANSPORT | %s | %s",
+                    event,
+                    _format_transport_log_context(
+                        backend=backend,
+                        label=label,
+                        op=op_name,
+                        operation_kind=_operation_kind.value,
+                        attempt=attempt,
+                        max_attempts=self.max_attempts,
+                        elapsed_ms=elapsed_ms,
+                        error_type=exc.__class__.__name__,
+                        error_text=_safe_error_text(exc),
+                        retryable=decision.should_retry,
+                        retry_after=self._extract_wait_seconds(exc, str(exc).lower()),
+                        sleep_seconds=f"{decision.delay:.2f}" if decision.should_retry else None,
+                        decision=decision_name,
+                    ),
                 )
 
                 if not decision.should_retry or attempt >= self.max_attempts:
@@ -210,7 +252,12 @@ class TransportPolicy:
         key: str,
         attempt: int,
         exc: Exception,
+        label: str | None = None,
+        operation_kind: TransportOperationKind | None = None,
+        elapsed_ms: int = 0,
     ) -> RetryDecision:
+        label = label or _transport_label_from_key(key, op_name)
+        operation_kind = operation_kind or self.classify_operation(backend=backend, op_name=op_name)
         text = f"{exc}".lower()
         class_name = exc.__class__.__name__.lower()
 
@@ -218,11 +265,21 @@ class TransportPolicy:
         if flood_seconds is not None:
             if flood_seconds > self.long_retry_after_threshold_sec:
                 logger.warning(
-                    "TRANSPORT | RATE_LIMITED | backend=%s | op=%s | key=%s | retry_after=%s",
-                    backend,
-                    op_name,
-                    key,
-                    flood_seconds,
+                    "TRANSPORT | RATE_LIMITED | %s",
+                    _format_transport_log_context(
+                        backend=backend,
+                        label=label,
+                        op=op_name,
+                        operation_kind=operation_kind.value,
+                        attempt=attempt,
+                        max_attempts=self.max_attempts,
+                        elapsed_ms=elapsed_ms,
+                        retry_after=flood_seconds,
+                        threshold=self.long_retry_after_threshold_sec,
+                        decision="rate_limited",
+                        error_type=exc.__class__.__name__,
+                        error_text=_safe_error_text(exc),
+                    ),
                 )
                 raise TransportRateLimited(
                     retry_after_seconds=flood_seconds,
@@ -307,6 +364,40 @@ class TransportPolicy:
             delay=0.0,
             reason="unknown_non_retry",
         )
+
+    def _failure_decision_name(
+        self,
+        *,
+        operation_kind: TransportOperationKind,
+        decision: RetryDecision,
+        attempt: int,
+    ) -> str:
+        if decision.should_retry and attempt < self.max_attempts:
+            return "retry"
+        if decision.should_retry and attempt >= self.max_attempts:
+            return "max_attempts_exceeded"
+        if (
+            operation_kind == TransportOperationKind.NON_IDEMPOTENT_WRITE
+            and "non_idempotent_write_auto_retry_disabled" in decision.reason
+        ):
+            return "no_retry_non_idempotent_write"
+        if (
+            operation_kind == TransportOperationKind.UNKNOWN
+            and "unknown_operation_auto_retry_disabled" in decision.reason
+        ):
+            return "no_retry_unknown_operation"
+        if decision.reason == "non_retry_business_error":
+            return "non_retryable_error"
+        return "raise"
+
+    def _failure_event_name(self, *, decision_name: str, decision: RetryDecision, attempt: int) -> str:
+        if decision_name == "retry" and decision.should_retry and attempt < self.max_attempts:
+            return "CALL_RETRY"
+        if decision_name.startswith("no_retry_"):
+            return "RETRY_SKIPPED"
+        if decision_name == "non_retryable_error":
+            return "CALL_FAILED_NON_RETRYABLE"
+        return "CALL_FAILED"
 
     def _exp_backoff(self, attempt: int) -> float:
         delay = min(
