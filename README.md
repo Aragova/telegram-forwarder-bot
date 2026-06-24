@@ -21,6 +21,11 @@
 В исходном коде поле `posts.sent` было общим для всех правил. Из-за этого один и тот же пост нельзя было безопасно доставлять в несколько получателей.
 Теперь доставка вынесена в таблицу `deliveries`, и каждая связка source -> target имеет свою очередь.
 
+
+## Architecture notes
+
+- [Sender Architecture v2](docs/sender-architecture-v2.md)
+
 ## Запуск
 
 ### Production (рекомендуется): split-runtime
