@@ -212,3 +212,158 @@ def test_policy_classifies_transport_operations_without_changing_execute_api():
 
     assert policy.classify_operation(backend="bot", op_name="copy_message") == "non_idempotent_write"
     assert policy.classify_operation(backend="telethon", op_name="get_messages") == "safe_read"
+
+
+def test_sender_bot_policy_does_not_retry_non_idempotent_write_transient_error(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+        policy = build_sender_bot_policy()
+        calls = 0
+
+        async def operation():
+            nonlocal calls
+            calls += 1
+            raise TimeoutError("timed out")
+
+        with pytest.raises(TimeoutError):
+            await policy.execute(backend="bot", key="sender.copy", op_name="copy_message", func=operation)
+
+        assert calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_sender_telethon_policy_does_not_retry_non_idempotent_write_transient_error(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+        policy = build_sender_telethon_policy()
+        calls = 0
+
+        async def operation():
+            nonlocal calls
+            calls += 1
+            raise TimeoutError("connection reset")
+
+        with pytest.raises(TimeoutError):
+            await policy.execute(backend="telethon", key="sender.send-file", op_name="send_file", func=operation)
+
+        assert calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_sender_telethon_policy_still_retries_safe_read_transient_errors(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+        policy = build_sender_telethon_policy()
+        calls = 0
+
+        async def operation():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError("server disconnected")
+            return "messages"
+
+        result = await policy.execute(backend="telethon", key="sender.get", op_name="get_messages", func=operation)
+
+        assert result == "messages"
+        assert calls == 2
+
+    asyncio.run(scenario())
+
+
+def test_sender_telethon_policy_still_retries_download_transient_errors(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+        policy = build_sender_telethon_policy()
+        calls = 0
+
+        async def operation():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError("temporary failure")
+            return "downloaded"
+
+        result = await policy.execute(backend="telethon", key="sender.download", op_name="download_media", func=operation)
+
+        assert result == "downloaded"
+        assert calls == 2
+
+    asyncio.run(scenario())
+
+
+def test_sender_bot_policy_long_retry_after_on_write_raises_rate_limited_once():
+    async def scenario():
+        class RetryAfterError(Exception):
+            def __init__(self, retry_after):
+                self.retry_after = retry_after
+                super().__init__(f"retry after {retry_after}")
+
+        policy = build_sender_bot_policy()
+        calls = 0
+
+        async def operation():
+            nonlocal calls
+            calls += 1
+            raise RetryAfterError(policy.long_retry_after_threshold_sec + 1)
+
+        with pytest.raises(TransportRateLimited) as raised:
+            await policy.execute(backend="bot", key="sender.long-flood", op_name="send_message", func=operation)
+
+        assert raised.value.retry_after_seconds == policy.long_retry_after_threshold_sec + 1
+        assert calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_sender_bot_policy_short_retry_after_on_write_does_not_resend(monkeypatch):
+    async def scenario():
+        sleep_delays = []
+
+        async def fake_sleep(delay):
+            sleep_delays.append(delay)
+
+        class RetryAfterError(Exception):
+            def __init__(self, retry_after):
+                self.retry_after = retry_after
+                super().__init__(f"retry after {retry_after}")
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        policy = build_sender_bot_policy()
+        calls = 0
+
+        async def operation():
+            nonlocal calls
+            calls += 1
+            raise RetryAfterError(2)
+
+        with pytest.raises(RetryAfterError):
+            await policy.execute(backend="bot", key="sender.short-flood", op_name="send_message", func=operation)
+
+        assert calls == 1
+        assert sleep_delays == []
+
+    asyncio.run(scenario())
+
+
+def test_generic_policy_keeps_retrying_non_idempotent_write_transient_errors(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+        policy = TransportPolicy(max_attempts=2, base_backoff_sec=0.1, jitter_sec=0.0)
+        calls = 0
+
+        async def operation():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError("timed out")
+            return "ok"
+
+        result = await policy.execute(backend="bot", key="generic.send", op_name="send_message", func=operation)
+
+        assert result == "ok"
+        assert calls == 2
+
+    asyncio.run(scenario())
