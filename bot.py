@@ -8240,10 +8240,20 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
         admin_handlers_ctx.bot = bot
         admin_handlers_ctx.telethon_client = telethon_client
 
+    sender_bot = wrap_bot(
+        bot,
+        label="sender.bot",
+        policy=build_sender_bot_policy(),
+    )
+    sender_telethon_client = wrap_telethon_client(
+        telethon_client,
+        label="sender.telethon",
+        policy=build_sender_telethon_policy(),
+    )
     sender_service = SenderService(
-        bot=bot,
+        bot=sender_bot,
         db=db,
-        telethon_client=telethon_client,
+        telethon_client=sender_telethon_client,
         reaction_clients=reaction_clients,
     )
     runtime_context = RuntimeContext(
