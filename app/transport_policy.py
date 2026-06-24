@@ -7,6 +7,8 @@ import re
 import time
 from dataclasses import dataclass
 
+from app.transport_operation import TransportOperationKind, classify_transport_operation
+
 
 logger = logging.getLogger("forwarder.transport")
 
@@ -67,6 +69,19 @@ class TransportPolicy:
         self._rate_lock = asyncio.Lock()
         self._last_call_by_key: dict[str, float] = {}
 
+    def classify_operation(
+        self,
+        *,
+        backend: str,
+        op_name: str,
+        explicit_kind: TransportOperationKind | str | None = None,
+    ) -> TransportOperationKind:
+        return classify_transport_operation(
+            backend=backend,
+            op_name=op_name,
+            explicit_kind=explicit_kind,
+        )
+
     async def execute(
         self,
         *,
@@ -74,7 +89,13 @@ class TransportPolicy:
         key: str,
         op_name: str,
         func,
+        operation_kind: TransportOperationKind | str | None = None,
     ):
+        _operation_kind = self.classify_operation(
+            backend=backend,
+            op_name=op_name,
+            explicit_kind=operation_kind,
+        )
         last_error = None
 
         for attempt in range(1, self.max_attempts + 1):
