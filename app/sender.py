@@ -19,6 +19,14 @@ from .scheduler_service import SchedulerService
 from .reaction_runtime_resolver import ReactionRuntimeResolver
 from .top_time_guard_service import TopTimeGuardService
 from .delivery_idempotency import build_delivery_idempotency_key, extract_sent_message_ids_from_attempt, normalize_valid_sent_message_ids
+from .delivery_content_helpers import (
+    build_video_caption_delivery_payload,
+    content_requires_builder,
+    extract_text_from_content,
+    normalize_caption_delivery_mode,
+    normalize_caption_entities,
+    video_caption_requires_premium,
+)
 from .telegram_send_result import telegram_send_result_from_raw
 from telethon.tl.types import (
     MessageEntityBold,
@@ -579,100 +587,7 @@ class SenderService:
             return {"ok": False, "error": str(exc)}
 
     def _normalize_video_caption_entities(self, raw_entities) -> list[dict]:
-        if not raw_entities:
-            return []
-
-        parsed = raw_entities
-
-        try:
-            # 1) строка -> пробуем обычный JSON
-            if isinstance(parsed, str):
-                raw_text = parsed.strip()
-                if not raw_text:
-                    return []
-
-                try:
-                    parsed = json.loads(raw_text)
-                except Exception:
-                    # 2) fallback: иногда в базе лежит python-подобная строка
-                    import ast
-                    try:
-                        parsed = ast.literal_eval(raw_text)
-                    except Exception:
-                        logger.warning(
-                            "VIDEO_CAPTION_MODE | не удалось распарсить caption entities | type=%s | preview=%r",
-                            type(raw_entities),
-                            raw_text[:300],
-                        )
-                        return []
-
-            # 3) если после первого json.loads получили снова строку -> пробуем ещё раз
-            if isinstance(parsed, str):
-                parsed = parsed.strip()
-                if not parsed:
-                    return []
-                try:
-                    parsed = json.loads(parsed)
-                except Exception:
-                    logger.warning(
-                        "VIDEO_CAPTION_MODE | caption entities остались строкой после повторного parse | preview=%r",
-                        parsed[:300],
-                    )
-                    return []
-
-            if isinstance(parsed, dict):
-                parsed = [parsed]
-
-            if not isinstance(parsed, list):
-                logger.warning(
-                    "VIDEO_CAPTION_MODE | caption entities не список после нормализации | type=%s",
-                    type(parsed),
-                )
-                return []
-
-            normalized: list[dict] = []
-
-            for item in parsed:
-                if not isinstance(item, dict):
-                    continue
-
-                entity_type = str(item.get("type") or "").strip().lower()
-                offset = item.get("offset")
-                length = item.get("length")
-
-                try:
-                    offset = int(offset)
-                    length = int(length)
-                except Exception:
-                    continue
-
-                if not entity_type or offset < 0 or length <= 0:
-                    continue
-
-                normalized_item = {
-                    "type": entity_type,
-                    "offset": offset,
-                    "length": length,
-                }
-
-                if item.get("url"):
-                    normalized_item["url"] = str(item.get("url"))
-                if item.get("language"):
-                    normalized_item["language"] = str(item.get("language"))
-                if item.get("custom_emoji_id"):
-                    normalized_item["custom_emoji_id"] = str(item.get("custom_emoji_id"))
-
-                normalized.append(normalized_item)
-
-            return normalized
-
-        except Exception as exc:
-            logger.warning(
-                "VIDEO_CAPTION_MODE | normalize caption entities failed | error=%s | raw_type=%s",
-                exc,
-                type(raw_entities),
-            )
-            return []
+        return normalize_caption_entities(raw_entities)
 
     def _content_from_message_or_post(self, message=None, post_row=None) -> dict:
         def _row_value(row_obj, key: str, default=None):
@@ -824,80 +739,25 @@ class SenderService:
         }
 
     def _video_caption_requires_premium(self, caption: str | None, caption_entities) -> bool:
-        entities = self._normalize_video_caption_entities(caption_entities)
-
-        for entity in entities:
-            entity_type = str(entity.get("type") or "").strip().lower()
-            if entity_type == "custom_emoji":
-                return True
-
-        return False
+        return video_caption_requires_premium(caption_entities)
 
     def _build_video_caption_delivery_payload(self, rule) -> dict[str, Any]:
-        caption = getattr(rule, "video_caption", None)
-        raw_caption_entities = getattr(rule, "video_caption_entities_json", None)
-
-        caption_text = caption or ""
-        caption_entities = self._normalize_video_caption_entities(raw_caption_entities)
-        caption_delivery_mode = self._get_rule_video_caption_delivery_mode(rule)
-
-        requires_premium = self._video_caption_requires_premium(
-            caption_text,
-            caption_entities,
+        payload = build_video_caption_delivery_payload(
+            caption=getattr(rule, "video_caption", None),
+            raw_caption_entities=getattr(rule, "video_caption_entities_json", None),
+            caption_delivery_mode=self._get_rule_video_caption_delivery_mode(rule),
         )
-
-        has_any_entities = bool(caption_entities)
-
-        # SaaS-логика:
-        # builder_first  -> всегда premium
-        # copy_first     -> всегда plain
-        # auto           -> premium, если есть ЛЮБЫЕ entities
-        #                   (не только custom emoji), иначе plain
-        if caption_delivery_mode == "builder_first":
-            selected_mode = "premium"
-        elif caption_delivery_mode == "copy_first":
-            selected_mode = "plain"
-        else:
-            selected_mode = "premium" if has_any_entities else "plain"
-
-        caption_entities_json = None
-        if caption_entities:
-            try:
-                caption_entities_json = json.dumps(caption_entities, ensure_ascii=False)
-            except Exception as exc:
-                logger.warning(
-                    "VIDEO_CAPTION_MODE | не удалось сериализовать caption entities в json | error=%s",
-                    exc,
-                )
-                caption_entities_json = None
-
-        if caption_entities_json and isinstance(caption_entities_json, str):
-            try:
-                json.loads(caption_entities_json)
-            except Exception:
-                logger.warning(
-                    "VIDEO_CAPTION_MODE | caption_entities_json битый, сбрасываю в None"
-                )
-                caption_entities_json = None
 
         logger.info(
             "VIDEO_CAPTION_MODE | payload built | mode=%s | selected_mode=%s | has_caption=%s | entities=%s | requires_premium=%s",
-            caption_delivery_mode,
-            selected_mode,
-            bool(caption_text),
-            len(caption_entities),
-            requires_premium,
+            payload["caption_delivery_mode"],
+            payload["selected_mode"],
+            bool(payload["caption"]),
+            len(payload["caption_entities"]),
+            payload["requires_premium"],
         )
 
-        return {
-            "caption": caption_text,
-            "caption_entities": caption_entities,
-            "caption_entities_json": caption_entities_json,
-            "caption_delivery_mode": caption_delivery_mode,
-            "requires_premium": requires_premium,
-            "has_any_entities": has_any_entities,
-            "selected_mode": selected_mode,
-        }
+        return payload
 
     def _build_telethon_entities_from_content(self, content: dict | None, text: str) -> list:
         if not content:
@@ -1006,8 +866,7 @@ class SenderService:
         return built
 
     def _build_text_and_entities_from_content(self, content: dict | None) -> tuple[str, list]:
-        content = content or {}
-        text = str(content.get("text") or "")
+        text = extract_text_from_content(content)
         entities = self._build_telethon_entities_from_content(content, text)
         return text, entities
 
@@ -2219,10 +2078,7 @@ class SenderService:
         return None
 
     def _get_rule_video_caption_delivery_mode(self, rule) -> str:
-        mode = str(getattr(rule, "video_caption_delivery_mode", "auto") or "auto").strip().lower()
-        if mode not in ("copy_first", "builder_first", "auto"):
-            return "auto"
-        return mode
+        return normalize_caption_delivery_mode(getattr(rule, "video_caption_delivery_mode", "auto"))
 
     def _resolve_repost_caption_delivery_strategy(
         self,
@@ -2271,33 +2127,10 @@ class SenderService:
         Использует ТОЛЬКО поле caption_delivery_mode.
         Не смешивать с video_caption_delivery_mode.
         """
-        mode = str(getattr(rule, "caption_delivery_mode", "auto") or "auto").strip().lower()
-        if mode not in ("copy_first", "builder_first", "auto"):
-            return "auto"
-        return mode
+        return normalize_caption_delivery_mode(getattr(rule, "caption_delivery_mode", "auto"))
 
     def _content_requires_builder(self, content: dict | None) -> bool:
-        """
-        Для репоста считаем, что builder нужен,
-        если в контенте есть ЛЮБЫЕ entities.
-
-        Это делает auto-режим полностью одинаковым
-        с video-веткой:
-        - нет entities -> copy_first
-        - есть entities -> builder_first
-        """
-        content = content or {}
-        entities = content.get("entities") or []
-
-        for entity in entities:
-            try:
-                entity_type = str(entity.get("type") or "").strip().lower()
-                if entity_type:
-                    return True
-            except Exception:
-                continue
-
-        return False
+        return content_requires_builder(content)
 
     def _get_post_row_for_rule_message(
         self,
