@@ -1085,6 +1085,33 @@ class SenderService:
     def _mark_many_deliveries_sent_sync(self, delivery_ids: list[int]) -> None:
         self.db.mark_many_deliveries_sent(delivery_ids)
 
+    def _mark_album_deliveries_sent_sync(
+        self,
+        delivery_ids: list[int],
+        *,
+        sent_message_ids: list[int] | None = None,
+        target_id: str | None = None,
+        delivery_method: str | None = None,
+    ) -> None:
+        normalized_delivery_ids = [int(x) for x in (delivery_ids or [])]
+        if not normalized_delivery_ids:
+            raise RuntimeError("Не удалось определить deliveries альбома для перевода в sent")
+
+        valid_sent_message_ids = normalize_valid_sent_message_ids(sent_message_ids)
+        if valid_sent_message_ids and hasattr(self.db, "mark_delivery_sent_with_target_message"):
+            for index, album_delivery_id in enumerate(normalized_delivery_ids):
+                sent_message_id = valid_sent_message_ids[index] if index < len(valid_sent_message_ids) else valid_sent_message_ids[0]
+                self.db.mark_delivery_sent_with_target_message(
+                    album_delivery_id,
+                    sent_message_id=int(sent_message_id),
+                    sent_message_ids=valid_sent_message_ids,
+                    target_id=target_id,
+                    delivery_method=delivery_method,
+                )
+            return
+
+        self.db.mark_many_deliveries_sent(normalized_delivery_ids)
+
     def _mark_delivery_faulty_sync(self, delivery_id: int, error_text: str) -> None:
         self.db.mark_delivery_faulty(delivery_id, error_text)
 
@@ -3109,12 +3136,27 @@ class SenderService:
             normalized_mode,
             normalized_schedule_mode,
         )
-        album_source_ids = [int(x) for x in (delivery_ids or [])]
+        album_delivery_ids = [int(x) for x in (delivery_ids or [])]
+        if not album_delivery_ids and delivery_id is not None:
+            album_delivery_ids = [int(delivery_id)]
+        album_source_ids = list(album_delivery_ids)
         idempotency_key = build_delivery_idempotency_key(operation_kind="album", rule_id=int(rule_id), target_id=str(target_id), media_group_id=media_group_id, source_message_ids=album_source_ids)
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         if isinstance(attempt, dict) and str(attempt.get("status") or "") in {"accepted", "verified"} and cached_ids:
             logger.info("DELIVERY_ATTEMPT_CACHE_HIT | operation=album | key=%s | sent_message_ids=%s", idempotency_key, cached_ids)
+            await run_db(
+                self._mark_album_deliveries_sent_sync,
+                album_delivery_ids,
+                sent_message_ids=cached_ids,
+                target_id=str(target_id),
+                delivery_method="idempotency_cache",
+            )
+            logger.info(
+                "DELIVERY_ATTEMPT_CACHE_HIT | operation=album | marked deliveries sent | rule_id=%s | delivery_ids=%s",
+                rule_id,
+                album_delivery_ids,
+            )
             return True
         await run_db(self.db.create_delivery_attempt, delivery_id=int(delivery_id or 0), rule_id=int(rule_id), tenant_id=1, job_id=None, idempotency_key=idempotency_key, operation_kind="album", status="created", target_id=str(target_id), source_message_ids=album_source_ids)
         logger.info("DELIVERY_ATTEMPT_CREATED | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
@@ -3136,6 +3178,7 @@ class SenderService:
             )
             if not album_rows:
                 raise RuntimeError(f"Не найден processing-альбом media_group_id={media_group_id}")
+            album_delivery_ids = [int(r["delivery_id"]) for r in album_rows] or album_delivery_ids
 
             ok = await self._deliver_album(
                 rule,
@@ -3148,10 +3191,34 @@ class SenderService:
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
             if ok:
+                latest_attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
+                sent_ids = extract_sent_message_ids_from_attempt(latest_attempt)
+                try:
+                    await run_db(
+                        self._mark_album_deliveries_sent_sync,
+                        album_delivery_ids,
+                        sent_message_ids=sent_ids,
+                        target_id=str(target_id),
+                        delivery_method="repost_album",
+                    )
+                except Exception as mark_exc:
+                    logger.warning(
+                        "JOB EXECUTOR | repost_album | cannot mark deliveries sent | rule_id=%s | delivery_ids=%s | error=%s",
+                        rule_id,
+                        album_delivery_ids,
+                        mark_exc,
+                    )
+                    raise
                 logger.info(
-                    "JOB EXECUTOR | repost_album | success | rule_id=%s | delivery_id=%s",
+                    "JOB EXECUTOR | repost_album | marked deliveries sent | rule_id=%s | delivery_ids=%s",
+                    rule_id,
+                    album_delivery_ids,
+                )
+                logger.info(
+                    "JOB EXECUTOR | repost_album | success | rule_id=%s | delivery_id=%s | delivery_ids=%s",
                     rule_id,
                     delivery_id,
+                    album_delivery_ids,
                 )
             else:
                 await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
