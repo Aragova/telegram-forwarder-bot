@@ -56,6 +56,8 @@ class TransportPolicy:
         jitter_sec: float = 0.25,
         retry_unknown_errors: bool = False,
         long_retry_after_threshold_sec: int = 30,
+        retry_non_idempotent_writes: bool = True,
+        retry_unknown_operations: bool = True,
     ) -> None:
         self.max_attempts = max(1, int(max_attempts))
         self.min_interval_sec = max(0.0, float(min_interval_sec))
@@ -64,6 +66,8 @@ class TransportPolicy:
         self.jitter_sec = max(0.0, float(jitter_sec))
         self.retry_unknown_errors = bool(retry_unknown_errors)
         self.long_retry_after_threshold_sec = max(1, int(long_retry_after_threshold_sec))
+        self.retry_non_idempotent_writes = bool(retry_non_idempotent_writes)
+        self.retry_unknown_operations = bool(retry_unknown_operations)
 
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrency)))
         self._rate_lock = asyncio.Lock()
@@ -129,10 +133,16 @@ class TransportPolicy:
                     exc=exc,
                 )
 
+                decision = self.should_retry_operation(
+                    operation_kind=_operation_kind,
+                    decision=decision,
+                )
+
                 logger.warning(
-                    "TRANSPORT | ERROR | backend=%s | op=%s | key=%s | attempt=%s/%s | retry=%s | delay=%.2f | reason=%s | error=%s",
+                    "TRANSPORT | ERROR | backend=%s | op=%s | kind=%s | key=%s | attempt=%s/%s | retry=%s | delay=%.2f | reason=%s | error=%s",
                     backend,
                     op_name,
+                    _operation_kind.value,
                     key,
                     attempt,
                     self.max_attempts,
@@ -149,6 +159,34 @@ class TransportPolicy:
 
         if last_error:
             raise last_error
+
+    def should_retry_operation(
+        self,
+        *,
+        operation_kind: TransportOperationKind,
+        decision: RetryDecision,
+    ) -> RetryDecision:
+        if not decision.should_retry:
+            return decision
+
+        if (
+            operation_kind == TransportOperationKind.NON_IDEMPOTENT_WRITE
+            and not self.retry_non_idempotent_writes
+        ):
+            return RetryDecision(
+                should_retry=False,
+                delay=0.0,
+                reason=f"{decision.reason}:non_idempotent_write_auto_retry_disabled",
+            )
+
+        if operation_kind == TransportOperationKind.UNKNOWN and not self.retry_unknown_operations:
+            return RetryDecision(
+                should_retry=False,
+                delay=0.0,
+                reason=f"{decision.reason}:unknown_operation_auto_retry_disabled",
+            )
+
+        return decision
 
     async def _wait_rate_slot(self, key: str) -> None:
         if self.min_interval_sec <= 0:
@@ -312,6 +350,8 @@ def build_sender_bot_policy() -> TransportPolicy:
         max_backoff_sec=5.0,
         jitter_sec=0.2,
         retry_unknown_errors=False,
+        retry_non_idempotent_writes=False,
+        retry_unknown_operations=False,
     )
 
 
@@ -324,6 +364,8 @@ def build_sender_telethon_policy() -> TransportPolicy:
         max_backoff_sec=8.0,
         jitter_sec=0.25,
         retry_unknown_errors=False,
+        retry_non_idempotent_writes=False,
+        retry_unknown_operations=False,
     )
 
 
