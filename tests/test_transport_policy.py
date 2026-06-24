@@ -199,7 +199,9 @@ def test_policy_builders_return_usable_transport_policies():
     ]
 
     policies = [builder() for builder in builders]
+    sender_telethon_policy = build_sender_telethon_policy()
 
     assert all(isinstance(policy, TransportPolicy) for policy in policies)
     assert build_sender_bot_policy().max_attempts == 2
+    assert sender_telethon_policy._semaphore._value == 1
     assert build_reaction_policy().max_attempts == 1
