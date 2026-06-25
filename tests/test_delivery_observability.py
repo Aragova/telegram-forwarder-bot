@@ -63,7 +63,7 @@ def test_healthy_queue_is_ok():
     ])
     assert snapshot.status == DeliveryHealthStatus.OK
     assert snapshot.ok
-    assert snapshot.problem_rules == ()
+    assert [rule.rule_id for rule in snapshot.problem_rules] == [1]
 
 
 def test_faulty_warning_and_critical():
@@ -84,13 +84,13 @@ def test_stuck_processing_is_critical():
     assert snapshot.stuck_processing_count == 1
 
 
-def test_queue_lag_warning_and_critical():
+def test_old_pending_alone_does_not_make_warning_or_critical():
     service = DeliveryObservabilityService()
-    warning = service.build_snapshot([DeliveryRuleMetrics(rule_id=1, pending_count=1, oldest_pending_age_seconds=600)])
-    critical = service.build_snapshot([DeliveryRuleMetrics(rule_id=1, pending_count=1, oldest_pending_age_seconds=1800)])
-    assert warning.status == DeliveryHealthStatus.WARNING
-    assert warning.has_signal(DeliveryDiagnosticSignal.QUEUE_LAG)
-    assert critical.status == DeliveryHealthStatus.CRITICAL
+    warning_age = service.build_snapshot([DeliveryRuleMetrics(rule_id=1, pending_count=1, oldest_pending_age_seconds=600)])
+    critical_age = service.build_snapshot([DeliveryRuleMetrics(rule_id=1, pending_count=999999, oldest_pending_age_seconds=1800)])
+    assert warning_age.status == DeliveryHealthStatus.OK
+    assert warning_age.has_signal(DeliveryDiagnosticSignal.QUEUE_LAG)
+    assert critical_age.status == DeliveryHealthStatus.OK
 
 
 def test_rate_limited_or_deferred_warning():

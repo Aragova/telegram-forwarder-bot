@@ -1737,6 +1737,101 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return int(count or 0)
 
+
+    def get_stuck_processing_deliveries(
+        self,
+        *,
+        older_than_seconds: int,
+        limit: int = 50,
+        rule_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 50))
+        safe_seconds = max(1, int(older_than_seconds))
+        params: list[Any] = [safe_seconds]
+        rule_filter = ""
+        if rule_id is not None:
+            rule_filter = "AND d.rule_id = %s"
+            params.append(int(rule_id))
+        params.append(safe_limit)
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        d.id AS delivery_id,
+                        d.rule_id,
+                        d.post_id,
+                        r.source_id,
+                        r.target_id,
+                        EXTRACT(EPOCH FROM (NOW() - COALESCE(NULLIF(d.created_at, '')::timestamptz, NOW()))) AS age_seconds,
+                        d.created_at,
+                        d.error_text
+                    FROM deliveries d
+                    JOIN routing r ON r.id = d.rule_id
+                    WHERE d.status = 'processing'
+                      AND COALESCE(NULLIF(d.created_at, '')::timestamptz, NOW()) < NOW() - make_interval(secs => %s)
+                      {rule_filter}
+                    ORDER BY COALESCE(NULLIF(d.created_at, '')::timestamptz, NOW()) ASC, d.id ASC
+                    LIMIT %s
+                    """,
+                    tuple(params),
+                )
+                rows = cur.fetchall() or []
+        return [dict(row) for row in rows]
+
+    def reset_stuck_processing_deliveries_to_pending(
+        self,
+        *,
+        older_than_seconds: int,
+        limit: int = 50,
+        rule_id: int | None = None,
+        admin_id: int | None = None,
+    ) -> dict[str, Any]:
+        safe_limit = max(1, min(int(limit), 50))
+        safe_seconds = max(1, int(older_than_seconds))
+        params: list[Any] = [safe_seconds]
+        rule_filter = ""
+        if rule_id is not None:
+            rule_filter = "AND rule_id = %s"
+            params.append(int(rule_id))
+        params.append(safe_limit)
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH candidates AS (
+                        SELECT id
+                        FROM deliveries
+                        WHERE status = 'processing'
+                          AND COALESCE(NULLIF(created_at, '')::timestamptz, NOW()) < NOW() - make_interval(secs => %s)
+                          AND sent_at IS NULL
+                          AND sent_message_id IS NULL
+                          AND (sent_message_ids_json IS NULL OR sent_message_ids_json = '[]'::jsonb)
+                          {rule_filter}
+                        ORDER BY COALESCE(NULLIF(created_at, '')::timestamptz, NOW()) ASC, id ASC
+                        LIMIT %s
+                    )
+                    UPDATE deliveries d
+                    SET status = 'pending',
+                        error_text = NULL
+                    FROM candidates
+                    WHERE d.id = candidates.id
+                      AND d.status = 'processing'
+                    RETURNING d.id
+                    """,
+                    tuple(params),
+                )
+                rows = cur.fetchall() or []
+                delivery_ids = [int(row["id"]) for row in rows]
+            conn.commit()
+        logger.warning(
+            "manual_stuck_processing_reset: admin_id=%s reset_count=%s delivery_ids=%s",
+            admin_id,
+            len(delivery_ids),
+            delivery_ids,
+        )
+        return {"updated_count": len(delivery_ids), "delivery_ids": delivery_ids, "limit": safe_limit}
+
     # =========================================================
     # SAAS REACTIONS FOUNDATION
     # =========================================================

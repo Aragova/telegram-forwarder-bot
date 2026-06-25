@@ -17,7 +17,8 @@ def test_delivery_diagnostics_button_is_in_main_diagnostics_menu_next_to_existin
     assert "📊 Диагностика доставки" in menu_source
     assert "⚠️ Проблемные доставки" in menu_source
     assert "📊 Журнал системы" in menu_source
-    assert menu_source.index("⚠️ Проблемные доставки") < menu_source.index("📊 Диагностика доставки") < menu_source.index("📊 Журнал системы")
+    assert "🧯 Зависшие задачи" in menu_source
+    assert menu_source.index("⚠️ Проблемные доставки") < menu_source.index("📊 Диагностика доставки") < menu_source.index("🧯 Зависшие задачи") < menu_source.index("📊 Журнал системы")
 
     bot_source = (ROOT / "bot.py").read_text(encoding="utf-8")
     rule_card_start = bot_source.find("def build_rule_card")
@@ -52,3 +53,26 @@ def test_forbidden_runtime_files_do_not_contain_delivery_diagnostics_button() ->
     for relative_path in ("app/sender.py", "app/worker_runtime.py", "app/video_processor.py"):
         source = (ROOT / relative_path).read_text(encoding="utf-8")
         assert "📊 Диагностика доставки" not in source
+
+
+def test_stuck_delivery_handlers_are_admin_only_and_confirmation_required() -> None:
+    source = (ROOT / "app/admin_handlers/diagnostics.py").read_text(encoding="utf-8")
+    start = source.index("async def handle_stuck_deliveries")
+    end = source.index('@dp.message(lambda m: m.text == "📊 Журнал системы")', start)
+    handler_source = source[start:end]
+    assert "ctx.is_admin(message)" in handler_source
+    assert "ctx.is_admin_callback(callback)" in handler_source
+    assert "stuck_reset_request" in handler_source
+    assert "stuck_reset_confirm" in handler_source
+    assert handler_source.index("stuck_reset_request") < handler_source.index("reset_stuck_processing_deliveries_to_pending")
+    request_block = handler_source[handler_source.index("async def handle_stuck_reset_request"):handler_source.index("async def handle_stuck_reset_confirm")]
+    assert "reset_stuck_processing_deliveries_to_pending" not in request_block
+
+
+def test_stuck_button_not_added_to_rule_card() -> None:
+    bot_source = (ROOT / "bot.py").read_text(encoding="utf-8")
+    rule_card_start = bot_source.find("def build_rule_card")
+    if rule_card_start != -1:
+        next_section = bot_source.find("\ndef ", rule_card_start + 1)
+        rule_card_source = bot_source[rule_card_start:next_section if next_section != -1 else len(bot_source)]
+        assert "🧯 Зависшие задачи" not in rule_card_source

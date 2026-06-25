@@ -3,6 +3,8 @@ from __future__ import annotations
 from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from app.delivery_observability import DeliveryObservabilityConfig
+
 from .context import AdminHandlersContext
 
 
@@ -37,6 +39,60 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             ctx.logger.warning("Ошибка подготовки диагностики доставки", exc_info=True)
             text = "📊 Диагностика доставки\n\nСтатус: UNKNOWN\nПричина: временная ошибка диагностики. Попробуйте позже."
         await ctx.send_message_safe(chat_id=message.chat.id, text=text)
+
+
+    @dp.message(lambda m: (m.text or "").strip() == "🧯 Зависшие задачи")
+    async def handle_stuck_deliveries(message: Message):
+        ctx.reset_user_state(message.from_user.id if message.from_user else None)
+        if not await ctx.is_admin(message):
+            return
+        stale_seconds = DeliveryObservabilityConfig().stale_processing_after_seconds
+        rows = await ctx.run_db(ctx.db.get_stuck_processing_deliveries, older_than_seconds=stale_seconds, limit=50)
+        text = ctx.format_stuck_processing_deliveries_text(rows) if ctx.format_stuck_processing_deliveries_text else _format_stuck_processing_deliveries_text(rows)
+        await ctx.send_message_safe(chat_id=message.chat.id, text=text, reply_markup=_build_stuck_processing_keyboard(bool(rows)))
+
+    @dp.callback_query(lambda c: c.data == "stuck_reset_request")
+    async def handle_stuck_reset_request(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        stale_seconds = DeliveryObservabilityConfig().stale_processing_after_seconds
+        rows = await ctx.run_db(ctx.db.get_stuck_processing_deliveries, older_than_seconds=stale_seconds, limit=50)
+        if not rows:
+            await ctx.answer_callback_safe(callback, "Зависшие задачи не найдены", show_alert=True)
+            return
+        await ctx.answer_callback_safe_once(callback)
+        text = (
+            "🧯 Возврат зависших задач в очередь\n\n"
+            f"Будет обработано не больше 50 задач. Сейчас найдено к возврату: {len(rows)}.\n\n"
+            "⚠️ Важно:\n"
+            "если задача зависла после фактической отправки в Telegram, возврат в очередь может привести к дублю.\n"
+            "Используйте только когда уверены, что задача действительно зависла."
+        )
+        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=_build_stuck_reset_confirm_keyboard())
+
+    @dp.callback_query(lambda c: c.data == "stuck_reset_confirm")
+    async def handle_stuck_reset_confirm(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        stale_seconds = DeliveryObservabilityConfig().stale_processing_after_seconds
+        result = await ctx.run_db(
+            ctx.db.reset_stuck_processing_deliveries_to_pending,
+            older_than_seconds=stale_seconds,
+            limit=50,
+            admin_id=callback.from_user.id if callback.from_user else None,
+        )
+        await ctx.answer_callback_safe_once(callback, "Готово")
+        updated = int(result.get("updated_count") or 0)
+        remaining = await ctx.run_db(ctx.db.get_stuck_processing_deliveries, older_than_seconds=stale_seconds, limit=1)
+        tail = "\nОстались зависшие задачи — повторите действие при необходимости." if remaining else "\nЗависших задач больше не найдено."
+        await ctx.edit_message_text_safe(message=callback.message, text=f"🧯 Зависшие задачи\n\nВозвращено в очередь: {updated}.{tail}")
+
+    @dp.callback_query(lambda c: c.data == "stuck_reset_cancel")
+    async def handle_stuck_reset_cancel(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        await ctx.answer_callback_safe_once(callback, "Отменено")
+        await ctx.edit_message_text_safe(message=callback.message, text="🧯 Зависшие задачи\n\nДействие отменено. Reset не выполнялся.")
 
     @dp.message(lambda m: m.text == "📊 Журнал системы")
     async def handle_system_journal(message: Message):
@@ -213,3 +269,47 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(message=callback.message, text="⚠️ Раздел: Диагностика")
         await ctx.send_message_safe(chat_id=callback.message.chat.id, text="⚠️ Раздел: Диагностика", reply_markup=ctx.get_diagnostics_menu())
+
+
+def _duration_ru(seconds: object) -> str:
+    try:
+        value = max(0, int(float(seconds or 0)))
+    except (TypeError, ValueError):
+        return "нет данных"
+    minutes = value // 60
+    if minutes < 60:
+        return f"{minutes} мин"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч {minutes} мин"
+
+
+def _format_stuck_processing_deliveries_text(rows) -> str:
+    rows = list(rows or [])
+    lines = ["🧯 Зависшие задачи", "", f"Найдено: {len(rows)}"]
+    if not rows:
+        lines.extend(["", "Зависшие задачи не найдены."])
+        return "\n".join(lines)
+    for index, row in enumerate(rows, start=1):
+        lines.extend([
+            "",
+            f"{index}) delivery_id={row.get('delivery_id')}",
+            f"Правило #{row.get('rule_id')}",
+            f"Висит: {_duration_ru(row.get('age_seconds'))}",
+            f"Пост: {row.get('post_id')}",
+        ])
+    lines.extend([
+        "",
+        "Вы можете вернуть зависшие задачи в очередь.",
+        "Это безопаснее, чем править базу руками, но если пост уже был фактически отправлен Telegram, возможен дубль.",
+    ])
+    return "\n".join(lines)[:4000]
+
+
+def _build_stuck_processing_keyboard(has_rows: bool) -> InlineKeyboardMarkup | None:
+    if not has_rows:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Вернуть зависшие в очередь", callback_data="stuck_reset_request")]])
+
+
+def _build_stuck_reset_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Да, вернуть в очередь", callback_data="stuck_reset_confirm")], [InlineKeyboardButton(text="❌ Отмена", callback_data="stuck_reset_cancel")]])

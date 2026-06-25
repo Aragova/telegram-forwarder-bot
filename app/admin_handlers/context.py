@@ -38,6 +38,7 @@ class AdminHandlersContext:
     build_system_journal_pages: Callable[..., Any] | None = None
     build_system_journal_inline_keyboard: Callable[..., Any] | None = None
     build_delivery_diagnostics_admin_text: Callable[..., Any] | None = None
+    format_stuck_processing_deliveries_text: Callable[..., str] | None = None
     edit_message_text_safe: Callable[..., Any] | None = None
     get_channels_menu: Callable[..., Any] | None = None
     get_queue_menu: Callable[..., Any] | None = None
