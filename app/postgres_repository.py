@@ -6220,7 +6220,7 @@ class PostgresRepository(RepositoryProtocol):
                         COUNT(*) AS cnt
                     FROM jobs j
                     WHERE j.status = 'done'
-                      AND j.created_at >= NOW() - make_interval(mins => %s)
+                      AND j.updated_at >= NOW() - make_interval(mins => %s)
                       AND (%s = FALSE OR j.queue = %s)
                     GROUP BY {_JOB_TENANT_SQL}
                     """,
