@@ -14,6 +14,7 @@ from app.delivery_observability import (
 from app.delivery_pipeline_result import DeliveryPipelineResult
 from app.reaction_post_send_service import ReactionPostSendResult
 from app.repository_contracts import known_repository_responsibility_areas
+from app.sender_legacy_inventory import build_legacy_cleanup_readiness
 from app.sender_pipeline_facade import SenderPipelineFacade, SenderPipelineFacadeResult, SenderPipelineFeatureFlags
 from app.telegram_send_gateway import TelegramSendGateway
 from app.transport_operation import TransportOperationKind, classify_transport_operation
@@ -120,6 +121,7 @@ def test_foundation_modules_do_not_import_runtime_heavy_dependencies() -> None:
         "app/sender_pipeline_facade.py",
         "app/repository_contracts.py",
         "app/delivery_observability.py",
+        "app/sender_legacy_inventory.py",
     )
     forbidden_import_markers = (
         "from app.sender import",
@@ -141,6 +143,13 @@ def test_foundation_modules_do_not_import_runtime_heavy_dependencies() -> None:
         source = _read_repo_text(module_path)
         for marker in forbidden_import_markers:
             assert marker not in source, f"{module_path} must not contain {marker!r}"
+
+
+def test_sender_legacy_inventory_remains_runtime_neutral() -> None:
+    readiness = build_legacy_cleanup_readiness()
+
+    assert readiness.total_entries > 0
+    assert readiness.do_not_touch_count > 0
 
 
 def test_telegram_send_gateway_public_methods_remain_narrow() -> None:
