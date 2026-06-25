@@ -25,6 +25,19 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         current = pages[page]
         await ctx.send_message_safe(chat_id=message.chat.id, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]))
 
+
+    @dp.message(lambda m: m.text == "📊 Диагностика доставки")
+    async def handle_delivery_diagnostics(message: Message):
+        ctx.reset_user_state(message.from_user.id if message.from_user else None)
+        if not await ctx.is_admin(message):
+            return
+        try:
+            text = await ctx.build_delivery_diagnostics_admin_text()
+        except Exception:
+            ctx.logger.warning("Ошибка подготовки диагностики доставки", exc_info=True)
+            text = "📊 Диагностика доставки\n\nСтатус: UNKNOWN\nПричина: временная ошибка диагностики. Попробуйте позже."
+        await ctx.send_message_safe(chat_id=message.chat.id, text=text)
+
     @dp.message(lambda m: m.text == "📊 Журнал системы")
     async def handle_system_journal(message: Message):
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
