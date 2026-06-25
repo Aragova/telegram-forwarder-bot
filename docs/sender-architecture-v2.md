@@ -432,3 +432,8 @@ This stage must not:
 Runtime code was not changed.
 Transport layer was not duplicated.
 This stage only documents the agreed Sender Architecture v2 baseline.
+
+
+## Stage 26 — Delivery diagnostics admin integration v1
+
+Stage 26 adds a read-only admin UI integration for delivery diagnostics. The admin diagnostics menu can show a safe Russian DeliveryDiagnosticsSnapshot report built from repository delivery metrics. This stage does not change sender runtime, worker runtime, Telegram send gateway, rollout strategy activation, delivery attempts behavior, scheduler behavior, database schema, or migrations.

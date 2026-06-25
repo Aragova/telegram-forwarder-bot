@@ -121,6 +121,8 @@ def test_foundation_modules_do_not_import_runtime_heavy_dependencies() -> None:
         "app/sender_pipeline_facade.py",
         "app/repository_contracts.py",
         "app/delivery_observability.py",
+        "app/delivery_observability_provider.py",
+        "app/delivery_diagnostics_admin.py",
         "app/sender_legacy_inventory.py",
     )
     forbidden_import_markers = (

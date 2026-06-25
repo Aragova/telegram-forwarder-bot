@@ -54,6 +54,9 @@ from app.keyboards import (
 from app.logging_setup import setup_logging
 from app.parser import parse_channel_history, parse_group_history
 from app.sender import SenderService
+from app.delivery_diagnostics_admin import format_delivery_diagnostics_admin_text
+from app.delivery_observability import DeliveryObservabilityService
+from app.delivery_observability_provider import RepositoryDeliveryObservabilityProvider
 telethon_client = None
 from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIActionResult, UIErrorPolicy
@@ -214,6 +217,7 @@ MENU_NAVIGATION_TEXTS = {
     "➖ Удалить получатель",
     "➕ Добавить правило",
     "⚠️ Проблемные доставки",
+    "📊 Диагностика доставки",
     "📊 Журнал системы",
     "▶️ Запуск",
     "▶️ Запустить пересылку",
@@ -5296,6 +5300,12 @@ def paginate_html_blocks(
 
     return pages
 
+async def build_delivery_diagnostics_admin_text() -> str:
+    provider = RepositoryDeliveryObservabilityProvider(db)
+    service = DeliveryObservabilityService(metrics_provider=provider)
+    snapshot = await service.collect_snapshot(generated_at=datetime.now(timezone.utc))
+    return format_delivery_diagnostics_admin_text(snapshot)
+
 def build_system_journal_pages(limit: int = 300) -> list[str]:
     rows = db.get_recent_audit(limit=limit)
     if not rows:
@@ -8562,6 +8572,7 @@ def _register_admin_handlers() -> None:
         build_faulty_inline_keyboard=build_faulty_inline_keyboard,
         build_system_journal_pages=build_system_journal_pages,
         build_system_journal_inline_keyboard=build_system_journal_inline_keyboard,
+        build_delivery_diagnostics_admin_text=build_delivery_diagnostics_admin_text,
         edit_message_text_safe=lambda *a, **k: edit_message_text_safe(*a, **k),
         get_channels_menu=get_channels_menu,
         get_queue_menu=get_queue_menu,

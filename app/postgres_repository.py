@@ -6535,6 +6535,81 @@ class PostgresRepository(RepositoryProtocol):
                 )
                 return cur.fetchall()
 
+
+    def get_delivery_observability_rule_metrics(self) -> list[DeliveryRuleMetrics]:
+        """Return read-only delivery diagnostics metrics grouped by rule."""
+        from app.delivery_observability import DeliveryRuleMetrics, sanitize_diagnostic_text
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        r.id AS rule_id,
+                        r.source_id AS source_id,
+                        r.target_id AS target_id,
+                        COALESCE(COUNT(d.id) FILTER (WHERE d.status = 'pending'), 0) AS pending_count,
+                        COALESCE(COUNT(d.id) FILTER (WHERE d.status = 'processing'), 0) AS processing_count,
+                        COALESCE(COUNT(d.id) FILTER (WHERE d.status = 'sent'), 0) AS sent_count,
+                        COALESCE(COUNT(d.id) FILTER (WHERE d.status = 'faulty'), 0) AS faulty_count,
+                        0 AS deferred_count,
+                        COALESCE(COUNT(d.id) FILTER (
+                            WHERE d.status = 'faulty'
+                              AND d.error_text IS NOT NULL
+                              AND (
+                                  d.error_text ILIKE '%%retryafter%%'
+                                  OR d.error_text ILIKE '%%retry after%%'
+                                  OR d.error_text ILIKE '%%rate limit%%'
+                                  OR d.error_text ILIKE '%%too many requests%%'
+                              )
+                        ), 0) AS rate_limited_count,
+                        EXTRACT(EPOCH FROM (NOW() - MIN(d.created_at::timestamptz) FILTER (WHERE d.status = 'pending'))) AS oldest_pending_age_seconds,
+                        EXTRACT(EPOCH FROM (NOW() - MIN(d.created_at::timestamptz) FILTER (WHERE d.status = 'processing'))) AS oldest_processing_age_seconds,
+                        EXTRACT(EPOCH FROM (r.next_run_at::timestamptz - NOW())) AS next_run_in_seconds,
+                        last_fault.error_text AS last_error_text
+                    FROM routing r
+                    LEFT JOIN deliveries d ON d.rule_id = r.id
+                    LEFT JOIN LATERAL (
+                        SELECT fd.error_text
+                        FROM deliveries fd
+                        WHERE fd.rule_id = r.id
+                          AND fd.status = 'faulty'
+                          AND fd.error_text IS NOT NULL
+                        ORDER BY fd.id DESC
+                        LIMIT 1
+                    ) AS last_fault ON TRUE
+                    GROUP BY r.id, r.source_id, r.target_id, r.next_run_at, last_fault.error_text
+                    ORDER BY r.id
+                    """
+                )
+                rows = cur.fetchall()
+
+        metrics: list[DeliveryRuleMetrics] = []
+        for row in rows:
+            last_error_text = sanitize_diagnostic_text(row.get("last_error_text"), max_length=500)
+            last_error_type = None
+            if last_error_text:
+                last_error_type = sanitize_diagnostic_text(last_error_text.split(":", 1)[0], max_length=120)
+            metrics.append(
+                DeliveryRuleMetrics(
+                    rule_id=row.get("rule_id"),
+                    source_id=row.get("source_id"),
+                    target_id=row.get("target_id"),
+                    pending_count=int(row.get("pending_count") or 0),
+                    processing_count=int(row.get("processing_count") or 0),
+                    sent_count=int(row.get("sent_count") or 0),
+                    faulty_count=int(row.get("faulty_count") or 0),
+                    deferred_count=int(row.get("deferred_count") or 0),
+                    rate_limited_count=int(row.get("rate_limited_count") or 0),
+                    oldest_pending_age_seconds=row.get("oldest_pending_age_seconds"),
+                    oldest_processing_age_seconds=row.get("oldest_processing_age_seconds"),
+                    next_run_in_seconds=row.get("next_run_in_seconds"),
+                    last_error_type=last_error_type,
+                    last_error_text=last_error_text,
+                )
+            )
+        return metrics
+
     def get_rule_card_snapshot(self, rule_id: int) -> dict[str, Any] | None:
         """
         Быстрый snapshot для карточки одного правила.
