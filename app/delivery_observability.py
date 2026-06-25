@@ -333,7 +333,7 @@ class DeliveryObservabilityService:
             stuck_processing_count=stuck_processing_count,
             queue_lag_seconds=queue_lag_seconds,
         )
-        status = self._build_status(total_faulty, total_deferred, total_rate_limited, stuck_processing_count, queue_lag_seconds)
+        status = self._build_status(total_faulty, total_deferred, total_rate_limited, stuck_processing_count)
         problem_rules = self._select_problem_rules(metrics)
         return DeliveryDiagnosticsSnapshot(
             status=status,
@@ -404,19 +404,14 @@ class DeliveryObservabilityService:
         total_deferred: int,
         total_rate_limited: int,
         stuck_processing_count: int,
-        queue_lag_seconds: int | float | None,
     ) -> DeliveryHealthStatus:
         if total_faulty >= self.config.faulty_critical_count:
             return DeliveryHealthStatus.CRITICAL
         if stuck_processing_count > 0:
             return DeliveryHealthStatus.CRITICAL
-        if queue_lag_seconds is not None and queue_lag_seconds >= self.config.queue_lag_critical_seconds:
-            return DeliveryHealthStatus.CRITICAL
         if total_faulty >= self.config.faulty_warning_count:
             return DeliveryHealthStatus.WARNING
         if total_rate_limited >= self.config.rate_limited_warning_count or total_deferred > 0:
-            return DeliveryHealthStatus.WARNING
-        if queue_lag_seconds is not None and queue_lag_seconds >= self.config.queue_lag_warning_seconds:
             return DeliveryHealthStatus.WARNING
         return DeliveryHealthStatus.OK
 
@@ -445,9 +440,14 @@ class DeliveryObservabilityService:
         return tuple(signals)
 
     def _select_problem_rules(self, metrics: tuple[DeliveryRuleMetrics, ...]) -> tuple[DeliveryRuleMetrics, ...]:
+        # The snapshot keeps a compact rule sample for the admin formatter:
+        # real problem rules first, then the largest planned queues as context.
         problem = [item for item in metrics if self._is_problem_rule(item)]
+        backlog = [item for item in metrics if item.pending_count > 0 and item not in problem]
         problem.sort(key=self._problem_sort_key, reverse=True)
-        return tuple(problem[: max(self.config.max_problem_rules, 0)])
+        backlog.sort(key=lambda item: item.pending_count, reverse=True)
+        limit = max(self.config.max_problem_rules, 0)
+        return tuple((problem + backlog)[:limit])
 
     def _is_problem_rule(self, item: DeliveryRuleMetrics) -> bool:
         return (
@@ -455,7 +455,6 @@ class DeliveryObservabilityService:
             or item.rate_limited_count > 0
             or item.deferred_count > 0
             or self._is_stuck_processing(item)
-            or self._has_queue_lag(item)
         )
 
     def _problem_sort_key(self, item: DeliveryRuleMetrics) -> tuple[int, int, int, float, int]:

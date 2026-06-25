@@ -1737,6 +1737,137 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return int(count or 0)
 
+
+    def get_stuck_processing_deliveries(
+        self,
+        *,
+        older_than_seconds: int,
+        limit: int = 50,
+        rule_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 50))
+        safe_seconds = max(1, int(older_than_seconds))
+        params: list[Any] = [safe_seconds]
+        rule_filter = ""
+        if rule_id is not None:
+            rule_filter = "AND d.rule_id = %s"
+            params.append(int(rule_id))
+        params.append(safe_limit)
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        d.id AS delivery_id,
+                        d.rule_id,
+                        d.post_id,
+                        r.source_id,
+                        r.target_id,
+                        EXTRACT(EPOCH FROM (NOW() - processing_clock.processing_job_created_at)) AS age_seconds,
+                        processing_clock.processing_job_created_at AS created_at,
+                        d.error_text
+                    FROM deliveries d
+                    JOIN routing r ON r.id = d.rule_id
+                    JOIN LATERAL (
+                        SELECT MIN(j.created_at) AS processing_job_created_at
+                        FROM jobs j
+                        WHERE j.status IN ('pending', 'leased', 'processing', 'retry')
+                          AND (
+                              (
+                                  (j.payload_json ->> 'delivery_id') ~ '^[0-9]+$'
+                                  AND (j.payload_json ->> 'delivery_id')::bigint = d.id
+                              )
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM jsonb_array_elements_text(COALESCE(j.payload_json -> 'delivery_ids', '[]'::jsonb)) AS delivery_ids(value)
+                                  WHERE delivery_ids.value ~ '^[0-9]+$'
+                                    AND delivery_ids.value::bigint = d.id
+                              )
+                          )
+                    ) AS processing_clock ON TRUE
+                    WHERE d.status = 'processing'
+                      AND processing_clock.processing_job_created_at IS NOT NULL
+                      AND processing_clock.processing_job_created_at < NOW() - make_interval(secs => %s)
+                      {rule_filter}
+                    ORDER BY processing_clock.processing_job_created_at ASC, d.id ASC
+                    LIMIT %s
+                    """,
+                    tuple(params),
+                )
+                rows = cur.fetchall() or []
+        return [dict(row) for row in rows]
+
+    def reset_stuck_processing_deliveries_to_pending(
+        self,
+        *,
+        older_than_seconds: int,
+        limit: int = 50,
+        rule_id: int | None = None,
+        admin_id: int | None = None,
+    ) -> dict[str, Any]:
+        safe_limit = max(1, min(int(limit), 50))
+        safe_seconds = max(1, int(older_than_seconds))
+        params: list[Any] = [safe_seconds]
+        rule_filter = ""
+        if rule_id is not None:
+            rule_filter = "AND d.rule_id = %s"
+            params.append(int(rule_id))
+        params.append(safe_limit)
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH candidates AS (
+                        SELECT d.id
+                        FROM deliveries d
+                        JOIN LATERAL (
+                            SELECT MIN(j.created_at) AS processing_job_created_at
+                            FROM jobs j
+                            WHERE j.status IN ('pending', 'leased', 'processing', 'retry')
+                              AND (
+                                  (
+                                      (j.payload_json ->> 'delivery_id') ~ '^[0-9]+$'
+                                      AND (j.payload_json ->> 'delivery_id')::bigint = d.id
+                                  )
+                                  OR EXISTS (
+                                      SELECT 1
+                                      FROM jsonb_array_elements_text(COALESCE(j.payload_json -> 'delivery_ids', '[]'::jsonb)) AS delivery_ids(value)
+                                      WHERE delivery_ids.value ~ '^[0-9]+$'
+                                        AND delivery_ids.value::bigint = d.id
+                                  )
+                              )
+                        ) AS processing_clock ON TRUE
+                        WHERE d.status = 'processing'
+                          AND processing_clock.processing_job_created_at IS NOT NULL
+                          AND processing_clock.processing_job_created_at < NOW() - make_interval(secs => %s)
+                          AND d.sent_at IS NULL
+                          AND d.sent_message_id IS NULL
+                          AND (d.sent_message_ids_json IS NULL OR d.sent_message_ids_json = '[]'::jsonb)
+                          {rule_filter}
+                        ORDER BY processing_clock.processing_job_created_at ASC, d.id ASC
+                        LIMIT %s
+                    )
+                    UPDATE deliveries d
+                    SET status = 'pending',
+                        error_text = NULL
+                    FROM candidates
+                    WHERE d.id = candidates.id
+                      AND d.status = 'processing'
+                    RETURNING d.id
+                    """,
+                    tuple(params),
+                )
+                rows = cur.fetchall() or []
+                delivery_ids = [int(row["id"]) for row in rows]
+            conn.commit()
+        logger.warning(
+            "manual_stuck_processing_reset: admin_id=%s reset_count=%s delivery_ids=%s",
+            admin_id,
+            len(delivery_ids),
+            delivery_ids,
+        )
+        return {"updated_count": len(delivery_ids), "delivery_ids": delivery_ids, "limit": safe_limit}
+
     # =========================================================
     # SAAS REACTIONS FOUNDATION
     # =========================================================
@@ -6564,11 +6695,29 @@ class PostgresRepository(RepositoryProtocol):
                               )
                         ), 0) AS rate_limited_count,
                         EXTRACT(EPOCH FROM (NOW() - MIN(d.created_at::timestamptz) FILTER (WHERE d.status = 'pending'))) AS oldest_pending_age_seconds,
-                        EXTRACT(EPOCH FROM (NOW() - MIN(d.created_at::timestamptz) FILTER (WHERE d.status = 'processing'))) AS oldest_processing_age_seconds,
+                        EXTRACT(EPOCH FROM (NOW() - MIN(processing_clock.processing_job_created_at) FILTER (WHERE d.status = 'processing'))) AS oldest_processing_age_seconds,
                         EXTRACT(EPOCH FROM (r.next_run_at::timestamptz - NOW())) AS next_run_in_seconds,
                         last_fault.error_text AS last_error_text
                     FROM routing r
                     LEFT JOIN deliveries d ON d.rule_id = r.id
+                    LEFT JOIN LATERAL (
+                        SELECT MIN(j.created_at) AS processing_job_created_at
+                        FROM jobs j
+                        WHERE d.status = 'processing'
+                          AND j.status IN ('pending', 'leased', 'processing', 'retry')
+                          AND (
+                              (
+                                  (j.payload_json ->> 'delivery_id') ~ '^[0-9]+$'
+                                  AND (j.payload_json ->> 'delivery_id')::bigint = d.id
+                              )
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM jsonb_array_elements_text(COALESCE(j.payload_json -> 'delivery_ids', '[]'::jsonb)) AS delivery_ids(value)
+                                  WHERE delivery_ids.value ~ '^[0-9]+$'
+                                    AND delivery_ids.value::bigint = d.id
+                              )
+                          )
+                    ) AS processing_clock ON TRUE
                     LEFT JOIN LATERAL (
                         SELECT fd.error_text
                         FROM deliveries fd
