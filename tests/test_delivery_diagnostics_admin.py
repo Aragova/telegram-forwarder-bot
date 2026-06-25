@@ -44,6 +44,15 @@ def test_big_planned_queue_is_not_described_as_error() -> None:
     assert "CRITICAL" not in text
 
 
+def test_young_processing_is_not_shown_as_stuck() -> None:
+    rule = DeliveryRuleMetrics(rule_id=77, pending_count=4000, processing_count=1, oldest_processing_age_seconds=30)
+    text = format_delivery_diagnostics_admin_text(_snapshot(total_pending=4000, total_processing=1, stuck_processing_count=0, problem_rules=(rule,)))
+    stuck_section = text.split("🧯 Зависшие задачи:", 1)[1].split("⚠️ Правила с ошибками:", 1)[0]
+    assert "Не найдено" in stuck_section
+    assert "Правило #77" not in stuck_section
+    assert "Правило #77 — ждут своего времени: 4000" in text
+
+
 def test_unknown_snapshot_text_is_safe() -> None:
     text = format_delivery_diagnostics_admin_text(_snapshot(status=DeliveryHealthStatus.UNKNOWN, signals=(DeliveryDiagnosticSignal.NO_DATA,), reason="Traceback SECRET_TOKEN content_json caption"))
     assert "диагностика временно недоступна" in text

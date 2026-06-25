@@ -5,6 +5,7 @@ from __future__ import annotations
 from app.delivery_observability import (
     DeliveryDiagnosticSignal,
     DeliveryDiagnosticsSnapshot,
+    DeliveryObservabilityConfig,
     DeliveryHealthStatus,
     DeliveryRuleMetrics,
     sanitize_diagnostic_text,
@@ -51,7 +52,14 @@ def _safe_error(rule: DeliveryRuleMetrics) -> str | None:
 
 
 def _stuck_rules(snapshot: DeliveryDiagnosticsSnapshot) -> list[DeliveryRuleMetrics]:
-    return [r for r in snapshot.problem_rules if r.processing_count > 0 and r.oldest_processing_age_seconds is not None]
+    stale_seconds = DeliveryObservabilityConfig().stale_processing_after_seconds
+    return [
+        r
+        for r in snapshot.problem_rules
+        if r.processing_count > 0
+        and r.oldest_processing_age_seconds is not None
+        and r.oldest_processing_age_seconds > stale_seconds
+    ]
 
 
 def _error_rules(snapshot: DeliveryDiagnosticsSnapshot) -> list[DeliveryRuleMetrics]:

@@ -1763,15 +1763,33 @@ class PostgresRepository(RepositoryProtocol):
                         d.post_id,
                         r.source_id,
                         r.target_id,
-                        EXTRACT(EPOCH FROM (NOW() - COALESCE(NULLIF(d.created_at, '')::timestamptz, NOW()))) AS age_seconds,
-                        d.created_at,
+                        EXTRACT(EPOCH FROM (NOW() - processing_clock.processing_job_created_at)) AS age_seconds,
+                        processing_clock.processing_job_created_at AS created_at,
                         d.error_text
                     FROM deliveries d
                     JOIN routing r ON r.id = d.rule_id
+                    JOIN LATERAL (
+                        SELECT MIN(j.created_at) AS processing_job_created_at
+                        FROM jobs j
+                        WHERE j.status IN ('pending', 'leased', 'processing', 'retry')
+                          AND (
+                              (
+                                  (j.payload_json ->> 'delivery_id') ~ '^[0-9]+$'
+                                  AND (j.payload_json ->> 'delivery_id')::bigint = d.id
+                              )
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM jsonb_array_elements_text(COALESCE(j.payload_json -> 'delivery_ids', '[]'::jsonb)) AS delivery_ids(value)
+                                  WHERE delivery_ids.value ~ '^[0-9]+$'
+                                    AND delivery_ids.value::bigint = d.id
+                              )
+                          )
+                    ) AS processing_clock ON TRUE
                     WHERE d.status = 'processing'
-                      AND COALESCE(NULLIF(d.created_at, '')::timestamptz, NOW()) < NOW() - make_interval(secs => %s)
+                      AND processing_clock.processing_job_created_at IS NOT NULL
+                      AND processing_clock.processing_job_created_at < NOW() - make_interval(secs => %s)
                       {rule_filter}
-                    ORDER BY COALESCE(NULLIF(d.created_at, '')::timestamptz, NOW()) ASC, d.id ASC
+                    ORDER BY processing_clock.processing_job_created_at ASC, d.id ASC
                     LIMIT %s
                     """,
                     tuple(params),
@@ -1792,7 +1810,7 @@ class PostgresRepository(RepositoryProtocol):
         params: list[Any] = [safe_seconds]
         rule_filter = ""
         if rule_id is not None:
-            rule_filter = "AND rule_id = %s"
+            rule_filter = "AND d.rule_id = %s"
             params.append(int(rule_id))
         params.append(safe_limit)
         with self.connect() as conn:
@@ -1800,15 +1818,33 @@ class PostgresRepository(RepositoryProtocol):
                 cur.execute(
                     f"""
                     WITH candidates AS (
-                        SELECT id
-                        FROM deliveries
-                        WHERE status = 'processing'
-                          AND COALESCE(NULLIF(created_at, '')::timestamptz, NOW()) < NOW() - make_interval(secs => %s)
-                          AND sent_at IS NULL
-                          AND sent_message_id IS NULL
-                          AND (sent_message_ids_json IS NULL OR sent_message_ids_json = '[]'::jsonb)
+                        SELECT d.id
+                        FROM deliveries d
+                        JOIN LATERAL (
+                            SELECT MIN(j.created_at) AS processing_job_created_at
+                            FROM jobs j
+                            WHERE j.status IN ('pending', 'leased', 'processing', 'retry')
+                              AND (
+                                  (
+                                      (j.payload_json ->> 'delivery_id') ~ '^[0-9]+$'
+                                      AND (j.payload_json ->> 'delivery_id')::bigint = d.id
+                                  )
+                                  OR EXISTS (
+                                      SELECT 1
+                                      FROM jsonb_array_elements_text(COALESCE(j.payload_json -> 'delivery_ids', '[]'::jsonb)) AS delivery_ids(value)
+                                      WHERE delivery_ids.value ~ '^[0-9]+$'
+                                        AND delivery_ids.value::bigint = d.id
+                                  )
+                              )
+                        ) AS processing_clock ON TRUE
+                        WHERE d.status = 'processing'
+                          AND processing_clock.processing_job_created_at IS NOT NULL
+                          AND processing_clock.processing_job_created_at < NOW() - make_interval(secs => %s)
+                          AND d.sent_at IS NULL
+                          AND d.sent_message_id IS NULL
+                          AND (d.sent_message_ids_json IS NULL OR d.sent_message_ids_json = '[]'::jsonb)
                           {rule_filter}
-                        ORDER BY COALESCE(NULLIF(created_at, '')::timestamptz, NOW()) ASC, id ASC
+                        ORDER BY processing_clock.processing_job_created_at ASC, d.id ASC
                         LIMIT %s
                     )
                     UPDATE deliveries d
@@ -6184,7 +6220,7 @@ class PostgresRepository(RepositoryProtocol):
                         COUNT(*) AS cnt
                     FROM jobs j
                     WHERE j.status = 'done'
-                      AND j.updated_at >= NOW() - make_interval(mins => %s)
+                      AND j.created_at >= NOW() - make_interval(mins => %s)
                       AND (%s = FALSE OR j.queue = %s)
                     GROUP BY {_JOB_TENANT_SQL}
                     """,
@@ -6659,11 +6695,29 @@ class PostgresRepository(RepositoryProtocol):
                               )
                         ), 0) AS rate_limited_count,
                         EXTRACT(EPOCH FROM (NOW() - MIN(d.created_at::timestamptz) FILTER (WHERE d.status = 'pending'))) AS oldest_pending_age_seconds,
-                        EXTRACT(EPOCH FROM (NOW() - MIN(d.created_at::timestamptz) FILTER (WHERE d.status = 'processing'))) AS oldest_processing_age_seconds,
+                        EXTRACT(EPOCH FROM (NOW() - MIN(processing_clock.processing_job_created_at) FILTER (WHERE d.status = 'processing'))) AS oldest_processing_age_seconds,
                         EXTRACT(EPOCH FROM (r.next_run_at::timestamptz - NOW())) AS next_run_in_seconds,
                         last_fault.error_text AS last_error_text
                     FROM routing r
                     LEFT JOIN deliveries d ON d.rule_id = r.id
+                    LEFT JOIN LATERAL (
+                        SELECT MIN(j.created_at) AS processing_job_created_at
+                        FROM jobs j
+                        WHERE d.status = 'processing'
+                          AND j.status IN ('pending', 'leased', 'processing', 'retry')
+                          AND (
+                              (
+                                  (j.payload_json ->> 'delivery_id') ~ '^[0-9]+$'
+                                  AND (j.payload_json ->> 'delivery_id')::bigint = d.id
+                              )
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM jsonb_array_elements_text(COALESCE(j.payload_json -> 'delivery_ids', '[]'::jsonb)) AS delivery_ids(value)
+                                  WHERE delivery_ids.value ~ '^[0-9]+$'
+                                    AND delivery_ids.value::bigint = d.id
+                              )
+                          )
+                    ) AS processing_clock ON TRUE
                     LEFT JOIN LATERAL (
                         SELECT fd.error_text
                         FROM deliveries fd
