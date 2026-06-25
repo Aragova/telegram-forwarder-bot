@@ -302,11 +302,14 @@ def _detect_message_media_kind(message) -> str:
     return "text"
 
 class SenderService:
-    def __init__(self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db):
+    def __init__(
+        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db, sender_pipeline_facade: object | None = None
+    ):
         self.bot = bot
         self.telethon = telethon_client
         self.reaction_clients = reaction_clients or []
         self.db = db
+        self.sender_pipeline_facade = sender_pipeline_facade
         self.scheduler_service = SchedulerService(self.db)
 
         self.video_processor = VideoProcessor(
