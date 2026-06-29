@@ -3,18 +3,7 @@ from pathlib import Path
 
 
 FOUNDATION_MODULES = (
-    "app.telegram_send_gateway",
-    "app.target_verifier",
-    "app.attempt_ledger_service",
-    "app.post_send_steps",
-    "app.delivery_finalizer",
-    "app.repost_single_pipeline",
-    "app.repost_album_pipeline",
-    "app.video_send_pipeline",
-    "app.legacy_video_delivery_pipeline",
-    "app.repost_campaign_pipeline",
     "app.reaction_post_send_service",
-    "app.sender_pipeline_facade",
 )
 
 

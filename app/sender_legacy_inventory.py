@@ -63,15 +63,15 @@ SENDER_LEGACY_INVENTORY: tuple[SenderLegacyEntry, ...] = (
         area=SenderLegacyArea.REPOST_SINGLE,
         risk=SenderLegacyRisk.HIGH,
         cleanup_status=SenderLegacyCleanupStatus.READY_FOR_SHADOW,
-        replacement="RepostSinglePipeline / SenderPipelineFacade / SenderPipelineRolloutStrategy",
-        notes="Первый кандидат для shadow и ограниченного active rollout по allowlist правил; legacy должен остаться fallback.",
+        replacement="legacy-preserving single repost extraction module",
+        notes="Первый кандидат для extraction без изменения поведения; legacy copy-first flow должен остаться source of truth.",
     ),
     SenderLegacyEntry(
         name="_deliver_album",
         area=SenderLegacyArea.REPOST_ALBUM,
         risk=SenderLegacyRisk.HIGH,
         cleanup_status=SenderLegacyCleanupStatus.READY_FOR_ADAPTER,
-        replacement="RepostAlbumPipeline / SenderPipelineFacade",
+        replacement="legacy-preserving album extraction module",
         notes="Нужно сохранить порядок альбома, logical item semantics и защиту от частичной доставки.",
     ),
     SenderLegacyEntry(
@@ -79,7 +79,7 @@ SENDER_LEGACY_INVENTORY: tuple[SenderLegacyEntry, ...] = (
         area=SenderLegacyArea.VIDEO_SEND,
         risk=SenderLegacyRisk.CRITICAL,
         cleanup_status=SenderLegacyCleanupStatus.DO_NOT_TOUCH_YET,
-        replacement="VideoSendPipeline / LegacyVideoDeliveryPipeline",
+        replacement="legacy-preserving video extraction module",
         notes="Video path имеет download/process/send side effects; переносить только после single/album rollout.",
     ),
     SenderLegacyEntry(
@@ -87,7 +87,7 @@ SENDER_LEGACY_INVENTORY: tuple[SenderLegacyEntry, ...] = (
         area=SenderLegacyArea.LEGACY_VIDEO_DELIVERY,
         risk=SenderLegacyRisk.CRITICAL,
         cleanup_status=SenderLegacyCleanupStatus.DO_NOT_TOUCH_YET,
-        replacement="LegacyVideoDeliveryPipeline / VideoSendPipeline",
+        replacement="legacy-preserving video delivery extraction module",
         notes="Мост к legacy video processing и файловым side effects; без отдельного этапа не менять.",
     ),
     SenderLegacyEntry(
@@ -95,7 +95,7 @@ SENDER_LEGACY_INVENTORY: tuple[SenderLegacyEntry, ...] = (
         area=SenderLegacyArea.REPOST_CAMPAIGN,
         risk=SenderLegacyRisk.HIGH,
         cleanup_status=SenderLegacyCleanupStatus.KEEP_AS_FALLBACK,
-        replacement="RepostCampaignPipeline",
+        replacement="legacy-preserving campaign extraction module",
         notes="Campaign copy/delete должен сохранять текущие Telegram side effects и cleanup guarantees.",
     ),
     SenderLegacyEntry(
@@ -103,7 +103,7 @@ SENDER_LEGACY_INVENTORY: tuple[SenderLegacyEntry, ...] = (
         area=SenderLegacyArea.REPOST_CAMPAIGN,
         risk=SenderLegacyRisk.HIGH,
         cleanup_status=SenderLegacyCleanupStatus.KEEP_AS_FALLBACK,
-        replacement="RepostCampaignPipeline",
+        replacement="legacy-preserving campaign extraction module",
         notes="Удаление campaign копий переносить только вместе с проверенным rollback планом.",
     ),
     SenderLegacyEntry(
@@ -119,7 +119,7 @@ SENDER_LEGACY_INVENTORY: tuple[SenderLegacyEntry, ...] = (
         area=SenderLegacyArea.ATTEMPT_LEDGER,
         risk=SenderLegacyRisk.HIGH,
         cleanup_status=SenderLegacyCleanupStatus.KEEP_AS_FALLBACK,
-        replacement="AttemptLedgerService / DeliveryFinalizer",
+        replacement="existing sender.py delivery attempt helpers",
         notes="delivery_attempts и статусы должны оставаться консистентными для rollback и диагностики.",
     ),
     SenderLegacyEntry(
@@ -127,7 +127,7 @@ SENDER_LEGACY_INVENTORY: tuple[SenderLegacyEntry, ...] = (
         area=SenderLegacyArea.TARGET_VERIFICATION,
         risk=SenderLegacyRisk.HIGH,
         cleanup_status=SenderLegacyCleanupStatus.READY_FOR_ADAPTER,
-        replacement="TargetVerifier",
+        replacement="existing sender.py target confirmation helpers",
         notes="Защищает от false success после Telegram send/copy/reupload; удалять только после parity checks.",
     ),
     SenderLegacyEntry(
@@ -135,7 +135,7 @@ SENDER_LEGACY_INVENTORY: tuple[SenderLegacyEntry, ...] = (
         area=SenderLegacyArea.FINALIZATION,
         risk=SenderLegacyRisk.MEDIUM,
         cleanup_status=SenderLegacyCleanupStatus.READY_FOR_ADAPTER,
-        replacement="DeliveryFinalizer / PostSendSteps",
+        replacement="existing sender.py finalization helpers",
         notes="Финализация должна сохранить audit log, success/failure mapping и post-send steps.",
     ),
     SenderLegacyEntry(
@@ -143,7 +143,7 @@ SENDER_LEGACY_INVENTORY: tuple[SenderLegacyEntry, ...] = (
         area=SenderLegacyArea.AUDIT_AND_SCHEDULER,
         risk=SenderLegacyRisk.HIGH,
         cleanup_status=SenderLegacyCleanupStatus.DO_NOT_TOUCH_YET,
-        replacement="PostSendSteps / DeliveryFinalizer",
+        replacement="existing sender.py audit/scheduler helpers",
         notes="Scheduler/audit touch влияет на следующие доставки; менять только отдельным этапом.",
     ),
     SenderLegacyEntry(
@@ -151,7 +151,7 @@ SENDER_LEGACY_INVENTORY: tuple[SenderLegacyEntry, ...] = (
         area=SenderLegacyArea.QUEUE_AND_STATUS,
         risk=SenderLegacyRisk.CRITICAL,
         cleanup_status=SenderLegacyCleanupStatus.DO_NOT_TOUCH_YET,
-        replacement="SenderPipelineRolloutStrategy / DeliveryObservabilityService",
+        replacement="repository logical queue helpers and diagnostics",
         notes="Очередь и статусы нельзя считать альтернативно; source of truth остаётся в repository queue helpers.",
     ),
     SenderLegacyEntry(
@@ -167,7 +167,7 @@ SENDER_LEGACY_INVENTORY: tuple[SenderLegacyEntry, ...] = (
         area=SenderLegacyArea.TRANSPORT_BOUNDARY,
         risk=SenderLegacyRisk.CRITICAL,
         cleanup_status=SenderLegacyCleanupStatus.KEEP_AS_FALLBACK,
-        replacement="Stage 9 Telegram send gateway",
+        replacement="existing transport-wrapped Telegram writes",
         notes="Граница Telegram write side effects; fallback обязателен до завершения controlled rollout.",
     ),
 )
