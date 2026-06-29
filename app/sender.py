@@ -29,6 +29,7 @@ from .delivery_content_helpers import (
 )
 from .telegram_send_result import telegram_send_result_from_raw
 from .repost_single_rollout_probe import RepostSingleRolloutProbe
+from .repost_single_active_canary import RepostSingleActiveCanaryRunner
 from telethon.tl.types import (
     MessageEntityBold,
     MessageEntityItalic,
@@ -304,7 +305,7 @@ def _detect_message_media_kind(message) -> str:
 
 class SenderService:
     def __init__(
-        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db, sender_pipeline_facade: object | None = None, repost_single_rollout_probe: RepostSingleRolloutProbe | None = None
+        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db, sender_pipeline_facade: object | None = None, repost_single_rollout_probe: RepostSingleRolloutProbe | None = None, repost_single_active_canary_runner: RepostSingleActiveCanaryRunner | None = None
     ):
         self.bot = bot
         self.telethon = telethon_client
@@ -312,6 +313,7 @@ class SenderService:
         self.db = db
         self.sender_pipeline_facade = sender_pipeline_facade
         self.repost_single_rollout_probe = repost_single_rollout_probe
+        self.repost_single_active_canary_runner = repost_single_active_canary_runner
         self.scheduler_service = SchedulerService(self.db)
 
         self.video_processor = VideoProcessor(
@@ -3786,6 +3788,7 @@ class SenderService:
             message_id,
         )
 
+        probe_result = None
         if self.repost_single_rollout_probe is not None:
             probe_result = self.repost_single_rollout_probe.probe(
                 rule_id=getattr(rule, "id", None),
@@ -3806,6 +3809,30 @@ class SenderService:
                 probe_context.get("target_id"),
                 probe_context.get("source_message_id"),
             )
+
+        if self.repost_single_active_canary_runner is not None and probe_result is not None:
+            active_canary_unsupported_features = ()
+            if self.reaction_clients or int(getattr(rule, "tenant_id", 0) or 0) > 1:
+                active_canary_unsupported_features = ("reactions",)
+            active_canary_result = await self.repost_single_active_canary_runner.try_run(
+                probe_result=probe_result,
+                rule=rule,
+                delivery_id=delivery_id,
+                message_id=message_id,
+                source_channel=source_channel,
+                target_id=target_id,
+                target_thread_id=target_thread_id,
+                post_id=post_id,
+                idempotency_key=idempotency_key,
+                caption_mode=caption_mode,
+                requires_builder=requires_builder,
+                use_copy_first=use_copy_first,
+                unsupported_features=active_canary_unsupported_features,
+            )
+            if active_canary_result.attempted_pipeline:
+                return active_canary_result.status.value == "handled"
+            if not active_canary_result.should_continue_legacy:
+                return False
 
         # =========================================================
         # 1) COPY SINGLE

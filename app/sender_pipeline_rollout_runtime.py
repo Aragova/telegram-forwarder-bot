@@ -16,6 +16,24 @@ logger = logging.getLogger("forwarder")
 _MODE_ENV = "SENDER_PIPELINE_ROLLOUT_MODE"
 _RULE_IDS_ENV = "SENDER_PIPELINE_ROLLOUT_REPOST_SINGLE_RULE_IDS"
 _BLOCKED_RULE_IDS_ENV = "SENDER_PIPELINE_ROLLOUT_BLOCKED_RULE_IDS"
+_ACTIVE_CANARY_ENV = "SENDER_PIPELINE_REPOST_SINGLE_ACTIVE_CANARY_ENABLED"
+
+
+def repost_single_active_canary_enabled_from_env() -> bool:
+    return _parse_bool(os.getenv(_ACTIVE_CANARY_ENV, ""))
+
+
+def _parse_bool(raw: str | None) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def build_repost_single_active_canary_config_from_env():
+    from .repost_single_active_canary import RepostSingleActiveCanaryConfig
+
+    return RepostSingleActiveCanaryConfig(
+        canary_enabled=repost_single_active_canary_enabled_from_env(),
+        enabled_rule_ids=_parse_rule_ids(os.getenv(_RULE_IDS_ENV, "")),
+    )
 
 
 def build_sender_pipeline_rollout_strategy_from_env() -> SenderPipelineRolloutStrategy:

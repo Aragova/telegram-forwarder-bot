@@ -126,6 +126,7 @@ def test_foundation_modules_do_not_import_runtime_heavy_dependencies() -> None:
         "app/sender_legacy_inventory.py",
         "app/sender_pipeline_rollout_runtime.py",
         "app/repost_single_rollout_probe.py",
+        "app/repost_single_active_canary.py",
     )
     forbidden_import_markers = (
         "from app.sender import",
