@@ -12,7 +12,7 @@ def test_sender_service_accepts_optional_repost_single_rollout_probe_none() -> N
     assert service.repost_single_rollout_probe is None
 
 
-def test_sender_service_stores_injected_repost_single_rollout_probe() -> None:
+def test_sender_service_ignores_deprecated_repost_single_rollout_probe() -> None:
     probe = object()
     service = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=DummyRepo(), repost_single_rollout_probe=probe)  # type: ignore[arg-type]
-    assert service.repost_single_rollout_probe is probe
+    assert service.repost_single_rollout_probe is None
