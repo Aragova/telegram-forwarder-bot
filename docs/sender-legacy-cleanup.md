@@ -139,3 +139,8 @@ Legacy methods можно удалять только когда выполне�
 ## Stage 26 — Delivery diagnostics admin integration v1
 
 Stage 26 adds a read-only admin UI integration for delivery diagnostics. The admin diagnostics menu can show a safe Russian DeliveryDiagnosticsSnapshot report built from repository delivery metrics. This stage does not change sender runtime, worker runtime, Telegram send gateway, rollout strategy activation, delivery attempts behavior, scheduler behavior, database schema, or migrations.
+
+
+## Stage 27 note
+
+Первое runtime-подключение single repost ограничено shadow-safe probe: legacy `_deliver_single` остаётся источником истины, а результат probe используется только для safe logging готовности правила. Album/video/campaign/reaction cleanup этим этапом не меняется.
