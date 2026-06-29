@@ -57,6 +57,8 @@ from app.sender import SenderService
 from app.delivery_diagnostics_admin import format_delivery_diagnostics_admin_text
 from app.delivery_observability import DeliveryObservabilityService
 from app.delivery_observability_provider import RepositoryDeliveryObservabilityProvider
+from app.sender_pipeline_rollout_runtime import build_sender_pipeline_rollout_strategy_from_env
+from app.repost_single_rollout_probe import RepostSingleRolloutProbe
 telethon_client = None
 from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIActionResult, UIErrorPolicy
@@ -8260,11 +8262,14 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
         label="sender.telethon",
         policy=build_sender_telethon_policy(),
     )
+    rollout_strategy = build_sender_pipeline_rollout_strategy_from_env()
+    repost_single_rollout_probe = RepostSingleRolloutProbe(rollout_strategy=rollout_strategy)
     sender_service = SenderService(
         bot=sender_bot,
         db=db,
         telethon_client=sender_telethon_client,
         reaction_clients=reaction_clients,
+        repost_single_rollout_probe=repost_single_rollout_probe,
     )
     runtime_context = RuntimeContext(
         repo=db,

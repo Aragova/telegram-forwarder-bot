@@ -28,6 +28,7 @@ from .delivery_content_helpers import (
     video_caption_requires_premium,
 )
 from .telegram_send_result import telegram_send_result_from_raw
+from .repost_single_rollout_probe import RepostSingleRolloutProbe
 from telethon.tl.types import (
     MessageEntityBold,
     MessageEntityItalic,
@@ -303,13 +304,14 @@ def _detect_message_media_kind(message) -> str:
 
 class SenderService:
     def __init__(
-        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db, sender_pipeline_facade: object | None = None
+        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db, sender_pipeline_facade: object | None = None, repost_single_rollout_probe: RepostSingleRolloutProbe | None = None
     ):
         self.bot = bot
         self.telethon = telethon_client
         self.reaction_clients = reaction_clients or []
         self.db = db
         self.sender_pipeline_facade = sender_pipeline_facade
+        self.repost_single_rollout_probe = repost_single_rollout_probe
         self.scheduler_service = SchedulerService(self.db)
 
         self.video_processor = VideoProcessor(
@@ -3783,6 +3785,27 @@ class SenderService:
             source_channel,
             message_id,
         )
+
+        if self.repost_single_rollout_probe is not None:
+            probe_result = self.repost_single_rollout_probe.probe(
+                rule_id=getattr(rule, "id", None),
+                source_id=source_channel,
+                target_id=target_id,
+                source_message_id=message_id,
+                target_thread_id=target_thread_id,
+            )
+            probe_context = probe_result.to_log_context()
+            logger.info(
+                "SENDER_ROLLOUT | одиночный repost | probe=%s | mode=%s | action=%s | reason=%s | rule_id=%s | source_id=%s | target_id=%s | source_message_id=%s",
+                probe_context.get("status"),
+                probe_context.get("mode"),
+                probe_context.get("action"),
+                probe_context.get("reason") or probe_context.get("decision_reason"),
+                probe_context.get("rule_id"),
+                probe_context.get("source_id"),
+                probe_context.get("target_id"),
+                probe_context.get("source_message_id"),
+            )
 
         # =========================================================
         # 1) COPY SINGLE

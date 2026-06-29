@@ -124,6 +124,8 @@ def test_foundation_modules_do_not_import_runtime_heavy_dependencies() -> None:
         "app/delivery_observability_provider.py",
         "app/delivery_diagnostics_admin.py",
         "app/sender_legacy_inventory.py",
+        "app/sender_pipeline_rollout_runtime.py",
+        "app/repost_single_rollout_probe.py",
     )
     forbidden_import_markers = (
         "from app.sender import",
@@ -319,3 +321,24 @@ def test_repository_contracts_are_runtime_neutral() -> None:
         "usage_limits",
         "payments",
     )
+
+
+def test_stage_27_rollout_probe_modules_are_shadow_safe() -> None:
+    for module_path in ("app/sender_pipeline_rollout_runtime.py", "app/repost_single_rollout_probe.py"):
+        source = _read_repo_text(module_path)
+        for forbidden in (
+            "from aiogram",
+            "import aiogram",
+            "from telethon",
+            "import telethon",
+            "PostgresRepository",
+            "worker_runtime",
+            "video_processor",
+            "TelegramSendGateway",
+            "copy_message(",
+            ".send_message(",
+            ".send_video(",
+            ".send_document(",
+            ".send_media_group(",
+        ):
+            assert forbidden not in source, f"{module_path} must not contain {forbidden!r}"
