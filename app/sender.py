@@ -29,6 +29,7 @@ from .delivery_content_helpers import (
 )
 from .telegram_send_result import telegram_send_result_from_raw
 from .repost_single_rollout_probe import RepostSingleRolloutProbe
+from .repost_single_active_canary import RepostSingleActiveCanaryRunner
 from telethon.tl.types import (
     MessageEntityBold,
     MessageEntityItalic,
@@ -304,7 +305,7 @@ def _detect_message_media_kind(message) -> str:
 
 class SenderService:
     def __init__(
-        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db, sender_pipeline_facade: object | None = None, repost_single_rollout_probe: RepostSingleRolloutProbe | None = None
+        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db, sender_pipeline_facade: object | None = None, repost_single_rollout_probe: RepostSingleRolloutProbe | None = None, repost_single_active_canary_runner: RepostSingleActiveCanaryRunner | None = None
     ):
         self.bot = bot
         self.telethon = telethon_client
@@ -312,6 +313,7 @@ class SenderService:
         self.db = db
         self.sender_pipeline_facade = sender_pipeline_facade
         self.repost_single_rollout_probe = repost_single_rollout_probe
+        self.repost_single_active_canary_runner = repost_single_active_canary_runner
         self.scheduler_service = SchedulerService(self.db)
 
         self.video_processor = VideoProcessor(
@@ -3786,6 +3788,7 @@ class SenderService:
             message_id,
         )
 
+        probe_result = None
         if self.repost_single_rollout_probe is not None:
             probe_result = self.repost_single_rollout_probe.probe(
                 rule_id=getattr(rule, "id", None),
@@ -3806,6 +3809,83 @@ class SenderService:
                 probe_context.get("target_id"),
                 probe_context.get("source_message_id"),
             )
+
+        if self.repost_single_active_canary_runner is not None and probe_result is not None:
+            active_canary_unsupported_features = ()
+            if self.reaction_clients or int(getattr(rule, "tenant_id", 0) or 0) > 1:
+                active_canary_unsupported_features = ("reactions",)
+            active_canary_result = await self.repost_single_active_canary_runner.try_run(
+                probe_result=probe_result,
+                rule=rule,
+                delivery_id=delivery_id,
+                message_id=message_id,
+                source_channel=source_channel,
+                target_id=target_id,
+                target_thread_id=target_thread_id,
+                post_id=post_id,
+                idempotency_key=idempotency_key,
+                caption_mode=caption_mode,
+                requires_builder=requires_builder,
+                use_copy_first=use_copy_first,
+                unsupported_features=active_canary_unsupported_features,
+            )
+            if active_canary_result.attempted_pipeline:
+                if active_canary_result.status.value == "handled":
+                    sent_message_ids = list(active_canary_result.sent_message_ids)
+                    if not sent_message_ids:
+                        error_text = "active_pipeline_uncertain_no_sent_message_ids: pipeline handled without sent ids; manual review required"
+                        await run_db(self._mark_delivery_faulty_sync, delivery_id, error_text)
+                        await self._log_delivery_final_failure(
+                            rule_id=rule.id,
+                            delivery_ids=delivery_ids,
+                            final_method="repost_single_active_pipeline_uncertain",
+                            source_channel=source_channel,
+                            target_id=target_id,
+                            source_message_ids=source_message_ids,
+                            error_text=error_text,
+                            attempts_debug=[{"stage": "repost_single_active_pipeline", "pipeline_status": active_canary_result.pipeline_status}],
+                            extra={"non_retryable": True, "manual_review_required": True},
+                        )
+                        return False
+                    authoritative_sent_message_id = int(sent_message_ids[0])
+                    await self._log_delivery_final_success(
+                        rule_id=rule.id,
+                        delivery_ids=delivery_ids,
+                        final_method="repost_single_active_pipeline",
+                        source_channel=source_channel,
+                        target_id=target_id,
+                        source_message_ids=source_message_ids,
+                        sent_message_id=authoritative_sent_message_id,
+                        sent_message_ids=sent_message_ids,
+                        verify_result=None,
+                        extra={"pipeline_status": active_canary_result.pipeline_status},
+                    )
+                    await run_db(
+                        self._mark_delivery_sent_sync,
+                        delivery_id,
+                        sent_message_id=authoritative_sent_message_id,
+                        sent_message_ids=sent_message_ids,
+                        target_id=str(target_id),
+                        delivery_method="repost_single_active_pipeline",
+                    )
+                    await run_db(self._touch_rule_after_send_sync, rule.id, int(getattr(rule, "interval", 0) or 0))
+                    return True
+                error_text = f"active_pipeline_failed_no_fallback: {active_canary_result.reason or active_canary_result.pipeline_status or 'unknown'}"
+                await run_db(self._mark_delivery_faulty_sync, delivery_id, error_text)
+                await self._log_delivery_final_failure(
+                    rule_id=rule.id,
+                    delivery_ids=delivery_ids,
+                    final_method="repost_single_active_pipeline_failed",
+                    source_channel=source_channel,
+                    target_id=target_id,
+                    source_message_ids=source_message_ids,
+                    error_text=error_text,
+                    attempts_debug=[{"stage": "repost_single_active_pipeline", "pipeline_status": active_canary_result.pipeline_status}],
+                    extra={"non_retryable": True, "manual_review_required": True},
+                )
+                return False
+            if not active_canary_result.should_continue_legacy:
+                return False
 
         # =========================================================
         # 1) COPY SINGLE

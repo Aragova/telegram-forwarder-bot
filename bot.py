@@ -54,11 +54,18 @@ from app.keyboards import (
 from app.logging_setup import setup_logging
 from app.parser import parse_channel_history, parse_group_history
 from app.sender import SenderService
+from app.attempt_ledger_service import AttemptLedgerService
 from app.delivery_diagnostics_admin import format_delivery_diagnostics_admin_text
 from app.delivery_observability import DeliveryObservabilityService
 from app.delivery_observability_provider import RepositoryDeliveryObservabilityProvider
-from app.sender_pipeline_rollout_runtime import build_sender_pipeline_rollout_strategy_from_env
+from app.sender_pipeline_rollout_runtime import build_repost_single_active_canary_config_from_env, build_sender_pipeline_rollout_strategy_from_env
+from app.repost_single_active_canary import RepostSingleActiveCanaryRunner
+from app.repost_single_pipeline import RepostSinglePipeline
+from app.delivery_finalizer import DeliveryFinalizer
+from app.post_send_steps import PostSendSteps
 from app.repost_single_rollout_probe import RepostSingleRolloutProbe
+from app.telegram_send_gateway import TelegramSendGateway
+from app.target_verifier import TargetVerifier
 telethon_client = None
 from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIActionResult, UIErrorPolicy
@@ -8264,12 +8271,24 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
     )
     rollout_strategy = build_sender_pipeline_rollout_strategy_from_env()
     repost_single_rollout_probe = RepostSingleRolloutProbe(rollout_strategy=rollout_strategy)
+    repost_single_active_canary_runner = RepostSingleActiveCanaryRunner(
+        pipeline=RepostSinglePipeline(
+            send_gateway=TelegramSendGateway(bot=sender_bot, telethon_client=sender_telethon_client),
+            post_send_steps=PostSendSteps(
+                attempt_ledger=AttemptLedgerService(repository=db),
+                target_verifier=TargetVerifier(telethon_client=sender_telethon_client),
+            ),
+            finalizer=DeliveryFinalizer(),
+        ),
+        config=build_repost_single_active_canary_config_from_env(),
+    )
     sender_service = SenderService(
         bot=sender_bot,
         db=db,
         telethon_client=sender_telethon_client,
         reaction_clients=reaction_clients,
         repost_single_rollout_probe=repost_single_rollout_probe,
+        repost_single_active_canary_runner=repost_single_active_canary_runner,
     )
     runtime_context = RuntimeContext(
         repo=db,
