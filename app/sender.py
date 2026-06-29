@@ -3830,7 +3830,60 @@ class SenderService:
                 unsupported_features=active_canary_unsupported_features,
             )
             if active_canary_result.attempted_pipeline:
-                return active_canary_result.status.value == "handled"
+                if active_canary_result.status.value == "handled":
+                    sent_message_ids = list(active_canary_result.sent_message_ids)
+                    if not sent_message_ids:
+                        error_text = "active_pipeline_uncertain_no_sent_message_ids: pipeline handled without sent ids; manual review required"
+                        await run_db(self._mark_delivery_faulty_sync, delivery_id, error_text)
+                        await self._log_delivery_final_failure(
+                            rule_id=rule.id,
+                            delivery_ids=delivery_ids,
+                            final_method="repost_single_active_pipeline_uncertain",
+                            source_channel=source_channel,
+                            target_id=target_id,
+                            source_message_ids=source_message_ids,
+                            error_text=error_text,
+                            attempts_debug=[{"stage": "repost_single_active_pipeline", "pipeline_status": active_canary_result.pipeline_status}],
+                            extra={"non_retryable": True, "manual_review_required": True},
+                        )
+                        return False
+                    authoritative_sent_message_id = int(sent_message_ids[0])
+                    await self._log_delivery_final_success(
+                        rule_id=rule.id,
+                        delivery_ids=delivery_ids,
+                        final_method="repost_single_active_pipeline",
+                        source_channel=source_channel,
+                        target_id=target_id,
+                        source_message_ids=source_message_ids,
+                        sent_message_id=authoritative_sent_message_id,
+                        sent_message_ids=sent_message_ids,
+                        verify_result=None,
+                        extra={"pipeline_status": active_canary_result.pipeline_status},
+                    )
+                    await run_db(
+                        self._mark_delivery_sent_sync,
+                        delivery_id,
+                        sent_message_id=authoritative_sent_message_id,
+                        sent_message_ids=sent_message_ids,
+                        target_id=str(target_id),
+                        delivery_method="repost_single_active_pipeline",
+                    )
+                    await run_db(self._touch_rule_after_send_sync, rule.id, int(getattr(rule, "interval", 0) or 0))
+                    return True
+                error_text = f"active_pipeline_failed_no_fallback: {active_canary_result.reason or active_canary_result.pipeline_status or 'unknown'}"
+                await run_db(self._mark_delivery_faulty_sync, delivery_id, error_text)
+                await self._log_delivery_final_failure(
+                    rule_id=rule.id,
+                    delivery_ids=delivery_ids,
+                    final_method="repost_single_active_pipeline_failed",
+                    source_channel=source_channel,
+                    target_id=target_id,
+                    source_message_ids=source_message_ids,
+                    error_text=error_text,
+                    attempts_debug=[{"stage": "repost_single_active_pipeline", "pipeline_status": active_canary_result.pipeline_status}],
+                    extra={"non_retryable": True, "manual_review_required": True},
+                )
+                return False
             if not active_canary_result.should_continue_legacy:
                 return False
 

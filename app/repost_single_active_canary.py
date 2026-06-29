@@ -31,6 +31,7 @@ class RepostSingleActiveCanaryResult:
     rule_id: int | str | None = None
     delivery_id: int | None = None
     pipeline_status: str | None = None
+    sent_message_ids: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if self.attempted_pipeline and self.should_continue_legacy:
@@ -126,6 +127,7 @@ class RepostSingleActiveCanaryRunner:
 
         status = getattr(getattr(pipeline_result, "status", None), "value", None) or str(getattr(pipeline_result, "status", "unknown"))
         ok = bool(getattr(pipeline_result, "ok", False)) or status == "finalized"
+        sent_message_ids = tuple(int(item) for item in (getattr(pipeline_result, "sent_message_ids", None) or ()) if item is not None)
         result = RepostSingleActiveCanaryResult(
             status=RepostSingleActiveCanaryStatus.HANDLED if ok else RepostSingleActiveCanaryStatus.FAILED,
             attempted_pipeline=True,
@@ -134,6 +136,7 @@ class RepostSingleActiveCanaryRunner:
             rule_id=rule_id,
             delivery_id=delivery_id,
             pipeline_status=status,
+            sent_message_ids=sent_message_ids,
         )
         self._log(result)
         return result

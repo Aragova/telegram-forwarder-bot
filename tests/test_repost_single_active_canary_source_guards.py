@@ -42,3 +42,12 @@ def test_album_video_campaign_reaction_modules_do_not_import_active_canary():
     ):
         assert "repost_single_active_canary" not in read(module)
         assert "RepostSingleActiveCanary" not in read(module)
+
+
+def test_bot_wires_post_send_steps_and_finalizer_for_active_canary_pipeline():
+    source = read("bot.py")
+    assert "RepostSinglePipeline(" in source
+    assert "post_send_steps=PostSendSteps(" in source
+    assert "attempt_ledger=AttemptLedgerService(repository=db)" in source
+    assert "target_verifier=TargetVerifier(telethon_client=sender_telethon_client)" in source
+    assert "finalizer=DeliveryFinalizer()" in source
