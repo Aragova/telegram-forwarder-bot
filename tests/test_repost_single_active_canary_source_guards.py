@@ -51,3 +51,27 @@ def test_bot_wires_post_send_steps_and_finalizer_for_active_canary_pipeline():
     assert "attempt_ledger=AttemptLedgerService(repository=db)" in source
     assert "target_verifier=TargetVerifier(telethon_client=sender_telethon_client)" in source
     assert "finalizer=DeliveryFinalizer()" in source
+
+
+def test_sender_active_canary_does_not_treat_reactions_as_unsupported():
+    source = read("app/sender.py")
+    assert 'unsupported_features=("reactions",)' not in source
+    assert 'active_canary_unsupported_features = ("reactions",)' not in source
+    assert 'reason="unsupported_feature:reactions"' not in source
+    active_block = source[source.index("if self.repost_single_active_canary_runner is not None"):source.index("# =========================================================", source.index("if self.repost_single_active_canary_runner is not None"))]
+    assert "unsupported_feature:reactions" not in active_block
+    assert "reaction_after_active_pipeline" in active_block
+    assert "self._add_reaction_for_rule_if_possible" in active_block
+    assert "if active_canary_result.attempted_pipeline" in active_block
+
+
+def test_active_canary_runner_remains_reaction_agnostic():
+    source = read("app/repost_single_active_canary.py")
+    forbidden = (
+        "ReactionRuntimeResolver",
+        "_add_reaction_for_rule_if_possible",
+        "reaction_clients",
+        "enqueue_reaction_job",
+    )
+    for token in forbidden:
+        assert token not in source

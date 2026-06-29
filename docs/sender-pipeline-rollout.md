@@ -123,3 +123,11 @@ Stage 26 adds a read-only admin UI integration for delivery diagnostics. The adm
 ## Stage 27 — RepostSingle rollout probe / shadow-safe runtime integration v1
 
 Stage 27 подключает runtime decision для одиночного repost через `SenderPipelineRolloutStrategy`, но не переводит отправку на новый pipeline. Env builder поддерживает `SENDER_PIPELINE_ROLLOUT_MODE`, `SENDER_PIPELINE_ROLLOUT_REPOST_SINGLE_RULE_IDS` и `SENDER_PIPELINE_ROLLOUT_BLOCKED_RULE_IDS`; default остаётся `disabled`, `rollout_percent=0`, `require_rule_allowlist=True`, `fail_closed=True`. В `dry_run`/`shadow` probe только проверяет наличие безопасных полей для будущего `RepostSingleInput` и пишет safe log. В `active` Stage 27 возвращает `active_not_enabled_in_stage_27` и продолжает legacy path. `RepostSinglePipeline.run()` не вызывается, Telegram copy/send через новый pipeline не выполняется.
+
+## Stage 28.2 — RepostSingle active canary reactions post-send
+
+Stage 28.2 allows the `RepostSingle` active canary to use the existing SenderService reaction post-send flow after a successful active pipeline send. Reactions are no longer treated as `unsupported_feature` for the `RepostSingle` active canary: a rule that uses the standard reaction runtime can pass the active canary guards when the rest of the single repost requirements are safe.
+
+When `RepostSingleActiveCanaryRunner` attempts `RepostSinglePipeline.run()`, legacy copy/send remains stopped for that delivery. If the active pipeline returns usable `sent_message_ids`, SenderService uses the first id as authoritative, runs the existing reaction post-send step, marks the delivery sent, and touches the rule. Reaction post-send warnings are non-fatal after the active send; they never trigger a legacy copy fallback or a second `copy_message`.
+
+Active failure, exception, or handled-without-sent-ids still fails closed with manual review / faulty delivery behavior and no legacy fallback. Dry-run and shadow rollout remain read-only for Telegram writes, active still requires `SENDER_PIPELINE_REPOST_SINGLE_ACTIVE_CANARY_ENABLED=1`, and active canary still requires exactly one allowlisted rule id.
