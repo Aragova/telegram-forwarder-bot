@@ -442,3 +442,11 @@ Stage 26 adds a read-only admin UI integration for delivery diagnostics. The adm
 ## Stage 27 runtime probe boundary
 
 Stage 27 добавляет безопасную границу rollout для одиночного repost: `SenderService` получает optional `RepostSingleRolloutProbe`, `bot.py` создаёт его из env-config builder с disabled-by-default настройками. Probe не импортирует Telegram gateway/pipeline и не делает внешних write side effects; legacy sender продолжает выполнять фактический `copy_message`.
+
+## Stage 28.2 — RepostSingle active canary with reactions
+
+Stage 28.2 keeps `RepostSingleActiveCanaryRunner` generic: the runner calls `RepostSinglePipeline.run()` and returns status plus `sent_message_ids`; it does not become reaction-aware. Reaction side effects stay in `SenderService` as the existing post-send behavior.
+
+For successful active single repost sends, `SenderService` now runs the same reaction post-send flow used by legacy copy-single after it receives `sent_message_ids` from the active pipeline. Reactions are not an unsupported feature for this active canary anymore. If the reaction post-send step fails after the active send, the delivery is still finalized as sent because Telegram copy already happened; legacy copy/send is not executed after any attempted active pipeline result.
+
+The unsupported boundary remains for unsafe or unsupported sender shapes such as albums/media groups, video mode, campaign behavior, caption-builder / builder-first / non-copy-first paths, missing required ids, and unknown unsafe content shapes. The stage does not change worker runtime, video processing, TelegramSendGateway, repository/schema/migrations, or transport/retry behavior.

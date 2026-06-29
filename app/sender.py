@@ -3812,8 +3812,6 @@ class SenderService:
 
         if self.repost_single_active_canary_runner is not None and probe_result is not None:
             active_canary_unsupported_features = ()
-            if self.reaction_clients or int(getattr(rule, "tenant_id", 0) or 0) > 1:
-                active_canary_unsupported_features = ("reactions",)
             active_canary_result = await self.repost_single_active_canary_runner.try_run(
                 probe_result=probe_result,
                 rule=rule,
@@ -3848,6 +3846,24 @@ class SenderService:
                         )
                         return False
                     authoritative_sent_message_id = int(sent_message_ids[0])
+                    post_send_warnings: list[str] = []
+                    reaction_result = await self._run_post_send_step_safe(
+                        step_name="reaction_after_active_pipeline",
+                        rule_id=rule.id,
+                        delivery_id=delivery_id,
+                        idempotency_key=idempotency_key,
+                        accepted_sent_message_ids=sent_message_ids,
+                        coro_factory=lambda: self._add_reaction_for_rule_if_possible(
+                            rule=rule,
+                            target_id=target_id,
+                            sent_message_id=authoritative_sent_message_id,
+                            source_channel=str(source_channel or ""),
+                            source_message_ids=source_message_ids,
+                            delivery_id=delivery_id,
+                        ),
+                    )
+                    if not reaction_result.get("ok"):
+                        post_send_warnings.append("reaction_failed_after_active_pipeline")
                     await self._log_delivery_final_success(
                         rule_id=rule.id,
                         delivery_ids=delivery_ids,
@@ -3858,7 +3874,7 @@ class SenderService:
                         sent_message_id=authoritative_sent_message_id,
                         sent_message_ids=sent_message_ids,
                         verify_result=None,
-                        extra={"pipeline_status": active_canary_result.pipeline_status},
+                        extra={"pipeline_status": active_canary_result.pipeline_status, "post_send_warnings": post_send_warnings},
                     )
                     await run_db(
                         self._mark_delivery_sent_sync,
