@@ -321,6 +321,51 @@ class SenderService:
             telethon_client=self.telethon,
         )
 
+
+    def _rule_requires_reaction_post_send(self, rule) -> bool:
+        """Return True only when this rule has an explicit post-send reaction requirement."""
+        explicit_fields = (
+            "reactions_enabled",
+            "enable_reactions",
+            "post_send_reactions",
+            "premium_reactions_enabled",
+        )
+        for field in explicit_fields:
+            if hasattr(rule, field):
+                return bool(getattr(rule, field))
+
+        for field in ("reaction_count", "normal_count"):
+            if hasattr(rule, field):
+                try:
+                    return int(getattr(rule, field) or 0) > 0
+                except Exception:
+                    return bool(getattr(rule, field))
+
+        if hasattr(rule, "reaction_accounts"):
+            return bool(getattr(rule, "reaction_accounts") or [])
+
+        if hasattr(rule, "reaction_mode"):
+            reaction_mode = str(getattr(rule, "reaction_mode") or "").strip().lower()
+            if reaction_mode in {"", "off", "disabled", "none", "false", "0"}:
+                return False
+            return True
+
+        try:
+            tenant_id = int(getattr(rule, "tenant_id", 0) or 0)
+        except Exception:
+            tenant_id = 0
+        rule_id = int(getattr(rule, "id", 0) or 0)
+        if tenant_id > 1:
+            if hasattr(self.db, "get_rule_reaction_settings_for_tenant"):
+                try:
+                    settings = self.db.get_rule_reaction_settings_for_tenant(tenant_id, rule_id)
+                    return bool(settings and settings.get("enabled"))
+                except Exception:
+                    return True
+            return True
+
+        return False
+
     def _extract_sent_message_id(self, sent_msg) -> int | None:
         ids = self._extract_sent_message_ids(sent_msg)
         return ids[0] if ids else None
@@ -3812,7 +3857,7 @@ class SenderService:
 
         if self.repost_single_active_canary_runner is not None and probe_result is not None:
             active_canary_unsupported_features = ()
-            if self.reaction_clients or int(getattr(rule, "tenant_id", 0) or 0) > 1:
+            if self._rule_requires_reaction_post_send(rule):
                 active_canary_unsupported_features = ("reactions",)
             active_canary_result = await self.repost_single_active_canary_runner.try_run(
                 probe_result=probe_result,

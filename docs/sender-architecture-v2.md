@@ -442,3 +442,7 @@ Stage 26 adds a read-only admin UI integration for delivery diagnostics. The adm
 ## Stage 27 runtime probe boundary
 
 Stage 27 добавляет безопасную границу rollout для одиночного repost: `SenderService` получает optional `RepostSingleRolloutProbe`, `bot.py` создаёт его из env-config builder с disabled-by-default настройками. Probe не импортирует Telegram gateway/pipeline и не делает внешних write side effects; legacy sender продолжает выполнять фактический `copy_message`.
+
+## Stage 28.1 — RepostSingle active canary rule-level reaction guard
+
+Stage 28.1 narrows reaction guard from global reaction client presence to rule-level reaction requirement. This keeps `RepostSingleActiveCanaryRunner` generic: `SenderService` computes whether the concrete rule requires post-send reactions and passes the prepared `unsupported_features=("reactions",)` only for those rules. Global reaction client presence no longer blocks a simple rule from reaching the active pipeline attempt when all Stage 28 guards pass.

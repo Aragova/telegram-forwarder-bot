@@ -123,3 +123,7 @@ Stage 26 adds a read-only admin UI integration for delivery diagnostics. The adm
 ## Stage 27 — RepostSingle rollout probe / shadow-safe runtime integration v1
 
 Stage 27 подключает runtime decision для одиночного repost через `SenderPipelineRolloutStrategy`, но не переводит отправку на новый pipeline. Env builder поддерживает `SENDER_PIPELINE_ROLLOUT_MODE`, `SENDER_PIPELINE_ROLLOUT_REPOST_SINGLE_RULE_IDS` и `SENDER_PIPELINE_ROLLOUT_BLOCKED_RULE_IDS`; default остаётся `disabled`, `rollout_percent=0`, `require_rule_allowlist=True`, `fail_closed=True`. В `dry_run`/`shadow` probe только проверяет наличие безопасных полей для будущего `RepostSingleInput` и пишет safe log. В `active` Stage 27 возвращает `active_not_enabled_in_stage_27` и продолжает legacy path. `RepostSinglePipeline.run()` не вызывается, Telegram copy/send через новый pipeline не выполняется.
+
+## Stage 28.1 — RepostSingle active canary rule-level reaction guard
+
+Stage 28.1 narrows reaction guard from global reaction client presence to rule-level reaction requirement. `RepostSingle` active canary no longer treats configured global reaction clients as an unsupported feature by itself; only rules that explicitly require post-send reactions are passed to the active canary runner with `unsupported_feature:reactions`, so legacy fallback continues for those rules.

@@ -51,3 +51,11 @@ def test_bot_wires_post_send_steps_and_finalizer_for_active_canary_pipeline():
     assert "attempt_ledger=AttemptLedgerService(repository=db)" in source
     assert "target_verifier=TargetVerifier(telethon_client=sender_telethon_client)" in source
     assert "finalizer=DeliveryFinalizer()" in source
+
+
+def test_sender_uses_rule_level_reaction_guard_for_active_canary():
+    source = read("app/sender.py")
+    assert "if self.reaction_clients or" not in source
+    assert "def _rule_requires_reaction_post_send" in source
+    assert "if self._rule_requires_reaction_post_send(rule):" in source
+    assert "active_canary_unsupported_features = (\"reactions\",)" in source

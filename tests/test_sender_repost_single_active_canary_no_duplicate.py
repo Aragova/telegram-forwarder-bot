@@ -8,10 +8,11 @@ from app.sender import SenderService
 
 
 class DummyRepo:
-    def __init__(self):
+    def __init__(self, reaction_settings=None):
         self.sent_calls = []
         self.faulty_calls = []
         self.events = []
+        self.reaction_settings = reaction_settings
 
     def log_delivery_event(self, *args, **kwargs):
         self.events.append((args, kwargs))
@@ -35,6 +36,9 @@ class DummyRepo:
     def touch_rule_after_send(self, *args, **kwargs):
         return None
 
+    def get_rule_reaction_settings_for_tenant(self, tenant_id, rule_id):
+        return self.reaction_settings
+
 
 class FakeProbe:
     def probe(self, **kwargs):
@@ -52,10 +56,10 @@ class FakeRunner:
 
 
 class SenderForTest(SenderService):
-    def __init__(self, runner_result):
+    def __init__(self, runner_result, *, reaction_clients=None, reaction_settings=None):
         self.copy_calls = []
-        self.repo = DummyRepo()
-        super().__init__(bot=SimpleNamespace(), telethon_client=None, reaction_clients=[], db=self.repo, repost_single_rollout_probe=FakeProbe(), repost_single_active_canary_runner=FakeRunner(runner_result))
+        self.repo = DummyRepo(reaction_settings=reaction_settings)
+        super().__init__(bot=SimpleNamespace(), telethon_client=None, reaction_clients=reaction_clients or [], db=self.repo, repost_single_rollout_probe=FakeProbe(), repost_single_active_canary_runner=FakeRunner(runner_result))
 
     async def _deliver_single_video(self, *args, **kwargs):
         raise AssertionError("video path must not be called")
@@ -90,8 +94,10 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def rule():
-    return SimpleNamespace(id=12, mode="repost")
+def rule(**kwargs):
+    data = {"id": 12, "mode": "repost"}
+    data.update(kwargs)
+    return SimpleNamespace(**data)
 
 
 def test_attempted_pipeline_stops_legacy_copy():
@@ -133,3 +139,50 @@ def test_handled_without_sent_ids_marks_faulty_and_stops_legacy_copy():
     assert service.copy_calls == []
     assert service.repo.sent_calls == []
     assert service.repo.faulty_calls
+
+
+def test_global_reaction_clients_do_not_block_rule_without_reaction_requirement():
+    service = SenderForTest(
+        RepostSingleActiveCanaryResult(status=RepostSingleActiveCanaryStatus.HANDLED, attempted_pipeline=True, should_continue_legacy=False, sent_message_ids=(101,), pipeline_status="finalized"),
+        reaction_clients=[object()],
+    )
+
+    result = run(service._deliver_single(rule(), 1, 10, -100, -200, None))
+
+    assert result is True
+    assert service.repost_single_active_canary_runner.calls[0]["unsupported_features"] == ()
+    assert service.copy_calls == []
+
+
+def test_explicit_rule_reaction_requirement_blocks_active_canary_and_falls_back():
+    service = SenderForTest(RepostSingleActiveCanaryResult(status=RepostSingleActiveCanaryStatus.NOT_READY, should_continue_legacy=True, reason="unsupported_feature:reactions"))
+
+    run(service._deliver_single(rule(reactions_enabled=True), 1, 10, -100, -200, None))
+
+    assert service.repost_single_active_canary_runner.calls[0]["unsupported_features"] == ("reactions",)
+    assert len(service.copy_calls) == 1
+
+
+def test_tenant_reaction_settings_block_only_enabled_rule_and_fallback_continues():
+    service = SenderForTest(
+        RepostSingleActiveCanaryResult(status=RepostSingleActiveCanaryStatus.NOT_READY, should_continue_legacy=True, reason="unsupported_feature:reactions"),
+        reaction_settings={"enabled": True},
+    )
+
+    run(service._deliver_single(rule(tenant_id=89), 1, 10, -100, -200, None))
+
+    assert service.repost_single_active_canary_runner.calls[0]["unsupported_features"] == ("reactions",)
+    assert len(service.copy_calls) == 1
+
+
+def test_tenant_without_enabled_reaction_settings_can_reach_active_pipeline():
+    service = SenderForTest(
+        RepostSingleActiveCanaryResult(status=RepostSingleActiveCanaryStatus.HANDLED, attempted_pipeline=True, should_continue_legacy=False, sent_message_ids=(101,), pipeline_status="finalized"),
+        reaction_settings={"enabled": False},
+    )
+
+    result = run(service._deliver_single(rule(tenant_id=89), 1, 10, -100, -200, None))
+
+    assert result is True
+    assert service.repost_single_active_canary_runner.calls[0]["unsupported_features"] == ()
+    assert service.copy_calls == []
