@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from app.repost_single_active_canary import RepostSingleActiveCanaryResult, RepostSingleActiveCanaryStatus
 from app.sender import SenderService
 
 
@@ -37,27 +36,39 @@ class DummyRepo:
 
 
 class FakeProbe:
+    def __init__(self):
+        self.calls = []
+
     def probe(self, **kwargs):
+        self.calls.append(kwargs)
         return SimpleNamespace(to_log_context=lambda: {"status": "ready"})
 
 
 class FakeRunner:
-    def __init__(self, result):
-        self.result = result
+    def __init__(self):
         self.calls = []
 
     async def try_run(self, **kwargs):
         self.calls.append(kwargs)
-        return self.result
+        raise AssertionError("active canary runner must not be called")
 
 
 class SenderForTest(SenderService):
-    def __init__(self, runner_result):
+    def __init__(self):
         self.copy_calls = []
         self.reaction_calls = []
         self.final_success_calls = []
+        self.fake_probe = FakeProbe()
+        self.fake_runner = FakeRunner()
         self.repo = DummyRepo()
-        super().__init__(bot=SimpleNamespace(), telethon_client=None, reaction_clients=[SimpleNamespace()], db=self.repo, repost_single_rollout_probe=FakeProbe(), repost_single_active_canary_runner=FakeRunner(runner_result))
+        super().__init__(
+            bot=SimpleNamespace(),
+            telethon_client=None,
+            reaction_clients=[SimpleNamespace()],
+            db=self.repo,
+            repost_single_rollout_probe=self.fake_probe,
+            repost_single_active_canary_runner=self.fake_runner,
+        )
 
     async def _deliver_single_video(self, *args, **kwargs):
         raise AssertionError("video path must not be called")
@@ -103,14 +114,16 @@ def rule():
     return SimpleNamespace(id=12, mode="repost", tenant_id=2, interval=0)
 
 
-def test_active_success_runs_reaction_and_stops_legacy_copy():
-    service = SenderForTest(RepostSingleActiveCanaryResult(status=RepostSingleActiveCanaryStatus.HANDLED, attempted_pipeline=True, should_continue_legacy=False, sent_message_ids=(101,), pipeline_status="finalized"))
+def test_deprecated_probe_and_runner_are_ignored_and_legacy_copy_runs_once():
+    service = SenderForTest()
     test_rule = rule()
 
     result = run(service._deliver_single(test_rule, 1, 10, -100, -200, None))
 
     assert result is True
-    assert service.copy_calls == []
+    assert len(service.copy_calls) == 1
+    assert service.fake_probe.calls == []
+    assert service.fake_runner.calls == []
     assert service.repo.sent_calls
     assert service.repo.faulty_calls == []
     assert len(service.reaction_calls) == 1
@@ -122,51 +135,17 @@ def test_active_success_runs_reaction_and_stops_legacy_copy():
         "source_message_ids": [10],
         "delivery_id": 1,
     }
-    assert service.repost_single_active_canary_runner.calls[0]["unsupported_features"] == ()
 
 
-def test_reaction_failure_after_active_success_still_marks_sent_without_legacy_copy():
-    service = SenderForTest(RepostSingleActiveCanaryResult(status=RepostSingleActiveCanaryStatus.HANDLED, attempted_pipeline=True, should_continue_legacy=False, sent_message_ids=(101,), pipeline_status="finalized"))
+def test_reaction_failure_in_legacy_path_still_does_not_call_active_runner():
+    service = SenderForTest()
     service.fail_reaction = True
 
     result = run(service._deliver_single(rule(), 1, 10, -100, -200, None))
 
     assert result is True
-    assert service.copy_calls == []
+    assert len(service.copy_calls) == 1
+    assert service.fake_runner.calls == []
     assert service.repo.sent_calls
     assert service.repo.faulty_calls == []
     assert len(service.reaction_calls) == 1
-    assert service.final_success_calls[-1][1]["final_method"] == "repost_single_active_pipeline"
-    assert service.final_success_calls[-1][1]["extra"]["post_send_warnings"] == ["reaction_failed_after_active_pipeline"]
-
-
-def test_legacy_continues_when_runner_allows_fallback():
-    service = SenderForTest(RepostSingleActiveCanaryResult(status=RepostSingleActiveCanaryStatus.NOT_READY, should_continue_legacy=True))
-
-    run(service._deliver_single(rule(), 1, 10, -100, -200, None))
-
-    assert len(service.copy_calls) == 1
-
-
-def test_failed_attempted_pipeline_stops_legacy_copy():
-    service = SenderForTest(RepostSingleActiveCanaryResult(status=RepostSingleActiveCanaryStatus.FAILED, attempted_pipeline=True, should_continue_legacy=False))
-
-    result = run(service._deliver_single(rule(), 1, 10, -100, -200, None))
-
-    assert result is False
-    assert service.copy_calls == []
-    assert service.repo.sent_calls == []
-    assert service.repo.faulty_calls
-    assert service.reaction_calls == []
-
-
-def test_handled_without_sent_ids_marks_faulty_and_stops_legacy_copy():
-    service = SenderForTest(RepostSingleActiveCanaryResult(status=RepostSingleActiveCanaryStatus.HANDLED, attempted_pipeline=True, should_continue_legacy=False, pipeline_status="finalized"))
-
-    result = run(service._deliver_single(rule(), 1, 10, -100, -200, None))
-
-    assert result is False
-    assert service.copy_calls == []
-    assert service.repo.sent_calls == []
-    assert service.repo.faulty_calls
-    assert service.reaction_calls == []
