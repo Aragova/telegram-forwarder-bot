@@ -126,4 +126,4 @@ Stage 27 подключает runtime decision для одиночного repos
 
 ## Stage 28.1 — RepostSingle active canary rule-level reaction guard
 
-Stage 28.1 narrows reaction guard from global reaction client presence to rule-level reaction requirement. `RepostSingle` active canary no longer treats configured global reaction clients as an unsupported feature by itself; only rules that explicitly require post-send reactions are passed to the active canary runner with `unsupported_feature:reactions`, so legacy fallback continues for those rules.
+Stage 28.1 narrows reaction guard from global reaction client presence to rule-level reaction requirement and reuses the existing reaction runtime resolver for tenant reaction detection. `RepostSingle` active canary no longer treats configured global reaction clients as an unsupported feature by itself; only rules that explicitly require post-send reactions are passed to the active canary runner with `unsupported_feature:reactions`, so legacy fallback continues for those rules.

@@ -8,11 +8,13 @@ from app.sender import SenderService
 
 
 class DummyRepo:
-    def __init__(self, reaction_settings=None):
+    def __init__(self, reaction_settings=None, *, rule_tenant_id=None, reaction_accounts=None):
         self.sent_calls = []
         self.faulty_calls = []
         self.events = []
         self.reaction_settings = reaction_settings
+        self.rule_tenant_id = rule_tenant_id
+        self.reaction_accounts = reaction_accounts if reaction_accounts is not None else [{"id": 7}]
 
     def log_delivery_event(self, *args, **kwargs):
         self.events.append((args, kwargs))
@@ -36,8 +38,14 @@ class DummyRepo:
     def touch_rule_after_send(self, *args, **kwargs):
         return None
 
+    def get_rule_tenant_id(self, rule_id):
+        return self.rule_tenant_id or 1
+
     def get_rule_reaction_settings_for_tenant(self, tenant_id, rule_id):
         return self.reaction_settings
+
+    def list_reaction_accounts_for_tenant(self, tenant_id, active_only=True):
+        return self.reaction_accounts
 
 
 class FakeProbe:
@@ -56,9 +64,9 @@ class FakeRunner:
 
 
 class SenderForTest(SenderService):
-    def __init__(self, runner_result, *, reaction_clients=None, reaction_settings=None):
+    def __init__(self, runner_result, *, reaction_clients=None, reaction_settings=None, rule_tenant_id=None, reaction_accounts=None):
         self.copy_calls = []
-        self.repo = DummyRepo(reaction_settings=reaction_settings)
+        self.repo = DummyRepo(reaction_settings=reaction_settings, rule_tenant_id=rule_tenant_id, reaction_accounts=reaction_accounts)
         super().__init__(bot=SimpleNamespace(), telethon_client=None, reaction_clients=reaction_clients or [], db=self.repo, repost_single_rollout_probe=FakeProbe(), repost_single_active_canary_runner=FakeRunner(runner_result))
 
     async def _deliver_single_video(self, *args, **kwargs):
@@ -186,3 +194,43 @@ def test_tenant_without_enabled_reaction_settings_can_reach_active_pipeline():
     assert result is True
     assert service.repost_single_active_canary_runner.calls[0]["unsupported_features"] == ()
     assert service.copy_calls == []
+
+
+def test_rule_without_tenant_id_uses_repository_tenant_reaction_settings_and_falls_back():
+    service = SenderForTest(
+        RepostSingleActiveCanaryResult(status=RepostSingleActiveCanaryStatus.NOT_READY, should_continue_legacy=True, reason="unsupported_feature:reactions"),
+        rule_tenant_id=4,
+        reaction_settings={"enabled": True},
+    )
+
+    run(service._deliver_single(rule(id=89), 1, 10, -100, -200, None))
+
+    assert service.repost_single_active_canary_runner.calls[0]["unsupported_features"] == ("reactions",)
+    assert len(service.copy_calls) == 1
+
+
+def test_rule_without_tenant_id_disabled_repository_reactions_can_reach_active_pipeline():
+    service = SenderForTest(
+        RepostSingleActiveCanaryResult(status=RepostSingleActiveCanaryStatus.HANDLED, attempted_pipeline=True, should_continue_legacy=False, sent_message_ids=(101,), pipeline_status="finalized"),
+        rule_tenant_id=4,
+        reaction_settings={"enabled": False},
+    )
+
+    result = run(service._deliver_single(rule(id=89), 1, 10, -100, -200, None))
+
+    assert result is True
+    assert service.repost_single_active_canary_runner.calls[0]["unsupported_features"] == ()
+    assert service.copy_calls == []
+
+
+def test_negative_explicit_reaction_flag_does_not_override_enabled_tenant_reactions():
+    service = SenderForTest(
+        RepostSingleActiveCanaryResult(status=RepostSingleActiveCanaryStatus.NOT_READY, should_continue_legacy=True, reason="unsupported_feature:reactions"),
+        rule_tenant_id=4,
+        reaction_settings={"enabled": True},
+    )
+
+    run(service._deliver_single(rule(id=89, reactions_enabled=False), 1, 10, -100, -200, None))
+
+    assert service.repost_single_active_canary_runner.calls[0]["unsupported_features"] == ("reactions",)
+    assert len(service.copy_calls) == 1

@@ -331,37 +331,46 @@ class SenderService:
             "premium_reactions_enabled",
         )
         for field in explicit_fields:
-            if hasattr(rule, field):
-                return bool(getattr(rule, field))
+            if hasattr(rule, field) and bool(getattr(rule, field)):
+                return True
 
         for field in ("reaction_count", "normal_count"):
             if hasattr(rule, field):
                 try:
-                    return int(getattr(rule, field) or 0) > 0
+                    if int(getattr(rule, field) or 0) > 0:
+                        return True
                 except Exception:
-                    return bool(getattr(rule, field))
+                    if bool(getattr(rule, field)):
+                        return True
 
-        if hasattr(rule, "reaction_accounts"):
-            return bool(getattr(rule, "reaction_accounts") or [])
+        if hasattr(rule, "reaction_accounts") and bool(getattr(rule, "reaction_accounts") or []):
+            return True
 
         if hasattr(rule, "reaction_mode"):
             reaction_mode = str(getattr(rule, "reaction_mode") or "").strip().lower()
-            if reaction_mode in {"", "off", "disabled", "none", "false", "0"}:
-                return False
-            return True
+            if reaction_mode not in {"", "off", "disabled", "none", "false", "0"}:
+                return True
+
+        rule_id = int(getattr(rule, "id", 0) or 0)
+        tenant_signal = False
+        try:
+            tenant_signal = int(getattr(rule, "tenant_id", 0) or 0) > 1
+        except Exception:
+            tenant_signal = False
 
         try:
-            tenant_id = int(getattr(rule, "tenant_id", 0) or 0)
+            plan = ReactionRuntimeResolver(self.db).resolve_for_rule(rule)
         except Exception:
-            tenant_id = 0
-        rule_id = int(getattr(rule, "id", 0) or 0)
-        if tenant_id > 1:
-            if hasattr(self.db, "get_rule_reaction_settings_for_tenant"):
+            if tenant_signal:
+                return True
+            if hasattr(self.db, "get_rule_tenant_id") and rule_id > 0:
                 try:
-                    settings = self.db.get_rule_reaction_settings_for_tenant(tenant_id, rule_id)
-                    return bool(settings and settings.get("enabled"))
+                    return int(self.db.get_rule_tenant_id(rule_id) or 0) > 1
                 except Exception:
-                    return True
+                    return False
+            return False
+
+        if plan.use_tenant_reactors:
             return True
 
         return False

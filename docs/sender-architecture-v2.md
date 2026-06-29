@@ -445,4 +445,4 @@ Stage 27 добавляет безопасную границу rollout для �
 
 ## Stage 28.1 — RepostSingle active canary rule-level reaction guard
 
-Stage 28.1 narrows reaction guard from global reaction client presence to rule-level reaction requirement. This keeps `RepostSingleActiveCanaryRunner` generic: `SenderService` computes whether the concrete rule requires post-send reactions and passes the prepared `unsupported_features=("reactions",)` only for those rules. Global reaction client presence no longer blocks a simple rule from reaching the active pipeline attempt when all Stage 28 guards pass.
+Stage 28.1 narrows reaction guard from global reaction client presence to rule-level reaction requirement and reuses the existing reaction runtime resolver for tenant reaction detection. This keeps `RepostSingleActiveCanaryRunner` generic: `SenderService` computes whether the concrete rule requires post-send reactions and passes the prepared `unsupported_features=("reactions",)` only for those rules. Global reaction client presence no longer blocks a simple rule from reaching the active pipeline attempt when all Stage 28 guards pass.
