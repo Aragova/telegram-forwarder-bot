@@ -588,6 +588,39 @@ class SenderService:
             )
             return {"ok": False, "error": str(exc)}
 
+
+    def _caption_entity_counts(self, entities) -> dict[str, int]:
+        counts = {"total": 0, "custom_emoji": 0, "urls": 0, "bold": 0, "italic": 0}
+        for entity in entities or []:
+            try:
+                entity_type = str(entity.get("type") if isinstance(entity, dict) else getattr(entity, "type", entity.__class__.__name__) or "").lower()
+            except Exception:
+                entity_type = ""
+            counts["total"] += 1
+            if entity_type in {"custom_emoji", "messageentitycustomemoji"} or "customemoji" in entity_type:
+                counts["custom_emoji"] += 1
+            elif entity_type in {"url", "text_link", "messageentityurl", "messageentitytexturl"}:
+                counts["urls"] += 1
+            elif entity_type in {"bold", "messageentitybold"}:
+                counts["bold"] += 1
+            elif entity_type in {"italic", "messageentityitalic"}:
+                counts["italic"] += 1
+        return counts
+
+    def _log_caption_entity_inventory(self, *, source: str, rule_id=None, message_ids=None, entities=None) -> None:
+        counts = self._caption_entity_counts(entities or [])
+        logger.info(
+            "CAPTION_ENTITY_INVENTORY | source=%s | rule_id=%s | message_ids=%s | total=%s | custom_emoji=%s | urls=%s | bold=%s | italic=%s",
+            source,
+            rule_id,
+            message_ids or [],
+            counts["total"],
+            counts["custom_emoji"],
+            counts["urls"],
+            counts["bold"],
+            counts["italic"],
+        )
+
     def _normalize_video_caption_entities(self, raw_entities) -> list[dict]:
         return normalize_caption_entities(raw_entities)
 
@@ -869,7 +902,18 @@ class SenderService:
 
     def _build_text_and_entities_from_content(self, content: dict | None) -> tuple[str, list]:
         text = extract_text_from_content(content)
+        raw_entities = (content or {}).get("entities") or []
+        in_counts = self._caption_entity_counts(raw_entities)
         entities = self._build_telethon_entities_from_content(content, text)
+        out_counts = self._caption_entity_counts(entities)
+        logger.info(
+            "CAPTION_ENTITY_BUILD_RESULT | source=album | rule_id=%s | total_in=%s | total_out=%s | custom_emoji_in=%s | custom_emoji_out=%s",
+            (content or {}).get("rule_id"),
+            in_counts["total"],
+            out_counts["total"],
+            in_counts["custom_emoji"],
+            out_counts["custom_emoji"],
+        )
         return text, entities
 
     def _serialize_pipeline_verify_result(self, verify_result: dict | None) -> dict:

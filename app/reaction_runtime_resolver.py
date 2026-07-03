@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any
+
+
+logger = logging.getLogger("forwarder")
 
 
 @dataclass
@@ -12,6 +16,12 @@ class ReactionRuntimePlan:
     use_tenant_reactors: bool
     reason: str
     tenant_accounts: list[dict[str, Any]] = field(default_factory=list)
+    eligible_accounts: int = 0
+    selected_accounts: int = 0
+    skipped_accounts: int = 0
+    limit_applied: bool = False
+    limit: int | None = None
+    selection_reason: str | None = None
 
 
 class ReactionRuntimeResolver:
@@ -54,6 +64,7 @@ class ReactionRuntimeResolver:
             )
 
         accounts = self.db.list_reaction_accounts_for_tenant(tenant_id=tenant_id, active_only=True) or []
+        eligible_accounts = len(accounts)
         if not accounts:
             return ReactionRuntimePlan(
                 mode="no_accounts",
@@ -61,7 +72,23 @@ class ReactionRuntimeResolver:
                 use_legacy_reactors=False,
                 use_tenant_reactors=False,
                 reason="no_active_tenant_reaction_accounts",
+                eligible_accounts=0,
+                selected_accounts=0,
+                skipped_accounts=0,
+                selection_reason="no_active_tenant_reaction_accounts",
             )
+
+        logger.info(
+            "REACTION_ACCOUNT_SELECTION | rule_id=%s | tenant_id=%s | mode=tenant_saas | eligible_accounts=%s | selected_accounts=%s | skipped_accounts=%s | limit_applied=%s | limit=%s | reason=%s",
+            rule_id,
+            tenant_id,
+            eligible_accounts,
+            len(accounts),
+            max(eligible_accounts - len(accounts), 0),
+            False,
+            None,
+            "no_limit_all_active_accounts",
+        )
 
         return ReactionRuntimePlan(
             mode="tenant_saas",
@@ -70,4 +97,10 @@ class ReactionRuntimeResolver:
             use_tenant_reactors=True,
             reason="tenant_reactions_enabled",
             tenant_accounts=accounts,
+            eligible_accounts=eligible_accounts,
+            selected_accounts=len(accounts),
+            skipped_accounts=max(eligible_accounts - len(accounts), 0),
+            limit_applied=False,
+            limit=None,
+            selection_reason="no_limit_all_active_accounts",
         )
