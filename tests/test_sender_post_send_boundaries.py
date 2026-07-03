@@ -533,6 +533,124 @@ def test_video_send_runtime_extracted_from_sender():
         assert needle not in runtime_source
 
 
+def _run_album_delivery_with_entities(entities):
+    from app.repost_album_delivery import RepostAlbumDelivery
+
+    events = []
+
+    class RuntimeRepo:
+        def mark_many_deliveries_sent(self, delivery_ids):
+            events.append(("mark_many", tuple(delivery_ids)))
+
+    class RuntimeOwner(SenderService):
+        def __init__(self):
+            self.db = RuntimeRepo()
+            self.copy_calls = 0
+            self.reupload_calls = 0
+
+        def _resolve_repost_caption_delivery_strategy_sync(self, **_kwargs):
+            return {"configured_mode": "auto", "requires_builder": False, "use_copy_first": True}
+
+        def _get_album_primary_text(self, *_args, **_kwargs):
+            return "caption"
+
+        async def _fetch_album_messages(self, *_args, **_kwargs):
+            return [type("Msg", (), {"id": 10})(), type("Msg", (), {"id": 11})()]
+
+        def _content_from_message_or_post(self, message=None, post_row=None):
+            if message is not None and getattr(message, "id", None) == 10:
+                return {"text": "caption", "entities": entities}
+            return {"text": "", "entities": []}
+
+        def _log_caption_entity_inventory(self, **kwargs):
+            events.append(("inventory", kwargs.get("entities")))
+
+        def _is_self_loop_rule(self, *_args):
+            return False
+
+        async def _log_delivery_pipeline_step(self, **kwargs):
+            events.append(("pipeline", kwargs.get("pipeline_stage"), kwargs.get("pipeline_result"), kwargs.get("error_text"), kwargs.get("extra") or {}))
+
+        async def _copy_album_via_bot(self, **_kwargs):
+            self.copy_calls += 1
+            return {"ok": True, "sent_message_id": 501, "sent_message_ids": [501, 502], "sent_count": 2}
+
+        async def _reupload_album(self, **_kwargs):
+            self.reupload_calls += 1
+            return {"ok": True, "sent_message_id": 601, "sent_message_ids": [601, 602], "sent_count": 2}
+
+        async def _verify_album_delivery(self, **kwargs):
+            return {"ok": True, "first_message_id": (kwargs.get("sent_message_ids") or [None])[0], "sent_message_ids": kwargs.get("sent_message_ids") or []}
+
+        def _serialize_pipeline_verify_result(self, result):
+            return result
+
+        async def _run_post_send_step_safe(self, *, coro_factory, **_kwargs):
+            return {"ok": True, "result": await coro_factory()}
+
+        async def _add_reaction_for_rule_if_possible(self, **_kwargs):
+            return True
+
+        async def _select_reaction_message_id(self, *, sent_message_ids, **_kwargs):
+            return ((sent_message_ids or [None])[0], "first_sent_message")
+
+        async def _log_delivery_final_success(self, **kwargs):
+            events.append(("final_success", kwargs.get("final_method")))
+
+        def _mark_many_deliveries_sent_sync(self, delivery_ids):
+            self.db.mark_many_deliveries_sent(delivery_ids)
+
+    owner = RuntimeOwner()
+    ok = asyncio.run(
+        RepostAlbumDelivery(owner).deliver(
+            DummyRule(),
+            [{"delivery_id": 1, "message_id": 10}, {"delivery_id": 2, "message_id": 11}],
+            "@src",
+            "-1001",
+            None,
+        )
+    )
+    return ok, owner, events
+
+
+def test_album_custom_emoji_forces_telethon_reupload_path():
+    ok, owner, _events = _run_album_delivery_with_entities(
+        [{"type": "custom_emoji", "offset": 0, "length": 1, "custom_emoji_id": "777"}]
+    )
+
+    assert ok is True
+    assert owner.copy_calls == 0
+    assert owner.reupload_calls == 1
+
+
+def test_album_custom_emoji_logs_force_telethon(caplog):
+    caplog.set_level("INFO", logger="forwarder")
+
+    ok, _owner, events = _run_album_delivery_with_entities(
+        [{"type": "custom_emoji", "offset": 0, "length": 1, "custom_emoji_id": "777"}]
+    )
+
+    assert ok is True
+    assert "ALBUM_CUSTOM_EMOJI_FORCE_TELETHON" in caplog.text
+    assert "COPY_ALBUM_CAPTION_POLICY" in caplog.text
+    assert "custom_emoji_requires_telethon" in caplog.text
+    assert any(
+        event[0:3] == ("pipeline", "copy_album", "skipped")
+        and event[3] == "copy_album skipped because custom_emoji requires Telethon"
+        for event in events
+    )
+
+
+def test_album_without_custom_emoji_keeps_copy_first():
+    ok, owner, events = _run_album_delivery_with_entities(
+        [{"type": "bold", "offset": 0, "length": 1}]
+    )
+
+    assert ok is True
+    assert owner.copy_calls == 1
+    assert owner.reupload_calls == 0
+    assert ("final_success", "copy_album_verified") in events
+
 
 def test_album_content_entities_preserve_custom_emoji():
     from telethon.tl import types
