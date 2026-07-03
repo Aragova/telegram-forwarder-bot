@@ -229,3 +229,64 @@ def test_video_send_extracted_log_uses_payload_source_message_ids(tmp_path: Path
         and "source_message_ids=[2914]" in message
         for message in messages
     )
+
+
+def test_video_send_wrapper_success_result_contract(tmp_path: Path):
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _confirm(**kwargs):
+        return list(kwargs["candidate_sent_message_ids"])
+
+    async def _react(*_args, **_kwargs):
+        return None
+
+    service._confirm_target_delivery_message_ids_with_retry = _confirm  # type: ignore[method-assign]
+    service._add_reaction_if_possible = _react  # type: ignore[method-assign]
+    processed_file = tmp_path / "video.mp4"
+    processed_file.write_bytes(b"ok")
+
+    result = asyncio.run(
+        service.execute_video_send_from_processed_job(
+            delivery_id=15,
+            rule_id=1,
+            tenant_id=1,
+            target_id="-1006",
+            message_id=2914,
+            processed_video_path=str(processed_file),
+            artifact_version=1,
+            pipeline_version=1,
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["fallback_to_legacy"] is False
+
+
+def test_video_send_wrapper_failed_send_result_contract(tmp_path: Path):
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _failed_send(*_args, **_kwargs):
+        return None
+
+    service.video_processor.send_with_retry = _failed_send  # type: ignore[method-assign]
+    processed_file = tmp_path / "video.mp4"
+    processed_file.write_bytes(b"ok")
+
+    result = asyncio.run(
+        service.execute_video_send_from_processed_job(
+            delivery_id=16,
+            rule_id=1,
+            tenant_id=1,
+            target_id="-1007",
+            message_id=2914,
+            processed_video_path=str(processed_file),
+            artifact_version=1,
+            pipeline_version=1,
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["retryable"] is True
+    assert result["fallback_to_legacy"] is False
