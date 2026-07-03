@@ -412,3 +412,39 @@ def test_repost_single_delivery_reaction_calls_keep_full_context_source_guard():
     assert 'source_channel=str(source_channel or "")' in text_block
     assert 'source_message_ids=source_message_ids' in text_block
     assert 'delivery_id=delivery_id' in text_block
+
+
+def test_video_send_runtime_extracted_from_sender():
+    sender_source = open("app/sender.py", encoding="utf-8").read()
+    runtime_source = open("app/video_send_delivery.py", encoding="utf-8").read()
+
+    wrapper_start = sender_source.index("    async def execute_video_send_from_processed_job(")
+    wrapper_end = sender_source.index("    async def _deliver_single(", wrapper_start)
+    wrapper_source = sender_source[wrapper_start:wrapper_end]
+
+    assert len(wrapper_source.splitlines()) <= 24
+    assert "VideoSendDelivery(self).execute_from_processed_job" in wrapper_source
+    assert "send_with_retry" not in wrapper_source
+    assert "DELIVERY_ATTEMPT_ACCEPTED" not in wrapper_source
+    assert "reaction_after_video_send" not in wrapper_source
+    assert "DELIVERY_SENT_MESSAGE_IDS_EXTRACTED" not in wrapper_source
+
+    assert "class VideoSendDelivery" in runtime_source
+    assert "execute_from_processed_job" in runtime_source
+    assert "send_with_retry" in runtime_source
+    assert "DELIVERY_ATTEMPT_ACCEPTED" in runtime_source
+    assert "reaction_after_video_send" in runtime_source
+    assert "DELIVERY_SENT_MESSAGE_IDS_EXTRACTED" in runtime_source
+
+    forbidden = [
+        "ActiveCanary",
+        "active_canary",
+        "Rollout",
+        "Pipeline",
+        "TelegramSendGateway",
+        "TargetVerifier",
+        "DeliveryFinalizer",
+        "DeliveryContext",
+    ]
+    for needle in forbidden:
+        assert needle not in runtime_source
