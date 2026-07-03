@@ -3926,7 +3926,6 @@ class SenderService:
                     target_id=str(target_id),
                     delivery_method="copy_single",
                 )
-                await run_db(self._touch_rule_after_send_sync, rule.id, int(getattr(rule, "interval", 0) or 0))
                 return True
             if valid_sent_ids:
                 logger.warning("DELIVERY_SENT_UNVERIFIED_AFTER_ACCEPTED | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_ids=%s | warnings=%s", rule.id, delivery_id, target_id, valid_sent_ids, post_send_warnings)

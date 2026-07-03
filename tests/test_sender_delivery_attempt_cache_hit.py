@@ -45,3 +45,36 @@ def test_repost_single_cache_hit_ignores_invalid_zero_id():
         )
     )
     assert ok is True
+
+
+def test_repost_single_success_touches_rule_once_at_outer_level():
+    class TouchRepo(FakeRepo):
+        def __init__(self):
+            self.touches = []
+
+        def get_delivery_attempt_by_idempotency_key(self, _key):
+            return None
+
+        def touch_rule_after_send(self, rule_id, interval):
+            self.touches.append((rule_id, interval))
+            return None
+
+    repo = TouchRepo()
+    service = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=repo)
+
+    async def _deliver(*_args, **_kwargs):
+        return True
+
+    service._deliver_single = _deliver  # type: ignore[method-assign]
+    ok = asyncio.run(
+        service.execute_repost_single_from_job(
+            rule_id=1,
+            delivery_id=10,
+            message_id=11,
+            source_channel="@src",
+            target_id="-1001",
+            interval=3600,
+        )
+    )
+    assert ok is True
+    assert repo.touches == [(1, 3600)]
