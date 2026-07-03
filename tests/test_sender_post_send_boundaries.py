@@ -134,6 +134,89 @@ def test_single_delivery_source_extracted_from_sender():
     assert "COPY_SINGLE_TARGET_CONFIRM_OK" in runtime_source
 
 
+def test_repost_album_runtime_extracted_from_sender():
+    sender_source = open("app/sender.py", encoding="utf-8").read()
+    runtime_source = open("app/repost_album_delivery.py", encoding="utf-8").read()
+
+    wrapper_start = sender_source.index("    async def _deliver_album(")
+    wrapper_end = sender_source.index("    async def", wrapper_start + 1)
+    wrapper_source = sender_source[wrapper_start:wrapper_end]
+
+    assert len(wrapper_source.splitlines()) <= 24
+    assert "RepostAlbumDelivery(self).deliver" in wrapper_source
+
+    assert "copy_album" not in wrapper_source
+    assert "reupload_album" not in wrapper_source
+    assert "verify_after_copy_album" not in wrapper_source
+    assert "verify_after_reupload" not in wrapper_source
+
+    assert "class RepostAlbumDelivery" in runtime_source
+    assert "copy_album" in runtime_source
+    assert "reupload_album" in runtime_source
+    assert "verify_after_copy_album" in runtime_source
+    assert "verify_after_reupload" in runtime_source
+    assert "_mark_many_deliveries_sent_sync" in runtime_source
+
+    forbidden = [
+        "ActiveCanary",
+        "active_canary",
+        "Rollout",
+        "TelegramSendGateway",
+        "TargetVerifier",
+        "DeliveryFinalizer",
+        "DeliveryContext",
+    ]
+    for needle in forbidden:
+        assert needle not in runtime_source
+
+
+def test_deliver_album_wrapper_delegates_to_repost_album_delivery(monkeypatch):
+    from app.repost_album_delivery import RepostAlbumDelivery
+
+    s = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=Repo())
+    rule = DummyRule()
+    album_rows = [{"delivery_id": 1, "message_id": 10}]
+    calls = []
+
+    async def fake_deliver(
+        self,
+        got_rule,
+        got_album_rows,
+        got_source_channel,
+        got_target_id,
+        got_target_thread_id,
+        idempotency_key=None,
+    ):
+        calls.append(
+            (
+                self.owner,
+                got_rule,
+                got_album_rows,
+                got_source_channel,
+                got_target_id,
+                got_target_thread_id,
+                idempotency_key,
+            )
+        )
+        return {"delegated": True}
+
+    monkeypatch.setattr(RepostAlbumDelivery, "deliver", fake_deliver)
+
+    result = asyncio.run(
+        s._deliver_album(
+            rule,
+            album_rows,
+            "@src",
+            "-1001",
+            55,
+            idempotency_key="album-key",
+        )
+    )
+
+    assert result == {"delegated": True}
+    assert calls == [(s, rule, album_rows, "@src", "-1001", 55, "album-key")]
+
+
 def test_execute_repost_single_calls_delivery_and_touches_once():
     repo = Repo()
     touches = []
