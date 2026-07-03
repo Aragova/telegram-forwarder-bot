@@ -72,15 +72,6 @@ class RepostAlbumDelivery:
         except Exception as exc:
             logger.warning("CAPTION_ENTITY_INVENTORY_FAILED | source=album | rule_id=%s | error=%s", rule.id, exc)
 
-        logger.info(
-            "COPY_ALBUM_CAPTION_POLICY | rule_id=%s | requires_builder=%s | selected_path=%s | caption_override=%s | reason=%s",
-            rule.id,
-            requires_builder,
-            "copy_first" if use_copy_first else "builder_first",
-            False,
-            "pure_copy_messages_no_caption_override" if use_copy_first and not requires_builder else "copy_messages_api_has_no_caption_override",
-        )
-
         # =========================================================
         # PREVIEW / caption text for verify
         # =========================================================
@@ -104,6 +95,59 @@ class RepostAlbumDelivery:
             )
             source_messages = None
             first_source_caption = None
+
+        try:
+            album_caption_entities = []
+            if source_messages:
+                for message in source_messages:
+                    message_id = int(getattr(message, "id"))
+                    content = owner._content_from_message_or_post(message=message)
+                    entities = (content or {}).get("entities") or []
+                    if not entities:
+                        row_content = owner._content_from_message_or_post(
+                            message=None,
+                            post_row=post_rows_by_message_id.get(message_id),
+                        )
+                        entities = (row_content or {}).get("entities") or []
+                    album_caption_entities.extend(entities)
+            else:
+                for row in album_rows:
+                    content = owner._content_from_message_or_post(message=None, post_row=row)
+                    album_caption_entities.extend((content or {}).get("entities") or [])
+
+            album_entity_counts = owner._caption_entity_counts(album_caption_entities)
+            album_custom_emoji_count = int(album_entity_counts.get("custom_emoji") or 0)
+        except Exception as exc:
+            logger.warning(
+                "ALBUM_CUSTOM_EMOJI_DETECT_FAILED | rule_id=%s | message_ids=%s | error=%s",
+                rule.id,
+                message_ids,
+                exc,
+            )
+            album_custom_emoji_count = 0
+
+        if album_custom_emoji_count > 0 and use_copy_first:
+            logger.info(
+                "ALBUM_CUSTOM_EMOJI_FORCE_TELETHON | rule_id=%s | message_ids=%s | custom_emoji=%s | previous_selected_path=%s | new_selected_path=%s",
+                rule.id,
+                message_ids,
+                album_custom_emoji_count,
+                "copy_first",
+                "reupload_album",
+            )
+            use_copy_first = False
+            requires_builder = True
+
+        logger.info(
+            "COPY_ALBUM_CAPTION_POLICY | rule_id=%s | requires_builder=%s | selected_path=%s | caption_override=%s | reason=%s",
+            rule.id,
+            requires_builder,
+            "copy_first" if use_copy_first else "builder_first",
+            False,
+            "custom_emoji_requires_telethon" if album_custom_emoji_count > 0 else (
+                "pure_copy_messages_no_caption_override" if use_copy_first and not requires_builder else "copy_messages_api_has_no_caption_override"
+            ),
+        )
 
         # =========================================================
         # 1) COPY VIA BOT API
@@ -290,7 +334,7 @@ class RepostAlbumDelivery:
                 "ok": False,
                 "sent_message_id": None,
                 "sent_count": 0,
-                "error_text": "copy_album пропущен политикой caption mode",
+                "error_text": "copy_album skipped because custom_emoji requires Telethon" if album_custom_emoji_count > 0 else "copy_album пропущен политикой caption mode",
             }
 
             await owner._log_delivery_pipeline_step(
@@ -302,11 +346,12 @@ class RepostAlbumDelivery:
                 source_channel=source_channel,
                 target_id=target_id,
                 source_message_ids=message_ids,
-                error_text="copy_album пропущен политикой caption mode",
+                error_text=copy_result["error_text"],
                 extra={
                     "caption_delivery_mode": caption_mode,
                     "requires_builder": requires_builder,
-                    "skip_reason": "builder_required_or_builder_first",
+                    "skip_reason": "custom_emoji_requires_telethon" if album_custom_emoji_count > 0 else "builder_required_or_builder_first",
+                    "custom_emoji": album_custom_emoji_count,
                 },
             )
 
@@ -1112,4 +1157,3 @@ class RepostAlbumDelivery:
             },
         )
         return False
-
