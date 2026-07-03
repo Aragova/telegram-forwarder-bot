@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from app.sender import SenderService
+from app.repost_single_delivery import RepostSingleDelivery
 
 
 class FakeTelethon:
@@ -241,7 +242,7 @@ def test_mark_delivery_sent_sync_has_no_authoritative_sent_message_id_reference(
 
 
 def test_copy_single_path_does_not_reference_unbound_valid_sent_message_ids():
-    source = inspect.getsource(SenderService._deliver_single)
+    source = inspect.getsource(RepostSingleDelivery.deliver)
     copy_single_block_start = source.index("if use_copy_first:")
     mark_sent_call = source.index("delivery_method=\"copy_single\"")
     block = source[copy_single_block_start:mark_sent_call]
@@ -250,28 +251,28 @@ def test_copy_single_path_does_not_reference_unbound_valid_sent_message_ids():
 
 
 def test_copy_single_uncertain_result_stops_without_reupload():
-    source = inspect.getsource(SenderService._deliver_single)
+    source = inspect.getsource(RepostSingleDelivery.deliver)
     assert "COPY_SINGLE_UNCERTAIN_NO_FALLBACK" in source
     assert "if copy_result.get(\"attempted\")" in source
     assert "return False" in source[source.index("COPY_SINGLE_UNCERTAIN_NO_FALLBACK"):source.index("COPY_TO_REUPLOAD_FALLBACK_ALLOWED")]
 
 
 def test_copy_single_has_confirmation_gate_before_mark_sent():
-    source = inspect.getsource(SenderService._deliver_single)
+    source = inspect.getsource(RepostSingleDelivery.deliver)
     confirm_call_pos = source.index("method=\"copy_single\"")
     mark_sent_pos = source.index("delivery_method=\"copy_single\"")
     assert confirm_call_pos < mark_sent_pos
 
 
 def test_copy_single_fallback_allowed_only_when_not_attempted():
-    source = inspect.getsource(SenderService._deliver_single)
+    source = inspect.getsource(RepostSingleDelivery.deliver)
     allowed_pos = source.index("COPY_TO_REUPLOAD_FALLBACK_ALLOWED")
     attempted_guard_pos = source.rfind("if copy_result.get(\"attempted\")", 0, allowed_pos)
     assert attempted_guard_pos != -1
 
 
 def test_copy_single_uncertain_marks_faulty_and_manual_review_error():
-    source = inspect.getsource(SenderService._deliver_single)
+    source = inspect.getsource(RepostSingleDelivery.deliver)
     assert "copy_single_uncertain_no_fallback: copy_message was attempted but target confirmation failed; manual review required" in source
     assert "_mark_delivery_faulty_sync" in source
     assert "non_retryable" in source
@@ -284,9 +285,9 @@ def test_execute_repost_single_returns_non_retryable_for_uncertain_faulty():
 
 
 def test_copy_single_success_does_not_touch_rule_internally():
-    source = inspect.getsource(SenderService._deliver_single)
+    source = inspect.getsource(RepostSingleDelivery.deliver)
     copy_single_start = source.index("if use_copy_first:")
-    copy_single_success_mark = source.index("self._mark_delivery_sent_sync", copy_single_start)
+    copy_single_success_mark = source.index("owner._mark_delivery_sent_sync", copy_single_start)
     copy_single_success_return = source.index("return True", copy_single_success_mark)
     success_block = source[copy_single_success_mark:copy_single_success_return]
     assert 'delivery_method="copy_single"' in success_block

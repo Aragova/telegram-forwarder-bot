@@ -116,3 +116,117 @@ def test_video_delivery_post_send_failure_after_accepted_is_non_fatal():
     assert result is True
     assert repo.accepted
     assert repo.sent
+
+
+def test_single_delivery_source_extracted_from_sender():
+    sender_source = open("app/sender.py", encoding="utf-8").read()
+    runtime_source = open("app/repost_single_delivery.py", encoding="utf-8").read()
+
+    wrapper_start = sender_source.index("    async def _deliver_single(")
+    wrapper_end = sender_source.index("    async def _deliver_single_video", wrapper_start)
+    wrapper_source = sender_source[wrapper_start:wrapper_end]
+
+    assert len(wrapper_source.splitlines()) <= 20
+    assert "RepostSingleDelivery(self).deliver" in wrapper_source
+    assert "pipeline_stage=\"copy_single\"" not in wrapper_source
+    assert "class RepostSingleDelivery" in runtime_source
+    assert "pipeline_stage=\"copy_single\"" in runtime_source
+    assert "COPY_SINGLE_TARGET_CONFIRM_OK" in runtime_source
+
+
+def test_execute_repost_single_calls_delivery_and_touches_once():
+    repo = Repo()
+    touches = []
+    s = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=repo)
+
+    async def _deliver(rule, delivery_id, message_id, source_channel, target_id, target_thread_id, idempotency_key=None):
+        assert rule.id == 1
+        assert delivery_id == 9
+        assert message_id == 13
+        assert idempotency_key
+        return True
+
+    def _touch(rule_id, interval):
+        touches.append((rule_id, interval))
+
+    s._deliver_single = _deliver  # type: ignore
+    s._touch_rule_after_send_sync = _touch  # type: ignore
+
+    ok = asyncio.run(
+        s.execute_repost_single_from_job(
+            rule_id=1,
+            delivery_id=9,
+            message_id=13,
+            source_channel="@src",
+            target_id="-1001",
+            interval=77,
+        )
+    )
+
+    assert ok is True
+    assert touches == [(1, 77)]
+
+
+def test_copy_single_success_marks_sent_reacts_and_does_not_touch_inside_delivery():
+    from app.repost_single_delivery import RepostSingleDelivery
+
+    events = []
+
+    class RuntimeRepo:
+        def log_delivery_event(self, **kwargs):
+            events.append(("log_event", kwargs.get("event_type")))
+
+        def mark_delivery_attempt_accepted(self, key, *, sent_message_ids, telegram_method=None):
+            events.append(("accepted", key, tuple(sent_message_ids), telegram_method))
+
+    class RuntimeOwner:
+        db = RuntimeRepo()
+        bot = DummyBot()
+
+        def _get_post_id_by_delivery_sync(self, delivery_id):
+            return 1000 + delivery_id
+
+        def _resolve_repost_caption_delivery_strategy_sync(self, **_kwargs):
+            return {"configured_mode": "copy", "requires_builder": False, "use_copy_first": True}
+
+        def _get_post_row_for_rule_message_sync(self, *_args):
+            return None
+
+        async def _log_delivery_pipeline_step(self, **kwargs):
+            events.append(("pipeline", kwargs.get("pipeline_stage"), kwargs.get("pipeline_result")))
+
+        async def _copy_single_via_bot(self, *_args):
+            return {"raw_result": {"message_id": 501}, "sent_ids": [501], "attempted": True, "raw_result_type": "dict"}
+
+        async def _run_post_send_step_safe(self, *, step_name, coro_factory, **_kwargs):
+            result = await coro_factory()
+            events.append(("post_send", step_name, result))
+            return {"ok": True, "result": result}
+
+        async def _confirm_target_delivery_message_ids_with_retry(self, **_kwargs):
+            return [501]
+
+        async def _add_reaction_for_rule_if_possible(self, **kwargs):
+            events.append(("reaction", kwargs.get("sent_message_id")))
+            return True
+
+        async def _log_delivery_final_success(self, **kwargs):
+            events.append(("final_success", kwargs.get("final_method")))
+
+        def _mark_delivery_sent_sync(self, delivery_id, **kwargs):
+            events.append(("mark_sent", delivery_id, kwargs.get("delivery_method"), kwargs.get("sent_message_ids")))
+
+        def _touch_rule_after_send_sync(self, *_args):
+            events.append(("touch",))
+
+    ok = asyncio.run(
+        RepostSingleDelivery(RuntimeOwner()).deliver(
+            DummyRule(), 9, 13, "@src", "-1001", None, idempotency_key="key-1"
+        )
+    )
+
+    assert ok is True
+    assert ("reaction", 501) in events
+    assert ("final_success", "copy_single") in events
+    assert ("mark_sent", 9, "copy_single", [501]) in events
+    assert not [event for event in events if event[0] == "touch"]
