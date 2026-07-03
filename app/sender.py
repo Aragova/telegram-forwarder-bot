@@ -303,17 +303,12 @@ def _detect_message_media_kind(message) -> str:
 
 class SenderService:
     def __init__(
-        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db, sender_pipeline_facade: object | None = None, repost_single_rollout_probe: object | None = None, repost_single_active_canary_runner: object | None = None
+        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db
     ):
         self.bot = bot
         self.telethon = telethon_client
         self.reaction_clients = reaction_clients or []
         self.db = db
-        self.sender_pipeline_facade = sender_pipeline_facade
-        # Deprecated Stage 27 injection points are accepted for compatibility only.
-        # Stage R0 HARD keeps production single-repost delivery on legacy copy-first flow.
-        self.repost_single_rollout_probe = None
-        self.repost_single_active_canary_runner = None
         self.scheduler_service = SchedulerService(self.db)
 
         self.video_processor = VideoProcessor(
