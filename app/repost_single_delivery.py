@@ -443,10 +443,13 @@ class RepostSingleDelivery:
             logger.info("REUPLOAD_SINGLE_TARGET_VERIFY_OK | rule_id=%s | delivery_id=%s | source_channel=%s | source_message_id=%s | target_id=%s | valid_sent_message_ids=%s", rule.id, delivery_id, source_channel, message_id, target_id, valid_sent_message_ids)
             authoritative_sent_message_id = int(valid_sent_message_ids[0])
             await owner._add_reaction_for_rule_if_possible(
-                            rule=rule,
-                            target_id=target_id,
-                            sent_message_id=sent_message_id,
-                        )
+                rule=rule,
+                target_id=target_id,
+                sent_message_id=authoritative_sent_message_id,
+                source_channel=str(source_channel or ""),
+                source_message_ids=source_message_ids,
+                delivery_id=delivery_id,
+            )
 
             await owner._log_delivery_final_success(
                 rule_id=rule.id,
@@ -566,10 +569,13 @@ class RepostSingleDelivery:
                 )
 
                 await owner._add_reaction_for_rule_if_possible(
-                            rule=rule,
-                            target_id=target_id,
-                            sent_message_id=sent.message_id,
-                        )
+                    rule=rule,
+                    target_id=target_id,
+                    sent_message_id=sent.message_id,
+                    source_channel=str(source_channel or ""),
+                    source_message_ids=source_message_ids,
+                    delivery_id=delivery_id,
+                )
 
                 text_fallback_ok = True
                 text_fallback_sent_message_id = sent.message_id
