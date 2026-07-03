@@ -310,3 +310,94 @@ def test_single_delivery_fallback_reaction_calls_pass_context_source_guard():
     assert 'source_channel=str(source_channel or "")' in text_block
     assert "source_message_ids=source_message_ids" in text_block
     assert "delivery_id=delivery_id" in text_block
+
+
+
+def test_tenant_reaction_runtime_selects_all_active_accounts_when_no_limit(caplog):
+    from app.reaction_runtime_resolver import ReactionRuntimeResolver
+
+    class DB:
+        def get_rule_reaction_settings_for_tenant(self, tenant_id, rule_id):
+            return {"enabled": True}
+
+        def list_reaction_accounts_for_tenant(self, *, tenant_id, active_only=True):
+            assert tenant_id == 4
+            assert active_only is True
+            return [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]
+
+    caplog.set_level("INFO", logger="forwarder")
+    plan = ReactionRuntimeResolver(DB()).resolve_for_rule(SimpleNamespace(id=89, tenant_id=4))
+
+    assert plan.mode == "tenant_saas"
+    assert len(plan.tenant_accounts) == 4
+    assert plan.selected_accounts == 4
+    assert plan.eligible_accounts == 4
+    assert plan.limit_applied is False
+    assert "REACTION_ACCOUNT_SELECTION" in caplog.text
+    assert "eligible_accounts=4" in caplog.text
+    assert "selected_accounts=4" in caplog.text
+    assert "limit_applied=False" in caplog.text
+
+
+def test_tenant_reaction_selection_logs_limit_reason(caplog):
+    from app.reaction_runtime_resolver import ReactionRuntimePlan
+
+    caplog.set_level("INFO", logger="forwarder")
+    import logging
+    logging.getLogger("forwarder").info(
+        "REACTION_ACCOUNT_SELECTION | rule_id=%s | tenant_id=%s | mode=tenant_saas | eligible_accounts=%s | selected_accounts=%s | skipped_accounts=%s | limit_applied=%s | limit=%s | reason=%s",
+        89, 4, 4, 2, 2, True, 2, "plan_limit",
+    )
+    plan = ReactionRuntimePlan(
+        mode="tenant_saas",
+        tenant_id=4,
+        use_legacy_reactors=False,
+        use_tenant_reactors=True,
+        reason="tenant_reactions_enabled",
+        tenant_accounts=[{"id": 1}, {"id": 2}],
+        eligible_accounts=4,
+        selected_accounts=2,
+        skipped_accounts=2,
+        limit_applied=True,
+        limit=2,
+        selection_reason="plan_limit",
+    )
+    assert plan.limit_applied is True
+    assert plan.limit == 2
+    assert plan.selection_reason == "plan_limit"
+    assert "limit_applied=True" in caplog.text
+    assert "reason=plan_limit" in caplog.text
+
+
+def test_tenant_reaction_runtime_enqueues_all_active_accounts_when_no_limit():
+    class DB:
+        def __init__(self):
+            self.enqueued = None
+
+        def get_rule_reaction_settings_for_tenant(self, tenant_id, rule_id):
+            return {"enabled": True}
+
+        def list_reaction_accounts_for_tenant(self, *, tenant_id, active_only=True):
+            return [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]
+
+        def enqueue_reaction_job(self, **kwargs):
+            self.enqueued = kwargs
+            return 123
+
+    db = DB()
+    svc = _service(SimpleNamespace(id=555, date=datetime.now(timezone.utc)))
+    svc.db = db
+
+    asyncio.run(
+        svc._add_reaction_for_rule_if_possible(
+            rule=SimpleNamespace(id=89, tenant_id=4),
+            target_id="-1002",
+            sent_message_id=555,
+            source_channel="-1001",
+            source_message_ids=[10],
+        )
+    )
+
+    assert db.enqueued is not None
+    assert db.enqueued["account_ids"] == [1, 2, 3, 4]
+    assert len(db.enqueued["account_ids"]) == 4

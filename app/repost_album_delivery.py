@@ -58,6 +58,29 @@ class RepostAlbumDelivery:
             len(message_ids),
         )
 
+        try:
+            source_entities = []
+            for row in album_rows:
+                content = owner._content_from_message_or_post(message=None, post_row=row)
+                source_entities.extend((content or {}).get("entities") or [])
+            owner._log_caption_entity_inventory(
+                source="album",
+                rule_id=rule.id,
+                message_ids=message_ids,
+                entities=source_entities,
+            )
+        except Exception as exc:
+            logger.warning("CAPTION_ENTITY_INVENTORY_FAILED | source=album | rule_id=%s | error=%s", rule.id, exc)
+
+        logger.info(
+            "COPY_ALBUM_CAPTION_POLICY | rule_id=%s | requires_builder=%s | selected_path=%s | caption_override=%s | reason=%s",
+            rule.id,
+            requires_builder,
+            "copy_first" if use_copy_first else "builder_first",
+            False,
+            "pure_copy_messages_no_caption_override" if use_copy_first and not requires_builder else "copy_messages_api_has_no_caption_override",
+        )
+
         # =========================================================
         # PREVIEW / caption text for verify
         # =========================================================

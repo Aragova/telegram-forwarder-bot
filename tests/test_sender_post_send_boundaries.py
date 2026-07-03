@@ -531,3 +531,50 @@ def test_video_send_runtime_extracted_from_sender():
     ]
     for needle in forbidden:
         assert needle not in runtime_source
+
+
+
+def test_album_content_entities_preserve_custom_emoji():
+    from telethon.tl import types
+
+    s = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=Repo())
+    content = {
+        "text": "A 🔥 caption",
+        "entities": [{"type": "custom_emoji", "offset": 2, "length": 2, "custom_emoji_id": "5470177992950946662"}],
+    }
+
+    text, entities = s._build_text_and_entities_from_content(content)
+
+    assert text == "A 🔥 caption"
+    assert len(entities) == 1
+    assert isinstance(entities[0], types.MessageEntityCustomEmoji)
+    assert entities[0].document_id == 5470177992950946662
+    assert entities[0].offset == 2
+    assert entities[0].length == 2
+
+
+def test_album_builder_keeps_custom_emoji_entities():
+    test_album_content_entities_preserve_custom_emoji()
+
+
+def test_copy_album_copy_first_does_not_override_caption_when_builder_not_required():
+    from aiogram.methods import CopyMessages
+
+    calls = []
+
+    class Bot:
+        async def __call__(self, method):
+            calls.append(method)
+            return [type("M", (), {"message_id": 501})()]
+
+    s = SenderService(bot=Bot(), telethon_client=None, reaction_clients=[], db=Repo())
+
+    async def run():
+        return await s._copy_album_via_bot("-1001", "-1002", [10, 11], None)
+
+    result = asyncio.run(run())
+
+    assert result["ok"] is True
+    assert isinstance(calls[0], CopyMessages)
+    assert not hasattr(calls[0], "caption")
+    assert not hasattr(calls[0], "caption_entities")
