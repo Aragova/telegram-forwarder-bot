@@ -134,6 +134,90 @@ def test_single_delivery_source_extracted_from_sender():
     assert "COPY_SINGLE_TARGET_CONFIRM_OK" in runtime_source
 
 
+def test_video_single_delivery_runtime_extracted_from_sender():
+    sender_source = open("app/sender.py", encoding="utf-8").read()
+    runtime_source = open("app/video_single_delivery.py", encoding="utf-8").read()
+
+    wrapper_start = sender_source.index("    async def _deliver_single_video(")
+    wrapper_end = sender_source.index("    async def", wrapper_start + 1)
+    wrapper_source = sender_source[wrapper_start:wrapper_end]
+
+    assert len(wrapper_source.splitlines()) <= 24
+    assert "VideoSingleDelivery(self).deliver" in wrapper_source
+
+    assert "process_video(" not in wrapper_source
+    assert "video_processing_started" not in wrapper_source
+    assert "video_download_started" not in wrapper_source
+    assert "DELIVERY_SENT_MESSAGE_IDS_EXTRACTED" not in wrapper_source
+    assert "VIDEO_REACTION" not in wrapper_source
+
+    assert "class VideoSingleDelivery" in runtime_source
+    assert "process_video(" in runtime_source
+    assert "video_processing_started" in runtime_source
+    assert "video_download_started" in runtime_source
+    assert "DELIVERY_SENT_MESSAGE_IDS_EXTRACTED" in runtime_source
+    assert "method=video_process" in runtime_source or '"video_process"' in runtime_source
+
+    forbidden = [
+        "ActiveCanary",
+        "active_canary",
+        "Rollout",
+        "TelegramSendGateway",
+        "TargetVerifier",
+        "DeliveryFinalizer",
+        "DeliveryContext",
+        "PipelineResult",
+    ]
+    for needle in forbidden:
+        assert needle not in runtime_source
+
+
+def test_deliver_single_video_wrapper_delegates_to_video_single_delivery(monkeypatch):
+    from app.video_single_delivery import VideoSingleDelivery
+
+    s = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=Repo())
+    rule = DummyRule()
+    calls = []
+
+    async def fake_deliver(
+        self,
+        got_rule,
+        got_delivery_id,
+        got_message_id,
+        got_source_channel,
+        got_target_id,
+        got_target_thread_id,
+    ):
+        calls.append(
+            (
+                self.owner,
+                got_rule,
+                got_delivery_id,
+                got_message_id,
+                got_source_channel,
+                got_target_id,
+                got_target_thread_id,
+            )
+        )
+        return {"delegated": True}
+
+    monkeypatch.setattr(VideoSingleDelivery, "deliver", fake_deliver)
+
+    result = asyncio.run(
+        s._deliver_single_video(
+            rule,
+            7,
+            12,
+            "@src",
+            "-1001",
+            55,
+        )
+    )
+
+    assert result == {"delegated": True}
+    assert calls == [(s, rule, 7, 12, "@src", "-1001", 55)]
+
+
 def test_repost_album_runtime_extracted_from_sender():
     sender_source = open("app/sender.py", encoding="utf-8").read()
     runtime_source = open("app/repost_album_delivery.py", encoding="utf-8").read()
