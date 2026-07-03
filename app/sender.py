@@ -3539,6 +3539,7 @@ class SenderService:
         target_id = str(payload.get("target_id") or "")
         tenant_id = int(payload.get("tenant_id") or 1)
         source_message_id = int(payload.get("message_id")) if payload.get("message_id") else None
+        source_message_ids = [int(payload.get("message_id"))] if payload.get("message_id") else []
         idempotency_key = build_delivery_idempotency_key(
             operation_kind="video_send",
             delivery_id=int(delivery_id),
@@ -3704,7 +3705,7 @@ class SenderService:
                 delivery_id=delivery_id,
                 source_channel=str(payload.get("source_channel") or ""),
                 target_id=str(payload.get("target_id") or ""),
-                source_message_ids=[int(payload.get("message_id"))] if payload.get("message_id") else [],
+                source_message_ids=source_message_ids,
                 candidate_sent_message_ids=sent_message_ids,
                 method="video_send",
                 max_age_seconds=900,
@@ -3712,7 +3713,7 @@ class SenderService:
         )
         valid_sent_message_ids = confirm_result.get("result") or []
         sent_message_id = valid_sent_message_ids[0] if valid_sent_message_ids else None
-        logger.info("DELIVERY_SENT_MESSAGE_IDS_EXTRACTED | rule_id=%s | delivery_id=%s | method=%s | source_message_ids=%s | sent_message_ids=%s | result_type=%s", rule_id, delivery_id, "video_send", [], sent_message_ids, type(sent_msg).__name__)
+        logger.info("DELIVERY_SENT_MESSAGE_IDS_EXTRACTED | rule_id=%s | delivery_id=%s | method=%s | source_message_ids=%s | sent_message_ids=%s | result_type=%s", rule_id, delivery_id, "video_send", source_message_ids, sent_message_ids, type(sent_msg).__name__)
         if sent_message_id:
             await self._run_post_send_step_safe(
                 step_name="reaction_after_video_send",
@@ -3720,7 +3721,7 @@ class SenderService:
                 delivery_id=delivery_id,
                 idempotency_key=idempotency_key,
                 accepted_sent_message_ids=valid_sent_ids,
-                coro_factory=lambda: self._add_reaction_if_possible(payload.get("target_id"), int(sent_message_id)),
+                coro_factory=lambda: self._add_reaction_if_possible(payload.get("target_id"), int(sent_message_id), rule_id=rule_id),
             )
         elif valid_sent_ids:
             sent_message_id = int(valid_sent_ids[0])

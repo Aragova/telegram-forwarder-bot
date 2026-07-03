@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 
 from app.sender import SenderService
@@ -157,3 +158,74 @@ def test_video_send_skips_accept_for_invalid_zero_sent_id(tmp_path: Path):
     assert not accepted_calls
     assert result["ok"] is False
     assert result["retryable"] is True
+
+
+def test_video_send_reaction_after_send_passes_rule_id(tmp_path: Path):
+    repo = FakeRepo()
+    service = _build_service(repo)
+    reaction_calls = []
+
+    async def _confirm(**kwargs):
+        return list(kwargs["candidate_sent_message_ids"])
+
+    async def _react(*args, **kwargs):
+        reaction_calls.append((args, kwargs))
+
+    service._confirm_target_delivery_message_ids_with_retry = _confirm  # type: ignore[method-assign]
+    service._add_reaction_if_possible = _react  # type: ignore[method-assign]
+    processed_file = tmp_path / "video.mp4"
+    processed_file.write_bytes(b"ok")
+
+    result = asyncio.run(
+        service.execute_video_send_from_job(
+            delivery_id=13,
+            rule_id=51,
+            tenant_id=1,
+            target_id="-1004",
+            message_id=2914,
+            processed_video_path=str(processed_file),
+            artifact_version=1,
+            pipeline_version=1,
+        )
+    )
+
+    assert result["ok"] is True
+    assert reaction_calls == [(("-1004", 778), {"rule_id": 51})]
+
+
+def test_video_send_extracted_log_uses_payload_source_message_ids(tmp_path: Path, caplog):
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _confirm(**kwargs):
+        return list(kwargs["candidate_sent_message_ids"])
+
+    async def _react(*_args, **_kwargs):
+        return None
+
+    service._confirm_target_delivery_message_ids_with_retry = _confirm  # type: ignore[method-assign]
+    service._add_reaction_if_possible = _react  # type: ignore[method-assign]
+    processed_file = tmp_path / "video.mp4"
+    processed_file.write_bytes(b"ok")
+
+    with caplog.at_level(logging.INFO, logger="forwarder"):
+        result = asyncio.run(
+            service.execute_video_send_from_job(
+                delivery_id=14,
+                rule_id=51,
+                tenant_id=1,
+                target_id="-1005",
+                message_id=2914,
+                processed_video_path=str(processed_file),
+                artifact_version=1,
+                pipeline_version=1,
+            )
+        )
+
+    assert result["ok"] is True
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "DELIVERY_SENT_MESSAGE_IDS_EXTRACTED" in message
+        and "source_message_ids=[2914]" in message
+        for message in messages
+    )
