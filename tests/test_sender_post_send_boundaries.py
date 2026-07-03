@@ -192,6 +192,9 @@ def test_copy_single_success_marks_sent_reacts_and_does_not_touch_inside_deliver
         def _get_post_row_for_rule_message_sync(self, *_args):
             return None
 
+        def _is_self_loop_rule(self, *_args):
+            return False
+
         async def _log_delivery_pipeline_step(self, **kwargs):
             events.append(("pipeline", kwargs.get("pipeline_stage"), kwargs.get("pipeline_result")))
 
@@ -230,3 +233,182 @@ def test_copy_single_success_marks_sent_reacts_and_does_not_touch_inside_deliver
     assert ("final_success", "copy_single") in events
     assert ("mark_sent", 9, "copy_single", [501]) in events
     assert not [event for event in events if event[0] == "touch"]
+
+
+def test_reupload_single_passes_reaction_context():
+    from app.repost_single_delivery import RepostSingleDelivery
+
+    rule = DummyRule()
+    delivery_id = 91
+    message_id = 131
+    source_channel = "@src"
+    target_id = "-1001"
+    reaction_kwargs = {}
+
+    class RuntimeRepo:
+        def log_delivery_event(self, **_kwargs):
+            return None
+
+    class RuntimeOwner:
+        db = RuntimeRepo()
+        bot = DummyBot()
+
+        def _get_post_id_by_delivery_sync(self, delivery_id):
+            return 1000 + delivery_id
+
+        def _resolve_repost_caption_delivery_strategy_sync(self, **_kwargs):
+            return {"configured_mode": "builder", "requires_builder": True, "use_copy_first": False}
+
+        def _get_post_row_for_rule_message_sync(self, *_args):
+            return None
+
+        def _is_self_loop_rule(self, *_args):
+            return False
+
+        async def _log_delivery_pipeline_step(self, **_kwargs):
+            return None
+
+        async def _fetch_message(self, *_args):
+            return object()
+
+        def _content_from_message_or_post(self, **_kwargs):
+            return "текст"
+
+        def _build_text_and_entities_from_content(self, content):
+            return content, []
+
+        async def _reupload_message(self, *_args, **_kwargs):
+            return 501
+
+        async def _confirm_target_delivery_message_ids_with_retry(self, **_kwargs):
+            return [501]
+
+        async def _add_reaction_for_rule_if_possible(self, **kwargs):
+            reaction_kwargs.update(kwargs)
+            return True
+
+        async def _log_delivery_final_success(self, **_kwargs):
+            return None
+
+        def _mark_delivery_sent_sync(self, *_args, **_kwargs):
+            return None
+
+    ok = asyncio.run(
+        RepostSingleDelivery(RuntimeOwner()).deliver(
+            rule, delivery_id, message_id, source_channel, target_id, None, idempotency_key="key-r2-1"
+        )
+    )
+
+    assert ok is True
+    assert reaction_kwargs["rule"] is rule
+    assert reaction_kwargs["target_id"] == target_id
+    assert reaction_kwargs["sent_message_id"] == 501
+    assert reaction_kwargs["source_channel"] == source_channel
+    assert reaction_kwargs["source_message_ids"] == [message_id]
+    assert reaction_kwargs["delivery_id"] == delivery_id
+
+
+def test_text_fallback_passes_reaction_context():
+    from app.repost_single_delivery import RepostSingleDelivery
+
+    rule = DummyRule()
+    delivery_id = 92
+    message_id = 132
+    source_channel = "@src"
+    target_id = "-1001"
+    reaction_kwargs = {}
+
+    class RuntimeRepo:
+        def log_delivery_event(self, **_kwargs):
+            return None
+
+    class RuntimeBot:
+        async def send_message(self, **_kwargs):
+            class Sent:
+                message_id = 777
+            return Sent()
+
+    class RuntimeOwner:
+        db = RuntimeRepo()
+        bot = RuntimeBot()
+
+        def _get_post_id_by_delivery_sync(self, delivery_id):
+            return 1000 + delivery_id
+
+        def _resolve_repost_caption_delivery_strategy_sync(self, **_kwargs):
+            return {"configured_mode": "builder", "requires_builder": True, "use_copy_first": False}
+
+        def _get_post_row_for_rule_message_sync(self, *_args):
+            return None
+
+        def _is_self_loop_rule(self, *_args):
+            return False
+
+        async def _log_delivery_pipeline_step(self, **_kwargs):
+            return None
+
+        async def _fetch_message(self, *_args):
+            return object()
+
+        def _content_from_message_or_post(self, **_kwargs):
+            return "текст"
+
+        def _build_text_and_entities_from_content(self, content):
+            return content, []
+
+        async def _reupload_message(self, *_args, **_kwargs):
+            return None
+
+        async def _confirm_target_delivery_message_ids_with_retry(self, **_kwargs):
+            return []
+
+        async def _add_reaction_for_rule_if_possible(self, **kwargs):
+            reaction_kwargs.update(kwargs)
+            return True
+
+        async def _log_delivery_final_success(self, **_kwargs):
+            return None
+
+        def _mark_delivery_sent_sync(self, *_args, **_kwargs):
+            return None
+
+    ok = asyncio.run(
+        RepostSingleDelivery(RuntimeOwner()).deliver(
+            rule, delivery_id, message_id, source_channel, target_id, None, idempotency_key="key-r2-1-fallback"
+        )
+    )
+
+    assert ok
+    assert reaction_kwargs["rule"] is rule
+    assert reaction_kwargs["target_id"] == target_id
+    assert reaction_kwargs["sent_message_id"] == 777
+    assert reaction_kwargs["source_channel"] == source_channel
+    assert reaction_kwargs["source_message_ids"] == [message_id]
+    assert reaction_kwargs["delivery_id"] == delivery_id
+
+
+def test_repost_single_delivery_reaction_calls_keep_full_context_source_guard():
+    source = open("app/repost_single_delivery.py", encoding="utf-8").read()
+
+    copy_start = source.index('step_name="reaction_after_copy_single"')
+    copy_block = source[copy_start:source.index("await owner._log_delivery_final_success", copy_start)]
+    assert 'sent_message_id=authoritative_sent_message_id' in copy_block
+    assert 'source_channel=str(source_channel or "")' in copy_block
+    assert 'source_message_ids=source_message_ids' in copy_block
+    assert 'delivery_id=delivery_id' in copy_block
+
+    reupload_start = source.index('final_method="reupload_single"')
+    reupload_call_start = source.rfind("await owner._add_reaction_for_rule_if_possible", 0, reupload_start)
+    reupload_block = source[reupload_call_start:reupload_start]
+    assert 'sent_message_id=authoritative_sent_message_id' in reupload_block
+    assert 'source_channel=str(source_channel or "")' in reupload_block
+    assert 'source_message_ids=source_message_ids' in reupload_block
+    assert 'delivery_id=delivery_id' in reupload_block
+
+    text_start = source.index('final_method="text_fallback"')
+    text_call_start = source.rfind("await owner._add_reaction_for_rule_if_possible", 0, text_start)
+    text_block = source[text_call_start:text_start]
+    assert 'sent_message_id=sent.message_id' in text_block
+    assert 'source_channel=str(source_channel or "")' in text_block
+    assert 'source_message_ids=source_message_ids' in text_block
+    assert 'delivery_id=delivery_id' in text_block

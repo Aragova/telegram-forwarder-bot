@@ -292,3 +292,21 @@ def test_copy_single_success_does_not_touch_rule_internally():
     success_block = source[copy_single_success_mark:copy_single_success_return]
     assert 'delivery_method="copy_single"' in success_block
     assert "_touch_rule_after_send_sync" not in success_block
+
+
+def test_single_delivery_fallback_reaction_calls_pass_context_source_guard():
+    source = inspect.getsource(RepostSingleDelivery.deliver)
+
+    reupload_success = source[:source.index('final_method="reupload_single"')]
+    reupload_block = reupload_success[reupload_success.rindex("await owner._add_reaction_for_rule_if_possible"):]
+    assert "sent_message_id=authoritative_sent_message_id" in reupload_block
+    assert 'source_channel=str(source_channel or "")' in reupload_block
+    assert "source_message_ids=source_message_ids" in reupload_block
+    assert "delivery_id=delivery_id" in reupload_block
+
+    text_success = source[:source.index('final_method="text_fallback"')]
+    text_block = text_success[text_success.rindex("await owner._add_reaction_for_rule_if_possible"):]
+    assert "sent_message_id=sent.message_id" in text_block
+    assert 'source_channel=str(source_channel or "")' in text_block
+    assert "source_message_ids=source_message_ids" in text_block
+    assert "delivery_id=delivery_id" in text_block
