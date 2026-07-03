@@ -281,3 +281,13 @@ def test_execute_repost_single_returns_non_retryable_for_uncertain_faulty():
     source = inspect.getsource(SenderService.execute_repost_single_from_job)
     assert "non_retryable_uncertain" in source
     assert "retryable\": False" in source
+
+
+def test_copy_single_success_does_not_touch_rule_internally():
+    source = inspect.getsource(SenderService._deliver_single)
+    copy_single_start = source.index("if use_copy_first:")
+    copy_single_success_mark = source.index("self._mark_delivery_sent_sync", copy_single_start)
+    copy_single_success_return = source.index("return True", copy_single_success_mark)
+    success_block = source[copy_single_success_mark:copy_single_success_return]
+    assert 'delivery_method="copy_single"' in success_block
+    assert "_touch_rule_after_send_sync" not in success_block
