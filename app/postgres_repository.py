@@ -3347,8 +3347,23 @@ class PostgresRepository(RepositoryProtocol):
                 )
             rules = cur.fetchall()
 
+            message_id = self._get_post_message_id_conn(conn, post_id)
             now_iso = utc_now_iso()
             for rule in rules:
+                if self._is_self_target_echo_post_for_rule_conn(
+                    conn,
+                    rule_id=int(rule["id"]),
+                    source_channel=str(source_channel),
+                    source_thread_id=source_thread_id,
+                    message_id=message_id,
+                ):
+                    self._log_self_target_echo_delivery_skipped(
+                        rule_id=int(rule["id"]),
+                        source_channel=str(source_channel),
+                        source_thread_id=source_thread_id,
+                        message_id=message_id,
+                    )
+                    continue
                 cur.execute(
                     """
                     INSERT INTO deliveries(rule_id, post_id, status, created_at, tenant_id)
@@ -3357,6 +3372,73 @@ class PostgresRepository(RepositoryProtocol):
                     """,
                     (int(rule["id"]), int(post_id), now_iso, int(rule["id"])),
                 )
+
+    def _get_post_message_id_conn(self, conn, post_id: int) -> int:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT message_id
+                FROM posts
+                WHERE id = %s
+                LIMIT 1
+                """,
+                (int(post_id),),
+            )
+            row = cur.fetchone()
+
+        if not row:
+            raise RuntimeError("Не удалось найти post для создания delivery")
+
+        return int(row["message_id"])
+
+    def _is_self_target_echo_post_for_rule_conn(
+        self,
+        conn,
+        *,
+        rule_id: int,
+        source_channel: str,
+        source_thread_id: int | None,
+        message_id: int,
+    ) -> bool:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM routing r
+                JOIN deliveries d ON d.rule_id = r.id
+                WHERE r.id = %s
+                  AND r.source_id::text = r.target_id::text
+                  AND r.source_id::text = %s
+                  AND COALESCE(r.source_thread_id, -1) = COALESCE(%s, -1)
+                  AND (
+                    r.target_thread_id IS NULL
+                    OR COALESCE(r.source_thread_id, -1) = COALESCE(r.target_thread_id, -1)
+                  )
+                  AND d.status = 'sent'
+                  AND d.sent_message_id = %s
+                LIMIT 1
+                """,
+                (int(rule_id), str(source_channel), source_thread_id, int(message_id)),
+            )
+            row = cur.fetchone()
+
+        return row is not None
+
+    def _log_self_target_echo_delivery_skipped(
+        self,
+        *,
+        rule_id: int,
+        source_channel: str,
+        source_thread_id: int | None,
+        message_id: int,
+    ) -> None:
+        logger.warning(
+            "SELF_TARGET_ECHO_DELIVERY_SKIPPED | rule_id=%s | source_channel=%s | source_thread_id=%s | message_id=%s | reason=message_is_previous_sent_output",
+            rule_id,
+            source_channel,
+            source_thread_id,
+            message_id,
+        )
 
     def _backfill_deliveries_for_rule_conn(
         self,
@@ -3369,7 +3451,7 @@ class PostgresRepository(RepositoryProtocol):
             if source_thread_id is None:
                 cur.execute(
                     """
-                    SELECT id
+                    SELECT id, message_id
                     FROM posts
                     WHERE source_channel = %s
                       AND source_thread_id IS NULL
@@ -3380,7 +3462,7 @@ class PostgresRepository(RepositoryProtocol):
             else:
                 cur.execute(
                     """
-                    SELECT id
+                    SELECT id, message_id
                     FROM posts
                     WHERE source_channel = %s
                       AND source_thread_id = %s
@@ -3393,6 +3475,20 @@ class PostgresRepository(RepositoryProtocol):
             inserted = 0
             now_iso = utc_now_iso()
             for row in rows:
+                if self._is_self_target_echo_post_for_rule_conn(
+                    conn,
+                    rule_id=int(rule_id),
+                    source_channel=str(source_id),
+                    source_thread_id=source_thread_id,
+                    message_id=int(row["message_id"]),
+                ):
+                    self._log_self_target_echo_delivery_skipped(
+                        rule_id=int(rule_id),
+                        source_channel=str(source_id),
+                        source_thread_id=source_thread_id,
+                        message_id=int(row["message_id"]),
+                    )
+                    continue
                 cur.execute(
                     """
                     INSERT INTO deliveries(rule_id, post_id, status, created_at, tenant_id)
