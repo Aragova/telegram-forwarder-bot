@@ -5,7 +5,8 @@ import json
 import logging
 from pathlib import Path
 
-from .sender import MAX_INVALID_MP4_RETRY, run_db
+from .runtime_utils import run_db
+from .sender_primitives import MAX_INVALID_MP4_RETRY
 
 logger = logging.getLogger("forwarder")
 

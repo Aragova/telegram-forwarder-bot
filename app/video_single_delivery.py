@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from .sender import _detect_message_media_kind, logger, run_db
+import logging
+
+from .runtime_utils import run_db
+from .sender_primitives import _detect_message_media_kind
+
+logger = logging.getLogger("forwarder")
 
 
 class VideoSingleDelivery:

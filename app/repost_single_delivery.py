@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import importlib
 import logging
 
+from .runtime_utils import run_db
+from .sender_primitives import DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK, _prepare_html_text
 from .telegram_send_result import telegram_send_result_from_raw
 
 logger = logging.getLogger("forwarder")
-
-
-def _sender_module():
-    return importlib.import_module("app.sender")
 
 
 class RepostSingleDelivery:
@@ -18,9 +15,6 @@ class RepostSingleDelivery:
 
     async def deliver(self, rule, delivery_id, message_id, source_channel, target_id, target_thread_id, idempotency_key: str | None = None):
         owner = self.owner
-        sender_module = _sender_module()
-        run_db = sender_module.run_db
-        _prepare_html_text = sender_module._prepare_html_text
         post_id = await run_db(owner._get_post_id_by_delivery_sync, delivery_id)
         delivery_ids = [int(delivery_id)]
         source_message_ids = [int(message_id)]
@@ -482,7 +476,7 @@ class RepostSingleDelivery:
         # =========================================================
         # 5) DEBUG: fallback disabled
         # =========================================================
-        if sender_module.DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK:
+        if DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK:
             await owner._log_delivery_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
