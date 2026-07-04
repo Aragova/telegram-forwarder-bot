@@ -780,3 +780,161 @@ def test_copy_album_copy_first_does_not_override_caption_when_builder_not_requir
     assert isinstance(calls[0], CopyMessages)
     assert not hasattr(calls[0], "caption")
     assert not hasattr(calls[0], "caption_entities")
+
+
+def test_video_pipeline_stages_extracted_from_sender():
+    sender_source = open("app/sender.py", encoding="utf-8").read()
+    runtime_source = open("app/video_pipeline_stages.py", encoding="utf-8").read()
+
+    assert "class VideoPipelineStages" in runtime_source
+    assert "execute_download_from_job" in runtime_source
+    assert "execute_process_from_job" in runtime_source
+    assert "validate_mp4_file_for_pipeline" in runtime_source
+    assert "ffprobe" in runtime_source
+    assert "VIDEO DOWNLOAD DONE" in runtime_source
+    assert "VIDEO PROCESS DONE" in runtime_source
+    assert "VIDEO_PROCESS_CLIP_DURATION" in runtime_source
+
+    download_start = sender_source.index("    async def execute_video_download_from_job(")
+    download_end = sender_source.index("    async def", download_start + 1)
+    download_wrapper = sender_source[download_start:download_end]
+
+    process_start = sender_source.index("    async def execute_video_process_from_job(")
+    process_end = sender_source.index("    async def", process_start + 1)
+    process_wrapper = sender_source[process_start:process_end]
+
+    validate_start = sender_source.index("    async def _validate_mp4_file_for_pipeline(")
+    validate_end = sender_source.index("    async def", validate_start + 1)
+    validate_wrapper = sender_source[validate_start:validate_end]
+
+    assert len(download_wrapper.splitlines()) <= 35
+    assert len(process_wrapper.splitlines()) <= 35
+    assert len(validate_wrapper.splitlines()) <= 24
+
+    assert "VideoPipelineStages(self).execute_download_from_job" in download_wrapper
+    assert "VideoPipelineStages(self).execute_process_from_job" in process_wrapper
+    assert "VideoPipelineStages(self).validate_mp4_file_for_pipeline" in validate_wrapper
+
+    for wrapper in [download_wrapper, process_wrapper, validate_wrapper]:
+        assert "ffprobe" not in wrapper
+        assert "build_processed_video" not in wrapper
+        assert "VIDEO FILE VALIDATION FAILED" not in wrapper
+        assert "VIDEO PROCESS DONE" not in wrapper
+
+    forbidden = [
+        "ActiveCanary",
+        "active_canary",
+        "Rollout",
+        "TelegramSendGateway",
+        "TargetVerifier",
+        "DeliveryFinalizer",
+        "DeliveryContext",
+        "PipelineResult",
+    ]
+    for needle in forbidden:
+        assert needle not in runtime_source
+
+
+def test_execute_video_download_wrapper_delegates_to_video_pipeline_stages(monkeypatch):
+    from app.video_pipeline_stages import VideoPipelineStages
+
+    s = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=Repo())
+    calls = []
+
+    async def fake_execute(self, **kwargs):
+        calls.append((self.owner, kwargs))
+        return {"delegated": "download"}
+
+    monkeypatch.setattr(VideoPipelineStages, "execute_download_from_job", fake_execute)
+
+    result = asyncio.run(
+        s.execute_video_download_from_job(
+            job_id=10,
+            job_attempt=2,
+            rule_id=3,
+            delivery_id=4,
+            message_id=5,
+            source_channel="@src",
+            target_id="-100",
+            invalid_file_attempts=1,
+            extra="value",
+        )
+    )
+
+    assert result == {"delegated": "download"}
+    assert calls == [(
+        s,
+        {
+            "job_id": 10,
+            "job_attempt": 2,
+            "rule_id": 3,
+            "delivery_id": 4,
+            "message_id": 5,
+            "source_channel": "@src",
+            "target_id": "-100",
+            "invalid_file_attempts": 1,
+            "extra": "value",
+        },
+    )]
+
+
+def test_execute_video_process_wrapper_delegates_to_video_pipeline_stages(monkeypatch):
+    from app.video_pipeline_stages import VideoPipelineStages
+
+    s = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=Repo())
+    calls = []
+
+    async def fake_execute(self, **kwargs):
+        calls.append((self.owner, kwargs))
+        return {"delegated": "process"}
+
+    monkeypatch.setattr(VideoPipelineStages, "execute_process_from_job", fake_execute)
+
+    result = asyncio.run(
+        s.execute_video_process_from_job(
+            job_id=11,
+            job_attempt=3,
+            rule_id=4,
+            delivery_id=5,
+            source_video_path="/tmp/source.mp4",
+            artifact_version=1,
+            invalid_file_attempts=2,
+            extra="value",
+        )
+    )
+
+    assert result == {"delegated": "process"}
+    assert calls == [(
+        s,
+        {
+            "job_id": 11,
+            "job_attempt": 3,
+            "rule_id": 4,
+            "delivery_id": 5,
+            "source_video_path": "/tmp/source.mp4",
+            "artifact_version": 1,
+            "invalid_file_attempts": 2,
+            "extra": "value",
+        },
+    )]
+
+
+def test_validate_mp4_wrapper_delegates_to_video_pipeline_stages(monkeypatch, tmp_path):
+    from app.video_pipeline_stages import VideoPipelineStages
+
+    s = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=Repo())
+    path = tmp_path / "source.mp4"
+    calls = []
+
+    async def fake_validate(self, file_path, **kwargs):
+        calls.append((self.owner, file_path, kwargs))
+        return True, None
+
+    monkeypatch.setattr(VideoPipelineStages, "validate_mp4_file_for_pipeline", fake_validate)
+
+    result = asyncio.run(
+        s._validate_mp4_file_for_pipeline(path, delivery_id=7, job_id=8, stage="download")
+    )
+
+    assert result == (True, None)
+    assert calls == [(s, path, {"delivery_id": 7, "job_id": 8, "stage": "download"})]
