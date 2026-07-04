@@ -47,9 +47,9 @@ def test_sender_content_helpers_do_not_import_sender():
     source = Path("app/sender_content_helpers.py").read_text(encoding="utf-8")
 
     forbidden = [
-        "from .sender import",
-        "import app.sender",
-        "import .sender",
+        "from ." "sender import",
+        "import app." "sender",
+        "import ." "sender",
     ]
 
     for item in forbidden:
