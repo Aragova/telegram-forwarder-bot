@@ -101,3 +101,72 @@ def test_rule_snapshot_repository_runtime_protocol():
 
     assert isinstance(CompleteFake(), RuleSnapshotRepository) is True
     assert isinstance(MissingFake(), RuleSnapshotRepository) is False
+
+
+def test_self_target_echo_post_does_not_create_delivery_guard_is_repository_level():
+    import inspect
+    from app.postgres_repository import PostgresRepository
+
+    source = inspect.getsource(PostgresRepository)
+
+    assert "_is_self_target_echo_post_for_rule_conn" in source
+    assert "SELF_TARGET_ECHO_DELIVERY_SKIPPED" in source
+    assert "d.sent_message_id = %s" in source
+    assert "d.status = 'sent'" in source
+    assert "r.source_id::text = r.target_id::text" in source
+
+
+def test_self_target_normal_new_post_still_creates_delivery_when_no_sent_echo_match():
+    import inspect
+    from app.postgres_repository import PostgresRepository
+
+    source = inspect.getsource(PostgresRepository._is_self_target_echo_post_for_rule_conn)
+
+    assert "d.sent_message_id = %s" in source
+    assert "LIMIT 1" in source
+
+
+def test_non_self_target_rule_not_affected_by_same_message_id():
+    import inspect
+    from app.postgres_repository import PostgresRepository
+
+    source = inspect.getsource(PostgresRepository._is_self_target_echo_post_for_rule_conn)
+
+    assert "r.source_id::text = r.target_id::text" in source
+    assert "r.source_id::text = %s" in source
+
+
+def test_backfill_rule_skips_self_target_echo_posts():
+    import inspect
+    from app.postgres_repository import PostgresRepository
+
+    source = inspect.getsource(PostgresRepository._backfill_deliveries_for_rule_conn)
+
+    assert "_is_self_target_echo_post_for_rule_conn" in source
+    assert "continue" in source
+    assert "SELECT id, message_id" in source
+
+
+def test_reset_queue_does_not_resurrect_self_target_echo_deliveries():
+    import inspect
+    from app.postgres_repository import PostgresRepository
+
+    reset_source = inspect.getsource(PostgresRepository.reset_queue_for_source)
+    reset_all = inspect.getsource(PostgresRepository.reset_all_queue)
+
+    assert "AND status = 'sent'" in reset_source
+    assert "WHERE status = 'sent'" in reset_all
+
+
+def test_existing_manual_cleanup_self_target_echo_remains_terminal():
+    import inspect
+    from app.postgres_repository import PostgresRepository
+
+    reset_source = inspect.getsource(PostgresRepository.reset_queue_for_source)
+    reset_all = inspect.getsource(PostgresRepository.reset_all_queue)
+
+    assert "self_target_echo_blocked_manual_cleanup" not in reset_source
+    assert "self_target_echo_blocked_manual_cleanup" not in reset_all
+    assert "faulty" not in reset_source.lower()
+    assert reset_all.count("WHERE status = 'sent'") == 1
+    assert "WHERE status IN" not in reset_all
