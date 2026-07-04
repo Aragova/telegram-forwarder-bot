@@ -483,16 +483,12 @@ class SenderContentHelpers:
         source_channel: str,
         message_id: int,
     ) -> bool | dict[str, object]:
-        get_post_row = self.owner.__dict__.get("_get_post_row_for_rule_message", self.get_post_row_for_rule_message)
-        content_from = self.owner.__dict__.get("_content_from_message_or_post", self.content_from_message_or_post)
-        requires_builder_fn = self.owner.__dict__.get("_content_requires_builder", self.content_requires_builder)
-
-        post_row = get_post_row(rule, source_channel, message_id)
+        post_row = self.get_post_row_for_rule_message(rule, source_channel, message_id)
         if not post_row:
             return False
 
-        content = content_from(message=None, post_row=post_row)
-        needs_builder = requires_builder_fn(content)
+        content = self.content_from_message_or_post(message=None, post_row=post_row)
+        needs_builder = self.content_requires_builder(content)
 
         logger.info(
             "CAPTION_MODE_DETECT | single | rule_id=%s | message_id=%s | requires_builder=%s",
@@ -513,17 +509,13 @@ class SenderContentHelpers:
         Для альбома смотрим все элементы и особенно caption-элемент.
         Если хотя бы где-то есть custom_emoji -> builder required.
         """
-        get_post_row = self.owner.__dict__.get("_get_post_row_for_rule_message", self.get_post_row_for_rule_message)
-        content_from = self.owner.__dict__.get("_content_from_message_or_post", self.content_from_message_or_post)
-        requires_builder_fn = self.owner.__dict__.get("_content_requires_builder", self.content_requires_builder)
-
         for message_id in message_ids:
-            post_row = get_post_row(rule, source_channel, int(message_id))
+            post_row = self.get_post_row_for_rule_message(rule, source_channel, int(message_id))
             if not post_row:
                 continue
 
-            content = content_from(message=None, post_row=post_row)
-            if requires_builder_fn(content):
+            content = self.content_from_message_or_post(message=None, post_row=post_row)
+            if self.content_requires_builder(content):
                 logger.info(
                     "CAPTION_MODE_DETECT | album | rule_id=%s | message_id=%s | requires_builder=True",
                     getattr(rule, "id", None),

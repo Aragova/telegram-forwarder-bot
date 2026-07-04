@@ -3,17 +3,26 @@ from types import SimpleNamespace
 from app.sender import SenderService
 
 
+class _AlbumRequiresBuilderDb:
+    def __init__(self, post_rows_by_message_id):
+        self.post_rows_by_message_id = post_rows_by_message_id
+
+    def get_post(self, _source_channel, _source_thread_id, message_id):
+        return self.post_rows_by_message_id.get(int(message_id))
+
+
+def _content_row(has_entities: bool):
+    entities = []
+    if has_entities:
+        entities.append({"type": "custom_emoji", "offset": 0, "length": 1, "custom_emoji_id": "123"})
+    return {"content_json": {"text": "x", "entities": entities}}
+
+
 def _build_sender_for_album_requires_builder(post_rows_by_message_id):
     sender = SenderService.__new__(SenderService)
-
-    sender._get_post_row_for_rule_message = (
-        lambda rule, source_channel, message_id: post_rows_by_message_id.get(int(message_id))
+    sender.db = _AlbumRequiresBuilderDb(
+        {message_id: _content_row(row.get("has_entities", False)) for message_id, row in post_rows_by_message_id.items()}
     )
-    sender._content_from_message_or_post = (
-        lambda message=None, post_row=None: {"has_entities": bool(post_row and post_row.get("has_entities"))}
-    )
-    sender._content_requires_builder = lambda content: bool(content.get("has_entities"))
-
     return sender
 
 
