@@ -4,7 +4,7 @@ import asyncio
 import logging
 
 from .delivery_idempotency import normalize_valid_sent_message_ids
-from .sender import run_db
+from .runtime_utils import run_db
 
 
 logger = logging.getLogger("forwarder")
