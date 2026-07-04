@@ -401,3 +401,139 @@ def test_tenant_reaction_runtime_enqueues_all_active_accounts_when_no_limit():
     assert db.enqueued is not None
     assert db.enqueued["account_ids"] == [1, 2, 3, 4]
     assert len(db.enqueued["account_ids"]) == 4
+
+
+def _method_source(source: str, method_name: str) -> str:
+    start = source.index(f"    async def {method_name}(")
+    next_start = source.find("\n    async def ", start + 1)
+    if next_start == -1:
+        next_start = len(source)
+    return source[start:next_start]
+
+
+def test_reaction_delivery_runtime_extracted_from_sender():
+    from pathlib import Path
+
+    sender_source = Path("app/sender.py").read_text(encoding="utf-8")
+    runtime_source = Path("app/reaction_delivery.py").read_text(encoding="utf-8")
+
+    assert "class ReactionDelivery" in runtime_source
+
+    for needle in [
+        "REACTION_TARGET_VALIDATE_START",
+        "PREMIUM_REACTION_VISIBLE_CONFIRMED",
+        "REACTION_VISIBLE_CONFIRMED",
+        "REACTION_NORMAL_CONTINUE_AFTER_PREMIUM",
+        "CONFIRM_REACTION_SET_DEBUG",
+        "REACTION_RUNTIME_SELECTED",
+        "REACTION_ACCOUNT_SELECTION",
+    ]:
+        assert needle in runtime_source
+
+    for method_name in [
+        "_validate_reaction_target_message",
+        "_try_add_normal_reaction",
+        "_try_add_premium_reactions",
+        "_confirm_reaction",
+        "_confirm_reaction_set",
+        "_select_reaction_message_id",
+        "_add_reaction_if_possible",
+        "_add_reaction_for_rule_if_possible",
+    ]:
+        assert f"ReactionDelivery(self).{method_name}" in sender_source
+        wrapper = _method_source(sender_source, method_name)
+        assert len(wrapper.splitlines()) <= 35
+        assert "ReactionDelivery(self)" in wrapper
+
+    assert "from .sender import" not in runtime_source
+    assert "import app.sender" not in runtime_source
+    assert 'import_module("app.sender")' not in runtime_source
+    assert "import_module('app.sender')" not in runtime_source
+
+    for needle in [
+        "ActiveCanary",
+        "active_canary",
+        "Rollout",
+        "TelegramSendGateway",
+        "TargetVerifier",
+        "DeliveryFinalizer",
+        "DeliveryContext",
+        "PipelineResult",
+    ]:
+        assert needle not in runtime_source
+
+
+def test_add_reaction_for_rule_wrapper_delegates_to_reaction_delivery(monkeypatch):
+    from app.reaction_delivery import ReactionDelivery
+
+    svc = _service()
+    calls = {}
+
+    async def fake(self, **kwargs):
+        calls["owner"] = self.owner
+        calls["kwargs"] = kwargs
+        return "delegated"
+
+    monkeypatch.setattr(ReactionDelivery, "_add_reaction_for_rule_if_possible", fake)
+    result = asyncio.run(
+        svc._add_reaction_for_rule_if_possible(
+            rule="rule",
+            target_id="target",
+            sent_message_id=42,
+            source_channel="source",
+            source_message_ids=[1, 2],
+            delivery_id=7,
+            max_age_seconds=8,
+        )
+    )
+
+    assert result == "delegated"
+    assert calls["owner"] is svc
+    assert calls["kwargs"] == {
+        "rule": "rule",
+        "target_id": "target",
+        "sent_message_id": 42,
+        "source_channel": "source",
+        "source_message_ids": [1, 2],
+        "delivery_id": 7,
+        "max_age_seconds": 8,
+    }
+
+
+def test_select_reaction_message_id_wrapper_delegates_to_reaction_delivery(monkeypatch):
+    from app.reaction_delivery import ReactionDelivery
+
+    svc = _service()
+    calls = {}
+
+    async def fake(self, target_id, sent_message_ids):
+        calls["owner"] = self.owner
+        calls["args"] = (target_id, sent_message_ids)
+        return 10, "caption_message"
+
+    monkeypatch.setattr(ReactionDelivery, "_select_reaction_message_id", fake)
+    result = asyncio.run(svc._select_reaction_message_id("target", [10, 11]))
+
+    assert result == (10, "caption_message")
+    assert calls["owner"] is svc
+    assert calls["args"] == ("target", [10, 11])
+
+
+def test_confirm_reaction_set_wrapper_delegates_to_reaction_delivery(monkeypatch):
+    from app.reaction_delivery import ReactionDelivery
+
+    svc = _service()
+    calls = {}
+
+    async def fake(self, client, entity, message_id, emojis):
+        calls["owner"] = self.owner
+        calls["args"] = (client, entity, message_id, emojis)
+        return True, ["🔥"]
+
+    monkeypatch.setattr(ReactionDelivery, "_confirm_reaction_set", fake)
+    client = object()
+    result = asyncio.run(svc._confirm_reaction_set(client, "entity", 33, ["🔥", "👍"]))
+
+    assert result == (True, ["🔥"])
+    assert calls["owner"] is svc
+    assert calls["args"] == (client, "entity", 33, ["🔥", "👍"])
