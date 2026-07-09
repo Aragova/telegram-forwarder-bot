@@ -31,6 +31,42 @@ class RepostSingleDelivery:
         requires_builder = strategy["requires_builder"]
         use_copy_first = strategy["use_copy_first"]
 
+        live_message_for_builder = None
+        if use_copy_first and caption_mode == "auto":
+            live_message = await owner._fetch_message(source_channel, message_id)
+            if live_message:
+                live_content = owner._content_from_message_or_post(
+                    message=live_message,
+                    post_row=None,
+                )
+                if owner._content_requires_builder(live_content):
+                    requires_builder = True
+                    use_copy_first = False
+                    live_message_for_builder = live_message
+
+                    logger.warning(
+                        "SINGLE_LIVE_ENTITY_GUARD_BUILDER_REQUIRED | rule_id=%s | delivery_id=%s | message_id=%s | reason=live_entities_require_builder",
+                        rule.id,
+                        delivery_id,
+                        message_id,
+                    )
+
+                    await run_db(
+                        owner.db.log_delivery_event,
+                        event_type="single_live_entity_guard_builder_required",
+                        delivery_id=delivery_id,
+                        rule_id=rule.id,
+                        post_id=post_id,
+                        status="processing",
+                        extra={
+                            "message_id": message_id,
+                            "source_channel": source_channel,
+                            "target_id": target_id,
+                            "caption_delivery_mode": caption_mode,
+                            "reason": "live_entities_require_builder",
+                        },
+                    )
+
         await run_db(
             owner.db.log_delivery_event,
             event_type="delivery_caption_mode_selected",
@@ -320,7 +356,7 @@ class RepostSingleDelivery:
             },
         )
 
-        message = await owner._fetch_message(source_channel, message_id)
+        message = live_message_for_builder or await owner._fetch_message(source_channel, message_id)
 
         await owner._log_delivery_pipeline_step(
             rule_id=rule.id,
@@ -679,4 +715,3 @@ class RepostSingleDelivery:
             },
         )
         return False
-

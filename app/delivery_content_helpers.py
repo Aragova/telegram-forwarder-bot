@@ -89,13 +89,58 @@ def normalize_caption_delivery_mode(mode: Any) -> str:
     return normalized_mode
 
 
-def content_requires_builder(content: dict | None) -> bool:
-    content = content or {}
-    entities = content.get("entities") or []
+def is_custom_emoji_entity(entity: Any) -> bool:
+    try:
+        if isinstance(entity, dict):
+            raw_type = entity.get("type") or entity.get("_") or ""
+            custom_id = entity.get("custom_emoji_id") or entity.get("document_id")
+        else:
+            raw_type = getattr(entity, "type", "") or entity.__class__.__name__
+            custom_id = (
+                getattr(entity, "custom_emoji_id", None)
+                or getattr(entity, "document_id", None)
+            )
 
-    for entity in entities:
+        normalized_type = str(raw_type or "").strip().lower().replace("_", "")
+        if "customemoji" in normalized_type:
+            return True
+
+        if custom_id is not None:
+            return True
+
+    except Exception:
+        return False
+
+    return False
+
+
+def _iter_content_entities(content: dict | None):
+    content = content or {}
+
+    for key in ("entities", "caption_entities", "text_entities", "raw_entities"):
+        entities = content.get(key) or []
+
+        if isinstance(entities, dict):
+            entities = [entities]
+
+        for entity in entities or []:
+            yield entity
+
+
+def content_requires_builder(content: dict | None) -> bool:
+    for entity in _iter_content_entities(content):
         try:
-            entity_type = str(entity.get("type") or "").strip().lower()
+            if is_custom_emoji_entity(entity):
+                return True
+
+            if isinstance(entity, dict):
+                raw_type = entity.get("type") or entity.get("_") or ""
+            elif isinstance(entity, (str, bytes, int, float, bool)):
+                continue
+            else:
+                raw_type = getattr(entity, "type", "") or entity.__class__.__name__
+
+            entity_type = str(raw_type or "").strip().lower()
             if entity_type:
                 return True
         except Exception:

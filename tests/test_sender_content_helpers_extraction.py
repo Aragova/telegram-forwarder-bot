@@ -179,3 +179,49 @@ def test_sender_content_requires_builder_custom_emoji_smoke():
     }
 
     assert helpers.content_requires_builder(content) is True
+
+
+def test_content_from_message_or_post_merges_live_entities_when_post_row_stale():
+    from types import SimpleNamespace
+    from telethon import types
+    from app.sender_content_helpers import SenderContentHelpers
+
+    helpers = SenderContentHelpers(owner=SimpleNamespace())
+
+    post_row = {
+        "content_json": {
+            "text": "abc",
+            "entities": [],
+            "has_media": True,
+            "media_kind": "video",
+        }
+    }
+
+    message = SimpleNamespace(
+        raw_text="abc",
+        text="abc",
+        message="abc",
+        entities=[
+            types.MessageEntityCustomEmoji(
+                offset=0,
+                length=1,
+                document_id=123,
+            )
+        ],
+        media=object(),
+        video=True,
+        photo=None,
+        gif=None,
+        document=None,
+        date=None,
+    )
+
+    result = helpers.content_from_message_or_post(
+        message=message,
+        post_row=post_row,
+    )
+
+    assert result["text"] == "abc"
+    assert result["entities"]
+    assert result["entities"][0]["type"] == "custom_emoji"
+    assert result["entities"][0]["custom_emoji_id"] == "123"
