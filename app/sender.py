@@ -51,57 +51,14 @@ class SenderService:
         )
 
     def _extract_sent_message_id(self, sent_msg) -> int | None:
-        ids = self._extract_sent_message_ids(sent_msg)
-        return ids[0] if ids else None
+        from .sender_post_send_helpers import SenderPostSendHelpers
+
+        return SenderPostSendHelpers(self).extract_sent_message_id(sent_msg)
 
     def _extract_sent_message_ids(self, sent_result) -> list[int]:
-        def _extract_one(item) -> list[int]:
-            if item is None:
-                return []
-            if isinstance(item, (list, tuple)):
-                nested: list[int] = []
-                for nested_item in item:
-                    nested.extend(_extract_one(nested_item))
-                return nested
-            if isinstance(item, dict):
-                values = []
-                for key in ("message_id", "id"):
-                    val = item.get(key)
-                    if val is not None:
-                        try:
-                            values.append(int(val))
-                        except Exception:
-                            pass
-                if values:
-                    return values
-                for nested_key in ("message", "result", "data"):
-                    if nested_key in item:
-                        nested_values = _extract_one(item.get(nested_key))
-                        if nested_values:
-                            return nested_values
-                return values
-            for attr in ("message_id", "id"):
-                try:
-                    val = getattr(item, attr, None)
-                    if val is not None:
-                        return [int(val)]
-                except Exception:
-                    continue
-            for key in ("message", "result", "data"):
-                nested_obj = getattr(item, key, None)
-                if nested_obj is not None:
-                    nested_values = _extract_one(nested_obj)
-                    if nested_values:
-                        return nested_values
-            return []
+        from .sender_post_send_helpers import SenderPostSendHelpers
 
-        if sent_result is None:
-            return []
-        raw_items = list(sent_result) if isinstance(sent_result, (list, tuple)) else [sent_result]
-        ids: list[int] = []
-        for item in raw_items:
-            ids.extend(_extract_one(item))
-        return [x for x in ids if isinstance(x, int)]
+        return SenderPostSendHelpers(self).extract_sent_message_ids(sent_result)
 
     async def _validate_reaction_target_message(
         self,
@@ -114,9 +71,9 @@ class SenderService:
         delivery_id: int | None = None,
         max_age_seconds: int = 300,
     ) -> int | None:
-        from .reaction_delivery import ReactionDelivery
+        from .sender_post_send_helpers import SenderPostSendHelpers
 
-        return await ReactionDelivery(self)._validate_reaction_target_message(
+        return await SenderPostSendHelpers(self).validate_reaction_target_message(
             rule_id=rule_id,
             source_channel=source_channel,
             target_id=target_id,
@@ -138,70 +95,18 @@ class SenderService:
         method: str,
         max_age_seconds: int = 300,
     ) -> list[int]:
-        normalized_candidates: list[int] = []
-        for value in candidate_sent_message_ids or []:
-            try:
-                normalized_candidates.append(int(value))
-            except Exception:
-                continue
+        from .sender_post_send_helpers import SenderPostSendHelpers
 
-        logger.info(
-            "DELIVERY_SENT_MESSAGE_IDS_VALIDATE_START | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s",
-            rule_id,
-            delivery_id,
-            method,
-            target_id,
-            normalized_candidates,
+        return await SenderPostSendHelpers(self).validate_sent_message_ids_for_delivery(
+            rule_id=rule_id,
+            delivery_id=delivery_id,
+            source_channel=source_channel,
+            target_id=target_id,
+            source_message_ids=source_message_ids,
+            candidate_sent_message_ids=candidate_sent_message_ids,
+            method=method,
+            max_age_seconds=max_age_seconds,
         )
-
-        valid_ids: list[int] = []
-        for candidate_id in normalized_candidates:
-            try:
-                validated = await self._validate_reaction_target_message(
-                    rule_id=rule_id,
-                    source_channel=str(source_channel or ""),
-                    target_id=str(target_id),
-                    source_message_ids=source_message_ids or [],
-                    sent_message_id=candidate_id,
-                    delivery_id=delivery_id,
-                    max_age_seconds=max_age_seconds,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "DELIVERY_SENT_MESSAGE_IDS_VALIDATE_ITEM_FAILED | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | sent_message_id=%s | error=%s",
-                    rule_id,
-                    delivery_id,
-                    method,
-                    target_id,
-                    candidate_id,
-                    exc,
-                )
-                continue
-            if validated:
-                valid_ids.append(int(validated))
-
-        if valid_ids:
-            logger.info(
-                "DELIVERY_SENT_MESSAGE_IDS_VALIDATE_OK | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | valid_sent_message_ids=%s",
-                rule_id,
-                delivery_id,
-                method,
-                target_id,
-                valid_ids,
-            )
-            return valid_ids
-
-        reason = "no_candidate_ids" if not normalized_candidates else "all_candidates_rejected"
-        logger.warning(
-            "DELIVERY_SENT_MESSAGE_IDS_VALIDATE_EMPTY | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s | reason=%s",
-            rule_id,
-            delivery_id,
-            method,
-            target_id,
-            normalized_candidates,
-            reason,
-        )
-        return []
 
     async def _confirm_target_delivery_message_ids(
         self,
@@ -215,87 +120,25 @@ class SenderService:
         method: str,
         max_age_seconds: int = 300,
     ) -> list[int]:
-        normalized_candidates: list[int] = []
-        for value in candidate_sent_message_ids or []:
-            try:
-                normalized_candidates.append(int(value))
-            except Exception:
-                continue
+        from .sender_post_send_helpers import SenderPostSendHelpers
 
-        logger.info(
-            "DELIVERY_TARGET_CONFIRM_START | rule_id=%s | delivery_id=%s | method=%s | source_channel=%s | target_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s",
-            rule_id,
-            delivery_id,
-            method,
-            source_channel,
-            target_id,
-            source_message_ids,
-            normalized_candidates,
-        )
-
-        if not hasattr(self.telethon, "get_messages"):
-            logger.warning(
-                "DELIVERY_TARGET_CONFIRM_SKIPPED_NO_GET_MESSAGES | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s",
-                rule_id,
-                delivery_id,
-                method,
-                target_id,
-                normalized_candidates,
-            )
-            return normalized_candidates
-
-        if not normalized_candidates:
-            logger.warning(
-                "DELIVERY_TARGET_CONFIRM_FAILED | rule_id=%s | delivery_id=%s | method=%s | source_channel=%s | target_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s | reason=%s",
-                rule_id, delivery_id, method, source_channel, target_id, source_message_ids, normalized_candidates, "no_candidate_ids"
-            )
-            return []
-
-        valid_ids = await self._validate_sent_message_ids_for_delivery(
+        return await SenderPostSendHelpers(self).confirm_target_delivery_message_ids(
             rule_id=rule_id,
             delivery_id=delivery_id,
             source_channel=source_channel,
             target_id=target_id,
             source_message_ids=source_message_ids,
-            candidate_sent_message_ids=normalized_candidates,
+            candidate_sent_message_ids=candidate_sent_message_ids,
             method=method,
             max_age_seconds=max_age_seconds,
         )
 
-        if not valid_ids:
-            logger.warning(
-                "DELIVERY_TARGET_CONFIRM_FAILED | rule_id=%s | delivery_id=%s | method=%s | source_channel=%s | target_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s | reason=%s",
-                rule_id, delivery_id, method, source_channel, target_id, source_message_ids, normalized_candidates, "all_candidates_rejected"
-            )
-            return []
+    async def _confirm_target_delivery_message_ids_with_retry(self, **kwargs) -> list[int]:
+        from .sender_post_send_helpers import SenderPostSendHelpers
 
-        logger.info(
-            "DELIVERY_TARGET_CONFIRM_OK | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | valid_sent_message_ids=%s",
-            rule_id,
-            delivery_id,
-            method,
-            target_id,
-            valid_ids,
+        return await SenderPostSendHelpers(self).confirm_target_delivery_message_ids_with_retry(
+            **kwargs,
         )
-        return valid_ids
-
-    async def _confirm_target_delivery_message_ids_with_retry(
-        self,
-        **kwargs,
-    ) -> list[int]:
-        attempts = (0.0, 0.7, 1.5)
-        last_reason = "target_message_not_found_after_send"
-        for attempt_no, delay_seconds in enumerate(attempts, start=1):
-            if delay_seconds > 0:
-                logger.info(
-                    "DELIVERY_TARGET_CONFIRM_RETRY | rule_id=%s | delivery_id=%s | attempt=%s | delay=%s | candidate_sent_message_ids=%s | reason=%s",
-                    kwargs.get("rule_id"), kwargs.get("delivery_id"), attempt_no, delay_seconds, kwargs.get("candidate_sent_message_ids"), last_reason
-                )
-                await asyncio.sleep(delay_seconds)
-            valid_ids = await self._confirm_target_delivery_message_ids(**kwargs)
-            if valid_ids:
-                return valid_ids
-        return []
 
     async def _run_post_send_step_safe(
         self,
@@ -307,20 +150,16 @@ class SenderService:
         accepted_sent_message_ids: list[int] | None = None,
         coro_factory=None,
     ) -> dict:
-        try:
-            result = await coro_factory()
-            return {"ok": True, "result": result}
-        except Exception as exc:
-            logger.warning(
-                "POST_SEND_STEP_FAILED_NON_FATAL | step_name=%s | rule_id=%s | delivery_id=%s | idempotency_key=%s | accepted_sent_message_ids=%s | error=%s",
-                step_name,
-                rule_id,
-                delivery_id,
-                idempotency_key,
-                accepted_sent_message_ids or [],
-                exc,
-            )
-            return {"ok": False, "error": str(exc)}
+        from .sender_post_send_helpers import SenderPostSendHelpers
+
+        return await SenderPostSendHelpers(self).run_post_send_step_safe(
+            step_name=step_name,
+            rule_id=rule_id,
+            delivery_id=delivery_id,
+            idempotency_key=idempotency_key,
+            accepted_sent_message_ids=accepted_sent_message_ids,
+            coro_factory=coro_factory,
+        )
 
 
     def _caption_entity_counts(self, entities) -> dict[str, int]:

@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import inspect
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -123,15 +124,16 @@ def test_validate_sent_message_ids_for_delivery_self_target_source_id_blocked():
     assert validated == []
 
 
-def test_validate_sent_message_ids_for_delivery_passes_full_context():
+def test_validate_sent_message_ids_for_delivery_passes_full_context(monkeypatch):
     svc = _service(SimpleNamespace(id=901, date=datetime.now(timezone.utc)))
     captured = {}
 
-    async def _fake_validate(**kwargs):
+    async def _fake_validate(self, **kwargs):
         captured.update(kwargs)
         return kwargs["sent_message_id"]
 
-    svc._validate_reaction_target_message = _fake_validate
+    helper_module = importlib.import_module("app.sender_post_send_helpers")
+    monkeypatch.setattr(helper_module.SenderPostSendHelpers, "validate_reaction_target_message", _fake_validate)
     validated = asyncio.run(
         svc._validate_sent_message_ids_for_delivery(
             rule_id=15,
@@ -430,8 +432,9 @@ def test_reaction_delivery_runtime_extracted_from_sender():
     ]:
         assert needle in runtime_source
 
+    assert "ReactionDelivery(self.owner)._validate_reaction_target_message" in Path("app/sender_post_send_helpers.py").read_text(encoding="utf-8")
+
     for method_name in [
-        "_validate_reaction_target_message",
         "_try_add_normal_reaction",
         "_try_add_premium_reactions",
         "_confirm_reaction",
