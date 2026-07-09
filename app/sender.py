@@ -1,5 +1,4 @@
 from __future__ import annotations
-import asyncio
 import logging, time
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -227,22 +226,16 @@ class SenderService:
         error_text: str | None = None,
         extra: dict | None = None,
     ) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
+        from .sender_video_logging_helpers import SenderVideoLoggingHelpers
 
-        loop.create_task(
-            run_db(
-                self._log_video_event_sync,
-                event_type=event_type,
-                delivery_id=delivery_id,
-                rule_id=rule_id,
-                post_id=post_id,
-                status=status,
-                error_text=error_text,
-                extra=extra,
-            )
+        return SenderVideoLoggingHelpers(self).schedule_video_event_log(
+            event_type=event_type,
+            delivery_id=delivery_id,
+            rule_id=rule_id,
+            post_id=post_id,
+            status=status,
+            error_text=error_text,
+            extra=extra,
         )
 
     def _get_post_row_for_rule_message_sync(
@@ -324,7 +317,9 @@ class SenderService:
         error_text: str | None = None,
         extra: dict | None = None,
     ) -> None:
-        self.db.log_video_event(
+        from .sender_video_logging_helpers import SenderVideoLoggingHelpers
+
+        return SenderVideoLoggingHelpers(self).log_video_event_sync(
             event_type=event_type,
             delivery_id=delivery_id,
             rule_id=rule_id,
@@ -350,32 +345,22 @@ class SenderService:
         selected_mode: str | None = None,
         caption_requires_premium: bool | None = None,
     ) -> None:
-        extra = {
-            "source_channel": source_channel,
-            "target_id": target_id,
-            "target_thread_id": target_thread_id,
-            "source_message_id": source_message_id,
-        }
+        from .sender_video_logging_helpers import SenderVideoLoggingHelpers
 
-        if fallback_mode is not None:
-            extra["fallback_mode"] = fallback_mode
-        if caption_delivery_mode is not None:
-            extra["caption_delivery_mode"] = caption_delivery_mode
-        if selected_mode is not None:
-            extra["selected_mode"] = selected_mode
-        if caption_requires_premium is not None:
-            extra["caption_requires_premium"] = caption_requires_premium
-
-        self.db.log_video_event(
-            event_type="video_processing_failed",
+        return SenderVideoLoggingHelpers(self).finalize_video_failure_sync(
             delivery_id=delivery_id,
             rule_id=rule_id,
             post_id=post_id,
-            status="faulty",
+            source_channel=source_channel,
+            target_id=target_id,
+            target_thread_id=target_thread_id,
+            source_message_id=source_message_id,
             error_text=error_text,
-            extra=extra,
+            fallback_mode=fallback_mode,
+            caption_delivery_mode=caption_delivery_mode,
+            selected_mode=selected_mode,
+            caption_requires_premium=caption_requires_premium,
         )
-        self.db.mark_delivery_faulty(delivery_id, error_text)
 
     def _finalize_video_success_sync(
         self,
@@ -395,41 +380,24 @@ class SenderService:
         candidate_sent_message_ids: list[int] | None = None,
         valid_sent_message_ids: list[int] | None = None,
     ) -> None:
-        normalized_candidate_ids: list[int] = []
-        for value in candidate_sent_message_ids or []:
-            try:
-                normalized_candidate_ids.append(int(value))
-            except Exception:
-                continue
+        from .sender_video_logging_helpers import SenderVideoLoggingHelpers
 
-        normalized_valid_ids: list[int] = []
-        for value in valid_sent_message_ids or []:
-            try:
-                normalized_valid_ids.append(int(value))
-            except Exception:
-                continue
-
-        self.db.log_video_event(
-            event_type="video_processing_completed",
+        return SenderVideoLoggingHelpers(self).finalize_video_success_sync(
             delivery_id=delivery_id,
             rule_id=rule_id,
             post_id=post_id,
-            status="sent",
-            extra={
-                "source_channel": source_channel,
-                "target_id": target_id,
-                "target_thread_id": target_thread_id,
-                "source_message_id": source_message_id,
-                "sent_message_id": sent_message_id,
-                "candidate_sent_message_ids": normalized_candidate_ids,
-                "valid_sent_message_ids": normalized_valid_ids,
-                "fallback_mode": fallback_mode,
-                "caption_delivery_mode": caption_delivery_mode,
-                "selected_mode": selected_mode,
-                "caption_requires_premium": caption_requires_premium,
-            },
+            source_channel=source_channel,
+            target_id=target_id,
+            target_thread_id=target_thread_id,
+            source_message_id=source_message_id,
+            sent_message_id=sent_message_id,
+            fallback_mode=fallback_mode,
+            caption_delivery_mode=caption_delivery_mode,
+            selected_mode=selected_mode,
+            caption_requires_premium=caption_requires_premium,
+            candidate_sent_message_ids=candidate_sent_message_ids,
+            valid_sent_message_ids=valid_sent_message_ids,
         )
-        self.db.mark_delivery_sent(delivery_id)
 
     def _log_delivery_pipeline_step_sync(
         self,
@@ -684,18 +652,9 @@ class SenderService:
         )
 
     def _stage_name_ru(self, stage: str | None) -> str:
-        mapping = {
-            "pipeline": "общий процесс",
-            "download": "скачивание",
-            "probe": "анализ видео",
-            "trim": "обрезка",
-            "normalize": "нормализация",
-            "intro": "подготовка заставки",
-            "concat": "склейка",
-            "thumbnail": "создание превью",
-            "send": "отправка",
-        }
-        return mapping.get(stage or "", stage or "неизвестный этап")
+        from .sender_video_logging_helpers import SenderVideoLoggingHelpers
+
+        return SenderVideoLoggingHelpers(self).stage_name_ru(stage)
 
     def _log_human_video_event(
         self,
@@ -705,65 +664,14 @@ class SenderService:
         error_text: str | None = None,
         extra: dict | None = None,
     ) -> None:
-        payload = dict(extra or {})
-        stage = payload.get("stage")
-        stage_name = self._stage_name_ru(stage)
+        from .sender_video_logging_helpers import SenderVideoLoggingHelpers
 
-        if event_type == "video_stage_started":
-            logger.info("▶️ Начат этап: %s", stage_name)
-            return
-
-        if event_type == "video_stage_completed":
-            if stage == "download":
-                file_size_mb = payload.get("file_size_mb")
-                if file_size_mb is not None:
-                    logger.info("✅ Скачивание завершено: %.1f МБ", float(file_size_mb))
-                else:
-                    logger.info("✅ Завершён этап: %s", stage_name)
-            else:
-                logger.info("✅ Завершён этап: %s", stage_name)
-            return
-
-        if event_type == "video_stage_failed":
-            if error_text:
-                logger.error("❌ Ошибка на этапе «%s»: %s", stage_name, error_text)
-            else:
-                logger.error("❌ Ошибка на этапе «%s»", stage_name)
-            return
-
-        if event_type == "video_ffmpeg_progress":
-            operation = payload.get("operation")
-            percent = payload.get("percent")
-            processed_sec = payload.get("processed_sec")
-            total_sec = payload.get("total_sec")
-            speed = payload.get("speed")
-
-            parts = []
-            if operation:
-                parts.append(str(operation))
-            elif stage_name:
-                parts.append(stage_name.capitalize())
-
-            if percent is not None:
-                parts.append(f"{float(percent):.1f}%")
-            if processed_sec is not None and total_sec is not None:
-                parts.append(f"{float(processed_sec):.1f} / {float(total_sec):.1f} сек")
-            if speed:
-                parts.append(f"скорость {speed}")
-
-            logger.info("🎬 %s", " | ".join(parts))
-            return
-
-        if event_type == "video_send_retry":
-            attempt = payload.get("attempt")
-            max_retries = payload.get("max_retries")
-            if attempt is not None and max_retries is not None:
-                logger.warning("🔁 Повторная попытка отправки: %s из %s", attempt, max_retries)
-            elif attempt is not None:
-                logger.warning("🔁 Повторная попытка отправки: %s", attempt)
-            else:
-                logger.warning("🔁 Повторная попытка отправки")
-            return
+        return SenderVideoLoggingHelpers(self).log_human_video_event(
+            event_type=event_type,
+            status=status,
+            error_text=error_text,
+            extra=extra,
+        )
 
     def _get_rule_intro_items(self, rule):
         horizontal_intro = None
