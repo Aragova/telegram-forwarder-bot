@@ -5,7 +5,6 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 from telethon.tl import types as tl_types
 from pathlib import Path
-from aiogram.methods import CopyMessages
 from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo
 from .config import settings
 from .repository_models import GLOBAL_INTERVAL_GAP_SECONDS, utc_now_iso
@@ -27,8 +26,6 @@ from .sender_primitives import (
     REACTION_POOL,
     NORMAL_REACTION_POOL,
     DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK,
-    DEBUG_FORCE_SKIP_COPY_SINGLE,
-    DEBUG_FORCE_SKIP_COPY_ALBUM,
     _telethon_entities_to_bot,
     _build_text_with_entities,
     _utf16_text_length,
@@ -1980,76 +1977,24 @@ class SenderService:
         )
 
     async def _copy_single_via_bot(self, source_channel, target_id, message_id, target_thread_id):
-        if DEBUG_FORCE_SKIP_COPY_SINGLE:
-            logger.warning(
-                "COPY_SINGLE | TEST MODE | принудительно пропускаю Bot API copy_message для проверки Telethon"
-            )
-            return {"attempted": False, "sent_ids": [], "fallback_allowed": True, "raw_result_type": "debug_skip"}
+        from .sender_botapi_copy_helpers import SenderBotApiCopyHelpers
 
-        try:
-            sent = await self.bot.copy_message(
-                chat_id=target_id,
-                from_chat_id=source_channel,
-                message_id=message_id,
-                message_thread_id=target_thread_id,
-            )
-            sent_ids = self._extract_sent_message_ids(sent)
-            return {"attempted": True, "sent_ids": sent_ids, "fallback_allowed": False, "raw_result_type": type(sent).__name__, "raw_result": sent}
-        except Exception as exc:
-            logger.warning(
-                "Не удалось скопировать сообщение %s/%s в %s: %s",
-                source_channel,
-                message_id,
-                target_id,
-                exc,
-            )
-            return {"attempted": True, "sent_ids": [], "fallback_allowed": False, "raw_result_type": "exception", "error_text": str(exc)}
+        return await SenderBotApiCopyHelpers(self).copy_single_via_bot(
+            source_channel,
+            target_id,
+            message_id,
+            target_thread_id,
+        )
 
     async def _copy_album_via_bot(self, source_channel, target_id, message_ids, target_thread_id):
-        if DEBUG_FORCE_SKIP_COPY_ALBUM:
-            logger.warning(
-                "COPY_ALBUM | TEST MODE | принудительно пропускаю Bot API CopyMessages для проверки Telethon album send"
-            )
-            return {
-                "ok": False,
-                "sent_message_id": None,
-                "sent_count": 0,
-                "error_text": "Bot API copy_album принудительно отключён",
-            }
+        from .sender_botapi_copy_helpers import SenderBotApiCopyHelpers
 
-        try:
-            sent_messages = await self.bot(
-                CopyMessages(
-                    chat_id=target_id,
-                    from_chat_id=source_channel,
-                    message_ids=message_ids,
-                    message_thread_id=target_thread_id,
-                )
-            )
-
-            if sent_messages and len(sent_messages) > 0:
-                return {
-                    "ok": True,
-                    "sent_message_id": sent_messages[0].message_id,
-                    "sent_message_ids": [int(m.message_id) for m in sent_messages],
-                    "sent_count": len(sent_messages),
-                    "error_text": None,
-                }
-
-            return {
-                "ok": False,
-                "sent_message_id": None,
-                "sent_count": 0,
-                "error_text": "CopyMessages вернул пустой результат",
-            }
-
-        except Exception as exc:
-            return {
-                "ok": False,
-                "sent_message_id": None,
-                "sent_count": 0,
-                "error_text": str(exc),
-            }
+        return await SenderBotApiCopyHelpers(self).copy_album_via_bot(
+            source_channel,
+            target_id,
+            message_ids,
+            target_thread_id,
+        )
 
     async def _send_album_one_by_one(self, messages, target_id, target_thread_id, post_rows: list[dict] | None = None):
         sent_ids: list[int] = []
