@@ -234,6 +234,8 @@ class VideoSingleDelivery:
                     caption_delivery_mode=caption_delivery_mode,
                     selected_mode=selected_mode,
                     caption_requires_premium=requires_premium,
+                    candidate_sent_message_ids=sent_message_ids,
+                    valid_sent_message_ids=valid_sent_message_ids,
                 )
                 return True
 

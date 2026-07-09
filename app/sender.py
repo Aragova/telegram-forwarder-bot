@@ -392,7 +392,23 @@ class SenderService:
         caption_delivery_mode: str,
         selected_mode: str,
         caption_requires_premium: bool,
+        candidate_sent_message_ids: list[int] | None = None,
+        valid_sent_message_ids: list[int] | None = None,
     ) -> None:
+        normalized_candidate_ids: list[int] = []
+        for value in candidate_sent_message_ids or []:
+            try:
+                normalized_candidate_ids.append(int(value))
+            except Exception:
+                continue
+
+        normalized_valid_ids: list[int] = []
+        for value in valid_sent_message_ids or []:
+            try:
+                normalized_valid_ids.append(int(value))
+            except Exception:
+                continue
+
         self.db.log_video_event(
             event_type="video_processing_completed",
             delivery_id=delivery_id,
@@ -405,8 +421,8 @@ class SenderService:
                 "target_thread_id": target_thread_id,
                 "source_message_id": source_message_id,
                 "sent_message_id": sent_message_id,
-                "candidate_sent_message_ids": candidate_sent_message_ids,
-                "valid_sent_message_ids": valid_sent_message_ids,
+                "candidate_sent_message_ids": normalized_candidate_ids,
+                "valid_sent_message_ids": normalized_valid_ids,
                 "fallback_mode": fallback_mode,
                 "caption_delivery_mode": caption_delivery_mode,
                 "selected_mode": selected_mode,
