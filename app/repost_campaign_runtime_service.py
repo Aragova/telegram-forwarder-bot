@@ -1367,14 +1367,29 @@ class RepostCampaignRuntimeService:
         has_skipped = will_skip_total > 0
         last_run = self.repo.list_campaign_runs_for_rule(rule_id, limit=1)[0] if self.repo.list_campaign_runs_for_rule(rule_id, limit=1) else None
         last_run_details = self.get_campaign_run_details(rule_id=rule_id, run_id=int(last_run.get("id"))) if last_run else {}
-        summary = (last_run_details or {}).get("summary") or {}
         active_messages = (last_run_details or {}).get("messages") or []
-        delete_pending = int(summary.get("delete_pending") or 0)
-        delete_failed = int(summary.get("delete_failed") or 0)
+        sent_active_messages = [
+            msg
+            for msg in active_messages
+            if str(msg.get("send_status") or "").strip().lower() == "sent"
+        ]
+        delete_pending = sum(
+            1
+            for msg in sent_active_messages
+            if str(msg.get("delete_status") or "").strip().lower() == "pending"
+        )
+        delete_processing = sum(
+            1
+            for msg in sent_active_messages
+            if str(msg.get("delete_status") or "").strip().lower() == "processing"
+        )
+        delete_failed = sum(
+            1
+            for msg in sent_active_messages
+            if str(msg.get("delete_status") or "").strip().lower() == "failed"
+        )
         active_delete_at_values: list[datetime] = []
-        for msg in active_messages:
-            if str(msg.get("send_status") or "").strip().lower() != "sent":
-                continue
+        for msg in sent_active_messages:
             if str(msg.get("delete_status") or "").strip().lower() not in {"pending", "processing", "failed"}:
                 continue
             raw = msg.get("delete_after_at")
@@ -1386,7 +1401,7 @@ class RepostCampaignRuntimeService:
                 continue
         active_delete_after_at = max(active_delete_at_values).astimezone(timezone.utc).isoformat() if active_delete_at_values else None
         next_available_at = (datetime.fromisoformat(active_delete_after_at) + timedelta(seconds=30)).isoformat() if active_delete_after_at else None
-        active_placement = delete_pending > 0 or int(summary.get("delete_processing") or 0) > 0
+        active_placement = delete_pending > 0 or delete_processing > 0
         can_launch = saved_post_exists and show_seconds > 0 and main_target_ready and extra_active_problem == 0 and will_send_total > 0
         if include_active_placement_block:
             if active_placement:
@@ -1430,13 +1445,28 @@ class RepostCampaignRuntimeService:
             "next_available_at": next_available_at,
             "next_available_text": (format_campaign_datetime_text(next_available_at, timezone_offset_hours=3) + " UTC+3") if next_available_at else None,
             "delete_pending": delete_pending,
+            "delete_processing": delete_processing,
             "delete_failed": delete_failed,
             "targets_delete_unknown": targets_delete_unknown,
             "targets_delete_denied": targets_delete_denied,
             "targets_publish_unknown": targets_publish_unknown,
             "targets_publish_denied": targets_publish_denied,
         }
-        self.logger.info("REPOST_CAMPAIGN_LAUNCH_READINESS | rule_id=%s can_launch=%s will_send_total=%s extra_ready=%s extra_ready_duplicates=%s extra_paused=%s extra_problem=%s extra_active_problem=%s", rule_id, can_launch, will_send_total, len(unique_ready_extra_targets), duplicate_ready_targets, len(paused_targets), len(problem_targets), extra_active_problem)
+        self.logger.info(
+            "REPOST_CAMPAIGN_LAUNCH_READINESS | rule_id=%s can_launch=%s will_send_total=%s extra_ready=%s extra_ready_duplicates=%s extra_paused=%s extra_problem=%s extra_active_problem=%s active_run_id=%s delete_pending=%s delete_processing=%s delete_failed=%s",
+            rule_id,
+            can_launch,
+            will_send_total,
+            len(unique_ready_extra_targets),
+            duplicate_ready_targets,
+            len(paused_targets),
+            len(problem_targets),
+            extra_active_problem,
+            int(last_run.get("id")) if last_run else None,
+            delete_pending,
+            delete_processing,
+            delete_failed,
+        )
         return result
 
     def get_campaign_readiness(self, *, rule_id: int) -> dict:
