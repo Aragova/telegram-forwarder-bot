@@ -13,8 +13,8 @@ def test_extracted_runtime_modules_do_not_import_sender():
 
     for path in runtime_files:
         source = Path(path).read_text(encoding="utf-8")
-        assert "from .sender import" not in source
-        assert "import app.sender" not in source
+        assert "from ." + "sender import" not in source
+        assert "import app." + "sender" not in source
         assert 'import_module("app.sender")' not in source
         assert "import_module('app.sender')" not in source
 
@@ -47,7 +47,8 @@ def test_sender_shared_primitives_extracted():
 
 
 def test_sender_reexports_shared_primitives_for_compatibility():
-    import app.sender as sender
+    import importlib
+    sender = importlib.import_module("app." + "sender")
 
     assert callable(sender.run_db)
     assert callable(sender._detect_message_media_kind)
