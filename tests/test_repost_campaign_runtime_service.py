@@ -1247,9 +1247,60 @@ def test_build_campaign_launch_readiness_can_ignore_delete_failed_block():
 
     readiness = runtime.build_campaign_launch_readiness(rule_id=1, include_active_placement_block=False)
 
-    assert readiness["delete_failed"] == 2
+    assert readiness["delete_failed"] == 1
     assert readiness["can_launch"] is True
     assert not any("Есть проблемы удаления" in reason for reason in readiness["block_reasons"])
+
+
+def test_launch_readiness_ignores_delete_failed_for_not_sent_messages():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=300, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"id": 55})
+    repo._runs = [{"id": 22, "rule_id": 1}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    runtime.get_campaign_run_details = lambda **kwargs: {
+        "summary": {"delete_failed": 1},
+        "messages": [{"send_status": "failed", "delete_status": "failed"}],
+    }
+
+    readiness = runtime.build_campaign_launch_readiness(rule_id=1)
+
+    assert readiness["can_launch"] is True
+    assert readiness["delete_failed"] == 0
+    assert not any("Есть проблемы удаления в предыдущем запуске." == reason for reason in readiness["block_reasons"])
+
+
+def test_launch_readiness_blocks_delete_failed_for_sent_messages():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=300, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"id": 55})
+    repo._runs = [{"id": 22, "rule_id": 1}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    runtime.get_campaign_run_details = lambda **kwargs: {
+        "summary": {},
+        "messages": [{"send_status": "sent", "delete_status": "failed"}],
+    }
+
+    readiness = runtime.build_campaign_launch_readiness(rule_id=1)
+
+    assert readiness["can_launch"] is False
+    assert readiness["delete_failed"] == 1
+    assert any("Есть проблемы удаления в предыдущем запуске." == reason for reason in readiness["block_reasons"])
+
+
+def test_launch_readiness_blocks_pending_for_sent_messages():
+    rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=300, target_id="-1001")
+    repo = _FakeRepo(rule=rule, saved_post={"id": 55})
+    repo._runs = [{"id": 22, "rule_id": 1}]
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+    runtime.get_campaign_run_details = lambda **kwargs: {
+        "summary": {},
+        "messages": [{"send_status": "sent", "delete_status": "pending"}],
+    }
+
+    readiness = runtime.build_campaign_launch_readiness(rule_id=1)
+
+    assert readiness["active_placement"] is True
+    assert readiness["delete_pending"] == 1
+    assert readiness["can_launch"] is False
 
 def test_build_launch_readiness_exposes_active_placement_details():
     rule = SimpleNamespace(mode="repost", repost_campaign_saved_post_id=55, repost_campaign_show_seconds=300, target_id="-1001")
