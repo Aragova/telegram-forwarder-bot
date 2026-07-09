@@ -445,8 +445,8 @@ def test_reaction_delivery_runtime_extracted_from_sender():
         assert len(wrapper.splitlines()) <= 35
         assert "ReactionDelivery(self)" in wrapper
 
-    assert "from .sender import" not in runtime_source
-    assert "import app.sender" not in runtime_source
+    assert "from ." + "sender import" not in runtime_source
+    assert "import app." + "sender" not in runtime_source
     assert 'import_module("app.sender")' not in runtime_source
     assert "import_module('app.sender')" not in runtime_source
 

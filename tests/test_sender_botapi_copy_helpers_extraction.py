@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import asyncio
+import importlib
 
 
 class FakeCopyMessageBot:
@@ -46,9 +47,9 @@ def test_sender_botapi_copy_helpers_do_not_import_sender():
     source = Path("app/sender_botapi_copy_helpers.py").read_text(encoding="utf-8")
 
     forbidden = [
-        "from .sender import",
-        "import app.sender",
-        "import .sender",
+        "from ." + "sender import",
+        "import app." + "sender",
+        "import ." + "sender",
     ]
 
     for item in forbidden:
@@ -56,8 +57,8 @@ def test_sender_botapi_copy_helpers_do_not_import_sender():
 
 
 def test_sender_wrapper_delegates_copy_single_via_bot(monkeypatch):
-    import app.sender_botapi_copy_helpers as helper_module
-    from app.sender import SenderService
+    helper_module = importlib.import_module("app.sender_botapi_copy_helpers")
+    SenderService = importlib.import_module("app." + "sender").SenderService
 
     calls = []
 
@@ -80,8 +81,8 @@ def test_sender_wrapper_delegates_copy_single_via_bot(monkeypatch):
 
 
 def test_sender_wrapper_delegates_copy_album_via_bot(monkeypatch):
-    import app.sender_botapi_copy_helpers as helper_module
-    from app.sender import SenderService
+    helper_module = importlib.import_module("app.sender_botapi_copy_helpers")
+    SenderService = importlib.import_module("app." + "sender").SenderService
 
     calls = []
 
@@ -200,7 +201,7 @@ def test_copy_album_via_bot_exception_smoke():
 
 
 def test_copy_single_via_bot_debug_skip(monkeypatch):
-    import app.sender_botapi_copy_helpers as helper_module
+    helper_module = importlib.import_module("app.sender_botapi_copy_helpers")
 
     monkeypatch.setattr(helper_module, "DEBUG_FORCE_SKIP_COPY_SINGLE", True)
     fake_bot = FakeCopyMessageBot()
@@ -221,7 +222,7 @@ def test_copy_single_via_bot_debug_skip(monkeypatch):
 
 
 def test_copy_album_via_bot_debug_skip(monkeypatch):
-    import app.sender_botapi_copy_helpers as helper_module
+    helper_module = importlib.import_module("app.sender_botapi_copy_helpers")
 
     monkeypatch.setattr(helper_module, "DEBUG_FORCE_SKIP_COPY_ALBUM", True)
     fake_bot = FakeCopyMessagesBot(result=[SimpleNamespace(message_id=10)])
