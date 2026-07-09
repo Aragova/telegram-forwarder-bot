@@ -315,6 +315,65 @@ def test_launch_result_failed_without_run_id_remains_failed():
     assert ("failed", 1, "bad") in repo.events
 
 
+def test_scheduled_launch_active_placement_result_goes_waiting_clean_channel():
+    result = RepostCampaignActionResult(
+        ok=False,
+        action="launch_campaign",
+        rule_id=10,
+        error_text="Кампания уже активна",
+        extra={"active_placement": True, "launch_readiness": {"active_placement": True}},
+    )
+    repo = FakeRepo(clean_channel_enabled=True, placements=[])
+    runtime = FakeRuntime(result=result)
+
+    asyncio.run(_service(repo, runtime).process_due_scheduled_launches(worker_id="worker"))
+
+    waiting_events = [event for event in repo.events if event[0] == "waiting_clean_channel"]
+    assert len(waiting_events) == 1
+    assert waiting_events[0][3] == "Кампания уже активна"
+    assert waiting_events[0][4]["source"] == "launch_campaign_now"
+    assert repo.launches[1]["status"] == "waiting_clean_channel"
+    assert "clean_channel_next_retry_at" in repo.launches[1]
+    assert not [event for event in repo.events if event[0] == "failed"]
+
+
+def test_scheduled_launch_delete_failed_result_goes_waiting_clean_channel():
+    result = RepostCampaignActionResult(
+        ok=False,
+        action="launch_campaign",
+        rule_id=10,
+        error_text="Есть проблемы удаления в предыдущем запуске.",
+        extra={"launch_readiness": {"delete_failed": 1}},
+    )
+    repo = FakeRepo(clean_channel_enabled=True, placements=[])
+    runtime = FakeRuntime(result=result)
+
+    asyncio.run(_service(repo, runtime).process_due_scheduled_launches(worker_id="worker"))
+
+    waiting_events = [event for event in repo.events if event[0] == "waiting_clean_channel"]
+    assert len(waiting_events) == 1
+    assert "Есть проблемы удаления" in waiting_events[0][3]
+    assert repo.launches[1]["status"] == "waiting_clean_channel"
+    assert not [event for event in repo.events if event[0] == "failed"]
+
+
+def test_scheduled_launch_real_not_ready_still_failed():
+    result = RepostCampaignActionResult(
+        ok=False,
+        action="launch_campaign",
+        rule_id=10,
+        error_text="Кампания не готова к запуску",
+        extra={},
+    )
+    repo = FakeRepo(clean_channel_enabled=True, placements=[])
+    runtime = FakeRuntime(result=result)
+
+    asyncio.run(_service(repo, runtime).process_due_scheduled_launches(worker_id="worker"))
+
+    assert ("failed", 1, "Кампания не готова к запуску") in repo.events
+    assert not [event for event in repo.events if event[0] == "waiting_clean_channel"]
+
+
 def test_source_guards_keep_clean_channel_worker_enforcement_scoped():
     schedule_service = Path("app/repost_campaign_schedule_service.py").read_text(encoding="utf-8")
     process_due_source = schedule_service.split("    async def process_due_scheduled_launches", 1)[1].split("\n\nasync def run_repost_campaign_scheduled_launch_loop", 1)[0]

@@ -85,6 +85,29 @@ def _campaign_schedule_clean_channel_wait_reason(policy_state: dict | None) -> s
     return "Чистый канал занят активной рекламой"
 
 
+def _is_scheduled_launch_blocked_by_clean_channel_result(result) -> bool:
+    if not result or result.ok is not False:
+        return False
+
+    extra = result.extra if isinstance(getattr(result, "extra", None), dict) else {}
+    launch_readiness = extra.get("launch_readiness") if isinstance(extra.get("launch_readiness"), dict) else {}
+
+    if extra.get("active_placement") is True:
+        return True
+    if launch_readiness.get("active_placement") is True:
+        return True
+    try:
+        if int(launch_readiness.get("delete_failed") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+
+    return result.error_text in {
+        "Кампания уже активна",
+        "Есть проблемы удаления в предыдущем запуске.",
+    }
+
+
 def format_campaign_schedule_datetime(
     value: datetime | str | None,
     *,
@@ -556,6 +579,25 @@ class RepostCampaignScheduleService:
             run_id = int(((result.extra or {}) if result else {}).get("campaign_run_id") or captured_run_id or 0)
             if result and result.ok and run_id:
                 self.repo.mark_campaign_scheduled_launch_launched(scheduled_launch_id, campaign_run_id=run_id)
+            elif result and _is_scheduled_launch_blocked_by_clean_channel_result(result) and not run_id:
+                next_retry_at = _campaign_schedule_clean_channel_next_retry_at()
+                self.repo.mark_campaign_scheduled_launch_waiting_clean_channel(
+                    scheduled_launch_id,
+                    next_retry_at=next_retry_at.isoformat(),
+                    reason=result.error_text or "Чистый канал занят активной рекламой",
+                    policy_snapshot={
+                        "source": "launch_campaign_now",
+                        "error_text": result.error_text,
+                        "extra": result.extra,
+                    },
+                )
+                self.logger.info(
+                    "REPOST_CAMPAIGN_SCHEDULE_WAITING_CLEAN_CHANNEL_AFTER_LAUNCH_GUARD | scheduled_launch_id=%s | rule_id=%s | next_retry_at=%s | error=%s",
+                    scheduled_launch_id,
+                    rule_id,
+                    next_retry_at.isoformat(),
+                    result.error_text,
+                )
             elif run_id:
                 self.repo.mark_campaign_scheduled_launch_needs_review(
                     scheduled_launch_id,
