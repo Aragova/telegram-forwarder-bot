@@ -1544,6 +1544,7 @@ class RepostCampaignRuntimeService:
             failed = sum(1 for row in messages if row.get("send_status") == "failed")
             pending = sum(1 for row in messages if row.get("send_status") in {"pending", "sending"})
             delete_pending = sum(1 for row in messages if row.get("delete_status") == "pending")
+            delete_processing = sum(1 for row in messages if row.get("delete_status") == "processing")
             deleted = sum(1 for row in messages if row.get("delete_status") == "deleted")
             delete_failed = sum(1 for row in messages if row.get("delete_status") == "failed")
             self.logger.info(
@@ -1564,6 +1565,7 @@ class RepostCampaignRuntimeService:
                     "failed": failed,
                     "pending": pending,
                     "delete_pending": delete_pending,
+                    "delete_processing": delete_processing,
                     "deleted": deleted,
                     "delete_failed": delete_failed,
                 },
@@ -1713,6 +1715,49 @@ class RepostCampaignRuntimeService:
             ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, target_id=str(message["target_id"]), message_id=int(message["sent_message_id"]), method=result.method, error_text=result.error_text,
             extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id, "delete_status": "failed"},
         )
+
+    async def resolve_campaign_run_delete_failures(self, *, rule_id: int, run_id: int, admin_id: int | None = None) -> RepostCampaignActionResult:
+        action = "resolve_campaign_run_delete_failures"
+        try:
+            self.logger.info("REPOST_CAMPAIGN_DELETE_FAILURES_RESOLVE_STARTED | rule_id=%s | run_id=%s | admin_id=%s", rule_id, run_id, admin_id)
+            run = self.repo.get_campaign_run(run_id)
+            if not run:
+                self.logger.warning("REPOST_CAMPAIGN_DELETE_FAILURES_RESOLVE_FAILED | rule_id=%s | run_id=%s | reason=run_not_found", rule_id, run_id)
+                return RepostCampaignActionResult(ok=False, action=action, rule_id=rule_id, error_text="Запуск кампании не найден", extra={"campaign_run_id": run_id})
+            if int(run.get("rule_id") or 0) != int(rule_id):
+                self.logger.warning("REPOST_CAMPAIGN_DELETE_FAILURES_RESOLVE_FAILED | rule_id=%s | run_id=%s | actual_rule_id=%s", rule_id, run_id, run.get("rule_id"))
+                return RepostCampaignActionResult(ok=False, action=action, rule_id=rule_id, error_text="Запуск не относится к этому правилу", extra={"campaign_run_id": run_id})
+            details = self.get_campaign_run_details(rule_id=rule_id, run_id=run_id)
+            if not details.get("ok"):
+                return RepostCampaignActionResult(ok=False, action=action, rule_id=rule_id, error_text=details.get("error_text") or "Не удалось загрузить детали запуска", extra={"campaign_run_id": run_id})
+            summary = details.get("summary") or {}
+            delete_failed = int(summary.get("delete_failed") or 0)
+            if delete_failed <= 0:
+                self.logger.info("REPOST_CAMPAIGN_DELETE_FAILURES_RESOLVE_SKIPPED | rule_id=%s | run_id=%s | reason=no_failed", rule_id, run_id)
+                return RepostCampaignActionResult(ok=True, action=action, rule_id=rule_id, extra={"campaign_run_id": run_id, "noop": True, "resolved": 0})
+            result = self.repo.resolve_campaign_run_delete_failures(
+                run_id=run_id,
+                rule_id=rule_id,
+                actor_id=admin_id,
+                reason="manual_admin_resolve_delete_failures",
+            )
+            remaining_pending = int((result or {}).get("remaining_pending") or 0)
+            remaining_processing = int((result or {}).get("remaining_processing") or 0)
+            remaining_failed = int((result or {}).get("remaining_failed") or 0)
+            resolved = int((result or {}).get("resolved") or 0)
+            extra = {
+                "campaign_run_id": run_id,
+                "resolved": resolved,
+                "remaining_pending": remaining_pending,
+                "remaining_processing": remaining_processing,
+                "remaining_failed": remaining_failed,
+                "still_active": remaining_pending + remaining_processing > 0,
+            }
+            self.logger.info("REPOST_CAMPAIGN_DELETE_FAILURES_RESOLVED | rule_id=%s | run_id=%s | resolved=%s | remaining_failed=%s", rule_id, run_id, resolved, remaining_failed)
+            return RepostCampaignActionResult(ok=True, action=action, rule_id=rule_id, extra=extra)
+        except Exception as exc:
+            self.logger.exception("REPOST_CAMPAIGN_DELETE_FAILURES_RESOLVE_FAILED | rule_id=%s | run_id=%s | error=%s", rule_id, run_id, exc)
+            return RepostCampaignActionResult(ok=False, action=action, rule_id=rule_id, error_text="Не удалось снять проблему удаления", extra={"campaign_run_id": run_id})
 
     async def delete_campaign_run_now(self, *, rule_id: int, run_id: int, admin_id: int | None = None) -> RepostCampaignActionResult:
         _ = admin_id

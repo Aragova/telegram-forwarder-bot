@@ -982,11 +982,18 @@ def build_repost_campaign_active_placements_view(
             continue
         details_callback = (placement or {}).get("details_callback_data") or f"rule_repost_campaign_history_detail:{rule_id}:{run_id}"
         delete_callback = (placement or {}).get("delete_callback_data") or f"rule_repost_campaign_run_delete_confirm:{rule_id}:{run_id}"
+        resolve_callback = (placement or {}).get("delete_failures_resolve_callback_data") or f"rule_repost_campaign_run_delete_failures_resolve_confirm:{rule_id}:{run_id}"
         report_callback = (placement or {}).get("report_callback_data") or f"rule_repost_campaign_views_report:{rule_id}:{run_id}"
-        rows.append([
-            InlineKeyboardButton(text=f"📄 #{run_id}", callback_data=details_callback),
-            InlineKeyboardButton(text=f"🧹 Удалить #{run_id}", callback_data=delete_callback),
-        ])
+        delete_failed = _safe_non_negative_int((placement or {}).get("delete_failed"))
+        delete_pending = _safe_non_negative_int((placement or {}).get("delete_pending"))
+        delete_processing = _safe_non_negative_int((placement or {}).get("delete_processing"))
+        has_delete_counts = any(key in (placement or {}) for key in ("delete_pending", "delete_processing", "delete_failed"))
+        action_row = [InlineKeyboardButton(text=f"📄 #{run_id}", callback_data=details_callback)]
+        if not has_delete_counts or delete_pending + delete_processing > 0:
+            action_row.append(InlineKeyboardButton(text=f"🧹 Удалить #{run_id}", callback_data=delete_callback))
+        rows.append(action_row)
+        if delete_failed > 0:
+            rows.append([InlineKeyboardButton(text=f"🧯 Снять проблему #{run_id}", callback_data=resolve_callback)])
         rows.append([InlineKeyboardButton(text=f"📊 Отчёт #{run_id}", callback_data=report_callback)])
 
     if placements_total > page_size:
@@ -2471,6 +2478,72 @@ def build_repost_campaign_run_delete_result_view(*, rule_id: int, run_id: int, r
     ])
     return text, kb
 
+
+def build_repost_campaign_run_delete_failures_resolve_confirm_view(*, rule_id: int, run_id: int, details: dict) -> tuple[str, InlineKeyboardMarkup]:
+    summary = (details or {}).get("summary") or {}
+    pending_processing = int(summary.get("delete_pending") or 0) + int(summary.get("delete_processing") or 0)
+    lines = [
+        "🧯 Снять проблему удаления",
+        "",
+        f"Запуск #{run_id}",
+        "",
+        "У этого запуска есть ошибки удаления.",
+        "",
+        "Используйте это действие только если:",
+        "— канал/группа уже удалены;",
+        "— пост уже исчез;",
+        "— бот больше не имеет доступа к каналу;",
+        "— удалить пост через Telegram технически невозможно.",
+        "",
+        "ViMi пометит проблемные публикации как технически завершённые.",
+        "Это снимет ошибку удаления.",
+        "",
+        "Публикации в Telegram удаляться не будут.",
+    ]
+    if pending_processing > 0:
+        lines.extend([
+            "",
+            "⚠️ В этом запуске ещё есть публикации, которые ожидают удаления.",
+            "",
+            "“Снять проблему” исправит только ошибки удаления.",
+            "Ожидающие публикации останутся активными и всё ещё могут блокировать “Чистый канал”.",
+            "",
+            "Чтобы полностью убрать запуск, сначала попробуйте:",
+            "🧹 Удалить запуск",
+        ])
+    rows = [
+        [InlineKeyboardButton(text="✅ Снять проблему", callback_data=f"rule_repost_campaign_run_delete_failures_resolve_apply:{rule_id}:{run_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")],
+    ]
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_campaign_run_delete_failures_resolve_result_view(*, rule_id: int, run_id: int, result) -> tuple[str, InlineKeyboardMarkup]:
+    payload = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})
+    extra = payload.get("extra") or {}
+    if payload.get("ok") and extra.get("noop"):
+        text = "✅ Проблем удаления не найдено\n\nЭтот запуск уже не блокирует “Чистый канал” ошибками удаления."
+    elif payload.get("ok"):
+        text = (
+            "✅ Проблема удаления снята\n\n"
+            f"Запуск #{run_id}\n\n"
+            f"Исправлено ошибок удаления: {int(extra.get('resolved') or 0)}\n"
+            f"Осталось ожидающих удаления: {int(extra.get('remaining_pending') or 0)}\n"
+            f"Осталось в процессе удаления: {int(extra.get('remaining_processing') or 0)}\n"
+            f"Осталось ошибок удаления: {int(extra.get('remaining_failed') or 0)}"
+        )
+        if extra.get("still_active"):
+            text += "\n\nЗапуск всё ещё активен, потому что часть публикаций ожидает удаления."
+        else:
+            text += "\n\nТеперь этот запуск больше не блокирует “Чистый канал”."
+    else:
+        error_text = payload.get("error_text") or "Попробуйте позже."
+        text = f"⚠️ Не удалось снять проблему удаления\n\n{error_text}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧹 Активные размещения", callback_data=f"rule_repost_campaign_active_placements:{rule_id}:0")],
+        [InlineKeyboardButton(text="💰 К кампании", callback_data=f"rule_repost_campaign_menu:{rule_id}")],
+    ])
+    return text, kb
 
 def build_repost_campaign_views_report_view(*, rule_id: int, run_id: int, report: dict) -> tuple[str, InlineKeyboardMarkup]:
     vm = build_campaign_views_report_view_model(report=report or {})

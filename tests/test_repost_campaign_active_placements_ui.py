@@ -205,3 +205,56 @@ def test_handler_source_contains_active_placements_and_launch_flow_is_not_couple
     launch_source = _runtime_method_source(runtime_source, "launch_campaign_now")
     assert "RepostCampaignPlacementService" not in launch_source
     assert "build_launch_policy_preview" not in launch_source
+
+from app.repost_campaign_ui import (
+    build_repost_campaign_run_delete_failures_resolve_confirm_view,
+    build_repost_campaign_run_delete_failures_resolve_result_view,
+)
+
+
+def test_delete_failed_placement_shows_resolve_button():
+    placement = _placement(130)
+    placement.update({"delete_pending": 0, "delete_processing": 0, "delete_failed": 1})
+    _, keyboard = build_repost_campaign_active_placements_view(rule_id=10, state=_state("delete_problem", [placement], delete_problem_total=1))
+
+    assert "🧯 Снять проблему #130" in _texts_from_keyboard(keyboard)
+
+
+def test_pending_only_placement_shows_delete_not_resolve():
+    placement = _placement(140)
+    placement.update({"delete_pending": 1, "delete_processing": 0, "delete_failed": 0})
+    _, keyboard = build_repost_campaign_active_placements_view(rule_id=10, state=_state("active", [placement], active_total=1))
+    texts = _texts_from_keyboard(keyboard)
+
+    assert "🧹 Удалить #140" in texts
+    assert not any("🧯" in text for text in texts)
+
+
+def test_mixed_placement_shows_delete_and_resolve():
+    placement = _placement(140)
+    placement.update({"delete_pending": 1, "delete_processing": 0, "delete_failed": 1})
+    _, keyboard = build_repost_campaign_active_placements_view(rule_id=10, state=_state("mixed", [placement], active_total=1, delete_problem_total=1))
+    texts = _texts_from_keyboard(keyboard)
+
+    assert "🧹 Удалить #140" in texts
+    assert "🧯 Снять проблему #140" in texts
+
+
+def test_resolve_confirm_screen_warns_telegram_posts_not_deleted():
+    text, _ = build_repost_campaign_run_delete_failures_resolve_confirm_view(rule_id=10, run_id=130, details={"summary": {"delete_failed": 1}})
+
+    assert "Публикации в Telegram удаляться не будут" in text
+
+
+def test_mixed_resolve_confirm_screen_warns_pending_stays_active():
+    text, _ = build_repost_campaign_run_delete_failures_resolve_confirm_view(rule_id=10, run_id=130, details={"summary": {"delete_failed": 1, "delete_pending": 1}})
+
+    assert "Ожидающие публикации останутся активными" in text
+
+
+def test_resolve_result_screen_shows_counts():
+    result = {"ok": True, "extra": {"resolved": 5, "remaining_pending": 42, "remaining_processing": 0, "remaining_failed": 0, "still_active": True}}
+    text, _ = build_repost_campaign_run_delete_failures_resolve_result_view(rule_id=10, run_id=130, result=result)
+
+    assert "Исправлено ошибок удаления" in text
+    assert "Осталось ожидающих удаления" in text
