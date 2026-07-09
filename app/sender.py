@@ -244,7 +244,9 @@ class SenderService:
         return self._get_post_row_for_rule_message(rule, source_channel, message_id)
 
     def _get_rule_intro_items_sync(self, rule):
-        return self._get_rule_intro_items(rule)
+        from .sender_state_sync_helpers import SenderStateSyncHelpers
+
+        return SenderStateSyncHelpers(self).get_rule_intro_items_sync(rule)
 
     def _resolve_repost_caption_delivery_strategy_sync(
         self,
@@ -261,14 +263,29 @@ class SenderService:
             is_album=is_album,
         )
 
-    def _mark_delivery_sent_sync(self, delivery_id: int, *, sent_message_id: int | None = None, sent_message_ids: list[int] | None = None, target_id: str | None = None, delivery_method: str | None = None) -> None:
-        if hasattr(self.db, "mark_delivery_sent_with_target_message"):
-            self.db.mark_delivery_sent_with_target_message(delivery_id, sent_message_id=sent_message_id, sent_message_ids=sent_message_ids, target_id=target_id, delivery_method=delivery_method)
-            return
-        self.db.mark_delivery_sent(delivery_id)
+    def _mark_delivery_sent_sync(
+        self,
+        delivery_id: int,
+        *,
+        sent_message_id: int | None = None,
+        sent_message_ids: list[int] | None = None,
+        target_id: str | None = None,
+        delivery_method: str | None = None,
+    ) -> None:
+        from .sender_state_sync_helpers import SenderStateSyncHelpers
+
+        return SenderStateSyncHelpers(self).mark_delivery_sent_sync(
+            delivery_id,
+            sent_message_id=sent_message_id,
+            sent_message_ids=sent_message_ids,
+            target_id=target_id,
+            delivery_method=delivery_method,
+        )
 
     def _mark_many_deliveries_sent_sync(self, delivery_ids: list[int]) -> None:
-        self.db.mark_many_deliveries_sent(delivery_ids)
+        from .sender_state_sync_helpers import SenderStateSyncHelpers
+
+        return SenderStateSyncHelpers(self).mark_many_deliveries_sent_sync(delivery_ids)
 
     def _mark_album_deliveries_sent_sync(
         self,
@@ -278,30 +295,27 @@ class SenderService:
         target_id: str | None = None,
         delivery_method: str | None = None,
     ) -> None:
-        normalized_delivery_ids = [int(x) for x in (delivery_ids or [])]
-        if not normalized_delivery_ids:
-            raise RuntimeError("Не удалось определить deliveries альбома для перевода в sent")
+        from .sender_state_sync_helpers import SenderStateSyncHelpers
 
-        valid_sent_message_ids = normalize_valid_sent_message_ids(sent_message_ids)
-        if valid_sent_message_ids and hasattr(self.db, "mark_delivery_sent_with_target_message"):
-            for index, album_delivery_id in enumerate(normalized_delivery_ids):
-                sent_message_id = valid_sent_message_ids[index] if index < len(valid_sent_message_ids) else valid_sent_message_ids[0]
-                self.db.mark_delivery_sent_with_target_message(
-                    album_delivery_id,
-                    sent_message_id=int(sent_message_id),
-                    sent_message_ids=valid_sent_message_ids,
-                    target_id=target_id,
-                    delivery_method=delivery_method,
-                )
-            return
-
-        self.db.mark_many_deliveries_sent(normalized_delivery_ids)
+        return SenderStateSyncHelpers(self).mark_album_deliveries_sent_sync(
+            delivery_ids,
+            sent_message_ids=sent_message_ids,
+            target_id=target_id,
+            delivery_method=delivery_method,
+        )
 
     def _mark_delivery_faulty_sync(self, delivery_id: int, error_text: str) -> None:
-        self.db.mark_delivery_faulty(delivery_id, error_text)
+        from .sender_state_sync_helpers import SenderStateSyncHelpers
+
+        return SenderStateSyncHelpers(self).mark_delivery_faulty_sync(
+            delivery_id,
+            error_text,
+        )
 
     def _get_post_id_by_delivery_sync(self, delivery_id: int) -> int | None:
-        return self.db.get_post_id_by_delivery(delivery_id)
+        from .sender_state_sync_helpers import SenderStateSyncHelpers
+
+        return SenderStateSyncHelpers(self).get_post_id_by_delivery_sync(delivery_id)
 
     def _log_video_event_sync(
         self,
@@ -593,25 +607,9 @@ class SenderService:
         )
 
     def _get_rule_intro_items(self, rule):
-        horizontal_intro = None
-        vertical_intro = None
+        from .sender_state_sync_helpers import SenderStateSyncHelpers
 
-        horizontal_id = getattr(rule, "video_intro_horizontal_id", None)
-        vertical_id = getattr(rule, "video_intro_vertical_id", None)
-
-        try:
-            if horizontal_id:
-                horizontal_intro = self.db.get_intro_by_id(int(horizontal_id))
-        except Exception:
-            horizontal_intro = None
-
-        try:
-            if vertical_id:
-                vertical_intro = self.db.get_intro_by_id(int(vertical_id))
-        except Exception:
-            vertical_intro = None
-
-        return horizontal_intro, vertical_intro
+        return SenderStateSyncHelpers(self).get_rule_intro_items(rule)
 
     def _is_self_loop_rule(self, rule) -> bool:
         return (
@@ -620,7 +618,9 @@ class SenderService:
         )
 
     def _get_post_id_by_delivery(self, delivery_id: int) -> int | None:
-        return self.db.get_post_id_by_delivery(delivery_id)
+        from .sender_state_sync_helpers import SenderStateSyncHelpers
+
+        return SenderStateSyncHelpers(self).get_post_id_by_delivery(delivery_id)
 
     def _handle_process_rule_exception_sync(
         self,
