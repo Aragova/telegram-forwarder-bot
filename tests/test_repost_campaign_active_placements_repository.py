@@ -16,6 +16,7 @@ class _PlacementCursor:
         self._row: dict[str, Any] | None = None
         self.last_sql = ""
         self.last_params: tuple[Any, ...] | None = None
+        self.rowcount = 0
 
     def __enter__(self):
         return self
@@ -26,6 +27,35 @@ class _PlacementCursor:
     def execute(self, sql: str, params: tuple[Any, ...] | None = None):
         self.last_sql = sql
         self.last_params = params
+        if "UPDATE campaign_run_messages" in sql and "manual_resolved_orphaned_target" in sql:
+            run_id = int(params[0]) if params else 0
+            rule_id = int(params[1]) if params and len(params) > 1 else 0
+            changed = 0
+            for message in self._messages:
+                message_rule_id = int(message.get("rule_id") or next((run.get("rule_id") for run in self._runs if int(run["id"]) == int(message["run_id"])), 0))
+                if int(message.get("run_id") or 0) == run_id and message_rule_id == rule_id and message.get("send_status") == "sent" and message.get("delete_status") == "failed":
+                    message["delete_status"] = "deleted"
+                    message["delete_error_text"] = "[manual_resolved_orphaned_target] " + str(message.get("delete_error_text") or "")
+                    changed += 1
+            self.rowcount = changed
+            self._row = None
+            self._rows = []
+            return
+        if "remaining_pending" in sql and "remaining_processing" in sql and "remaining_failed" in sql:
+            run_id = int(params[0]) if params else 0
+            rule_id = int(params[1]) if params and len(params) > 1 else 0
+            scoped = []
+            for message in self._messages:
+                message_rule_id = int(message.get("rule_id") or next((run.get("rule_id") for run in self._runs if int(run["id"]) == int(message["run_id"])), 0))
+                if int(message.get("run_id") or 0) == run_id and message_rule_id == rule_id and message.get("send_status") == "sent":
+                    scoped.append(message)
+            self._row = {
+                "remaining_pending": sum(1 for m in scoped if m.get("delete_status") == "pending"),
+                "remaining_processing": sum(1 for m in scoped if m.get("delete_status") == "processing"),
+                "remaining_failed": sum(1 for m in scoped if m.get("delete_status") == "failed"),
+            }
+            self._rows = []
+            return
         rule_id = int(params[0]) if params else 0
         is_summary = "WITH placements AS" in sql
         limit = None if is_summary else (int(params[-1]) if params else 20)
@@ -147,7 +177,7 @@ def _run(run_id: int, *, rule_id: int = 10, run_type: str = "manual", scheduled_
     }
 
 
-def _message(message_id: int, run_id: int, delete_status: str, *, send_status: str = "sent", delete_after_at: str | None = "2026-05-01T01:00:00+00:00") -> dict[str, Any]:
+def _message(message_id: int, run_id: int, delete_status: str, *, send_status: str = "sent", delete_after_at: str | None = "2026-05-01T01:00:00+00:00", rule_id: int | None = None) -> dict[str, Any]:
     return {
         "id": message_id,
         "run_id": run_id,
@@ -155,6 +185,7 @@ def _message(message_id: int, run_id: int, delete_status: str, *, send_status: s
         "delete_status": delete_status,
         "delete_after_at": delete_after_at,
         "sent_at": f"2026-05-01T00:{message_id:02d}:00+00:00",
+        **({"rule_id": rule_id} if rule_id is not None else {}),
     }
 
 
@@ -287,3 +318,24 @@ def test_scheduled_post_service_does_not_use_clean_channel_active_placements_yet
     assert "list_active_campaign_placements_for_rule" not in source
     assert "clean_channel" not in source
     assert "waiting_clean_channel" not in source
+
+
+def test_resolve_campaign_run_delete_failures_marks_failed_as_deleted():
+    messages = [
+        _message(1, 130, "failed", rule_id=4),
+        _message(2, 130, "pending", rule_id=4),
+        _message(3, 130, "processing", rule_id=4),
+        _message(4, 130, "failed", rule_id=5),
+    ]
+    repo, _ = _repo_with_data([_run(130, rule_id=4), _run(131, rule_id=5)], messages)
+
+    result = repo.resolve_campaign_run_delete_failures(run_id=130, rule_id=4)
+
+    assert messages[0]["delete_status"] == "deleted"
+    assert messages[1]["delete_status"] == "pending"
+    assert messages[2]["delete_status"] == "processing"
+    assert messages[3]["delete_status"] == "failed"
+    assert result["resolved"] == 1
+    assert result["remaining_pending"] == 1
+    assert result["remaining_processing"] == 1
+    assert result["remaining_failed"] == 0

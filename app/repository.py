@@ -723,6 +723,14 @@ class RepositoryProtocol(Protocol):
         *,
         error_text: str,
     ) -> bool: ...
+    def resolve_campaign_run_delete_failures(
+        self,
+        *,
+        run_id: int,
+        rule_id: int,
+        actor_id: int | None = None,
+        reason: str | None = None,
+    ) -> dict[str, int]: ...
     def reset_stuck_campaign_delete_processing(
         self,
         *,

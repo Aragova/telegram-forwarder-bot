@@ -123,3 +123,21 @@ def test_invite_links_stats_are_loaded_for_main_stats_list_and_card():
     assert "link_stats[int(invite_link_id)]" in HANDLERS_SOURCE
     assert "build_repost_campaign_invite_link_view(rule_id=rule_id, link=link, stats=stats)" in HANDLERS_SOURCE
     assert "REPOST_CAMPAIGN_INVITE_LINK_STATS_LOAD_FAILED" in HANDLERS_SOURCE
+
+
+def test_delete_failures_resolve_callbacks_are_registered():
+    source = Path("app/repost_campaign_report_handlers.py").read_text(encoding="utf-8")
+
+    assert "rule_repost_campaign_run_delete_failures_resolve_confirm" in source
+    assert "rule_repost_campaign_run_delete_failures_resolve_apply" in source
+
+
+def test_delete_failures_resolve_apply_calls_runtime_service_method():
+    source = Path("app/repost_campaign_report_handlers.py").read_text(encoding="utf-8")
+    marker = "async def handle_rule_repost_campaign_run_delete_failures_resolve_apply"
+    start = source.index(marker)
+    end = source.index("@dp.callback_query", start + 1)
+    handler_source = source[start:end]
+
+    assert "runtime.resolve_campaign_run_delete_failures" in handler_source
+    assert "delete_campaign_run_now" not in handler_source

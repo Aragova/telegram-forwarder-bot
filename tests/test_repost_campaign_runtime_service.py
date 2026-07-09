@@ -1796,3 +1796,62 @@ def test_top_time_pause_stage_seven_six_does_not_add_worker_guard():
         source = Path(path).read_text(encoding="utf-8")
         for marker in forbidden_markers:
             assert marker not in source
+
+
+def test_resolve_delete_failures_success():
+    repo = _FakeRepo()
+    repo._run = {"id": 130, "rule_id": 4}
+    repo._messages = [{"id": 1, "send_status": "sent", "delete_status": "failed"}]
+    repo.resolve_campaign_run_delete_failures_calls = []
+    def _resolve(**kwargs):
+        repo.resolve_campaign_run_delete_failures_calls.append(kwargs)
+        return {"resolved": 1, "remaining_pending": 0, "remaining_processing": 0, "remaining_failed": 0}
+    repo.resolve_campaign_run_delete_failures = _resolve
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+
+    result = asyncio.run(runtime.resolve_campaign_run_delete_failures(rule_id=4, run_id=130, admin_id=7))
+
+    assert result.ok is True
+    assert repo.resolve_campaign_run_delete_failures_calls
+    assert result.extra["resolved"] == 1
+
+
+def test_resolve_delete_failures_wrong_rule_blocked():
+    repo = _FakeRepo()
+    repo._run = {"id": 130, "rule_id": 5}
+    repo.resolve_campaign_run_delete_failures_calls = []
+    repo.resolve_campaign_run_delete_failures = lambda **kwargs: repo.resolve_campaign_run_delete_failures_calls.append(kwargs)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+
+    result = asyncio.run(runtime.resolve_campaign_run_delete_failures(rule_id=4, run_id=130))
+
+    assert result.ok is False
+    assert repo.resolve_campaign_run_delete_failures_calls == []
+
+
+def test_resolve_delete_failures_noop_when_no_failed():
+    repo = _FakeRepo()
+    repo._run = {"id": 130, "rule_id": 4}
+    repo._messages = [{"id": 1, "send_status": "sent", "delete_status": "pending"}]
+    repo.resolve_campaign_run_delete_failures_calls = []
+    repo.resolve_campaign_run_delete_failures = lambda **kwargs: repo.resolve_campaign_run_delete_failures_calls.append(kwargs)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+
+    result = asyncio.run(runtime.resolve_campaign_run_delete_failures(rule_id=4, run_id=130))
+
+    assert result.ok is True
+    assert result.extra["noop"] is True
+    assert repo.resolve_campaign_run_delete_failures_calls == []
+
+
+def test_resolve_delete_failures_keeps_still_active_when_pending_left():
+    repo = _FakeRepo()
+    repo._run = {"id": 130, "rule_id": 4}
+    repo._messages = [{"id": 1, "send_status": "sent", "delete_status": "failed"}]
+    repo.resolve_campaign_run_delete_failures = lambda **kwargs: {"resolved": 1, "remaining_pending": 1, "remaining_processing": 0, "remaining_failed": 0}
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None))
+
+    result = asyncio.run(runtime.resolve_campaign_run_delete_failures(rule_id=4, run_id=130))
+
+    assert result.ok is True
+    assert result.extra["still_active"] is True

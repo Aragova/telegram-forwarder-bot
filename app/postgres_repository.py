@@ -10043,6 +10043,54 @@ class PostgresRepository(RepositoryProtocol):
                 cur.execute("SELECT * FROM campaign_run_messages WHERE run_id=%s ORDER BY id ASC", (int(run_id),))
                 return [dict(row) for row in (cur.fetchall() or [])]
 
+    def resolve_campaign_run_delete_failures(
+        self,
+        *,
+        run_id: int,
+        rule_id: int,
+        actor_id: int | None = None,
+        reason: str | None = None,
+    ) -> dict[str, int]:
+        _ = actor_id, reason
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET delete_status = 'deleted',
+                        deleted_at = NOW(),
+                        delete_error_text = '[manual_resolved_orphaned_target] ' || COALESCE(delete_error_text, ''),
+                        updated_at = NOW()
+                    WHERE run_id = %s
+                      AND rule_id = %s
+                      AND send_status = 'sent'
+                      AND delete_status = 'failed'
+                    """,
+                    (int(run_id), int(rule_id)),
+                )
+                resolved = int(cur.rowcount or 0)
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE delete_status = 'pending') AS remaining_pending,
+                        COUNT(*) FILTER (WHERE delete_status = 'processing') AS remaining_processing,
+                        COUNT(*) FILTER (WHERE delete_status = 'failed') AS remaining_failed
+                    FROM campaign_run_messages
+                    WHERE run_id = %s
+                      AND rule_id = %s
+                      AND send_status = 'sent'
+                    """,
+                    (int(run_id), int(rule_id)),
+                )
+                row = dict(cur.fetchone() or {})
+            conn.commit()
+        return {
+            "resolved": resolved,
+            "remaining_pending": int(row.get("remaining_pending") or 0),
+            "remaining_processing": int(row.get("remaining_processing") or 0),
+            "remaining_failed": int(row.get("remaining_failed") or 0),
+        }
+
     def list_active_campaign_placements_for_rule(
         self,
         rule_id: int,
