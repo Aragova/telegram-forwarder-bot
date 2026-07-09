@@ -136,3 +136,42 @@ def test_build_video_caption_delivery_payload_malformed_entities_keeps_existing_
         "has_any_entities": False,
         "selected_mode": "plain",
     }
+
+
+def test_content_requires_builder_custom_emoji_variants():
+    from app.delivery_content_helpers import content_requires_builder
+
+    variants = [
+        {"type": "custom_emoji", "custom_emoji_id": "123"},
+        {"type": "MessageEntityCustomEmoji", "custom_emoji_id": "123"},
+        {"type": "messageentitycustomemoji", "document_id": "123"},
+        {"_": "MessageEntityCustomEmoji", "document_id": "123"},
+    ]
+
+    for entity in variants:
+        assert content_requires_builder({"entities": [entity]}) is True
+
+
+def test_content_requires_builder_checks_alternate_entity_fields():
+    from app.delivery_content_helpers import content_requires_builder
+
+    assert content_requires_builder({
+        "text": "x",
+        "caption_entities": [
+            {"type": "custom_emoji", "custom_emoji_id": "123"}
+        ],
+    }) is True
+
+    assert content_requires_builder({
+        "text": "x",
+        "text_entities": [
+            {"type": "MessageEntityCustomEmoji", "document_id": "123"}
+        ],
+    }) is True
+
+    assert content_requires_builder({
+        "text": "x",
+        "raw_entities": [
+            {"_": "MessageEntityCustomEmoji", "document_id": "123"}
+        ],
+    }) is True

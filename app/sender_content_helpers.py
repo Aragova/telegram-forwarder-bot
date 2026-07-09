@@ -7,6 +7,7 @@ from typing import Any
 from telethon import types
 
 from .delivery_content_helpers import (
+    _iter_content_entities,
     content_requires_builder,
     extract_text_from_content,
     normalize_caption_delivery_mode,
@@ -80,23 +81,28 @@ class SenderContentHelpers:
 
             return default
 
+        post_content = None
         if post_row is not None:
             content = _row_value(post_row, "content_json")
 
             if isinstance(content, dict):
-                return content
+                post_content = content
 
-            if isinstance(content, str) and content.strip():
+            if post_content is None and isinstance(content, str) and content.strip():
                 try:
                     parsed = json.loads(content)
                     if isinstance(parsed, dict):
-                        return parsed
+                        post_content = parsed
                 except Exception:
                     logger.warning(
                         "CONTENT_FROM_POST_ROW | не удалось распарсить content_json | type=%s",
                         type(post_row).__name__,
                     )
 
+            if post_content is not None and message is None:
+                return post_content
+
+        live_content = None
         if message is not None:
             text = (
                 getattr(message, "raw_text", None)
@@ -190,13 +196,36 @@ class SenderContentHelpers:
                 len(entities_payload),
             )
 
-            return {
+            live_content = {
                 "text": text,
                 "entities": entities_payload,
                 "has_media": bool(getattr(message, "media", None)),
                 "media_kind": _detect_message_media_kind(message),
                 "date": getattr(getattr(message, "date", None), "isoformat", lambda: None)(),
             }
+
+        if post_content is not None:
+            live_entities = (live_content or {}).get("entities") or []
+            post_entities = list(_iter_content_entities(post_content))
+            if not post_entities and live_entities:
+                merged = dict(post_content)
+                merged["entities"] = live_entities
+                if not merged.get("text") and (live_content or {}).get("text"):
+                    merged["text"] = live_content.get("text")
+                merged.setdefault("has_media", (live_content or {}).get("has_media", False))
+                merged.setdefault("media_kind", (live_content or {}).get("media_kind", "text"))
+                merged.setdefault("date", (live_content or {}).get("date"))
+                logger.warning(
+                    "CONTENT_FROM_MESSAGE_OR_POST | merged_live_entities | post_entities=%s | live_entities=%s | result_entities=%s",
+                    len(post_entities),
+                    len(live_entities),
+                    len(merged.get("entities") or []),
+                )
+                return merged
+            return post_content
+
+        if live_content is not None:
+            return live_content
 
         return {
             "text": "",
@@ -490,10 +519,13 @@ class SenderContentHelpers:
         content = self.content_from_message_or_post(message=None, post_row=post_row)
         needs_builder = self.content_requires_builder(content)
 
+        counts = self.caption_entity_counts(list(_iter_content_entities(content)))
         logger.info(
-            "CAPTION_MODE_DETECT | single | rule_id=%s | message_id=%s | requires_builder=%s",
+            "CAPTION_MODE_DETECT | single | rule_id=%s | message_id=%s | entities=%s | custom_emoji=%s | requires_builder=%s",
             getattr(rule, "id", None),
             message_id,
+            counts["total"],
+            counts["custom_emoji"],
             needs_builder,
         )
         return needs_builder
