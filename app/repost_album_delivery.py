@@ -10,6 +10,13 @@ from .runtime_utils import run_db
 logger = logging.getLogger("forwarder")
 
 
+def _reaction_applied_or_enqueued(result) -> bool:
+    payload = result.get("result") if isinstance(result, dict) and isinstance(result.get("result"), dict) else result
+    if isinstance(payload, dict):
+        return bool(payload.get("applied") or payload.get("enqueued"))
+    return bool(payload)
+
+
 class RepostAlbumDelivery:
     def __init__(self, owner):
         self.owner = owner
@@ -333,7 +340,7 @@ class RepostAlbumDelivery:
                             delivery_id=(delivery_ids[0] if delivery_ids else None),
                         ),
                     )
-                    if is_self_loop and reaction_result.get("ok"):
+                    if is_self_loop and _reaction_applied_or_enqueued(reaction_result):
                         logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, sent_message_id)
                     elif is_self_loop:
                         logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, sent_message_id, reaction_result.get("error"))
@@ -742,7 +749,7 @@ class RepostAlbumDelivery:
                             rule.id, (delivery_ids[0] if delivery_ids else None), message_ids, sent_message_ids, reaction_message_id,
                         )
                     try:
-                        await owner._add_reaction_for_rule_if_possible(
+                        reaction_result = await owner._add_reaction_for_rule_if_possible(
                             rule=rule,
                             target_id=target_id,
                             sent_message_id=reaction_message_id,
@@ -750,8 +757,10 @@ class RepostAlbumDelivery:
                             source_message_ids=message_ids,
                             delivery_id=(delivery_ids[0] if delivery_ids else None),
                         )
-                        if is_self_loop:
+                        if is_self_loop and _reaction_applied_or_enqueued(reaction_result):
                             logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, reaction_message_id)
+                        elif is_self_loop:
+                            logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_message_id, reaction_result)
                     except Exception as exc:
                         if is_self_loop:
                             logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_message_id, exc)
@@ -826,7 +835,7 @@ class RepostAlbumDelivery:
                         reaction_result = {"ok": True, "result": await _apply_unverified_album_reaction()}
                     except Exception as exc:
                         reaction_result = {"ok": False, "error": str(exc)}
-                if reaction_result.get("ok"):
+                if _reaction_applied_or_enqueued(reaction_result):
                     logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, reaction_message_id)
                 else:
                     logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_message_id, reaction_result.get("error"))

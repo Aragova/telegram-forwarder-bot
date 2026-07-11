@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import asyncio
 import json
+import struct
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,9 @@ from .config import settings
 from .sender_primitives import _detect_message_media_kind
 
 logger = logging.getLogger("forwarder")
+
+MAX_TELEGRAM_THUMB_BYTES = 20 * 1024
+MAX_TELEGRAM_THUMB_SIDE = 320
 
 
 def _positive_int(value: Any) -> int:
@@ -69,26 +73,76 @@ class SenderTelethonHelpers:
         try:
             if not path or not path.exists() or path.stat().st_size <= 0:
                 return False
+            if path.stat().st_size >= MAX_TELEGRAM_THUMB_BYTES:
+                return False
             header = path.read_bytes()[:12]
-            return header.startswith(b"\xff\xd8\xff") or header.startswith(b"\x89PNG\r\n\x1a\n") or header.startswith(b"GIF8")
+            if not header.startswith(b"\xff\xd8\xff"):
+                return False
+            width, height = self._jpeg_dimensions(path)
+            return bool(width and height and width <= MAX_TELEGRAM_THUMB_SIDE and height <= MAX_TELEGRAM_THUMB_SIDE)
         except Exception:
             return False
+
+    def _jpeg_dimensions(self, path: Path) -> tuple[int, int]:
+        try:
+            data = path.read_bytes()
+            pos = 2
+            while pos + 9 < len(data):
+                if data[pos] != 0xFF:
+                    pos += 1
+                    continue
+                marker = data[pos + 1]
+                pos += 2
+                while marker == 0xFF and pos < len(data):
+                    marker = data[pos]
+                    pos += 1
+                if marker in {0xD8, 0xD9, 0x01} or 0xD0 <= marker <= 0xD7:
+                    continue
+                if pos + 2 > len(data):
+                    break
+                segment_len = struct.unpack(">H", data[pos:pos + 2])[0]
+                if segment_len < 2 or pos + segment_len > len(data):
+                    break
+                if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+                    if segment_len >= 7:
+                        height = struct.unpack(">H", data[pos + 3:pos + 5])[0]
+                        width = struct.unpack(">H", data[pos + 5:pos + 7])[0]
+                        return int(width), int(height)
+                    break
+                pos += segment_len
+            return 0, 0
+        except Exception:
+            return 0, 0
+
+    def _select_source_photo_thumb(self, thumbs: list[Any]) -> Any | None:
+        photo_thumbs = [
+            thumb for thumb in (thumbs or [])
+            if isinstance(thumb, tl_types.PhotoSize)
+            and not isinstance(thumb, (tl_types.VideoSize, tl_types.PhotoPathSize))
+        ]
+        if not photo_thumbs:
+            return None
+        return max(photo_thumbs, key=lambda t: (_positive_int(getattr(t, "w", 0)) * _positive_int(getattr(t, "h", 0)), _positive_int(getattr(t, "size", 0))))
 
     async def _download_source_video_thumb(self, message) -> tuple[Path | None, str]:
         document = getattr(getattr(message, "media", None), "document", None)
         thumbs = list(getattr(document, "thumbs", []) or [])
-        if not thumbs:
+        selected_thumb = self._select_source_photo_thumb(thumbs)
+        if not selected_thumb:
             return None, "none"
-        thumb = thumbs[-1]
         tmp = Path(tempfile.NamedTemporaryFile(prefix="telegram_video_thumb_", suffix=".jpg", delete=False).name)
         try:
-            downloaded = await self.owner.telethon.download_media(thumb, file=str(tmp))
+            downloaded = await self.owner.telethon.download_media(message, file=str(tmp), thumb=selected_thumb)
             path = Path(downloaded) if downloaded else tmp
             valid = self._valid_thumb_file(path)
             logger.info("VIDEO_REUPLOAD_THUMB | source=telegram | path=%s | valid=%s", path, valid)
-            return (path, "telegram") if valid else (None, "none")
+            if valid:
+                return path, "telegram"
+            path.unlink(missing_ok=True)
+            return None, "none"
         except Exception as exc:
             logger.warning("VIDEO_REUPLOAD_THUMB | source=telegram | path=%s | valid=False | error=%s", tmp, exc)
+            tmp.unlink(missing_ok=True)
             return None, "none"
 
     async def _generate_video_thumb(self, file_path: Path, duration: int) -> tuple[Path | None, str, float | None]:
@@ -99,21 +153,27 @@ class SenderTelethonHelpers:
             seek_seconds = max(0.5, min(float(duration) / 2.0, float(duration) - 0.1))
         tmp = Path(tempfile.NamedTemporaryFile(prefix="generated_video_thumb_", suffix=".jpg", delete=False).name)
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-ss", f"{seek_seconds:.2f}", "-i", str(file_path),
-                "-frames:v", "1", "-vf", "scale='min(1280,iw)':-2",
-                "-q:v", "3", str(tmp),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _stdout, stderr = await proc.communicate()
-            valid = proc.returncode == 0 and self._valid_thumb_file(tmp)
-            if valid:
-                logger.info("VIDEO_REUPLOAD_THUMB | source=generated_ffmpeg | seek_seconds=%s | path=%s | valid=True", seek_seconds, tmp)
-                return tmp, "generated_ffmpeg", seek_seconds
-            logger.warning("VIDEO_REUPLOAD_THUMB | source=none | error=%s", stderr.decode("utf-8", errors="ignore")[-300:])
+            last_error = ""
+            for quality in (5, 8, 12, 16, 20):
+                tmp.unlink(missing_ok=True)
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y", "-ss", f"{seek_seconds:.2f}", "-i", str(file_path),
+                    "-frames:v", "1", "-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+                    "-q:v", str(quality), str(tmp),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _stdout, stderr = await proc.communicate()
+                last_error = stderr.decode("utf-8", errors="ignore")[-300:]
+                valid = proc.returncode == 0 and self._valid_thumb_file(tmp)
+                if valid:
+                    logger.info("VIDEO_REUPLOAD_THUMB | source=generated_ffmpeg | seek_seconds=%s | path=%s | valid=True", seek_seconds, tmp)
+                    return tmp, "generated_ffmpeg", seek_seconds
+            tmp.unlink(missing_ok=True)
+            logger.warning("VIDEO_REUPLOAD_THUMB | source=none | error=%s", last_error)
             return None, "none", seek_seconds
         except Exception as exc:
+            tmp.unlink(missing_ok=True)
             logger.warning("VIDEO_REUPLOAD_THUMB | source=none | error=%s", exc)
             return None, "none", seek_seconds
 

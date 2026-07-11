@@ -9,6 +9,13 @@ from .telegram_send_result import telegram_send_result_from_raw
 logger = logging.getLogger("forwarder")
 
 
+def _reaction_applied_or_enqueued(result) -> bool:
+    payload = result.get("result") if isinstance(result, dict) and isinstance(result.get("result"), dict) else result
+    if isinstance(payload, dict):
+        return bool(payload.get("applied") or payload.get("enqueued"))
+    return bool(payload)
+
+
 class RepostSingleDelivery:
     def __init__(self, owner):
         self.owner = owner
@@ -242,7 +249,7 @@ class RepostSingleDelivery:
                         delivery_id=delivery_id,
                     ),
                 )
-                if not reaction_result.get("ok"):
+                if not reaction_result.get("ok") or not _reaction_applied_or_enqueued(reaction_result):
                     post_send_warnings.append("reaction_failed_after_accepted")
                     if is_self_loop:
                         logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_target_message_id, reaction_result.get("error"))
@@ -498,7 +505,7 @@ class RepostSingleDelivery:
                     rule.id, delivery_id, source_message_ids, accepted_target_message_ids, reaction_target_message_id,
                 )
             try:
-                await owner._add_reaction_for_rule_if_possible(
+                reaction_result = await owner._add_reaction_for_rule_if_possible(
                     rule=rule,
                     target_id=target_id,
                     sent_message_id=authoritative_sent_message_id,
@@ -506,8 +513,10 @@ class RepostSingleDelivery:
                     source_message_ids=source_message_ids,
                     delivery_id=delivery_id,
                 )
-                if is_self_loop:
+                if is_self_loop and _reaction_applied_or_enqueued(reaction_result):
                     logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, reaction_target_message_id)
+                elif is_self_loop:
+                    logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_target_message_id, reaction_result)
             except Exception as exc:
                 if is_self_loop:
                     logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_target_message_id, exc)

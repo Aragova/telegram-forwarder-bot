@@ -248,3 +248,60 @@ def test_self_loop_reaction_failure_is_non_fatal_no_fallback():
     owner.reupload_message.assert_called_once()
     owner.bot.send_message.assert_not_called()
     assert owner.mark_delivery_sent.call_args.kwargs["sent_message_id"] == 777
+
+
+def test_reaction_target_not_found_retries_then_applies_to_new_id(monkeypatch):
+    import datetime
+    from app import reaction_delivery as reaction_module
+    from app.reaction_delivery import ReactionDelivery
+
+    class _Plan:
+        use_legacy_reactors = True
+        use_tenant_reactors = False
+        mode = "legacy"
+        reason = "test"
+        tenant_id = None
+        tenant_accounts = []
+
+    class _Resolver:
+        def __init__(self, _db): pass
+        def resolve_for_rule(self, _rule): return _Plan()
+
+    class _Telethon:
+        def __init__(self): self.calls = []
+        async def get_messages(self, entity, ids):
+            self.calls.append((entity, ids))
+            if len(self.calls) == 1:
+                return None
+            return SimpleNamespace(id=ids, date=datetime.datetime.now(datetime.UTC))
+
+    owner = SimpleNamespace(db=SimpleNamespace(), telethon=_Telethon(), reaction_clients=[])
+    delivery = ReactionDelivery(owner)
+    applied = AsyncMock(return_value=True)
+    monkeypatch.setattr(reaction_module, "ReactionRuntimeResolver", _Resolver)
+    monkeypatch.setattr(delivery, "_add_reaction_if_possible", applied)
+
+    result = asyncio.run(delivery._add_reaction_for_rule_if_possible(
+        rule=SimpleNamespace(id=14),
+        target_id="-1001",
+        sent_message_id=777,
+        source_channel="-1001",
+        source_message_ids=[469],
+        delivery_id=123,
+    ))
+
+    assert result["applied"] is True
+    assert len(owner.telethon.calls) == 2
+    assert all(call[1] == 777 for call in owner.telethon.calls)
+    applied.assert_awaited_once_with("-1001", 777, rule_id=14)
+
+
+def test_validation_none_does_not_log_self_loop_applied_or_react_to_source(caplog):
+    owner = _SingleOwner(self_loop=True, use_copy_first=False, verify_ids=[777], reupload_id=777)
+    owner.reaction = AsyncMock(return_value={"applied": False, "enqueued": False, "reason": "target_not_found"})
+
+    assert _deliver_single(owner) is True
+
+    assert owner.reaction.call_args.kwargs["sent_message_id"] == 777
+    assert all(call.kwargs.get("sent_message_id") != 469 for call in owner.reaction.call_args_list)
+    assert "SELF_LOOP_REACTION_APPLIED" not in caplog.text

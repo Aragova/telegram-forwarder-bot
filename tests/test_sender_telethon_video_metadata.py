@@ -37,10 +37,52 @@ class _Owner:
         return list(entities or [])
 
 
+
+def _jpeg_bytes(width=100, height=100, payload_size=0):
+    return (
+        b"\xff\xd8"
+        b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+        + b"\xff\xc0\x00\x11\x08"
+        + int(height).to_bytes(2, "big")
+        + int(width).to_bytes(2, "big")
+        + b"\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00"
+        + (b"0" * payload_size)
+        + b"\xff\xd9"
+    )
+
 def _message(attr=None, thumbs=None):
     document = SimpleNamespace(attributes=[attr] if attr else [], thumbs=thumbs or [])
     return SimpleNamespace(media=SimpleNamespace(document=document), video=True)
 
+
+
+def test_download_source_thumb_uses_message_and_selected_photosize(tmp_path):
+    message = _message(
+        thumbs=[
+            tl_types.PhotoPathSize(type="i", bytes=b"x"),
+            tl_types.VideoSize(type="v", w=640, h=360, size=1000),
+            tl_types.PhotoSize(type="s", w=90, h=90, size=100),
+            tl_types.PhotoSize(type="m", w=320, h=180, size=200),
+        ]
+    )
+    telethon = _Telethon()
+
+    async def fake_download_media(media, *, file, thumb=None):
+        fake_download_media.media = media
+        fake_download_media.thumb = thumb
+        Path(file).write_bytes(_jpeg_bytes(320, 180))
+        return file
+
+    telethon.download_media = fake_download_media
+    helper = SenderTelethonHelpers(_Owner(telethon))
+
+    path, source = asyncio.run(helper._download_source_video_thumb(message))
+
+    assert source == "telegram"
+    assert fake_download_media.media is message
+    assert isinstance(fake_download_media.thumb, tl_types.PhotoSize)
+    assert fake_download_media.thumb.type == "m"
+    Path(path).unlink(missing_ok=True)
 
 def test_video_metadata_from_source_document_attribute(tmp_path, monkeypatch):
     video = tmp_path / "v.mp4"
@@ -81,7 +123,7 @@ def test_source_thumbnail_is_passed_to_send_file(tmp_path, monkeypatch):
     video = tmp_path / "v.mp4"
     video.write_bytes(b"video")
     thumb = tmp_path / "thumb.jpg"
-    thumb.write_bytes(b"\xff\xd8\xffx")
+    thumb.write_bytes(_jpeg_bytes(100, 100))
     telethon = _Telethon()
     helper = SenderTelethonHelpers(_Owner(telethon))
     monkeypatch.setattr(helper, "_probe_video_file", AsyncMock(return_value={"duration": 10, "width": 100, "height": 100}))
@@ -96,7 +138,7 @@ def test_generated_thumbnail_exists_during_send_and_removed(tmp_path, monkeypatc
     video = tmp_path / "v.mp4"
     video.write_bytes(b"video")
     thumb = tmp_path / "generated.jpg"
-    thumb.write_bytes(b"\xff\xd8\xffx")
+    thumb.write_bytes(_jpeg_bytes(100, 100))
     telethon = _Telethon()
     helper = SenderTelethonHelpers(_Owner(telethon))
     monkeypatch.setattr(helper, "_probe_video_file", AsyncMock(return_value={"duration": 20, "width": 100, "height": 100}))
@@ -119,7 +161,7 @@ def test_seek_seconds_positive_when_duration_allows(tmp_path, monkeypatch):
         class Proc:
             returncode = 0
             async def communicate(self):
-                Path(cmd[-1]).write_bytes(b"\xff\xd8\xffx")
+                Path(cmd[-1]).write_bytes(_jpeg_bytes(320, 180))
                 return b"", b""
         fake_exec.cmd = cmd
         return Proc()
@@ -130,6 +172,31 @@ def test_seek_seconds_positive_when_duration_allows(tmp_path, monkeypatch):
     assert "-ss" in fake_exec.cmd
     Path(thumb).unlink(missing_ok=True)
 
+
+
+def test_generated_thumb_contract_jpeg_320_and_under_20kb(tmp_path, monkeypatch):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"video")
+    helper = SenderTelethonHelpers(_Owner(_Telethon()))
+
+    async def fake_exec(*cmd, **_kwargs):
+        class Proc:
+            returncode = 0
+            async def communicate(self):
+                Path(cmd[-1]).write_bytes(_jpeg_bytes(320, 180, payload_size=512))
+                return b"", b""
+        fake_exec.cmd = cmd
+        return Proc()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    thumb, source, _seek = asyncio.run(helper._generate_video_thumb(video, 20))
+
+    assert source == "generated_ffmpeg"
+    assert thumb.read_bytes().startswith(b"\xff\xd8")
+    assert thumb.stat().st_size < 20 * 1024
+    assert helper._jpeg_dimensions(thumb) == (320, 180)
+    assert "scale=320:320:force_original_aspect_ratio=decrease" in fake_exec.cmd
+    thumb.unlink(missing_ok=True)
 
 def test_non_video_behaviour_unchanged(tmp_path, monkeypatch):
     file_path = tmp_path / "image.jpg"

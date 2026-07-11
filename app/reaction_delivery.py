@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import random
+import asyncio
 import time
 from typing import Any
 
@@ -27,22 +28,27 @@ class ReactionDelivery:
 
     async def _validate_reaction_target_message(self, *, rule_id: int | None, source_channel: str, target_id: str, source_message_ids: list[int], sent_message_id: int | None, delivery_id: int | None = None, max_age_seconds: int = 300) -> int | None:
         owner = self.owner
+        self._last_reaction_validation_reason = None
         logger.info("REACTION_TARGET_VALIDATE_START | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, source_message_ids)
         if sent_message_id is None or int(sent_message_id) <= 0:
+            self._last_reaction_validation_reason = "invalid_target"
             logger.warning("REACTION_SKIPPED_INVALID_TARGET_MESSAGE | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, source_message_ids)
             return None
         entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
         msg = await owner.telethon.get_messages(entity, ids=int(sent_message_id))
         if not msg:
+            self._last_reaction_validation_reason = "target_not_found"
             logger.warning("REACTION_SKIPPED_TARGET_MESSAGE_NOT_FOUND | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_id=%s", rule_id, delivery_id, target_id, sent_message_id)
             return None
         now_ts = int(time.time())
         msg_ts = int(getattr(msg, "date").timestamp()) if getattr(msg, "date", None) else 0
         age_seconds = now_ts - msg_ts if msg_ts else 10**9
         if age_seconds > int(max_age_seconds):
+            self._last_reaction_validation_reason = "stale_target"
             logger.warning("REACTION_BLOCKED_STALE_SENT_MESSAGE_ID | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | message_date=%s | age_seconds=%s | max_age_seconds=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, getattr(msg, "date", None), age_seconds, max_age_seconds, source_message_ids)
             return None
         if str(source_channel) == str(target_id) and int(sent_message_id) in {int(x) for x in (source_message_ids or [])}:
+            self._last_reaction_validation_reason = "source_blocked"
             logger.warning("SELF_LOOP_REACTION_SOURCE_MESSAGE_BLOCKED | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | source_message_ids=%s | requested_reaction_message_id=%s", rule_id, delivery_id, source_channel, target_id, source_message_ids, sent_message_id)
             return None
         logger.info("REACTION_TARGET_VALIDATE_OK | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_id=%s | message_date=%s | age_seconds=%s", rule_id, delivery_id, target_id, sent_message_id, getattr(msg, "date", None), age_seconds)
@@ -290,7 +296,7 @@ class ReactionDelivery:
     async def _add_reaction_if_possible(self, target_id, sent_message_id, rule_id: int | None = None):
         owner = self.owner
         if not owner.reaction_clients:
-            return
+            return False
 
         entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
         premium_reactors: list[ReactionClientInfo] = []
@@ -337,13 +343,14 @@ class ReactionDelivery:
 
         for reactor in normal_reactors:
             try:
-                await self._try_add_normal_reaction(
+                if await self._try_add_normal_reaction(
                     client=reactor.client,
                     entity=entity,
                     sent_message_id=sent_message_id,
                     session_name=reactor.session_name,
                     rule_id=rule_id,
-                )
+                ):
+                    premium_accepted = True
             except Exception as exc:
                 logger.warning(
                     "Реактор %s упал на сообщении %s в %s: %s",
@@ -352,6 +359,7 @@ class ReactionDelivery:
                     target_id,
                     exc,
                 )
+        return bool(premium_accepted)
 
     async def _add_reaction_for_rule_if_possible(
         self,
@@ -363,22 +371,29 @@ class ReactionDelivery:
         source_message_ids: list[int] | None = None,
         delivery_id: int | None = None,
         max_age_seconds: int = 300,
-    ) -> None:
+    ) -> dict[str, Any]:
         owner = self.owner
         rule_id = int(getattr(rule, "id", 0) or 0)
         if str(source_channel) and str(source_channel) == str(target_id):
             logger.info("SELF_TARGET_REPOST_DETECTED | rule_id=%s | source_id=%s | target_id=%s", rule_id, source_channel, target_id)
-        validated_id = await self._validate_reaction_target_message(
-            rule_id=rule_id,
-            source_channel=str(source_channel or ""),
-            target_id=str(target_id),
-            source_message_ids=source_message_ids or [],
-            sent_message_id=sent_message_id,
-            delivery_id=delivery_id,
-            max_age_seconds=max_age_seconds,
-        )
+        validated_id = None
+        validation_reason = None
+        for attempt in range(1, 4):
+            validated_id = await self._validate_reaction_target_message(
+                rule_id=rule_id,
+                source_channel=str(source_channel or ""),
+                target_id=str(target_id),
+                source_message_ids=source_message_ids or [],
+                sent_message_id=sent_message_id,
+                delivery_id=delivery_id,
+                max_age_seconds=max_age_seconds,
+            )
+            validation_reason = getattr(self, "_last_reaction_validation_reason", None)
+            if validated_id or validation_reason != "target_not_found" or attempt >= 3:
+                break
+            await asyncio.sleep(0.5 * attempt)
         if not validated_id:
-            return
+            return {"applied": False, "enqueued": False, "reason": validation_reason or "validation_failed"}
         sent_message_id = validated_id
 
         resolver = ReactionRuntimeResolver(owner.db)
@@ -391,8 +406,8 @@ class ReactionDelivery:
                 rule_id,
                 exc.__class__.__name__,
             )
-            await self._add_reaction_if_possible(target_id, sent_message_id, rule_id=rule_id)
-            return
+            applied = await self._add_reaction_if_possible(target_id, sent_message_id, rule_id=rule_id)
+            return {"applied": bool(applied), "enqueued": False, "reason": "legacy_fallback"}
 
         if plan.use_legacy_reactors:
             logger.info(
@@ -401,8 +416,8 @@ class ReactionDelivery:
                 plan.reason,
                 len(owner.reaction_clients or []),
             )
-            await self._add_reaction_if_possible(target_id, sent_message_id, rule_id=rule_id)
-            return
+            applied = await self._add_reaction_if_possible(target_id, sent_message_id, rule_id=rule_id)
+            return {"applied": bool(applied), "enqueued": False, "reason": "legacy_admin"}
 
         if plan.mode == "disabled":
             logger.info(
@@ -410,7 +425,7 @@ class ReactionDelivery:
                 rule_id,
                 plan.reason,
             )
-            return
+            return {"applied": False, "enqueued": False, "reason": "disabled"}
 
         if plan.mode == "no_accounts":
             logger.info(
@@ -419,7 +434,7 @@ class ReactionDelivery:
                 plan.tenant_id,
                 plan.reason,
             )
-            return
+            return {"applied": False, "enqueued": False, "reason": "no_accounts"}
 
         if plan.use_tenant_reactors:
             logger.info(
@@ -448,6 +463,8 @@ class ReactionDelivery:
                     sent_message_id,
                     len(account_ids),
                 )
+                return {"applied": False, "enqueued": True, "reason": "job_enqueued", "job_id": job_id}
             except Exception:
                 logger.exception("REACTION_JOB_ENQUEUE_FAILED | tenant_id=%s | rule_id=%s", plan.tenant_id, rule_id)
-            return
+            return {"applied": False, "enqueued": False, "reason": "enqueue_failed"}
+        return {"applied": False, "enqueued": False, "reason": "unsupported_mode"}
