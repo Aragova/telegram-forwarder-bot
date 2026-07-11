@@ -201,3 +201,50 @@ def test_no_runtime_self_loop_noop_strings_in_app():
     assert "self_loop_noop_single" not in runtime_sources
     assert "self_loop_noop_album" not in runtime_sources
     assert "action=noop_mark_sent" not in runtime_sources
+
+
+def test_verified_self_loop_reaction_goes_to_new_id_not_source():
+    owner = _SingleOwner(self_loop=True, use_copy_first=False, verify_ids=[777], reupload_id=777)
+    assert _deliver_single(owner) is True
+    assert owner.reaction.call_args.kwargs["sent_message_id"] == 777
+    assert all(call.kwargs.get("sent_message_id") != 469 for call in owner.reaction.call_args_list)
+
+
+def test_accepted_unverified_reaction_goes_to_candidate_new_id_no_second_send():
+    owner = _SingleOwner(self_loop=True, use_copy_first=False, verify_ids=[], reupload_id=1147)
+    assert _deliver_single(owner) is True
+    assert owner.reupload_message.call_count == 1
+    assert owner.mark_delivery_sent.call_args.kwargs["sent_message_id"] == 1147
+    assert owner.reaction.call_args.kwargs["sent_message_id"] == 1147
+    assert all(call.kwargs.get("sent_message_id") != 469 for call in owner.reaction.call_args_list)
+
+
+def test_copy_first_reaction_goes_to_copy_result_new_id():
+    owner = _SingleOwner(self_loop=True, use_copy_first=True, verify_ids=[700], copy_result={"raw_result": None, "sent_ids": [700], "attempted": True})
+    assert _deliver_single(owner) is True
+    assert owner.reaction.call_args.kwargs["sent_message_id"] == 700
+
+
+def test_self_loop_source_target_id_collision_blocks_mark_sent_and_reaction(caplog):
+    owner = _SingleOwner(self_loop=True, use_copy_first=False, verify_ids=[469], reupload_id=469)
+    assert _deliver_single(owner) is False
+    owner.reaction.assert_not_called()
+    owner.mark_delivery_sent.assert_not_called()
+    owner.mark_faulty.assert_called_once()
+    assert "SELF_LOOP_SENT_ID_COLLISION" in caplog.text
+
+
+def test_album_reaction_uses_new_target_id_not_source():
+    owner = _AlbumOwner(verify_ok=True)
+    assert _deliver_album(owner) is True
+    assert owner.reaction.call_args.kwargs["sent_message_id"] in [100, 101, 102]
+    assert owner.reaction.call_args.kwargs["sent_message_id"] not in [10, 11, 12]
+
+
+def test_self_loop_reaction_failure_is_non_fatal_no_fallback():
+    owner = _SingleOwner(self_loop=True, use_copy_first=False, verify_ids=[777], reupload_id=777)
+    owner.reaction = AsyncMock(side_effect=RuntimeError("reaction api down"))
+    assert _deliver_single(owner) is True
+    owner.reupload_message.assert_called_once()
+    owner.bot.send_message.assert_not_called()
+    assert owner.mark_delivery_sent.call_args.kwargs["sent_message_id"] == 777

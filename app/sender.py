@@ -964,6 +964,23 @@ class SenderService:
             target_grouped_id=target_grouped_id,
         )
 
+    async def _verify_self_loop_video_metadata(
+        self,
+        *,
+        rule_id,
+        source_message_id,
+        target_id,
+        sent_message_id,
+    ) -> None:
+        from .sender_telethon_helpers import SenderTelethonHelpers
+
+        return await SenderTelethonHelpers(self).verify_self_loop_video_metadata(
+            rule_id=rule_id,
+            source_message_id=source_message_id,
+            target_id=target_id,
+            sent_message_id=sent_message_id,
+        )
+
     async def _try_add_normal_reaction(
         self,
         client,

@@ -43,7 +43,7 @@ class ReactionDelivery:
             logger.warning("REACTION_BLOCKED_STALE_SENT_MESSAGE_ID | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | message_date=%s | age_seconds=%s | max_age_seconds=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, getattr(msg, "date", None), age_seconds, max_age_seconds, source_message_ids)
             return None
         if str(source_channel) == str(target_id) and int(sent_message_id) in {int(x) for x in (source_message_ids or [])}:
-            logger.warning("REACTION_BLOCKED_SOURCE_MESSAGE_ID | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, source_message_ids)
+            logger.warning("SELF_LOOP_REACTION_SOURCE_MESSAGE_BLOCKED | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | source_message_ids=%s | requested_reaction_message_id=%s", rule_id, delivery_id, source_channel, target_id, source_message_ids, sent_message_id)
             return None
         logger.info("REACTION_TARGET_VALIDATE_OK | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_id=%s | message_date=%s | age_seconds=%s", rule_id, delivery_id, target_id, sent_message_id, getattr(msg, "date", None), age_seconds)
         return int(sent_message_id)
@@ -451,4 +451,3 @@ class ReactionDelivery:
             except Exception:
                 logger.exception("REACTION_JOB_ENQUEUE_FAILED | tenant_id=%s | rule_id=%s", plan.tenant_id, rule_id)
             return
-
