@@ -35,6 +35,7 @@ class _SingleOwner:
         self.mark_delivery_sent = Mock()
         self.mark_faulty = Mock()
         self.final_success = AsyncMock()
+        self.final_failure = AsyncMock()
         self.pipeline_step = AsyncMock()
         self.reaction = AsyncMock(return_value=True)
 
@@ -47,7 +48,7 @@ class _SingleOwner:
     async def _confirm_target_delivery_message_ids_with_retry(self, **_kwargs): return self.verify_ids
     async def _log_delivery_pipeline_step(self, **kwargs): await self.pipeline_step(**kwargs)
     async def _log_delivery_final_success(self, **kwargs): await self.final_success(**kwargs)
-    async def _log_delivery_final_failure(self, **_kwargs): return None
+    async def _log_delivery_final_failure(self, **kwargs): await self.final_failure(**kwargs)
     async def _add_reaction_for_rule_if_possible(self, **kwargs): return await self.reaction(**kwargs)
     async def _run_post_send_step_safe(self, *, coro_factory, **_kwargs):
         return {"ok": True, "result": await coro_factory()}
@@ -89,6 +90,28 @@ def test_self_loop_copy_explicit_failure_allows_one_reupload():
     owner.bot.send_message.assert_not_called()
     assert owner.mark_delivery_sent.call_args.kwargs["sent_message_id"] == 777
 
+
+
+def test_non_self_loop_attempted_copy_with_error_does_not_reupload():
+    owner = _SingleOwner(
+        self_loop=False,
+        use_copy_first=True,
+        copy_result={
+            "raw_result": None,
+            "sent_ids": [],
+            "attempted": True,
+            "error_text": "network error",
+        },
+    )
+
+    assert _deliver_single(owner) is False
+
+    owner.copy_single.assert_called_once()
+    owner.reupload_message.assert_not_called()
+    owner.bot.send_message.assert_not_called()
+    owner.mark_faulty.assert_called_once()
+    owner.final_failure.assert_called_once()
+    assert owner.final_failure.call_args.kwargs["final_method"] == "copy_single_uncertain_no_fallback"
 
 def test_reupload_returned_id_verification_failed_marks_self_loop_without_text_fallback():
     owner = _SingleOwner(self_loop=True, use_copy_first=False, verify_ids=[], reupload_id=1147)
@@ -135,7 +158,7 @@ class _AlbumOwner:
     async def _verify_album_delivery(self, **_kwargs): return {"ok": self.verify_ok, "sent_message_ids": [100, 101, 102], "first_message_id": 100}
     async def _add_reaction_for_rule_if_possible(self, **kwargs): return await self.reaction(**kwargs)
     async def _log_delivery_final_success(self, **kwargs): await self.final_success(**kwargs)
-    async def _log_delivery_final_failure(self, **_kwargs): return None
+    async def _log_delivery_final_failure(self, **kwargs): await self.final_failure(**kwargs)
     async def _log_delivery_pipeline_step(self, **kwargs): await self.pipeline_step(**kwargs)
     def _content_from_message_or_post(self, **_kwargs): return {"text": "", "entities": []}
     def _get_album_primary_text(self, *_args, **_kwargs): return ""
