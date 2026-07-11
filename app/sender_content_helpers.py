@@ -208,20 +208,35 @@ class SenderContentHelpers:
             live_entities = (live_content or {}).get("entities") or []
             post_entities = list(_iter_content_entities(post_content))
             if not post_entities and live_entities:
-                merged = dict(post_content)
-                merged["entities"] = live_entities
-                if not merged.get("text") and (live_content or {}).get("text"):
-                    merged["text"] = live_content.get("text")
-                merged.setdefault("has_media", (live_content or {}).get("has_media", False))
-                merged.setdefault("media_kind", (live_content or {}).get("media_kind", "text"))
-                merged.setdefault("date", (live_content or {}).get("date"))
+                post_text = str(post_content.get("text") or "")
+                live_text = str((live_content or {}).get("text") or "")
+                normalized_post_text = post_text.replace("\r\n", "\n").replace("\r", "\n")
+                normalized_live_text = live_text.replace("\r\n", "\n").replace("\r", "\n")
+
+                if post_text == live_text or normalized_post_text == normalized_live_text:
+                    merged = dict(post_content)
+                    merged["entities"] = live_entities
+                    if not merged.get("text") and live_text:
+                        merged["text"] = live_text
+                    merged.setdefault("has_media", (live_content or {}).get("has_media", False))
+                    merged.setdefault("media_kind", (live_content or {}).get("media_kind", "text"))
+                    merged.setdefault("date", (live_content or {}).get("date"))
+                    logger.warning(
+                        "CONTENT_FROM_MESSAGE_OR_POST | merged_live_entities | post_entities=%s | live_entities=%s | result_entities=%s",
+                        len(post_entities),
+                        len(live_entities),
+                        len(merged.get("entities") or []),
+                    )
+                    return merged
+
                 logger.warning(
-                    "CONTENT_FROM_MESSAGE_OR_POST | merged_live_entities | post_entities=%s | live_entities=%s | result_entities=%s",
+                    "CONTENT_FROM_MESSAGE_OR_POST | prefer_live_content_text_mismatch | post_text_len=%s | live_text_len=%s | post_entities=%s | live_entities=%s",
+                    len(post_text),
+                    len(live_text),
                     len(post_entities),
                     len(live_entities),
-                    len(merged.get("entities") or []),
                 )
-                return merged
+                return live_content
             return post_content
 
         if live_content is not None:

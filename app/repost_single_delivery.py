@@ -31,6 +31,84 @@ class RepostSingleDelivery:
         requires_builder = strategy["requires_builder"]
         use_copy_first = strategy["use_copy_first"]
 
+        if owner._is_self_loop_rule(rule):
+            logger.info(
+                "SELF_LOOP_REPOST_DETECTED_EARLY | single | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | message_id=%s | action=noop_mark_sent",
+                rule.id,
+                delivery_id,
+                source_channel,
+                target_id,
+                message_id,
+            )
+
+            if idempotency_key:
+                await run_db(
+                    owner.db.mark_delivery_attempt_accepted,
+                    idempotency_key,
+                    sent_message_ids=[int(message_id)],
+                    telegram_method="self_loop_noop_single",
+                )
+
+            try:
+                logger.info(
+                    "SELF_LOOP_REACTION | single | rule_id=%s | delivery_id=%s | target_id=%s | message_id=%s | action=start",
+                    rule.id,
+                    delivery_id,
+                    target_id,
+                    message_id,
+                )
+                await owner._add_reaction_for_rule_if_possible(
+                    rule=rule,
+                    target_id=target_id,
+                    sent_message_id=int(message_id),
+                    source_channel=str(source_channel or ""),
+                    source_message_ids=source_message_ids,
+                    delivery_id=delivery_id,
+                )
+                logger.info(
+                    "SELF_LOOP_REACTION | single | rule_id=%s | delivery_id=%s | target_id=%s | message_id=%s | action=ok",
+                    rule.id,
+                    delivery_id,
+                    target_id,
+                    message_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "SELF_LOOP_REACTION | single | rule_id=%s | delivery_id=%s | target_id=%s | message_id=%s | action=failed | error=%s",
+                    rule.id,
+                    delivery_id,
+                    target_id,
+                    message_id,
+                    exc,
+                )
+
+            await owner._log_delivery_final_success(
+                rule_id=rule.id,
+                delivery_ids=delivery_ids,
+                final_method="self_loop_noop_single",
+                source_channel=source_channel,
+                target_id=target_id,
+                source_message_ids=source_message_ids,
+                sent_message_id=int(message_id),
+                sent_message_ids=[int(message_id)],
+                verify_result=None,
+                extra={
+                    "caption_delivery_mode": caption_mode,
+                    "requires_builder": requires_builder,
+                    "action": "noop_mark_sent",
+                },
+            )
+
+            await run_db(
+                owner._mark_delivery_sent_sync,
+                delivery_id,
+                sent_message_id=int(message_id),
+                sent_message_ids=[int(message_id)],
+                target_id=str(target_id),
+                delivery_method="self_loop_noop_single",
+            )
+            return True
+
         live_message_for_builder = None
         if use_copy_first and caption_mode == "auto":
             live_message = await owner._fetch_message(source_channel, message_id)
@@ -293,52 +371,6 @@ class RepostSingleDelivery:
             )
 
         # =========================================================
-        # 2) SELF LOOP
-        # =========================================================
-        if owner._is_self_loop_rule(rule) and use_copy_first:
-            logger.info(
-                "Self-loop: copy_single не сработал для %s/%s, проблемную доставку не создаю, потому что источник и получатель совпадают",
-                source_channel,
-                message_id,
-            )
-
-            try:
-                await owner._add_reaction_if_possible(target_id, int(message_id))
-            except Exception as exc:
-                logger.warning(
-                    "SELF_LOOP_REACTION | single | не удалось поставить реакцию на исходное сообщение %s в %s: %s",
-                    message_id,
-                    target_id,
-                    exc,
-                )
-
-            await owner._log_delivery_final_success(
-                rule_id=rule.id,
-                delivery_ids=delivery_ids,
-                final_method="self_loop_copy_only_single",
-                source_channel=source_channel,
-                target_id=target_id,
-                source_message_ids=source_message_ids,
-                sent_message_id=int(message_id),
-                verify_result=None,
-                extra={
-                    "skip_reason": "self_loop_copy_not_supported",
-                    "caption_delivery_mode": caption_mode,
-                    "requires_builder": requires_builder,
-                },
-            )
-
-            await run_db(
-                owner._mark_delivery_sent_sync,
-                delivery_id,
-                sent_message_id=int(message_id),
-                sent_message_ids=[int(message_id)],
-                target_id=str(target_id),
-                delivery_method="self_loop_copy_only_single",
-            )
-            return True
-
-        # =========================================================
         # 3) FETCH MESSAGE
         # =========================================================
         await owner._log_delivery_pipeline_step(
@@ -508,6 +540,41 @@ class RepostSingleDelivery:
 
         logger.warning("REUPLOAD_SINGLE_TARGET_VERIFY_FAILED | rule_id=%s | delivery_id=%s | source_channel=%s | source_message_id=%s | target_id=%s | candidate_sent_message_ids=%s | reason=target_message_not_found_after_send", rule.id, delivery_id, source_channel, message_id, target_id, candidate_sent_message_ids)
         logger.warning("DELIVERY_FALSE_SUCCESS_PREVENTED | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s | action=retry_or_faulty", rule.id, delivery_id, "reupload_single", target_id, candidate_sent_message_ids)
+
+        if owner._is_self_loop_rule(rule):
+            logger.warning(
+                "SELF_LOOP_TEXT_FALLBACK_BLOCKED | rule_id=%s | delivery_id=%s | source_message_id=%s | candidate_sent_message_ids=%s",
+                rule.id,
+                delivery_id,
+                message_id,
+                candidate_sent_message_ids,
+            )
+            await owner._log_delivery_final_success(
+                rule_id=rule.id,
+                delivery_ids=delivery_ids,
+                final_method="self_loop_noop_single",
+                source_channel=source_channel,
+                target_id=target_id,
+                source_message_ids=source_message_ids,
+                sent_message_id=int(message_id),
+                sent_message_ids=[int(message_id)],
+                verify_result=None,
+                extra={
+                    "caption_delivery_mode": caption_mode,
+                    "requires_builder": requires_builder,
+                    "blocked_fallback": True,
+                    "candidate_sent_message_ids": candidate_sent_message_ids,
+                },
+            )
+            await run_db(
+                owner._mark_delivery_sent_sync,
+                delivery_id,
+                sent_message_id=int(message_id),
+                sent_message_ids=[int(message_id)],
+                target_id=str(target_id),
+                delivery_method="self_loop_noop_single",
+            )
+            return True
 
         # =========================================================
         # 5) DEBUG: fallback disabled
