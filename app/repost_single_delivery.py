@@ -31,83 +31,16 @@ class RepostSingleDelivery:
         requires_builder = strategy["requires_builder"]
         use_copy_first = strategy["use_copy_first"]
 
-        if owner._is_self_loop_rule(rule):
+        is_self_loop = owner._is_self_loop_rule(rule)
+        if is_self_loop:
             logger.info(
-                "SELF_LOOP_REPOST_DETECTED_EARLY | single | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | message_id=%s | action=noop_mark_sent",
+                "SELF_LOOP_REPOST_MODE | single | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | source_message_id=%s | action=real_repost",
                 rule.id,
                 delivery_id,
                 source_channel,
                 target_id,
                 message_id,
             )
-
-            if idempotency_key:
-                await run_db(
-                    owner.db.mark_delivery_attempt_accepted,
-                    idempotency_key,
-                    sent_message_ids=[int(message_id)],
-                    telegram_method="self_loop_noop_single",
-                )
-
-            try:
-                logger.info(
-                    "SELF_LOOP_REACTION | single | rule_id=%s | delivery_id=%s | target_id=%s | message_id=%s | action=start",
-                    rule.id,
-                    delivery_id,
-                    target_id,
-                    message_id,
-                )
-                await owner._add_reaction_for_rule_if_possible(
-                    rule=rule,
-                    target_id=target_id,
-                    sent_message_id=int(message_id),
-                    source_channel=str(source_channel or ""),
-                    source_message_ids=source_message_ids,
-                    delivery_id=delivery_id,
-                )
-                logger.info(
-                    "SELF_LOOP_REACTION | single | rule_id=%s | delivery_id=%s | target_id=%s | message_id=%s | action=ok",
-                    rule.id,
-                    delivery_id,
-                    target_id,
-                    message_id,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "SELF_LOOP_REACTION | single | rule_id=%s | delivery_id=%s | target_id=%s | message_id=%s | action=failed | error=%s",
-                    rule.id,
-                    delivery_id,
-                    target_id,
-                    message_id,
-                    exc,
-                )
-
-            await owner._log_delivery_final_success(
-                rule_id=rule.id,
-                delivery_ids=delivery_ids,
-                final_method="self_loop_noop_single",
-                source_channel=source_channel,
-                target_id=target_id,
-                source_message_ids=source_message_ids,
-                sent_message_id=int(message_id),
-                sent_message_ids=[int(message_id)],
-                verify_result=None,
-                extra={
-                    "caption_delivery_mode": caption_mode,
-                    "requires_builder": requires_builder,
-                    "action": "noop_mark_sent",
-                },
-            )
-
-            await run_db(
-                owner._mark_delivery_sent_sync,
-                delivery_id,
-                sent_message_id=int(message_id),
-                sent_message_ids=[int(message_id)],
-                target_id=str(target_id),
-                delivery_method="self_loop_noop_single",
-            )
-            return True
 
         live_message_for_builder = None
         if use_copy_first and caption_mode == "auto":
@@ -334,24 +267,28 @@ class RepostSingleDelivery:
                 )
                 return True
             if copy_result.get("attempted"):
-                error_text = "copy_single_uncertain_no_fallback: copy_message was attempted but target confirmation failed; manual review required"
-                logger.warning("COPY_SINGLE_UNCERTAIN_NO_FALLBACK | rule_id=%s | delivery_id=%s | reason=copy_attempted_without_verified_target_message", rule.id, delivery_id)
-                await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
-                await owner._log_delivery_final_failure(
-                    rule_id=rule.id,
-                    delivery_ids=delivery_ids,
-                    final_method="copy_single_uncertain_no_fallback",
-                    source_channel=source_channel,
-                    target_id=target_id,
-                    source_message_ids=source_message_ids,
-                    error_text=error_text,
-                    attempts_debug=[
-                        {"stage": "copy_single", "ok": False, "attempted": True, "candidate_sent_message_ids": copy_sent_ids},
-                    ],
-                    extra={"non_retryable": True, "manual_review_required": True},
-                )
-                return False
-            logger.info("COPY_TO_REUPLOAD_FALLBACK_ALLOWED | rule_id=%s | delivery_id=%s | reason=copy_not_attempted", rule.id, delivery_id)
+                if is_self_loop and send_result.error_text:
+                    logger.info("SELF_LOOP_COPY_TO_REUPLOAD_ALLOWED | rule_id=%s | delivery_id=%s | error=%s", rule.id, delivery_id, send_result.error_text)
+                else:
+                    error_text = "copy_single_uncertain_no_fallback: copy_message was attempted but target confirmation failed; manual review required"
+                    logger.warning("COPY_SINGLE_UNCERTAIN_NO_FALLBACK | rule_id=%s | delivery_id=%s | reason=copy_attempted_without_verified_target_message", rule.id, delivery_id)
+                    await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+                    await owner._log_delivery_final_failure(
+                        rule_id=rule.id,
+                        delivery_ids=delivery_ids,
+                        final_method="copy_single_uncertain_no_fallback",
+                        source_channel=source_channel,
+                        target_id=target_id,
+                        source_message_ids=source_message_ids,
+                        error_text=error_text,
+                        attempts_debug=[
+                            {"stage": "copy_single", "ok": False, "attempted": True, "candidate_sent_message_ids": copy_sent_ids},
+                        ],
+                        extra={"non_retryable": True, "manual_review_required": True},
+                    )
+                    return False
+            else:
+                logger.info("COPY_TO_REUPLOAD_FALLBACK_ALLOWED | rule_id=%s | delivery_id=%s | reason=copy_not_attempted", rule.id, delivery_id)
         else:
             await owner._log_delivery_pipeline_step(
                 rule_id=rule.id,
@@ -473,6 +410,19 @@ class RepostSingleDelivery:
             send_result.method, send_result.ok, send_result.sent_message_ids, send_result.sent_message_id, send_result.raw_result_type, send_result.error_text, send_result.retryable
         )
         candidate_sent_message_ids = send_result.sent_message_ids
+        if idempotency_key and candidate_sent_message_ids and hasattr(owner.db, "mark_delivery_attempt_accepted"):
+            await run_db(
+                owner.db.mark_delivery_attempt_accepted,
+                idempotency_key,
+                sent_message_ids=candidate_sent_message_ids,
+                telegram_method="reupload_single",
+            )
+            logger.info(
+                "DELIVERY_ATTEMPT_ACCEPTED | operation=single | method=reupload_single | key=%s | delivery_id=%s | sent_message_ids=%s",
+                idempotency_key,
+                delivery_id,
+                candidate_sent_message_ids,
+            )
         valid_sent_message_ids = await owner._confirm_target_delivery_message_ids_with_retry(
             rule_id=rule.id,
             delivery_id=delivery_id,
@@ -541,40 +491,46 @@ class RepostSingleDelivery:
         logger.warning("REUPLOAD_SINGLE_TARGET_VERIFY_FAILED | rule_id=%s | delivery_id=%s | source_channel=%s | source_message_id=%s | target_id=%s | candidate_sent_message_ids=%s | reason=target_message_not_found_after_send", rule.id, delivery_id, source_channel, message_id, target_id, candidate_sent_message_ids)
         logger.warning("DELIVERY_FALSE_SUCCESS_PREVENTED | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s | action=retry_or_faulty", rule.id, delivery_id, "reupload_single", target_id, candidate_sent_message_ids)
 
-        if owner._is_self_loop_rule(rule):
+        if is_self_loop and candidate_sent_message_ids:
             logger.warning(
-                "SELF_LOOP_TEXT_FALLBACK_BLOCKED | rule_id=%s | delivery_id=%s | source_message_id=%s | candidate_sent_message_ids=%s",
-                rule.id,
-                delivery_id,
-                message_id,
-                candidate_sent_message_ids,
+                "SELF_LOOP_REUPLOAD_ACCEPTED_UNVERIFIED | rule_id=%s | delivery_id=%s | source_message_id=%s | candidate_sent_message_ids=%s | action=mark_sent_no_second_send",
+                rule.id, delivery_id, message_id, candidate_sent_message_ids,
+            )
+            authoritative_sent_message_id = int(candidate_sent_message_ids[0])
+            await owner._run_post_send_step_safe(
+                step_name="reaction_after_reupload_single_self_loop_unverified",
+                rule_id=rule.id,
+                delivery_id=delivery_id,
+                idempotency_key=idempotency_key,
+                accepted_sent_message_ids=candidate_sent_message_ids,
+                coro_factory=lambda: owner._add_reaction_for_rule_if_possible(
+                    rule=rule, target_id=target_id, sent_message_id=authoritative_sent_message_id,
+                    source_channel=str(source_channel or ""), source_message_ids=source_message_ids, delivery_id=delivery_id,
+                ),
             )
             await owner._log_delivery_final_success(
-                rule_id=rule.id,
-                delivery_ids=delivery_ids,
-                final_method="self_loop_noop_single",
-                source_channel=source_channel,
-                target_id=target_id,
-                source_message_ids=source_message_ids,
-                sent_message_id=int(message_id),
-                sent_message_ids=[int(message_id)],
-                verify_result=None,
+                rule_id=rule.id, delivery_ids=delivery_ids, final_method="reupload_single_self_loop_unverified",
+                source_channel=source_channel, target_id=target_id, source_message_ids=source_message_ids,
+                sent_message_id=authoritative_sent_message_id, sent_message_ids=candidate_sent_message_ids, verify_result=None,
                 extra={
-                    "caption_delivery_mode": caption_mode,
-                    "requires_builder": requires_builder,
-                    "blocked_fallback": True,
-                    "candidate_sent_message_ids": candidate_sent_message_ids,
+                    "caption_delivery_mode": caption_mode, "requires_builder": requires_builder,
+                    "verification_ok": False, "post_send_warning": "target_message_not_found_after_send",
+                    "candidate_sent_message_ids": candidate_sent_message_ids, "second_send_blocked": True,
                 },
             )
             await run_db(
-                owner._mark_delivery_sent_sync,
-                delivery_id,
-                sent_message_id=int(message_id),
-                sent_message_ids=[int(message_id)],
-                target_id=str(target_id),
-                delivery_method="self_loop_noop_single",
+                owner._mark_delivery_sent_sync, delivery_id, sent_message_id=authoritative_sent_message_id,
+                sent_message_ids=candidate_sent_message_ids, target_id=str(target_id),
+                delivery_method="reupload_single_self_loop_unverified",
             )
             return True
+
+        if is_self_loop:
+            logger.warning(
+                "SELF_LOOP_SEND_FAILED_NO_DEGRADED_FALLBACK | rule_id=%s | delivery_id=%s | source_message_id=%s | has_media=%s",
+                rule.id, delivery_id, message_id, bool(getattr(message, "media", None)),
+            )
+            return False
 
         # =========================================================
         # 5) DEBUG: fallback disabled

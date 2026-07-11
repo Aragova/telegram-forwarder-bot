@@ -44,84 +44,16 @@ class RepostAlbumDelivery:
             for r in album_rows
         }
 
-        if owner._is_self_loop_rule(rule):
-            first_album_message_id = int(message_ids[0]) if message_ids else None
+        is_self_loop = owner._is_self_loop_rule(rule)
+        if is_self_loop:
             logger.info(
-                "SELF_LOOP_REPOST_DETECTED_EARLY | album | rule_id=%s | delivery_ids=%s | source_channel=%s | target_id=%s | message_ids=%s | action=noop_mark_sent",
+                "SELF_LOOP_REPOST_MODE | album | rule_id=%s | delivery_ids=%s | source_channel=%s | target_id=%s | source_message_ids=%s | action=real_repost",
                 rule.id,
                 delivery_ids,
                 source_channel,
                 target_id,
                 message_ids,
             )
-
-            if idempotency_key:
-                await run_db(
-                    owner.db.mark_delivery_attempt_accepted,
-                    idempotency_key,
-                    sent_message_ids=message_ids,
-                    telegram_method="self_loop_noop_album",
-                )
-
-            try:
-                if first_album_message_id:
-                    logger.info(
-                        "SELF_LOOP_REACTION | album | rule_id=%s | delivery_ids=%s | target_id=%s | message_id=%s | action=start",
-                        rule.id,
-                        delivery_ids,
-                        target_id,
-                        first_album_message_id,
-                    )
-                    await owner._add_reaction_for_rule_if_possible(
-                        rule=rule,
-                        target_id=target_id,
-                        sent_message_id=first_album_message_id,
-                        source_channel=str(source_channel or ""),
-                        source_message_ids=message_ids,
-                        delivery_id=(delivery_ids[0] if delivery_ids else None),
-                    )
-                    logger.info(
-                        "SELF_LOOP_REACTION | album | rule_id=%s | delivery_ids=%s | target_id=%s | message_id=%s | action=ok",
-                        rule.id,
-                        delivery_ids,
-                        target_id,
-                        first_album_message_id,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "SELF_LOOP_REACTION | album | rule_id=%s | delivery_ids=%s | target_id=%s | message_id=%s | action=failed | error=%s",
-                    rule.id,
-                    delivery_ids,
-                    target_id,
-                    first_album_message_id,
-                    exc,
-                )
-
-            await owner._log_delivery_final_success(
-                rule_id=rule.id,
-                delivery_ids=delivery_ids,
-                final_method="self_loop_noop_album",
-                source_channel=source_channel,
-                target_id=target_id,
-                source_message_ids=message_ids,
-                sent_message_id=first_album_message_id,
-                sent_message_ids=message_ids,
-                verify_result=None,
-                extra={
-                    "caption_delivery_mode": caption_mode,
-                    "requires_builder": requires_builder,
-                    "action": "noop_mark_sent",
-                },
-            )
-
-            await run_db(
-                owner._mark_album_deliveries_sent_sync,
-                delivery_ids=delivery_ids,
-                sent_message_ids=message_ids,
-                target_id=str(target_id),
-                delivery_method="self_loop_noop_album",
-            )
-            return True
 
         source_messages = None
         first_source_caption = None
@@ -437,7 +369,7 @@ class RepostAlbumDelivery:
         # =========================================================
         # 3) RETRY COPY ONLY IF COPY REALLY FAILED
         # =========================================================
-        if use_copy_first and not copy_result["ok"]:
+        if use_copy_first and not copy_result["ok"] and not is_self_loop:
             await asyncio.sleep(1.2)
 
             await owner._log_delivery_pipeline_step(
@@ -651,6 +583,18 @@ class RepostAlbumDelivery:
             ],
         )
         attempts_debug.append({"stage": "reupload_album", **reupload_result})
+        reupload_candidate_sent_ids = normalize_valid_sent_message_ids(reupload_result.get("sent_message_ids") or [])
+        if idempotency_key and reupload_candidate_sent_ids:
+            await run_db(
+                owner.db.mark_delivery_attempt_accepted,
+                idempotency_key,
+                sent_message_ids=reupload_candidate_sent_ids,
+                telegram_method="reupload_album",
+            )
+            logger.info(
+                "DELIVERY_ATTEMPT_ACCEPTED | operation=album | method=reupload_album | key=%s | delivery_ids=%s | sent_message_ids=%s",
+                idempotency_key, delivery_ids, reupload_candidate_sent_ids,
+            )
 
         await owner._log_delivery_pipeline_step(
             rule_id=rule.id,
@@ -794,7 +738,39 @@ class RepostAlbumDelivery:
                     },
                 )
 
-                await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
+                if is_self_loop:
+                    await run_db(
+                        owner._mark_album_deliveries_sent_sync,
+                        delivery_ids=delivery_ids,
+                        sent_message_ids=sent_message_ids,
+                        target_id=str(target_id),
+                        delivery_method="reupload_album_verified",
+                    )
+                else:
+                    await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
+                return True
+
+            if is_self_loop and reupload_candidate_sent_ids:
+                logger.warning(
+                    "SELF_LOOP_ALBUM_ACCEPTED_UNVERIFIED | rule_id=%s | delivery_ids=%s | candidate_sent_message_ids=%s | action=mark_sent_no_second_send",
+                    rule.id, delivery_ids, reupload_candidate_sent_ids,
+                )
+                await owner._log_delivery_final_success(
+                    rule_id=rule.id, delivery_ids=delivery_ids, final_method="reupload_album_self_loop_unverified",
+                    source_channel=source_channel, target_id=target_id, source_message_ids=message_ids,
+                    sent_message_id=int(reupload_candidate_sent_ids[0]), sent_message_ids=reupload_candidate_sent_ids,
+                    verify_result=verified,
+                    extra={
+                        "caption_delivery_mode": caption_mode, "requires_builder": requires_builder,
+                        "verification_ok": False, "post_send_warning": "target_message_not_found_after_send",
+                        "candidate_sent_message_ids": reupload_candidate_sent_ids, "second_send_blocked": True,
+                    },
+                )
+                await run_db(
+                    owner._mark_album_deliveries_sent_sync,
+                    delivery_ids=delivery_ids, sent_message_ids=reupload_candidate_sent_ids,
+                    target_id=str(target_id), delivery_method="reupload_album_self_loop_unverified",
+                )
                 return True
 
             if upload_confirmed_by_send_result:
@@ -921,6 +897,13 @@ class RepostAlbumDelivery:
 
                 await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                 return True
+
+        if is_self_loop:
+            logger.warning(
+                "SELF_LOOP_ALBUM_SEND_FAILED_NO_FALLBACK | rule_id=%s | delivery_ids=%s | source_message_ids=%s",
+                rule.id, delivery_ids, message_ids,
+            )
+            return False
 
         # =========================================================
         # 6) RETRY REUPLOAD ONLY IF REUPLOAD REALLY FAILED
