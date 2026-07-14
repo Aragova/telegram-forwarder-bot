@@ -34,6 +34,34 @@ from .sender_primitives import (
 
 logger = logging.getLogger("forwarder")
 
+TERMINAL_NON_RETRYABLE_DELIVERY_REASONS = (
+    "copy_single_uncertain_no_fallback",
+    "telethon_send_accepted_target_id_unresolved_non_retryable",
+    "telethon_one_by_one_send_accepted_target_id_unresolved_non_retryable",
+)
+
+
+def _is_terminal_non_retryable_delivery(row) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if str(row.get("status") or "") != "faulty":
+        return False
+    error_text = str(row.get("error_text") or "")
+    return any(reason in error_text for reason in TERMINAL_NON_RETRYABLE_DELIVERY_REASONS)
+
+
+def _terminal_non_retryable_result(error_text: str) -> dict:
+    return {
+        "ok": False,
+        "retryable": False,
+        "accepted": True,
+        "error_text": error_text,
+        "manual_review_required": True,
+        "non_retryable": True,
+        "transport_accepted": True,
+        "authoritative_resolved": False,
+    }
+
 class SenderService:
     def __init__(
         self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db
@@ -1262,21 +1290,19 @@ class SenderService:
                     delivery_id,
                 )
             else:
-                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
-                logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
                 delivery_row = await run_db(self.db.get_delivery, int(delivery_id))
-                uncertain_error = "copy_single_uncertain_no_fallback"
-                if (
-                    isinstance(delivery_row, dict)
-                    and str(delivery_row.get("status") or "") == "faulty"
-                    and uncertain_error in str(delivery_row.get("error_text") or "")
-                ):
+                if _is_terminal_non_retryable_delivery(delivery_row):
+                    terminal_error = str(delivery_row.get("error_text") or "telethon_send_accepted_target_id_unresolved_non_retryable")
+                    await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send", error_text=terminal_error)
                     logger.warning(
-                        "JOB EXECUTOR | repost_single | non_retryable_uncertain | rule_id=%s | delivery_id=%s",
+                        "JOB EXECUTOR | repost_single | terminal_non_retryable | rule_id=%s | delivery_id=%s | error=%s",
                         rule_id,
                         delivery_id,
+                        terminal_error,
                     )
-                    return {"ok": False, "retryable": False, "error_text": str(delivery_row.get("error_text") or uncertain_error)}
+                    return _terminal_non_retryable_result(terminal_error)
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
+                logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
                 logger.warning(
                     "JOB EXECUTOR | repost_single | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат",
                     rule_id,
@@ -1411,6 +1437,18 @@ class SenderService:
                     album_delivery_ids,
                 )
             else:
+                delivery_rows = [await run_db(self.db.get_delivery, int(row_id)) for row_id in album_delivery_ids]
+                terminal_rows = [row for row in delivery_rows if _is_terminal_non_retryable_delivery(row)]
+                if delivery_rows and len(terminal_rows) == len(delivery_rows):
+                    terminal_error = str(terminal_rows[0].get("error_text") or "telethon_send_accepted_target_id_unresolved_non_retryable")
+                    await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send", error_text=terminal_error)
+                    logger.warning(
+                        "JOB EXECUTOR | repost_album | terminal_non_retryable | rule_id=%s | delivery_ids=%s | error=%s",
+                        rule_id,
+                        album_delivery_ids,
+                        terminal_error,
+                    )
+                    return _terminal_non_retryable_result(terminal_error)
                 await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
                 logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
                 logger.warning(

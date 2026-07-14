@@ -282,8 +282,10 @@ def test_copy_single_uncertain_marks_faulty_and_manual_review_error():
 
 def test_execute_repost_single_returns_non_retryable_for_uncertain_faulty():
     source = inspect.getsource(SenderService.execute_repost_single_from_job)
-    assert "non_retryable_uncertain" in source
-    assert "retryable\": False" in source
+    module_source = inspect.getsource(__import__("app.sender", fromlist=["SenderService"]))
+    assert "terminal_non_retryable" in source
+    assert "copy_single_uncertain_no_fallback" in module_source
+    assert "\"retryable\": False" in module_source
 
 
 def test_copy_single_success_does_not_touch_rule_internally():
