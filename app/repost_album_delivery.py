@@ -1242,6 +1242,39 @@ class RepostAlbumDelivery:
             },
         )
 
+        if one_by_one_result.get("transport_accepted") and not one_by_one_result.get("authoritative_resolved"):
+            error_text = "telethon_one_by_one_send_accepted_target_id_unresolved_non_retryable"
+            logger.warning(
+                "ONE_BY_ONE_ACCEPTED_TARGET_ID_UNRESOLVED | rule_id=%s | delivery_ids=%s | target_id=%s | returned_candidate_ids=%s | action=no_retry_no_second_send | manual_review_required=True",
+                rule.id, delivery_ids, target_id, one_by_one_result.get("returned_candidate_ids"),
+            )
+            await owner._log_delivery_pipeline_step(
+                rule_id=rule.id,
+                delivery_ids=delivery_ids,
+                event_type="delivery_pipeline_step",
+                pipeline_stage="one_by_one_accepted_target_id_unresolved",
+                pipeline_result="terminal_manual_review",
+                source_channel=source_channel,
+                target_id=target_id,
+                source_message_ids=message_ids,
+                error_text=error_text,
+                extra={
+                    "transport_accepted": True,
+                    "authoritative_resolved": False,
+                    "returned_candidate_id": one_by_one_result.get("returned_candidate_id"),
+                    "returned_candidate_ids": one_by_one_result.get("returned_candidate_ids"),
+                    "resolution_method": one_by_one_result.get("resolution_method"),
+                    "sent_count": one_by_one_result.get("sent_count"),
+                    "resolved_authoritative_message_ids_before_unresolved": one_by_one_result.get("resolved_authoritative_message_ids_before_unresolved"),
+                    "manual_review_required": True,
+                    "non_retryable": True,
+                    "action": "no_retry_no_second_send",
+                },
+            )
+            for delivery_id in delivery_ids:
+                await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+            return False
+
         if one_by_one_result["ok"]:
             sent_message_id = one_by_one_result.get("sent_message_id")
             if sent_message_id:

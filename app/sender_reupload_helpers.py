@@ -56,6 +56,7 @@ class SenderReuploadHelpers:
                             "sent_count": accepted_transport_count,
                             "returned_candidate_id": outcome.returned_candidate_id,
                             "returned_candidate_ids": outcome.returned_candidate_ids or [],
+                            "resolved_authoritative_message_ids_before_unresolved": sent_ids[:],
                             "resolution_method": outcome.resolution_method,
                             "error_text": outcome.error_text,
                             "manual_review_required": True,
