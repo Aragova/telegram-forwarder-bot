@@ -149,7 +149,7 @@ class FakeTelethon:
     async def get_messages(self, entity, ids=None, limit=None):
         if limit:
             return [SimpleNamespace(id=122)]
-        return SimpleNamespace(id=ids, message="hello" if ids == 123 else "caption")
+        return SimpleNamespace(id=ids, message="hello" if ids == 123 else "caption", reply_to=SimpleNamespace(reply_to_top_id=7))
 
 
 def _owner(telethon):
@@ -167,7 +167,8 @@ def test_send_text_via_telethon_smoke():
 
     result = asyncio.run(helper.send_text_via_telethon(target_id="-100", target_thread_id=7, text="hello", entities=["e1"]))
 
-    assert result == 123
+    assert result.authoritative_message_id == 123
+    assert result.authoritative_resolved is True
     assert telethon.calls[0]["entity"] == -100
     assert telethon.calls[0]["message"] == "hello"
     assert telethon.calls[0]["formatting_entities"] == ["e1"]
@@ -182,7 +183,8 @@ def test_send_file_via_telethon_original_media_smoke():
 
     result = asyncio.run(helper.send_file_via_telethon(target_id="-100", target_thread_id=None, message=message))
 
-    assert result == 456
+    assert result.authoritative_message_id == 456
+    assert result.authoritative_resolved is True
     assert telethon.calls[0]["file"] == message.media
     assert telethon.calls[0]["caption"] == "caption"
     assert telethon.calls[0]["supports_streaming"] is True
@@ -205,7 +207,8 @@ def test_send_file_via_telethon_fallback_smoke(tmp_path):
 
     result = asyncio.run(helper.send_file_via_telethon(target_id="-100", target_thread_id=None, message=message, file_path=file_path))
 
-    assert result == 789
+    assert result.authoritative_message_id == 789
+    assert result.authoritative_resolved is True
     assert len(telethon.calls) == 2
     assert telethon.calls[1]["file"] == str(file_path)
 

@@ -20,6 +20,7 @@ class SenderReuploadHelpers:
 
     async def send_album_one_by_one(self, messages, target_id, target_thread_id, post_rows: list[dict] | None = None):
         sent_ids: list[int] = []
+        accepted_transport_count = 0
 
         try:
             if not messages:
@@ -32,22 +33,53 @@ class SenderReuploadHelpers:
 
             for idx, message in enumerate(messages):
                 post_row = post_rows[idx] if post_rows and idx < len(post_rows) else None
-                sent_message_id = await self.reupload_message(
+                outcome = await self.reupload_message(
                     message=message,
                     target_id=target_id,
                     target_thread_id=target_thread_id,
                     post_row=post_row,
                 )
 
-                if not sent_message_id:
+                if isinstance(outcome, TelethonSendOutcome):
+                    if outcome.transport_accepted:
+                        accepted_transport_count += 1
+                    if outcome.transport_accepted and outcome.authoritative_resolved and outcome.authoritative_message_id:
+                        sent_ids.append(int(outcome.authoritative_message_id))
+                        continue
+                    if outcome.transport_accepted and not outcome.authoritative_resolved:
+                        return {
+                            "ok": False,
+                            "transport_accepted": True,
+                            "authoritative_resolved": False,
+                            "sent_message_id": None,
+                            "sent_message_ids": [],
+                            "sent_count": accepted_transport_count,
+                            "returned_candidate_id": outcome.returned_candidate_id,
+                            "returned_candidate_ids": outcome.returned_candidate_ids or [],
+                            "resolution_method": outcome.resolution_method,
+                            "error_text": outcome.error_text,
+                            "manual_review_required": True,
+                            "non_retryable": True,
+                            "action": "no_second_send",
+                        }
                     return {
                         "ok": False,
                         "sent_message_id": sent_ids[0] if sent_ids else None,
+                        "sent_message_ids": sent_ids[:],
+                        "sent_count": len(sent_ids),
+                        "error_text": outcome.error_text or "Не удалось отправить один из элементов альбома в аварийном fallback",
+                    }
+
+                if not outcome:
+                    return {
+                        "ok": False,
+                        "sent_message_id": sent_ids[0] if sent_ids else None,
+                        "sent_message_ids": sent_ids[:],
                         "sent_count": len(sent_ids),
                         "error_text": "Не удалось отправить один из элементов альбома в аварийном fallback",
                     }
-
-                sent_ids.append(int(sent_message_id))
+                legacy_sent_message_id = outcome
+                sent_ids.append(int(legacy_sent_message_id))
 
             return {
                 "ok": True,
@@ -281,6 +313,7 @@ class SenderReuploadHelpers:
                 target_thread_id=target_thread_id,
                 text=raw_text,
                 entities=raw_entities,
+                source_message_ids=({int(getattr(message, "id"))} if is_self_loop and getattr(message, "id", None) else None),
             )
             if isinstance(telethon_outcome, int) and telethon_outcome > 0:
                 return TelethonSendOutcome(True, True, True, int(telethon_outcome), [int(telethon_outcome)], resolution_method="legacy_telethon_helper")

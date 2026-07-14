@@ -32,6 +32,20 @@ def _message_text(message: Any) -> str:
     return str(getattr(message, "message", None) or getattr(message, "text", None) or "")
 
 
+def _message_thread_matches(message: Any, target_thread_id: int | None) -> bool:
+    if target_thread_id is None:
+        return True
+    reply_to = getattr(message, "reply_to", None)
+    if reply_to is None:
+        return False
+    expected = int(target_thread_id)
+    for attr_name in ("reply_to_top_id", "top_msg_id", "reply_to_msg_id"):
+        value = getattr(reply_to, attr_name, None)
+        if value is not None and int(value) == expected:
+            return True
+    return False
+
+
 def _document(message: Any) -> Any | None:
     return getattr(getattr(message, "media", None), "document", None)
 
@@ -96,11 +110,6 @@ class TelethonSendOutcome:
     def ok(self) -> bool:
         return bool(self.transport_accepted and self.authoritative_resolved and self.authoritative_message_id)
 
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, int):
-            return self.authoritative_message_id == other
-        return super().__eq__(other)
-
     def to_reupload_album_result(self, *, sent_count: int = 0) -> dict[str, Any]:
         return {
             "ok": self.ok,
@@ -152,7 +161,7 @@ class TelethonAuthoritativeMessageResolver:
             logger.warning("TELETHON_TARGET_WATERMARK_FAILED | target_id=%s | error=%s", target_id, exc)
             return None
 
-    async def validate_message_in_target(self, target_entity: Any, target_id: Any, candidate_id: int | None, expected_fp: dict[str, Any], source_message_ids: set[int] | None = None) -> tuple[bool, Any | None, str]:
+    async def validate_message_in_target(self, target_entity: Any, target_id: Any, candidate_id: int | None, expected_fp: dict[str, Any], source_message_ids: set[int] | None = None, target_thread_id: int | None = None) -> tuple[bool, Any | None, str]:
         if not candidate_id or candidate_id <= 0:
             return False, None, "invalid_id"
         if source_message_ids and int(candidate_id) in source_message_ids:
@@ -166,8 +175,8 @@ class TelethonAuthoritativeMessageResolver:
             return False, None, "not_found_in_target"
         if hasattr(message, "out") and getattr(message, "out") is not True:
             return False, message, "not_outbound"
-        if hasattr(message, "post") and getattr(message, "post") is not True:
-            return False, message, "not_channel_post"
+        if not _message_thread_matches(message, target_thread_id):
+            return False, message, "thread_mismatch"
         score = _fingerprint_score(expected_fp, build_media_fingerprint(message))
         if score < 0:
             return False, message, "fingerprint_mismatch"
@@ -181,10 +190,10 @@ class TelethonAuthoritativeMessageResolver:
             date = date.replace(tzinfo=timezone.utc)
         return (started_at - timedelta(seconds=30)) <= date <= (finished_at + timedelta(seconds=120))
 
-    async def resolve_authoritative_single_message(self, *, target_entity: Any, target_id: Any, sent: Any, expected_message: Any = None, expected_text: str = "", before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None) -> TelethonResolutionResult:
+    async def resolve_authoritative_single_message(self, *, target_entity: Any, target_id: Any, sent: Any, expected_message: Any = None, expected_text: str = "", before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None, target_thread_id: int | None = None) -> TelethonResolutionResult:
         returned_candidate_id = _message_id(sent)
         expected_fp = build_media_fingerprint(sent or expected_message, text=expected_text)
-        ok, message, reason = await self.validate_message_in_target(target_entity, target_id, returned_candidate_id, expected_fp, source_message_ids)
+        ok, message, reason = await self.validate_message_in_target(target_entity, target_id, returned_candidate_id, expected_fp, source_message_ids, target_thread_id)
         if ok:
             return TelethonResolutionResult(True, _message_id(message), returned_candidate_id=returned_candidate_id, resolution_method="returned_candidate_verified")
         best: list[tuple[int, Any]] = []
@@ -206,7 +215,7 @@ class TelethonAuthoritativeMessageResolver:
                     continue
                 if hasattr(item, "out") and getattr(item, "out") is not True:
                     continue
-                if hasattr(item, "post") and getattr(item, "post") is not True:
+                if not _message_thread_matches(item, target_thread_id):
                     continue
                 score = _fingerprint_score(expected_fp, build_media_fingerprint(item))
                 if score >= 0:
@@ -223,7 +232,7 @@ class TelethonAuthoritativeMessageResolver:
         logger.warning("TELETHON_SEND_ACCEPTED_TARGET_ID_UNRESOLVED | target_id=%s | returned_candidate_id=%s | action=no_second_send", target_id, returned_candidate_id)
         return TelethonResolutionResult(False, None, returned_candidate_id=returned_candidate_id, resolution_method="unresolved", error_text=reason)
 
-    async def resolve_authoritative_album_messages(self, *, target_entity: Any, target_id: Any, sent_messages: list[Any], expected_messages: list[Any], expected_text: str, before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None) -> TelethonResolutionResult:
+    async def resolve_authoritative_album_messages(self, *, target_entity: Any, target_id: Any, sent_messages: list[Any], expected_messages: list[Any], expected_text: str, before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None, target_thread_id: int | None = None) -> TelethonResolutionResult:
         if not sent_messages or any(m is None for m in sent_messages):
             return TelethonResolutionResult(False, None, returned_candidate_ids=[], resolution_method="album_unresolved", error_text="album_sent_messages_empty")
         if len(sent_messages) != len(expected_messages):
@@ -236,7 +245,7 @@ class TelethonAuthoritativeMessageResolver:
         ids = [_message_id(m) for m in sent_messages]
         resolved = []
         for sent, expected in zip(sent_messages, expected_messages):
-            r = await self.resolve_authoritative_single_message(target_entity=target_entity, target_id=target_id, sent=sent, expected_message=expected, expected_text=expected_text, before_max_message_id=before_max_message_id, send_started_at=send_started_at, send_finished_at=send_finished_at, source_message_ids=source_message_ids)
+            r = await self.resolve_authoritative_single_message(target_entity=target_entity, target_id=target_id, sent=sent, expected_message=expected, expected_text=expected_text, before_max_message_id=before_max_message_id, send_started_at=send_started_at, send_finished_at=send_finished_at, source_message_ids=source_message_ids, target_thread_id=target_thread_id)
             if not r.ok or not r.authoritative_message_id:
                 return TelethonResolutionResult(False, None, returned_candidate_ids=[i for i in ids if i], resolution_method="album_unresolved", error_text=r.error_text)
             resolved.append(int(r.authoritative_message_id))

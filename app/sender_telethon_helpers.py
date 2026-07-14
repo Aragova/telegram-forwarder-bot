@@ -220,6 +220,7 @@ class SenderTelethonHelpers:
         target_thread_id,
         text: str,
         entities,
+        source_message_ids: set[int] | None = None,
     ) -> TelethonSendOutcome:
         entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
         formatting_entities = self.owner._clone_telethon_entities(entities, text)
@@ -264,6 +265,8 @@ class SenderTelethonHelpers:
                 before_max_message_id=before_max_message_id,
                 send_started_at=send_started_at,
                 send_finished_at=send_finished_at,
+                source_message_ids=source_message_ids,
+                target_thread_id=target_thread_id,
             )
         except Exception as exc:
             logger.warning("TELETHON_TEXT_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_id=%s | error=%s | action=no_second_send", target_id, returned_candidate_id, exc)
@@ -341,6 +344,7 @@ class SenderTelethonHelpers:
                     send_started_at=send_started_at,
                     send_finished_at=send_finished_at,
                     source_message_ids=({int(getattr(message, "id"))} if is_self_loop and getattr(message, "id", None) else None),
+                    target_thread_id=target_thread_id,
                 )
             except Exception as exc:
                 logger.warning("TELETHON_FILE_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_id=%s | error=%s | action=no_second_send", target_id, returned_candidate_id, exc)
@@ -444,6 +448,7 @@ class SenderTelethonHelpers:
                     send_started_at=send_started_at,
                     send_finished_at=send_finished_at,
                     source_message_ids=({int(getattr(message, "id"))} if is_self_loop and getattr(message, "id", None) else None),
+                    target_thread_id=target_thread_id,
                 )
             except Exception as exc:
                 logger.warning("TELETHON_FILE_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_id=%s | error=%s | action=no_second_send", target_id, returned_candidate_id, exc)
@@ -558,6 +563,7 @@ class SenderTelethonHelpers:
                         send_started_at=send_started_at,
                         send_finished_at=send_finished_at,
                         source_message_ids=({int(getattr(m, "id")) for m in messages if getattr(m, "id", None)} if is_self_loop else None),
+                        target_thread_id=target_thread_id,
                     )
                 except Exception as exc:
                     returned_ids = [int(m.id) for m in sent_messages if m and getattr(m, "id", None)]
@@ -672,6 +678,7 @@ class SenderTelethonHelpers:
                     send_started_at=send_started_at,
                     send_finished_at=send_finished_at,
                     source_message_ids=({int(getattr(m, "id")) for m in messages if getattr(m, "id", None)} if is_self_loop else None),
+                    target_thread_id=target_thread_id,
                 )
             except Exception as exc:
                 returned_ids = [int(m.id) for m in sent_messages if m and getattr(m, "id", None)]

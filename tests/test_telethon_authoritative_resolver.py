@@ -110,3 +110,58 @@ def test_history_ignores_matching_non_outbound_message():
     result = asyncio.run(resolver.resolve_authoritative_single_message(target_entity=-100, target_id=-100, sent=sent, expected_text="caption", before_max_message_id=2882, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc)))
     assert result.ok is True
     assert result.authoritative_message_id == 2884
+
+
+def _thread_msg(mid, *, thread_id=None, post=False, out=True, text="caption", doc_id=1):
+    msg = _msg(mid, text=text, doc_id=doc_id)
+    msg.post = post
+    msg.out = out
+    if thread_id is not None:
+        msg.reply_to = SimpleNamespace(reply_to_top_id=thread_id)
+    return msg
+
+
+def test_supergroup_candidate_post_false_is_accepted():
+    sent = _thread_msg(300, post=False, out=True)
+    telethon = FakeTelethon(by_id={300: sent}, history=[])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+    result = asyncio.run(resolver.resolve_authoritative_single_message(target_entity=-100, target_id=-100, sent=sent, expected_text="caption", before_max_message_id=299, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc)))
+    assert result.ok is True
+    assert result.authoritative_message_id == 300
+
+
+def test_supergroup_history_post_false_is_accepted():
+    sent = _msg(1157)
+    telethon = FakeTelethon(by_id={1157: None}, history=[_thread_msg(301, post=False, out=True)])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+    result = asyncio.run(resolver.resolve_authoritative_single_message(target_entity=-100, target_id=-100, sent=sent, expected_text="caption", before_max_message_id=300, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc)))
+    assert result.ok is True
+    assert result.authoritative_message_id == 301
+
+
+def test_history_message_from_other_topic_is_not_selected():
+    sent = _msg(1157)
+    telethon = FakeTelethon(by_id={1157: None}, history=[_thread_msg(302, thread_id=20, post=False, out=True)])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+    result = asyncio.run(resolver.resolve_authoritative_single_message(target_entity=-100, target_id=-100, sent=sent, expected_text="caption", before_max_message_id=301, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc), target_thread_id=10))
+    assert result.ok is False
+    assert result.authoritative_message_id is None
+
+
+def test_history_message_from_expected_topic_is_selected():
+    sent = _msg(1157)
+    telethon = FakeTelethon(by_id={1157: None}, history=[_thread_msg(303, thread_id=10, post=False, out=True)])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+    result = asyncio.run(resolver.resolve_authoritative_single_message(target_entity=-100, target_id=-100, sent=sent, expected_text="caption", before_max_message_id=302, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc), target_thread_id=10))
+    assert result.ok is True
+    assert result.authoritative_message_id == 303
+
+
+def test_self_loop_text_candidate_collision_uses_history():
+    sent = SimpleNamespace(id=100, message="hello")
+    history = [SimpleNamespace(id=101, message="hello", out=True)]
+    telethon = FakeTelethon(by_id={100: SimpleNamespace(id=100, message="hello", out=True)}, history=history)
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+    result = asyncio.run(resolver.resolve_authoritative_single_message(target_entity=-100, target_id=-100, sent=sent, expected_text="hello", before_max_message_id=99, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc), source_message_ids={100}))
+    assert result.ok is True
+    assert result.authoritative_message_id == 101
