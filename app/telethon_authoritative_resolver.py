@@ -67,12 +67,18 @@ def build_media_fingerprint(message: Any, *, text: str | None = None) -> dict[st
     document = _document(message)
     photo = _photo(message)
     if document is not None:
+        document_id = getattr(document, "id", None)
+        size = getattr(document, "size", None)
+        mime_type = getattr(document, "mime_type", None)
+        filename = _filename(document)
+        if document_id is None and size is None and mime_type is None and filename is None:
+            return {"kind": "text", "text": text if text is not None else _message_text(message)}
         return {
             "kind": "document",
-            "document_id": getattr(document, "id", None),
-            "size": getattr(document, "size", None),
-            "mime_type": getattr(document, "mime_type", None),
-            "filename": _filename(document),
+            "document_id": document_id,
+            "size": size,
+            "mime_type": mime_type,
+            "filename": filename,
             "text": text if text is not None else _message_text(message),
         }
     if photo is not None:
@@ -182,21 +188,40 @@ class TelethonAuthoritativeMessageResolver:
             return False, message, "fingerprint_mismatch"
         return True, message, "candidate_verified"
 
-    def _in_window(self, message: Any, started_at: datetime, finished_at: datetime) -> bool:
+    def _in_window(self, message: Any, started_at: datetime, finished_at: datetime, *, before_seconds: int = 30, after_seconds: int = 120) -> bool:
         date = getattr(message, "date", None)
         if not isinstance(date, datetime):
             return True
         if date.tzinfo is None:
             date = date.replace(tzinfo=timezone.utc)
-        return (started_at - timedelta(seconds=30)) <= date <= (finished_at + timedelta(seconds=120))
+        return (started_at - timedelta(seconds=before_seconds)) <= date <= (finished_at + timedelta(seconds=after_seconds))
+
+    def _is_safe_history_candidate(self, message: Any, *, expected_fp: dict[str, Any], before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None, target_thread_id: int | None) -> bool:
+        mid = _message_id(message)
+        if not mid or (before_max_message_id is not None and mid <= before_max_message_id):
+            return False
+        if source_message_ids and mid in source_message_ids:
+            return False
+        if not self._in_window(message, send_started_at, send_finished_at, before_seconds=5, after_seconds=30):
+            return False
+        if hasattr(message, "out") and getattr(message, "out") is not True:
+            return False
+        if not _message_thread_matches(message, target_thread_id):
+            return False
+        actual_fp = build_media_fingerprint(message)
+        if expected_fp.get("kind") != actual_fp.get("kind"):
+            return False
+        return True
 
     async def resolve_authoritative_single_message(self, *, target_entity: Any, target_id: Any, sent: Any, expected_message: Any = None, expected_text: str = "", before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None, target_thread_id: int | None = None) -> TelethonResolutionResult:
         returned_candidate_id = _message_id(sent)
-        expected_fp = build_media_fingerprint(sent or expected_message, text=expected_text)
+        expected_fp = build_media_fingerprint(expected_message or sent, text=expected_text)
         ok, message, reason = await self.validate_message_in_target(target_entity, target_id, returned_candidate_id, expected_fp, source_message_ids, target_thread_id)
         if ok:
             return TelethonResolutionResult(True, _message_id(message), returned_candidate_id=returned_candidate_id, resolution_method="returned_candidate_verified")
         best: list[tuple[int, Any]] = []
+        safe_history_candidates: list[Any] = []
+        scanned_history: list[Any] = []
         for delay in (0, 0.7, 1.5):
             if delay:
                 await asyncio.sleep(delay)
@@ -205,23 +230,25 @@ class TelethonAuthoritativeMessageResolver:
             except Exception as exc:
                 logger.warning("TELETHON_HISTORY_RESOLUTION_FAILED | target_id=%s | error=%s", target_id, exc)
                 continue
-            for item in (history or []):
-                mid = _message_id(item)
-                if not mid or (before_max_message_id is not None and mid <= before_max_message_id):
+            scanned_history = list(history or [])
+            safe_history_candidates = []
+            best = []
+            for item in scanned_history:
+                if not self._is_safe_history_candidate(item, expected_fp=expected_fp, before_max_message_id=before_max_message_id, send_started_at=send_started_at, send_finished_at=send_finished_at, source_message_ids=source_message_ids, target_thread_id=target_thread_id):
                     continue
-                if source_message_ids and mid in source_message_ids:
-                    continue
-                if not self._in_window(item, send_started_at, send_finished_at):
-                    continue
-                if hasattr(item, "out") and getattr(item, "out") is not True:
-                    continue
-                if not _message_thread_matches(item, target_thread_id):
-                    continue
+                safe_history_candidates.append(item)
                 score = _fingerprint_score(expected_fp, build_media_fingerprint(item))
                 if score >= 0:
                     best.append((score, item))
-            if best:
+            if best or safe_history_candidates:
                 break
+        strong_match_ids: list[int] = []
+        if best:
+            max_score = max(score for score, _ in best)
+            winners = [m for score, m in best if score == max_score]
+            strong_match_ids = [mid for mid in (_message_id(m) for m in winners) if mid]
+        safe_candidate_ids = [mid for mid in (_message_id(m) for m in safe_history_candidates) if mid]
+        logger.info("TELETHON_HISTORY_RESOLUTION_SCAN | target_id=%s | before_max_message_id=%s | returned_candidate_id=%s | history_count=%s | safe_candidate_ids=%s | strong_match_ids=%s", target_id, before_max_message_id, returned_candidate_id, len(scanned_history), safe_candidate_ids, strong_match_ids)
         if best:
             max_score = max(score for score, _ in best)
             winners = [m for score, m in best if score == max_score]
@@ -229,6 +256,12 @@ class TelethonAuthoritativeMessageResolver:
                 authoritative = _message_id(winners[0])
                 logger.info("TELETHON_AUTHORITATIVE_TARGET_RESOLVED | target_id=%s | returned_candidate_id=%s | authoritative_message_id=%s | resolution_method=target_history_media_fingerprint", target_id, returned_candidate_id, authoritative)
                 return TelethonResolutionResult(True, authoritative, returned_candidate_id=returned_candidate_id, resolution_method="target_history_media_fingerprint")
+        if len(safe_history_candidates) == 1:
+            authoritative = _message_id(safe_history_candidates[0])
+            logger.info("TELETHON_AUTHORITATIVE_TARGET_RESOLVED | target_id=%s | returned_candidate_id=%s | authoritative_message_id=%s | resolution_method=target_history_unique_new_outbound", target_id, returned_candidate_id, authoritative)
+            return TelethonResolutionResult(True, authoritative, returned_candidate_id=returned_candidate_id, resolution_method="target_history_unique_new_outbound")
+        if len(safe_history_candidates) > 1:
+            logger.warning("TELETHON_HISTORY_RESOLUTION_AMBIGUOUS | safe_candidate_ids=%s | action=no_guess_no_second_send", safe_candidate_ids)
         logger.warning("TELETHON_SEND_ACCEPTED_TARGET_ID_UNRESOLVED | target_id=%s | returned_candidate_id=%s | action=no_second_send", target_id, returned_candidate_id)
         return TelethonResolutionResult(False, None, returned_candidate_id=returned_candidate_id, resolution_method="unresolved", error_text=reason)
 

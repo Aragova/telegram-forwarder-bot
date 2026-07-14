@@ -165,3 +165,150 @@ def test_self_loop_text_candidate_collision_uses_history():
     result = asyncio.run(resolver.resolve_authoritative_single_message(target_entity=-100, target_id=-100, sent=sent, expected_text="hello", before_max_message_id=99, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc), source_message_ids={100}))
     assert result.ok is True
     assert result.authoritative_message_id == 101
+
+
+def test_unique_new_outbound_production_regression_1158_to_2884():
+    now = datetime.now(timezone.utc)
+    sent = _msg(1158, text="wrong returned", doc_id=999)
+    history = [_msg(2884, text="real target", doc_id=42)]
+    history[0].out = True
+    telethon = FakeTelethon(by_id={1158: None}, history=history)
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+
+    result = asyncio.run(resolver.resolve_authoritative_single_message(
+        target_entity=-1002693516250,
+        target_id=-1002693516250,
+        sent=sent,
+        expected_message=_msg(525, text="source caption", doc_id=777),
+        expected_text="source caption",
+        before_max_message_id=2883,
+        send_started_at=now,
+        send_finished_at=now,
+        source_message_ids={525},
+    ))
+
+    assert result.ok is True
+    assert result.returned_candidate_id == 1158
+    assert result.authoritative_message_id == 2884
+    assert result.resolution_method == "target_history_unique_new_outbound"
+
+
+def test_damaged_sent_fingerprint_still_uses_unique_history_candidate():
+    now = datetime.now(timezone.utc)
+    sent = _msg(1158, text="telethon damaged", doc_id=999999)
+    target = _msg(2884, text="uploaded target", doc_id=123)
+    target.out = True
+    telethon = FakeTelethon(by_id={1158: None}, history=[target])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+
+    result = asyncio.run(resolver.resolve_authoritative_single_message(
+        target_entity=-100,
+        target_id=-100,
+        sent=sent,
+        expected_message=_msg(525, text="source caption", doc_id=456),
+        expected_text="source caption",
+        before_max_message_id=2883,
+        send_started_at=now,
+        send_finished_at=now,
+    ))
+
+    assert result.ok is True
+    assert result.authoritative_message_id == 2884
+    assert result.resolution_method == "target_history_unique_new_outbound"
+
+
+def test_self_loop_source_collision_excludes_source_and_selects_unique_new_outbound():
+    now = datetime.now(timezone.utc)
+    sent = _msg(1158, text="wrong", doc_id=999)
+    source = _msg(525, text="source caption", doc_id=777)
+    source.out = True
+    target = _msg(2884, text="target caption", doc_id=123)
+    target.out = True
+    telethon = FakeTelethon(by_id={1158: None}, history=[target, source])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+
+    result = asyncio.run(resolver.resolve_authoritative_single_message(
+        target_entity=-1002693516250,
+        target_id=-1002693516250,
+        sent=sent,
+        expected_message=source,
+        expected_text="source caption",
+        before_max_message_id=500,
+        send_started_at=now,
+        send_finished_at=now,
+        source_message_ids={525},
+    ))
+
+    assert result.ok is True
+    assert result.authoritative_message_id == 2884
+    assert result.resolution_method == "target_history_unique_new_outbound"
+
+
+def test_two_unique_fallback_candidates_are_unresolved():
+    now = datetime.now(timezone.utc)
+    sent = _msg(1158, text="wrong", doc_id=999)
+    one = _msg(2884, text="target one", doc_id=1)
+    two = _msg(2885, text="target two", doc_id=2)
+    one.out = two.out = True
+    telethon = FakeTelethon(by_id={1158: None}, history=[two, one])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+
+    result = asyncio.run(resolver.resolve_authoritative_single_message(
+        target_entity=-100,
+        target_id=-100,
+        sent=sent,
+        expected_message=_msg(525, text="source caption", doc_id=777),
+        expected_text="source caption",
+        before_max_message_id=2883,
+        send_started_at=now,
+        send_finished_at=now,
+    ))
+
+    assert result.ok is False
+    assert result.authoritative_message_id is None
+    assert result.resolution_method == "unresolved"
+
+
+def test_unique_fallback_rejects_wrong_media_kind():
+    now = datetime.now(timezone.utc)
+    sent = _msg(1158, text="wrong", doc_id=999)
+    text_post = SimpleNamespace(id=2884, message="target text", date=now, out=True)
+    telethon = FakeTelethon(by_id={1158: None}, history=[text_post])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+
+    result = asyncio.run(resolver.resolve_authoritative_single_message(
+        target_entity=-100,
+        target_id=-100,
+        sent=sent,
+        expected_message=_msg(525, text="source caption", doc_id=777),
+        expected_text="source caption",
+        before_max_message_id=2883,
+        send_started_at=now,
+        send_finished_at=now,
+    ))
+
+    assert result.ok is False
+    assert result.authoritative_message_id is None
+
+
+def test_unique_fallback_rejects_wrong_thread():
+    now = datetime.now(timezone.utc)
+    sent = _msg(1158, text="wrong", doc_id=999)
+    other_topic = _thread_msg(2884, thread_id=20, post=False, out=True, text="target")
+    telethon = FakeTelethon(by_id={1158: None}, history=[other_topic])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+
+    result = asyncio.run(resolver.resolve_authoritative_single_message(
+        target_entity=-100,
+        target_id=-100,
+        sent=sent,
+        expected_message=_msg(525, text="source caption", doc_id=777),
+        expected_text="source caption",
+        before_max_message_id=2883,
+        send_started_at=now,
+        send_finished_at=now,
+        target_thread_id=10,
+    ))
+
+    assert result.ok is False
+    assert result.authoritative_message_id is None
