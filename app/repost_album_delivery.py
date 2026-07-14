@@ -819,6 +819,7 @@ class RepostAlbumDelivery:
                         source_channel=str(source_channel or ""),
                         source_message_ids=message_ids,
                         delivery_id=(delivery_ids[0] if delivery_ids else None),
+                        allow_unverified_self_loop_target=True,
                     )
 
                 if hasattr(owner, "_run_post_send_step_safe"):
@@ -838,7 +839,13 @@ class RepostAlbumDelivery:
                 if _reaction_applied_or_enqueued(reaction_result):
                     logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, reaction_message_id)
                 else:
-                    logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_message_id, reaction_result.get("error"))
+                    reaction_payload = reaction_result.get("result") if isinstance(reaction_result, dict) and isinstance(reaction_result.get("result"), dict) else reaction_result
+                    reaction_reason = reaction_payload.get("reason") if isinstance(reaction_payload, dict) else None
+                    reaction_error = reaction_result.get("error") if isinstance(reaction_result, dict) else None
+                    logger.warning(
+                        "SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | delivery_id=%s | target_id=%s | reaction_target_message_id=%s | reason=%s",
+                        rule.id, (delivery_ids[0] if delivery_ids else None), target_id, reaction_message_id, reaction_reason or reaction_error or "unknown",
+                    )
                 await owner._log_delivery_final_success(
                     rule_id=rule.id, delivery_ids=delivery_ids, final_method="reupload_album_self_loop_unverified",
                     source_channel=source_channel, target_id=target_id, source_message_ids=message_ids,

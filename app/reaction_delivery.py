@@ -371,6 +371,7 @@ class ReactionDelivery:
         source_message_ids: list[int] | None = None,
         delivery_id: int | None = None,
         max_age_seconds: int = 300,
+        allow_unverified_self_loop_target: bool = False,
     ) -> dict[str, Any]:
         owner = self.owner
         rule_id = int(getattr(rule, "id", 0) or 0)
@@ -378,22 +379,60 @@ class ReactionDelivery:
             logger.info("SELF_TARGET_REPOST_DETECTED | rule_id=%s | source_id=%s | target_id=%s", rule_id, source_channel, target_id)
         validated_id = None
         validation_reason = None
-        for attempt in range(1, 4):
-            validated_id = await self._validate_reaction_target_message(
-                rule_id=rule_id,
-                source_channel=str(source_channel or ""),
-                target_id=str(target_id),
-                source_message_ids=source_message_ids or [],
-                sent_message_id=sent_message_id,
-                delivery_id=delivery_id,
-                max_age_seconds=max_age_seconds,
+        if allow_unverified_self_loop_target:
+            try:
+                normalized_sent_id = int(sent_message_id or 0)
+                normalized_source_ids = {int(x) for x in (source_message_ids or [])}
+            except (TypeError, ValueError):
+                logger.warning(
+                    "REACTION_SKIPPED_INVALID_TARGET_MESSAGE | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s | validation_mode=self_loop_send_result",
+                    rule_id, delivery_id, source_channel, target_id, sent_message_id, source_message_ids or [],
+                )
+                return {"applied": False, "enqueued": False, "reason": "invalid_target"}
+
+            if normalized_sent_id <= 0:
+                logger.warning(
+                    "REACTION_SKIPPED_INVALID_TARGET_MESSAGE | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s | validation_mode=self_loop_send_result",
+                    rule_id, delivery_id, source_channel, target_id, sent_message_id, source_message_ids or [],
+                )
+                return {"applied": False, "enqueued": False, "reason": "invalid_target"}
+
+            if str(source_channel) != str(target_id):
+                logger.warning(
+                    "REACTION_UNVERIFIED_TARGET_REJECTED_NOT_SELF_LOOP | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s | validation_mode=self_loop_send_result",
+                    rule_id, delivery_id, source_channel, target_id, normalized_sent_id, source_message_ids or [],
+                )
+                return {"applied": False, "enqueued": False, "reason": "unverified_target_not_self_loop"}
+
+            if normalized_sent_id in normalized_source_ids:
+                logger.warning(
+                    "SELF_LOOP_REACTION_SOURCE_MESSAGE_BLOCKED | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s | validation_mode=self_loop_send_result",
+                    rule_id, delivery_id, source_channel, target_id, normalized_sent_id, source_message_ids or [],
+                )
+                return {"applied": False, "enqueued": False, "reason": "source_blocked"}
+
+            validated_id = normalized_sent_id
+            logger.info(
+                "REACTION_TARGET_ACCEPTED_FROM_SEND_RESULT | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s | validation_mode=self_loop_send_result",
+                rule_id, delivery_id, source_channel, target_id, validated_id, source_message_ids or [],
             )
-            validation_reason = getattr(self, "_last_reaction_validation_reason", None)
-            if validated_id or validation_reason != "target_not_found" or attempt >= 3:
-                break
-            await asyncio.sleep(0.5 * attempt)
-        if not validated_id:
-            return {"applied": False, "enqueued": False, "reason": validation_reason or "validation_failed"}
+        else:
+            for attempt in range(1, 4):
+                validated_id = await self._validate_reaction_target_message(
+                    rule_id=rule_id,
+                    source_channel=str(source_channel or ""),
+                    target_id=str(target_id),
+                    source_message_ids=source_message_ids or [],
+                    sent_message_id=sent_message_id,
+                    delivery_id=delivery_id,
+                    max_age_seconds=max_age_seconds,
+                )
+                validation_reason = getattr(self, "_last_reaction_validation_reason", None)
+                if validated_id or validation_reason != "target_not_found" or attempt >= 3:
+                    break
+                await asyncio.sleep(0.5 * attempt)
+            if not validated_id:
+                return {"applied": False, "enqueued": False, "reason": validation_reason or "validation_failed"}
         sent_message_id = validated_id
 
         resolver = ReactionRuntimeResolver(owner.db)
