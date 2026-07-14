@@ -312,3 +312,107 @@ def test_unique_fallback_rejects_wrong_thread():
 
     assert result.ok is False
     assert result.authoritative_message_id is None
+
+
+def test_broadcast_history_post_out_false_resolves_unique_new_outbound():
+    now = datetime.now(timezone.utc)
+    sent = _msg(1159, text="returned wrong", doc_id=999)
+    target = _msg(2885, text="real broadcast post", doc_id=123)
+    target.post = True
+    target.out = False
+    telethon = FakeTelethon(by_id={1159: None}, history=[target])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+
+    result = asyncio.run(resolver.resolve_authoritative_single_message(
+        target_entity=-1002693516250,
+        target_id=-1002693516250,
+        sent=sent,
+        expected_message=_msg(526, text="source caption", doc_id=777),
+        expected_text="source caption",
+        before_max_message_id=2884,
+        send_started_at=now,
+        send_finished_at=now,
+        source_message_ids={526},
+        target_is_broadcast_channel=True,
+    ))
+
+    assert result.ok is True
+    assert result.returned_candidate_id == 1159
+    assert result.authoritative_message_id == 2885
+    assert result.resolution_method == "target_history_unique_new_outbound"
+
+
+def test_broadcast_history_requires_channel_post():
+    now = datetime.now(timezone.utc)
+    sent = _msg(1159, text="returned wrong", doc_id=999)
+    target = _msg(2885, text="real broadcast post", doc_id=123)
+    target.post = False
+    target.out = False
+    telethon = FakeTelethon(by_id={1159: None}, history=[target])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+
+    result = asyncio.run(resolver.resolve_authoritative_single_message(
+        target_entity=-1002693516250,
+        target_id=-1002693516250,
+        sent=sent,
+        expected_message=_msg(526, text="source caption", doc_id=777),
+        expected_text="source caption",
+        before_max_message_id=2884,
+        send_started_at=now,
+        send_finished_at=now,
+        target_is_broadcast_channel=True,
+    ))
+
+    assert result.ok is False
+    assert result.authoritative_message_id is None
+
+
+def test_group_history_out_false_is_rejected():
+    now = datetime.now(timezone.utc)
+    sent = _msg(1159, text="returned wrong", doc_id=999)
+    foreign = _thread_msg(2885, post=False, out=False, text="foreign", doc_id=123)
+    telethon = FakeTelethon(by_id={1159: None}, history=[foreign])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+
+    result = asyncio.run(resolver.resolve_authoritative_single_message(
+        target_entity=-100,
+        target_id=-100,
+        sent=sent,
+        expected_message=_msg(526, text="source caption", doc_id=777),
+        expected_text="source caption",
+        before_max_message_id=2884,
+        send_started_at=now,
+        send_finished_at=now,
+        target_is_broadcast_channel=False,
+    ))
+
+    assert result.ok is False
+    assert result.authoritative_message_id is None
+
+
+def test_broadcast_two_new_posts_are_unresolved_no_guess():
+    now = datetime.now(timezone.utc)
+    sent = _msg(1159, text="returned wrong", doc_id=999)
+    one = _msg(2885, text="one", doc_id=123)
+    two = _msg(2886, text="two", doc_id=124)
+    one.post = two.post = True
+    one.out = two.out = False
+    telethon = FakeTelethon(by_id={1159: None}, history=[two, one])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+
+    result = asyncio.run(resolver.resolve_authoritative_single_message(
+        target_entity=-1002693516250,
+        target_id=-1002693516250,
+        sent=sent,
+        expected_message=_msg(526, text="source caption", doc_id=777),
+        expected_text="source caption",
+        before_max_message_id=2884,
+        send_started_at=now,
+        send_finished_at=now,
+        target_is_broadcast_channel=True,
+    ))
+
+    assert result.ok is False
+    assert result.authoritative_message_id is None
+    assert result.resolution_method == "unresolved"
+    assert telethon.send_file_calls == 0

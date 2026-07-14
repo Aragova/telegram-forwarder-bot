@@ -33,6 +33,19 @@ class SenderTelethonHelpers:
     def __init__(self, owner: Any):
         self.owner = owner
 
+    async def _resolve_target_entity_and_broadcast_flag(self, target_id: Any) -> tuple[Any, bool]:
+        entity_ref = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
+        try:
+            entity = await self.owner.telethon.get_entity(entity_ref)
+            target_is_broadcast_channel = bool(
+                getattr(entity, "broadcast", False)
+                and not getattr(entity, "megagroup", False)
+            )
+            return entity, target_is_broadcast_channel
+        except Exception as exc:
+            logger.warning("TELETHON_TARGET_ENTITY_RESOLVE_FAILED | target=%s | error=%s", target_id, exc)
+            return entity_ref, False
+
     def _source_video_attribute(self, message) -> Any | None:
         document = getattr(getattr(message, "media", None), "document", None)
         for attr in getattr(document, "attributes", []) or []:
@@ -222,7 +235,7 @@ class SenderTelethonHelpers:
         entities,
         source_message_ids: set[int] | None = None,
     ) -> TelethonSendOutcome:
-        entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
+        entity, target_is_broadcast_channel = await self._resolve_target_entity_and_broadcast_flag(target_id)
         formatting_entities = self.owner._clone_telethon_entities(entities, text)
 
         logger.info(
@@ -267,6 +280,7 @@ class SenderTelethonHelpers:
                 send_finished_at=send_finished_at,
                 source_message_ids=source_message_ids,
                 target_thread_id=target_thread_id,
+                target_is_broadcast_channel=target_is_broadcast_channel,
             )
         except Exception as exc:
             logger.warning("TELETHON_TEXT_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_id=%s | error=%s | action=no_second_send", target_id, returned_candidate_id, exc)
@@ -293,7 +307,7 @@ class SenderTelethonHelpers:
         raw_text, raw_entities = self.owner._build_text_and_entities_from_content(content)
         formatting_entities = self.owner._clone_telethon_entities(raw_entities, raw_text)
 
-        entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
+        entity, target_is_broadcast_channel = await self._resolve_target_entity_and_broadcast_flag(target_id)
         media_kind = _detect_message_media_kind(message)
         supports_streaming = media_kind == "video"
 
@@ -345,6 +359,7 @@ class SenderTelethonHelpers:
                     send_finished_at=send_finished_at,
                     source_message_ids=({int(getattr(message, "id"))} if is_self_loop and getattr(message, "id", None) else None),
                     target_thread_id=target_thread_id,
+                    target_is_broadcast_channel=target_is_broadcast_channel,
                 )
             except Exception as exc:
                 logger.warning("TELETHON_FILE_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_id=%s | error=%s | action=no_second_send", target_id, returned_candidate_id, exc)
@@ -449,6 +464,7 @@ class SenderTelethonHelpers:
                     send_finished_at=send_finished_at,
                     source_message_ids=({int(getattr(message, "id"))} if is_self_loop and getattr(message, "id", None) else None),
                     target_thread_id=target_thread_id,
+                    target_is_broadcast_channel=target_is_broadcast_channel,
                 )
             except Exception as exc:
                 logger.warning("TELETHON_FILE_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_id=%s | error=%s | action=no_second_send", target_id, returned_candidate_id, exc)
@@ -499,7 +515,7 @@ class SenderTelethonHelpers:
             if not messages:
                 return telethon_transport_failed("Пустой список сообщений для Telethon album send").to_reupload_album_result(sent_count=0)
 
-            entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
+            entity, target_is_broadcast_channel = await self._resolve_target_entity_and_broadcast_flag(target_id)
 
             caption_text = ""
             caption_entities = None
@@ -564,6 +580,7 @@ class SenderTelethonHelpers:
                         send_finished_at=send_finished_at,
                         source_message_ids=({int(getattr(m, "id")) for m in messages if getattr(m, "id", None)} if is_self_loop else None),
                         target_thread_id=target_thread_id,
+                        target_is_broadcast_channel=target_is_broadcast_channel,
                     )
                 except Exception as exc:
                     returned_ids = [int(m.id) for m in sent_messages if m and getattr(m, "id", None)]
@@ -679,6 +696,7 @@ class SenderTelethonHelpers:
                     send_finished_at=send_finished_at,
                     source_message_ids=({int(getattr(m, "id")) for m in messages if getattr(m, "id", None)} if is_self_loop else None),
                     target_thread_id=target_thread_id,
+                    target_is_broadcast_channel=target_is_broadcast_channel,
                 )
             except Exception as exc:
                 returned_ids = [int(m.id) for m in sent_messages if m and getattr(m, "id", None)]
