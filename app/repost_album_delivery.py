@@ -10,6 +10,13 @@ from .runtime_utils import run_db
 logger = logging.getLogger("forwarder")
 
 
+def _reaction_applied_or_enqueued(result) -> bool:
+    payload = result.get("result") if isinstance(result, dict) and isinstance(result.get("result"), dict) else result
+    if isinstance(payload, dict):
+        return bool(payload.get("applied") or payload.get("enqueued"))
+    return bool(payload)
+
+
 class RepostAlbumDelivery:
     def __init__(self, owner):
         self.owner = owner
@@ -305,8 +312,20 @@ class RepostAlbumDelivery:
                         verified = verified_retry
 
                 if verified["ok"]:
-                    sent_message_id = verified.get("first_message_id") or copy_result.get("sent_message_id")
-                    await owner._run_post_send_step_safe(
+                    accepted_target_message_ids = normalize_valid_sent_message_ids(verified.get("sent_message_ids") or copy_result.get("sent_message_ids") or [])
+                    if is_self_loop and any(x in set(message_ids) for x in accepted_target_message_ids):
+                        logger.warning(
+                            "SELF_LOOP_SENT_ID_COLLISION | rule_id=%s | delivery_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s | action=reject_as_new_target",
+                            rule.id, (delivery_ids[0] if delivery_ids else None), message_ids, accepted_target_message_ids,
+                        )
+                        return False
+                    sent_message_id = (accepted_target_message_ids[0] if accepted_target_message_ids else None) or verified.get("first_message_id") or copy_result.get("sent_message_id")
+                    if is_self_loop:
+                        logger.info(
+                            "SELF_LOOP_REACTION_TARGET_RESOLVED | rule_id=%s | delivery_id=%s | source_message_ids=%s | accepted_target_message_ids=%s | reaction_target_message_id=%s | method=copy_album",
+                            rule.id, (delivery_ids[0] if delivery_ids else None), message_ids, accepted_target_message_ids, sent_message_id,
+                        )
+                    reaction_result = await owner._run_post_send_step_safe(
                         step_name="reaction_after_copy_album",
                         rule_id=rule.id,
                         delivery_id=delivery_ids[0] if delivery_ids else None,
@@ -316,8 +335,15 @@ class RepostAlbumDelivery:
                             rule=rule,
                             target_id=target_id,
                             sent_message_id=sent_message_id,
+                            source_channel=str(source_channel or ""),
+                            source_message_ids=message_ids,
+                            delivery_id=(delivery_ids[0] if delivery_ids else None),
                         ),
                     )
+                    if is_self_loop and _reaction_applied_or_enqueued(reaction_result):
+                        logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, sent_message_id)
+                    elif is_self_loop:
+                        logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, sent_message_id, reaction_result.get("error"))
 
                     await owner._log_delivery_final_success(
                         rule_id=rule.id,
@@ -703,7 +729,13 @@ class RepostAlbumDelivery:
                     verified = verified_retry
 
             if verified["ok"]:
-                sent_message_ids = verified.get("sent_message_ids") or reupload_result.get("sent_message_ids") or []
+                sent_message_ids = [int(x) for x in (verified.get("sent_message_ids") or reupload_result.get("sent_message_ids") or [])]
+                if is_self_loop and any(x in set(message_ids) for x in sent_message_ids):
+                    logger.warning(
+                        "SELF_LOOP_SENT_ID_COLLISION | rule_id=%s | delivery_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s | action=reject_as_new_target",
+                        rule.id, (delivery_ids[0] if delivery_ids else None), message_ids, sent_message_ids,
+                    )
+                    return False
                 reaction_message_id, reaction_target_reason = await owner._select_reaction_message_id(
                     target_id=target_id,
                     sent_message_ids=sent_message_ids,
@@ -711,14 +743,27 @@ class RepostAlbumDelivery:
                 sent_message_id = (sent_message_ids[0] if sent_message_ids else None) or reupload_result.get("sent_message_id")
 
                 if reaction_message_id:
-                    await owner._add_reaction_for_rule_if_possible(
-                        rule=rule,
-                        target_id=target_id,
-                        sent_message_id=reaction_message_id,
-                        source_channel=str(source_channel or ""),
-                        source_message_ids=message_ids,
-                        delivery_id=(delivery_ids[0] if delivery_ids else None),
-                    )
+                    if is_self_loop:
+                        logger.info(
+                            "SELF_LOOP_REACTION_TARGET_RESOLVED | rule_id=%s | delivery_id=%s | source_message_ids=%s | accepted_target_message_ids=%s | reaction_target_message_id=%s | method=reupload_album",
+                            rule.id, (delivery_ids[0] if delivery_ids else None), message_ids, sent_message_ids, reaction_message_id,
+                        )
+                    try:
+                        reaction_result = await owner._add_reaction_for_rule_if_possible(
+                            rule=rule,
+                            target_id=target_id,
+                            sent_message_id=reaction_message_id,
+                            source_channel=str(source_channel or ""),
+                            source_message_ids=message_ids,
+                            delivery_id=(delivery_ids[0] if delivery_ids else None),
+                        )
+                        if is_self_loop and _reaction_applied_or_enqueued(reaction_result):
+                            logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, reaction_message_id)
+                        elif is_self_loop:
+                            logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_message_id, reaction_result)
+                    except Exception as exc:
+                        if is_self_loop:
+                            logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_message_id, exc)
 
                 await owner._log_delivery_final_success(
                     rule_id=rule.id,
@@ -751,10 +796,49 @@ class RepostAlbumDelivery:
                 return True
 
             if is_self_loop and reupload_candidate_sent_ids:
+                if any(int(x) in set(message_ids) for x in reupload_candidate_sent_ids):
+                    logger.warning(
+                        "SELF_LOOP_SENT_ID_COLLISION | rule_id=%s | delivery_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s | action=reject_as_new_target",
+                        rule.id, (delivery_ids[0] if delivery_ids else None), message_ids, reupload_candidate_sent_ids,
+                    )
+                    return False
                 logger.warning(
                     "SELF_LOOP_ALBUM_ACCEPTED_UNVERIFIED | rule_id=%s | delivery_ids=%s | candidate_sent_message_ids=%s | action=mark_sent_no_second_send",
                     rule.id, delivery_ids, reupload_candidate_sent_ids,
                 )
+                reaction_message_id = int(reupload_candidate_sent_ids[0])
+                logger.info(
+                    "SELF_LOOP_REACTION_TARGET_RESOLVED | rule_id=%s | delivery_id=%s | source_message_ids=%s | accepted_target_message_ids=%s | reaction_target_message_id=%s | method=reupload_album",
+                    rule.id, (delivery_ids[0] if delivery_ids else None), message_ids, reupload_candidate_sent_ids, reaction_message_id,
+                )
+                async def _apply_unverified_album_reaction():
+                    return await owner._add_reaction_for_rule_if_possible(
+                        rule=rule,
+                        target_id=target_id,
+                        sent_message_id=reaction_message_id,
+                        source_channel=str(source_channel or ""),
+                        source_message_ids=message_ids,
+                        delivery_id=(delivery_ids[0] if delivery_ids else None),
+                    )
+
+                if hasattr(owner, "_run_post_send_step_safe"):
+                    reaction_result = await owner._run_post_send_step_safe(
+                        step_name="reaction_after_reupload_album_self_loop_unverified",
+                        rule_id=rule.id,
+                        delivery_id=delivery_ids[0] if delivery_ids else None,
+                        idempotency_key=idempotency_key,
+                        accepted_sent_message_ids=reupload_candidate_sent_ids,
+                        coro_factory=_apply_unverified_album_reaction,
+                    )
+                else:
+                    try:
+                        reaction_result = {"ok": True, "result": await _apply_unverified_album_reaction()}
+                    except Exception as exc:
+                        reaction_result = {"ok": False, "error": str(exc)}
+                if _reaction_applied_or_enqueued(reaction_result):
+                    logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, reaction_message_id)
+                else:
+                    logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_message_id, reaction_result.get("error"))
                 await owner._log_delivery_final_success(
                     rule_id=rule.id, delivery_ids=delivery_ids, final_method="reupload_album_self_loop_unverified",
                     source_channel=source_channel, target_id=target_id, source_message_ids=message_ids,

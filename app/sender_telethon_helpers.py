@@ -1,18 +1,215 @@
 from __future__ import annotations
 
 import logging
+import asyncio
+import json
+import struct
+import tempfile
 from pathlib import Path
 from typing import Any
+
+from telethon.tl import types as tl_types
 
 from .config import settings
 from .sender_primitives import _detect_message_media_kind
 
 logger = logging.getLogger("forwarder")
 
+MAX_TELEGRAM_THUMB_BYTES = 20 * 1024
+MAX_TELEGRAM_THUMB_SIDE = 320
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        result = int(round(float(value)))
+        return result if result > 0 else 0
+    except Exception:
+        return 0
+
 
 class SenderTelethonHelpers:
     def __init__(self, owner: Any):
         self.owner = owner
+
+    def _source_video_attribute(self, message) -> Any | None:
+        document = getattr(getattr(message, "media", None), "document", None)
+        for attr in getattr(document, "attributes", []) or []:
+            if isinstance(attr, tl_types.DocumentAttributeVideo):
+                return attr
+        return None
+
+    async def _probe_video_file(self, file_path: Path) -> dict[str, Any] | None:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "error", "-print_format", "json",
+                "-show_format", "-show_streams", str(file_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await proc.communicate()
+            if proc.returncode != 0:
+                return None
+            data = json.loads(stdout.decode("utf-8", errors="ignore") or "{}")
+            video_stream = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
+            if not video_stream:
+                return None
+            duration = _positive_int(video_stream.get("duration")) or _positive_int((data.get("format") or {}).get("duration"))
+            width = _positive_int(video_stream.get("width"))
+            height = _positive_int(video_stream.get("height"))
+            if not duration or not width or not height:
+                return None
+            return {
+                "duration": duration,
+                "width": width,
+                "height": height,
+                "codec": video_stream.get("codec_name"),
+                "has_video": True,
+            }
+        except Exception as exc:
+            logger.warning("VIDEO_REUPLOAD_METADATA | source=ffprobe | path=%s | error=%s", file_path.name, exc)
+            return None
+
+    def _valid_thumb_file(self, path: Path | None) -> bool:
+        try:
+            if not path or not path.exists() or path.stat().st_size <= 0:
+                return False
+            if path.stat().st_size >= MAX_TELEGRAM_THUMB_BYTES:
+                return False
+            header = path.read_bytes()[:12]
+            if not header.startswith(b"\xff\xd8\xff"):
+                return False
+            width, height = self._jpeg_dimensions(path)
+            return bool(width and height and width <= MAX_TELEGRAM_THUMB_SIDE and height <= MAX_TELEGRAM_THUMB_SIDE)
+        except Exception:
+            return False
+
+    def _jpeg_dimensions(self, path: Path) -> tuple[int, int]:
+        try:
+            data = path.read_bytes()
+            pos = 2
+            while pos + 9 < len(data):
+                if data[pos] != 0xFF:
+                    pos += 1
+                    continue
+                marker = data[pos + 1]
+                pos += 2
+                while marker == 0xFF and pos < len(data):
+                    marker = data[pos]
+                    pos += 1
+                if marker in {0xD8, 0xD9, 0x01} or 0xD0 <= marker <= 0xD7:
+                    continue
+                if pos + 2 > len(data):
+                    break
+                segment_len = struct.unpack(">H", data[pos:pos + 2])[0]
+                if segment_len < 2 or pos + segment_len > len(data):
+                    break
+                if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+                    if segment_len >= 7:
+                        height = struct.unpack(">H", data[pos + 3:pos + 5])[0]
+                        width = struct.unpack(">H", data[pos + 5:pos + 7])[0]
+                        return int(width), int(height)
+                    break
+                pos += segment_len
+            return 0, 0
+        except Exception:
+            return 0, 0
+
+    def _select_source_photo_thumb(self, thumbs: list[Any]) -> Any | None:
+        photo_thumbs = [
+            thumb for thumb in (thumbs or [])
+            if isinstance(thumb, tl_types.PhotoSize)
+            and not isinstance(thumb, (tl_types.VideoSize, tl_types.PhotoPathSize))
+        ]
+        if not photo_thumbs:
+            return None
+        return max(photo_thumbs, key=lambda t: (_positive_int(getattr(t, "w", 0)) * _positive_int(getattr(t, "h", 0)), _positive_int(getattr(t, "size", 0))))
+
+    async def _download_source_video_thumb(self, message) -> tuple[Path | None, str]:
+        document = getattr(getattr(message, "media", None), "document", None)
+        thumbs = list(getattr(document, "thumbs", []) or [])
+        selected_thumb = self._select_source_photo_thumb(thumbs)
+        if not selected_thumb:
+            return None, "none"
+        tmp = Path(tempfile.NamedTemporaryFile(prefix="telegram_video_thumb_", suffix=".jpg", delete=False).name)
+        try:
+            downloaded = await self.owner.telethon.download_media(message, file=str(tmp), thumb=selected_thumb)
+            path = Path(downloaded) if downloaded else tmp
+            valid = self._valid_thumb_file(path)
+            logger.info("VIDEO_REUPLOAD_THUMB | source=telegram | path=%s | valid=%s", path, valid)
+            if valid:
+                return path, "telegram"
+            path.unlink(missing_ok=True)
+            return None, "none"
+        except Exception as exc:
+            logger.warning("VIDEO_REUPLOAD_THUMB | source=telegram | path=%s | valid=False | error=%s", tmp, exc)
+            tmp.unlink(missing_ok=True)
+            return None, "none"
+
+    async def _generate_video_thumb(self, file_path: Path, duration: int) -> tuple[Path | None, str, float | None]:
+        seek_seconds = 1.0
+        if duration > 10:
+            seek_seconds = 2.0
+        elif duration > 1:
+            seek_seconds = max(0.5, min(float(duration) / 2.0, float(duration) - 0.1))
+        tmp = Path(tempfile.NamedTemporaryFile(prefix="generated_video_thumb_", suffix=".jpg", delete=False).name)
+        try:
+            last_error = ""
+            for quality in (5, 8, 12, 16, 20):
+                tmp.unlink(missing_ok=True)
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y", "-ss", f"{seek_seconds:.2f}", "-i", str(file_path),
+                    "-frames:v", "1", "-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+                    "-q:v", str(quality), str(tmp),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _stdout, stderr = await proc.communicate()
+                last_error = stderr.decode("utf-8", errors="ignore")[-300:]
+                valid = proc.returncode == 0 and self._valid_thumb_file(tmp)
+                if valid:
+                    logger.info("VIDEO_REUPLOAD_THUMB | source=generated_ffmpeg | seek_seconds=%s | path=%s | valid=True", seek_seconds, tmp)
+                    return tmp, "generated_ffmpeg", seek_seconds
+            tmp.unlink(missing_ok=True)
+            logger.warning("VIDEO_REUPLOAD_THUMB | source=none | error=%s", last_error)
+            return None, "none", seek_seconds
+        except Exception as exc:
+            tmp.unlink(missing_ok=True)
+            logger.warning("VIDEO_REUPLOAD_THUMB | source=none | error=%s", exc)
+            return None, "none", seek_seconds
+
+    async def _build_video_reupload_kwargs(self, *, message, file_path: Path, force_document: bool) -> tuple[list[Any] | None, Path | None, str, dict[str, int]]:
+        if force_document:
+            return None, None, "none", {}
+        source_attr = self._source_video_attribute(message)
+        source_meta = {
+            "duration": _positive_int(getattr(source_attr, "duration", 0)),
+            "width": _positive_int(getattr(source_attr, "w", 0)),
+            "height": _positive_int(getattr(source_attr, "h", 0)),
+        } if source_attr else {}
+        ffprobe_meta = await self._probe_video_file(file_path)
+        meta = ffprobe_meta or source_meta
+        meta_source = "ffprobe" if ffprobe_meta else "telegram_attribute"
+        if not meta or not (meta.get("duration") and meta.get("width") and meta.get("height")):
+            return None, None, "none", {}
+        logger.info(
+            "VIDEO_REUPLOAD_METADATA | source=%s | duration=%s | width=%s | height=%s | supports_streaming=%s",
+            meta_source, meta["duration"], meta["width"], meta["height"], True,
+        )
+        attr_kwargs = {
+            "duration": int(meta["duration"]),
+            "w": int(meta["width"]),
+            "h": int(meta["height"]),
+            "supports_streaming": True,
+        }
+        if source_attr is not None:
+            for name in ("round_message", "nosound"):
+                if hasattr(source_attr, name):
+                    attr_kwargs[name] = bool(getattr(source_attr, name))
+        attributes = [tl_types.DocumentAttributeVideo(**attr_kwargs)]
+        thumb_path, thumb_source = await self._download_source_video_thumb(message)
+        if not thumb_path:
+            thumb_path, thumb_source, _seek = await self._generate_video_thumb(file_path, int(meta["duration"]))
+        return attributes, thumb_path, thumb_source, {"duration": int(meta["duration"]), "width": int(meta["width"]), "height": int(meta["height"])}
 
     async def send_text_via_telethon(
         self,
@@ -135,9 +332,20 @@ class SenderTelethonHelpers:
             )
             return None
 
+        temp_thumb_path: Path | None = None
+        video_attributes = None
+        thumb_source = "none"
+        video_meta: dict[str, int] = {}
+        if media_kind == "video" and file_path and Path(file_path).exists() and not force_document:
+            video_attributes, temp_thumb_path, thumb_source, video_meta = await self._build_video_reupload_kwargs(
+                message=message,
+                file_path=Path(file_path),
+                force_document=force_document,
+            )
+
         try:
             logger.info(
-                "TELETHON_FILE_SEND | START_FILE_PATH | target=%s | thread=%s | file=%s | media_kind=%s | caption_len=%s | entities_in=%s | entities_out=%s | supports_streaming=%s",
+                "TELETHON_FILE_SEND | START_FILE_PATH | target=%s | thread=%s | file=%s | media_kind=%s | caption_len=%s | entities_in=%s | entities_out=%s | duration=%s | width=%s | height=%s | attributes=%s | thumb_source=%s | thumb_path=%s | supports_streaming=%s",
                 target_id,
                 target_thread_id,
                 file_path.name,
@@ -145,6 +353,12 @@ class SenderTelethonHelpers:
                 len(raw_text or ""),
                 len(raw_entities or []),
                 len(formatting_entities or []),
+                video_meta.get("duration"),
+                video_meta.get("width"),
+                video_meta.get("height"),
+                len(video_attributes or []),
+                thumb_source,
+                str(temp_thumb_path) if temp_thumb_path else None,
                 supports_streaming,
             )
 
@@ -157,6 +371,12 @@ class SenderTelethonHelpers:
                 "link_preview": False,
                 "supports_streaming": supports_streaming,
             }
+            if video_attributes:
+                send_kwargs["attributes"] = video_attributes
+                send_kwargs["force_document"] = False
+                send_kwargs["supports_streaming"] = True
+            if temp_thumb_path:
+                send_kwargs["thumb"] = str(temp_thumb_path)
 
             if target_thread_id is not None:
                 send_kwargs["comment_to"] = int(target_thread_id)
@@ -165,11 +385,13 @@ class SenderTelethonHelpers:
             sent_id = int(sent.id) if sent else None
 
             logger.info(
-                "TELETHON_FILE_SEND | OK_FILE_PATH | target=%s | thread=%s | file=%s | sent_message_id=%s",
+                "TELETHON_FILE_SEND | OK_FILE_PATH | target=%s | thread=%s | file=%s | sent_message_id=%s | duration=%s | thumb_used=%s",
                 target_id,
                 target_thread_id,
                 file_path.name,
                 sent_id,
+                video_meta.get("duration"),
+                bool(temp_thumb_path),
             )
             return sent_id
 
@@ -182,6 +404,12 @@ class SenderTelethonHelpers:
                 exc,
             )
             return None
+        finally:
+            if temp_thumb_path:
+                try:
+                    temp_thumb_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     async def send_album_via_telethon(
         self,
@@ -476,3 +704,59 @@ class SenderTelethonHelpers:
                 "sent_message_ids": [],
             }
 
+    async def verify_self_loop_video_metadata(
+        self,
+        *,
+        rule_id,
+        source_message_id,
+        target_id,
+        sent_message_id,
+    ) -> None:
+        try:
+            entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
+            msg = await self.owner.telethon.get_messages(entity, ids=int(sent_message_id))
+            if not msg or int(getattr(msg, "id", 0) or 0) != int(sent_message_id):
+                logger.warning(
+                    "SELF_LOOP_VIDEO_METADATA_VERIFY_WARNING | rule_id=%s | sent_message_id=%s | reason=message_missing",
+                    rule_id,
+                    sent_message_id,
+                )
+                return
+            attr = self._source_video_attribute(msg)
+            if not attr:
+                logger.warning(
+                    "SELF_LOOP_VIDEO_METADATA_VERIFY_WARNING | rule_id=%s | sent_message_id=%s | reason=attribute_missing",
+                    rule_id,
+                    sent_message_id,
+                )
+                return
+            duration = _positive_int(getattr(attr, "duration", 0))
+            width = _positive_int(getattr(attr, "w", 0))
+            height = _positive_int(getattr(attr, "h", 0))
+            thumbs = len(getattr(getattr(getattr(msg, "media", None), "document", None), "thumbs", []) or [])
+            if not duration or not width or not height:
+                reason = "duration_zero" if not duration else "size_zero"
+                logger.warning(
+                    "SELF_LOOP_VIDEO_METADATA_VERIFY_WARNING | rule_id=%s | sent_message_id=%s | reason=%s",
+                    rule_id,
+                    sent_message_id,
+                    reason,
+                )
+                return
+            logger.info(
+                "SELF_LOOP_VIDEO_METADATA_VERIFY_OK | rule_id=%s | source_message_id=%s | sent_message_id=%s | duration=%s | width=%s | height=%s | thumbs=%s",
+                rule_id,
+                source_message_id,
+                sent_message_id,
+                duration,
+                width,
+                height,
+                thumbs,
+            )
+        except Exception as exc:
+            logger.warning(
+                "SELF_LOOP_VIDEO_METADATA_VERIFY_WARNING | rule_id=%s | sent_message_id=%s | reason=verify_error | error=%s",
+                rule_id,
+                sent_message_id,
+                exc,
+            )

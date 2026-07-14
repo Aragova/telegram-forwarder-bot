@@ -9,6 +9,13 @@ from .telegram_send_result import telegram_send_result_from_raw
 logger = logging.getLogger("forwarder")
 
 
+def _reaction_applied_or_enqueued(result) -> bool:
+    payload = result.get("result") if isinstance(result, dict) and isinstance(result.get("result"), dict) else result
+    if isinstance(payload, dict):
+        return bool(payload.get("applied") or payload.get("enqueued"))
+    return bool(payload)
+
+
 class RepostSingleDelivery:
     def __init__(self, owner):
         self.owner = owner
@@ -211,8 +218,22 @@ class RepostSingleDelivery:
             )
 
             if valid_copy_sent_ids:
-                candidate_sent_message_ids = valid_copy_sent_ids
-                authoritative_sent_message_id = int(valid_copy_sent_ids[0])
+                accepted_target_message_ids = [int(x) for x in valid_copy_sent_ids]
+                if is_self_loop and any(x in set(source_message_ids) for x in accepted_target_message_ids):
+                    logger.warning(
+                        "SELF_LOOP_SENT_ID_COLLISION | rule_id=%s | delivery_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s | action=reject_as_new_target",
+                        rule.id, delivery_id, source_message_ids, accepted_target_message_ids,
+                    )
+                    await run_db(owner._mark_delivery_faulty_sync, delivery_id, "self_loop_sent_id_collision")
+                    return False
+                candidate_sent_message_ids = accepted_target_message_ids
+                authoritative_sent_message_id = int(accepted_target_message_ids[0])
+                reaction_target_message_id = authoritative_sent_message_id
+                if is_self_loop:
+                    logger.info(
+                        "SELF_LOOP_REACTION_TARGET_RESOLVED | rule_id=%s | delivery_id=%s | source_message_ids=%s | accepted_target_message_ids=%s | reaction_target_message_id=%s | method=copy_single",
+                        rule.id, delivery_id, source_message_ids, accepted_target_message_ids, reaction_target_message_id,
+                    )
                 reaction_result = await owner._run_post_send_step_safe(
                     step_name="reaction_after_copy_single",
                     rule_id=rule.id,
@@ -228,8 +249,12 @@ class RepostSingleDelivery:
                         delivery_id=delivery_id,
                     ),
                 )
-                if not reaction_result.get("ok"):
+                if not reaction_result.get("ok") or not _reaction_applied_or_enqueued(reaction_result):
                     post_send_warnings.append("reaction_failed_after_accepted")
+                    if is_self_loop:
+                        logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_target_message_id, reaction_result.get("error"))
+                elif is_self_loop:
+                    logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, reaction_target_message_id)
 
                 await owner._log_delivery_final_success(
                     rule_id=rule.id,
@@ -453,15 +478,48 @@ class RepostSingleDelivery:
 
         if valid_sent_message_ids:
             logger.info("REUPLOAD_SINGLE_TARGET_VERIFY_OK | rule_id=%s | delivery_id=%s | source_channel=%s | source_message_id=%s | target_id=%s | valid_sent_message_ids=%s", rule.id, delivery_id, source_channel, message_id, target_id, valid_sent_message_ids)
-            authoritative_sent_message_id = int(valid_sent_message_ids[0])
-            await owner._add_reaction_for_rule_if_possible(
-                rule=rule,
-                target_id=target_id,
-                sent_message_id=authoritative_sent_message_id,
-                source_channel=str(source_channel or ""),
-                source_message_ids=source_message_ids,
-                delivery_id=delivery_id,
-            )
+            accepted_target_message_ids = [int(x) for x in valid_sent_message_ids]
+            if is_self_loop and any(x in set(source_message_ids) for x in accepted_target_message_ids):
+                logger.warning(
+                    "SELF_LOOP_SENT_ID_COLLISION | rule_id=%s | delivery_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s | action=reject_as_new_target",
+                    rule.id, delivery_id, source_message_ids, accepted_target_message_ids,
+                )
+                await run_db(owner._mark_delivery_faulty_sync, delivery_id, "self_loop_sent_id_collision")
+                return False
+            authoritative_sent_message_id = int(accepted_target_message_ids[0])
+            if is_self_loop and hasattr(owner, "_verify_self_loop_video_metadata"):
+                await owner._run_post_send_step_safe(
+                    step_name="self_loop_video_metadata_verify",
+                    rule_id=rule.id,
+                    delivery_id=delivery_id,
+                    idempotency_key=idempotency_key,
+                    accepted_sent_message_ids=accepted_target_message_ids,
+                    coro_factory=lambda: owner._verify_self_loop_video_metadata(
+                        rule_id=rule.id, source_message_id=message_id, target_id=target_id, sent_message_id=authoritative_sent_message_id,
+                    ),
+                )
+            reaction_target_message_id = authoritative_sent_message_id
+            if is_self_loop:
+                logger.info(
+                    "SELF_LOOP_REACTION_TARGET_RESOLVED | rule_id=%s | delivery_id=%s | source_message_ids=%s | accepted_target_message_ids=%s | reaction_target_message_id=%s | method=reupload_single",
+                    rule.id, delivery_id, source_message_ids, accepted_target_message_ids, reaction_target_message_id,
+                )
+            try:
+                reaction_result = await owner._add_reaction_for_rule_if_possible(
+                    rule=rule,
+                    target_id=target_id,
+                    sent_message_id=authoritative_sent_message_id,
+                    source_channel=str(source_channel or ""),
+                    source_message_ids=source_message_ids,
+                    delivery_id=delivery_id,
+                )
+                if is_self_loop and _reaction_applied_or_enqueued(reaction_result):
+                    logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, reaction_target_message_id)
+                elif is_self_loop:
+                    logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_target_message_id, reaction_result)
+            except Exception as exc:
+                if is_self_loop:
+                    logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_target_message_id, exc)
 
             await owner._log_delivery_final_success(
                 rule_id=rule.id,
@@ -496,7 +554,20 @@ class RepostSingleDelivery:
                 "SELF_LOOP_REUPLOAD_ACCEPTED_UNVERIFIED | rule_id=%s | delivery_id=%s | source_message_id=%s | candidate_sent_message_ids=%s | action=mark_sent_no_second_send",
                 rule.id, delivery_id, message_id, candidate_sent_message_ids,
             )
-            authoritative_sent_message_id = int(candidate_sent_message_ids[0])
+            accepted_target_message_ids = [int(x) for x in candidate_sent_message_ids]
+            if any(x in set(source_message_ids) for x in accepted_target_message_ids):
+                logger.warning(
+                    "SELF_LOOP_SENT_ID_COLLISION | rule_id=%s | delivery_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s | action=reject_as_new_target",
+                    rule.id, delivery_id, source_message_ids, accepted_target_message_ids,
+                )
+                await run_db(owner._mark_delivery_faulty_sync, delivery_id, "self_loop_sent_id_collision")
+                return False
+            authoritative_sent_message_id = int(accepted_target_message_ids[0])
+            reaction_target_message_id = authoritative_sent_message_id
+            logger.info(
+                "SELF_LOOP_REACTION_TARGET_RESOLVED | rule_id=%s | delivery_id=%s | source_message_ids=%s | accepted_target_message_ids=%s | reaction_target_message_id=%s | method=reupload_single",
+                rule.id, delivery_id, source_message_ids, accepted_target_message_ids, reaction_target_message_id,
+            )
             await owner._run_post_send_step_safe(
                 step_name="reaction_after_reupload_single_self_loop_unverified",
                 rule_id=rule.id,
@@ -504,7 +575,7 @@ class RepostSingleDelivery:
                 idempotency_key=idempotency_key,
                 accepted_sent_message_ids=candidate_sent_message_ids,
                 coro_factory=lambda: owner._add_reaction_for_rule_if_possible(
-                    rule=rule, target_id=target_id, sent_message_id=authoritative_sent_message_id,
+                    rule=rule, target_id=target_id, sent_message_id=reaction_target_message_id,
                     source_channel=str(source_channel or ""), source_message_ids=source_message_ids, delivery_id=delivery_id,
                 ),
             )

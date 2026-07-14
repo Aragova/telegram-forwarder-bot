@@ -222,7 +222,7 @@ class SenderService:
         status: str | None = None,
         error_text: str | None = None,
         extra: dict | None = None,
-    ) -> None:
+    ) -> dict:
         from .sender_video_logging_helpers import SenderVideoLoggingHelpers
 
         return SenderVideoLoggingHelpers(self).schedule_video_event_log(
@@ -271,7 +271,7 @@ class SenderService:
         sent_message_ids: list[int] | None = None,
         target_id: str | None = None,
         delivery_method: str | None = None,
-    ) -> None:
+    ) -> dict:
         from .sender_state_sync_helpers import SenderStateSyncHelpers
 
         return SenderStateSyncHelpers(self).mark_delivery_sent_sync(
@@ -964,6 +964,23 @@ class SenderService:
             target_grouped_id=target_grouped_id,
         )
 
+    async def _verify_self_loop_video_metadata(
+        self,
+        *,
+        rule_id,
+        source_message_id,
+        target_id,
+        sent_message_id,
+    ) -> None:
+        from .sender_telethon_helpers import SenderTelethonHelpers
+
+        return await SenderTelethonHelpers(self).verify_self_loop_video_metadata(
+            rule_id=rule_id,
+            source_message_id=source_message_id,
+            target_id=target_id,
+            sent_message_id=sent_message_id,
+        )
+
     async def _try_add_normal_reaction(
         self,
         client,
@@ -1023,7 +1040,7 @@ class SenderService:
         source_message_ids: list[int] | None = None,
         delivery_id: int | None = None,
         max_age_seconds: int = 300,
-    ) -> None:
+    ) -> dict:
         from .reaction_delivery import ReactionDelivery
 
         return await ReactionDelivery(self)._add_reaction_for_rule_if_possible(
