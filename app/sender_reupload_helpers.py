@@ -9,6 +9,7 @@ from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, Inpu
 from .config import settings
 from . import sender_primitives as _sender_primitives
 from .telegram_send_result import telegram_send_result_from_raw
+from .telethon_authoritative_resolver import TelethonSendOutcome, telethon_transport_failed, telethon_not_attempted
 
 logger = logging.getLogger("forwarder")
 
@@ -65,7 +66,7 @@ class SenderReuploadHelpers:
                 "error_text": str(exc),
             }
 
-    async def reupload_album(self, messages, target_id, target_thread_id, post_rows: list[dict] | None = None):
+    async def reupload_album(self, messages, target_id, target_thread_id, post_rows: list[dict] | None = None, is_self_loop: bool = False):
         downloaded_paths: list[Path] = []
 
         try:
@@ -89,6 +90,7 @@ class SenderReuploadHelpers:
                 target_id=target_id,
                 target_thread_id=target_thread_id,
                 post_rows=post_rows,
+                is_self_loop=is_self_loop,
             )
 
             logger.info(
@@ -261,7 +263,7 @@ class SenderReuploadHelpers:
                 except Exception:
                     pass
 
-    async def reupload_message(self, message, target_id, target_thread_id, post_row: dict | None = None):
+    async def reupload_message(self, message, target_id, target_thread_id, post_row: dict | None = None, is_self_loop: bool = False) -> TelethonSendOutcome:
         content = self.owner._content_from_message_or_post(message=message, post_row=post_row)
         raw_text, raw_entities = self.owner._build_text_and_entities_from_content(content)
 
@@ -274,22 +276,20 @@ class SenderReuploadHelpers:
                 len(raw_entities or []),
             )
 
-            sent_message_id = await self.owner._send_text_via_telethon(
+            telethon_outcome = await self.owner._send_text_via_telethon(
                 target_id=target_id,
                 target_thread_id=target_thread_id,
                 text=raw_text,
                 entities=raw_entities,
             )
-            if sent_message_id:
-                logger.info(
-                    "REUPLOAD_MESSAGE | TELETHON_TEXT_USED | sent_message_id=%s",
-                    sent_message_id,
-                )
-                return sent_message_id
-            if getattr(self.owner, "_telethon_send_accepted_unresolved", False):
-                self.owner._telethon_send_accepted_unresolved = False
-                logger.warning("REUPLOAD_MESSAGE | TELETHON_TEXT_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
-                return None
+            if isinstance(telethon_outcome, int) and telethon_outcome > 0:
+                return TelethonSendOutcome(True, True, True, int(telethon_outcome), [int(telethon_outcome)], resolution_method="legacy_telethon_helper")
+            if getattr(telethon_outcome, "transport_accepted", False):
+                if telethon_outcome.authoritative_resolved:
+                    logger.info("REUPLOAD_MESSAGE | TELETHON_TEXT_USED | sent_message_id=%s", telethon_outcome.authoritative_message_id)
+                else:
+                    logger.warning("REUPLOAD_MESSAGE | TELETHON_TEXT_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
+                return telethon_outcome
 
             html_text = _sender_primitives._prepare_html_text(raw_text)
             if html_text:
@@ -301,19 +301,16 @@ class SenderReuploadHelpers:
                     parse_mode="HTML",
                     disable_web_page_preview=True,
                 )
-                logger.info(
-                    "REUPLOAD_MESSAGE | BOTAPI_TEXT_FALLBACK | OK | sent_message_id=%s",
-                    sent.message_id,
-                )
-                return sent.message_id
+                logger.info("REUPLOAD_MESSAGE | BOTAPI_TEXT_FALLBACK | OK | sent_message_id=%s", sent.message_id)
+                return TelethonSendOutcome(True, True, True, int(sent.message_id), [int(sent.message_id)], resolution_method="botapi_text_fallback")
 
             logger.warning("REUPLOAD_MESSAGE | TEXT_ONLY | ALL_METHODS_FAILED")
-            return None
+            return telethon_outcome if isinstance(telethon_outcome, TelethonSendOutcome) else telethon_not_attempted("text_only_all_methods_failed")
 
         file_path = await self.owner.telethon.download_media(message, file=str(settings.media_cache_path))
         if not file_path:
             logger.warning("REUPLOAD_MESSAGE | DOWNLOAD_FAILED")
-            return None
+            return telethon_transport_failed("download_failed_before_send")
 
         try:
             path = Path(file_path)
@@ -330,24 +327,23 @@ class SenderReuploadHelpers:
                 len(raw_entities or []),
             )
 
-            sent_message_id = await self.owner._send_file_via_telethon(
+            telethon_outcome = await self.owner._send_file_via_telethon(
                 target_id=target_id,
                 target_thread_id=target_thread_id,
                 message=message,
                 file_path=path,
                 force_document=not (mime.startswith("image/") or mime.startswith("video/")),
                 post_row=post_row,
+                is_self_loop=is_self_loop,
             )
-            if sent_message_id:
-                logger.info(
-                    "REUPLOAD_MESSAGE | TELETHON_FILE_USED | sent_message_id=%s",
-                    sent_message_id,
-                )
-                return sent_message_id
-            if getattr(self.owner, "_telethon_send_accepted_unresolved", False):
-                self.owner._telethon_send_accepted_unresolved = False
-                logger.warning("REUPLOAD_MESSAGE | TELETHON_FILE_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
-                return None
+            if isinstance(telethon_outcome, int) and telethon_outcome > 0:
+                return TelethonSendOutcome(True, True, True, int(telethon_outcome), [int(telethon_outcome)], resolution_method="legacy_telethon_helper")
+            if getattr(telethon_outcome, "transport_accepted", False):
+                if telethon_outcome.authoritative_resolved:
+                    logger.info("REUPLOAD_MESSAGE | TELETHON_FILE_USED | sent_message_id=%s", telethon_outcome.authoritative_message_id)
+                else:
+                    logger.warning("REUPLOAD_MESSAGE | TELETHON_FILE_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
+                return telethon_outcome
 
             html_text = _sender_primitives._prepare_html_text(raw_text)
             input_file = FSInputFile(path)
@@ -380,11 +376,8 @@ class SenderReuploadHelpers:
                     parse_mode="HTML" if html_text else None,
                 )
 
-            logger.info(
-                "REUPLOAD_MESSAGE | BOTAPI_MEDIA_FALLBACK | OK | sent_message_id=%s",
-                sent.message_id,
-            )
-            return sent.message_id
+            logger.info("REUPLOAD_MESSAGE | BOTAPI_MEDIA_FALLBACK | OK | sent_message_id=%s", sent.message_id)
+            return TelethonSendOutcome(True, True, True, int(sent.message_id), [int(sent.message_id)], resolution_method="botapi_media_fallback")
 
         finally:
             try:

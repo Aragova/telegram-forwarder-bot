@@ -760,7 +760,7 @@ class SenderService:
         target_thread_id,
         text: str,
         entities,
-    ) -> int | None:
+    ):
         from .sender_telethon_helpers import SenderTelethonHelpers
 
         return await SenderTelethonHelpers(self).send_text_via_telethon(
@@ -779,17 +779,21 @@ class SenderService:
         file_path: Path | None = None,
         force_document: bool = False,
         post_row: dict | None = None,
-    ) -> int | None:
+        is_self_loop: bool = False,
+    ):
         from .sender_telethon_helpers import SenderTelethonHelpers
 
-        return await SenderTelethonHelpers(self).send_file_via_telethon(
-            target_id=target_id,
-            target_thread_id=target_thread_id,
-            message=message,
-            file_path=file_path,
-            force_document=force_document,
-            post_row=post_row,
-        )
+        kwargs = {
+            "target_id": target_id,
+            "target_thread_id": target_thread_id,
+            "message": message,
+            "file_path": file_path,
+            "force_document": force_document,
+            "post_row": post_row,
+        }
+        if is_self_loop:
+            kwargs["is_self_loop"] = True
+        return await SenderTelethonHelpers(self).send_file_via_telethon(**kwargs)
 
     async def _send_album_via_telethon(
         self,
@@ -798,15 +802,14 @@ class SenderService:
         target_id,
         target_thread_id,
         post_rows: list[dict] | None = None,
+        is_self_loop: bool = False,
     ) -> dict:
         from .sender_telethon_helpers import SenderTelethonHelpers
 
-        return await SenderTelethonHelpers(self).send_album_via_telethon(
-            messages=messages,
-            target_id=target_id,
-            target_thread_id=target_thread_id,
-            post_rows=post_rows,
-        )
+        kwargs = {"messages": messages, "target_id": target_id, "target_thread_id": target_thread_id, "post_rows": post_rows}
+        if is_self_loop:
+            kwargs["is_self_loop"] = True
+        return await SenderTelethonHelpers(self).send_album_via_telethon(**kwargs)
 
     def _build_video_stage_logger(
         self,
@@ -1702,15 +1705,13 @@ class SenderService:
             post_rows=post_rows,
         )
 
-    async def _reupload_album(self, messages, target_id, target_thread_id, post_rows: list[dict] | None = None):
+    async def _reupload_album(self, messages, target_id, target_thread_id, post_rows: list[dict] | None = None, is_self_loop: bool = False):
         from .sender_reupload_helpers import SenderReuploadHelpers
 
-        return await SenderReuploadHelpers(self).reupload_album(
-            messages,
-            target_id,
-            target_thread_id,
-            post_rows=post_rows,
-        )
+        kwargs = {"post_rows": post_rows}
+        if is_self_loop:
+            kwargs["is_self_loop"] = True
+        return await SenderReuploadHelpers(self).reupload_album(messages, target_id, target_thread_id, **kwargs)
 
     async def _fetch_message(self, source_channel, message_id):
         from .sender_fetch_download_helpers import SenderFetchDownloadHelpers
@@ -1743,15 +1744,13 @@ class SenderService:
             source_message_id=source_message_id,
         )
 
-    async def _reupload_message(self, message, target_id, target_thread_id, post_row: dict | None = None):
+    async def _reupload_message(self, message, target_id, target_thread_id, post_row: dict | None = None, is_self_loop: bool = False):
         from .sender_reupload_helpers import SenderReuploadHelpers
 
-        return await SenderReuploadHelpers(self).reupload_message(
-            message,
-            target_id,
-            target_thread_id,
-            post_row=post_row,
-        )
+        kwargs = {"post_row": post_row}
+        if is_self_loop:
+            kwargs["is_self_loop"] = True
+        return await SenderReuploadHelpers(self).reupload_message(message, target_id, target_thread_id, **kwargs)
 
     async def execute_repost_campaign_send_copy_from_job(self, *, copy_id: int, **kwargs) -> dict:
         from .sender_campaign_copy_helpers import SenderCampaignCopyHelpers

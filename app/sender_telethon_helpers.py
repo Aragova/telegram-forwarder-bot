@@ -13,7 +13,7 @@ from telethon.tl import types as tl_types
 
 from .config import settings
 from .sender_primitives import _detect_message_media_kind
-from .telethon_authoritative_resolver import TelethonAuthoritativeMessageResolver
+from .telethon_authoritative_resolver import TelethonAuthoritativeMessageResolver, TelethonSendOutcome, telethon_transport_failed
 
 logger = logging.getLogger("forwarder")
 
@@ -220,36 +220,42 @@ class SenderTelethonHelpers:
         target_thread_id,
         text: str,
         entities,
-    ) -> int | None:
+    ) -> TelethonSendOutcome:
+        entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
+        formatting_entities = self.owner._clone_telethon_entities(entities, text)
+
+        logger.info(
+            "TELETHON_TEXT_SEND | START | target=%s | thread=%s | text_len=%s | entities_in=%s | entities_out=%s",
+            target_id,
+            target_thread_id,
+            len(text or ""),
+            len(entities or []),
+            len(formatting_entities or []),
+        )
+
+        send_kwargs = {
+            "entity": entity,
+            "message": text or "",
+            "formatting_entities": formatting_entities or None,
+            "link_preview": False,
+        }
+
+        if target_thread_id is not None:
+            send_kwargs["comment_to"] = int(target_thread_id)
+
+        resolver = TelethonAuthoritativeMessageResolver(self.owner.telethon)
+        before_max_message_id = await resolver.get_before_max_message_id(entity, target_id)
+        send_started_at = datetime.now(timezone.utc)
         try:
-            entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
-            formatting_entities = self.owner._clone_telethon_entities(entities, text)
-
-            logger.info(
-                "TELETHON_TEXT_SEND | START | target=%s | thread=%s | text_len=%s | entities_in=%s | entities_out=%s",
-                target_id,
-                target_thread_id,
-                len(text or ""),
-                len(entities or []),
-                len(formatting_entities or []),
-            )
-
-            send_kwargs = {
-                "entity": entity,
-                "message": text or "",
-                "formatting_entities": formatting_entities or None,
-                "link_preview": False,
-            }
-
-            if target_thread_id is not None:
-                send_kwargs["comment_to"] = int(target_thread_id)
-
-            resolver = TelethonAuthoritativeMessageResolver(self.owner.telethon)
-            before_max_message_id = await resolver.get_before_max_message_id(entity, target_id)
-            send_started_at = datetime.now(timezone.utc)
             sent = await self.owner.telethon.send_message(**send_kwargs)
-            send_finished_at = datetime.now(timezone.utc)
-            returned_candidate_id = int(sent.id) if sent else None
+        except Exception as exc:
+            logger.warning("TELETHON_TEXT_SEND | FAILED | target=%s | thread=%s | error=%s", target_id, target_thread_id, exc)
+            return telethon_transport_failed(str(exc))
+        send_finished_at = datetime.now(timezone.utc)
+        returned_candidate_id = int(sent.id) if sent else None
+        if not sent:
+            return telethon_transport_failed("telethon_send_message_returned_empty")
+        try:
             resolved = await resolver.resolve_authoritative_single_message(
                 target_entity=entity,
                 target_id=target_id,
@@ -259,27 +265,15 @@ class SenderTelethonHelpers:
                 send_started_at=send_started_at,
                 send_finished_at=send_finished_at,
             )
-            sent_id = resolved.authoritative_message_id if resolved.ok else None
-            self.owner._telethon_send_accepted_unresolved = bool(sent and not resolved.ok)
-
-            logger.info(
-                "TELETHON_TEXT_SEND | OK | target=%s | thread=%s | returned_candidate_id=%s | sent_message_id=%s | resolution_method=%s",
-                target_id,
-                target_thread_id,
-                returned_candidate_id,
-                sent_id,
-                resolved.resolution_method,
-            )
-            return sent_id
-
         except Exception as exc:
-            logger.warning(
-                "TELETHON_TEXT_SEND | FAILED | target=%s | thread=%s | error=%s",
-                target_id,
-                target_thread_id,
-                exc,
-            )
-            return None
+            logger.warning("TELETHON_TEXT_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_id=%s | error=%s | action=no_second_send", target_id, returned_candidate_id, exc)
+            return TelethonSendOutcome(True, True, False, None, [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method="resolver_exception", error_text=str(exc))
+        sent_id = resolved.authoritative_message_id if resolved.ok else None
+        logger.info(
+            "TELETHON_TEXT_SEND | OK | target=%s | thread=%s | returned_candidate_id=%s | sent_message_id=%s | resolution_method=%s",
+            target_id, target_thread_id, returned_candidate_id, sent_id, resolved.resolution_method,
+        )
+        return TelethonSendOutcome(True, True, bool(resolved.ok), sent_id, [sent_id] if sent_id else [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method=resolved.resolution_method, error_text=resolved.error_text)
 
     async def send_file_via_telethon(
         self,
@@ -290,7 +284,8 @@ class SenderTelethonHelpers:
         file_path: Path | None = None,
         force_document: bool = False,
         post_row: dict | None = None,
-    ) -> int | None:
+        is_self_loop: bool = False,
+    ) -> TelethonSendOutcome:
         content = self.owner._content_from_message_or_post(message=message, post_row=post_row)
         raw_text, raw_entities = self.owner._build_text_and_entities_from_content(content)
         formatting_entities = self.owner._clone_telethon_entities(raw_entities, raw_text)
@@ -327,22 +322,30 @@ class SenderTelethonHelpers:
             resolver = TelethonAuthoritativeMessageResolver(self.owner.telethon)
             before_max_message_id = await resolver.get_before_max_message_id(entity, target_id)
             send_started_at = datetime.now(timezone.utc)
-            sent = await self.owner.telethon.send_file(**send_kwargs)
+            try:
+                sent = await self.owner.telethon.send_file(**send_kwargs)
+            except Exception:
+                raise
             send_finished_at = datetime.now(timezone.utc)
             returned_candidate_id = int(sent.id) if sent else None
-            resolved = await resolver.resolve_authoritative_single_message(
-                target_entity=entity,
-                target_id=target_id,
-                sent=sent,
-                expected_message=message,
-                expected_text=raw_text or "",
-                before_max_message_id=before_max_message_id,
-                send_started_at=send_started_at,
-                send_finished_at=send_finished_at,
-                source_message_ids={int(getattr(message, "id"))} if getattr(message, "id", None) else None,
-            )
+            if not sent:
+                return telethon_transport_failed("telethon_send_file_returned_empty")
+            try:
+                resolved = await resolver.resolve_authoritative_single_message(
+                    target_entity=entity,
+                    target_id=target_id,
+                    sent=sent,
+                    expected_message=message,
+                    expected_text=raw_text or "",
+                    before_max_message_id=before_max_message_id,
+                    send_started_at=send_started_at,
+                    send_finished_at=send_finished_at,
+                    source_message_ids=({int(getattr(message, "id"))} if is_self_loop and getattr(message, "id", None) else None),
+                )
+            except Exception as exc:
+                logger.warning("TELETHON_FILE_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_id=%s | error=%s | action=no_second_send", target_id, returned_candidate_id, exc)
+                return TelethonSendOutcome(True, True, False, None, [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method="resolver_exception", error_text=str(exc))
             sent_id = resolved.authoritative_message_id if resolved.ok else None
-            self.owner._telethon_send_accepted_unresolved = bool(sent and not resolved.ok)
 
             logger.info(
                 "TELETHON_FILE_SEND | OK_ORIGINAL_MEDIA | target=%s | thread=%s | returned_candidate_id=%s | sent_message_id=%s | resolution_method=%s",
@@ -352,7 +355,7 @@ class SenderTelethonHelpers:
                 sent_id,
                 resolved.resolution_method,
             )
-            return sent_id
+            return TelethonSendOutcome(True, True, bool(resolved.ok), sent_id, [sent_id] if sent_id else [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method=resolved.resolution_method, error_text=resolved.error_text)
 
         except Exception as exc:
             logger.warning(
@@ -368,7 +371,7 @@ class SenderTelethonHelpers:
                 target_id,
                 target_thread_id,
             )
-            return None
+            return telethon_transport_failed("telethon_original_media_failed_no_file_path")
 
         temp_thumb_path: Path | None = None
         video_attributes = None
@@ -422,22 +425,30 @@ class SenderTelethonHelpers:
             resolver = TelethonAuthoritativeMessageResolver(self.owner.telethon)
             before_max_message_id = await resolver.get_before_max_message_id(entity, target_id)
             send_started_at = datetime.now(timezone.utc)
-            sent = await self.owner.telethon.send_file(**send_kwargs)
+            try:
+                sent = await self.owner.telethon.send_file(**send_kwargs)
+            except Exception:
+                raise
             send_finished_at = datetime.now(timezone.utc)
             returned_candidate_id = int(sent.id) if sent else None
-            resolved = await resolver.resolve_authoritative_single_message(
-                target_entity=entity,
-                target_id=target_id,
-                sent=sent,
-                expected_message=message,
-                expected_text=raw_text or "",
-                before_max_message_id=before_max_message_id,
-                send_started_at=send_started_at,
-                send_finished_at=send_finished_at,
-                source_message_ids={int(getattr(message, "id"))} if getattr(message, "id", None) else None,
-            )
+            if not sent:
+                return telethon_transport_failed("telethon_send_file_returned_empty")
+            try:
+                resolved = await resolver.resolve_authoritative_single_message(
+                    target_entity=entity,
+                    target_id=target_id,
+                    sent=sent,
+                    expected_message=message,
+                    expected_text=raw_text or "",
+                    before_max_message_id=before_max_message_id,
+                    send_started_at=send_started_at,
+                    send_finished_at=send_finished_at,
+                    source_message_ids=({int(getattr(message, "id"))} if is_self_loop and getattr(message, "id", None) else None),
+                )
+            except Exception as exc:
+                logger.warning("TELETHON_FILE_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_id=%s | error=%s | action=no_second_send", target_id, returned_candidate_id, exc)
+                return TelethonSendOutcome(True, True, False, None, [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method="resolver_exception", error_text=str(exc))
             sent_id = resolved.authoritative_message_id if resolved.ok else None
-            self.owner._telethon_send_accepted_unresolved = bool(sent and not resolved.ok)
 
             logger.info(
                 "TELETHON_FILE_SEND | OK_FILE_PATH | target=%s | thread=%s | file=%s | returned_candidate_id=%s | sent_message_id=%s | resolution_method=%s | duration=%s | thumb_used=%s",
@@ -450,7 +461,7 @@ class SenderTelethonHelpers:
                 video_meta.get("duration"),
                 bool(temp_thumb_path),
             )
-            return sent_id
+            return TelethonSendOutcome(True, True, bool(resolved.ok), sent_id, [sent_id] if sent_id else [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method=resolved.resolution_method, error_text=resolved.error_text)
 
         except Exception as exc:
             logger.warning(
@@ -460,7 +471,7 @@ class SenderTelethonHelpers:
                 file_path.name if file_path else None,
                 exc,
             )
-            return None
+            return telethon_transport_failed(str(exc))
         finally:
             if temp_thumb_path:
                 try:
@@ -475,17 +486,13 @@ class SenderTelethonHelpers:
         target_id,
         target_thread_id,
         post_rows: list[dict] | None = None,
+        is_self_loop: bool = False,
     ) -> dict:
         downloaded_paths: list[Path] = []
 
         try:
             if not messages:
-                return {
-                    "ok": False,
-                    "sent_message_id": None,
-                    "sent_count": 0,
-                    "error_text": "Пустой список сообщений для Telethon album send",
-                }
+                return telethon_transport_failed("Пустой список сообщений для Telethon album send").to_reupload_album_result(sent_count=0)
 
             entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
 
@@ -496,12 +503,7 @@ class SenderTelethonHelpers:
             for idx, message in enumerate(messages):
                 media = getattr(message, "media", None)
                 if not media:
-                    return {
-                        "ok": False,
-                        "sent_message_id": None,
-                        "sent_count": 0,
-                        "error_text": "Один из элементов альбома не содержит media",
-                    }
+                    return telethon_transport_failed("Один из элементов альбома не содержит media").to_reupload_album_result(sent_count=0)
                 media_items.append(media)
 
                 post_row = post_rows[idx] if post_rows and idx < len(post_rows) else None
@@ -540,24 +542,30 @@ class SenderTelethonHelpers:
             send_started_at = datetime.now(timezone.utc)
             sent = await self.owner.telethon.send_file(**send_kwargs)
             send_finished_at = datetime.now(timezone.utc)
+            if not sent:
+                return telethon_transport_failed("telethon_album_send_file_returned_empty").to_reupload_album_result(sent_count=0)
             sent_messages = sent if isinstance(sent, list) else [sent]
 
             if sent_messages:
-                resolved = await resolver.resolve_authoritative_album_messages(
-                    target_entity=entity,
-                    target_id=target_id,
-                    sent_messages=sent_messages,
-                    expected_messages=list(messages),
-                    expected_text=caption_text or "",
-                    before_max_message_id=before_max_message_id,
-                    send_started_at=send_started_at,
-                    send_finished_at=send_finished_at,
-                    source_message_ids={int(getattr(m, "id")) for m in messages if getattr(m, "id", None)},
-                )
+                try:
+                    resolved = await resolver.resolve_authoritative_album_messages(
+                        target_entity=entity,
+                        target_id=target_id,
+                        sent_messages=sent_messages,
+                        expected_messages=list(messages),
+                        expected_text=caption_text or "",
+                        before_max_message_id=before_max_message_id,
+                        send_started_at=send_started_at,
+                        send_finished_at=send_finished_at,
+                        source_message_ids=({int(getattr(m, "id")) for m in messages if getattr(m, "id", None)} if is_self_loop else None),
+                    )
+                except Exception as exc:
+                    returned_ids = [int(m.id) for m in sent_messages if m and getattr(m, "id", None)]
+                    logger.warning("TELETHON_ALBUM_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_ids=%s | error=%s | action=no_second_send", target_id, returned_ids, exc)
+                    return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=returned_ids, resolution_method="resolver_exception", error_text=str(exc)).to_reupload_album_result(sent_count=len(sent_messages))
                 if not resolved.ok:
-                    self.owner._telethon_send_accepted_unresolved = True
                     logger.warning("TELETHON_ALBUM_SEND | ACCEPTED_UNRESOLVED | target=%s | thread=%s | returned_candidate_ids=%s", target_id, target_thread_id, resolved.returned_candidate_ids)
-                    return {"ok": False, "transport_accepted": True, "sent_message_id": None, "sent_message_ids": [], "sent_count": len(sent_messages), "error_text": resolved.error_text or "telethon_album_target_id_unresolved"}
+                    return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=resolved.returned_candidate_ids or [], resolution_method=resolved.resolution_method, error_text=resolved.error_text or "telethon_album_target_id_unresolved").to_reupload_album_result(sent_count=len(sent_messages))
                 first_id = int(resolved.authoritative_message_id)
                 logger.info(
                     "TELETHON_ALBUM_SEND | OK_ORIGINAL_MEDIA | target=%s | thread=%s | sent_count=%s | returned_candidate_ids=%s | sent_message_ids=%s | first_message_id=%s | resolution_method=%s",
@@ -604,12 +612,7 @@ class SenderTelethonHelpers:
                     file=str(settings.media_cache_path),
                 )
                 if not file_path:
-                    return {
-                        "ok": False,
-                        "sent_message_id": None,
-                        "sent_count": len(files),
-                        "error_text": f"Не удалось скачать элемент альбома {idx + 1}/{len(messages)}",
-                    }
+                    return telethon_transport_failed(f"Не удалось скачать элемент альбома {idx + 1}/{len(messages)}").to_reupload_album_result(sent_count=len(files))
 
                 path = Path(file_path)
                 downloaded_paths.append(path)
@@ -651,31 +654,32 @@ class SenderTelethonHelpers:
             send_started_at = datetime.now(timezone.utc)
             sent = await self.owner.telethon.send_file(**send_kwargs)
             send_finished_at = datetime.now(timezone.utc)
+            if not sent:
+                return telethon_transport_failed("telethon_album_send_file_returned_empty").to_reupload_album_result(sent_count=0)
             sent_messages = sent if isinstance(sent, list) else [sent]
 
             if not sent_messages:
-                return {
-                    "ok": False,
-                    "sent_message_id": None,
-                    "sent_count": 0,
-                    "error_text": "Telethon send_file(album) вернул пустой результат",
-                }
+                return telethon_transport_failed("Telethon send_file(album) вернул пустой результат").to_reupload_album_result(sent_count=0)
 
-            resolved = await resolver.resolve_authoritative_album_messages(
-                target_entity=entity,
-                target_id=target_id,
-                sent_messages=sent_messages,
-                expected_messages=list(messages),
-                expected_text=caption_text or "",
-                before_max_message_id=before_max_message_id,
-                send_started_at=send_started_at,
-                send_finished_at=send_finished_at,
-                source_message_ids={int(getattr(m, "id")) for m in messages if getattr(m, "id", None)},
-            )
+            try:
+                resolved = await resolver.resolve_authoritative_album_messages(
+                    target_entity=entity,
+                    target_id=target_id,
+                    sent_messages=sent_messages,
+                    expected_messages=list(messages),
+                    expected_text=caption_text or "",
+                    before_max_message_id=before_max_message_id,
+                    send_started_at=send_started_at,
+                    send_finished_at=send_finished_at,
+                    source_message_ids=({int(getattr(m, "id")) for m in messages if getattr(m, "id", None)} if is_self_loop else None),
+                )
+            except Exception as exc:
+                returned_ids = [int(m.id) for m in sent_messages if m and getattr(m, "id", None)]
+                logger.warning("TELETHON_ALBUM_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_ids=%s | error=%s | action=no_second_send", target_id, returned_ids, exc)
+                return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=returned_ids, resolution_method="resolver_exception", error_text=str(exc)).to_reupload_album_result(sent_count=len(sent_messages))
             if not resolved.ok:
-                self.owner._telethon_send_accepted_unresolved = True
                 logger.warning("TELETHON_ALBUM_SEND | ACCEPTED_UNRESOLVED_FILE_PATH | target=%s | thread=%s | returned_candidate_ids=%s", target_id, target_thread_id, resolved.returned_candidate_ids)
-                return {"ok": False, "transport_accepted": True, "sent_message_id": None, "sent_message_ids": [], "sent_count": len(sent_messages), "error_text": resolved.error_text or "telethon_album_target_id_unresolved"}
+                return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=resolved.returned_candidate_ids or [], resolution_method=resolved.resolution_method, error_text=resolved.error_text or "telethon_album_target_id_unresolved").to_reupload_album_result(sent_count=len(sent_messages))
 
             first_id = int(resolved.authoritative_message_id)
             logger.info(
@@ -705,12 +709,7 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
-            return {
-                "ok": False,
-                "sent_message_id": None,
-                "sent_count": 0,
-                "error_text": str(exc),
-            }
+            return telethon_transport_failed(str(exc)).to_reupload_album_result(sent_count=0)
 
         finally:
             for path in downloaded_paths:

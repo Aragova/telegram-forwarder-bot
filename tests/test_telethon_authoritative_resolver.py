@@ -63,3 +63,50 @@ def test_self_loop_source_id_collision_blocked_then_history_used():
     result = asyncio.run(resolver.resolve_authoritative_single_message(target_entity=-100, target_id=-100, sent=sent, expected_text="caption", before_max_message_id=2881, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc), source_message_ids={523}))
     assert result.ok is True
     assert result.authoritative_message_id == 2882
+
+
+def test_cross_channel_same_numeric_id_is_allowed_without_self_loop_guard():
+    sent = _msg(100)
+    telethon = FakeTelethon(by_id={100: sent}, history=[])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+    result = asyncio.run(resolver.resolve_authoritative_single_message(target_entity=-200, target_id=-200, sent=sent, expected_text="caption", before_max_message_id=99, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc), source_message_ids=None))
+    assert result.ok is True
+    assert result.authoritative_message_id == 100
+
+
+def test_true_self_loop_same_numeric_id_is_blocked():
+    sent = _msg(100)
+    telethon = FakeTelethon(by_id={100: sent}, history=[])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+    result = asyncio.run(resolver.resolve_authoritative_single_message(target_entity=-100, target_id=-100, sent=sent, expected_text="caption", before_max_message_id=99, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc), source_message_ids={100}))
+    assert result.ok is False
+    assert result.authoritative_message_id is None
+
+
+def test_album_sent_count_mismatch_is_unresolved():
+    telethon = FakeTelethon(by_id={}, history=[])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+    result = asyncio.run(resolver.resolve_authoritative_album_messages(target_entity=-100, target_id=-100, sent_messages=[_msg(10)], expected_messages=[_msg(1), _msg(2)], expected_text="caption", before_max_message_id=9, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc)))
+    assert result.ok is False
+    assert result.error_text == "album_sent_count_mismatch"
+
+
+def test_album_duplicate_authoritative_ids_are_unresolved():
+    telethon = FakeTelethon(by_id={10: _msg(20), 11: _msg(20)}, history=[])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+    result = asyncio.run(resolver.resolve_authoritative_album_messages(target_entity=-100, target_id=-100, sent_messages=[_msg(10), _msg(11)], expected_messages=[_msg(1), _msg(2)], expected_text="caption", before_max_message_id=9, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc)))
+    assert result.ok is False
+    assert result.error_text == "album_authoritative_ids_not_unique"
+
+
+def test_history_ignores_matching_non_outbound_message():
+    sent = _msg(1157)
+    foreign = _msg(2883)
+    foreign.out = False
+    own = _msg(2884)
+    own.out = True
+    telethon = FakeTelethon(by_id={1157: None}, history=[foreign, own])
+    resolver = TelethonAuthoritativeMessageResolver(telethon)
+    result = asyncio.run(resolver.resolve_authoritative_single_message(target_entity=-100, target_id=-100, sent=sent, expected_text="caption", before_max_message_id=2882, send_started_at=datetime.now(timezone.utc), send_finished_at=datetime.now(timezone.utc)))
+    assert result.ok is True
+    assert result.authoritative_message_id == 2884

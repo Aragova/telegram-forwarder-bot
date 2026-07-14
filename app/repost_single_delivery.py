@@ -418,12 +418,44 @@ class RepostSingleDelivery:
             },
         )
 
-        sent_message_id = await owner._reupload_message(
+        reupload_outcome = await owner._reupload_message(
             message,
             target_id,
             target_thread_id,
             post_row=post_row,
+            is_self_loop=is_self_loop,
         )
+        if getattr(reupload_outcome, "transport_accepted", False) and not getattr(reupload_outcome, "authoritative_resolved", False):
+            error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
+            logger.warning(
+                "REUPLOAD_SINGLE_ACCEPTED_TARGET_ID_UNRESOLVED | rule_id=%s | delivery_id=%s | target_id=%s | returned_candidate_id=%s | action=no_second_send_no_reaction_manual_review",
+                rule.id, delivery_id, target_id, getattr(reupload_outcome, "returned_candidate_id", None),
+            )
+            await owner._log_delivery_pipeline_step(
+                rule_id=rule.id,
+                delivery_ids=delivery_ids,
+                event_type="delivery_pipeline_step",
+                pipeline_stage="reupload_single_accepted_target_id_unresolved",
+                pipeline_result="terminal_manual_review",
+                source_channel=source_channel,
+                target_id=target_id,
+                source_message_ids=source_message_ids,
+                error_text=error_text,
+                extra={
+                    "transport_accepted": True,
+                    "authoritative_resolved": False,
+                    "returned_candidate_id": getattr(reupload_outcome, "returned_candidate_id", None),
+                    "returned_candidate_ids": getattr(reupload_outcome, "returned_candidate_ids", None),
+                    "resolution_method": getattr(reupload_outcome, "resolution_method", None),
+                    "manual_review_required": True,
+                    "non_retryable": True,
+                    "action": "no_second_send",
+                },
+            )
+            await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+            return False
+
+        sent_message_id = getattr(reupload_outcome, "authoritative_message_id", None) if hasattr(reupload_outcome, "authoritative_message_id") else reupload_outcome
         send_result = telegram_send_result_from_raw(
             None,
             method="reupload_single",

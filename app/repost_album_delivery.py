@@ -559,6 +559,7 @@ class RepostAlbumDelivery:
                     post_rows_by_message_id.get(int(getattr(m, "id")))
                     for m in source_messages
                 ],
+                is_self_loop=is_self_loop,
             )
 
         if len(source_messages) != len(message_ids):
@@ -607,6 +608,7 @@ class RepostAlbumDelivery:
                 post_rows_by_message_id.get(int(getattr(m, "id")))
                 for m in source_messages
             ],
+            is_self_loop=is_self_loop,
         )
         attempts_debug.append({"stage": "reupload_album", **reupload_result})
         reupload_candidate_sent_ids = normalize_valid_sent_message_ids(reupload_result.get("sent_message_ids") or [])
@@ -989,6 +991,36 @@ class RepostAlbumDelivery:
                 await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                 return True
 
+        if reupload_result.get("transport_accepted") and not reupload_result.get("authoritative_resolved"):
+            error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
+            logger.warning(
+                "REUPLOAD_ALBUM_ACCEPTED_TARGET_ID_UNRESOLVED | rule_id=%s | delivery_ids=%s | target_id=%s | returned_candidate_ids=%s | action=no_retry_no_second_send",
+                rule.id, delivery_ids, target_id, reupload_result.get("returned_candidate_ids"),
+            )
+            await owner._log_delivery_pipeline_step(
+                rule_id=rule.id,
+                delivery_ids=delivery_ids,
+                event_type="delivery_pipeline_step",
+                pipeline_stage="reupload_album_accepted_target_id_unresolved",
+                pipeline_result="terminal_manual_review",
+                source_channel=source_channel,
+                target_id=target_id,
+                source_message_ids=message_ids,
+                error_text=error_text,
+                extra={
+                    "transport_accepted": True,
+                    "authoritative_resolved": False,
+                    "returned_candidate_ids": reupload_result.get("returned_candidate_ids"),
+                    "resolution_method": reupload_result.get("resolution_method"),
+                    "manual_review_required": True,
+                    "non_retryable": True,
+                    "action": "no_retry_no_second_send",
+                },
+            )
+            for delivery_id in delivery_ids:
+                await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+            return False
+
         if is_self_loop:
             logger.warning(
                 "SELF_LOOP_ALBUM_SEND_FAILED_NO_FALLBACK | rule_id=%s | delivery_ids=%s | source_message_ids=%s",
@@ -1022,6 +1054,7 @@ class RepostAlbumDelivery:
                     post_rows_by_message_id.get(int(getattr(m, "id")))
                     for m in source_messages
                 ],
+                is_self_loop=is_self_loop,
             )
             attempts_debug.append({"stage": "reupload_album_retry", **reupload_retry_result})
 
