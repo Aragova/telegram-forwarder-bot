@@ -540,3 +540,170 @@ def test_confirm_reaction_set_wrapper_delegates_to_reaction_delivery(monkeypatch
     assert result == (True, ["🔥"])
     assert calls["owner"] is svc
     assert calls["args"] == (client, "entity", 33, ["🔥", "👍"])
+
+
+def test_unverified_self_loop_target_accepts_send_result_without_get_messages(monkeypatch):
+    from app import reaction_delivery as reaction_module
+
+    class Plan:
+        use_legacy_reactors = True
+        use_tenant_reactors = False
+        mode = "legacy"
+        reason = "test"
+        tenant_id = None
+        tenant_accounts = []
+
+    class Resolver:
+        def __init__(self, _db):
+            pass
+        def resolve_for_rule(self, rule):
+            return Plan()
+
+    class Telethon:
+        def __init__(self):
+            self.calls = 0
+        async def get_messages(self, entity, ids):
+            self.calls += 1
+            return None
+
+    svc = _service(None)
+    svc.telethon = Telethon()
+    monkeypatch.setattr(reaction_module, "ReactionRuntimeResolver", Resolver)
+    applied_ids = []
+
+    async def fake_apply(self, target_id, sent_message_id, rule_id=None):
+        applied_ids.append(sent_message_id)
+        return True
+
+    monkeypatch.setattr(reaction_module.ReactionDelivery, "_add_reaction_if_possible", fake_apply)
+    result = asyncio.run(
+        svc._add_reaction_for_rule_if_possible(
+            rule=SimpleNamespace(id=14),
+            target_id="-1002693516250",
+            sent_message_id=1155,
+            source_channel="-1002693516250",
+            source_message_ids=[520],
+            delivery_id=1,
+            allow_unverified_self_loop_target=True,
+        )
+    )
+
+    assert result["applied"] is True
+    assert svc.telethon.calls == 0
+    assert applied_ids == [1155]
+    assert 520 not in applied_ids
+
+
+def test_unverified_self_loop_tenant_job_uses_send_result(monkeypatch):
+    from app import reaction_delivery as reaction_module
+
+    class Plan:
+        use_legacy_reactors = False
+        use_tenant_reactors = True
+        mode = "tenant_saas"
+        reason = "test"
+        tenant_id = 44
+        tenant_accounts = [{"id": 7}, {"id": 8}]
+
+    class Resolver:
+        def __init__(self, _db):
+            pass
+        def resolve_for_rule(self, rule):
+            return Plan()
+
+    class DB:
+        def enqueue_reaction_job(self, **kwargs):
+            self.enqueued = kwargs
+            return 991
+
+    db = DB()
+    svc = _service(None)
+    svc.db = db
+    monkeypatch.setattr(reaction_module, "ReactionRuntimeResolver", Resolver)
+    result = asyncio.run(
+        svc._add_reaction_for_rule_if_possible(
+            rule=SimpleNamespace(id=14),
+            target_id="-1002693516250",
+            sent_message_id=1155,
+            source_channel="-1002693516250",
+            source_message_ids=[520],
+            delivery_id=1,
+            allow_unverified_self_loop_target=True,
+        )
+    )
+
+    assert result == {"applied": False, "enqueued": True, "reason": "job_enqueued", "job_id": 991}
+    assert db.enqueued["target_id"] == "-1002693516250"
+    assert db.enqueued["message_id"] == 1155
+    assert db.enqueued["account_ids"] == [7, 8]
+
+
+def test_unverified_self_loop_blocks_source_message_id(monkeypatch, caplog):
+    from app import reaction_delivery as reaction_module
+
+    svc = _service(None)
+    called = False
+
+    async def fake_apply(*args, **kwargs):
+        nonlocal called
+        called = True
+        return True
+
+    monkeypatch.setattr(reaction_module.ReactionDelivery, "_add_reaction_if_possible", fake_apply)
+    result = asyncio.run(
+        svc._add_reaction_for_rule_if_possible(
+            rule=SimpleNamespace(id=14),
+            target_id="-1002693516250",
+            sent_message_id=520,
+            source_channel="-1002693516250",
+            source_message_ids=[520],
+            delivery_id=1,
+            allow_unverified_self_loop_target=True,
+        )
+    )
+
+    assert result == {"applied": False, "enqueued": False, "reason": "source_blocked"}
+    assert called is False
+    assert "SELF_LOOP_REACTION_SOURCE_MESSAGE_BLOCKED" in caplog.text
+
+
+def test_unverified_target_flag_rejects_non_self_loop():
+    svc = _service(None)
+    result = asyncio.run(
+        svc._add_reaction_for_rule_if_possible(
+            rule=SimpleNamespace(id=14),
+            target_id="-1002",
+            sent_message_id=1155,
+            source_channel="-1001",
+            source_message_ids=[520],
+            delivery_id=1,
+            allow_unverified_self_loop_target=True,
+        )
+    )
+
+    assert result == {"applied": False, "enqueued": False, "reason": "unverified_target_not_self_loop"}
+
+
+def test_default_reaction_pipeline_still_validates_target_not_found():
+    class Telethon:
+        def __init__(self):
+            self.calls = 0
+        async def get_messages(self, entity, ids):
+            self.calls += 1
+            return None
+
+    svc = _service(None)
+    svc.telethon = Telethon()
+    result = asyncio.run(
+        svc._add_reaction_for_rule_if_possible(
+            rule=SimpleNamespace(id=14),
+            target_id="-1002693516250",
+            sent_message_id=1155,
+            source_channel="-1002693516250",
+            source_message_ids=[520],
+            delivery_id=1,
+        )
+    )
+
+    assert result == {"applied": False, "enqueued": False, "reason": "target_not_found"}
+    assert svc.telethon.calls == 3

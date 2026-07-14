@@ -568,7 +568,7 @@ class RepostSingleDelivery:
                 "SELF_LOOP_REACTION_TARGET_RESOLVED | rule_id=%s | delivery_id=%s | source_message_ids=%s | accepted_target_message_ids=%s | reaction_target_message_id=%s | method=reupload_single",
                 rule.id, delivery_id, source_message_ids, accepted_target_message_ids, reaction_target_message_id,
             )
-            await owner._run_post_send_step_safe(
+            reaction_step = await owner._run_post_send_step_safe(
                 step_name="reaction_after_reupload_single_self_loop_unverified",
                 rule_id=rule.id,
                 delivery_id=delivery_id,
@@ -577,8 +577,21 @@ class RepostSingleDelivery:
                 coro_factory=lambda: owner._add_reaction_for_rule_if_possible(
                     rule=rule, target_id=target_id, sent_message_id=reaction_target_message_id,
                     source_channel=str(source_channel or ""), source_message_ids=source_message_ids, delivery_id=delivery_id,
+                    allow_unverified_self_loop_target=True,
                 ),
             )
+            if _reaction_applied_or_enqueued(reaction_step):
+                logger.info(
+                    "SELF_LOOP_REACTION_APPLIED | rule_id=%s | delivery_id=%s | target_id=%s | reaction_target_message_id=%s",
+                    rule.id, delivery_id, target_id, reaction_target_message_id,
+                )
+            else:
+                reaction_payload = reaction_step.get("result") if isinstance(reaction_step, dict) and isinstance(reaction_step.get("result"), dict) else reaction_step
+                reaction_reason = reaction_payload.get("reason") if isinstance(reaction_payload, dict) else None
+                logger.warning(
+                    "SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | delivery_id=%s | target_id=%s | reaction_target_message_id=%s | reason=%s",
+                    rule.id, delivery_id, target_id, reaction_target_message_id, reaction_reason or "unknown",
+                )
             await owner._log_delivery_final_success(
                 rule_id=rule.id, delivery_ids=delivery_ids, final_method="reupload_single_self_loop_unverified",
                 source_channel=source_channel, target_id=target_id, source_message_ids=source_message_ids,

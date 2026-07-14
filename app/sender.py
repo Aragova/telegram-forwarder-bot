@@ -1040,18 +1040,22 @@ class SenderService:
         source_message_ids: list[int] | None = None,
         delivery_id: int | None = None,
         max_age_seconds: int = 300,
+        allow_unverified_self_loop_target: bool = False,
     ) -> dict:
         from .reaction_delivery import ReactionDelivery
 
-        return await ReactionDelivery(self)._add_reaction_for_rule_if_possible(
-            rule=rule,
-            target_id=target_id,
-            sent_message_id=sent_message_id,
-            source_channel=source_channel,
-            source_message_ids=source_message_ids,
-            delivery_id=delivery_id,
-            max_age_seconds=max_age_seconds,
-        )
+        kwargs = {
+            "rule": rule,
+            "target_id": target_id,
+            "sent_message_id": sent_message_id,
+            "source_channel": source_channel,
+            "source_message_ids": source_message_ids,
+            "delivery_id": delivery_id,
+            "max_age_seconds": max_age_seconds,
+        }
+        if allow_unverified_self_loop_target:
+            kwargs["allow_unverified_self_loop_target"] = True
+        return await ReactionDelivery(self)._add_reaction_for_rule_if_possible(**kwargs)
 
     async def process_rule_once(self, rule):
         schedule_mode = getattr(rule, "schedule_mode", "interval") or "interval"

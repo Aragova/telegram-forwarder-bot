@@ -193,6 +193,7 @@ def test_album_self_loop_failed_verify_marks_accepted_without_second_send():
     assert owner.mark_album.call_args.kwargs["sent_message_ids"] == [100, 101, 102]
     assert owner.mark_album.call_args.kwargs["delivery_method"] == "reupload_album_self_loop_unverified"
     assert owner.final_success.call_args.kwargs["final_method"] == "reupload_album_self_loop_unverified"
+    assert owner.reaction.call_args.kwargs["allow_unverified_self_loop_target"] is True
 
 
 def test_no_runtime_self_loop_noop_strings_in_app():
@@ -216,6 +217,7 @@ def test_accepted_unverified_reaction_goes_to_candidate_new_id_no_second_send():
     assert owner.reupload_message.call_count == 1
     assert owner.mark_delivery_sent.call_args.kwargs["sent_message_id"] == 1147
     assert owner.reaction.call_args.kwargs["sent_message_id"] == 1147
+    assert owner.reaction.call_args.kwargs["allow_unverified_self_loop_target"] is True
     assert all(call.kwargs.get("sent_message_id") != 469 for call in owner.reaction.call_args_list)
 
 
@@ -239,6 +241,8 @@ def test_album_reaction_uses_new_target_id_not_source():
     assert _deliver_album(owner) is True
     assert owner.reaction.call_args.kwargs["sent_message_id"] in [100, 101, 102]
     assert owner.reaction.call_args.kwargs["sent_message_id"] not in [10, 11, 12]
+    if owner.mark_album.call_args.kwargs["delivery_method"] == "reupload_album_self_loop_unverified":
+        assert owner.reaction.call_args.kwargs["allow_unverified_self_loop_target"] is True
 
 
 def test_self_loop_reaction_failure_is_non_fatal_no_fallback():
@@ -248,6 +252,19 @@ def test_self_loop_reaction_failure_is_non_fatal_no_fallback():
     owner.reupload_message.assert_called_once()
     owner.bot.send_message.assert_not_called()
     assert owner.mark_delivery_sent.call_args.kwargs["sent_message_id"] == 777
+
+
+def test_unverified_reaction_failure_is_non_fatal_and_logs_reason(caplog):
+    owner = _SingleOwner(self_loop=True, use_copy_first=False, verify_ids=[], reupload_id=1147)
+    owner.reaction = AsyncMock(return_value={"applied": False, "enqueued": False, "reason": "no_accounts"})
+
+    assert _deliver_single(owner) is True
+
+    owner.reupload_message.assert_called_once()
+    owner.bot.send_message.assert_not_called()
+    assert owner.mark_delivery_sent.call_args.kwargs["delivery_method"] == "reupload_single_self_loop_unverified"
+    assert "SELF_LOOP_REACTION_FAILED_NON_FATAL" in caplog.text
+    assert "reason=no_accounts" in caplog.text
 
 
 def test_reaction_target_not_found_retries_then_applies_to_new_id(monkeypatch):
