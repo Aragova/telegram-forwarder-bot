@@ -115,6 +115,9 @@ class SenderReuploadHelpers:
                 telethon_result["sent_message_ids"] = send_result.sent_message_ids
                 telethon_result["sent_message_id"] = send_result.sent_message_id
                 return telethon_result
+            if telethon_result.get("transport_accepted"):
+                logger.warning("REUPLOAD_ALBUM | TELETHON_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
+                return telethon_result
 
             caption_index = None
             caption_text = None
@@ -283,6 +286,10 @@ class SenderReuploadHelpers:
                     sent_message_id,
                 )
                 return sent_message_id
+            if getattr(self.owner, "_telethon_send_accepted_unresolved", False):
+                self.owner._telethon_send_accepted_unresolved = False
+                logger.warning("REUPLOAD_MESSAGE | TELETHON_TEXT_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
+                return None
 
             html_text = _sender_primitives._prepare_html_text(raw_text)
             if html_text:
@@ -337,6 +344,10 @@ class SenderReuploadHelpers:
                     sent_message_id,
                 )
                 return sent_message_id
+            if getattr(self.owner, "_telethon_send_accepted_unresolved", False):
+                self.owner._telethon_send_accepted_unresolved = False
+                logger.warning("REUPLOAD_MESSAGE | TELETHON_FILE_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
+                return None
 
             html_text = _sender_primitives._prepare_html_text(raw_text)
             input_file = FSInputFile(path)

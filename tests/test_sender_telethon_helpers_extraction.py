@@ -140,11 +140,16 @@ class FakeTelethon:
 
     async def send_message(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(id=123)
+        return SimpleNamespace(id=123, message=kwargs.get("message") or "")
 
     async def send_file(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(id=456)
+        return SimpleNamespace(id=456, message=kwargs.get("caption") or kwargs.get("message") or "")
+
+    async def get_messages(self, entity, ids=None, limit=None):
+        if limit:
+            return [SimpleNamespace(id=122)]
+        return SimpleNamespace(id=ids, message="hello" if ids == 123 else "caption")
 
 
 def _owner(telethon):
@@ -190,7 +195,7 @@ def test_send_file_via_telethon_fallback_smoke(tmp_path):
             self.calls.append(kwargs)
             if len(self.calls) == 1:
                 raise Exception("original failed")
-            return SimpleNamespace(id=789)
+            return SimpleNamespace(id=789, message=kwargs.get("caption") or "")
 
     telethon = FallbackTelethon()
     file_path = tmp_path / "fallback.mp4"
@@ -209,7 +214,7 @@ def test_send_album_via_telethon_original_media_smoke():
     class AlbumTelethon(FakeTelethon):
         async def send_file(self, **kwargs):
             self.calls.append(kwargs)
-            return [SimpleNamespace(id=10), SimpleNamespace(id=11)]
+            return [SimpleNamespace(id=10, message=kwargs.get("caption") or ""), SimpleNamespace(id=11, message="")]
 
     telethon = AlbumTelethon()
     messages = [SimpleNamespace(media="m1", raw_text="caption"), SimpleNamespace(media="m2", raw_text="")]
@@ -217,13 +222,11 @@ def test_send_album_via_telethon_original_media_smoke():
 
     result = asyncio.run(helper.send_album_via_telethon(messages=messages, target_id="-100", target_thread_id=None))
 
-    assert result == {
-        "ok": True,
-        "sent_message_id": 10,
-        "sent_message_ids": [10, 11],
-        "sent_count": 2,
-        "error_text": None,
-    }
+    assert result["ok"] is True
+    assert result["sent_message_id"] == 10
+    assert result["sent_message_ids"] == [10, 11]
+    assert result["sent_count"] == 2
+    assert result["error_text"] is None
 
 
 def test_verify_album_delivery_smoke():
