@@ -938,3 +938,137 @@ def test_validate_mp4_wrapper_delegates_to_video_pipeline_stages(monkeypatch, tm
 
     assert result == (True, None)
     assert calls == [(s, path, {"delivery_id": 7, "job_id": 8, "stage": "download"})]
+
+
+def _run_album_delivery_one_by_one_accepted_unresolved(*, first_resolved: bool):
+    from app.repost_album_delivery import RepostAlbumDelivery
+
+    events = []
+
+    class RuntimeRepo:
+        pass
+
+    class RuntimeOwner(SenderService):
+        def __init__(self):
+            self.db = RuntimeRepo()
+            self.reupload_calls = 0
+            self.one_by_one_calls = 0
+            self.reaction_calls = 0
+            self.faulty = []
+
+        def _resolve_repost_caption_delivery_strategy_sync(self, **_kwargs):
+            return {"configured_mode": "auto", "requires_builder": False, "use_copy_first": False}
+
+        def _is_self_loop_rule(self, *_args):
+            return False
+
+        def _content_from_message_or_post(self, message=None, post_row=None):
+            return {"text": "caption" if (message is None or getattr(message, "id", None) == 10) else "", "entities": []}
+
+        def _log_caption_entity_inventory(self, **_kwargs):
+            pass
+
+        def _caption_entity_counts(self, entities):
+            return {"custom_emoji": 0}
+
+        async def _fetch_album_messages(self, *_args, **_kwargs):
+            return [type("Msg", (), {"id": 10})(), type("Msg", (), {"id": 11})(), type("Msg", (), {"id": 12})()]
+
+        def _get_album_primary_text(self, *_args, **_kwargs):
+            return "caption"
+
+        async def _log_delivery_pipeline_step(self, **kwargs):
+            events.append(("pipeline", kwargs.get("pipeline_stage"), kwargs.get("pipeline_result"), kwargs.get("error_text"), kwargs.get("extra") or {}))
+
+        async def _reupload_album(self, **_kwargs):
+            self.reupload_calls += 1
+            return {"ok": False, "transport_accepted": False, "authoritative_resolved": False, "sent_message_id": None, "sent_message_ids": [], "sent_count": 0, "error_text": "transport_failed"}
+
+        async def _send_album_one_by_one(self, **_kwargs):
+            self.one_by_one_calls += 1
+            if first_resolved:
+                return {
+                    "ok": False,
+                    "transport_accepted": True,
+                    "authoritative_resolved": False,
+                    "sent_message_id": None,
+                    "sent_message_ids": [],
+                    "sent_count": 2,
+                    "returned_candidate_id": 1158,
+                    "returned_candidate_ids": [1158],
+                    "resolved_authoritative_message_ids_before_unresolved": [201],
+                    "resolution_method": "unresolved",
+                    "error_text": "not_found",
+                    "manual_review_required": True,
+                    "non_retryable": True,
+                    "action": "no_second_send",
+                }
+            return {
+                "ok": False,
+                "transport_accepted": True,
+                "authoritative_resolved": False,
+                "sent_message_id": None,
+                "sent_message_ids": [],
+                "sent_count": 1,
+                "returned_candidate_id": 1158,
+                "returned_candidate_ids": [1158],
+                "resolved_authoritative_message_ids_before_unresolved": [],
+                "resolution_method": "unresolved",
+                "error_text": "not_found",
+                "manual_review_required": True,
+                "non_retryable": True,
+                "action": "no_second_send",
+            }
+
+        async def _add_reaction_for_rule_if_possible(self, **_kwargs):
+            self.reaction_calls += 1
+            return True
+
+        async def _log_delivery_final_failure(self, **kwargs):
+            events.append(("final_failure", kwargs.get("final_method"), kwargs.get("error_text")))
+
+        def _mark_delivery_faulty_sync(self, delivery_id, error_text):
+            self.faulty.append((delivery_id, error_text))
+
+    owner = RuntimeOwner()
+    ok = asyncio.run(
+        RepostAlbumDelivery(owner).deliver(
+            DummyRule(),
+            [{"delivery_id": 1, "message_id": 10}, {"delivery_id": 2, "message_id": 11}, {"delivery_id": 3, "message_id": 12}],
+            "@src",
+            "-1001",
+            None,
+        )
+    )
+    return ok, owner, events
+
+
+def test_album_delivery_one_by_one_second_accepted_unresolved_terminal_faulty():
+    ok, owner, events = _run_album_delivery_one_by_one_accepted_unresolved(first_resolved=True)
+
+    assert ok is False
+    assert owner.one_by_one_calls == 1
+    assert owner.reupload_calls == 2
+    assert owner.reaction_calls == 0
+    assert owner.faulty == [
+        (1, "telethon_one_by_one_send_accepted_target_id_unresolved_non_retryable"),
+        (2, "telethon_one_by_one_send_accepted_target_id_unresolved_non_retryable"),
+        (3, "telethon_one_by_one_send_accepted_target_id_unresolved_non_retryable"),
+    ]
+    terminal = [event for event in events if event[1] == "one_by_one_accepted_target_id_unresolved"]
+    assert terminal and terminal[0][2] == "terminal_manual_review"
+    assert terminal[0][4]["returned_candidate_ids"] == [1158]
+    assert terminal[0][4]["resolved_authoritative_message_ids_before_unresolved"] == [201]
+    assert not [event for event in events if event[0] == "final_failure" and event[1] == "album_pipeline_final_failure"]
+
+
+def test_album_delivery_one_by_one_first_accepted_unresolved_terminal_faulty():
+    ok, owner, events = _run_album_delivery_one_by_one_accepted_unresolved(first_resolved=False)
+
+    assert ok is False
+    assert owner.one_by_one_calls == 1
+    assert owner.reaction_calls == 0
+    assert len(owner.faulty) == 3
+    terminal = [event for event in events if event[1] == "one_by_one_accepted_target_id_unresolved"]
+    assert terminal and terminal[0][4]["sent_count"] == 1
+    assert terminal[0][4]["resolved_authoritative_message_ids_before_unresolved"] == []

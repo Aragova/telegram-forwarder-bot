@@ -219,7 +219,8 @@ def test_reupload_message_text_telethon_success_smoke():
     owner = _owner_for_message(bot=bot, text_id=123)
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(SimpleNamespace(media=None), "dst", 777))
 
-    assert result == 123
+    assert result.authoritative_message_id == 123
+    assert result.authoritative_resolved is True
     assert bot.send_message_calls == []
 
 
@@ -230,7 +231,8 @@ def test_reupload_message_text_botapi_fallback_smoke():
     owner = _owner_for_message(bot=bot, text_id=None)
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(SimpleNamespace(media=None), "dst", 777))
 
-    assert result == 456
+    assert result.authoritative_message_id == 456
+    assert result.authoritative_resolved is True
     assert bot.send_message_calls[0]["parse_mode"] == "HTML"
     assert bot.send_message_calls[0]["disable_web_page_preview"] is True
 
@@ -246,7 +248,8 @@ def test_reupload_message_media_telethon_success_smoke(tmp_path):
 
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(message, "dst", 777))
 
-    assert result == 789
+    assert result.authoritative_message_id == 789
+    assert result.authoritative_resolved is True
     assert owner.send_file_calls[0]["force_document"] is False
     assert not video_path.exists()
     assert bot.send_video_calls == []
@@ -265,7 +268,8 @@ def test_reupload_message_media_botapi_fallback_smoke(tmp_path):
 
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(message, "dst", 777))
 
-    assert result == 790
+    assert result.authoritative_message_id == 790
+    assert result.authoritative_resolved is True
     assert bot.send_video_calls[0]["supports_streaming"] is True
     assert not video_path.exists()
 
@@ -314,3 +318,141 @@ def test_reupload_album_botapi_fallback_smoke(tmp_path):
     assert result["sent_message_ids"] == [20, 21]
     assert not image_path.exists()
     assert not video_path.exists()
+
+
+def test_reupload_message_media_accepted_unresolved_blocks_botapi_fallback(tmp_path):
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    from app.telethon_authoritative_resolver import TelethonSendOutcome
+
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"video")
+    bot = FakeBot()
+    unresolved = TelethonSendOutcome(
+        True, True, False, None, [], returned_candidate_id=1157,
+        returned_candidate_ids=[1157], resolution_method="unresolved", error_text="not_found_in_target",
+    )
+    owner = _owner_for_message(bot=bot, telethon=FakeTelethon([video_path]), file_id=unresolved)
+    message = SimpleNamespace(media=object())
+
+    result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(message, "dst", 777))
+
+    assert result.transport_accepted is True
+    assert result.authoritative_resolved is False
+    assert owner.send_file_calls and len(owner.send_file_calls) == 1
+    assert bot.send_video_calls == []
+    assert bot.send_document_calls == []
+    assert bot.send_photo_calls == []
+    assert bot.send_message_calls == []
+
+
+def test_reupload_message_text_accepted_unresolved_blocks_outer_text_fallback():
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    from app.telethon_authoritative_resolver import TelethonSendOutcome
+
+    bot = FakeBot()
+    unresolved = TelethonSendOutcome(
+        True, True, False, None, [], returned_candidate_id=1157,
+        returned_candidate_ids=[1157], resolution_method="resolver_exception", error_text="boom",
+    )
+    owner = _owner_for_message(bot=bot, text_id=unresolved)
+
+    result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(SimpleNamespace(media=None), "dst", 777))
+
+    assert result.transport_accepted is True
+    assert result.authoritative_resolved is False
+    assert bot.send_message_calls == []
+
+
+def test_reupload_album_accepted_unresolved_blocks_botapi_album_fallback():
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+
+    bot = FakeBot()
+    owner = _owner_for_message(
+        bot=bot,
+        album_result={
+            "ok": False,
+            "transport_accepted": True,
+            "authoritative_resolved": False,
+            "sent_message_id": None,
+            "sent_message_ids": [],
+            "sent_count": 2,
+            "error_text": "telethon_album_target_id_unresolved",
+            "returned_candidate_ids": [1157, 1158],
+        },
+    )
+
+    result = asyncio.run(SenderReuploadHelpers(owner).reupload_album([SimpleNamespace(), SimpleNamespace()], "dst", 777))
+
+    assert result["transport_accepted"] is True
+    assert result["authoritative_resolved"] is False
+    assert len(owner.send_album_calls) == 1
+    assert bot.send_media_group_calls == []
+
+
+def test_send_album_one_by_one_uses_authoritative_message_id_from_outcome(monkeypatch):
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    from app.telethon_authoritative_resolver import TelethonSendOutcome
+
+    calls = []
+    outcomes = [
+        TelethonSendOutcome(True, True, True, 201, [201], returned_candidate_id=101),
+        TelethonSendOutcome(True, True, True, 202, [202], returned_candidate_id=102),
+    ]
+
+    async def fake_reupload_message(self, message, target_id, target_thread_id, post_row=None):
+        calls.append(message)
+        return outcomes.pop(0)
+
+    monkeypatch.setattr(SenderReuploadHelpers, "reupload_message", fake_reupload_message)
+    result = asyncio.run(SenderReuploadHelpers(SimpleNamespace()).send_album_one_by_one(["m1", "m2"], "dst", 777))
+
+    assert result["ok"] is True
+    assert result["sent_message_ids"] == [201, 202]
+    assert calls == ["m1", "m2"]
+
+
+def test_send_album_one_by_one_stops_on_first_accepted_unresolved(monkeypatch):
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    from app.telethon_authoritative_resolver import TelethonSendOutcome
+
+    calls = []
+    unresolved = TelethonSendOutcome(True, True, False, None, [], returned_candidate_id=1157, returned_candidate_ids=[1157], resolution_method="unresolved", error_text="not_found")
+
+    async def fake_reupload_message(self, message, target_id, target_thread_id, post_row=None):
+        calls.append(message)
+        return unresolved
+
+    monkeypatch.setattr(SenderReuploadHelpers, "reupload_message", fake_reupload_message)
+    result = asyncio.run(SenderReuploadHelpers(SimpleNamespace()).send_album_one_by_one(["m1", "m2"], "dst", 777))
+
+    assert result["transport_accepted"] is True
+    assert result["authoritative_resolved"] is False
+    assert result["sent_message_ids"] == []
+    assert result["returned_candidate_id"] == 1157
+    assert result["sent_count"] == 1
+    assert calls == ["m1"]
+
+
+def test_send_album_one_by_one_stops_on_second_accepted_unresolved(monkeypatch):
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    from app.telethon_authoritative_resolver import TelethonSendOutcome
+
+    calls = []
+    outcomes = [
+        TelethonSendOutcome(True, True, True, 201, [201], returned_candidate_id=101),
+        TelethonSendOutcome(True, True, False, None, [], returned_candidate_id=1158, returned_candidate_ids=[1158], resolution_method="unresolved", error_text="ambiguous"),
+    ]
+
+    async def fake_reupload_message(self, message, target_id, target_thread_id, post_row=None):
+        calls.append(message)
+        return outcomes.pop(0)
+
+    monkeypatch.setattr(SenderReuploadHelpers, "reupload_message", fake_reupload_message)
+    result = asyncio.run(SenderReuploadHelpers(SimpleNamespace()).send_album_one_by_one(["m1", "m2", "m3"], "dst", 777))
+
+    assert result["transport_accepted"] is True
+    assert result["authoritative_resolved"] is False
+    assert result["sent_message_ids"] == []
+    assert result["sent_count"] == 2
+    assert result["manual_review_required"] is True
+    assert calls == ["m1", "m2"]

@@ -18,9 +18,14 @@ class _Telethon:
         self.calls.append(kwargs)
         if len(self.calls) == 1 and not isinstance(kwargs.get("file"), str):
             if self._original_ok:
-                return SimpleNamespace(id=10)
+                return SimpleNamespace(id=10, message=kwargs.get("caption") or "")
             raise RuntimeError("original failed")
-        return SimpleNamespace(id=777)
+        return SimpleNamespace(id=777, message=kwargs.get("caption") or "")
+
+    async def get_messages(self, entity, ids=None, limit=None):
+        if limit:
+            return [SimpleNamespace(id=9)]
+        return SimpleNamespace(id=ids, message="caption")
 
 
 class _Owner:
@@ -94,7 +99,9 @@ def test_video_metadata_from_source_document_attribute(tmp_path, monkeypatch):
     monkeypatch.setattr(helper, "_download_source_video_thumb", AsyncMock(return_value=(None, "none")))
     monkeypatch.setattr(helper, "_generate_video_thumb", AsyncMock(return_value=(None, "none", 2.0)))
 
-    assert asyncio.run(helper.send_file_via_telethon(target_id="1", target_thread_id=None, message=_message(attr), file_path=video)) == 777
+    outcome = asyncio.run(helper.send_file_via_telethon(target_id="1", target_thread_id=None, message=_message(attr), file_path=video))
+    assert outcome.authoritative_message_id == 777
+    assert outcome.authoritative_resolved is True
     sent_attr = telethon.calls[-1]["attributes"][0]
     assert sent_attr.duration == 1050
     assert sent_attr.w == 1920
@@ -224,6 +231,8 @@ def test_original_media_success_does_not_use_file_path_fallback(tmp_path, monkey
     probe = AsyncMock()
     monkeypatch.setattr(helper, "_probe_video_file", probe)
 
-    assert asyncio.run(helper.send_file_via_telethon(target_id="1", target_thread_id=None, message=_message(), file_path=video)) == 10
+    outcome = asyncio.run(helper.send_file_via_telethon(target_id="1", target_thread_id=None, message=_message(), file_path=video))
+    assert outcome.authoritative_message_id == 10
+    assert outcome.authoritative_resolved is True
     assert len(telethon.calls) == 1
     probe.assert_not_awaited()
