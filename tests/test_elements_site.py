@@ -84,8 +84,8 @@ class ElementsSiteTest(unittest.TestCase):
             parser = PageParser()
             parser.feed(path.read_text(encoding="utf-8"))
             for _, attrs in parser.attrs:
-                if attrs.get("data-t"):
-                    self.assertIn(attrs["data-t"], english, (page, attrs["data-t"]))
+                if attrs.get("data-i18n"):
+                    self.assertIn(attrs["data-i18n"], english, (page, attrs["data-i18n"]))
             self.assertTrue(any(attrs.get("data-lang-choice") == "en"
                                 for _, attrs in parser.attrs))
             self.assertTrue(any(attrs.get("data-lang-choice") == "ru"
@@ -105,6 +105,24 @@ class ElementsSiteTest(unittest.TestCase):
         # Existing Autoposting SEO page, live links, legal URLs and domain remain.
         self.assertTrue((ROOT / "autoposting.html").is_file())
         self.assertEqual((ROOT / "CNAME").read_text().strip(), "usevimi.ru")
+
+    def test_existing_landing_language_contract_and_legacy_anchors(self):
+        js = (ROOT / "elements.js").read_text(encoding="utf-8")
+        self.assertIn("const dict = {", js)
+        self.assertIn("dict.ru =", js)
+        self.assertIn("vimi_lang", js)
+        self.assertNotIn("vimi-elements-language", js)
+        self.assertIn("autoposting.pricingButton", js)
+        new_auto = PAGES["autoposting"].read_text(encoding="utf-8")
+        self.assertIn('id="capabilities"', new_auto)
+        self.assertIn('id="pricing"', new_auto)
+        for old_page in ("autoposting.html", "telegram-bot.html", "video-repost.html"):
+            text = (ROOT / old_page).read_text(encoding="utf-8")
+            for outdated in ("index.html#features", "index.html#how", "index.html#pricing"):
+                self.assertNotIn(outdated, text, old_page)
+            self.assertIn("autoposting/#pricing", text, old_page)
+            self.assertIn("autoposting/#capabilities", text, old_page)
+            self.assertIn("ru/instructions.html", text, old_page)
 
     def test_responsive_reduced_motion_and_no_heavy_external_runtime(self):
         css = (ROOT / "elements.css").read_text(encoding="utf-8")
