@@ -2,7 +2,7 @@
 (() => {
   "use strict";
 
-  const translations = {
+  const dict = {
     en: {
       "common.skip": "Skip to content",
       "common.home": "Home",
@@ -166,16 +166,18 @@
     }
   };
 
-  const elements = [...document.querySelectorAll("[data-t]")];
-  const original = new Map(elements.map((el) => [el.dataset.t, el.textContent]));
+  const elements = [...document.querySelectorAll("[data-i18n]")];
+  const original = new Map(elements.map((el) => [el.dataset.i18n, el.textContent]));
+  // Preserve the original landing contract: dict.ru / dict.en + data-i18n.
+  dict.ru = Object.fromEntries(original);
   const page = document.body.dataset.page || "home";
 
   function applyLanguage(lang) {
     const current = lang === "en" ? "en" : "ru";
     document.documentElement.lang = current;
     for (const el of elements) {
-      const key = el.dataset.t;
-      const translated = current === "en" ? translations.en[key] : original.get(key);
+      const key = el.dataset.i18n;
+      const translated = dict[current][key];
       if (typeof translated === "string") el.textContent = translated;
     }
     for (const button of document.querySelectorAll("[data-lang-choice]")) {
@@ -200,14 +202,14 @@
       const node = document.querySelector(selector);
       if (node) node.setAttribute("content", text);
     }
-    try { localStorage.setItem("vimi-elements-language", current); } catch (_) { /* Storage can be blocked. */ }
+    try { localStorage.setItem("vimi_lang", current); } catch (_) { /* Storage can be blocked. */ }
   }
 
   for (const button of document.querySelectorAll("[data-lang-choice]")) {
     button.addEventListener("click", () => applyLanguage(button.dataset.langChoice));
   }
   let saved = "ru";
-  try { saved = localStorage.getItem("vimi-elements-language") || "ru"; } catch (_) { /* Private mode. */ }
+  try { saved = localStorage.getItem("vimi_lang") || "ru"; } catch (_) { /* Private mode. */ }
   applyLanguage(saved);
 
   const toggle = document.querySelector(".menu-toggle");
