@@ -347,6 +347,34 @@ class ElementsSiteTest(unittest.TestCase):
             self.assertIn('class="actions"', source)
             self.assertIn('data-robot="art"', source)
 
+    def test_mobile_v2_changes_information_hierarchy_not_only_spacing(self):
+        """Regression against the Android screenshots showing giant product cards."""
+        home = PAGES["home"].read_text(encoding="utf-8")
+        self.assertIn('class="hero home-hero"', home)
+        self.assertNotIn('class="section compact-cta"', home)
+        self.assertEqual(home.count('href="#products"'), 1)
+        self.assertNotIn('class="btn3d secondary" href="autoposting/"', home)
+        for page, path in PAGES.items():
+            source = path.read_text(encoding="utf-8")
+            relative = "../mobile-v2.css" if page != "home" else "mobile-v2.css"
+            self.assertIn('<link rel="stylesheet" href="' + relative + '">', source)
+            self.assertLess(source.index("elements.css"), source.index("mobile-v2.css"))
+        css = (ROOT / "mobile-v2.css").read_text(encoding="utf-8")
+        self.assertIn("@media (max-width:780px)", css)
+        self.assertIn("@media (max-width:420px)", css)
+        self.assertIn("prefers-reduced-motion", css)
+        self.assertIn(".home-hero .hero-copy { display:contents; }", css)
+        self.assertIn(".home-hero .world.robot-world.element-art-stage", css)
+        self.assertIn("grid-row:4;", css)
+        self.assertIn("grid-row:5;", css)
+        self.assertIn(".home-hero .hero-statline { display:none; }", css)
+        self.assertIn("#products .product-card {", css)
+        self.assertIn("display:grid;", css)
+        self.assertIn("grid-template-columns:minmax(0,1fr) minmax(100px,31%)", css)
+        self.assertIn(".product-hero .actions .btn3d.secondary", css)
+        self.assertIn("background:transparent;", css)
+        self.assertIn(".product-hero .product-flags,", css)
+
     def test_sitemap_contains_all_three_product_routes(self):
         import xml.etree.ElementTree as ET
         sitemap = ET.fromstring((ROOT / "sitemap.xml").read_text(encoding="utf-8"))
