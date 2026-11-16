@@ -91,6 +91,55 @@ class ElementsSiteTest(unittest.TestCase):
             self.assertTrue(any(attrs.get("data-lang-choice") == "ru"
                                 for _, attrs in parser.attrs))
 
+    def test_element_labels_are_translated_in_both_languages(self):
+        """Keep visible elemental decorations and feature badges bilingual.
+
+        dict.ru is derived from rendered Russian HTML; the default DOM must
+        therefore never contain English-only labels without translation keys.
+        """
+        import html
+        js = (ROOT / "elements.js").read_text(encoding="utf-8")
+        english = set(re.findall(r'^\\s*"([a-zA-Z][a-zA-Z0-9.]*)"\\s*:', js, re.M))
+
+        requirements = {
+            "home": {
+                "home.flowLabel": "ПОТОК",
+                "home.energyLabel": "ЭНЕРГИЯ",
+                "home.valueLabel": "ЦЕННОСТЬ",
+                "home.waterLabel": "01 · ВОДА",
+                "home.fireLabel": "02 · ОГОНЬ",
+                "home.earthLabel": "03 · ЗЕМЛЯ",
+                "home.waterSkyLabel": "ВОДА / НЕБО",
+                "home.fireEnergyLabel": "ОГОНЬ / ЭНЕРГИЯ",
+                "home.earthValueLabel": "ЗЕМЛЯ / ЦЕННОСТЬ",
+            },
+            "autoposting": {
+                "autoposting.elementLabel": "ВОДА · ViMi",
+                "autoposting.ctaElement": "ПОТОК",
+            },
+            "social": {
+                "social.flag1": "AI-поиск",
+                "social.flag2": "Подготовка медиа",
+                "social.flag3": "Подтверждение человеком",
+                "social.elementLabel": "ОГОНЬ · ViMi",
+                "social.ctaElement": "ЭНЕРГИЯ",
+            },
+            "pay": {
+                "pay.elementLabel": "ЗЕМЛЯ · ViMi",
+                "pay.ctaElement": "ЦЕННОСТЬ",
+            },
+        }
+        for page, labels in requirements.items():
+            source = PAGES[page].read_text(encoding="utf-8")
+            self.assertEqual(source.count('data-i18n="common.brandTagline"'), 2)
+            for key, russian in labels.items():
+                with self.subTest(page=page, label=key):
+                    self.assertIn(key, english, "Missing EN translation")
+                    pattern = r'data-i18n="' + re.escape(key) + r'"[^>]*>' + re.escape(html.escape(russian)) + r'<'
+                    self.assertRegex(source, pattern)
+            for unwanted in ('>Media Preparation<', '>Human Approval<', '>ELEMENTS ECOSYSTEM<'):
+                self.assertNotIn(unwanted, source, (page, unwanted))
+
     def test_product_links_and_status_honesty(self):
         home = PAGES["home"].read_text(encoding="utf-8")
         for product in ("autoposting", "social", "pay"):
