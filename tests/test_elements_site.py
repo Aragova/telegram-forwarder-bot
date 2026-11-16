@@ -99,7 +99,7 @@ class ElementsSiteTest(unittest.TestCase):
         """
         import html
         js = (ROOT / "elements.js").read_text(encoding="utf-8")
-        english = set(re.findall(r'^\\s*"([a-zA-Z][a-zA-Z0-9.]*)"\\s*:', js, re.M))
+        english = set(re.findall(r'^\s*"([a-zA-Z][a-zA-Z0-9.]*)"\s*:', js, re.M))
 
         requirements = {
             "home": {
