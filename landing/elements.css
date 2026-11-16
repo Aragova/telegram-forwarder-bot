@@ -304,3 +304,10 @@ body[data-product=autoposting] .robot-stage .auto-robot.element-artwork{height:m
  .product-card .product-art img.card-robot.element-artwork{height:207px}
 }
 @media(prefers-reduced-motion:reduce){.element-entry{transition:none!important}.element-entry:hover{transform:none!important}}
+
+/* Pixel-edge blend removes leftover clipped poster decorations while
+   preserving the approved central mascot and native interactive UI. */
+.element-artwork{
+  -webkit-mask-image:radial-gradient(ellipse 83% 82% at center,black 51%,rgba(0,0,0,.95) 68%,transparent 100%);
+  mask-image:radial-gradient(ellipse 83% 82% at center,black 51%,rgba(0,0,0,.95) 68%,transparent 100%);
+}
