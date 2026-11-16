@@ -67,6 +67,7 @@
     box-shadow:inset 0 2px 0 rgba(255,255,255,.55),0 4px 0 #284979,0 12px 20px rgba(59,114,241,.12);
   }
   .home-hero .actions .btn3d.secondary { display:none; }
+  .compact-cta { display:none; } /* Keep desktop closing CTA, hide mobile duplicate. */
 
   /* Three compact horizontal product choices instead of 3 huge posters. */
   #products.section { padding:17px 0 24px; }
