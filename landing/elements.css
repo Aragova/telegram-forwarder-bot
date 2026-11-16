@@ -233,3 +233,14 @@ body[data-product=pay] .btn3d.primary{background:linear-gradient(145deg,#e3fff0,
  .product-card{min-height:350px}
  .cta-panel{padding:25px}
 }
+
+/* Prevent language controls clipping at 320px, including fallback fonts. */
+@media (max-width:420px){
+  .header-primary{gap:5px}
+  .header-primary .brand{font-size:26px;line-height:1}
+  .header-primary .brand small{display:none}
+  .header-primary .header-tools{gap:4px}
+  .header-primary .home-entry{padding:5px 7px;white-space:nowrap}
+  .header-primary .lang-switch button{padding:5px 5px}
+  .header-primary .lang-switch{flex-shrink:0}
+}
