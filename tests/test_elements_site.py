@@ -205,6 +205,55 @@ class ElementsSiteTest(unittest.TestCase):
             self.assertIn("autoposting/#capabilities", text, old_page)
             self.assertIn("ru/instructions.html", text, old_page)
 
+    def test_restored_autoposting_includes_full_original_sales_and_help(self):
+        """The original site had 6 features, 5 steps, 3 plans and 8 methods."""
+        html = PAGES["autoposting"].read_text(encoding="utf-8")
+        for section in ("capabilities", "how", "pricing", "faq"):
+            self.assertIn('id="' + section + '"', html)
+        self.assertEqual(html.count('class="feature auto-feature"'), 6)
+        self.assertEqual(html.count('class="auto-step"'), 5)
+        self.assertEqual(html.count('class="auto-plan '), 3)
+        self.assertEqual(html.count('class="payment-chip"'), 8)
+        for name in ("FREE", "BASIC", "PRO"):
+            self.assertIn("<h3>" + name + "</h3>", html)
+        for value in ("0", "9", "29"):
+            self.assertIn('class="auto-price">' + value + "<span>", html)
+        self.assertIn('class="auto-demo"', html)
+        self.assertIn("https://t.me/topposter69_bot", html)
+        self.assertIn('href="#pricing"', html)
+        for icon in ("autoposting", "video", "tariffs", "payments", "stats", "automation"):
+            self.assertIn('../assets/features/' + icon + '.svg', html)
+        for method in ("telegram", "paypal", "card", "sbp", "bitcoin", "tribute", "lava", "manual"):
+            self.assertIn('../assets/payments/' + method + '.svg', html)
+
+    def test_original_vimi_robot_and_strong_elemental_backgrounds(self):
+        """Never replace the brand's character with generic three-dimensional orbs."""
+        script = (ROOT / "elements.js").read_text(encoding="utf-8")
+        css = (ROOT / "elements.css").read_text(encoding="utf-8")
+        for page, html_file in PAGES.items():
+            html = html_file.read_text(encoding="utf-8")
+            self.assertIn('data-robot=', html, page)
+            self.assertIn('class="vimi-robot', html, page)
+            self.assertIn('family=Inter:wght@', html, page)
+            self.assertIn('family=Manrope:wght@', html, page)
+        for variant in ("hero-robot-ru.png", "hero-robot-en.png",
+                        "hero-scene-ru.png", "hero-scene-en.png"):
+            self.assertTrue((ROOT / "assets" / variant).is_file(), variant)
+        for product in ("autoposting", "social", "pay"):
+            self.assertIn("body[data-product=" + product + "]", css)
+        self.assertIn("--product-rgb", css)
+        self.assertIn("font-family:Inter", css)
+        self.assertIn("[data-robot]", script)
+        self.assertIn("current + \".png\"", script)
+
+    def test_hero_copy_is_concise(self):
+        for page, path in PAGES.items():
+            source = path.read_text(encoding="utf-8")
+            hero = source.split('<section class="hero', 1)[1].split('</section>', 1)[0]
+            match = re.search(r'<p class="hero-lead"[^>]*>([^<]+)</p>', hero)
+            self.assertIsNotNone(match, page)
+            self.assertLessEqual(len(match.group(1)), 125, page)
+
     def test_responsive_reduced_motion_and_no_heavy_external_runtime(self):
         css = (ROOT / "elements.css").read_text(encoding="utf-8")
         js = (ROOT / "elements.js").read_text(encoding="utf-8")
