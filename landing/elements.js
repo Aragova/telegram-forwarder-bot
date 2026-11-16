@@ -5,6 +5,7 @@
   const dict = {
     en: {
       "common.skip": "Skip to content",
+      "common.brandTagline": "ELEMENTAL ECOSYSTEM",
       "common.home": "Home",
       "common.autoposting": "Autoposting",
       "common.social": "Social",
@@ -20,6 +21,15 @@
       "footer.contact": "Contact",
       "footer.note": "Products have separate terms and pricing.",
       "home.tag": "Three elements. One ecosystem.",
+      "home.flowLabel": "FLOW",
+      "home.energyLabel": "ENERGY",
+      "home.valueLabel": "VALUE",
+      "home.waterLabel": "01 · WATER",
+      "home.fireLabel": "02 · FIRE",
+      "home.earthLabel": "03 · EARTH",
+      "home.waterSkyLabel": "WATER / SKY",
+      "home.fireEnergyLabel": "FIRE / ENERGY",
+      "home.earthValueLabel": "EARTH / VALUE",
       "home.title1": "Own your",
       "home.title2": "element.",
       "home.lead": "Create content, automate publishing and turn your audience into value. Three independent tools united by the ViMi philosophy.",
@@ -52,6 +62,8 @@
       "home.ctaButton": "Choose a product",
 
       "autoposting.tag": "01 / Water & sky",
+      "autoposting.elementLabel": "WATER · ViMi",
+      "autoposting.ctaElement": "FLOW",
       "autoposting.headline1": "Let your content",
       "autoposting.headline2": "move on its own.",
       "autoposting.lead": "Automated posts, queues and publishing controls. Build a content flow that follows your rules.",
@@ -78,6 +90,8 @@
       "autoposting.pricingButton": "See Telegram pricing",
 
       "social.tag": "02 / Fire",
+      "social.elementLabel": "FIRE · ViMi",
+      "social.ctaElement": "ENERGY",
       "social.headline1": "Spark",
       "social.headline2": "their attention.",
       "social.lead": "AI-powered discovery, preparation and adaptation for social platforms. Give your ideas motion and form.",
@@ -100,6 +114,8 @@
       "social.ctaText": "Follow the project's progress and ask support about availability.",
 
       "pay.tag": "03 / Earth",
+      "pay.elementLabel": "EARTH · ViMi",
+      "pay.ctaElement": "VALUE",
       "pay.headline1": "Turn audiences",
       "pay.headline2": "into value.",
       "pay.lead": "Memberships, paid channels and digital files. Monetize Telegram with control over access and payments.",
@@ -189,6 +205,8 @@
     }
     const navigation = document.getElementById("main-nav");
     if (navigation) navigation.setAttribute("aria-label", current === "en" ? "Main navigation" : "Основная навигация");
+    const homeBrand = document.querySelector(".site-header .brand");
+    if (homeBrand) homeBrand.setAttribute("aria-label", current === "en" ? "ViMi, home" : "ViMi, главная");
     const menuButton = document.querySelector(".menu-toggle");
     if (menuButton) menuButton.setAttribute("aria-label", current === "en" ? "Open menu" : "Открыть меню");
     for (const link of document.querySelectorAll("[data-doc]")) {
