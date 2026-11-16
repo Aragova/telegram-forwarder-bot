@@ -115,7 +115,35 @@
       "pay.f3Title": "Payments & control",
       "pay.f3Text": "Configure available payment methods and approve manual payments.",
       "pay.ctaTitle": "Build value with ViMi Pay.",
-      "pay.ctaText": "Manage everything from the central Telegram bot."
+      "pay.ctaText": "Manage everything from the central Telegram bot.",
+      "footer.instructions": "Autoposting instructions",
+      "autoposting.faqLabel": "Frequently asked questions",
+      "autoposting.faqTitle": "The essentials, explained.",
+      "autoposting.faqLead": "Clear answers without marketing promises.",
+      "autoposting.q1": "How do I get started?",
+      "autoposting.a1": "Open the bot, connect a source and channel, then set a publishing rule and interval.",
+      "autoposting.q2": "Where can I see the pricing?",
+      "autoposting.a2": "Current terms and pricing are available in Autoposting. They do not apply to Social or Pay.",
+      "autoposting.q3": "Can it handle video?",
+      "autoposting.a3": "Yes. Video workflows and publishing queues are supported. Availability depends on your current plan.",
+      "social.faqLabel": "Frequently asked questions",
+      "social.faqTitle": "The essentials, explained.",
+      "social.faqLead": "Clear answers without marketing promises.",
+      "social.q1": "Can I join now?",
+      "social.a1": "ViMi Social is in testing. Ask support about access.",
+      "social.q2": "What does AI Search do?",
+      "social.a2": "It helps discover materials for a topic and task from available, authorized sources.",
+      "social.q3": "Does it publish automatically?",
+      "social.a3": "The currently implemented flow includes preview and approval before publishing.",
+      "pay.faqLabel": "Frequently asked questions",
+      "pay.faqTitle": "The essentials, explained.",
+      "pay.faqLead": "Clear answers without marketing promises.",
+      "pay.q1": "What can I sell?",
+      "pay.a1": "ViMi Pay provides tools for private-channel memberships and digital files, including free distribution.",
+      "pay.q2": "How are payments approved?",
+      "pay.a2": "Owners configure available payment methods. Administrators confirm manual payments.",
+      "pay.q3": "Is public registration open?",
+      "pay.a3": "The platform is still being tested. New onboarding may be limited."
     }
   };
 
@@ -153,9 +181,13 @@
     for (const button of document.querySelectorAll("[data-lang-choice]")) {
       button.setAttribute("aria-pressed", String(button.dataset.langChoice === current));
     }
+    const navigation = document.getElementById("main-nav");
+    if (navigation) navigation.setAttribute("aria-label", current === "en" ? "Main navigation" : "Основная навигация");
+    const menuButton = document.querySelector(".menu-toggle");
+    if (menuButton) menuButton.setAttribute("aria-label", current === "en" ? "Open menu" : "Открыть меню");
     for (const link of document.querySelectorAll("[data-doc]")) {
       const before = link.getAttribute("href");
-      link.setAttribute("href", before.replace(/(?:ru|en)\/(terms|privacy|refund|contacts)\.html$/, current + "/$1.html"));
+      link.setAttribute("href", before.replace(/(?:ru|en)\/(terms|privacy|refund|contacts|instructions)\.html$/, current + "/$1.html"));
     }
     const [title, description] = (meta[page] || meta.home)[current];
     document.title = title;
