@@ -76,7 +76,7 @@ def test_legal_links_and_faq_exist():
     index_text = read(LANDING / "index.html")
     for doc in ("terms", "privacy", "refund", "contacts", "instructions"):
         assert f'data-doc="{doc}"' in index_text
-    assert "ru/instructions.html" in index_text
+    assert "autoposting/#how" in index_text
     assert "footer.instructions" in read(LANDING / "elements.js")
     for product in ("autoposting", "social", "pay"):
         product_text = read(LANDING / product / "index.html")
