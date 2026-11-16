@@ -91,6 +91,38 @@ class ElementsSiteTest(unittest.TestCase):
             self.assertTrue(any(attrs.get("data-lang-choice") == "ru"
                                 for _, attrs in parser.attrs))
 
+    def test_site_navigation_separates_home_from_full_product_names(self):
+        """The ecosystem home link sits above three fully named product tabs."""
+        expected = (
+            ('autoposting', 'ViMi Autoposting'),
+            ('social', 'ViMi Social'),
+            ('pay', 'ViMi Pay'),
+        )
+        for current_page, page in PAGES.items():
+            with self.subTest(page=current_page):
+                source = page.read_text(encoding="utf-8")
+                header = source.split('<header class="site-header">', 1)[1].split('</header>', 1)[0]
+                top, product_nav = header.split('<nav id="main-nav"', 1)
+                self.assertIn('class="header-primary"', top)
+                self.assertIn('class="home-entry"', top)
+                self.assertIn('data-i18n="common.home">Главная</a>', top)
+                self.assertNotIn('data-i18n="common.home"', product_nav)
+                self.assertIn('aria-label="Продукты ViMi"', product_nav)
+                self.assertEqual(product_nav.count('data-i18n="common.'), 3)
+                self.assertNotIn('menu-toggle', header)
+                for slug, title in expected:
+                    self.assertIn('data-i18n="common.' + slug + '">' + title + '</a>', product_nav)
+                self.assertEqual(product_nav.count('aria-current="page"'), 0 if current_page == 'home' else 1)
+                self.assertEqual(top.count('aria-current="page"'), 1 if current_page == 'home' else 0)
+
+        javascript = (ROOT / "elements.js").read_text(encoding="utf-8")
+        for slug, title in expected:
+            self.assertIn('"common.' + slug + '": "' + title + '"', javascript)
+        self.assertNotIn('.menu-toggle', javascript)
+        css = (ROOT / "elements.css").read_text(encoding="utf-8")
+        self.assertIn("overflow-x:auto", css)
+        self.assertIn(".header-primary", css)
+
     def test_element_labels_are_translated_in_both_languages(self):
         """Keep visible elemental decorations and feature badges bilingual.
 
@@ -171,7 +203,67 @@ class ElementsSiteTest(unittest.TestCase):
                 self.assertNotIn(outdated, text, old_page)
             self.assertIn("autoposting/#pricing", text, old_page)
             self.assertIn("autoposting/#capabilities", text, old_page)
-            self.assertIn("ru/instructions.html", text, old_page)
+            self.assertIn("autoposting/#how", text, old_page)
+
+    def test_every_instruction_link_points_to_restored_guide(self):
+        homepage = PAGES["home"].read_text(encoding="utf-8")
+        self.assertIn('href="autoposting/#how" data-i18n="footer.instructions"', homepage)
+        for product in ("autoposting", "social", "pay"):
+            page = PAGES[product].read_text(encoding="utf-8")
+            target = "#how" if product == "autoposting" else "../autoposting/#how"
+            self.assertIn('href="' + target + '" data-i18n="footer.instructions"', page)
+        for old_page in ("autoposting.html", "telegram-bot.html", "video-repost.html"):
+            text = (ROOT / old_page).read_text(encoding="utf-8")
+            self.assertIn('href="autoposting/#how"', text)
+
+    def test_restored_autoposting_includes_full_original_sales_and_help(self):
+        """The original site had 6 features, 5 steps, 3 plans and 8 methods."""
+        html = PAGES["autoposting"].read_text(encoding="utf-8")
+        for section in ("capabilities", "how", "pricing", "faq"):
+            self.assertIn('id="' + section + '"', html)
+        self.assertEqual(html.count('class="feature auto-feature"'), 6)
+        self.assertEqual(html.count('class="auto-step"'), 5)
+        self.assertEqual(html.count('class="auto-plan '), 3)
+        self.assertEqual(html.count('class="payment-chip"'), 8)
+        for name in ("FREE", "BASIC", "PRO"):
+            self.assertIn("<h3>" + name + "</h3>", html)
+        for value in ("0", "9", "29"):
+            self.assertIn('class="auto-price">' + value + "<span>", html)
+        self.assertIn('class="auto-demo"', html)
+        self.assertIn("https://t.me/topposter69_bot", html)
+        self.assertIn('href="#pricing"', html)
+        for icon in ("autoposting", "video", "tariffs", "payments", "stats", "automation"):
+            self.assertIn('../assets/features/' + icon + '.svg', html)
+        for method in ("telegram", "paypal", "card", "sbp", "bitcoin", "tribute", "lava", "manual"):
+            self.assertIn('../assets/payments/' + method + '.svg', html)
+
+    def test_original_vimi_robot_and_strong_elemental_backgrounds(self):
+        """Never replace the brand's character with generic three-dimensional orbs."""
+        script = (ROOT / "elements.js").read_text(encoding="utf-8")
+        css = (ROOT / "elements.css").read_text(encoding="utf-8")
+        for page, html_file in PAGES.items():
+            html = html_file.read_text(encoding="utf-8")
+            self.assertIn('data-robot=', html, page)
+            self.assertIn('class="vimi-robot', html, page)
+            self.assertIn('family=Inter:wght@', html, page)
+            self.assertIn('family=Manrope:wght@', html, page)
+        for variant in ("hero-robot-ru.png", "hero-robot-en.png",
+                        "hero-scene-ru.png", "hero-scene-en.png"):
+            self.assertTrue((ROOT / "assets" / variant).is_file(), variant)
+        for product in ("autoposting", "social", "pay"):
+            self.assertIn("body[data-product=" + product + "]", css)
+        self.assertIn("--product-rgb", css)
+        self.assertIn("font-family:Inter", css)
+        self.assertIn("[data-robot]", script)
+        self.assertIn("current + \".png\"", script)
+
+    def test_hero_copy_is_concise(self):
+        for page, path in PAGES.items():
+            source = path.read_text(encoding="utf-8")
+            hero = source.split('<section class="hero', 1)[1].split('</section>', 1)[0]
+            match = re.search(r'<p class="hero-lead"[^>]*>([^<]+)</p>', hero)
+            self.assertIsNotNone(match, page)
+            self.assertLessEqual(len(match.group(1)), 125, page)
 
     def test_responsive_reduced_motion_and_no_heavy_external_runtime(self):
         css = (ROOT / "elements.css").read_text(encoding="utf-8")

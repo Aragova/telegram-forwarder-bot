@@ -43,6 +43,36 @@ landing pages.** Existing `api.usevimi.ru`, `staging.usevimi.ru`,
   to existing `@vimi_support_bot`. Status notices avoid fictional product
   launch dates, pricing or payment guarantees.
 
+## 2026-11-16 Visual and content restoration (PR #492)
+
+After the first site release, its appearance and Autoposting information were
+reviewed against the actual pre-#491 homepage
+(`29d5a5634ddd1a52737e0304357137e9a7680731`).
+
+- **ViMi is the original robot**: the existing
+  `hero-robot-ru/en.png` and `hero-scene-ru/en.png` assets are visible in
+  hero sections. No new surrogate robot or stock character was introduced.
+  The existing language switch also changes the image locale.
+- Header has two levels: ecosystem **Home** above **ViMi Autoposting**,
+  **ViMi Social**, **ViMi Pay**. Narrow phones horizontally scroll only
+  the product row, while the brand/Home/RU/EN remain accessible.
+- Typography: Manrope for headings/buttons and Inter for readable body text.
+  Product pages use visibly distinct blue water/sky, aubergine/coral fire,
+  and emerald earth backgrounds. Spacing and hero copy are compact.
+- Restored the **full Autoposting scope** from the old homepage:
+  6 features (Autoposting, Video, Plans, Payments, Statistics, Automation),
+  5 onboarding steps, illustrative bot preview, FREE/BASIC/PRO cards and their
+  previously published 0/9/29 USD prices and corresponding limits, 8 payment
+  method labels, FAQ and Telegram CTAs. These marketing prices are a
+  **historical baseline**, not a live billing API; the UI reminds visitors to
+  verify availability and price inside the bot.
+- Old SEO page Instructions links and the new site's footer now target the
+  actual `/autoposting/#how` guide instead of the existing placeholder help
+  page. Other legal documents were not changed.
+- Regression tests now guard the exact restored feature/step/plan/payment
+  counts, price values, existing robot assets, RU/EN strings, product
+  atmospheres, mobile navigation and internal links.
+
 ## Testing and release
 
 Run from repository root:
