@@ -1,3 +1,13 @@
+> **2026-11-16 · Текущий сайт:** на `usevimi.ru` создана экосистема
+> ViMi Elements с разделами `/autoposting/`, `/social/`, `/pay/`.
+> Подробнее: [VIMI_ELEMENTS_SITE.md](VIMI_ELEMENTS_SITE.md).
+>
+> **Фактическое развёртывание:** `.github/workflows/static.yml` автоматически
+> публикует `landing/` в GitHub Pages при **слиянии в main**. Старое
+> описание ручного Pages / Nginx ниже приведено как альтернативные
+> способы, **не** как действующий продакшен-процесс. Для выкладки не
+> требуется менять DNS или запускать команды на `fast-vm`.
+>
 # Landing deployment
 
 ## Где лежит landing

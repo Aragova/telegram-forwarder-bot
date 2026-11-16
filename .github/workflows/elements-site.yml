@@ -1,0 +1,29 @@
+name: ViMi Elements | Website Quality
+
+on:
+  pull_request:
+    paths:
+      - "landing/**"
+      - "tests/test_elements_site.py"
+      - ".github/workflows/elements-site.yml"
+  push:
+    branches: ["main"]
+    paths:
+      - "landing/**"
+      - "tests/test_elements_site.py"
+      - ".github/workflows/elements-site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  website:
+    name: Static site | routes, i18n, SEO, JS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check JavaScript syntax
+        run: node --check landing/elements.js
+      - name: Verify all four pages, translations, links and assets
+        run: python3 -m unittest -v tests/test_elements_site.py
