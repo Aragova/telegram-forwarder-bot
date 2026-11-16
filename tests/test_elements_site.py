@@ -203,7 +203,18 @@ class ElementsSiteTest(unittest.TestCase):
                 self.assertNotIn(outdated, text, old_page)
             self.assertIn("autoposting/#pricing", text, old_page)
             self.assertIn("autoposting/#capabilities", text, old_page)
-            self.assertIn("ru/instructions.html", text, old_page)
+            self.assertIn("autoposting/#how", text, old_page)
+
+    def test_every_instruction_link_points_to_restored_guide(self):
+        homepage = PAGES["home"].read_text(encoding="utf-8")
+        self.assertIn('href="autoposting/#how" data-i18n="footer.instructions"', homepage)
+        for product in ("autoposting", "social", "pay"):
+            page = PAGES[product].read_text(encoding="utf-8")
+            target = "#how" if product == "autoposting" else "../autoposting/#how"
+            self.assertIn('href="' + target + '" data-i18n="footer.instructions"', page)
+        for old_page in ("autoposting.html", "telegram-bot.html", "video-repost.html"):
+            text = (ROOT / old_page).read_text(encoding="utf-8")
+            self.assertIn('href="autoposting/#how"', text)
 
     def test_restored_autoposting_includes_full_original_sales_and_help(self):
         """The original site had 6 features, 5 steps, 3 plans and 8 methods."""
