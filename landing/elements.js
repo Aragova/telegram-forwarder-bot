@@ -72,6 +72,10 @@
       "autoposting.f3Text": "Prepare content and work with videos and reposts in a familiar interface.",
       "autoposting.ctaTitle": "Let the content flow.",
       "autoposting.ctaText": "ViMi Autoposting is accessible through Telegram.",
+      "autoposting.pricingLabel": "Autoposting pricing",
+      "autoposting.pricingTitle": "Find your rhythm.",
+      "autoposting.pricingLead": "Check the ViMi Autoposting bot for current plans, limits and payment methods. These terms belong to Autoposting, not ViMi Social or ViMi Pay.",
+      "autoposting.pricingButton": "See Telegram pricing",
 
       "social.tag": "02 / Fire",
       "social.headline1": "Spark",
