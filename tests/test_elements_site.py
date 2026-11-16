@@ -351,9 +351,10 @@ class ElementsSiteTest(unittest.TestCase):
         """Regression against the Android screenshots showing giant product cards."""
         home = PAGES["home"].read_text(encoding="utf-8")
         self.assertIn('class="hero home-hero"', home)
-        self.assertNotIn('class="section compact-cta"', home)
-        self.assertEqual(home.count('href="#products"'), 1)
-        self.assertNotIn('class="btn3d secondary" href="autoposting/"', home)
+        # Desktop CTAs remain in the DOM; the mobile stylesheet alone hides them.
+        self.assertIn('class="section compact-cta"', home)
+        self.assertEqual(home.count('href="#products"'), 2)
+        self.assertIn('class="btn3d secondary" href="autoposting/"', home)
         for page, path in PAGES.items():
             source = path.read_text(encoding="utf-8")
             relative = "../mobile-v2.css" if page != "home" else "mobile-v2.css"
@@ -368,6 +369,8 @@ class ElementsSiteTest(unittest.TestCase):
         self.assertIn("grid-row:4;", css)
         self.assertIn("grid-row:5;", css)
         self.assertIn(".home-hero .hero-statline { display:none; }", css)
+        self.assertIn(".home-hero .actions .btn3d.secondary { display:none; }", css)
+        self.assertIn(".compact-cta { display:none; }", css)
         self.assertIn("#products .product-card {", css)
         self.assertIn("display:grid;", css)
         self.assertIn("grid-template-columns:minmax(0,1fr) minmax(100px,31%)", css)
