@@ -7,9 +7,9 @@
       "common.skip": "Skip to content",
       "common.brandTagline": "ELEMENTAL ECOSYSTEM",
       "common.home": "Home",
-      "common.autoposting": "Autoposting",
-      "common.social": "Social",
-      "common.pay": "Pay",
+      "common.autoposting": "ViMi Autoposting",
+      "common.social": "ViMi Social",
+      "common.pay": "ViMi Pay",
       "common.learn": "Explore product",
       "footer.summary": "Three independent products for content, audiences and monetization. One ecosystem.",
       "footer.products": "Products",
@@ -204,11 +204,9 @@
       button.setAttribute("aria-pressed", String(button.dataset.langChoice === current));
     }
     const navigation = document.getElementById("main-nav");
-    if (navigation) navigation.setAttribute("aria-label", current === "en" ? "Main navigation" : "Основная навигация");
+    if (navigation) navigation.setAttribute("aria-label", current === "en" ? "ViMi products" : "Продукты ViMi");
     const homeBrand = document.querySelector(".site-header .brand");
     if (homeBrand) homeBrand.setAttribute("aria-label", current === "en" ? "ViMi, home" : "ViMi, главная");
-    const menuButton = document.querySelector(".menu-toggle");
-    if (menuButton) menuButton.setAttribute("aria-label", current === "en" ? "Open menu" : "Открыть меню");
     for (const link of document.querySelectorAll("[data-doc]")) {
       const before = link.getAttribute("href");
       link.setAttribute("href", before.replace(/(?:ru|en)\/(terms|privacy|refund|contacts|instructions)\.html$/, current + "/$1.html"));
@@ -234,25 +232,14 @@
   try { saved = localStorage.getItem("vimi_lang") || "ru"; } catch (_) { /* Private mode. */ }
   applyLanguage(saved);
 
-  const toggle = document.querySelector(".menu-toggle");
-  const nav = document.getElementById("main-nav");
-  if (toggle && nav) {
-    const close = () => {
-      nav.dataset.open = "false";
-      toggle.setAttribute("aria-expanded", "false");
-      toggle.setAttribute("aria-label", document.documentElement.lang === "en" ? "Open menu" : "Открыть меню");
-    };
-    toggle.addEventListener("click", () => {
-      const open = nav.dataset.open !== "true";
-      nav.dataset.open = String(open);
-      toggle.setAttribute("aria-expanded", String(open));
-      toggle.setAttribute("aria-label", open
-        ? (document.documentElement.lang === "en" ? "Close menu" : "Закрыть меню")
-        : (document.documentElement.lang === "en" ? "Open menu" : "Открыть меню"));
-    });
-    nav.querySelectorAll("a").forEach(link => link.addEventListener("click", close));
-    document.addEventListener("keydown", event => { if (event.key === "Escape") close(); });
-    window.addEventListener("resize", () => { if (window.innerWidth > 780) close(); });
+  // All three products remain visible as a horizontally scrollable row on mobile.
+  // Keep the active product centered within that row without moving the document.
+  const productNav = document.getElementById("main-nav");
+  const selectedProduct = productNav?.querySelector('[aria-current="page"]');
+  if (productNav && selectedProduct && productNav.scrollWidth > productNav.clientWidth) {
+    productNav.scrollLeft = Math.max(0,
+      selectedProduct.offsetLeft - productNav.offsetLeft -
+      (productNav.clientWidth - selectedProduct.clientWidth) / 2);
   }
 
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
