@@ -319,6 +319,34 @@ class ElementsSiteTest(unittest.TestCase):
         self.assertNotIn("three.min.js", js)
         self.assertNotIn("cdnjs", css + js)
 
+    def test_mobile_product_hero_hierarchy_is_compact(self):
+        """Keep first-screen mascot, CTA and status coherent at phone widths."""
+        css = (ROOT / "elements.css").read_text(encoding="utf-8")
+        marker = "Mobile hero correction after visual QA on /pay/"
+        self.assertEqual(css.count(marker), 1)
+        mobile = css.split(marker, 1)[1]
+        for selector in (
+            ".product-hero .hero-copy{display:contents}",
+            ".product-hero .tag{grid-column:1;grid-row:1",
+            ".product-hero h1{grid-column:1;grid-row:2",
+            ".product-hero .hero-lead{grid-column:1;grid-row:3",
+            ".product-hero .actions{grid-column:1;grid-row:4",
+            ".robot-stage.element-art-stage{",
+            "grid-column:1;grid-row:5",
+            ".product-hero .product-note{",
+            "grid-column:1;grid-row:6",
+            ".product-hero .product-flags{display:none}",
+            "min-height:0;max-height:none",
+            ".nav-links{min-height:38px",
+        ):
+            self.assertIn(selector, mobile, selector)
+        for product in ("autoposting", "social", "pay"):
+            source = PAGES[product].read_text(encoding="utf-8")
+            self.assertIn('class="hero product-hero"', source)
+            self.assertIn('class="product-stage robot-stage element-art-stage"', source)
+            self.assertIn('class="actions"', source)
+            self.assertIn('data-robot="art"', source)
+
     def test_sitemap_contains_all_three_product_routes(self):
         import xml.etree.ElementTree as ET
         sitemap = ET.fromstring((ROOT / "sitemap.xml").read_text(encoding="utf-8"))
