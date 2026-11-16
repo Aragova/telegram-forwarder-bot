@@ -311,3 +311,61 @@ body[data-product=autoposting] .robot-stage .auto-robot.element-artwork{height:m
   -webkit-mask-image:radial-gradient(ellipse 83% 82% at center,black 51%,rgba(0,0,0,.95) 68%,transparent 100%);
   mask-image:radial-gradient(ellipse 83% 82% at center,black 51%,rgba(0,0,0,.95) 68%,transparent 100%);
 }
+
+
+/* Mobile hero correction after visual QA on /pay/.
+   The mascot belongs to the first-screen product story, before legal/status copy.
+   No markup duplication and no changes to desktop arrangement. */
+@media (max-width:780px){
+  html{scroll-padding-top:90px}
+  .header-primary{min-height:49px}
+  .header-primary .brand{font-size:26px}
+  .nav-links{min-height:40px;gap:19px}
+  .nav-links a{min-height:40px;padding-top:5px;padding-bottom:5px;font-size:13px}
+  .hero.product-hero{padding:16px 0 6px}
+  .product-hero .hero-grid{
+    display:grid;grid-template-columns:minmax(0,1fr);grid-auto-rows:auto;
+    row-gap:0;column-gap:0;min-height:0;align-items:start
+  }
+  .product-hero .hero-copy{display:contents}
+  .product-hero .tag{grid-column:1;grid-row:1;justify-self:start;margin:0 0 10px}
+  .product-hero h1{grid-column:1;grid-row:2;margin:0 0 8px;font-size:clamp(36px,8.2vw,54px);line-height:1.11;letter-spacing:-.04em}
+  .product-hero .hero-lead{grid-column:1;grid-row:3;margin:0 0 14px;font-size:15px;line-height:1.45}
+  .product-hero .actions{grid-column:1;grid-row:4;display:grid;grid-template-columns:minmax(0,1fr);gap:9px;margin:0 0 5px}
+  .product-hero .actions .btn3d{width:100%;min-height:44px;padding:9px 15px;justify-content:space-between;font-size:14px;line-height:1.25}
+  .product-hero .actions .btn3d.secondary{box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 4px 0 rgba(0,0,0,.17)}
+  body[data-product] .product-hero .robot-stage.element-art-stage{
+    grid-column:1;grid-row:5;position:relative;display:flex;align-items:center;
+    justify-content:center;width:100%;height:auto;min-height:0;max-height:none;
+    margin:0;padding:0;overflow:hidden
+  }
+  body[data-product] .product-hero .robot-stage.element-art-stage .element-artwork,
+  body[data-product=autoposting] .product-hero .robot-stage .auto-robot.element-artwork{
+    width:auto;max-width:100%;height:clamp(210px,66vw,315px);max-height:none;
+    margin:0 auto;object-fit:contain;filter:drop-shadow(0 12px 18px rgba(0,0,0,.13))
+  }
+  body[data-product] .product-hero .robot-stage.element-art-stage:before{
+    inset:9% 15%;filter:blur(23px);opacity:.75
+  }
+  .product-hero .product-note{
+    grid-column:1;grid-row:6;max-width:none;margin:5px 0 0;padding:10px 12px;
+    font-size:12px;line-height:1.45;border-radius:12px
+  }
+  /* Features already have a full section immediately below the hero. */
+  .product-hero .product-flags{display:none}
+  .product-hero .product-float{display:none}
+  .product-hero + .section{padding-top:24px}
+}
+@media(max-width:430px){
+  html{scroll-padding-top:85px}
+  .header-primary{min-height:46px}
+  .header-primary .brand{font-size:24px}
+  .nav-links{min-height:38px;gap:17px}
+  .nav-links a{min-height:38px;font-size:12.5px}
+  .product-hero .tag{margin-bottom:8px}
+  .product-hero h1{font-size:clamp(34px,9.3vw,40px)}
+  body[data-product] .product-hero .robot-stage.element-art-stage .element-artwork,
+  body[data-product=autoposting] .product-hero .robot-stage .auto-robot.element-artwork{
+    height:clamp(205px,65vw,265px)
+  }
+}
