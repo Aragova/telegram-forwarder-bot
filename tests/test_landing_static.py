@@ -27,16 +27,18 @@ def test_owner_plan_not_visible():
 
 
 def test_cta_ru_en_and_telegram_bot_present():
+    """The shared homepage routes to the live Autoposting product."""
     index_text = read(LANDING / "index.html")
-    app_text = read(LANDING / "app.js")
+    auto_text = read(LANDING / "autoposting" / "index.html")
+    i18n_text = read(LANDING / "elements.js")
 
-    assert "header-open-bot" in index_text
-    assert "https://t.me/topposter69_bot" in index_text
-    assert "https://t.me/topposter69_bot" in index_text
-    assert "botUrl" in app_text
-    assert "Telegram" in app_text
-    assert 'data-lang="ru"' in index_text
-    assert 'data-lang="en"' in index_text
+    assert 'href="autoposting/"' in index_text
+    assert "https://t.me/topposter69_bot" in auto_text
+    assert 'data-lang-choice="ru"' in index_text
+    assert 'data-lang-choice="en"' in index_text
+    assert '"autoposting.button": "Open Telegram bot"' in i18n_text
+    # The legacy app's CTA remains available to older SEO/landing pages.
+    assert "botUrl" in read(LANDING / "app.js")
 
 
 def test_pricing_and_payment_blocks_exist():
@@ -70,19 +72,17 @@ def test_assets_robot_logo_favicon_exist():
 
 
 def test_legal_links_and_faq_exist():
+    """New ecosystem routes retain the legal docs, help and product FAQs."""
     index_text = read(LANDING / "index.html")
-    app_text = read(LANDING / "app.js")
-
-    for link_id in (
-        "footer-link-terms",
-        "footer-link-privacy",
-        "footer-link-refund",
-        "footer-link-contacts",
-    ):
-        assert link_id in index_text
-
-    assert "ru/instructions.html" in index_text or "#how" in index_text
-    assert "nav_instructions" in app_text
+    for doc in ("terms", "privacy", "refund", "contacts", "instructions"):
+        assert f'data-doc="{doc}"' in index_text
+    assert "ru/instructions.html" in index_text
+    assert "footer.instructions" in read(LANDING / "elements.js")
+    for product in ("autoposting", "social", "pay"):
+        product_text = read(LANDING / product / "index.html")
+        assert 'id="faq"' in product_text
+        assert 'class="faq-item"' in product_text
+        assert 'data-doc="instructions"' in product_text
 
 
 def test_ru_en_legal_and_instruction_pages_exist():
