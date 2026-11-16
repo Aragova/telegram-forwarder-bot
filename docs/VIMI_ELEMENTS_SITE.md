@@ -25,16 +25,19 @@ landing pages.** Existing `api.usevimi.ru`, `staging.usevimi.ru`,
 - Shared `elements.css` / `elements.js` provide a premium dark identity,
   CSS-based water/fire/earth 3D sculptures and subtle pointer tilt.
 - RU copy is present in the source HTML; EN translations are complete in
-  `elements.js`. A visitor can switch languages without leaving the product
-  page; preference is saved only in localStorage when supported.
+  `elements.js`, using the existing landing `data-i18n`/`dict` contract.
+  The same legacy `vimi_lang` preference is used across all pages. A visitor
+  switches languages without leaving the product page.
 - Lightweight CSS transforms and gradients replace WebGL. Pointer effects
   are disabled for touch/non-hover devices, and all animation is disabled by
   `prefers-reduced-motion`. All links/buttons are keyboard focusable.
 - Dedicated canonical URLs and existing social preview image are retained.
   Sitemap includes the three product pages.
-- Existing older Autoposting SEO page `/autoposting.html`, all `/ru/` and
-  `/en/` legal pages, media assets, `CNAME` and old `app.js`/`styles.css`
-  are left untouched.
+- Existing SEO pages `/autoposting.html`, `/telegram-bot.html` and
+  `/video-repost.html` retain their content; only their outdated root
+  `#features/#how/#pricing` links now point to real Autoposting destinations.
+  Existing `/ru/` and `/en/` legal/help pages, media assets, `CNAME`,
+  old `app.js` and `styles.css` are not modified.
 - Existing Telegram destinations: Autoposting `@topposter69_bot`, Pay
   `@vimipay_bot`; Social **does not invent a public bot** and instead links
   to existing `@vimi_support_bot`. Status notices avoid fictional product
