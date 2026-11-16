@@ -91,6 +91,38 @@ class ElementsSiteTest(unittest.TestCase):
             self.assertTrue(any(attrs.get("data-lang-choice") == "ru"
                                 for _, attrs in parser.attrs))
 
+    def test_site_navigation_separates_home_from_full_product_names(self):
+        """The ecosystem home link sits above three fully named product tabs."""
+        expected = (
+            ('autoposting', 'ViMi Autoposting'),
+            ('social', 'ViMi Social'),
+            ('pay', 'ViMi Pay'),
+        )
+        for current_page, page in PAGES.items():
+            with self.subTest(page=current_page):
+                source = page.read_text(encoding="utf-8")
+                header = source.split('<header class="site-header">', 1)[1].split('</header>', 1)[0]
+                top, product_nav = header.split('<nav id="main-nav"', 1)
+                self.assertIn('class="header-primary"', top)
+                self.assertIn('class="home-entry"', top)
+                self.assertIn('data-i18n="common.home">Главная</a>', top)
+                self.assertNotIn('data-i18n="common.home"', product_nav)
+                self.assertIn('aria-label="Продукты ViMi"', product_nav)
+                self.assertEqual(product_nav.count('data-i18n="common.'), 3)
+                self.assertNotIn('menu-toggle', header)
+                for slug, title in expected:
+                    self.assertIn('data-i18n="common.' + slug + '">' + title + '</a>', product_nav)
+                self.assertEqual(product_nav.count('aria-current="page"'), 0 if current_page == 'home' else 1)
+                self.assertEqual(top.count('aria-current="page"'), 1 if current_page == 'home' else 0)
+
+        javascript = (ROOT / "elements.js").read_text(encoding="utf-8")
+        for slug, title in expected:
+            self.assertIn('"common.' + slug + '": "' + title + '"', javascript)
+        self.assertNotIn('.menu-toggle', javascript)
+        css = (ROOT / "elements.css").read_text(encoding="utf-8")
+        self.assertIn("overflow-x:auto", css)
+        self.assertIn(".header-primary", css)
+
     def test_element_labels_are_translated_in_both_languages(self):
         """Keep visible elemental decorations and feature badges bilingual.
 
