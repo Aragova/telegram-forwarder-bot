@@ -244,3 +244,63 @@ body[data-product=pay] .btn3d.primary{background:linear-gradient(145deg,#e3fff0,
   .header-primary .lang-switch button{padding:5px 5px}
   .header-primary .lang-switch{flex-shrink:0}
 }
+
+
+/* ViMi Elements approved concept art — character scenes and real HTML remain separate.
+   Art files are compact transparent AVIF crops of the approved four sketches.
+   Native image transparency + gradient bleed produces edge-free integration. */
+.element-artwork{display:block;max-width:100%;height:auto;object-fit:contain;object-position:center;pointer-events:none;user-select:none;isolation:isolate}
+.element-art-stage{position:relative;isolation:isolate;overflow:visible}
+.robot-world.element-art-stage{display:flex;align-items:center;justify-content:center;min-height:455px;max-width:100%;margin:0;overflow:visible}
+.robot-world.element-art-stage:before{content:"";inset:-18% -16%;position:absolute;z-index:-1;pointer-events:none;border-radius:45%;background:
+ radial-gradient(ellipse at 25% 42%,rgba(18,157,236,.31),transparent 53%),
+ radial-gradient(ellipse at 78% 35%,rgba(224,59,156,.28),transparent 54%),
+ radial-gradient(ellipse at 48% 85%,rgba(12,188,132,.22),transparent 59%);filter:blur(23px)}
+.robot-world .home-robot.element-artwork{position:relative;inset:auto;z-index:1;width:min(100%,720px);height:auto;aspect-ratio:720/477;max-height:none;object-fit:contain;margin:auto;filter:drop-shadow(0 22px 32px rgba(21,92,159,.1))}
+.element-entry{position:absolute;z-index:3;display:flex;align-items:center;gap:10px;width:min(45%,250px);padding:11px 13px;border:1px solid rgba(179,221,255,.26);border-radius:16px;
+ background:linear-gradient(140deg,rgba(19,35,59,.92),rgba(11,21,39,.76));backdrop-filter:blur(17px) saturate(130%);-webkit-backdrop-filter:blur(17px) saturate(130%);
+ box-shadow:inset 0 1px 0 rgba(255,255,255,.17),0 12px 25px rgba(0,0,0,.16);color:#eff7ff;transform:translateY(0);transition:transform .2s ease,border-color .2s ease}
+.element-entry:hover,.element-entry:focus-visible{transform:translateY(-3px);border-color:rgba(255,255,255,.48)}
+.element-entry strong{display:block;font-family:Manrope,Inter,sans-serif;font-size:12px;line-height:1.25;white-space:nowrap;letter-spacing:-.03em}
+.element-entry small{display:block;margin-top:3px;font-size:10px;color:#b8cddd;line-height:1.4}
+.element-entry-symbol{display:grid;place-items:center;flex:0 0 26px;width:26px;height:26px;font-size:19px;border-radius:8px;background:rgba(121,194,255,.17);box-shadow:inset 0 1px 0 rgba(255,255,255,.14)}
+.element-entry-arrow{margin-left:auto;align-self:flex-start;font-size:15px}
+.element-entry.water{top:8%;left:-12%;border-color:rgba(71,193,251,.5)}
+.element-entry.fire{top:24%;right:-14%;border-color:rgba(255,106,197,.48)}
+.element-entry.fire .element-entry-symbol{background:rgba(255,104,180,.19)}
+.element-entry.earth{bottom:9%;right:-3%;border-color:rgba(90,222,169,.49)}
+.element-entry.earth .element-entry-symbol{background:rgba(90,222,169,.17)}
+/* Product portraits dissolve into the matching elemental canvas rather than floating as rectangles. */
+body[data-product=autoposting] .hero.product-hero{background:radial-gradient(ellipse 44% 50% at 76% 47%,rgba(33,146,229,.2),transparent 73%)}
+body[data-product=social] .hero.product-hero{background:radial-gradient(ellipse 44% 50% at 76% 47%,rgba(239,83,167,.2),transparent 73%)}
+body[data-product=pay] .hero.product-hero{background:radial-gradient(ellipse 44% 50% at 76% 47%,rgba(59,208,133,.2),transparent 73%)}
+body[data-product] .robot-stage.element-art-stage{display:flex;align-items:center;justify-content:center;min-height:450px;max-height:530px}
+body[data-product] .robot-stage.element-art-stage:before{content:"";inset:3% 10%;filter:blur(32px);background:radial-gradient(ellipse,rgba(var(--product-rgb),.33),transparent 72%)}
+body[data-product] .robot-stage.element-art-stage .element-artwork{position:relative;z-index:1;inset:auto;width:auto;max-width:100%;height:min(510px,44vw);max-height:510px;margin:auto;object-fit:contain;filter:drop-shadow(0 20px 28px rgba(0,0,0,.12))}
+body[data-product=autoposting] .robot-stage .auto-robot.element-artwork{height:min(510px,44vw);max-width:100%;filter:drop-shadow(0 16px 28px rgba(20,144,251,.12))}
+.product-card .product-art{height:218px;overflow:hidden;isolation:isolate;position:relative}
+.product-card .product-art:after{content:"";pointer-events:none;position:absolute;inset:-18%;z-index:0;background:radial-gradient(ellipse,rgba(var(--accent-rgb),.18),transparent 62%);filter:blur(16px)}
+.product-card .product-art img.card-robot.element-artwork{position:relative;z-index:2;inset:auto;margin:auto;width:auto;max-width:100%;height:220px;object-fit:contain;transform:none;filter:drop-shadow(0 10px 20px rgba(var(--accent-rgb),.12))}
+.product-card.fire .product-art img.card-robot.element-artwork{filter:drop-shadow(0 10px 20px rgba(250,65,156,.16))}
+.product-card.earth .product-art img.card-robot.element-artwork{filter:drop-shadow(0 10px 20px rgba(24,199,125,.16))}
+@media(max-width:1160px){.element-entry{width:43%;padding:9px;gap:7px}.element-entry.water{left:-2%}.element-entry.fire{right:-3%}.element-entry.earth{right:1%}.element-entry small{display:none}}
+@media(max-width:780px){
+ .robot-world.element-art-stage{min-height:340px;margin:8px auto 0;max-width:min(100%,580px)}
+ .robot-world .home-robot.element-artwork{height:auto;max-height:none;width:100%}
+ .element-entry{width:auto;padding:8px 9px;max-width:40%}
+ .element-entry strong{font-size:11px}
+ .element-entry.water{left:-1%;top:6%}.element-entry.fire{right:-1%;top:16%}.element-entry.earth{right:3%;bottom:0}
+ body[data-product] .robot-stage.element-art-stage{min-height:325px;max-height:365px}
+ body[data-product] .robot-stage.element-art-stage .element-artwork,
+ body[data-product=autoposting] .robot-stage .auto-robot.element-artwork{height:340px;width:auto;max-width:100%}
+ .product-card .product-art{height:225px}
+}
+@media(max-width:430px){
+ .robot-world.element-art-stage{min-height:260px}
+ .element-entry{display:none} /* full-size clickable cards remain below, preventing obscured buttons */
+ body[data-product] .robot-stage.element-art-stage{min-height:300px;max-height:315px}
+ body[data-product] .robot-stage.element-art-stage .element-artwork,
+ body[data-product=autoposting] .robot-stage .auto-robot.element-artwork{height:295px}
+ .product-card .product-art img.card-robot.element-artwork{height:207px}
+}
+@media(prefers-reduced-motion:reduce){.element-entry{transition:none!important}.element-entry:hover{transform:none!important}}
