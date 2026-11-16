@@ -1,0 +1,270 @@
+/*
+ * ViMi mobile composition v2. Purposefully loaded AFTER elements.css.
+ * The previous PR only shrank product spacing: this file changes the
+ * information hierarchy, image placement and product-card geometry.
+ * Desktop >780px keeps the original full-featured layout.
+ */
+@media (max-width:780px) {
+  /* Two rows, not two oversized panels. Keep full, scrollable product names. */
+  html { scroll-padding-top:89px; }
+  .site-header .header-primary { min-height:47px; }
+  .site-header .header-primary .brand { font-size:25px; }
+  .site-header .home-entry { min-height:29px; padding:4px 10px; font-size:12px; }
+  .site-header .lang-switch { padding:2px; }
+  .site-header .lang-switch button { padding:4px 7px; font-size:11px; }
+  .site-header .nav-links { min-height:39px; gap:17px; }
+  .site-header .nav-links a { min-height:39px; padding:5px 2px; font-size:12.5px; }
+  .site-header .nav-links a[aria-current=page]:after { height:2px; }
+
+  /* Homepage is no longer text + two buttons + labels + a tall poster. */
+  .home-hero { padding:16px 0 10px; }
+  .home-hero .hero-grid {
+    display:grid;
+    grid-template-columns:minmax(0,1fr);
+    grid-template-rows:auto auto auto auto auto;
+    gap:0;
+    min-height:0;
+  }
+  .home-hero .hero-copy { display:contents; }
+  .home-hero .tag { grid-column:1; grid-row:1; justify-self:start; padding:6px 11px; margin:0 0 9px; font-size:10px; }
+  .home-hero h1 { grid-column:1; grid-row:2; font-size:clamp(37px,9vw,54px); line-height:1.07; letter-spacing:-.05em; margin:0 0 8px; }
+  .home-hero .hero-lead { grid-column:1; grid-row:3; max-width:440px; font-size:14px; line-height:1.43; margin:0 0 5px; }
+  .home-hero .world.robot-world.element-art-stage {
+    grid-column:1;
+    grid-row:4;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:min(100%,490px);
+    max-width:490px;
+    min-height:0;
+    height:auto;
+    margin:0 auto 4px;
+    padding:0;
+  }
+  .home-hero .world.robot-world .home-robot.element-artwork {
+    width:100%;
+    height:auto;
+    max-height:240px;
+    aspect-ratio:720/477;
+    object-fit:contain;
+  }
+  .home-hero .element-entry { display:none; } /* The three visible cards below are the navigation. */
+  .home-hero .hero-statline { display:none; }
+  .home-hero .actions {
+    grid-column:1;
+    grid-row:5;
+    display:block;
+    margin:0;
+  }
+  .home-hero .actions .btn3d.primary {
+    display:flex;
+    width:100%;
+    min-height:45px;
+    padding:9px 15px;
+    justify-content:space-between;
+    font-size:14px;
+    box-shadow:inset 0 2px 0 rgba(255,255,255,.55),0 4px 0 #284979,0 12px 20px rgba(59,114,241,.12);
+  }
+  .home-hero .actions .btn3d.secondary { display:none; }
+
+  /* Three compact horizontal product choices instead of 3 huge posters. */
+  #products.section { padding:17px 0 24px; }
+  #products .section-header { margin:0 0 12px; }
+  #products .section-header .eyebrow { font-size:10px; letter-spacing:.11em; }
+  #products .section-header h2 { font-size:clamp(25px,6.2vw,34px); margin:5px 0 0; }
+  #products .section-header .section-desc { display:none; }
+  #products .products { display:grid; grid-template-columns:minmax(0,1fr); gap:11px; }
+  #products .product-card {
+    display:grid;
+    grid-template-columns:minmax(0,1fr) minmax(100px,31%);
+    grid-template-rows:auto 1fr;
+    column-gap:5px;
+    align-items:center;
+    min-height:164px;
+    padding:13px 15px;
+    border-radius:19px;
+    transform:none !important;
+    will-change:auto;
+  }
+  #products .product-card:before { opacity:.6; }
+  #products .product-card .card-top {
+    grid-row:1;grid-column:1 / -1;
+    display:flex;
+    justify-content:space-between;
+    align-self:start;
+    margin-bottom:4px;
+  }
+  #products .product-card .number,
+  #products .product-card .element-name { font-size:9.5px; letter-spacing:.08em; }
+  #products .product-card .product-art {
+    grid-row:2;grid-column:2;
+    align-self:center;
+    height:114px;
+    width:100%;
+    margin:0;
+    overflow:visible;
+  }
+  #products .product-card .product-art img.card-robot.element-artwork {
+    display:block;
+    width:100%;
+    height:114px;
+    max-height:114px;
+    object-fit:contain;
+    margin:0;
+  }
+  #products .product-card .card-bottom {
+    grid-row:2;grid-column:1;
+    min-width:0;
+    margin:0;
+    align-self:center;
+  }
+  #products .product-card .card-bottom h3 {
+    font-size:clamp(17px,4.3vw,22px);
+    margin:0 0 4px;
+    letter-spacing:-.035em;
+    line-height:1.18;
+    overflow-wrap:break-word;
+  }
+  #products .product-card .card-bottom p {
+    font-size:12px;
+    margin:0 0 9px;
+    line-height:1.35;
+  }
+  #products .product-card .card-link {
+    padding:0;
+    border-top:0;
+    font-size:12.5px;
+    min-height:28px;
+  }
+  #products .product-card .circle-arrow { width:27px; height:27px; }
+
+  /* Products: mascot comes immediately after the promise, not after two
+     full-width buttons and badges. One primary CTA, one quiet text link. */
+  .product-hero { padding:15px 0 5px; }
+  .product-hero .hero-grid {
+    display:grid;
+    grid-template-columns:minmax(0,1fr);
+    grid-auto-rows:auto;
+    gap:0;
+    min-height:0;
+    align-items:start;
+  }
+  .product-hero .hero-copy { display:contents; }
+  .product-hero .tag {
+    grid-column:1;grid-row:1;
+    justify-self:start;
+    margin:0 0 9px;
+    padding:6px 11px;
+    font-size:10px;
+  }
+  .product-hero h1 {
+    grid-column:1;grid-row:2;
+    font-size:clamp(35px,8.5vw,51px);
+    line-height:1.11;
+    letter-spacing:-.042em;
+    margin:0 0 7px;
+  }
+  .product-hero .hero-lead {
+    grid-column:1;grid-row:3;
+    font-size:14px;
+    line-height:1.42;
+    margin:0 0 5px;
+  }
+  body[data-product] .product-hero .robot-stage.element-art-stage {
+    grid-column:1;grid-row:4;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:100%;
+    min-height:0;
+    max-height:none;
+    height:245px;
+    padding:0;
+    margin:0;
+    overflow:hidden;
+  }
+  body[data-product] .product-hero .robot-stage.element-art-stage .element-artwork,
+  body[data-product=autoposting] .product-hero .robot-stage .auto-robot.element-artwork {
+    display:block;
+    height:240px;
+    width:auto;
+    max-width:100%;
+    max-height:240px;
+    margin:0 auto;
+    object-fit:contain;
+    filter:drop-shadow(0 12px 18px rgba(0,0,0,.13));
+  }
+  .product-hero .actions {
+    grid-column:1;grid-row:5;
+    display:flex;
+    flex-direction:column;
+    align-items:stretch;
+    gap:5px;
+    margin:0;
+  }
+  .product-hero .actions .btn3d.primary {
+    width:100%;
+    min-height:46px;
+    padding:10px 15px;
+    justify-content:space-between;
+    font-size:14px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.6),0 4px 0 rgba(6,31,38,.65),0 11px 18px rgba(var(--product-rgb),.13);
+  }
+  .product-hero .actions .btn3d.secondary {
+    align-self:flex-start;
+    width:auto;
+    min-height:29px;
+    padding:2px 4px;
+    border:none;
+    border-radius:6px;
+    background:transparent;
+    color:var(--product-accent,#cde5f9);
+    box-shadow:none;
+    font-size:12.5px;
+    text-decoration:underline;
+    text-underline-offset:4px;
+  }
+  .product-hero .actions .btn3d.secondary:hover,
+  .product-hero .actions .btn3d.secondary:active {
+    background:transparent;
+    transform:none;
+    box-shadow:none;
+  }
+  .product-hero .product-note {
+    grid-column:1;grid-row:6;
+    padding:9px 11px;
+    margin:7px 0 0;
+    max-width:none;
+    font-size:12px;
+    line-height:1.35;
+  }
+  .product-hero .product-flags,
+  .product-hero .product-float { display:none; }
+  .product-hero + .section { padding-top:14px; }
+  .product-hero + .section .section-header { margin-bottom:15px; }
+
+  .site-footer { margin-top:16px; padding:24px 0 17px; }
+  .footer-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:17px; }
+  .footer-grid > div:first-child { grid-column:1 / -1; }
+  .footer-grid p { margin:8px 0 0; }
+  .footer-bottom { margin-top:16px; }
+}
+@media (max-width:420px) {
+  .site-header .header-primary { min-height:44px; }
+  .site-header .header-primary .brand { font-size:23px; }
+  .site-header .nav-links, .site-header .nav-links a { min-height:37px; }
+  .home-hero .world.robot-world .home-robot.element-artwork { max-height:222px; }
+  #products .product-card { grid-template-columns:minmax(0,1fr) minmax(92px,30%); min-height:158px; padding:11px 12px; }
+  #products .product-card .product-art,
+  #products .product-card .product-art img.card-robot.element-artwork { height:108px;max-height:108px; }
+  #products .product-card .card-bottom h3 { font-size:18px; }
+  #products .product-card .card-bottom p { font-size:11.5px; }
+  body[data-product] .product-hero .robot-stage.element-art-stage { height:222px; }
+  body[data-product] .product-hero .robot-stage.element-art-stage .element-artwork,
+  body[data-product=autoposting] .product-hero .robot-stage .auto-robot.element-artwork { height:218px;max-height:218px; }
+  .product-hero h1 { font-size:clamp(33px,8.7vw,39px); }
+}
+@media (prefers-reduced-motion:reduce) {
+  #products .product-card, .product-hero .btn3d { transition:none !important; transform:none !important; }
+}
