@@ -138,9 +138,6 @@ class ElementsSiteTest(unittest.TestCase):
                 "home.flowLabel": "ПОТОК",
                 "home.energyLabel": "ЭНЕРГИЯ",
                 "home.valueLabel": "ЦЕННОСТЬ",
-                "home.waterLabel": "01 · ВОДА",
-                "home.fireLabel": "02 · ОГОНЬ",
-                "home.earthLabel": "03 · ЗЕМЛЯ",
                 "home.waterSkyLabel": "ВОДА / НЕБО",
                 "home.fireEnergyLabel": "ОГОНЬ / ЭНЕРГИЯ",
                 "home.earthValueLabel": "ЗЕМЛЯ / ЦЕННОСТЬ",
@@ -153,14 +150,15 @@ class ElementsSiteTest(unittest.TestCase):
                 "social.flag1": "AI-поиск",
                 "social.flag2": "Подготовка медиа",
                 "social.flag3": "Подтверждение человеком",
-                "social.elementLabel": "ОГОНЬ · ViMi",
                 "social.ctaElement": "ЭНЕРГИЯ",
             },
             "pay": {
-                "pay.elementLabel": "ЗЕМЛЯ · ViMi",
                 "pay.ctaElement": "ЦЕННОСТЬ",
             },
         }
+        # The new approved hero art replaces former floating labels; the
+        # remaining visible card/category labels must still be translated.
+        # Product CTA labels are kept as semantic HTML rather than baked into art.
         for page, labels in requirements.items():
             source = PAGES[page].read_text(encoding="utf-8")
             self.assertEqual(source.count('data-i18n="common.brandTagline"'), 2)
@@ -236,6 +234,49 @@ class ElementsSiteTest(unittest.TestCase):
             self.assertIn('../assets/features/' + icon + '.svg', html)
         for method in ("telegram", "paypal", "card", "sbp", "bitcoin", "tribute", "lava", "manual"):
             self.assertIn('../assets/payments/' + method + '.svg', html)
+
+    def test_approved_element_artwork_is_distinct_and_fully_local(self):
+        """Approved element art is stored locally and all CTA actions remain real links."""
+        import struct
+        artwork = {
+            "home": ("vimi-home-art.avif", 720, 477),
+            "autoposting": ("vimi-water-art.avif", 620, 795),
+            "social": ("vimi-fire-art.avif", 620, 795),
+            "pay": ("vimi-earth-art.avif", 620, 795),
+        }
+        for page, (filename, width, height) in artwork.items():
+            with self.subTest(page=page):
+                source = PAGES[page].read_text(encoding="utf-8")
+                file_path = ROOT / "assets" / filename
+                self.assertTrue(file_path.is_file(), str(file_path))
+                raw = file_path.read_bytes()
+                self.assertGreater(len(raw), 5000)
+                self.assertLess(len(raw), 250000, "Avoid high-cost hero images")
+                self.assertEqual(raw[4:8], b"ftyp")
+                self.assertIn(b"avif", raw[:32])
+                self.assertIn(filename, source)
+                self.assertIn('class="', source)
+                self.assertIn('data-robot="art"', source)
+                self.assertIn('fetchpriority="high"', source)
+                self.assertIn('data-i18n=', source)
+                if page == "home":
+                    for route in ('autoposting/', 'social/', 'pay/'):
+                        self.assertIn('class="element-entry', source)
+                        self.assertIn('href="' + route + '"', source)
+                else:
+                    self.assertIn('class="product-stage robot-stage', source)
+                    self.assertNotIn('src="../assets/hero-robot-ru.png"', source)
+        home = PAGES["home"].read_text(encoding="utf-8")
+        for filename in ("vimi-water-art.avif", "vimi-fire-art.avif", "vimi-earth-art.avif"):
+            self.assertIn(filename, home)
+        for old in ("assets/hero-robot-ru.png", 'class="sculpture water"'):
+            self.assertNotIn(old, home)
+        css = (ROOT / "elements.css").read_text(encoding="utf-8")
+        self.assertIn(".element-art-stage", css)
+        self.assertIn(".element-artwork", css)
+        self.assertIn("body[data-product=social]", css)
+        self.assertIn("body[data-product=pay]", css)
+        self.assertIn("@media(max-width:430px)", css)
 
     def test_original_vimi_robot_and_strong_elemental_backgrounds(self):
         """Never replace the brand's character with generic three-dimensional orbs."""

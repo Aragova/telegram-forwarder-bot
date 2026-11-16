@@ -73,6 +73,34 @@ reviewed against the actual pre-#491 homepage
   counts, price values, existing robot assets, RU/EN strings, product
   atmospheres, mobile navigation and internal links.
 
+## 2026-11-16 · Approved elemental robot artwork (website-only)
+
+Four specifically approved ViMi concepts are integrated as **local transparent AVIF
+assets** rather than screenshots or CSS orbs:
+
+| Route | Asset | Art direction |
+| --- | --- | --- |
+| `/` | `landing/assets/vimi-home-art.avif` | One unified ViMi mascot with blue, magenta and emerald light |
+| `/autoposting/` | `landing/assets/vimi-water-art.avif` | Water/sky ViMi |
+| `/social/` | `landing/assets/vimi-fire-art.avif` | Fire/energy ViMi |
+| `/pay/` | `landing/assets/vimi-earth-art.avif` | Earth/value ViMi |
+
+Original approved images were cropped to **remove poster captions and baked-in
+text**, then softly alpha-blended at the edges. Product backgrounds keep their
+corresponding cinematic color palette. Product headings, RU/EN copy and CTAs
+remain semantic HTML, including homepage links on overlay cards and the normal
+product card links. Art is decorative (`alt=""`); all actionable elements
+have text and keyboard focus.
+
+Assets are static, local and compressed for GitHub Pages; no network images,
+3D runtime or extra JS required. The legacy RU/EN robot PNGs are preserved for
+historical pages; the new illustrations have no text and do not need image
+swaps on language toggle.
+
+The site must **not** be merged to main until all four assets exist on the
+branch, static tests pass, and the product owner explicitly approves merge.
+Publishing to GitHub Pages is automatic on merge.
+
 ## Testing and release
 
 Run from repository root:
