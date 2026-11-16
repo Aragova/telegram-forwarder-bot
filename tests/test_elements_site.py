@@ -138,9 +138,6 @@ class ElementsSiteTest(unittest.TestCase):
                 "home.flowLabel": "ПОТОК",
                 "home.energyLabel": "ЭНЕРГИЯ",
                 "home.valueLabel": "ЦЕННОСТЬ",
-                "home.waterLabel": "01 · ВОДА",
-                "home.fireLabel": "02 · ОГОНЬ",
-                "home.earthLabel": "03 · ЗЕМЛЯ",
                 "home.waterSkyLabel": "ВОДА / НЕБО",
                 "home.fireEnergyLabel": "ОГОНЬ / ЭНЕРГИЯ",
                 "home.earthValueLabel": "ЗЕМЛЯ / ЦЕННОСТЬ",
@@ -153,14 +150,15 @@ class ElementsSiteTest(unittest.TestCase):
                 "social.flag1": "AI-поиск",
                 "social.flag2": "Подготовка медиа",
                 "social.flag3": "Подтверждение человеком",
-                "social.elementLabel": "ОГОНЬ · ViMi",
                 "social.ctaElement": "ЭНЕРГИЯ",
             },
             "pay": {
-                "pay.elementLabel": "ЗЕМЛЯ · ViMi",
                 "pay.ctaElement": "ЦЕННОСТЬ",
             },
         }
+        # The new approved hero art replaces former floating labels; the
+        # remaining visible card/category labels must still be translated.
+        # Product CTA labels are kept as semantic HTML rather than baked into art.
         for page, labels in requirements.items():
             source = PAGES[page].read_text(encoding="utf-8")
             self.assertEqual(source.count('data-i18n="common.brandTagline"'), 2)
