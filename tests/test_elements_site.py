@@ -428,6 +428,47 @@ class ElementsSiteTest(unittest.TestCase):
             else:
                 self.assertEqual(html.count('class="card-robot element-artwork"'), 3)
 
+    def test_compact_elemental_product_sections_preserve_content_and_routes(self):
+        """Prevent empty oversized banners and preserve all existing product copy."""
+        css = (ROOT / "sections-v2.css").read_text(encoding="utf-8")
+        self.assertIn("Loaded after mascot-fit.css", css)
+        self.assertIn("grid-template-columns: 46px minmax(0, 1fr)", css)
+        self.assertIn("min-height: 128px", css)
+        self.assertIn("min-height: 88px", css)
+        self.assertIn("grid-template-columns: minmax(0,1fr) auto", css)
+        self.assertIn("body[data-product=autoposting] .auto-feature::before", css)
+        self.assertIn("body[data-product=social] .product-list .feature::before", css)
+        self.assertIn("body[data-product=pay] .product-list .feature::before", css)
+        self.assertIn("body[data-product=autoposting] .product-cta-section .element-cta::after", css)
+        self.assertIn("body[data-product=social] .product-cta-section .element-cta::after", css)
+        self.assertIn("body[data-product=pay] .product-cta-section .element-cta::after", css)
+        for breakpoint in ("max-width: 980px", "max-width: 780px", "max-width: 420px"):
+            self.assertIn(breakpoint, css)
+        self.assertNotIn("object-fit: cover", css)
+        self.assertNotIn("display: none", css)
+        for product in ("autoposting", "social", "pay"):
+            html = PAGES[product].read_text(encoding="utf-8")
+            self.assertIn('href="../sections-v2.css"', html)
+            self.assertLess(html.index('href="../mascot-fit.css"'), html.index('href="../sections-v2.css"'))
+            self.assertIn('class="section product-cta-section"', html)
+            self.assertIn('class="cta-panel element-cta"', html)
+            self.assertEqual(html.count('class="cta-panel element-cta"'), 1)
+            self.assertIn('class="faq-list"', html)
+            self.assertIn('data-robot="art"', html)
+        autoposting = PAGES["autoposting"].read_text(encoding="utf-8")
+        self.assertEqual(autoposting.count('class="feature auto-feature"'), 6)
+        for name in ("FREE", "BASIC", "PRO"):
+            self.assertIn("<h3>" + name + "</h3>", autoposting)
+        self.assertIn("https://t.me/topposter69_bot", autoposting)
+        for product in ("social", "pay"):
+            html = PAGES[product].read_text(encoding="utf-8")
+            self.assertIn('class="section product-capabilities"', html)
+            self.assertEqual(html.count('<article class="feature">'), 3)
+        self.assertIn("https://t.me/vimi_support_bot", PAGES["social"].read_text(encoding="utf-8"))
+        self.assertIn("https://t.me/vimipay_bot", PAGES["pay"].read_text(encoding="utf-8"))
+        # Only product pages load the new stylesheet; homepage remains unchanged.
+        self.assertNotIn("sections-v2.css", PAGES["home"].read_text(encoding="utf-8"))
+
     def test_sitemap_contains_all_three_product_routes(self):
         import xml.etree.ElementTree as ET
         sitemap = ET.fromstring((ROOT / "sitemap.xml").read_text(encoding="utf-8"))

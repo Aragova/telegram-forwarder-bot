@@ -1,0 +1,344 @@
+/*
+ * ViMi product sections: compact, content-first and specific to each element.
+ * Loaded after mascot-fit.css, without changing any robot/hero sizing.
+ * Existing RU/EN copy, destinations, FAQ behaviour and pricing stay intact.
+ */
+body[data-product] {
+  --section-edge: rgba(var(--product-rgb), .34);
+  --section-glow: rgba(var(--product-rgb), .19);
+}
+
+/* Turn long, empty stretches of space into a readable section rhythm. */
+body[data-product] .section {
+  padding-block: 28px;
+}
+body[data-product] .section-header {
+  margin: 0 0 18px;
+  max-width: 780px;
+}
+body[data-product] .section h2 {
+  margin: 6px 0 9px;
+  font-size: clamp(30px, 3.3vw, 44px);
+  line-height: 1.16;
+}
+body[data-product] .section-desc {
+  line-height: 1.5;
+}
+body[data-product] .product-overline {
+  letter-spacing: .13em;
+}
+body[data-product] .faq-section {
+  padding-top: 24px;
+  padding-bottom: 16px;
+}
+body[data-product] .faq-list {
+  gap: 9px;
+}
+body[data-product] .faq-item summary {
+  padding: 15px 19px;
+}
+body[data-product] .faq-item p {
+  padding: 0 19px 17px;
+  line-height: 1.55;
+}
+
+/* All six Autoposting features and the Social/Pay feature sets use
+   a smaller editorial row: icon | concise title + actual explanation. */
+body[data-product] .auto-features .auto-grid,
+body[data-product] .product-capabilities .product-list {
+  gap: 13px;
+}
+body[data-product] .auto-features .auto-feature,
+body[data-product] .product-capabilities .product-list .feature {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: center;
+  align-items: start;
+  column-gap: 15px;
+  row-gap: 6px;
+  min-height: 128px;
+  padding: 18px 19px;
+  border-radius: 20px;
+  border: 1px solid var(--section-edge);
+  background:
+    radial-gradient(ellipse at 9% 50%, rgba(var(--product-rgb), .20), transparent 53%),
+    linear-gradient(112deg, rgba(var(--product-rgb), .13), rgba(8, 18, 31, .39) 83%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.07), 0 12px 26px rgba(0,0,0,.07);
+}
+body[data-product] .auto-features .auto-feature > *,
+body[data-product] .product-capabilities .product-list .feature > * {
+  position: relative;
+  z-index: 1;
+}
+body[data-product] .auto-features .auto-feature img.feature-logo,
+body[data-product] .product-capabilities .product-list .feature-icon {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  align-self: center;
+  justify-self: center;
+  width: 42px;
+  height: 42px;
+  margin: 0;
+}
+body[data-product] .auto-features .auto-feature h3,
+body[data-product] .product-capabilities .product-list .feature h3 {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: end;
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.3;
+  letter-spacing: -.025em;
+}
+body[data-product] .auto-features .auto-feature p,
+body[data-product] .product-capabilities .product-list .feature p {
+  grid-column: 2;
+  grid-row: 2;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.48;
+  color: #bdcbd9;
+}
+body[data-product] .product-capabilities .product-list .feature-icon {
+  display: grid;
+  place-items: center;
+  font-size: 24px;
+  color: #fff;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(var(--product-rgb),.28), rgba(var(--product-rgb),.09));
+  border-color: rgba(var(--product-rgb), .38);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.1);
+}
+/* Decorative themes require no repeated markup or non-translated text. */
+body[data-product] .auto-features .auto-feature::before,
+body[data-product] .product-capabilities .product-list .feature::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: .72;
+}
+body[data-product=autoposting] .auto-feature::before {
+  background: repeating-radial-gradient(ellipse at 97% 105%, transparent 0 18px, rgba(94,196,255,.17) 20px 21px, transparent 23px 41px);
+  mask-image: linear-gradient(to left, #000, transparent 55%);
+}
+body[data-product=social] .product-list .feature::before {
+  background:
+    radial-gradient(ellipse at 92% 92%, rgba(248,111,89,.23), transparent 51%),
+    repeating-linear-gradient(128deg, transparent 0 34px, rgba(252,99,181,.09) 35px 36px, transparent 37px 71px);
+  mask-image: linear-gradient(to left, #000, transparent 65%);
+}
+body[data-product=pay] .product-list .feature::before {
+  inset: 7% -2% 2% 68%;
+  background: conic-gradient(from 42deg, rgba(108,245,184,.18), transparent 32%, rgba(22,170,128,.16) 52%, transparent 80%, rgba(108,245,184,.18));
+  clip-path: polygon(51% 0%, 100% 34%, 85% 86%, 31% 100%, 0% 50%);
+}
+
+/* The former 400px-tall closing banners become clear horizontal calls to action.
+   The large empty circle is replaced with a subtle elemental signature. */
+body[data-product] .product-cta-section {
+  padding-top: 14px;
+  padding-bottom: 26px;
+}
+body[data-product] .product-cta-section .element-cta {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) auto;
+  grid-template-rows: auto auto auto;
+  gap: 4px 26px;
+  align-items: center;
+  min-height: 0;
+  padding: 24px 30px;
+  border-radius: 23px;
+  border-color: rgba(var(--product-rgb),.43);
+  background:
+    radial-gradient(ellipse at 92% 32%, rgba(var(--product-rgb), .22), transparent 55%),
+    linear-gradient(112deg, rgba(var(--product-rgb), .17), rgba(6,16,28,.75) 78%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 15px 38px rgba(0,0,0,.11);
+}
+body[data-product] .product-cta-section .element-cta > * {
+  position: relative;
+  z-index: 2;
+}
+body[data-product] .product-cta-section .element-cta .product-overline {
+  grid-column: 1;
+  grid-row: 1;
+  margin: 0;
+}
+body[data-product] .product-cta-section .element-cta h2 {
+  grid-column: 1;
+  grid-row: 2;
+  margin: 0;
+  max-width: none;
+  font-size: clamp(26px, 2.6vw, 36px);
+  line-height: 1.18;
+}
+body[data-product] .product-cta-section .element-cta p {
+  grid-column: 1;
+  grid-row: 3;
+  max-width: none;
+  margin: 0;
+  color: #c3d5e2;
+  font-size: 13px;
+  line-height: 1.42;
+}
+body[data-product] .product-cta-section .element-cta .btn3d {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  justify-self: end;
+  align-self: center;
+  min-height: 46px;
+  width: auto;
+  max-width: 100%;
+  margin: 0;
+  padding: 11px 19px;
+  white-space: nowrap;
+  font-size: 14px;
+}
+body[data-product] .product-cta-section .element-cta::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  width: 210px;
+  height: 210px;
+  right: 10%;
+  top: -92px;
+  opacity: .28;
+  border-radius: 50%;
+  border: 1px solid rgba(var(--product-rgb), .58);
+  box-shadow: 0 0 0 28px rgba(var(--product-rgb),.06), 0 0 0 58px rgba(var(--product-rgb),.04);
+}
+/* Water: ripples; Fire: energy flow; Earth: faceted crystal. */
+body[data-product=autoposting] .product-cta-section .element-cta::after {
+  transform: rotate(-18deg) scaleY(.55);
+  border: 2px solid rgba(121,216,255,.62);
+}
+body[data-product=social] .product-cta-section .element-cta::after {
+  border-radius: 68% 32% 64% 36% / 67% 36% 64% 33%;
+  transform: rotate(-35deg);
+  background: conic-gradient(from 52deg, rgba(255,130,67,.3), transparent 30%, rgba(255,67,169,.28), transparent 85%);
+}
+body[data-product=pay] .product-cta-section .element-cta::after {
+  border-radius: 0;
+  clip-path: polygon(50% 0, 100% 26%, 92% 72%, 50% 100%, 8% 72%, 0 26%);
+  background: conic-gradient(from 30deg, rgba(142,255,193,.36), transparent 26%, rgba(45,213,154,.25), transparent 60%, rgba(142,255,193,.36));
+}
+/* Avoid another empty gap before the footer on product pages only. */
+body[data-product] .site-footer {
+  margin-top: 0;
+  padding-top: 26px;
+}
+
+@media (max-width: 980px) {
+  body[data-product] .auto-features .auto-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  body[data-product] .product-capabilities .product-list {
+    grid-template-columns: repeat(2, minmax(0,1fr));
+  }
+  body[data-product] .product-cta-section .element-cta {
+    column-gap: 17px;
+    padding-inline: 22px;
+  }
+}
+@media (max-width: 780px) {
+  body[data-product] .section {
+    padding-block: 20px;
+  }
+  body[data-product] .section-header {
+    margin-bottom: 14px;
+  }
+  body[data-product] .section h2 {
+    font-size: clamp(28px, 6.6vw, 38px);
+  }
+  body[data-product] .auto-features .auto-grid,
+  body[data-product] .product-capabilities .product-list {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 9px;
+  }
+  body[data-product] .auto-features .auto-feature,
+  body[data-product] .product-capabilities .product-list .feature {
+    grid-template-columns: 40px minmax(0, 1fr);
+    gap: 4px 11px;
+    min-height: 88px;
+    padding: 13px 15px;
+    border-radius: 16px;
+  }
+  body[data-product] .auto-features .auto-feature img.feature-logo,
+  body[data-product] .product-capabilities .product-list .feature-icon {
+    width: 35px;
+    height: 35px;
+  }
+  body[data-product] .auto-features .auto-feature h3,
+  body[data-product] .product-capabilities .product-list .feature h3 {
+    font-size: 15px;
+  }
+  body[data-product] .auto-features .auto-feature p,
+  body[data-product] .product-capabilities .product-list .feature p {
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  body[data-product] .product-cta-section {
+    padding-top: 8px;
+    padding-bottom: 16px;
+  }
+  body[data-product] .product-cta-section .element-cta {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+    gap: 6px;
+    padding: 17px 18px;
+    border-radius: 18px;
+  }
+  body[data-product] .product-cta-section .element-cta .product-overline,
+  body[data-product] .product-cta-section .element-cta h2,
+  body[data-product] .product-cta-section .element-cta p,
+  body[data-product] .product-cta-section .element-cta .btn3d {
+    grid-column: 1;
+    grid-row: auto;
+  }
+  body[data-product] .product-cta-section .element-cta h2 {
+    font-size: clamp(24px, 6vw, 31px);
+  }
+  body[data-product] .product-cta-section .element-cta p {
+    font-size: 12px;
+  }
+  body[data-product] .product-cta-section .element-cta .btn3d {
+    margin-top: 8px;
+    justify-self: start;
+    width: auto;
+    min-height: 42px;
+    white-space: normal;
+    font-size: 13px;
+    padding: 9px 15px;
+  }
+  body[data-product] .product-cta-section .element-cta::after {
+    right: -75px;
+    top: -70px;
+    opacity: .17;
+  }
+}
+@media (max-width: 420px) {
+  body[data-product] .auto-features .auto-grid,
+  body[data-product] .product-capabilities .product-list {
+    grid-template-columns: minmax(0,1fr);
+  }
+  body[data-product] .section {
+    padding-block: 16px;
+  }
+  body[data-product] .product-cta-section .element-cta {
+    padding: 15px 16px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  body[data-product] .auto-features .feature,
+  body[data-product] .product-capabilities .feature,
+  body[data-product] .product-cta-section .element-cta {
+    animation: none !important;
+    transition: none !important;
+  }
+}
