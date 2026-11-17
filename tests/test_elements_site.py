@@ -378,6 +378,37 @@ class ElementsSiteTest(unittest.TestCase):
         self.assertIn("background:transparent;", css)
         self.assertIn(".product-hero .product-flags,", css)
 
+    def test_mascot_framing_never_crops_product_art(self):
+        """Portrait images stay contained on desktop and at 320px mobile widths."""
+        css = (ROOT / "mascot-fit.css").read_text(encoding="utf-8")
+        self.assertIn("@media (max-width: 780px)", css)
+        self.assertIn("@media (max-width: 420px)", css)
+        self.assertIn("prefers-reduced-motion: reduce", css)
+        self.assertIn("object-fit: contain", css)
+        self.assertIn("object-position: center", css)
+        self.assertIn("overflow: visible", css)
+        self.assertNotIn("object-fit: cover", css)
+        self.assertNotIn("overflow: hidden", css)
+        self.assertIn("minmax(112px, 37%)", css)
+        self.assertIn("max-height: 307px", css)
+        for page_name, path in PAGES.items():
+            html = path.read_text(encoding="utf-8")
+            prefix = "../" if page_name != "home" else ""
+            ordered = (
+                '<link rel="stylesheet" href="' + prefix + 'elements.css">',
+                '<link rel="stylesheet" href="' + prefix + 'mobile-v2.css">',
+                '<link rel="stylesheet" href="' + prefix + 'mascot-fit.css">',
+            )
+            for stylesheet in ordered:
+                self.assertIn(stylesheet, html, (page_name, stylesheet))
+            self.assertLess(html.index(ordered[0]), html.index(ordered[1]))
+            self.assertLess(html.index(ordered[1]), html.index(ordered[2]))
+            self.assertIn('data-robot="art"', html)
+            if page_name != "home":
+                self.assertIn('class="product-stage robot-stage element-art-stage"', html)
+            else:
+                self.assertEqual(html.count('class="card-robot element-artwork"'), 3)
+
     def test_sitemap_contains_all_three_product_routes(self):
         import xml.etree.ElementTree as ET
         sitemap = ET.fromstring((ROOT / "sitemap.xml").read_text(encoding="utf-8"))
