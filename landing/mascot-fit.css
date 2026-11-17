@@ -1,9 +1,11 @@
 /*
  * ViMi mascot framing v3: deliberate, fully contained artwork.
  *
- * Approved product illustrations are already transparent AVIF portraits.
- * Never crop them again in a tight square or hide the sides of the robot.
- * Their 620:795 intrinsic ratio is preserved at every breakpoint.
+ * Approved source images are re-exported as two separate transparent
+ * AVIF variants per product: a 360:330 compact card illustration and a
+ * 540:505 hero illustration. The waving hand, antenna, desk and laptop are
+ * fully inside each artwork with transparent breathing room.
+ * Keep contain sizing, never cover/crop them in their presentation windows.
  *
  * This layer deliberately loads AFTER mobile-v2.css.
  */
