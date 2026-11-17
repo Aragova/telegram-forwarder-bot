@@ -1,0 +1,169 @@
+/*
+ * ViMi mascot framing v3: deliberate, fully contained artwork.
+ *
+ * Approved product illustrations are already transparent AVIF portraits.
+ * Never crop them again in a tight square or hide the sides of the robot.
+ * Their 620:795 intrinsic ratio is preserved at every breakpoint.
+ *
+ * This layer deliberately loads AFTER mobile-v2.css.
+ */
+:root {
+  --mascot-water-glow: rgba(70, 182, 255, .17);
+  --mascot-fire-glow: rgba(255, 111, 186, .15);
+  --mascot-earth-glow: rgba(72, 215, 151, .15);
+}
+/* Desktop and tablet cards each get a dedicated composition window. */
+#products .product-card .product-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 232px;
+  padding: 16px 12px 12px;
+  margin: 0;
+  overflow: visible;
+  isolation: isolate;
+  background: none;
+}
+#products .product-card .product-art::after {
+  z-index: -1;
+  opacity: .75;
+  pointer-events: none;
+}
+#products .product-card .product-art img.card-robot.element-artwork {
+  position: relative;
+  inset: auto;
+  display: block;
+  width: auto;
+  height: 100%;
+  max-width: 100%;
+  max-height: 205px;
+  margin: 0 auto;
+  object-fit: contain;
+  object-position: center;
+  transform: none;
+  filter: drop-shadow(0 9px 16px rgba(0, 0, 0, .12));
+}
+#products .product-card.water .product-art {
+  background: radial-gradient(ellipse 65% 72% at 50% 54%,var(--mascot-water-glow),transparent 78%);
+}
+#products .product-card.fire .product-art {
+  background: radial-gradient(ellipse 65% 72% at 50% 54%,var(--mascot-fire-glow),transparent 78%);
+}
+#products .product-card.earth .product-art {
+  background: radial-gradient(ellipse 65% 72% at 50% 54%,var(--mascot-earth-glow),transparent 78%);
+}
+/* Product hero windows have comfortable breathing room on all screen sizes. */
+body[data-product] .product-hero .robot-stage.element-art-stage {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  overflow: visible;
+  isolation: isolate;
+}
+body[data-product] .product-hero .robot-stage.element-art-stage img.element-artwork {
+  position: relative;
+  inset: auto;
+  display: block;
+  width: auto;
+  height: min(480px, 38vw);
+  max-width: 94%;
+  max-height: 480px;
+  margin: auto;
+  object-fit: contain;
+  object-position: center;
+  transform: none;
+}
+/* The desktop stage itself should not amputate the image. */
+body[data-product] .product-stage.robot-stage.element-art-stage::before {
+  border-radius: 50%;
+  pointer-events: none;
+}
+@media (max-width: 780px) {
+  #products .product-card {
+    grid-template-columns: minmax(0, 1fr) minmax(123px, 38%);
+    min-height: 182px;
+    column-gap: 7px;
+    padding: 12px 15px;
+  }
+  #products .product-card .product-art {
+    grid-row: 2;
+    grid-column: 2;
+    width: 100%;
+    height: 152px;
+    padding: 7px;
+    align-self: center;
+    justify-self: center;
+    overflow: visible;
+  }
+  #products .product-card .product-art img.card-robot.element-artwork {
+    display: block;
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: 137px;
+    object-fit: contain;
+    object-position: center;
+    transform: scale(.91);
+    transform-origin: center;
+  }
+  /* The portrait is fully contained; stage extends to its full visual bounds. */
+  body[data-product] .product-hero .robot-stage.element-art-stage {
+    width: 100%;
+    height: clamp(278px, 77vw, 355px);
+    min-height: 0;
+    max-height: none;
+    padding: 7px 0 11px;
+    margin: 0 auto;
+    overflow: visible;
+    box-sizing: border-box;
+  }
+  body[data-product] .product-hero .robot-stage.element-art-stage img.element-artwork,
+  body[data-product=autoposting] .product-hero .robot-stage .auto-robot.element-artwork {
+    display: block;
+    width: auto;
+    height: 100%;
+    max-width: min(92%, 360px);
+    max-height: 325px;
+    object-fit: contain;
+    object-position: center;
+    transform: scale(.94);
+    transform-origin: center;
+  }
+  /* Do not remove the area immediately below the mascot: it is used by CTA. */
+  .product-hero .actions {
+    margin-top: 3px;
+  }
+}
+@media (max-width: 420px) {
+  #products .product-card {
+    grid-template-columns: minmax(0, 1fr) minmax(112px, 37%);
+    min-height: 171px;
+    column-gap: 4px;
+    padding: 11px 12px;
+  }
+  #products .product-card .product-art {
+    height: 140px;
+    padding: 4px;
+  }
+  #products .product-card .product-art img.card-robot.element-artwork {
+    max-height: 132px;
+    transform: scale(.89);
+  }
+  body[data-product] .product-hero .robot-stage.element-art-stage {
+    height: clamp(270px, 78vw, 335px);
+    padding: 7px 0;
+  }
+  body[data-product] .product-hero .robot-stage.element-art-stage img.element-artwork,
+  body[data-product=autoposting] .product-hero .robot-stage .auto-robot.element-artwork {
+    max-height: 307px;
+    max-width: min(91%, 318px);
+    transform: scale(.92);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #products .product-card .product-art img.card-robot.element-artwork,
+  body[data-product] .product-hero .robot-stage.element-art-stage img.element-artwork {
+    transition: none !important;
+  }
+}
