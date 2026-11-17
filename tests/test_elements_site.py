@@ -240,9 +240,9 @@ class ElementsSiteTest(unittest.TestCase):
         import struct
         artwork = {
             "home": ("vimi-home-art.avif", 720, 477),
-            "autoposting": ("vimi-water-art.avif", 620, 795),
-            "social": ("vimi-fire-art.avif", 620, 795),
-            "pay": ("vimi-earth-art.avif", 620, 795),
+            "autoposting": ("vimi-approved-water-hero.avif", 540, 505),
+            "social": ("vimi-approved-fire-hero.avif", 540, 505),
+            "pay": ("vimi-approved-earth-hero.avif", 540, 505),
         }
         for page, (filename, width, height) in artwork.items():
             with self.subTest(page=page):
@@ -267,8 +267,27 @@ class ElementsSiteTest(unittest.TestCase):
                     self.assertIn('class="product-stage robot-stage', source)
                     self.assertNotIn('src="../assets/hero-robot-ru.png"', source)
         home = PAGES["home"].read_text(encoding="utf-8")
-        for filename in ("vimi-water-art.avif", "vimi-fire-art.avif", "vimi-earth-art.avif"):
+        for filename in ("vimi-approved-water-card.avif", "vimi-approved-fire-card.avif", "vimi-approved-earth-card.avif"):
             self.assertIn(filename, home)
+        # Separate responsive files were exported from the original uploaded
+        # 1122x1402 artworks. Card scenes are not stretched portrait thumbnails.
+        for theme in ("water", "fire", "earth"):
+            card = "vimi-approved-" + theme + "-card.avif"
+            hero = "vimi-approved-" + theme + "-hero.avif"
+            home_markup = PAGES["home"].read_text(encoding="utf-8")
+            product_markup = PAGES[{"water":"autoposting", "fire":"social", "earth":"pay"}[theme]].read_text(encoding="utf-8")
+            self.assertIn('src="assets/' + card + '"', home_markup)
+            self.assertIn('src="../assets/' + hero + '"', product_markup)
+            self.assertIn('width="360" height="330"', home_markup)
+            self.assertIn('width="540" height="505"', product_markup)
+            for filename in (card, hero):
+                data = (ROOT / "assets" / filename).read_bytes()
+                self.assertGreater(len(data), 5000)
+                self.assertLess(len(data), 70000)
+                self.assertEqual(data[4:8], b"ftyp")
+                self.assertIn(b"avif", data[:32])
+            self.assertNotIn("vimi-" + theme + "-art.avif", home_markup)
+            self.assertNotIn("vimi-" + theme + "-art.avif", product_markup)
         for old in ("assets/hero-robot-ru.png", 'class="sculpture water"'):
             self.assertNotIn(old, home)
         css = (ROOT / "elements.css").read_text(encoding="utf-8")
