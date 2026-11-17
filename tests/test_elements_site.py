@@ -240,9 +240,9 @@ class ElementsSiteTest(unittest.TestCase):
         import struct
         artwork = {
             "home": ("vimi-home-art.avif", 720, 477),
-            "autoposting": ("vimi-water-art.avif", 620, 795),
-            "social": ("vimi-fire-art.avif", 620, 795),
-            "pay": ("vimi-earth-art.avif", 620, 795),
+            "autoposting": ("vimi-approved-water-hero.avif", 540, 505),
+            "social": ("vimi-approved-fire-hero.avif", 540, 505),
+            "pay": ("vimi-approved-earth-hero.avif", 540, 505),
         }
         for page, (filename, width, height) in artwork.items():
             with self.subTest(page=page):
@@ -267,8 +267,27 @@ class ElementsSiteTest(unittest.TestCase):
                     self.assertIn('class="product-stage robot-stage', source)
                     self.assertNotIn('src="../assets/hero-robot-ru.png"', source)
         home = PAGES["home"].read_text(encoding="utf-8")
-        for filename in ("vimi-water-art.avif", "vimi-fire-art.avif", "vimi-earth-art.avif"):
+        for filename in ("vimi-approved-water-card.avif", "vimi-approved-fire-card.avif", "vimi-approved-earth-card.avif"):
             self.assertIn(filename, home)
+        # Separate responsive files were exported from the original uploaded
+        # 1122x1402 artworks. Card scenes are not stretched portrait thumbnails.
+        for theme in ("water", "fire", "earth"):
+            card = "vimi-approved-" + theme + "-card.avif"
+            hero = "vimi-approved-" + theme + "-hero.avif"
+            home_markup = PAGES["home"].read_text(encoding="utf-8")
+            product_markup = PAGES[{"water":"autoposting", "fire":"social", "earth":"pay"}[theme]].read_text(encoding="utf-8")
+            self.assertIn('src="assets/' + card + '"', home_markup)
+            self.assertIn('src="../assets/' + hero + '"', product_markup)
+            self.assertIn('width="360" height="330"', home_markup)
+            self.assertIn('width="540" height="505"', product_markup)
+            for filename in (card, hero):
+                data = (ROOT / "assets" / filename).read_bytes()
+                self.assertGreater(len(data), 5000)
+                self.assertLess(len(data), 70000)
+                self.assertEqual(data[4:8], b"ftyp")
+                self.assertIn(b"avif", data[:32])
+            self.assertNotIn("vimi-" + theme + "-art.avif", home_markup)
+            self.assertNotIn("vimi-" + theme + "-art.avif", product_markup)
         for old in ("assets/hero-robot-ru.png", 'class="sculpture water"'):
             self.assertNotIn(old, home)
         css = (ROOT / "elements.css").read_text(encoding="utf-8")
@@ -377,6 +396,37 @@ class ElementsSiteTest(unittest.TestCase):
         self.assertIn(".product-hero .actions .btn3d.secondary", css)
         self.assertIn("background:transparent;", css)
         self.assertIn(".product-hero .product-flags,", css)
+
+    def test_mascot_framing_never_crops_product_art(self):
+        """Portrait images stay contained on desktop and at 320px mobile widths."""
+        css = (ROOT / "mascot-fit.css").read_text(encoding="utf-8")
+        self.assertIn("@media (max-width: 780px)", css)
+        self.assertIn("@media (max-width: 420px)", css)
+        self.assertIn("prefers-reduced-motion: reduce", css)
+        self.assertIn("object-fit: contain", css)
+        self.assertIn("object-position: center", css)
+        self.assertIn("overflow: visible", css)
+        self.assertNotIn("object-fit: cover", css)
+        self.assertNotIn("overflow: hidden", css)
+        self.assertIn("minmax(112px, 37%)", css)
+        self.assertIn("max-height: 307px", css)
+        for page_name, path in PAGES.items():
+            html = path.read_text(encoding="utf-8")
+            prefix = "../" if page_name != "home" else ""
+            ordered = (
+                '<link rel="stylesheet" href="' + prefix + 'elements.css">',
+                '<link rel="stylesheet" href="' + prefix + 'mobile-v2.css">',
+                '<link rel="stylesheet" href="' + prefix + 'mascot-fit.css">',
+            )
+            for stylesheet in ordered:
+                self.assertIn(stylesheet, html, (page_name, stylesheet))
+            self.assertLess(html.index(ordered[0]), html.index(ordered[1]))
+            self.assertLess(html.index(ordered[1]), html.index(ordered[2]))
+            self.assertIn('data-robot="art"', html)
+            if page_name != "home":
+                self.assertIn('class="product-stage robot-stage element-art-stage"', html)
+            else:
+                self.assertEqual(html.count('class="card-robot element-artwork"'), 3)
 
     def test_sitemap_contains_all_three_product_routes(self):
         import xml.etree.ElementTree as ET
