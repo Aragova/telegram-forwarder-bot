@@ -429,19 +429,18 @@ class ElementsSiteTest(unittest.TestCase):
                 self.assertEqual(html.count('class="card-robot element-artwork"'), 3)
 
     def test_compact_elemental_product_sections_preserve_content_and_routes(self):
-        """Prevent empty oversized banners and preserve all existing product copy."""
+        """Preserve product information, remove repeated footer CTA and keep hero links."""
         css = (ROOT / "sections-v2.css").read_text(encoding="utf-8")
         self.assertIn("Loaded after mascot-fit.css", css)
         self.assertIn("grid-template-columns: 46px minmax(0, 1fr)", css)
         self.assertIn("min-height: 128px", css)
         self.assertIn("min-height: 88px", css)
-        self.assertIn("grid-template-columns: minmax(0,1fr) auto", css)
         self.assertIn("body[data-product=autoposting] .auto-feature::before", css)
         self.assertIn("body[data-product=social] .product-list .feature::before", css)
         self.assertIn("body[data-product=pay] .product-list .feature::before", css)
-        self.assertIn("body[data-product=autoposting] .product-cta-section .element-cta::after", css)
-        self.assertIn("body[data-product=social] .product-cta-section .element-cta::after", css)
-        self.assertIn("body[data-product=pay] .product-cta-section .element-cta::after", css)
+        # No bottom CTA: the primary product action is already in the hero.
+        self.assertNotIn("product-cta-section", css)
+        self.assertNotIn("element-cta", css)
         for breakpoint in ("max-width: 980px", "max-width: 780px", "max-width: 420px"):
             self.assertIn(breakpoint, css)
         self.assertNotIn("object-fit: cover", css)
@@ -450,9 +449,13 @@ class ElementsSiteTest(unittest.TestCase):
             html = PAGES[product].read_text(encoding="utf-8")
             self.assertIn('href="../sections-v2.css"', html)
             self.assertLess(html.index('href="../mascot-fit.css"'), html.index('href="../sections-v2.css"'))
-            self.assertIn('class="section product-cta-section"', html)
-            self.assertIn('class="cta-panel element-cta"', html)
-            self.assertEqual(html.count('class="cta-panel element-cta"'), 1)
+            self.assertNotIn('class="section product-cta-section"', html)
+            self.assertNotIn('class="cta-panel element-cta"', html)
+            self.assertNotIn('class="cta-panel"', html)
+            self.assertIn('class="actions"', html)
+            # The final section before main closes is the FAQ, not a duplicate banner.
+            self.assertLess(html.index('class="faq-list"'), html.index("</main>"))
+            self.assertEqual(html.count('class="faq-list"'), 1)
             self.assertIn('class="faq-list"', html)
             self.assertIn('data-robot="art"', html)
         autoposting = PAGES["autoposting"].read_text(encoding="utf-8")
