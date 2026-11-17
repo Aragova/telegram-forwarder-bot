@@ -144,21 +144,17 @@ class ElementsSiteTest(unittest.TestCase):
             },
             "autoposting": {
                 "autoposting.elementLabel": "ВОДА · ViMi",
-                "autoposting.ctaElement": "ПОТОК",
             },
             "social": {
                 "social.flag1": "AI-поиск",
                 "social.flag2": "Подготовка медиа",
                 "social.flag3": "Подтверждение человеком",
-                "social.ctaElement": "ЭНЕРГИЯ",
             },
-            "pay": {
-                "pay.ctaElement": "ЦЕННОСТЬ",
-            },
+            "pay": {},
         }
         # The new approved hero art replaces former floating labels; the
         # remaining visible card/category labels must still be translated.
-        # Product CTA labels are kept as semantic HTML rather than baked into art.
+        # Removed footer CTA labels are no longer expected in the document.
         for page, labels in requirements.items():
             source = PAGES[page].read_text(encoding="utf-8")
             self.assertEqual(source.count('data-i18n="common.brandTagline"'), 2)
