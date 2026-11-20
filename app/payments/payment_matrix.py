@@ -28,6 +28,7 @@ PAYMENT_MATRIX: dict[str, list[dict[str, Any]]] = {
     "EUR": [
         {"code": "lava_card_eur", "title": "💳 Карта EUR", "provider": "lava_top", "payment_provider": "UNLIMINT"},
         {"code": "lava_paypal_eur", "title": "🅿️ PayPal через Lava.top", "provider": "lava_top", "payment_provider": "PAYPAL"},
+        {"code": "lava_external_eur", "title": "💳 LAVA.TOP 🇪🇺", "provider": "lava_external", "checkout_url": "https://app.lava.top/products/6846f916-88b7-4266-93d9-53f9d81767f8/16731707-ffba-466a-80a5-2d4002f33c64?currency=EUR"},
         {"code": "paypal_manual_eur", "title": "🅿️ PayPal вручную", "provider": "manual_paypal", "email": "hurremae@gmail.com"},
         {"code": "tribute_eur", "title": "💎 Tribute", "provider": "tribute", "enabled": _tribute_enabled()},
         {"code": "stars", "title": "⭐ Telegram Stars", "provider": "telegram_stars", "enabled": _stars_enabled()},
