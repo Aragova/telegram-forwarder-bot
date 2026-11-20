@@ -344,6 +344,19 @@ def register_user_payment_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> 
                 return
             await ctx.edit_message_text_safe(message=callback.message, text="Этот способ оплаты скоро будет доступен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к способам оплаты", callback_data=f"user_subscription_methods:{tariff}:{currency}:{period}")]]))
             return
+        if method_code == "lava_external_eur" and currency == "EUR" and method.get("provider") == "lava_external":
+            checkout_url = str(method.get("checkout_url") or "").strip()
+            await ctx.answer_callback_safe_once(callback)
+            await ctx.edit_message_text_safe(
+                message=callback.message,
+                text=user_ui.build_lava_external_eur_text(
+                    tariff_code=tariff, period_months=period, checkout_url=checkout_url,
+                ),
+                reply_markup=user_ui.build_lava_external_eur_keyboard(
+                    tariff_code=tariff, period_months=period, checkout_url=checkout_url,
+                ),
+            )
+            return
         if method_code == "crypto":
             amount_text = format_crypto_price(tariff, period, repo=ctx.db)
             rows = []
