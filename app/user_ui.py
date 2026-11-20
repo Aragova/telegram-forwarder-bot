@@ -1123,10 +1123,11 @@ def build_user_tariff_payment_select_keyboard(*, tariff_code: str, currency: str
 def build_lava_external_eur_text(*, tariff_code: str, period_months: int, checkout_url: str) -> str:
     """Instructions for the external LAVA.TOP EUR product, without claiming an invoice was created."""
     title, _ = _tariff_title_and_description(tariff_code)
+    period_unit = "месяц" if period_months == 1 else "месяца" if period_months == 3 else "месяцев"
     return (
         "💳 LAVA.TOP 🇪🇺\n\n"
         f"Тариф: {title}\n"
-        f"Срок: {period_months} месяц{'а' if period_months in (3, 6, 12) else ''}\n\n"
+        f"Срок: {period_months} {period_unit}\n\n"
         "To gain access to the premium channel, please complete the payment via this link:\n\n"
         f"{checkout_url}\n\n"
         "Please note that the price using this payment method may differ from the standard "
