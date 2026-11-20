@@ -34,6 +34,8 @@ def test_external_eur_checkout_screen_for_both_tariffs_and_all_periods(tariff, p
     )
     assert tariff.upper() in text
     assert EXTERNAL_LAVA_EUR_LINK in text
+    assert "Чтобы получить доступ к премиум-каналу" in text
+    assert "Цена на LAVA.TOP может отличаться" in text
     assert "To gain access to the premium channel" in text
     assert "price using this payment method may differ" in text
     assert "не активирует подписку автоматически" in text
