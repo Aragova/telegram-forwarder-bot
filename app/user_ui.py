@@ -1120,6 +1120,35 @@ def build_user_tariff_payment_select_keyboard(*, tariff_code: str, currency: str
     rows.append([InlineKeyboardButton(text="⬅️ Назад к срокам", callback_data=f"user_subscription_back_to_periods:{tariff_code}:{currency}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+def build_lava_external_eur_text(*, tariff_code: str, period_months: int, checkout_url: str) -> str:
+    """Instructions for the external LAVA.TOP EUR product, without claiming an invoice was created."""
+    title, _ = _tariff_title_and_description(tariff_code)
+    return (
+        "💳 LAVA.TOP 🇪🇺\n\n"
+        f"Тариф: {title}\n"
+        f"Срок: {period_months} месяц{'а' if period_months in (3, 6, 12) else ''}\n\n"
+        "To gain access to the premium channel, please complete the payment via this link:\n\n"
+        f"{checkout_url}\n\n"
+        "Please note that the price using this payment method may differ from the standard "
+        "subscription rate, as it is set by the LAVA.TOP platform.\n\n"
+        "После оплаты отправьте подтверждение в поддержку. "
+        "Оплата по этой внешней ссылке не активирует подписку автоматически."
+    )
+
+
+def build_lava_external_eur_keyboard(*, tariff_code: str, period_months: int, checkout_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Открыть LAVA.TOP 🇪🇺", url=checkout_url)],
+            [InlineKeyboardButton(text="🆘 Поддержка", callback_data="user_support")],
+            [InlineKeyboardButton(
+                text="⬅️ Назад к способам оплаты",
+                callback_data=f"user_subscription_methods:{tariff_code}:EUR:{period_months}",
+            )],
+        ]
+    )
+
+
 # backward compatibility
 build_billing_subscription_text = build_user_subscription_status_text
 build_billing_subscription_keyboard = build_user_subscription_status_keyboard
