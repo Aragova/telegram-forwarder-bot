@@ -75,10 +75,14 @@ def test_help_and_unknown_commands_do_not_forward(monkeypatch):
     fake_bot = MagicMock()
     fake_bot.forward_message = AsyncMock()
     monkeypatch.setattr(support_bot, "bot", fake_bot)
-    for text in ("/help", "/menu", "/start campaign"):
+    for text in ("/help", "/menu"):
         message = _message(user_id=3001, text=text)
         asyncio.run(support_bot.help_command(message))
         assert "Добро пожаловать" in message.answer.await_args.args[0]
+
+    deep_link = _message(user_id=3001, text="/start campaign")
+    asyncio.run(support_bot.start_command(deep_link))
+    assert "Добро пожаловать" in deep_link.answer.await_args.args[0]
 
     unknown = _message(user_id=3001, text="/not-a-ticket")
     asyncio.run(support_bot.unknown_command(unknown))
