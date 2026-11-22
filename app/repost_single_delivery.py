@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from .runtime_utils import run_db
+from .repost_caption import get_repost_caption_override, caption_override_content
 from .sender_primitives import DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK, _prepare_html_text
 from .telegram_send_result import telegram_send_result_from_raw
 
@@ -37,6 +38,12 @@ class RepostSingleDelivery:
         caption_mode = strategy["configured_mode"]
         requires_builder = strategy["requires_builder"]
         use_copy_first = strategy["use_copy_first"]
+        custom_caption = caption_override_content(get_repost_caption_override(rule))
+        if custom_caption is not None:
+            # CopyMessages cannot override album captions. Do not accidentally
+            # publish the original caption when an explicit override is ON.
+            use_copy_first = False
+            requires_builder = True
 
         is_self_loop = owner._is_self_loop_rule(rule)
         if is_self_loop:
@@ -447,6 +454,7 @@ class RepostSingleDelivery:
             target_thread_id,
             post_row=post_row,
             is_self_loop=is_self_loop,
+            **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
         if getattr(reupload_outcome, "transport_accepted", False) and not getattr(reupload_outcome, "authoritative_resolved", False):
             error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
