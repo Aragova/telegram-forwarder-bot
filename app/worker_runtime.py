@@ -630,7 +630,6 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 return True
             ok = delivery_result.ok
             if ok:
-                cleanup_video_artifacts(payload, mode="success")
                 _log_video_stage_event("VIDEO SEND DONE | стадия отправки завершена", int(payload.get("delivery_id") or 0))
         elif job_type == "video_delivery":
             raw_result = await sender_service.execute_video_delivery_from_job(**payload)
@@ -638,7 +637,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             result = delivery_result.to_dict()
             ok = delivery_result.ok
         else:
-            await asyncio.to_thread(repo.fail_job, job_id, f"Неподдерживаемый job_type: {job_type}")
+            await _finish_owned_job(repo, "fail", job_id, worker_id, f"Неподдерживаемый job_type: {job_type}")
             logger.warning("JOB FAILED | %s завершил задачу #%s с ошибкой: неподдерживаемый тип", worker_id, job_id)
             return True
 
@@ -667,6 +666,8 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             completed = await _finish_owned_job(repo, "complete", job_id, worker_id)
             if not completed:
                 return True
+            if job_type == "video_send":
+                cleanup_video_artifacts(payload, mode="success")
             # Учитываем видео usage один раз на завершение конечной стадии доставки.
             # Это защищает от накрутки на download/process/retry этапах.
             if str(job_type) in {"video_send", "video_delivery"}:
@@ -694,6 +695,10 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             if result_error_text:
                 error_text = result_error_text
             if bool(result.get("final_invalid_source_file")):
+                if hasattr(repo, "heartbeat_job_processing"):
+                    if not await asyncio.to_thread(repo.heartbeat_job_processing, job_id, worker_id):
+                        logger.warning("JOB_FENCED_STALE_INVALID_SOURCE | job_id=%s", job_id)
+                        return True
                 await asyncio.to_thread(
                     _finalize_invalid_source_file,
                     repo,
@@ -705,8 +710,8 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         attempts = int(job.get("attempts") or 0) + 1
         max_attempts = int(job.get("max_attempts") or 3)
         if (not retryable) or attempts >= max_attempts:
-            await _finish_owned_job(repo, "fail", job_id, worker_id, error_text)
-            if job_type.startswith("video_"):
+            failed = await _finish_owned_job(repo, "fail", job_id, worker_id, error_text)
+            if failed and job_type.startswith("video_"):
                 cleanup_video_artifacts(payload, mode="final_failure")
             logger.warning("JOB FAILED | Задача #%s помечена как failed", job_id)
         else:
@@ -776,8 +781,8 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         max_attempts = int(job.get("max_attempts") or 3)
         terminal_too_large = job_type in _HEAVY_STAGE_TYPES and isinstance(exc, TelegramEntityTooLarge)
         if terminal_too_large or attempts >= max_attempts:
-            await _finish_owned_job(repo, "fail", job_id, worker_id, str(exc))
-            if terminal_too_large:
+            failed = await _finish_owned_job(repo, "fail", job_id, worker_id, str(exc))
+            if failed and terminal_too_large:
                 cleanup_video_artifacts(payload, mode="final_failure")
                 logger.warning(
                     "VIDEO_SEND_TOO_LARGE_TERMINAL | job_id=%s | job_type=%s | delivery_id=%s",
