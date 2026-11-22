@@ -3467,6 +3467,7 @@ class PostgresRepository(RepositoryProtocol):
         source_thread_id: int | None,
         *,
         allowed_message_ids: set[int] | None = None,
+        include_newer_than_message_id: int | None = None,
     ) -> int:
         with conn.cursor() as cur:
             if source_thread_id is None:
@@ -3497,7 +3498,11 @@ class PostgresRepository(RepositoryProtocol):
             now_iso = utc_now_iso()
             for row in rows:
                 if (allowed_message_ids is not None
-                        and int(row["message_id"]) not in allowed_message_ids):
+                        and int(row["message_id"]) not in allowed_message_ids
+                        and not (
+                            include_newer_than_message_id is not None
+                            and int(row["message_id"]) > include_newer_than_message_id
+                        )):
                     continue
                 if self._is_self_target_echo_post_for_rule_conn(
                     conn,
@@ -4112,6 +4117,28 @@ class PostgresRepository(RepositoryProtocol):
 
         return str(row["source_id"]), row["source_thread_id"]
 
+    def get_rule_scan_start_max_message_id(self, rule_id: int) -> int:
+        """Cached high-water mark at scan start; live IDs increase monotonically.
+
+        A message arriving after this snapshot must not be erased just because
+        the finite Telegram history iterator did not observe it.
+        """
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(MAX(p.message_id), 0) AS max_message_id
+                    FROM routing r
+                    LEFT JOIN posts p
+                      ON p.source_channel = r.source_id
+                     AND p.source_thread_id IS NOT DISTINCT FROM r.source_thread_id
+                    WHERE r.id = %s
+                    """,
+                    (int(rule_id),),
+                )
+                row = cur.fetchone()
+        return int(row["max_message_id"] or 0) if row else 0
+
     def begin_rule_rescan(self, rule_id: int) -> tuple[bool, str]:
         """Acquire a PostgreSQL-backed exclusive rescan owner before parsing.
 
@@ -4255,6 +4282,7 @@ class PostgresRepository(RepositoryProtocol):
 
     def backfill_rule(
         self, rule_id: int, *, allowed_message_ids: set[int] | None = None,
+        include_newer_than_message_id: int | None = None,
     ) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -4279,6 +4307,7 @@ class PostgresRepository(RepositoryProtocol):
                 str(row["source_id"]),
                 row["source_thread_id"],
                 allowed_message_ids=allowed_message_ids,
+                include_newer_than_message_id=include_newer_than_message_id,
             )
             conn.commit()
             return inserted
@@ -4446,8 +4475,9 @@ class PostgresRepository(RepositoryProtocol):
     def drop_rule_pending_not_in_message_ids(
         self, rule_id: int, *, source_channel: str,
         source_thread_id: int | None, seen_message_ids: set[int],
+        scan_start_max_message_id: int,
     ) -> int:
-        """Prune only this rule's pending cache rows absent from full Telegram scan."""
+        """Prune stale snapshot posts, never new arrivals after scan started."""
         observed = sorted(int(x) for x in seen_message_ids)
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -4461,8 +4491,10 @@ class PostgresRepository(RepositoryProtocol):
                       AND p.source_channel = %s
                       AND p.source_thread_id IS NOT DISTINCT FROM %s
                       AND NOT (p.message_id = ANY(%s::bigint[]))
+                      AND p.message_id <= %s
                     """,
-                    (int(rule_id), str(source_channel), source_thread_id, observed),
+                    (int(rule_id), str(source_channel), source_thread_id, observed,
+                     int(scan_start_max_message_id)),
                 )
                 count = int(cur.rowcount or 0)
             conn.commit()
