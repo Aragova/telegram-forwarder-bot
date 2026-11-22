@@ -25,6 +25,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+class VideoPreSendError(RuntimeError):
+    """Failure known to precede any Telegram video-send request."""
+
+
 class VideoProcessor:
     def __init__(self, bot=None, telethon_client=None):
         self.temp_dir = str(config.temp_dir)
@@ -247,10 +251,14 @@ class VideoProcessor:
 
         # A Telethon result id may refer to another peer; resolve against
         # the target channel before handing the message to delivery or reactions.
-        target_entity = await self.telethon.get_entity(entity)
-        broadcast = bool(getattr(target_entity, "broadcast", False) and not getattr(target_entity, "megagroup", False))
-        resolver = TelethonAuthoritativeMessageResolver(self.telethon)
-        watermark = await resolver.get_before_max_message_id(target_entity, destination_channel)
+        try:
+            target_entity = await self.telethon.get_entity(entity)
+            broadcast = bool(getattr(target_entity, "broadcast", False) and not getattr(target_entity, "megagroup", False))
+            resolver = TelethonAuthoritativeMessageResolver(self.telethon)
+            watermark = await resolver.get_before_max_message_id(target_entity, destination_channel)
+        except Exception as exc:
+            # None of these reads sends media. They can be safely retried.
+            raise VideoPreSendError(f"video_telethon_preflight: {type(exc).__name__}: {exc}") from exc
         started_at = datetime.now(timezone.utc)
         sent_msg = await self.telethon.send_file(**{**send_kwargs, "entity": target_entity})
         finished_at = datetime.now(timezone.utc)
@@ -1405,7 +1413,10 @@ class VideoProcessor:
             logger.warning("Неизвестный caption_send_mode=%s, fallback -> plain", normalized_mode)
             normalized_mode = "plain"
 
-        file_size_bytes = os.path.getsize(video_path)
+        try:
+            file_size_bytes = os.path.getsize(video_path)
+        except OSError as exc:
+            raise VideoPreSendError(f"video_file_preflight: {type(exc).__name__}: {exc}") from exc
         api_session = getattr(bot, "session", None)
         local_api = bool(getattr(getattr(api_session, "api", None), "is_local", False))
         logger.info(
@@ -1482,6 +1493,10 @@ class VideoProcessor:
 
                 return sent_msg
 
+            except VideoPreSendError as exc:
+                self._stage_failed(stage_logger, "send", error_text=str(exc), extra={"retryable": True, "accepted": False})
+                logger.warning("VIDEO_SEND_PREFLIGHT_FAILED | action=safe_retry | error=%s", exc)
+                raise
             except TelegramRetryAfter as exc:
                 # The Bot API explicitly refused this request. Retrying via
                 # the job scheduler is safe, unlike retrying a network timeout.
