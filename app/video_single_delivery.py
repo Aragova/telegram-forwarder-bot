@@ -6,6 +6,7 @@ from aiogram.exceptions import TelegramEntityTooLarge
 
 from .runtime_utils import run_db
 from .sender_primitives import _detect_message_media_kind
+from .telethon_authoritative_resolver import TelethonSendOutcome
 
 logger = logging.getLogger("forwarder")
 
@@ -181,8 +182,24 @@ class VideoSingleDelivery:
                 except Exception:
                     pass
 
+            if isinstance(sent_msg, TelethonSendOutcome) and not sent_msg.authoritative_resolved:
+                error = "video_send_accepted_target_id_unresolved_non_retryable"
+                logger.warning("VIDEO_LEGACY_ACCEPTED_UNRESOLVED | rule_id=%s | delivery_id=%s | returned_candidate_ids=%s | action=no_resend", rule.id, delivery_id, sent_msg.returned_candidate_ids)
+                await run_db(
+                    owner._finalize_video_failure_sync,
+                    delivery_id=delivery_id, rule_id=rule.id, post_id=post_id,
+                    source_channel=source_channel, target_id=target_id,
+                    target_thread_id=target_thread_id, source_message_id=message_id,
+                    error_text=error,
+                )
+                return {"ok": False, "accepted_unresolved": True, "retryable": False, "error_text": error, "candidate_sent_message_ids": sent_msg.returned_candidate_ids or []}
+
             if sent_msg:
-                sent_message_ids = owner._extract_sent_message_ids(sent_msg)
+                sent_message_ids = (
+                    list(sent_msg.authoritative_message_ids)
+                    if isinstance(sent_msg, TelethonSendOutcome)
+                    else owner._extract_sent_message_ids(sent_msg)
+                )
                 valid_sent_message_ids = await owner._confirm_target_delivery_message_ids_with_retry(
                     rule_id=rule.id,
                     delivery_id=delivery_id,
@@ -194,6 +211,17 @@ class VideoSingleDelivery:
                     max_age_seconds=900,
                 )
                 sent_message_id = valid_sent_message_ids[0] if valid_sent_message_ids else None
+                if not sent_message_id:
+                    error = "video_send_accepted_target_id_unresolved_non_retryable"
+                    logger.warning("VIDEO_LEGACY_VERIFY_UNRESOLVED | rule_id=%s | delivery_id=%s | candidate_ids=%s | action=no_resend", rule.id, delivery_id, sent_message_ids)
+                    await run_db(
+                        owner._finalize_video_failure_sync,
+                        delivery_id=delivery_id, rule_id=rule.id, post_id=post_id,
+                        source_channel=source_channel, target_id=target_id,
+                        target_thread_id=target_thread_id, source_message_id=message_id,
+                        error_text=error,
+                    )
+                    return {"ok": False, "accepted_unresolved": True, "retryable": False, "error_text": error, "candidate_sent_message_ids": sent_message_ids}
                 logger.info("DELIVERY_SENT_MESSAGE_IDS_EXTRACTED | rule_id=%s | delivery_id=%s | method=%s | source_message_ids=%s | sent_message_ids=%s | result_type=%s", rule.id, delivery_id, "video_process", [message_id], sent_message_ids, type(sent_msg).__name__)
 
                 try:
