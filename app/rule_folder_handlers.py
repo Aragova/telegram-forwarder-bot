@@ -23,6 +23,7 @@ from app.rule_folders_ui import (
     move_picker_view,
     root_view,
     rule_catalog_view,
+    rule_matches_query,
 )
 
 # These are navigation/input caches only. Persistent assignments stay in PostgreSQL.
@@ -93,15 +94,7 @@ async def _catalog(ctx: Any, callback: CallbackQuery, *, tenant_id: int, admin: 
             if (int(mapping[int(r.id)]["id"]) if int(r.id) in mapping else 0) == folder_id
         ]
     if search is not None:
-        needle = search.casefold()
-        rules = [
-            r for r in rules
-            if needle in str(r.id).casefold()
-            or needle in str(r.source_title or r.source_id).casefold()
-            or needle in str(r.target_title or r.target_id).casefold()
-            or needle in str(r.source_id).casefold()
-            or needle in str(r.target_id).casefold()
-        ]
+        rules = [r for r in rules if rule_matches_query(r, search)]
     chosen = None
     if batch:
         selection = _selected.get(callback.from_user.id)
@@ -283,6 +276,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 await _catalog(ctx, callback, tenant_id=tenant_id, admin=admin,
                                folder_id=fid, page=page, search=term)
             elif action == "search":
+                ctx.user_states.pop(user_id, None)
                 text, back = _input_prompt("search")
                 _inputs[user_id] = {"kind": "search", "chat_id": callback.message.chat.id,
                                     "message_id": callback.message.message_id}
@@ -300,6 +294,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 origin = data[2] if action == "create_for" else ""
                 fid = int(data[2]) if action == "rename" else 0
                 kind = "rename" if action == "rename" else "create"
+                ctx.user_states.pop(user_id, None)
                 text, back = _input_prompt(kind, folder_id=fid, origin=origin)
                 _inputs[user_id] = {"kind": kind, "folder_id": fid, "origin": origin,
                                     "chat_id": callback.message.chat.id,
@@ -422,8 +417,10 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
             await _error(ctx, callback, "Некорректные данные действия")
 
     @dp.message(lambda m: bool(getattr(m, "text", None))
+                and getattr(m.chat, "type", None) == "private"
                 and bool(getattr(m, "from_user", None))
-                and m.from_user.id in _inputs)
+                and m.from_user.id in _inputs
+                and _inputs[m.from_user.id].get("chat_id") == m.chat.id)
     async def folder_input(message: Message):
         user_id = int(message.from_user.id)
         state = _inputs.get(user_id)
@@ -444,12 +441,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
             _inputs.pop(user_id, None)
             rules = await ctx.run_db(ctx.db.get_all_rules if admin else ctx.db.get_rules_for_tenant,
                                      *([] if admin else [tenant_id]))
-            needle = raw.casefold()
-            filtered = [r for r in rules if needle in str(r.id).casefold()
-                        or needle in str(r.source_title or r.source_id).casefold()
-                        or needle in str(r.target_title or r.target_id).casefold()
-                        or needle in str(r.source_id).casefold()
-                        or needle in str(r.target_id).casefold()]
+            filtered = [r for r in rules if rule_matches_query(r, raw)]
             text, kb = rule_catalog_view(filtered, folder_id=-1, folder_name="",
                                          page=0, search_term=raw)
         else:
