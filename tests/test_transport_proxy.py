@@ -217,3 +217,34 @@ def test_telethon_write_operations_remain_serialized_after_lane_split():
         assert maximum_active == 1
 
     asyncio.run(scenario())
+
+
+def test_telethon_bulk_upload_does_not_block_short_message_write():
+    from app.transport_policy import build_sender_telethon_policy
+
+    async def scenario():
+        upload_started = asyncio.Event()
+        release_upload = asyncio.Event()
+
+        class Raw:
+            async def send_file(self, *_args, **_kwargs):
+                upload_started.set()
+                await release_upload.wait()
+                return "uploaded"
+
+            async def send_message(self, *_args, **_kwargs):
+                return "short-message-sent"
+
+        proxy = wrap_telethon_client(
+            Raw(), label="sender.telethon", policy=build_sender_telethon_policy(),
+        )
+        upload = asyncio.create_task(proxy.send_file("target", file="large-video.mp4"))
+        await asyncio.wait_for(upload_started.wait(), timeout=1.0)
+        try:
+            assert await asyncio.wait_for(proxy.send_message("target", "hello"), timeout=0.5) == "short-message-sent"
+            assert not upload.done()
+        finally:
+            release_upload.set()
+            assert await asyncio.wait_for(upload, timeout=1.0) == "uploaded"
+
+    asyncio.run(scenario())
