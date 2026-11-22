@@ -1288,14 +1288,25 @@ class SenderService:
                     max_age_seconds=86400 * 30,
                 )
             if verified_ids:
-                if hasattr(self.db, "mark_delivery_attempt_verified"):
-                    await run_db(self.db.mark_delivery_attempt_verified, idempotency_key, sent_message_ids=verified_ids)
-                await run_db(
-                    self._mark_delivery_sent_sync, int(delivery_id),
-                    sent_message_id=int(verified_ids[0]), sent_message_ids=verified_ids,
-                    target_id=str(target_id), delivery_method="idempotency_cache_reconciled",
+                promoted = bool(
+                    hasattr(self.db, "mark_delivery_attempt_verified")
+                    and await run_db(
+                        self.db.mark_delivery_attempt_verified, idempotency_key,
+                        sent_message_ids=verified_ids,
+                    )
                 )
-                return True
+                if promoted:
+                    await run_db(
+                        self._mark_delivery_sent_sync, int(delivery_id),
+                        sent_message_id=int(verified_ids[0]), sent_message_ids=verified_ids,
+                        target_id=str(target_id), delivery_method="idempotency_cache_reconciled",
+                    )
+                    return True
+                logger.warning(
+                    "REPOST_SINGLE_CACHE_PROMOTION_REJECTED | rule_id=%s | delivery_id=%s | "
+                    "candidate_ids=%s | action=defer_no_delivery_mutation",
+                    rule_id, delivery_id, verified_ids,
+                )
             error = "copy_single_uncertain_no_fallback: cached attempt awaiting authoritative target confirmation"
             logger.warning(
                 "REPOST_SINGLE_CACHE_UNRESOLVED | rule_id=%s | delivery_id=%s | attempt_status=%s | "
