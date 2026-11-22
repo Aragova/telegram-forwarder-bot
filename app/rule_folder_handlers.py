@@ -255,8 +255,11 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
             elif action == "list":
                 await _catalog(ctx, callback, tenant_id=tenant_id, admin=admin,
                                folder_id=int(data[2]), page=int(data[3]))
-            elif action == "open":
-                rule_id, fid, page = int(data[2]), int(data[3]), int(data[4])
+            elif action in {"open", "open_search"}:
+                is_search = action == "open_search"
+                rule_id = int(data[2])
+                fid = -1 if is_search else int(data[3])
+                page = int(data[3]) if is_search else int(data[4])
                 if not await ctx.ensure_rule_callback_access(callback, rule_id):
                     return
                 if fid >= 0:
@@ -264,7 +267,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     if (int(mapping.get(rule_id, {}).get("id") or 0)) != fid:
                         await _error(ctx, callback, "Правило уже перемещено")
                         return
-                _origins[(user_id, rule_id)] = (fid, page, False)
+                _origins[(user_id, rule_id)] = (fid, page, is_search)
                 await ctx.answer_callback_safe_once(callback)
                 await ctx.refresh_rule_card_for_actor(callback, rule_id)
             elif action == "back":
