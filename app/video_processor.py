@@ -10,6 +10,12 @@ from .video_clip_duration import calculate_center_clip_window
 from aiogram import Bot
 from aiogram.exceptions import TelegramEntityTooLarge
 from .bot_api_session import create_bot_api_session
+from .subprocess_safety import (
+    communicate_safely,
+    await_critical_cleanup,
+    terminate_and_reap,
+    iter_stream_lines,
+)
 from aiogram.types import FSInputFile, MessageEntity
 from telethon import types as tl_types
 
@@ -559,7 +565,7 @@ class VideoProcessor:
                 stderr=asyncio.subprocess.PIPE
             )
 
-            stdout, stderr = await process.communicate()
+            stdout, stderr = await communicate_safely(process)
             stderr_text = stderr.decode("utf-8", errors="ignore").strip()
 
             if process.returncode != 0:
@@ -647,6 +653,14 @@ class VideoProcessor:
             logger.error(f"❌ Ошибка получения информации о видео: {e}", exc_info=True)
             return None
 
+    async def _await_critical_cleanup(self, cleanup_coro):
+        """Compatibility adapter; canonical implementation is subprocess_safety."""
+        return await await_critical_cleanup(cleanup_coro)
+
+    async def _terminate_ffmpeg_process(self, process, *, grace_seconds=5.0):
+        """Compatibility adapter; use one canonical SIGTERM / SIGKILL policy."""
+        return await terminate_and_reap(process, grace_seconds=grace_seconds)
+
     # ==================== FFMPEG RUNNER ====================
 
     async def run_ffmpeg_with_progress(
@@ -682,10 +696,7 @@ class VideoProcessor:
 
         async def read_stdout():
             nonlocal last_out_time_ms, last_progress_update, current_fps, current_speed, current_size
-            while True:
-                line = await process.stdout.readline()
-                if not line:
-                    break
+            async for line in iter_stream_lines(process.stdout):
                 line = line.decode("utf-8", errors="ignore").strip()
                 if not line:
                     continue
@@ -740,10 +751,7 @@ class VideoProcessor:
                             )
 
         async def read_stderr():
-            while True:
-                line = await process.stderr.readline()
-                if not line:
-                    break
+            async for line in iter_stream_lines(process.stderr):
                 line = line.decode("utf-8", errors="ignore").strip()
                 if line:
                     stderr_buffer.append(line)
@@ -763,40 +771,46 @@ class VideoProcessor:
                     if time.time() - last_progress_update > 300:
                         logger.error(f"   ⚠️ WATCHDOG: Нет прогресса >5 минут! Завершаю процесс.")
                         watchdog_triggered = True
-                        process.terminate()
-                        try:
-                            await asyncio.wait_for(process.wait(), timeout=5)
-                        except asyncio.TimeoutError:
-                            process.kill()
-                            await process.wait()
+                        await self._terminate_ffmpeg_process(process)
 
         watchdog_task = None
         if timeout is None:
             watchdog_task = asyncio.create_task(watchdog())
 
+        interrupted = False
         try:
             if timeout is None:
                 return_code = await process.wait()
             else:
                 return_code = await asyncio.wait_for(process.wait(), timeout=timeout)
         except asyncio.TimeoutError:
+            interrupted = True
             logger.error(f"   ❌ Таймаут {operation_name} (>{timeout} сек)")
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-            stdout_task.cancel()
-            stderr_task.cancel()
-            if watchdog_task:
-                watchdog_task.cancel()
             return False
+        except asyncio.CancelledError:
+            interrupted = True
+            logger.warning(
+                "FFMPEG_CANCELLED | operation=%s | action=terminate_and_reap_before_releasing_slot",
+                operation_name,
+            )
+            raise
+        finally:
+            # This cleanup task MUST finish even if the same worker receives a
+            # second cancellation. PIPE readers stay alive during reap.
+            async def cleanup():
+                if watchdog_task:
+                    watchdog_task.cancel()
+                if process.returncode is None:
+                    await self._terminate_ffmpeg_process(process)
+                if interrupted:
+                    stdout_task.cancel()
+                    stderr_task.cancel()
+                readers = [stdout_task, stderr_task]
+                if watchdog_task:
+                    readers.append(watchdog_task)
+                await asyncio.gather(*readers, return_exceptions=True)
 
-        if watchdog_task:
-            watchdog_task.cancel()
-        await stdout_task
-        await stderr_task
+            await self._await_critical_cleanup(cleanup())
 
         stderr = await process.stderr.read()
         stderr_text = stderr.decode("utf-8", errors="ignore").strip()
@@ -838,7 +852,7 @@ class VideoProcessor:
             check_cmd = ["ffprobe", "-v", "error", "-select_streams", "v", 
                         "-show_entries", "stream=codec_type", "-of", "default=noprint_wrappers=1:nokey=1", output_path]
             process = await asyncio.create_subprocess_exec(*check_cmd, stdout=asyncio.subprocess.PIPE)
-            stdout, _ = await process.communicate()
+            stdout, _ = await communicate_safely(process)
             if not stdout.strip():
                 logger.error(f"   ❌ Файл не содержит видеопоток")
                 os.remove(output_path)
@@ -1079,9 +1093,26 @@ class VideoProcessor:
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
         )
-        await process.wait()
+        # Keep communicate alive even if its caller times out or is canceled.
+        # process.wait() itself can hang after SIGKILL while PIPE readers are gone.
+        communicate_task = asyncio.create_task(process.communicate())
+        try:
+            await asyncio.wait_for(asyncio.shield(communicate_task), timeout=60)
+        except asyncio.TimeoutError:
+            logger.warning("THUMBNAIL_FFMPEG_TIMEOUT | path=%s", thumbnail_path)
+            async def cleanup_timeout():
+                await self._terminate_ffmpeg_process(process)
+                await communicate_task
+            await self._await_critical_cleanup(cleanup_timeout())
+            return False
+        except asyncio.CancelledError:
+            async def cleanup_cancel():
+                await self._terminate_ffmpeg_process(process)
+                await communicate_task
+            await self._await_critical_cleanup(cleanup_cancel())
+            raise
 
         if process.returncode == 0 and os.path.isfile(thumbnail_path):
             logger.info(f"   🖼️ Превью создано: {os.path.getsize(thumbnail_path) / 1024:.0f} KB")

@@ -6112,6 +6112,67 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return ok
 
+    def heartbeat_job_processing(self, job_id: int, worker_id: str) -> bool:
+        """Refresh liveness only for the execution that still owns the processing job."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                       SET updated_at = NOW()
+                     WHERE id = %s AND status = 'processing' AND locked_by = %s
+                    """,
+                    (int(job_id), str(worker_id)),
+                )
+                owned = cur.rowcount > 0
+            conn.commit()
+        return owned
+
+    def finalize_owned_job(
+        self,
+        job_id: int,
+        worker_id: str,
+        action: str,
+        error_text: str = "",
+        delay_seconds: int = 0,
+    ) -> bool:
+        """Fence stale tasks: an earlier execution must not overwrite the new owner's status."""
+        if action == "complete":
+            sql = """
+                UPDATE jobs SET status = 'done', lease_until = NULL, locked_by = NULL,
+                                error_text = NULL, updated_at = NOW()
+                 WHERE id = %s AND status = 'processing' AND locked_by = %s
+            """
+            params = (int(job_id), str(worker_id))
+        elif action in {"retry", "defer"}:
+            sql = """
+                UPDATE jobs SET status = 'retry', attempts = attempts + %s,
+                                lease_until = NULL, locked_by = NULL,
+                                run_at = NOW() + make_interval(secs => %s),
+                                error_text = %s, updated_at = NOW()
+                 WHERE id = %s AND status = 'processing' AND locked_by = %s
+            """
+            params = (
+                1 if action == "retry" else 0, max(1, int(delay_seconds)),
+                (error_text or "")[:1000], int(job_id), str(worker_id),
+            )
+        elif action == "fail":
+            sql = """
+                UPDATE jobs SET status = 'failed', attempts = attempts + 1,
+                                lease_until = NULL, locked_by = NULL,
+                                error_text = %s, updated_at = NOW()
+                 WHERE id = %s AND status = 'processing' AND locked_by = %s
+            """
+            params = ((error_text or "")[:1000], int(job_id), str(worker_id))
+        else:
+            raise ValueError(f"Unsupported owned job action: {action}")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
+
     def complete_job(self, job_id: int) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
