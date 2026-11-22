@@ -30,6 +30,7 @@ from app.rule_folders_ui import (
 _searches: dict[int, str] = {}
 _origins: dict[tuple[int, int], tuple[int, int, bool]] = {}
 _selected: dict[int, tuple[int, set[int]]] = {}
+_folder_index_page: dict[int, int] = {}
 _inputs: dict[int, dict[str, Any]] = {}
 _pending_new_rule: dict[int, tuple[int, float]] = {}
 
@@ -113,6 +114,7 @@ async def _catalog(ctx: Any, callback: CallbackQuery, *, tenant_id: int, admin: 
     await _render(ctx, callback, *rule_catalog_view(
         rules, folder_id=folder_id, folder_name=folder_name, page=page,
         search_term=search, selected=chosen,
+        folders_page=_folder_index_page.get(callback.from_user.id, 0),
     ))
 
 
@@ -212,7 +214,7 @@ def _input_prompt(kind: str, *, folder_id: int = 0, origin: str = "", page: int 
             "✏️ <b>ПЕРЕИМЕНОВАНИЕ ПАПКИ</b>\n\n"
             "Введите новое название (до 64 символов).\n"
             "Правила и их настройки останутся прежними.",
-            f"rf:folder_settings:{folder_id}",
+            f"rf:folder_settings:{folder_id}:{page}",
         )
     return (
         "📁 <b>НОВАЯ ПАПКА</b>\n\n"
@@ -227,6 +229,11 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
     async def rule_folder_callback(callback: CallbackQuery):
         user_id = callback.from_user.id if callback.from_user else 0
         if not user_id:
+            return
+        if getattr(callback.message.chat, "type", None) != "private":
+            await ctx.answer_callback_safe_once(
+                callback, "Управление правилами доступно только в личном чате", show_alert=True,
+            )
             return
         tenant_id, admin = await _actor(ctx, user_id)
         data = (callback.data or "").split(":")
@@ -259,8 +266,10 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                         reply_markup=ctx.get_main_menu(),
                     )
             elif action == "folders":
+                requested_page = int(data[2])
+                _folder_index_page[user_id] = requested_page
                 folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
-                await _render(ctx, callback, *folder_index_view(folders, int(data[2])))
+                await _render(ctx, callback, *folder_index_view(folders, requested_page))
             elif action == "list":
                 await _catalog(ctx, callback, tenant_id=tenant_id, admin=admin,
                                folder_id=int(data[2]), page=int(data[3]))
@@ -305,10 +314,15 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 origin = data[2] if action == "create_for" else ""
                 folder_page = int(data[3]) if action == "create_for" and len(data) > 3 else 0
                 fid = int(data[2]) if action == "rename" else 0
+                list_page = int(data[3]) if action == "rename" and len(data) > 3 else 0
                 kind = "rename" if action == "rename" else "create"
                 ctx.user_states.pop(user_id, None)
-                text, back = _input_prompt(kind, folder_id=fid, origin=origin, page=folder_page)
+                text, back = _input_prompt(
+                    kind, folder_id=fid, origin=origin,
+                    page=list_page if kind == "rename" else folder_page,
+                )
                 _inputs[user_id] = {"kind": kind, "folder_id": fid, "origin": origin,
+                                    "list_page": list_page,
                                     "chat_id": callback.message.chat.id,
                                     "message_id": callback.message.message_id,
                                     "origin_message": callback.message}
@@ -317,16 +331,18 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 ]))
             elif action == "folder_settings":
                 fid = int(data[2])
+                page = int(data[3]) if len(data) > 3 else 0
                 folder = next((f for f in await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
                                if int(f["id"]) == fid), None)
                 if not folder:
                     await _error(ctx, callback, "Папка не найдена")
                 else:
-                    await _render(ctx, callback, *folder_settings_view(folder))
+                    await _render(ctx, callback, *folder_settings_view(folder, page=page))
             elif action == "delete_confirm":
                 folder = await ctx.run_db(ctx.db.get_rule_folder, tenant_id, int(data[2]))
                 if folder:
-                    await _render(ctx, callback, *folder_delete_confirmation_view(folder))
+                    page = int(data[3]) if len(data) > 3 else 0
+                    await _render(ctx, callback, *folder_delete_confirmation_view(folder, page=page))
                 else:
                     await _error(ctx, callback, "Папка не найдена")
             elif action == "delete":
@@ -334,7 +350,9 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     await _error(ctx, callback, "Папка не найдена")
                     return
                 folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
-                await _render(ctx, callback, *folder_index_view(folders, 0))
+                await _render(ctx, callback, *folder_index_view(
+                    folders, _folder_index_page.get(user_id, 0),
+                ))
             elif action == "move":
                 await _move(ctx, callback, tenant_id=tenant_id, origin="s" + data[2])
             elif action == "move_page":
@@ -472,7 +490,9 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     return
                 folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
                 folder = next(f for f in folders if int(f["id"]) == int(state["folder_id"]))
-                text, kb = folder_settings_view(folder)
+                text, kb = folder_settings_view(
+                    folder, page=int(state.get("list_page") or 0),
+                )
             else:
                 fid = await ctx.run_db(ctx.db.create_rule_folder, tenant_id, name)
                 if not fid:
