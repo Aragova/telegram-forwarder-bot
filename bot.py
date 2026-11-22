@@ -1254,7 +1254,8 @@ def _filter_user_rule_card_keyboard(keyboard: InlineKeyboardMarkup, rule_id: int
         f"toggle_rule_mode:{rule_id}": f"user_rule_switch_mode:{rule_id}:video",
         f"video_intro_menu:{rule_id}": f"user_rule_intros:{rule_id}",
         f"video_caption_menu:{rule_id}": f"user_rule_caption:{rule_id}",
-        f"caption_mode_menu:{rule_id}": f"user_rule_caption_mode:{rule_id}",
+        f"repost_caption_menu:{rule_id}": f"user_rule_repost_caption:{rule_id}",
+        f"repost_caption_menu:{rule_id}": f"user_rule_repost_caption:{rule_id}",
         f"trigger_now:{rule_id}": f"user_rule_send_now:{rule_id}",
         f"delete_rule:{rule_id}": f"user_rule_delete:{rule_id}",
         f"rule_extra_menu:{rule_id}": f"user_rule_extra:{rule_id}",
@@ -5745,6 +5746,7 @@ register_intro_handlers(dp, intro_handlers_ctx)
 
 @dp.callback_query(lambda c: (
     c.data.startswith("repost_caption_menu:")
+    or c.data.startswith("user_rule_repost_caption:")
     or c.data.startswith("caption_mode_menu:")
     or c.data.startswith("user_rule_caption_mode:")
 ))
@@ -5756,6 +5758,9 @@ async def handle_repost_caption_menu(callback: CallbackQuery):
         return
     if not await ensure_rule_callback_access(callback, rule_id):
         return
+    state = user_states.get(callback.from_user.id, {})
+    if state.get("action") == "repost_caption" and state.get("rule_id") == rule_id:
+        reset_user_state(callback.from_user.id)
     rule = await run_db(db.get_rule, rule_id)
     if not rule or (getattr(rule, "mode", "repost") or "repost") != "repost":
         await answer_callback_safe(callback, "Режим доступен только для репоста", show_alert=True)
