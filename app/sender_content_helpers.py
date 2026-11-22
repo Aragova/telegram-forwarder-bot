@@ -285,7 +285,7 @@ class SenderContentHelpers:
                     built.append(types.MessageEntityItalic(offset=offset, length=length))
                 elif entity_type == "underline":
                     built.append(types.MessageEntityUnderline(offset=offset, length=length))
-                elif entity_type == "strike":
+                elif entity_type in ("strike", "strikethrough"):
                     built.append(types.MessageEntityStrike(offset=offset, length=length))
                 elif entity_type == "spoiler":
                     built.append(types.MessageEntitySpoiler(offset=offset, length=length))
@@ -313,6 +313,18 @@ class SenderContentHelpers:
                     built.append(types.MessageEntityUrl(offset=offset, length=length))
                 elif entity_type == "mention":
                     built.append(types.MessageEntityMention(offset=offset, length=length))
+                elif entity_type == "text_mention":
+                    # Preserve the referenced user even when source entities
+                    # were not run through normalize_caption_entities.
+                    try:
+                        user_id = int(item.get("user_id") or 0)
+                    except (TypeError, ValueError):
+                        user_id = 0
+                    if user_id > 0:
+                        built.append(types.MessageEntityTextUrl(
+                            offset=offset, length=length,
+                            url=f"tg://user?id={user_id}",
+                        ))
                 elif entity_type == "email":
                     built.append(types.MessageEntityEmail(offset=offset, length=length))
                 elif entity_type == "phone":
@@ -323,8 +335,11 @@ class SenderContentHelpers:
                     built.append(types.MessageEntityCashtag(offset=offset, length=length))
                 elif entity_type == "bot_command":
                     built.append(types.MessageEntityBotCommand(offset=offset, length=length))
-                elif entity_type == "blockquote":
-                    built.append(types.MessageEntityBlockquote(offset=offset, length=length))
+                elif entity_type in ("blockquote", "expandable_blockquote"):
+                    built.append(types.MessageEntityBlockquote(
+                        offset=offset, length=length,
+                        collapsed=(entity_type == "expandable_blockquote"),
+                    ))
                 elif entity_type == "custom_emoji":
                     custom_emoji_id = item.get("custom_emoji_id")
                     if custom_emoji_id:
