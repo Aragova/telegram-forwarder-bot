@@ -5,6 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, ReplyKeyboardRemove
 
 from .context import AdminHandlersContext
+from app.rule_folders_ui import root_view
 
 
 def register_admin_menu_handlers(dp: Dispatcher, ctx: AdminHandlersContext) -> None:
@@ -35,4 +36,24 @@ def register_admin_menu_handlers(dp: Dispatcher, ctx: AdminHandlersContext) -> N
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
         if not await ctx.is_admin(message):
             return
-        await ctx.send_message_safe(chat_id=message.chat.id, text="🔄 Раздел: Правила", reply_markup=ctx.get_rules_menu())
+        user_id = message.from_user.id if message.from_user else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
+        rules = await ctx.run_db(ctx.db.get_all_rules)
+        text, markup = root_view(total_rules=len(rules), folders_count=len(folders), admin=True)
+        # Reply keyboards cannot be dismissed and replaced with inline markup in
+        # the same Telegram message. Remove the old keyboard via a temporary
+        # service message, then keep only the navigable rich screen.
+        cleanup = await ctx.send_message_safe(
+            chat_id=message.chat.id, text="🔄 Открываю правила",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await ctx.send_message_safe(
+            chat_id=message.chat.id, text=text,
+            reply_markup=markup, parse_mode="HTML",
+        )
+        if cleanup:
+            try:
+                await ctx.bot.delete_message(message.chat.id, cleanup.message_id)
+            except Exception:
+                pass
