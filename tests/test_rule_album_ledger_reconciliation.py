@@ -78,8 +78,8 @@ class Cursor:
         query = " ".join(str(sql).split())
         self.executed.append((query, args))
         self.rowcount = 1
-        if query.startswith("SELECT target_id, mode FROM routing"):
-            self.result = {"target_id": "-100456", "mode": "repost"}
+        if query.startswith("SELECT target_id, mode, tenant_id FROM routing"):
+            self.result = {"target_id": "-100456", "mode": "repost", "tenant_id": 1}
         elif "FROM delivery_attempts WHERE id =" in query:
             self.result = {
                 "id": 20, "status": self.attempt_status,
