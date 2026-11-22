@@ -1074,7 +1074,6 @@ class SenderService:
         allow_unverified_self_loop_target: bool = False,
     ) -> dict:
         from .reaction_delivery import ReactionDelivery
-
         kwargs = {
             "rule": rule,
             "target_id": target_id,
