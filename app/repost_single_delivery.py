@@ -3,7 +3,11 @@ from __future__ import annotations
 import logging
 
 from .runtime_utils import run_db
-from .sender_primitives import DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK, _prepare_html_text
+from .repost_caption import get_repost_caption_override, caption_override_content
+from .sender_primitives import (
+    DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK, _prepare_html_text,
+    _telethon_entities_to_bot, _is_link_preview_only,
+)
 from .telegram_send_result import telegram_send_result_from_raw
 
 logger = logging.getLogger("forwarder")
@@ -37,6 +41,12 @@ class RepostSingleDelivery:
         caption_mode = strategy["configured_mode"]
         requires_builder = strategy["requires_builder"]
         use_copy_first = strategy["use_copy_first"]
+        custom_caption = caption_override_content(get_repost_caption_override(rule))
+        if custom_caption is not None:
+            # CopyMessages cannot override album captions. Do not accidentally
+            # publish the original caption when an explicit override is ON.
+            use_copy_first = False
+            requires_builder = True
 
         is_self_loop = owner._is_self_loop_rule(rule)
         if is_self_loop:
@@ -419,7 +429,10 @@ class RepostSingleDelivery:
             )
             return False
 
-        content = owner._content_from_message_or_post(message=message, post_row=post_row)
+        content = (
+            custom_caption if custom_caption is not None
+            else owner._content_from_message_or_post(message=message, post_row=post_row)
+        )
         built_text, _built_entities = owner._build_text_and_entities_from_content(content)
 
         # =========================================================
@@ -447,6 +460,7 @@ class RepostSingleDelivery:
             target_thread_id,
             post_row=post_row,
             is_self_loop=is_self_loop,
+            **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
         if getattr(reupload_outcome, "transport_accepted", False) and not getattr(reupload_outcome, "authoritative_resolved", False):
             error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
@@ -751,7 +765,21 @@ class RepostSingleDelivery:
         # =========================================================
         # 6) TEXT FALLBACK
         # =========================================================
-        html_text = _prepare_html_text(built_text)
+        # Never silently degrade a failed media repost to a text-only "sent".
+        # With custom caption ON a media failure must be visible and retriable.
+        media_downgrade_blocked = bool(
+            custom_caption is not None
+            and getattr(message, "media", None)
+            and not _is_link_preview_only(message)
+        )
+        html_text = (
+            None if media_downgrade_blocked
+            else built_text if custom_caption is not None
+            else _prepare_html_text(built_text)
+        )
+        bot_entities = (
+            _telethon_entities_to_bot(_built_entities) if custom_caption is not None else None
+        )
 
         await owner._log_delivery_pipeline_step(
             rule_id=rule.id,
@@ -777,7 +805,8 @@ class RepostSingleDelivery:
                     chat_id=target_id,
                     message_thread_id=target_thread_id,
                     text=html_text,
-                    parse_mode="HTML",
+                    parse_mode=None if custom_caption is not None else "HTML",
+                    **({"entities": bot_entities} if custom_caption is not None else {}),
                     disable_web_page_preview=True,
                 )
 
@@ -853,7 +882,10 @@ class RepostSingleDelivery:
                 source_channel=source_channel,
                 target_id=target_id,
                 source_message_ids=source_message_ids,
-                error_text="Текстовый fallback невозможен: текст пустой",
+                error_text=(
+                    "custom_caption_media_send_failed_no_text_only_downgrade"
+                    if media_downgrade_blocked else "Текстовый fallback невозможен: текст пустой"
+                ),
                 extra={
                     "caption_delivery_mode": caption_mode,
                     "requires_builder": requires_builder,

@@ -173,6 +173,10 @@ class PostgresRepository(RepositoryProtocol):
             video_intro_vertical_id=data.get("video_intro_vertical_id"),
             video_caption=data.get("video_caption"),
             video_caption_entities_json=data.get("video_caption_entities_json"),
+            repost_caption=data.get("repost_caption"),
+            repost_caption_entities_json=data.get("repost_caption_entities_json"),
+            repost_caption_enabled=bool(data.get("repost_caption_enabled", False)),
+            repost_caption_delivery_mode=data.get("repost_caption_delivery_mode") or "copy_first",
             caption_delivery_mode=data.get("caption_delivery_mode", "auto"),
             video_caption_delivery_mode=data.get("video_caption_delivery_mode", "copy_first"),
             repost_campaign_enabled=bool(data.get("repost_campaign_enabled") or False),
@@ -403,6 +407,10 @@ class PostgresRepository(RepositoryProtocol):
             video_intro_vertical TEXT NULL,
             video_caption TEXT NULL,
             video_caption_entities_json TEXT NULL,
+            repost_caption TEXT NULL,
+            repost_caption_entities_json TEXT NULL,
+            repost_caption_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+            repost_caption_delivery_mode TEXT NOT NULL DEFAULT 'copy_first',
             caption_delivery_mode TEXT NOT NULL DEFAULT 'auto',
             video_caption_delivery_mode TEXT NOT NULL DEFAULT 'copy_first',
 
@@ -749,6 +757,10 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_vertical TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_caption TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_caption_entities_json TEXT NULL;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_caption TEXT NULL;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_caption_entities_json TEXT NULL;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_caption_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_caption_delivery_mode TEXT NOT NULL DEFAULT 'copy_first';
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS caption_delivery_mode TEXT NOT NULL DEFAULT 'auto';
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_caption_delivery_mode TEXT NOT NULL DEFAULT 'copy_first';
         ALTER TABLE routing ALTER COLUMN video_caption_delivery_mode SET DEFAULT 'copy_first';
@@ -4711,6 +4723,67 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return updated
 
+    def update_rule_repost_caption(
+        self,
+        rule_id: int,
+        caption: str | None,
+        caption_entities_json: str | None = None,
+    ) -> bool:
+        # Do not implicitly switch the caption on for empty input. Clearing
+        # always restores original text; a valid save enables the override.
+        value = str(caption) if caption and str(caption).strip() else None
+        if value is not None and len(value.encode("utf-16-le")) // 2 > 1024:
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET repost_caption = %s,
+                        repost_caption_entities_json = %s,
+                        repost_caption_enabled = %s
+                    WHERE id = %s AND mode = 'repost'
+                    """,
+                    (value, caption_entities_json if value is not None else None,
+                     bool(value), int(rule_id)),
+                )
+                updated = cur.rowcount == 1
+            conn.commit()
+        return updated
+
+    def set_rule_repost_caption_enabled(self, rule_id: int, enabled: bool) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET repost_caption_enabled = %s
+                    WHERE id = %s AND mode = 'repost'
+                      AND (NOT %s OR NULLIF(BTRIM(repost_caption), '') IS NOT NULL)
+                    """,
+                    (bool(enabled), int(rule_id), bool(enabled)),
+                )
+                updated = cur.rowcount == 1
+            conn.commit()
+        return updated
+
+    def update_rule_repost_caption_delivery_mode(self, rule_id: int, mode: str) -> bool:
+        normalized = str(mode or "").strip().lower()
+        if normalized not in ("copy_first", "builder_first"):
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing SET repost_caption_delivery_mode = %s
+                    WHERE id = %s AND mode = 'repost'
+                    """,
+                    (normalized, int(rule_id)),
+                )
+                updated = cur.rowcount == 1
+            conn.commit()
+        return updated
+
     def update_rule_video_caption(
         self,
         rule_id: int,
@@ -7564,6 +7637,9 @@ class PostgresRepository(RepositoryProtocol):
                 "video_intro_vertical_id": rule.video_intro_vertical_id,
                 "video_caption": rule.video_caption,
                 "video_caption_entities_json": rule.video_caption_entities_json,
+                "repost_caption": rule.repost_caption,
+                "repost_caption_enabled": rule.repost_caption_enabled,
+                "repost_caption_delivery_mode": rule.repost_caption_delivery_mode,
                 "caption_delivery_mode": getattr(rule, "caption_delivery_mode", "auto"),
                 "video_caption_delivery_mode": getattr(rule, "video_caption_delivery_mode", "copy_first"),
                 "is_active": bool(rule.is_active),

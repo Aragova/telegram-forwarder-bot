@@ -5,6 +5,7 @@ import logging
 
 from .delivery_idempotency import normalize_valid_sent_message_ids
 from .runtime_utils import run_db
+from .repost_caption import get_repost_caption_override, caption_override_content
 
 
 logger = logging.getLogger("forwarder")
@@ -45,6 +46,11 @@ class RepostAlbumDelivery:
         caption_mode = strategy["configured_mode"]
         requires_builder = strategy["requires_builder"]
         use_copy_first = strategy["use_copy_first"]
+        custom_caption = caption_override_content(get_repost_caption_override(rule))
+        if custom_caption is not None:
+            # Bot API CopyMessages cannot override a caption.
+            use_copy_first = False
+            requires_builder = True
 
         post_rows_by_message_id = {
             int(r["message_id"]): r
@@ -633,6 +639,7 @@ class RepostAlbumDelivery:
                 for m in source_messages
             ],
             is_self_loop=is_self_loop,
+                **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
         attempts_debug.append({"stage": "reupload_album", **reupload_result})
         reupload_candidate_sent_ids = normalize_valid_sent_message_ids(reupload_result.get("sent_message_ids") or [])
@@ -975,6 +982,7 @@ class RepostAlbumDelivery:
                     for m in source_messages
                 ],
                 is_self_loop=is_self_loop,
+                **({"caption_override": custom_caption} if custom_caption is not None else {}),
             )
             attempts_debug.append({"stage": "reupload_album_retry", **reupload_retry_result})
 
@@ -1142,6 +1150,7 @@ class RepostAlbumDelivery:
                 post_rows_by_message_id.get(int(getattr(m, "id")))
                 for m in source_messages
             ],
+            **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
         attempts_debug.append({"stage": "send_album_one_by_one", **one_by_one_result})
 

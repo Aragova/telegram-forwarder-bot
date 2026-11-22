@@ -138,6 +138,10 @@ class Rule:
     video_intro_vertical: str | None = None
     video_caption: str | None = None
     video_caption_entities_json: str | None = None
+    repost_caption: str | None = None
+    repost_caption_entities_json: str | None = None
+    repost_caption_enabled: bool = False
+    repost_caption_delivery_mode: str = "copy_first"
 
     caption_delivery_mode: str = "auto"
     video_caption_delivery_mode: str = "copy_first"

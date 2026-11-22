@@ -239,6 +239,7 @@ class SenderTelethonHelpers:
         text: str,
         entities,
         source_message_ids: set[int] | None = None,
+        literal_caption: bool = False,
     ) -> TelethonSendOutcome:
         entity, target_is_broadcast_channel = await self._resolve_target_entity_and_broadcast_flag(target_id)
         formatting_entities = self.owner._clone_telethon_entities(entities, text)
@@ -258,6 +259,8 @@ class SenderTelethonHelpers:
             "formatting_entities": formatting_entities or None,
             "link_preview": False,
         }
+        if literal_caption:
+            send_kwargs["parse_mode"] = None
 
         if target_thread_id is not None:
             send_kwargs["comment_to"] = int(target_thread_id)
@@ -307,8 +310,13 @@ class SenderTelethonHelpers:
         force_document: bool = False,
         post_row: dict | None = None,
         is_self_loop: bool = False,
+        caption_override: dict | None = None,
     ) -> TelethonSendOutcome:
-        content = self.owner._content_from_message_or_post(message=message, post_row=post_row)
+        content = (
+            caption_override
+            if caption_override is not None
+            else self.owner._content_from_message_or_post(message=message, post_row=post_row)
+        )
         raw_text, raw_entities = self.owner._build_text_and_entities_from_content(content)
         formatting_entities = self.owner._clone_telethon_entities(raw_entities, raw_text)
 
@@ -338,6 +346,8 @@ class SenderTelethonHelpers:
                 "supports_streaming": supports_streaming,
             }
 
+            if caption_override is not None:
+                send_kwargs["parse_mode"] = None
             if target_thread_id is not None:
                 send_kwargs["comment_to"] = int(target_thread_id)
 
@@ -443,6 +453,8 @@ class SenderTelethonHelpers:
             if temp_thumb_path:
                 send_kwargs["thumb"] = str(temp_thumb_path)
 
+            if caption_override is not None:
+                send_kwargs["parse_mode"] = None
             if target_thread_id is not None:
                 send_kwargs["comment_to"] = int(target_thread_id)
 
@@ -513,6 +525,7 @@ class SenderTelethonHelpers:
         target_thread_id,
         post_rows: list[dict] | None = None,
         is_self_loop: bool = False,
+        caption_override: dict | None = None,
     ) -> dict:
         downloaded_paths: list[Path] = []
 
@@ -522,8 +535,10 @@ class SenderTelethonHelpers:
 
             entity, target_is_broadcast_channel = await self._resolve_target_entity_and_broadcast_flag(target_id)
 
-            caption_text = ""
-            caption_entities = None
+            caption_text, caption_entities = (
+                self.owner._build_text_and_entities_from_content(caption_override)
+                if caption_override is not None else ("", None)
+            )
             media_items = []
 
             for idx, message in enumerate(messages):
@@ -560,6 +575,8 @@ class SenderTelethonHelpers:
                 "link_preview": False,
             }
 
+            if caption_override is not None:
+                send_kwargs["parse_mode"] = None
             if target_thread_id is not None:
                 send_kwargs["comment_to"] = int(target_thread_id)
 
@@ -631,8 +648,10 @@ class SenderTelethonHelpers:
 
         try:
             files: list[str] = []
-            caption_text = ""
-            caption_entities = None
+            caption_text, caption_entities = (
+                self.owner._build_text_and_entities_from_content(caption_override)
+                if caption_override is not None else ("", None)
+            )
 
             for idx, message in enumerate(messages):
                 file_path = await self.owner.telethon.download_media(
@@ -674,6 +693,8 @@ class SenderTelethonHelpers:
                 "link_preview": False,
             }
 
+            if caption_override is not None:
+                send_kwargs["parse_mode"] = None
             if target_thread_id is not None:
                 send_kwargs["comment_to"] = int(target_thread_id)
 

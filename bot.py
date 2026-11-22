@@ -1254,7 +1254,7 @@ def _filter_user_rule_card_keyboard(keyboard: InlineKeyboardMarkup, rule_id: int
         f"toggle_rule_mode:{rule_id}": f"user_rule_switch_mode:{rule_id}:video",
         f"video_intro_menu:{rule_id}": f"user_rule_intros:{rule_id}",
         f"video_caption_menu:{rule_id}": f"user_rule_caption:{rule_id}",
-        f"caption_mode_menu:{rule_id}": f"user_rule_caption_mode:{rule_id}",
+        f"repost_caption_menu:{rule_id}": f"user_rule_repost_caption:{rule_id}",
         f"trigger_now:{rule_id}": f"user_rule_send_now:{rule_id}",
         f"delete_rule:{rule_id}": f"user_rule_delete:{rule_id}",
         f"rule_extra_menu:{rule_id}": f"user_rule_extra:{rule_id}",
@@ -1356,6 +1356,70 @@ def rule_label(row) -> str:
 def video_caption_delivery_mode_to_text(mode: str | None) -> str:
     normalized = (mode or "copy_first").strip().lower()
     return "💎 Премиум" if normalized == "builder_first" else "⚡ Обычный"
+
+def build_repost_caption_menu_text(rule_id: int) -> str:
+    rule = db.get_rule(rule_id)
+    if not rule:
+        return "❌ Правило не найдено"
+    has_caption = bool(str(getattr(rule, "repost_caption", None) or "").strip())
+    enabled = bool(getattr(rule, "repost_caption_enabled", False)) and has_caption
+    caption_status = "✅ Задана" if has_caption else "— Не задана"
+    status = "🟢 ON · своя подпись" if enabled else "⚪ OFF · оригинальный текст"
+    mode = video_caption_delivery_mode_to_text(
+        getattr(rule, "repost_caption_delivery_mode", "copy_first")
+    )
+    return (
+        "✍️ <b>Подпись репостов</b>\n\n"
+        f"📝 <b>Текущая подпись:</b> {caption_status}\n"
+        f"📌 <b>Статус:</b> {status}\n"
+        f"🎛 <b>Оформление:</b> {mode}\n\n"
+        "Если подпись включена, она заменяет оригинальный текст поста.\n"
+        "При выключении или очистке автоматически возвращается оригинал."
+    )
+
+
+def build_repost_caption_menu_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+    rule = db.get_rule(rule_id)
+    has_caption = bool(str(getattr(rule, "repost_caption", None) or "").strip())
+    enabled = has_caption and bool(getattr(rule, "repost_caption_enabled", False))
+    rows = [
+        [InlineKeyboardButton(text="✏️ Изменить", callback_data=f"repost_caption_edit:{rule_id}")],
+        [InlineKeyboardButton(text="🎛 Режим подписи", callback_data=f"repost_caption_mode_menu:{rule_id}")],
+    ]
+    if has_caption:
+        rows.append([InlineKeyboardButton(
+            text="⏸ Выключить" if enabled else "▶️ Включить",
+            callback_data=f"repost_caption_toggle:{rule_id}",
+        )])
+    rows.extend([
+        [InlineKeyboardButton(text="🗑 Очистить", callback_data=f"repost_caption_clear:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_caption_mode_menu_text(rule_id: int) -> str:
+    rule = db.get_rule(rule_id)
+    if not rule:
+        return "❌ Правило не найдено"
+    mode = video_caption_delivery_mode_to_text(
+        getattr(rule, "repost_caption_delivery_mode", "copy_first")
+    )
+    return (
+        "🎛 <b>Режим подписи репоста</b>\n\n"
+        "⚡ <b>Обычный</b> — текст и обычные смайлики.\n"
+        "💎 <b>Премиум</b> — жирный текст, ссылки и premium emoji.\n\n"
+        f"Текущий режим: {mode}"
+    )
+
+
+def build_repost_caption_mode_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚡ Обычный", callback_data=f"set_repost_caption_mode_copy_first:{rule_id}")],
+        [InlineKeyboardButton(text="💎 Премиум", callback_data=f"set_repost_caption_mode_builder_first:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"repost_caption_menu:{rule_id}")],
+    ])
+
 
 def build_video_caption_menu_text(rule_id: int) -> str:
     rule = db.get_rule(rule_id)
@@ -3507,8 +3571,8 @@ def build_rule_extra_keyboard(rule_id: int) -> InlineKeyboardMarkup:
     if mode == "repost":
         rows.append([
             InlineKeyboardButton(
-                text="✍️ Режим подписи",
-                callback_data=f"caption_mode_menu:{rule_id}",
+                text="✍️ Подпись",
+                callback_data=f"repost_caption_menu:{rule_id}",
             )
         ])
 
@@ -3732,6 +3796,24 @@ async def refresh_rule_card_message(
     finally:
         if card_key is not None:
             rule_card_refresh_inflight.discard(card_key)
+
+
+def _save_repost_caption_sync(
+    rule_id: int, caption: str | None, entities_json: str | None, admin_id: int,
+) -> dict[str, Any]:
+    previous = db.get_rule(rule_id)
+    ok = db.update_rule_repost_caption(rule_id, caption, entities_json)
+    if ok:
+        db.log_rule_change(
+            event_type="rule_repost_caption_changed",
+            rule_id=rule_id, admin_id=admin_id,
+            old_value={
+                "caption": previous.repost_caption if previous else None,
+                "enabled": previous.repost_caption_enabled if previous else False,
+            },
+            new_value={"caption": caption, "enabled": bool(caption)},
+        )
+    return {"ok": bool(ok)}
 
 
 def _save_video_caption_sync(
@@ -5679,47 +5761,199 @@ def _build_intro_handlers_context() -> IntroHandlersContext:
 intro_handlers_ctx = _build_intro_handlers_context()
 register_intro_handlers(dp, intro_handlers_ctx)
 
-@dp.callback_query(lambda c: c.data.startswith("caption_mode_menu:") or c.data.startswith("user_rule_caption_mode:"))
-async def handle_caption_mode_menu(callback: CallbackQuery):
+@dp.callback_query(lambda c: (
+    c.data.startswith("repost_caption_menu:")
+    or c.data.startswith("user_rule_repost_caption:")
+    or c.data.startswith("caption_mode_menu:")
+    or c.data.startswith("user_rule_caption_mode:")
+))
+async def handle_repost_caption_menu(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
-    except Exception:
+    except (IndexError, ValueError, AttributeError):
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
     if not await ensure_rule_callback_access(callback, rule_id):
         return
-
+    state = user_states.get(callback.from_user.id, {})
+    if state.get("action") == "repost_caption" and state.get("rule_id") == rule_id:
+        reset_user_state(callback.from_user.id)
     rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+    if not rule or (getattr(rule, "mode", "repost") or "repost") != "repost":
+        await answer_callback_safe(callback, "Режим доступен только для репоста", show_alert=True)
         return
+    edited = await edit_message_text_safe(
+        message=callback.message,
+        text=await run_db(build_repost_caption_menu_text, rule_id),
+        reply_markup=await run_db(build_repost_caption_menu_keyboard, rule_id),
+        parse_mode="HTML",
+    )
+    await answer_callback_safe_once(callback, "Открыто" if edited else "Уже открыто")
 
-    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "repost":
-        await answer_callback_safe(
-            callback,
-            "Это меню доступно только для режима репоста",
-            show_alert=True,
-        )
-        return
 
-    current_mode = await run_db(get_rule_caption_mode_value, rule_id)
-
+@dp.callback_query(lambda c: c.data.startswith("repost_caption_edit:"))
+async def handle_repost_caption_edit(callback: CallbackQuery):
     try:
-        await edit_message_text_safe(
-            message=callback.message,
-            text=build_caption_mode_text(current_mode),
-            parse_mode="HTML",
-            reply_markup=build_caption_mode_keyboard(rule_id),
-        )
-    except Exception as exc:
-        if "message is not modified" in str(exc).lower():
-            await answer_callback_safe_once(callback, "Уже открыто")
-            return
-        logger.exception("Ошибка открытия меню режима подписи rule_id=%s: %s", rule_id, exc)
-        await answer_callback_safe(callback, "Не удалось открыть меню", show_alert=True)
+        rule_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError, AttributeError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
-
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule or rule.mode != "repost":
+        await answer_callback_safe(callback, "Правило репоста не найдено", show_alert=True)
+        return
+    cancel = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"repost_caption_menu:{rule_id}")
+    ]])
+    edited = await edit_message_text_safe(
+        message=callback.message,
+        text=(
+            "✏️ <b>Изменение подписи репостов</b>\n\n"
+            f"Правило #{rule_id}\n\n"
+            "Отправьте новый текст одним сообщением (до 1024 символов).\n"
+            "Оформление и premium emoji сохраняются в режиме 💎 Премиум.\n\n"
+            "Для возврата оригинальной подписи используйте «Выключить» или «Очистить»."
+        ),
+        parse_mode="HTML",
+        reply_markup=cancel,
+    )
+    if not edited:
+        await answer_callback_safe_once(callback, "Не удалось открыть ввод", show_alert=True)
+        return
+    user_states[callback.from_user.id] = {
+        "action": "repost_caption",
+        "rule_id": rule_id,
+        "prompt_chat_id": callback.message.chat.id,
+        "prompt_message_id": callback.message.message_id,
+    }
     await answer_callback_safe_once(callback)
+
+
+@dp.callback_query(lambda c: c.data.startswith("repost_caption_toggle:"))
+async def handle_repost_caption_toggle(callback: CallbackQuery):
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError, AttributeError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    previous = await run_db(db.get_rule, rule_id)
+    if not previous or previous.mode != "repost":
+        await answer_callback_safe(callback, "Правило репоста не найдено", show_alert=True)
+        return
+    new_value = not bool(previous.repost_caption_enabled)
+    if not await run_db(db.set_rule_repost_caption_enabled, rule_id, new_value):
+        await answer_callback_safe(callback, "Сначала задайте подпись", show_alert=True)
+        return
+    await run_db(
+        db.log_rule_change, event_type="rule_repost_caption_toggled",
+        rule_id=rule_id, admin_id=callback.from_user.id,
+        old_value={"enabled": bool(previous.repost_caption_enabled)},
+        new_value={"enabled": new_value},
+    )
+    invalidate_rule_card_cache(rule_id)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=await run_db(build_repost_caption_menu_text, rule_id),
+        reply_markup=await run_db(build_repost_caption_menu_keyboard, rule_id),
+        parse_mode="HTML",
+    )
+    await answer_callback_safe_once(callback, "Включена" if new_value else "Оригинал восстановлен")
+
+
+@dp.callback_query(lambda c: c.data.startswith("repost_caption_clear:"))
+async def handle_repost_caption_clear(callback: CallbackQuery):
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError, AttributeError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    previous = await run_db(db.get_rule, rule_id)
+    if not previous or previous.mode != "repost":
+        await answer_callback_safe(callback, "Правило репоста не найдено", show_alert=True)
+        return
+    if not await run_db(db.update_rule_repost_caption, rule_id, None, None):
+        await answer_callback_safe(callback, "Не удалось очистить подпись", show_alert=True)
+        return
+    await run_db(
+        db.log_rule_change, event_type="rule_repost_caption_cleared",
+        rule_id=rule_id, admin_id=callback.from_user.id,
+        old_value={"caption": previous.repost_caption, "enabled": previous.repost_caption_enabled},
+        new_value={"caption": None, "enabled": False},
+    )
+    invalidate_rule_card_cache(rule_id)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=await run_db(build_repost_caption_menu_text, rule_id),
+        reply_markup=await run_db(build_repost_caption_menu_keyboard, rule_id),
+        parse_mode="HTML",
+    )
+    await answer_callback_safe_once(callback, "Оригинальная подпись восстановлена")
+
+
+@dp.callback_query(lambda c: c.data.startswith("repost_caption_mode_menu:"))
+async def handle_repost_caption_mode_menu(callback: CallbackQuery):
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError, AttributeError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule or rule.mode != "repost":
+        await answer_callback_safe(callback, "Правило репоста не найдено", show_alert=True)
+        return
+    await edit_message_text_safe(
+        message=callback.message,
+        text=await run_db(build_repost_caption_mode_menu_text, rule_id),
+        reply_markup=build_repost_caption_mode_keyboard(rule_id),
+        parse_mode="HTML",
+    )
+    await answer_callback_safe_once(callback)
+
+
+@dp.callback_query(lambda c: c.data.startswith("set_repost_caption_mode_"))
+async def handle_repost_caption_mode_select(callback: CallbackQuery):
+    try:
+        value, rule_id_raw = callback.data.rsplit(":", 1)
+        rule_id = int(rule_id_raw)
+        mode = value.removeprefix("set_repost_caption_mode_")
+    except (ValueError, AttributeError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if mode not in {"copy_first", "builder_first"}:
+        await answer_callback_safe(callback, "Неизвестный режим", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    previous = await run_db(db.get_rule, rule_id)
+    if not previous or previous.mode != "repost":
+        await answer_callback_safe(callback, "Правило репоста не найдено", show_alert=True)
+        return
+    if not await run_db(db.update_rule_repost_caption_delivery_mode, rule_id, mode):
+        await answer_callback_safe(callback, "Не удалось сохранить режим", show_alert=True)
+        return
+    await run_db(
+        db.log_rule_change, event_type="rule_repost_caption_mode_changed",
+        rule_id=rule_id, admin_id=callback.from_user.id,
+        old_value={"mode": previous.repost_caption_delivery_mode},
+        new_value={"mode": mode},
+    )
+    invalidate_rule_card_cache(rule_id)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=await run_db(build_repost_caption_mode_menu_text, rule_id),
+        reply_markup=build_repost_caption_mode_keyboard(rule_id),
+        parse_mode="HTML",
+    )
+    await answer_callback_safe_once(callback, "Режим сохранён")
+
 
 @dp.callback_query(lambda c: c.data.startswith("video_caption_menu:") or c.data.startswith("user_rule_caption:"))
 async def handle_video_caption_menu(callback: CallbackQuery):
@@ -7110,6 +7344,45 @@ async def handle_stateful_private_inputs(message: Message):
                 ]
             ),
         )
+        return
+
+    # =========================================================
+    # Подпись репоста: та же схема редактирования, что у видеоредактора.
+    # =========================================================
+    if action == "repost_caption":
+        rule_id = int(state["rule_id"])
+        # Preserve leading whitespace: Telegram entities use UTF-16 offsets
+        # in the *untrimmed* text received from the user.
+        caption = None if text == "-" else (message.text or "")
+        if caption and not caption.strip():
+            caption = None
+        if caption and len(caption.encode("utf-16-le")) // 2 > 1024:
+            await reply_message_safe(
+                message, "❌ Подпись слишком длинная. Максимум 1024 символа Telegram."
+            )
+            return
+        if not caption:
+            caption = None
+        entities_json = serialize_message_entities(message.entities) if caption else None
+        result = await run_db(
+            _save_repost_caption_sync, rule_id, caption, entities_json,
+            message.from_user.id if message.from_user else settings.admin_id,
+        )
+        if result["ok"]:
+            invalidate_rule_card_cache(rule_id)
+            await try_delete_message_safe(message.chat.id, message.message_id)
+            prompt_chat_id, prompt_message_id = _state_prompt_ids(state)
+            if prompt_chat_id and prompt_message_id:
+                await try_delete_message_safe(prompt_chat_id, prompt_message_id)
+            reset_user_state(user_id)
+            await send_message_safe(
+                chat_id=message.chat.id,
+                text=await run_db(build_repost_caption_menu_text, rule_id),
+                parse_mode="HTML",
+                reply_markup=await run_db(build_repost_caption_menu_keyboard, rule_id),
+            )
+        else:
+            await reply_message_safe(message, "❌ Не удалось сохранить подпись. Повторите ввод.")
         return
 
     # =========================================================

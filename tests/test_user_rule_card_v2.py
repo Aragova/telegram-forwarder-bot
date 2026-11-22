@@ -78,18 +78,20 @@ def test_repost_interval_keyboard_rows():
     rows = _texts(user_ui.build_user_rule_card_keyboard(rule_id=3, is_active=True, schedule_mode="interval", mode="repost"))
     assert rows[0] == ["🔁 Сделать фиксированным"]
     assert rows[1] == ["⏱ Интервал", "🕓 Время"]
-    assert rows[2] == ["⚙️ Дополнительные функции"]
-    assert rows[3] == ["🔄 Обновить", "⏸ Выключить"]
-    assert rows[4] == ["⬅️ К правилам", "🏠 Главное меню"]
+    assert rows[2] == ["✍️ Подпись"]
+    assert rows[3] == ["⚙️ Дополнительные функции"]
+    assert rows[4] == ["🔄 Обновить", "⏸ Выключить"]
+    assert rows[5] == ["⬅️ К правилам", "🏠 Главное меню"]
 
 
 def test_repost_fixed_keyboard_rows():
     rows = _texts(user_ui.build_user_rule_card_keyboard(rule_id=3, is_active=False, schedule_mode="fixed", mode="repost"))
     assert rows[0] == ["🔁 Сделать плавающим"]
     assert rows[1] == ["🕓 Фикс. время", "🕓 Время"]
-    assert rows[2] == ["⚙️ Дополнительные функции"]
-    assert rows[3] == ["🔄 Обновить", "▶️ Включить"]
-    assert rows[4] == ["⬅️ К правилам", "🏠 Главное меню"]
+    assert rows[2] == ["✍️ Подпись"]
+    assert rows[3] == ["⚙️ Дополнительные функции"]
+    assert rows[4] == ["🔄 Обновить", "▶️ Включить"]
+    assert rows[5] == ["⬅️ К правилам", "🏠 Главное меню"]
 
 
 def test_video_keyboards_include_intro_and_caption():
@@ -105,7 +107,6 @@ def test_repost_extra_menu_contains_required_actions():
     texts = [x for row in _texts(user_ui.build_user_rule_extra_keyboard(rule_id=3, mode="repost")) for x in row]
     for expected in [
         "🔁 Сменить режим: Видеоредактор",
-        "✍️ Режим подписи",
         "⚡ Отправить сейчас",
         "🔢 Начать с номера",
         "🔄 Пересканировать",
@@ -137,7 +138,7 @@ def test_user_card_has_no_admin_global_buttons():
     callbacks = " ".join(_callbacks(user_ui.build_user_rule_card_keyboard(rule_id=7, is_active=True, schedule_mode="interval", mode="repost")))
     for forbidden in ["diagnostics", "system", "queue", "reset", "worker", "scheduler"]:
         assert forbidden not in callbacks
-    assert "К моим правилам" not in " ".join(_texts(user_ui.build_user_rule_card_keyboard(rule_id=7, is_active=True, schedule_mode="interval", mode="repost"))[4])
+    assert "К моим правилам" not in " ".join(_texts(user_ui.build_user_rule_card_keyboard(rule_id=7, is_active=True, schedule_mode="interval", mode="repost"))[5])
 
 
 class _DummyCtx:
@@ -228,7 +229,6 @@ def test_extra_menus_have_exact_row_structure():
     repost_rows = _texts(user_ui.build_user_rule_extra_keyboard(rule_id=3, mode="repost"))
     assert repost_rows == [
         ["🔁 Сменить режим: Видеоредактор"],
-        ["✍️ Режим подписи"],
         ["⚙️ Реакции"],
         ["⚡ Отправить сейчас"],
         ["🔢 Начать с номера"],

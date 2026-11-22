@@ -167,6 +167,13 @@ class RepositoryProtocol(Protocol):
         caption_delivery_mode: str,
     ) -> bool: ...
 
+    def update_rule_repost_caption(
+        self, rule_id: int, caption: str | None,
+        caption_entities_json: str | None = None,
+    ) -> bool: ...
+    def set_rule_repost_caption_enabled(self, rule_id: int, enabled: bool) -> bool: ...
+    def update_rule_repost_caption_delivery_mode(self, rule_id: int, mode: str) -> bool: ...
+
     def update_rule_video_caption_delivery_mode(
         self,
         rule_id: int,

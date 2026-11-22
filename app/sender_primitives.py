@@ -16,6 +16,13 @@ from telethon.tl.types import (
     MessageEntityUrl,
     MessageEntityMention,
     MessageEntityCustomEmoji,
+    MessageEntitySpoiler,
+    MessageEntityBlockquote,
+    MessageEntityEmail,
+    MessageEntityPhone,
+    MessageEntityHashtag,
+    MessageEntityCashtag,
+    MessageEntityBotCommand,
 )
 
 MAX_INVALID_MP4_RETRY = 1
@@ -51,7 +58,19 @@ def _telethon_entities_to_bot(entities):
                 result.append(MessageEntity(type="code", offset=e.offset, length=e.length))
 
             elif isinstance(e, MessageEntityPre):
-                result.append(MessageEntity(type="pre", offset=e.offset, length=e.length))
+                result.append(MessageEntity(
+                    type="pre", offset=e.offset, length=e.length,
+                    language=getattr(e, "language", "") or None,
+                ))
+
+            elif isinstance(e, MessageEntitySpoiler):
+                result.append(MessageEntity(type="spoiler", offset=e.offset, length=e.length))
+
+            elif isinstance(e, MessageEntityBlockquote):
+                result.append(MessageEntity(
+                    type=("expandable_blockquote" if getattr(e, "collapsed", False) else "blockquote"),
+                    offset=e.offset, length=e.length,
+                ))
 
             elif isinstance(e, MessageEntityTextUrl):
                 result.append(
@@ -68,6 +87,21 @@ def _telethon_entities_to_bot(entities):
 
             elif isinstance(e, MessageEntityMention):
                 result.append(MessageEntity(type="mention", offset=e.offset, length=e.length))
+
+            elif isinstance(e, MessageEntityEmail):
+                result.append(MessageEntity(type="email", offset=e.offset, length=e.length))
+
+            elif isinstance(e, MessageEntityPhone):
+                result.append(MessageEntity(type="phone_number", offset=e.offset, length=e.length))
+
+            elif isinstance(e, MessageEntityHashtag):
+                result.append(MessageEntity(type="hashtag", offset=e.offset, length=e.length))
+
+            elif isinstance(e, MessageEntityCashtag):
+                result.append(MessageEntity(type="cashtag", offset=e.offset, length=e.length))
+
+            elif isinstance(e, MessageEntityBotCommand):
+                result.append(MessageEntity(type="bot_command", offset=e.offset, length=e.length))
 
             elif isinstance(e, MessageEntityCustomEmoji):
                 result.append(
@@ -234,6 +268,11 @@ def _prepare_html_text(text: str | None) -> str | None:
 
 def _normalize_reaction_emoji(value: str | None) -> str:
     return (value or "").replace("\ufe0f", "").strip()
+
+def _is_link_preview_only(message) -> bool:
+    """A Telegram webpage preview isn't a downloadable media attachment."""
+    return isinstance(getattr(message, "media", None), types.MessageMediaWebPage)
+
 
 def _detect_message_media_kind(message) -> str:
     """
