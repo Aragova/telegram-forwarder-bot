@@ -5566,10 +5566,21 @@ class PostgresRepository(RepositoryProtocol):
                           AND j.lease_until > NOW()
                           AND j.job_type IN ('repost_single', 'repost_album')
                           AND j.payload_json->>'rule_id' = %s
-                          AND j.payload_json->>'delivery_id' = ANY(%s)
+                          AND (
+                              j.payload_json->>'delivery_id' = ANY(%s)
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM jsonb_array_elements_text(
+                                      CASE WHEN jsonb_typeof(j.payload_json->'delivery_ids') = 'array'
+                                           THEN j.payload_json->'delivery_ids'
+                                           ELSE '[]'::jsonb END
+                                  ) AS member(id)
+                                  WHERE member.id = ANY(%s)
+                              )
+                          )
                     ) AS has_live_owner
                     """,
-                    (int(job_id), str(rule_id), [str(x) for x in ids]),
+                    (int(job_id), str(rule_id), [str(x) for x in ids], [str(x) for x in ids]),
                 )
                 owner = cur.fetchone()
                 if owner and bool(owner.get("has_live_owner")):
