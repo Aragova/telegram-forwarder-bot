@@ -445,8 +445,9 @@ class ReactionDelivery:
                 rule_id,
                 exc.__class__.__name__,
             )
-            applied = await self._add_reaction_if_possible(target_id, sent_message_id, rule_id=rule_id)
-            return {"applied": bool(applied), "enqueued": False, "reason": "legacy_fallback"}
+            # Fail closed: a SaaS rule must never silently use the operator's
+            # legacy reaction accounts when tenant resolution fails.
+            return {"applied": False, "enqueued": False, "reason": "runtime_resolve_failed"}
 
         if plan.use_legacy_reactors:
             logger.info(
