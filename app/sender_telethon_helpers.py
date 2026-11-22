@@ -13,6 +13,7 @@ from telethon.tl import types as tl_types
 
 from .config import settings
 from .sender_primitives import _detect_message_media_kind
+from .subprocess_safety import communicate_safely
 from .telethon_authoritative_resolver import TelethonAuthoritativeMessageResolver, TelethonSendOutcome, telethon_transport_failed
 
 logger = logging.getLogger("forwarder")
@@ -61,7 +62,7 @@ class SenderTelethonHelpers:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _stderr = await proc.communicate()
+            stdout, _stderr = await communicate_safely(proc)
             if proc.returncode != 0:
                 return None
             data = json.loads(stdout.decode("utf-8", errors="ignore") or "{}")
@@ -178,7 +179,7 @@ class SenderTelethonHelpers:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                _stdout, stderr = await proc.communicate()
+                _stdout, stderr = await communicate_safely(proc)
                 last_error = stderr.decode("utf-8", errors="ignore")[-300:]
                 valid = proc.returncode == 0 and self._valid_thumb_file(tmp)
                 if valid:
@@ -187,6 +188,10 @@ class SenderTelethonHelpers:
             tmp.unlink(missing_ok=True)
             logger.warning("VIDEO_REUPLOAD_THUMB | source=none | error=%s", last_error)
             return None, "none", seek_seconds
+        except asyncio.CancelledError:
+            # The subprocess is already reaped by communicate_safely().
+            tmp.unlink(missing_ok=True)
+            raise
         except Exception as exc:
             tmp.unlink(missing_ok=True)
             logger.warning("VIDEO_REUPLOAD_THUMB | source=none | error=%s", exc)
