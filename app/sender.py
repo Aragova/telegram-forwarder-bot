@@ -1420,6 +1420,34 @@ class SenderService:
                 album_delivery_ids,
             )
             return True
+        if attempt_status == "accepted" and cached_ids and len(cached_ids) == len(album_delivery_ids):
+            # A previously accepted copy may already exist in Telegram. Only
+            # READ the target history; never send the album a second time.
+            verification = await self._verify_album_delivery(
+                target_id=str(target_id),
+                expected_count=len(album_delivery_ids),
+                sent_message_ids=cached_ids,
+                target_thread_id=target_thread_id,
+            )
+            verified_ids = normalize_valid_sent_message_ids(
+                (verification.get("sent_message_ids") or cached_ids) if verification.get("ok") else []
+            )
+            if verification.get("ok") and len(verified_ids) == len(album_delivery_ids):
+                promoted = await run_db(
+                    self.db.mark_delivery_attempt_verified,
+                    idempotency_key, sent_message_ids=verified_ids,
+                )
+                if promoted:
+                    await run_db(
+                        self._mark_album_deliveries_sent_sync,
+                        album_delivery_ids, sent_message_ids=verified_ids,
+                        target_id=str(target_id), delivery_method="idempotency_album_cache_reconciled",
+                    )
+                    logger.info(
+                        "REPOST_ALBUM_CACHE_RECONCILED | rule_id=%s | delivery_ids=%s | target_ids=%s",
+                        rule_id, album_delivery_ids, verified_ids,
+                    )
+                    return True
         if attempt_status in {"sending", "accepted", "failed_after_send"}:
             error = "telethon_send_accepted_target_id_unresolved_non_retryable: album cache awaiting confirmation"
             logger.warning(
