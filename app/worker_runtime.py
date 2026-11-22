@@ -786,7 +786,26 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                         job_id, payload.get("rule_id"), count,
                     )
                 except Exception:
-                    logger.exception("REPOST_ORPHAN_FINALIZE_ERROR | job_id=%s", job_id)
+                    logger.exception("REPOST_ORPHAN_FINALIZE_ERROR | job_id=%s | action=defer_not_fail", job_id)
+                    count = 0
+                if not count:
+                    # Two competing last-attempt workers can veto one another.
+                    # Do NOT consume the final retry or leave a processing
+                    # delivery without any future recovery job. Defer without
+                    # incrementing attempts until an owner finishes or expires.
+                    delay = max(30, compute_retry_delay_seconds(queue, attempts, job_type, policy))
+                    await _finish_owned_job(
+                        repo, "defer", job_id, worker_id,
+                        "Orphan finalization vetoed/unavailable; recheck without second send",
+                        delay, finalization_started=finalization_started,
+                    )
+                    logger.warning(
+                        "REPOST_ORPHAN_FINALIZE_DEFERRED | job_id=%s | rule_id=%s | "
+                        "delay_sec=%s | attempts_unchanged=true | action=no_resend",
+                        job_id, payload.get("rule_id"), delay,
+                    )
+                    await _runtime_metrics.record_retry(job_type=job_type)
+                    return True
             failed = await _finish_owned_job(repo, "fail", job_id, worker_id, error_text, finalization_started=finalization_started)
             if failed and job_type.startswith("video_"):
                 cleanup_video_artifacts(payload, mode="final_failure")
