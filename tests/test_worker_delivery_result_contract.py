@@ -113,6 +113,25 @@ def test_video_send_fallback_to_legacy_contract_compatible():
     assert repo.completed == [3]
 
 
+def test_explicit_telegram_flood_wait_honors_retry_after():
+    repo = FakeRepo()
+    sender = FakeSender(video_send_result={
+        "ok": False, "retryable": True, "accepted": False,
+        "retry_after_seconds": 120,
+        "error_text": "FloodWaitError: retry_after=120",
+    })
+    ok = _run(repo, sender, {
+        "id": 120, "job_type": "video_send",
+        "payload_json": {"delivery_id": 103, "rule_id": 1},
+        "attempts": 0, "max_attempts": 4,
+    })
+    assert ok is True
+    assert repo.failed == []
+    assert len(repo.retried) == 1
+    assert repo.retried[0][0] == 120
+    assert repo.retried[0][2] >= 121
+
+
 def test_non_retryable_failure_preserved():
     repo = FakeRepo()
     sender = FakeSender(video_delivery_result={"ok": False, "retryable": False, "error_text": "manual review"})
