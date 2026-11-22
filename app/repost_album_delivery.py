@@ -360,12 +360,23 @@ class RepostAlbumDelivery:
                         },
                     )
 
+                    if idempotency_key and hasattr(owner.db, "mark_delivery_attempt_verified"):
+                        await run_db(owner.db.mark_delivery_attempt_verified, idempotency_key, sent_message_ids=accepted_target_message_ids)
                     await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                     return True
                 if accepted_copy_sent_ids:
-                    logger.warning("DELIVERY_SENT_UNVERIFIED_AFTER_ACCEPTED | rule_id=%s | delivery_ids=%s | target_id=%s | sent_message_ids=%s", rule.id, delivery_ids, target_id, accepted_copy_sent_ids)
-                    await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
-                    return True
+                    error_text = (
+                        "telethon_send_accepted_target_id_unresolved_non_retryable: "
+                        f"copy_album ID unverified (candidate_ids={accepted_copy_sent_ids})"
+                    )
+                    logger.warning(
+                        "REPOST_COPY_ALBUM_ACCEPTED_UNVERIFIED | rule_id=%s | delivery_ids=%s | "
+                        "target_id=%s | candidate_ids=%s | action=manual_review_no_second_copy",
+                        rule.id, delivery_ids, target_id, accepted_copy_sent_ids,
+                    )
+                    for disputed_id in delivery_ids:
+                        await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
+                    return False
         else:
             copy_result = {
                 "ok": False,
