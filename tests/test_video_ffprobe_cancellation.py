@@ -7,6 +7,7 @@ import pytest
 
 import app.video_processor as video_mod
 from app.video_pipeline_stages import VideoPipelineStages
+from app.sender_telethon_helpers import SenderTelethonHelpers
 from app.video_processor import VideoProcessor
 from app.subprocess_safety import communicate_safely
 
@@ -60,5 +61,39 @@ def test_probe_timeout_kills_and_reaps_child():
         with pytest.raises(asyncio.TimeoutError):
             await communicate_safely(proc, timeout_seconds=0.01)
         assert proc.returncode is not None
+
+    asyncio.run(scenario())
+
+
+
+@pytest.mark.parametrize("caller", ["reupload_probe", "generated_thumbnail"])
+def test_telethon_video_probe_and_thumbnail_cleanup_on_cancel(tmp_path, monkeypatch, caller):
+    original_spawn = asyncio.create_subprocess_exec
+    started = asyncio.Event()
+    children = []
+
+    async def fake_spawn(*args, **kwargs):
+        proc = await original_spawn(
+            sys.executable, "-c", "import time; time.sleep(60)", **kwargs
+        )
+        children.append(proc)
+        started.set()
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"dummy")
+    helper = SenderTelethonHelpers(owner=object())
+
+    async def scenario():
+        if caller == "reupload_probe":
+            task = asyncio.create_task(helper._probe_video_file(source))
+        else:
+            task = asyncio.create_task(helper._generate_video_thumb(source, 10))
+        await asyncio.wait_for(started.wait(), timeout=3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=8)
+        assert children[0].returncode is not None
 
     asyncio.run(scenario())
