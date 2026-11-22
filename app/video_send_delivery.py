@@ -11,6 +11,7 @@ from .delivery_idempotency import (
     normalize_valid_sent_message_ids,
 )
 from .runtime_utils import run_db
+from .telethon_authoritative_resolver import TelethonSendOutcome
 
 logger = logging.getLogger("forwarder")
 
@@ -54,37 +55,46 @@ class VideoSendDelivery:
         if has_attempt_ledger:
             attempt = await run_db(owner.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
             cached_sent_ids = extract_sent_message_ids_from_attempt(attempt)
-            if isinstance(attempt, dict) and str(attempt.get("status") or "") in {"accepted", "verified"} and cached_sent_ids:
-                logger.info(
-                    "DELIVERY_ATTEMPT_CACHE_HIT | operation_kind=video_send | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s | sent_message_ids=%s",
-                    delivery_id,
-                    rule_id,
-                    target_id,
-                    idempotency_key,
-                    cached_sent_ids,
-                )
-                await run_db(
-                    owner._mark_delivery_sent_sync,
-                    int(delivery_id),
-                    sent_message_id=int(cached_sent_ids[0]),
-                    sent_message_ids=cached_sent_ids,
-                    target_id=str(target_id),
-                    delivery_method="idempotency_cache",
-                )
-                logger.info(
-                    "DELIVERY_MARKED_SENT_FROM_CACHE_HIT | delivery_id=%s | rule_id=%s | sent_message_ids=%s",
-                    delivery_id,
-                    rule_id,
-                    cached_sent_ids,
-                )
-                return {
-                    "ok": True,
-                    "sent_message_ids": cached_sent_ids,
-                    "sent_message_id": int(cached_sent_ids[0]),
-                    "idempotency_key": idempotency_key,
-                    "cache_hit": True,
-                    "fallback_to_legacy": False,
-                }
+            # Once a send may have reached Telegram, retries are read-only.
+            # Even an 'accepted' cache entry is NOT proof that its id belongs
+            # to this channel (e.g. rule 141 returned 370 instead of 2183).
+            status = str((attempt or {}).get("status") or "").lower()
+            if status in {"sending", "accepted", "verified", "failed_after_send"}:
+                verified_ids = []
+                if cached_sent_ids:
+                    verified_ids = await owner._confirm_target_delivery_message_ids_with_retry(
+                        rule_id=rule_id,
+                        delivery_id=delivery_id,
+                        source_channel=str(payload.get("source_channel") or ""),
+                        target_id=target_id,
+                        source_message_ids=source_message_ids,
+                        candidate_sent_message_ids=cached_sent_ids,
+                        method="video_send_cache_verify",
+                        max_age_seconds=900 if status == "sending" else 86400 * 30,
+                    )
+                if verified_ids:
+                    if hasattr(owner.db, "mark_delivery_attempt_verified"):
+                        await run_db(owner.db.mark_delivery_attempt_verified, idempotency_key, sent_message_ids=verified_ids)
+                    rule = await run_db(owner.db.get_rule, rule_id)
+                    if rule:
+                        await owner._run_post_send_step_safe(
+                            step_name="reaction_after_video_cache_verify",
+                            rule_id=rule_id,
+                            delivery_id=delivery_id,
+                            idempotency_key=idempotency_key,
+                            accepted_sent_message_ids=verified_ids,
+                            coro_factory=lambda: owner._add_reaction_for_rule_if_possible(
+                                rule=rule, target_id=target_id, sent_message_id=int(verified_ids[0]),
+                                source_channel=str(payload.get("source_channel") or ""),
+                                source_message_ids=source_message_ids, delivery_id=delivery_id,
+                            ),
+                        )
+                    await run_db(owner._mark_delivery_sent_sync, delivery_id, sent_message_id=int(verified_ids[0]), sent_message_ids=verified_ids, target_id=target_id, delivery_method="video_cache_verified")
+                    return {"ok": True, "cache_hit": True, "sent_message_ids": verified_ids, "fallback_to_legacy": False}
+                error = "video_send_accepted_target_id_unresolved_non_retryable"
+                logger.warning("VIDEO_SEND_CACHE_UNRESOLVED | rule_id=%s | delivery_id=%s | status=%s | candidate_ids=%s | action=no_resend_manual_review", rule_id, delivery_id, status, cached_sent_ids)
+                await run_db(owner._mark_delivery_faulty_sync, delivery_id, error)
+                return {"ok": False, "retryable": False, "accepted": True, "error_text": error, "manual_review_required": True, "fallback_to_legacy": False}
             await run_db(
                 owner.db.create_delivery_attempt,
                 delivery_id=int(delivery_id),
@@ -107,7 +117,10 @@ class VideoSendDelivery:
                 target_id,
                 idempotency_key,
             )
-            await run_db(owner.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="video_send")
+            acquired = await run_db(owner.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="video_send")
+            if not acquired:
+                # A concurrent executor or a prior attempt owns this write.
+                return {"ok": False, "retryable": False, "accepted": True, "error_text": "video_send_attempt_not_acquired", "fallback_to_legacy": False}
             logger.info(
                 "DELIVERY_ATTEMPT_SENDING | operation_kind=video_send | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s",
                 delivery_id,
@@ -168,44 +181,35 @@ class VideoSendDelivery:
                     error_text=error_text,
                 )
             return {"ok": False, "fallback_to_legacy": False, "retryable": False, "error_text": error_text}
-        if not sent_msg:
-            logger.warning("VIDEO STAGE RETRY | неуспешная отправка для delivery_id=%s", delivery_id)
+        if isinstance(sent_msg, TelethonSendOutcome):
+            # Unknown result / wrong peer: do not guess the target message id,
+            # call reaction handlers, or permit another Telegram send.
+            if not sent_msg.authoritative_resolved:
+                candidate_ids = sent_msg.returned_candidate_ids or []
+                if has_attempt_ledger:
+                    await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=candidate_ids, telegram_method="video_send_unresolved")
+                error = "video_send_accepted_target_id_unresolved_non_retryable"
+                logger.warning("VIDEO_SEND_ACCEPTED_UNRESOLVED | rule_id=%s | delivery_id=%s | candidate_ids=%s | reason=%s | action=no_resend_manual_review", rule_id, delivery_id, candidate_ids, sent_msg.error_text)
+                await run_db(owner._mark_delivery_faulty_sync, delivery_id, error)
+                return {"ok": False, "retryable": False, "accepted": True, "transport_accepted": True, "authoritative_resolved": False, "error_text": error, "manual_review_required": True, "fallback_to_legacy": False}
+            sent_message_ids = list(sent_msg.authoritative_message_ids)
+        elif sent_msg:
+            sent_message_ids = owner._extract_sent_message_ids(sent_msg)
+        else:
+            # An empty response is not proof of rejection.
             if has_attempt_ledger:
-                await run_db(
-                    owner.db.mark_delivery_attempt_failed,
-                    idempotency_key,
-                    status="failed_before_send",
-                    error_text="send_with_retry returned empty result",
-                )
-                logger.info(
-                    "DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation_kind=video_send | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s",
-                    delivery_id,
-                    rule_id,
-                    target_id,
-                    idempotency_key,
-                )
-            return {"ok": False, "fallback_to_legacy": False, "retryable": True}
+                await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=[], telegram_method="video_send_unknown")
+            error = "video_send_response_missing_non_retryable"
+            await run_db(owner._mark_delivery_faulty_sync, delivery_id, error)
+            return {"ok": False, "retryable": False, "accepted": True, "error_text": error, "manual_review_required": True, "fallback_to_legacy": False}
 
-        sent_message_ids = owner._extract_sent_message_ids(sent_msg)
         valid_sent_ids = normalize_valid_sent_message_ids(sent_message_ids)
-        if has_attempt_ledger and valid_sent_ids:
+        if has_attempt_ledger:
             await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=valid_sent_ids, telegram_method="video_send")
-            logger.info(
-                "DELIVERY_ATTEMPT_ACCEPTED | operation_kind=video_send | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s | sent_message_ids=%s",
-                delivery_id,
-                rule_id,
-                target_id,
-                idempotency_key,
-                valid_sent_ids,
-            )
-        elif has_attempt_ledger:
-            logger.warning(
-                "DELIVERY_ATTEMPT_ACCEPTED_SKIPPED_INVALID_IDS | operation_kind=%s | idempotency_key=%s | delivery_id=%s | raw_sent_message_ids=%s",
-                "video_send",
-                idempotency_key,
-                delivery_id,
-                sent_message_ids,
-            )
+        if not valid_sent_ids:
+            error = "video_send_accepted_without_ids_non_retryable"
+            await run_db(owner._mark_delivery_faulty_sync, delivery_id, error)
+            return {"ok": False, "retryable": False, "accepted": True, "error_text": error, "fallback_to_legacy": False}
         confirm_result = await owner._run_post_send_step_safe(
             step_name="verify_after_video_send",
             rule_id=rule_id,
@@ -226,21 +230,25 @@ class VideoSendDelivery:
         valid_sent_message_ids = confirm_result.get("result") or []
         sent_message_id = valid_sent_message_ids[0] if valid_sent_message_ids else None
         logger.info("DELIVERY_SENT_MESSAGE_IDS_EXTRACTED | rule_id=%s | delivery_id=%s | method=%s | source_message_ids=%s | sent_message_ids=%s | result_type=%s", rule_id, delivery_id, "video_send", source_message_ids, sent_message_ids, type(sent_msg).__name__)
-        if sent_message_id:
-            await owner._run_post_send_step_safe(
-                step_name="reaction_after_video_send",
-                rule_id=rule_id,
-                delivery_id=delivery_id,
-                idempotency_key=idempotency_key,
-                accepted_sent_message_ids=valid_sent_ids,
-                coro_factory=lambda: owner._add_reaction_if_possible(payload.get("target_id"), int(sent_message_id), rule_id=rule_id),
-            )
-        elif valid_sent_ids:
-            sent_message_id = int(valid_sent_ids[0])
-            logger.warning("DELIVERY_SENT_UNVERIFIED_AFTER_ACCEPTED | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | sent_message_ids=%s", rule_id, delivery_id, "video_send", payload.get("target_id"), valid_sent_ids)
-        else:
-            logger.warning("DELIVERY_FALSE_SUCCESS_PREVENTED | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s | action=retry_or_faulty", rule_id, delivery_id, "video_send", payload.get("target_id"), sent_message_ids)
-            return {"ok": False, "fallback_to_legacy": False, "retryable": True}
+        if not sent_message_id:
+            error = "video_send_accepted_target_id_unresolved_non_retryable"
+            logger.warning("VIDEO_SEND_VERIFY_UNRESOLVED | rule_id=%s | delivery_id=%s | candidate_ids=%s | action=no_resend_manual_review", rule_id, delivery_id, valid_sent_ids)
+            await run_db(owner._mark_delivery_faulty_sync, delivery_id, error)
+            return {"ok": False, "retryable": False, "accepted": True, "error_text": error, "manual_review_required": True, "fallback_to_legacy": False}
+        if has_attempt_ledger and hasattr(owner.db, "mark_delivery_attempt_verified"):
+            await run_db(owner.db.mark_delivery_attempt_verified, idempotency_key, sent_message_ids=valid_sent_message_ids)
+        await owner._run_post_send_step_safe(
+            step_name="reaction_after_video_send",
+            rule_id=rule_id,
+            delivery_id=delivery_id,
+            idempotency_key=idempotency_key,
+            accepted_sent_message_ids=valid_sent_message_ids,
+            coro_factory=lambda: owner._add_reaction_for_rule_if_possible(
+                rule=rule, target_id=target_id, sent_message_id=int(sent_message_id),
+                source_channel=str(payload.get("source_channel") or ""),
+                source_message_ids=source_message_ids, delivery_id=delivery_id,
+            ),
+        )
         await run_db(owner._mark_delivery_sent_sync, delivery_id, sent_message_id=sent_message_id, sent_message_ids=(valid_sent_message_ids or valid_sent_ids), target_id=str(payload.get("target_id") or ""), delivery_method="video_send")
         await run_db(owner._touch_rule_after_send_sync, rule_id, int(payload.get("interval") or 0))
         logger.info("VIDEO SEND DONE | отправка завершена для delivery_id=%s", delivery_id)
