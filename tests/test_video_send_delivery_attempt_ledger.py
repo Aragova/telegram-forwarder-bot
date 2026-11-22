@@ -44,6 +44,14 @@ class FakeRepo:
         self.calls.append(("failed", key, kwargs))
         return True
 
+    def mark_delivery_faulty(self, delivery_id, error_text):
+        self.calls.append(("faulty", delivery_id, error_text))
+        return True
+
+    def mark_delivery_attempt_verified(self, key, *, sent_message_ids):
+        self.calls.append(("verified", key, list(sent_message_ids)))
+        return True
+
     def get_rule(self, _rule_id):
         return _Rule()
 
@@ -74,6 +82,15 @@ def test_video_send_cache_hit_skips_actual_send(tmp_path: Path):
         raise AssertionError("video send should not be called on cache hit")
 
     service.video_processor.send_with_retry = _should_not_call  # type: ignore[method-assign]
+
+    async def _confirm(**kwargs):
+        return list(kwargs["candidate_sent_message_ids"])
+
+    async def _react(**_kwargs):
+        return {"applied": True}
+
+    service._confirm_target_delivery_message_ids_with_retry = _confirm  # type: ignore[method-assign]
+    service._add_reaction_for_rule_if_possible = _react  # type: ignore[method-assign]
     processed_file = tmp_path / "video.mp4"
     processed_file.write_bytes(b"ok")
     result = asyncio.run(
@@ -97,7 +114,7 @@ def test_video_send_cache_hit_skips_actual_send(tmp_path: Path):
     assert kwargs["sent_message_id"] == 777
     assert kwargs["sent_message_ids"] == [777]
     assert kwargs["target_id"] == "-1001"
-    assert kwargs["delivery_method"] == "idempotency_cache"
+    assert kwargs["delivery_method"] == "video_cache_verified"
 
 
 def test_video_send_marks_accepted_before_followup_error(tmp_path: Path):
@@ -158,9 +175,10 @@ def test_video_send_skips_accept_for_invalid_zero_sent_id(tmp_path: Path):
     )
 
     accepted_calls = [call for call in repo.calls if call[0] == "accepted"]
-    assert not accepted_calls
+    assert accepted_calls  # acceptance with unknown target id is retained
+    assert accepted_calls[0][2] == []
     assert result["ok"] is False
-    assert result["retryable"] is True
+    assert result["retryable"] is False
 
 
 def test_video_send_reaction_after_send_passes_rule_id(tmp_path: Path):
@@ -175,7 +193,7 @@ def test_video_send_reaction_after_send_passes_rule_id(tmp_path: Path):
         reaction_calls.append((args, kwargs))
 
     service._confirm_target_delivery_message_ids_with_retry = _confirm  # type: ignore[method-assign]
-    service._add_reaction_if_possible = _react  # type: ignore[method-assign]
+    service._add_reaction_for_rule_if_possible = _react  # type: ignore[method-assign]
     processed_file = tmp_path / "video.mp4"
     processed_file.write_bytes(b"ok")
 
@@ -193,7 +211,13 @@ def test_video_send_reaction_after_send_passes_rule_id(tmp_path: Path):
     )
 
     assert result["ok"] is True
-    assert reaction_calls == [(("-1004", 778), {"rule_id": 51})]
+    assert len(reaction_calls) == 1
+    args, kwargs = reaction_calls[0]
+    assert args == ()
+    assert kwargs["rule"].id == 1
+    assert kwargs["sent_message_id"] == 778
+    assert kwargs["target_id"] == "-1004"
+    assert kwargs["delivery_id"] == 13
 
 
 def test_video_send_extracted_log_uses_payload_source_message_ids(tmp_path: Path, caplog):
@@ -207,7 +231,7 @@ def test_video_send_extracted_log_uses_payload_source_message_ids(tmp_path: Path
         return None
 
     service._confirm_target_delivery_message_ids_with_retry = _confirm  # type: ignore[method-assign]
-    service._add_reaction_if_possible = _react  # type: ignore[method-assign]
+    service._add_reaction_for_rule_if_possible = _react  # type: ignore[method-assign]
     processed_file = tmp_path / "video.mp4"
     processed_file.write_bytes(b"ok")
 
@@ -245,7 +269,7 @@ def test_video_send_wrapper_success_result_contract(tmp_path: Path):
         return None
 
     service._confirm_target_delivery_message_ids_with_retry = _confirm  # type: ignore[method-assign]
-    service._add_reaction_if_possible = _react  # type: ignore[method-assign]
+    service._add_reaction_for_rule_if_possible = _react  # type: ignore[method-assign]
     processed_file = tmp_path / "video.mp4"
     processed_file.write_bytes(b"ok")
 
@@ -291,7 +315,8 @@ def test_video_send_wrapper_failed_send_result_contract(tmp_path: Path):
     )
 
     assert result["ok"] is False
-    assert result["retryable"] is True
+    assert result["retryable"] is False
+    assert result["accepted"] is True
     assert result["fallback_to_legacy"] is False
 
 
