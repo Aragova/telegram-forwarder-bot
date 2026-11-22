@@ -149,6 +149,41 @@ def test_accepted_cache_wrong_peer_id_is_never_resent(tmp_path: Path):
     assert any(c[0] == "faulty" for c in repo.calls)
 
 
+def test_unresolved_telethon_video_is_not_marked_sent_or_reacted(tmp_path: Path):
+    from app.telethon_authoritative_resolver import TelethonSendOutcome
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _unresolved(*_args, **_kwargs):
+        return TelethonSendOutcome(
+            True, True, False, None, [],
+            returned_candidate_id=370,
+            returned_candidate_ids=[370],
+            resolution_method="unresolved",
+        )
+
+    async def _never_react(**_kwargs):
+        raise AssertionError("Do not react to an unverified message id")
+
+    service.video_processor.send_with_retry = _unresolved
+    service._add_reaction_for_rule_if_possible = _never_react
+    processed_file = tmp_path / "video.mp4"
+    processed_file.write_bytes(b"ok")
+
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=141, rule_id=141, tenant_id=1,
+        target_id="-1004477194308", processed_video_path=str(processed_file),
+        artifact_version=1, pipeline_version=1,
+    ))
+    assert result["ok"] is False
+    assert result["retryable"] is False
+    assert result["accepted"] is True
+    assert any(c[0] == "accepted" and c[2] == [370] for c in repo.calls)
+    assert any(c[0] == "faulty" for c in repo.calls)
+    assert not any(c[0] == "mark_delivery_sent" for c in repo.calls)
+
+
 def test_video_send_marks_accepted_before_followup_error(tmp_path: Path):
     repo = FakeRepo()
     service = _build_service(repo)
