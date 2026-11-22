@@ -753,6 +753,39 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         attempts = int(job.get("attempts") or 0) + 1
         max_attempts = int(job.get("max_attempts") or 3)
         if (not retryable) or attempts >= max_attempts:
+            # Unknown send result after a crashed/expired owner must not
+            # leave a delivery forever processing and block the whole rule.
+            # At the LAST retry, finish only orphaned entries, after a
+            # current lease check; never issue a second Telegram upload.
+            if (
+                retryable and attempts >= max_attempts
+                and job_type in {"repost_single", "repost_album"}
+                and isinstance(result, dict)
+                and result.get("manual_review_required")
+                and result.get("idempotency_key")
+                and hasattr(repo, "finalize_orphaned_repost_attempt")
+            ):
+                owner_ok = True
+                if hasattr(repo, "heartbeat_job_processing"):
+                    owner_ok = bool(await asyncio.to_thread(repo.heartbeat_job_processing, job_id, worker_id))
+                if not owner_ok:
+                    logger.warning("REPOST_ORPHAN_FINALIZE_LEASE_LOST | job_id=%s | action=skip", job_id)
+                    return True
+                try:
+                    candidates = payload.get("delivery_ids") or [payload.get("delivery_id")]
+                    delivery_ids = [int(x) for x in candidates if x is not None]
+                    count = await asyncio.to_thread(
+                        repo.finalize_orphaned_repost_attempt,
+                        idempotency_key=str(result["idempotency_key"]),
+                        job_id=job_id, rule_id=int(payload.get("rule_id") or 0),
+                        delivery_ids=delivery_ids, error_text=error_text,
+                    )
+                    logger.warning(
+                        "REPOST_ORPHAN_FINALIZED | job_id=%s | rule_id=%s | marked_manual_review=%s | action=no_resend",
+                        job_id, payload.get("rule_id"), count,
+                    )
+                except Exception:
+                    logger.exception("REPOST_ORPHAN_FINALIZE_ERROR | job_id=%s", job_id)
             failed = await _finish_owned_job(repo, "fail", job_id, worker_id, error_text, finalization_started=finalization_started)
             if failed and job_type.startswith("video_"):
                 cleanup_video_artifacts(payload, mode="final_failure")
