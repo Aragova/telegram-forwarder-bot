@@ -295,7 +295,7 @@ class TelethonAuthoritativeMessageResolver:
                     matched = score >= 0
                 if matched:
                     best.append((score, item))
-            if best or safe_history_candidates:
+            if best or (safe_history_candidates and not require_strong_media_match):
                 break
         strong_match_ids: list[int] = []
         if best:
