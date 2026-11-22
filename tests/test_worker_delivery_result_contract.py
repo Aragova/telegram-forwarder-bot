@@ -1,5 +1,8 @@
 import asyncio
 
+from aiogram.exceptions import TelegramEntityTooLarge
+from aiogram.methods import SendVideo
+
 from app.worker_resource_policy import POLICY
 from app.worker_runtime import _InFlightState, _process_job
 
@@ -116,4 +119,23 @@ def test_non_retryable_failure_preserved():
     ok = _run(repo, sender, {"id": 4, "job_type": "video_delivery", "payload_json": {"delivery_id": 104, "rule_id": 1, "max_attempts": 3}})
     assert ok is True
     assert repo.failed == [(4, "manual review")]
+    assert repo.retried == []
+
+
+
+def test_legacy_video_413_fails_once_without_job_retry():
+    class RejectingSender(FakeSender):
+        async def execute_video_delivery_from_job(self, **_payload):
+            raise TelegramEntityTooLarge(
+                method=SendVideo(chat_id=123, video="id"),
+                message="Request Entity Too Large",
+            )
+
+    repo = FakeRepo()
+    ok = _run(
+        repo, RejectingSender(),
+        {"id": 55, "job_type": "video_delivery", "payload_json": {"delivery_id": 103, "rule_id": 1}},
+    )
+    assert ok is True
+    assert len(repo.failed) == 1 and repo.failed[0][0] == 55
     assert repo.retried == []

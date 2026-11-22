@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 
+from aiogram.exceptions import TelegramEntityTooLarge
+
 from .runtime_utils import run_db
 from .sender_primitives import _detect_message_media_kind
 
@@ -270,5 +272,7 @@ class VideoSingleDelivery:
                 source_message_id=message_id,
                 error_text=str(exc),
             )
+            if isinstance(exc, TelegramEntityTooLarge):
+                raise
             return False
 
