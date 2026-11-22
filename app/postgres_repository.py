@@ -4050,31 +4050,20 @@ class PostgresRepository(RepositoryProtocol):
     def activate_rule_with_backfill(self, rule_id: int) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id, source_id, source_thread_id, rescan_queue_built
-                    FROM routing
-                    WHERE id = %s
-                    LIMIT 1
-                    """,
-                    (rule_id,),
-                )
-                row = cur.fetchone()
-
-                if not row:
-                    conn.commit()
-                    return False
-
+                # Atomically read the authoritative queue marker at the same
+                # moment activation is allowed. A preceding SELECT could
+                # race with another process finishing a rescan.
                 cur.execute(
                     """
                     UPDATE routing
                     SET is_active = TRUE
                     WHERE id = %s AND rescan_owner_token IS NULL
+                    RETURNING id, source_id, source_thread_id, rescan_queue_built
                     """,
-                    (rule_id,),
+                    (int(rule_id),),
                 )
-
-                if cur.rowcount == 0:
+                row = cur.fetchone()
+                if not row:
                     conn.commit()
                     return False
 
