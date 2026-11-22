@@ -8,6 +8,7 @@ from app.transport_policy import (
     TransportPolicy,
     build_sender_telethon_read_policy,
     build_sender_telethon_media_policy,
+    build_sender_telethon_upload_policy,
 )
 
 logger = logging.getLogger("forwarder.transport")
@@ -78,6 +79,7 @@ class TelethonTransportProxy:
         # test policies keep their existing delegation contract.
         self._read_policy = build_sender_telethon_read_policy() if isinstance(policy, TransportPolicy) else policy
         self._media_policy = build_sender_telethon_media_policy() if isinstance(policy, TransportPolicy) else policy
+        self._upload_policy = build_sender_telethon_upload_policy() if isinstance(policy, TransportPolicy) else policy
         self._control_read_timeout_sec = _TELETHON_READ_TIMEOUT_SEC
 
     @property
@@ -105,6 +107,9 @@ class TelethonTransportProxy:
             elif name in _TELETHON_MEDIA_OPS:
                 selected_policy = self._media_policy
                 lane = "bulk"
+            elif name == "send_file":
+                selected_policy = self._upload_policy
+                lane = "upload"
             else:
                 selected_policy = self._policy
                 lane = "send"
