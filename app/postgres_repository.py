@@ -5613,7 +5613,7 @@ class PostgresRepository(RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT target_id, mode FROM routing WHERE id = %s FOR UPDATE",
+                    "SELECT target_id, mode, tenant_id FROM routing WHERE id = %s FOR UPDATE",
                     (int(rule_id),),
                 )
                 rule = cur.fetchone()
@@ -5709,8 +5709,8 @@ class PostgresRepository(RepositoryProtocol):
                     INSERT INTO audit_log (
                         created_at, event_type, rule_id, delivery_id,
                         source_id, source_thread_id, target_id, status,
-                        old_value_json, new_value_json, extra_json
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        old_value_json, new_value_json, extra_json, tenant_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         utc_now_iso(), "album_ledger_reconciled", int(rule_id),
@@ -5727,6 +5727,7 @@ class PostgresRepository(RepositoryProtocol):
                         }),
                         _json_dumps({"media_group_id": str(media_group_id),
                                      "verification": "telegram_group_media_caption"}),
+                        int(rule.get("tenant_id") or 1),
                     ),
                 )
             conn.commit()
