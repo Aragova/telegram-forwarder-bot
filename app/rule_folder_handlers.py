@@ -54,6 +54,7 @@ async def _actor(ctx: Any, user_id: int) -> tuple[int, bool]:
 
 
 async def _render(ctx: Any, callback: CallbackQuery, text: str, kb: InlineKeyboardMarkup) -> None:
+    await ctx.answer_callback_safe_once(callback)
     await ctx.edit_message_text_safe(
         message=callback.message, text=text, reply_markup=kb, parse_mode="HTML",
     )
@@ -234,13 +235,12 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
         if action == "noop":
             await ctx.answer_callback_safe_once(callback)
             return
-        # Always acknowledge once, before database or edits.
-        await ctx.answer_callback_safe_once(callback)
         try:
             if action == "root":
                 _inputs.pop(user_id, None)
                 await _root(ctx, callback, tenant_id, admin)
             elif action == "main":
+                await ctx.answer_callback_safe_once(callback)
                 if not admin:
                     await _root(ctx, callback, tenant_id, admin)
                 else:
@@ -265,6 +265,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                         await _error(ctx, callback, "Правило уже перемещено")
                         return
                 _origins[(user_id, rule_id)] = (fid, page, False)
+                await ctx.answer_callback_safe_once(callback)
                 await ctx.refresh_rule_card_for_actor(callback, rule_id)
             elif action == "back":
                 rid = int(data[2])
@@ -364,6 +365,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 await _move(ctx, callback, tenant_id=tenant_id,
                             origin="b" + data[2])
             elif action in {"add", "add_in"}:
+                await ctx.answer_callback_safe_once(callback)
                 fid = int(data[2]) if action == "add_in" else 0
                 if fid:
                     if not await ctx.run_db(ctx.db.get_rule_folder, tenant_id, fid):
@@ -482,11 +484,11 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
             _inputs.pop(user_id, None)
         # Remove the message with user input; preserve a single navigable UI screen.
         try:
-            await ctx.bot.delete_message(message.chat.id, message.message_id)
+            await ctx.get_bot().delete_message(message.chat.id, message.message_id)
         except Exception:
             pass
         try:
-            await ctx.bot.edit_message_text(
+            await ctx.get_bot().edit_message_text(
                 chat_id=state["chat_id"], message_id=state["message_id"],
                 text=text, parse_mode="HTML", reply_markup=kb,
             )
