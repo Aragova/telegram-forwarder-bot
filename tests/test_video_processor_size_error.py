@@ -90,6 +90,11 @@ def test_send_with_retry_propagates_telethon_floodwait(tmp_path):
     client = ThrottledTelethon()
     processor.telethon = client
 
+    async def fake_video_info(*_args, **_kwargs):
+        return {"width": 720, "height": 1280, "duration": 30}
+
+    processor.get_video_info = fake_video_info
+
     with pytest.raises(FloodWaitError) as err:
         asyncio.run(processor.send_with_retry(
             None, destination_channel=-100123, target_thread_id=None,
