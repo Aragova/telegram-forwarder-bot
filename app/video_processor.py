@@ -206,7 +206,7 @@ class VideoProcessor:
 
         video_info = await self.get_video_info(video_path, use_cache=False)
         if not video_info:
-            raise RuntimeError(f"Не удалось получить video_info для Telethon-отправки: {video_path}")
+            raise VideoPreSendError(f"Не удалось получить video_info до Telethon send_file: {video_path}")
 
         width = int(video_info.get("width") or 0)
         height = int(video_info.get("height") or 0)
