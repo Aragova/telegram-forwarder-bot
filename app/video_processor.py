@@ -10,6 +10,7 @@ from .video_clip_duration import calculate_center_clip_window
 from aiogram import Bot
 from aiogram.exceptions import TelegramEntityTooLarge
 from .bot_api_session import create_bot_api_session
+from .subprocess_safety import communicate_safely
 from aiogram.types import FSInputFile, MessageEntity
 from telethon import types as tl_types
 
@@ -559,7 +560,7 @@ class VideoProcessor:
                 stderr=asyncio.subprocess.PIPE
             )
 
-            stdout, stderr = await process.communicate()
+            stdout, stderr = await communicate_safely(process)
             stderr_text = stderr.decode("utf-8", errors="ignore").strip()
 
             if process.returncode != 0:
@@ -883,7 +884,7 @@ class VideoProcessor:
             check_cmd = ["ffprobe", "-v", "error", "-select_streams", "v", 
                         "-show_entries", "stream=codec_type", "-of", "default=noprint_wrappers=1:nokey=1", output_path]
             process = await asyncio.create_subprocess_exec(*check_cmd, stdout=asyncio.subprocess.PIPE)
-            stdout, _ = await process.communicate()
+            stdout, _ = await communicate_safely(process)
             if not stdout.strip():
                 logger.error(f"   ❌ Файл не содержит видеопоток")
                 os.remove(output_path)
