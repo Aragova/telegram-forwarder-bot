@@ -212,3 +212,76 @@ def test_telethon_album_content_resolver_uses_custom_caption_in_both_paths():
     )[0]
     assert section.count("self.owner._build_text_and_entities_from_content(caption_override)") == 2
     assert section.count('"formatting_entities": formatting_entities or None') == 2
+
+
+
+def test_album_telethon_uses_custom_caption_and_entities_not_source(monkeypatch):
+    """Media send and authoritative resolver must see the replacement text."""
+    from app import sender_telethon_helpers as module
+    class Client:
+        def __init__(self):
+            self.sent = None
+        async def send_file(self, **kwargs):
+            self.sent = kwargs
+            return [SimpleNamespace(id=701), SimpleNamespace(id=702)]
+    class Resolver:
+        def __init__(self, _client):
+            pass
+        async def get_before_max_message_id(self, *_args):
+            return 700
+        async def resolve_authoritative_album_messages(self, **kwargs):
+            assert kwargs["expected_text"] == "My album 🔥"
+            return SimpleNamespace(
+                ok=True, authoritative_message_id=701,
+                authoritative_message_ids=[701, 702],
+                returned_candidate_ids=[701, 702], resolution_method="direct",
+            )
+    monkeypatch.setattr(module, "TelethonAuthoritativeMessageResolver", Resolver)
+    client = Client()
+    content_helper = SenderContentHelpers(owner=None)
+    owner = SimpleNamespace(
+        telethon=client,
+        _content_from_message_or_post=lambda **_kwargs: {"text": "Original", "entities": []},
+        _build_text_and_entities_from_content=content_helper.build_text_and_entities_from_content,
+        _clone_telethon_entities=content_helper.clone_telethon_entities,
+    )
+    sender = module.SenderTelethonHelpers(owner)
+    async def target(_id):
+        return "-100123", True
+    sender._resolve_target_entity_and_broadcast_flag = target
+    override = {"text": "My album 🔥", "entities": [{"type": "bold", "offset": 0, "length": 2}]}
+    messages = [
+        SimpleNamespace(id=1, media="media-1"),
+        SimpleNamespace(id=2, media="media-2"),
+    ]
+    result = asyncio.run(sender.send_album_via_telethon(
+        messages=messages, target_id="-100123", target_thread_id=None,
+        caption_override=override,
+    ))
+    assert result["ok"]
+    assert client.sent["file"] == ["media-1", "media-2"]
+    assert client.sent["caption"] == "My album 🔥"
+    assert isinstance(client.sent["formatting_entities"][0], MessageEntityBold)
+
+
+def test_custom_text_send_has_caption_instead_of_source():
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    class Owner:
+        def __init__(self):
+            self.called = None
+        def _content_from_message_or_post(self, **kwargs):
+            return {"text": "OLD TEXT", "entities": []}
+        def _build_text_and_entities_from_content(self, content):
+            return SenderContentHelpers(owner=None).build_text_and_entities_from_content(content)
+        async def _send_text_via_telethon(self, **kwargs):
+            self.called = kwargs
+            return 801
+    owner = Owner()
+    msg = SimpleNamespace(id=123, media=None)
+    override = {"text": "NEW TEXT", "entities": [{"type": "bold", "offset": 0, "length": 3}]}
+    result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
+        msg, "-1001", None, caption_override=override,
+    ))
+    assert result.authoritative_message_id == 801
+    assert owner.called["text"] == "NEW TEXT"
+    assert isinstance(owner.called["entities"][0], MessageEntityBold)
