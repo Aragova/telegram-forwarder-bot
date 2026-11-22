@@ -1575,6 +1575,25 @@ class SenderService:
                 error = str(outcome.get("error_text") or "video_send_accepted_target_id_unresolved_non_retryable")
                 logger.warning("VIDEO_DELIVERY_ACCEPTED_UNRESOLVED | rule_id=%s | delivery_id=%s | action=manual_review_no_resend", rule_id, delivery_id)
                 return {"ok": False, "retryable": False, "accepted": True, "transport_accepted": True, "authoritative_resolved": False, "error_text": error, "manual_review_required": True}
+            if isinstance(outcome, dict) and outcome.get("rejected_before_send"):
+                # Telegram explicitly rejected the attempt (429), so it is
+                # safe to retry; unlike a timeout, no video was published.
+                if has_attempt_ledger:
+                    await run_db(
+                        self.db.mark_delivery_attempt_failed,
+                        idempotency_key, status="failed_before_send",
+                        error_text=str(outcome.get("error_text") or "telegram rate limited"),
+                    )
+                logger.info(
+                    "VIDEO_DELIVERY_PRE_SEND_REJECTED | delivery_id=%s | rule_id=%s | retry_after=%s",
+                    delivery_id, rule_id, outcome.get("retry_after_seconds"),
+                )
+                return {
+                    "ok": False, "retryable": True, "accepted": False,
+                    "fallback_to_legacy": False,
+                    "retry_after_seconds": int(outcome.get("retry_after_seconds") or 1),
+                    "error_text": str(outcome.get("error_text") or "telegram rate limited"),
+                }
             ok = bool(outcome.get("ok")) if isinstance(outcome, dict) else bool(outcome)
             raw_sent_ids = outcome.get("sent_message_ids") if isinstance(outcome, dict) else None
             valid_sent_ids = normalize_valid_sent_message_ids(raw_sent_ids)
