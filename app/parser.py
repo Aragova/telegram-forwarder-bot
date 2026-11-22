@@ -201,7 +201,16 @@ def message_to_content_dict(message):
 
     return content
 
-async def parse_channel_history(client, db, channel_id: str, clean_start: bool = False):
+def _save_history_batch(db, batch, *, preserve_existing_deliveries: bool):
+    if preserve_existing_deliveries:
+        return db.save_post_batch(batch, preserve_existing_deliveries=True)
+    return db.save_post_batch(batch)
+
+
+async def parse_channel_history(
+    client, db, channel_id: str, clean_start: bool = False,
+    *, preserve_existing_deliveries: bool = False,
+):
     entity = int(channel_id) if str(channel_id).lstrip("-").isdigit() else channel_id
     channel = await client.get_entity(entity)
 
@@ -260,7 +269,9 @@ async def parse_channel_history(client, db, channel_id: str, clean_start: bool =
 
         if len(batch) >= 100:
             try:
-                saved += db.save_post_batch(batch)
+                saved += _save_history_batch(
+                    db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
+                )
             except Exception as exc:
                 logger.exception(
                     "parse_channel_history_batch_save_failed: source=%s batch_size=%s error=%s",
@@ -274,7 +285,9 @@ async def parse_channel_history(client, db, channel_id: str, clean_start: bool =
 
     if batch:
         try:
-            saved += db.save_post_batch(batch)
+            saved += _save_history_batch(
+                    db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
+                )
         except Exception as exc:
             logger.exception(
                 "parse_channel_history_final_batch_save_failed: source=%s batch_size=%s error=%s",
@@ -297,7 +310,10 @@ async def parse_channel_history(client, db, channel_id: str, clean_start: bool =
 
     return saved
 
-async def parse_group_history(client, db, chat_id: str, thread_id: int, clean_start: bool = False):
+async def parse_group_history(
+    client, db, chat_id: str, thread_id: int, clean_start: bool = False,
+    *, preserve_existing_deliveries: bool = False,
+):
     entity = int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id
     chat = await client.get_entity(entity)
 
@@ -358,7 +374,9 @@ async def parse_group_history(client, db, chat_id: str, thread_id: int, clean_st
 
         if len(batch) >= 100:
             try:
-                saved += db.save_post_batch(batch)
+                saved += _save_history_batch(
+                    db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
+                )
             except Exception as exc:
                 logger.exception(
                     "parse_group_history_batch_save_failed: source=%s:%s batch_size=%s error=%s",
@@ -373,7 +391,9 @@ async def parse_group_history(client, db, chat_id: str, thread_id: int, clean_st
 
     if batch:
         try:
-            saved += db.save_post_batch(batch)
+            saved += _save_history_batch(
+                    db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
+                )
         except Exception as exc:
             logger.exception(
                 "parse_group_history_final_batch_save_failed: source=%s:%s batch_size=%s error=%s",
