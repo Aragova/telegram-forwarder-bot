@@ -7,6 +7,12 @@ from .delivery_idempotency import normalize_valid_sent_message_ids
 
 logger = logging.getLogger("forwarder")
 
+# Read-only Telegram confirmation must never occupy a worker indefinitely.
+# An uncertain send is not repeated merely because confirmation timed out.
+CONFIRM_ATTEMPT_TIMEOUT_SECONDS = 12.0
+POST_SEND_VERIFY_TIMEOUT_SECONDS = 50.0
+POST_SEND_OTHER_TIMEOUT_SECONDS = 30.0
+
 
 class SenderPostSendHelpers:
     def __init__(self, owner):
@@ -254,7 +260,18 @@ class SenderPostSendHelpers:
                     kwargs.get("rule_id"), kwargs.get("delivery_id"), attempt_no, delay_seconds, kwargs.get("candidate_sent_message_ids"), last_reason
                 )
                 await asyncio.sleep(delay_seconds)
-            valid_ids = await self.confirm_target_delivery_message_ids(**kwargs)
+            try:
+                valid_ids = await asyncio.wait_for(
+                    self.confirm_target_delivery_message_ids(**kwargs),
+                    timeout=CONFIRM_ATTEMPT_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "DELIVERY_TARGET_CONFIRM_TIMEOUT | rule_id=%s | delivery_id=%s | attempt=%s | timeout_sec=%s | action=do_not_resend",
+                    kwargs.get("rule_id"), kwargs.get("delivery_id"), attempt_no,
+                    CONFIRM_ATTEMPT_TIMEOUT_SECONDS,
+                )
+                continue
             if valid_ids:
                 return valid_ids
         return []
@@ -270,8 +287,22 @@ class SenderPostSendHelpers:
         coro_factory=None,
     ) -> dict:
         try:
-            result = await coro_factory()
+            # Post-send verification and reactions must not block worker capacity.
+            # These steps run only after a Telegram transport attempt; their
+            # failure must never trigger a second non-idempotent send.
+            limit = (
+                POST_SEND_VERIFY_TIMEOUT_SECONDS
+                if step_name.startswith(("verify_", "self_loop_video_metadata_verify"))
+                else POST_SEND_OTHER_TIMEOUT_SECONDS
+            )
+            result = await asyncio.wait_for(coro_factory(), timeout=limit)
             return {"ok": True, "result": result}
+        except asyncio.TimeoutError:
+            logger.warning(
+                "POST_SEND_STEP_TIMEOUT_NON_FATAL | step_name=%s | rule_id=%s | delivery_id=%s | timeout_sec=%s | accepted_sent_message_ids=%s",
+                step_name, rule_id, delivery_id, limit, accepted_sent_message_ids or [],
+            )
+            return {"ok": False, "error": "post_send_step_timeout"}
         except Exception as exc:
             logger.warning(
                 "POST_SEND_STEP_FAILED_NON_FATAL | step_name=%s | rule_id=%s | delivery_id=%s | idempotency_key=%s | accepted_sent_message_ids=%s | error=%s",

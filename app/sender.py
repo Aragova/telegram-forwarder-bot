@@ -38,6 +38,7 @@ TERMINAL_NON_RETRYABLE_DELIVERY_REASONS = (
     "copy_single_uncertain_no_fallback",
     "telethon_send_accepted_target_id_unresolved_non_retryable",
     "telethon_one_by_one_send_accepted_target_id_unresolved_non_retryable",
+    "reupload_single_accepted_unverified_non_retryable",
 )
 
 

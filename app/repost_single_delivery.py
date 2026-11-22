@@ -581,6 +581,18 @@ class RepostSingleDelivery:
         logger.warning("REUPLOAD_SINGLE_TARGET_VERIFY_FAILED | rule_id=%s | delivery_id=%s | source_channel=%s | source_message_id=%s | target_id=%s | candidate_sent_message_ids=%s | reason=target_message_not_found_after_send", rule.id, delivery_id, source_channel, message_id, target_id, candidate_sent_message_ids)
         logger.warning("DELIVERY_FALSE_SUCCESS_PREVENTED | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s | action=retry_or_faulty", rule.id, delivery_id, "reupload_single", target_id, candidate_sent_message_ids)
 
+        if candidate_sent_message_ids and not is_self_loop:
+            # Telegram returned concrete target IDs, but subsequent read-only
+            # verification was inconclusive. A fallback here can create a
+            # duplicate post. Require reconciliation rather than a second send.
+            error_text = "reupload_single_accepted_unverified_non_retryable"
+            logger.warning(
+                "REUPLOAD_SINGLE_ACCEPTED_UNVERIFIED_NO_SECOND_SEND | rule_id=%s | delivery_id=%s | candidate_sent_message_ids=%s | action=manual_review",
+                rule.id, delivery_id, candidate_sent_message_ids,
+            )
+            await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+            return False
+
         if is_self_loop and candidate_sent_message_ids:
             logger.warning(
                 "SELF_LOOP_REUPLOAD_ACCEPTED_UNVERIFIED | rule_id=%s | delivery_id=%s | source_message_id=%s | candidate_sent_message_ids=%s | action=mark_sent_no_second_send",

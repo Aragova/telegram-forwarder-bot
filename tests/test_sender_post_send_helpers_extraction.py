@@ -282,3 +282,65 @@ def test_run_post_send_step_safe_exception_is_non_fatal(caplog):
 
     assert result == {"ok": False, "error": "boom"}
     assert "POST_SEND_STEP_FAILED_NON_FATAL" in caplog.text
+
+
+def test_confirm_timeout_does_not_block_worker_forever(monkeypatch, caplog):
+    helper = _helper()
+    mod = importlib.import_module("app.sender_post_send_helpers")
+    monkeypatch.setattr(mod, "CONFIRM_ATTEMPT_TIMEOUT_SECONDS", 0.01)
+    caplog.set_level(logging.WARNING, logger="forwarder")
+
+    async def never_finishes(**kwargs):
+        await asyncio.Event().wait()
+
+    async def quick_sleeps(_delay):
+        return None
+
+    monkeypatch.setattr(helper, "confirm_target_delivery_message_ids", never_finishes)
+    monkeypatch.setattr(mod.asyncio, "sleep", quick_sleeps)
+
+    async def scenario():
+        return await asyncio.wait_for(
+            helper.confirm_target_delivery_message_ids_with_retry(
+                rule_id=89, delivery_id=1457333, candidate_sent_message_ids=[772],
+            ),
+            timeout=1.0,
+        )
+
+    assert asyncio.run(scenario()) == []
+    assert caplog.text.count("DELIVERY_TARGET_CONFIRM_TIMEOUT") == 3
+
+
+def test_post_send_step_timeout_is_non_fatal_and_does_not_retry(monkeypatch):
+    helper = _helper()
+    mod = importlib.import_module("app.sender_post_send_helpers")
+    monkeypatch.setattr(mod, "POST_SEND_OTHER_TIMEOUT_SECONDS", 0.01)
+    calls = []
+
+    async def never_finishes():
+        calls.append("only_once")
+        await asyncio.Event().wait()
+
+    async def scenario():
+        return await asyncio.wait_for(
+            helper.run_post_send_step_safe(
+                step_name="reaction_after_copy_single",
+                rule_id=89, delivery_id=7, accepted_sent_message_ids=[772],
+                coro_factory=never_finishes,
+            ),
+            timeout=1.0,
+        )
+
+    assert asyncio.run(scenario()) == {"ok": False, "error": "post_send_step_timeout"}
+    assert calls == ["only_once"]
+
+
+def test_accepted_unverified_reupload_is_terminal_non_retryable_and_no_fallback():
+    from app.sender import _is_terminal_non_retryable_delivery
+    source = Path("app/repost_single_delivery.py").read_text(encoding="utf-8")
+    assert _is_terminal_non_retryable_delivery({
+        "status": "faulty",
+        "error_text": "reupload_single_accepted_unverified_non_retryable",
+    })
+    assert "REUPLOAD_SINGLE_ACCEPTED_UNVERIFIED_NO_SECOND_SEND" in source
+    assert 'if candidate_sent_message_ids and not is_self_loop:' in source
