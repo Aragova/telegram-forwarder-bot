@@ -231,7 +231,7 @@ def move_picker_view(
     if nav:
         rows.append(nav)
     rows.append([_button("📂 Без папки", f"rf:apply:{origin}:0")])
-    rows.append([_button("➕ Создать новую папку", f"rf:create_for:{origin}")])
+    rows.append([_button("➕ Создать новую папку", f"rf:create_for:{origin}:{page}")])
     rows.append([_button("⬅️ Назад", f"rf:move_back:{origin}")])
     return "\n".join(lines).rstrip(), InlineKeyboardMarkup(inline_keyboard=rows)
 
