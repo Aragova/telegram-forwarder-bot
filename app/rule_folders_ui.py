@@ -119,7 +119,8 @@ def rule_catalog_view(
             action = f"rf:pick:{folder_id}:{page}:{rid}"
         else:
             label = f"{state} #{rid}"
-            action = f"rf:open:{rid}:{folder_id}:{page}"
+            action = (f"rf:open_search:{rid}:{page}" if search_term is not None
+                      else f"rf:open:{rid}:{folder_id}:{page}")
         number_buttons.append(_button(label, action))
         if len(number_buttons) == 2:
             rows.append(number_buttons)
@@ -144,6 +145,7 @@ def rule_catalog_view(
         if search_term is None:
             rows.append([_button("☑️ Выбрать несколько", f"rf:batch:{folder_id}:{page}")])
             if folder_id > 0:
+                rows.append([_button("➕ Добавить правило", f"rf:add_in:{folder_id}", style="success")])
                 rows.append([_button("⚙️ Управление папкой", f"rf:folder_settings:{folder_id}")])
         rows.append([_button("🔎 Поиск", "rf:search")])
         rows.append([_button("⬅️ Назад", "rf:search" if search_term is not None
