@@ -107,7 +107,7 @@ def test_repost_album_accepted_cache_does_not_fake_success_or_resend():
     result = asyncio.run(_execute(repo, delivery_ids=[1, 2]))
 
     assert result["ok"] is False
-    assert result["retryable"] is False
-    assert result["accepted"] is True
+    assert result["retryable"] is True
+    assert result["accepted"] is False
     assert repo.marked == []
-    assert [delivery_id for delivery_id, _ in repo.faulty] == [1, 2]
+    assert repo.faulty == []
