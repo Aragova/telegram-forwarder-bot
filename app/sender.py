@@ -33,6 +33,7 @@ from .sender_primitives import (
 )
 
 logger = logging.getLogger("forwarder")
+POST_SEND_REACTION_TIMEOUT_SEC = 35.0
 
 TERMINAL_NON_RETRYABLE_DELIVERY_REASONS = (
     "copy_single_uncertain_no_fallback",
@@ -1091,13 +1092,13 @@ class SenderService:
             # after a publication has already been accepted.
             return await asyncio.wait_for(
                 ReactionDelivery(self)._add_reaction_for_rule_if_possible(**kwargs),
-                timeout=35.0,
+                timeout=POST_SEND_REACTION_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
             logger.warning(
                 "POST_SEND_REACTION_TIMEOUT | rule_id=%s | delivery_id=%s | target_id=%s | "
-                "message_id=%s | timeout_sec=35 | action=continue_delivery_without_resend",
-                getattr(rule, "id", None), delivery_id, target_id, sent_message_id,
+                "message_id=%s | timeout_sec=%s | action=continue_delivery_without_resend",
+                getattr(rule, "id", None), delivery_id, target_id, sent_message_id, POST_SEND_REACTION_TIMEOUT_SEC,
             )
             return {"applied": False, "enqueued": False, "reason": "reaction_timeout"}
 
