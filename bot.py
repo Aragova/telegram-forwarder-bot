@@ -7351,7 +7351,11 @@ async def handle_stateful_private_inputs(message: Message):
     # =========================================================
     if action == "repost_caption":
         rule_id = int(state["rule_id"])
-        caption = None if text == "-" else (message.text or "").strip()
+        # Preserve leading whitespace: Telegram entities use UTF-16 offsets
+        # in the *untrimmed* text received from the user.
+        caption = None if text == "-" else (message.text or "")
+        if caption and not caption.strip():
+            caption = None
         if caption and len(caption.encode("utf-16-le")) // 2 > 1024:
             await reply_message_safe(
                 message, "❌ Подпись слишком длинная. Максимум 1024 символа Telegram."
