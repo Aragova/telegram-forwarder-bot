@@ -329,6 +329,7 @@ class SenderReuploadHelpers:
                 text=raw_text,
                 entities=raw_entities,
                 source_message_ids=({int(getattr(message, "id"))} if is_self_loop and getattr(message, "id", None) else None),
+                **({"literal_caption": True} if caption_override is not None else {}),
             )
             if isinstance(telethon_outcome, int) and telethon_outcome > 0:
                 return TelethonSendOutcome(True, True, True, int(telethon_outcome), [int(telethon_outcome)], resolution_method="legacy_telethon_helper")
