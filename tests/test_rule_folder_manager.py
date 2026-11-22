@@ -10,6 +10,7 @@ from app import rule_folder_handlers as folder_handlers
 from app.rule_folders_ui import (
     additional_functions_view,
     folder_delete_confirmation_view,
+    folder_settings_view,
     folder_index_view,
     move_picker_view,
     root_view,
@@ -109,7 +110,7 @@ def test_folders_and_move_picker_use_short_buttons_and_full_names():
 def test_folder_delete_is_explicitly_non_destructive():
     text, kb = folder_delete_confirmation_view({"id": 2, "name": "Stars"})
     assert "Сами правила" in text
-    assert "rf:delete:2" in callbacks(kb)
+    assert "rf:delete:2:0" in callbacks(kb)
 
 
 @pytest.mark.parametrize("name", [" ", "\n", "x" * 65])
@@ -247,3 +248,23 @@ def test_folder_input_uses_safe_message_edits_and_private_chat_guard():
     assert 'getattr(m.chat, "type", None) == "private"' in source
     assert 'ctx.edit_message_text_safe(' in source
     assert 'ctx.try_delete_message_safe(' in source
+
+
+def test_folder_settings_and_catalog_back_remember_both_pages():
+    rules = [FakeRule(200 + i) for i in range(16)]
+    text, kb = rule_catalog_view(
+        rules, folder_id=7, folder_name="Публичные", page=2, folders_page=3,
+    )
+    assert "Публичные" in text
+    assert "rf:folder_settings:7:2" in callbacks(kb)
+    assert "rf:folders:3" in callbacks(kb)
+    folder = {"id": 7, "name": "Публичные", "rules_count": 16}
+    _, settings_kb = folder_settings_view(folder, page=2)
+    assert "rf:list:7:2" in callbacks(settings_kb)
+    assert "rf:rename:7:2" in callbacks(settings_kb)
+    assert "rf:delete_confirm:7:2" in callbacks(settings_kb)
+    _, delete_kb = folder_delete_confirmation_view(folder, page=2)
+    assert "rf:folder_settings:7:2" in callbacks(delete_kb)
+    assert "rf:delete:7:2" in callbacks(delete_kb)
+    _, back = folder_handlers._input_prompt("rename", folder_id=7, page=2)
+    assert back == "rf:folder_settings:7:2"
