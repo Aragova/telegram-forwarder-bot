@@ -7,6 +7,7 @@ from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from .runtime_utils import run_db
 from .sender_primitives import _detect_message_media_kind
 from .telethon_authoritative_resolver import TelethonSendOutcome
+from .video_processor import VideoPreSendError
 
 logger = logging.getLogger("forwarder")
 
@@ -286,6 +287,15 @@ class VideoSingleDelivery:
             )
             return False
 
+        except VideoPreSendError as exc:
+            logger.warning(
+                "VIDEO_LEGACY_PREFLIGHT_FAILED | rule_id=%s | delivery_id=%s | action=safe_retry | reason=%s",
+                rule.id, delivery_id, exc,
+            )
+            return {
+                "ok": False, "retryable": True, "accepted": False,
+                "rejected_before_send": True, "error_text": str(exc),
+            }
         except TelegramRetryAfter as exc:
             # A definite Bot API flood-control rejection happens before the
             # video is posted; never finalize as accepted or faulty, and let
