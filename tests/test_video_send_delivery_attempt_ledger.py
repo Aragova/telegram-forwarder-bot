@@ -117,6 +117,38 @@ def test_video_send_cache_hit_skips_actual_send(tmp_path: Path):
     assert kwargs["delivery_method"] == "video_cache_verified"
 
 
+def test_accepted_cache_wrong_peer_id_is_never_resent(tmp_path: Path):
+    repo = FakeRepo()
+    repo.attempt = {"status": "accepted", "sent_message_ids_json": [370]}
+    service = _build_service(repo)
+
+    async def _should_not_send(*_args, **_kwargs):
+        raise AssertionError("Never resend an accepted video to repair its id")
+
+    async def _unconfirmed(**_kwargs):
+        return []
+
+    service.video_processor.send_with_retry = _should_not_send
+    service._confirm_target_delivery_message_ids_with_retry = _unconfirmed
+    processed_file = tmp_path / "video.mp4"
+    processed_file.write_bytes(b"ok")
+
+    result = asyncio.run(
+        service.execute_video_send_from_job(
+            delivery_id=141, rule_id=141, tenant_id=1,
+            target_id="-1004477194308",
+            processed_video_path=str(processed_file),
+            artifact_version=1, pipeline_version=1,
+        )
+    )
+    assert result["ok"] is False
+    assert result["retryable"] is False
+    assert result["accepted"] is True
+    assert result["manual_review_required"] is True
+    assert not any(c[0] == "mark_delivery_sent" for c in repo.calls)
+    assert any(c[0] == "faulty" for c in repo.calls)
+
+
 def test_video_send_marks_accepted_before_followup_error(tmp_path: Path):
     repo = FakeRepo()
     service = _build_service(repo)
