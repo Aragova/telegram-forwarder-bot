@@ -102,7 +102,7 @@ def test_video_send_verify_failure_after_accepted_is_non_retryable_without_dupli
     assert repo.faulty
 
 
-def test_video_delivery_post_send_failure_after_accepted_is_non_fatal():
+def test_video_delivery_post_send_failure_after_accepted_is_non_retryable():
     repo = Repo()
     s = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=repo)
 
@@ -120,9 +120,12 @@ def test_video_delivery_post_send_failure_after_accepted_is_non_fatal():
             target_id="-1001",
         )
     )
-    assert result is True
+    assert result["ok"] is False
+    assert result["retryable"] is False
+    assert result["accepted"] is True
     assert repo.accepted
-    assert repo.sent
+    assert not repo.sent
+    assert repo.faulty
 
 
 def test_single_delivery_source_extracted_from_sender():
