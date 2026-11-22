@@ -103,6 +103,7 @@ def folder_index_view(folders: list[dict], page: int):
 def rule_catalog_view(
     rules: list, *, folder_id: int, folder_name: str, page: int,
     search_term: str | None = None, selected: set[int] | None = None,
+    folders_page: int = 0,
 ):
     current, page, pages = _paginate(rules, page, CATALOG_PAGE_SIZE)
     enabled = sum(bool(getattr(r, "is_active", False)) for r in rules)
@@ -165,15 +166,15 @@ def rule_catalog_view(
             rows.append([_button("☑️ Выбрать несколько", f"rf:batch:{folder_id}:{page}")])
             if folder_id > 0:
                 rows.append([_button("➕ Добавить правило", f"rf:add_in:{folder_id}", style="success")])
-                rows.append([_button("⚙️ Управление папкой", f"rf:folder_settings:{folder_id}")])
+                rows.append([_button("⚙️ Управление папкой", f"rf:folder_settings:{folder_id}:{page}")])
         rows.append([_button("🔎 Поиск", "rf:search")])
         rows.append([_button("⬅️ Назад", "rf:search" if search_term is not None
-                             else "rf:folders:0" if folder_id != -1
+                             else f"rf:folders:{folders_page}" if folder_id != -1
                              else "rf:root")])
     return "\n".join(lines).rstrip(), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def folder_settings_view(folder: dict):
+def folder_settings_view(folder: dict, *, page: int = 0):
     name = escape(str(folder["name"]))
     fid = int(folder["id"])
     text = (
@@ -185,14 +186,14 @@ def folder_settings_view(folder: dict):
         "Сами правила, настройки и очереди останутся."
     )
     rows = [
-        [_button("✏️ Переименовать", f"rf:rename:{fid}")],
-        [_button("🗑 Удалить папку", f"rf:delete_confirm:{fid}", style="danger")],
-        [_button("⬅️ Назад к папке", f"rf:list:{fid}:0")],
+        [_button("✏️ Переименовать", f"rf:rename:{fid}:{page}")],
+        [_button("🗑 Удалить папку", f"rf:delete_confirm:{fid}:{page}", style="danger")],
+        [_button("⬅️ Назад к папке", f"rf:list:{fid}:{page}")],
     ]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def folder_delete_confirmation_view(folder: dict):
+def folder_delete_confirmation_view(folder: dict, *, page: int = 0):
     fid = int(folder["id"])
     text = (
         "⚠️ <b>УДАЛИТЬ ПАПКУ?</b>\n\n"
@@ -201,8 +202,8 @@ def folder_delete_confirmation_view(folder: dict):
         "и будут видны в разделе «Без папки»."
     )
     return text, InlineKeyboardMarkup(inline_keyboard=[
-        [_button("🗑 Да, удалить папку", f"rf:delete:{fid}", style="danger")],
-        [_button("⬅️ Отмена", f"rf:folder_settings:{fid}")],
+        [_button("🗑 Да, удалить папку", f"rf:delete:{fid}:{page}", style="danger")],
+        [_button("⬅️ Отмена", f"rf:folder_settings:{fid}:{page}")],
     ])
 
 
