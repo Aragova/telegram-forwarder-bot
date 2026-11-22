@@ -6,6 +6,7 @@ from aiogram.types import Message, ReplyKeyboardRemove
 
 from .context import AdminHandlersContext
 from app.rule_folders_ui import root_view
+from app.rule_folder_handlers import clear_new_rule_folder
 
 
 def register_admin_menu_handlers(dp: Dispatcher, ctx: AdminHandlersContext) -> None:
@@ -37,6 +38,7 @@ def register_admin_menu_handlers(dp: Dispatcher, ctx: AdminHandlersContext) -> N
         if not await ctx.is_admin(message):
             return
         user_id = message.from_user.id if message.from_user else 0
+        clear_new_rule_folder(user_id)
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
         rules = await ctx.run_db(ctx.db.get_all_rules)
