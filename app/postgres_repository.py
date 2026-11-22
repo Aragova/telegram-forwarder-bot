@@ -3644,6 +3644,17 @@ class PostgresRepository(RepositoryProtocol):
                     post_id = int(row["id"])
                     if inserted:
                         count += 1
+                    else:
+                        # History rescans refresh metadata without replacing posts
+                        # or discarding per-rule delivery/attempt identities.
+                        cur.execute(
+                            """
+                            UPDATE posts
+                            SET content_json = %s, media_group_id = %s, is_faulty = FALSE
+                            WHERE id = %s
+                            """,
+                            (_json_dumps(content) or "{}", media_group_id, post_id),
+                        )
                     self._create_deliveries_for_post_conn(conn, post_id, str(source_channel), source_thread_id)
 
             conn.commit()
@@ -4084,6 +4095,107 @@ class PostgresRepository(RepositoryProtocol):
             return None
 
         return str(row["source_id"]), row["source_thread_id"]
+
+    def begin_rule_rescan(self, rule_id: int) -> bool:
+        """Pause one rule and refuse to replace state owned by live jobs.
+
+        Locking routing matches scheduler's atomic rule lock. Other rules
+        sharing the same source are deliberately never touched.
+        """
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT is_active FROM routing WHERE id = %s FOR UPDATE",
+                    (int(rule_id),),
+                )
+                rule = cur.fetchone()
+                if rule is None:
+                    raise RuntimeError(f"Правило #{rule_id} не найдено")
+                cur.execute(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM deliveries
+                        WHERE rule_id = %s AND status = 'processing'
+                    ) OR EXISTS(
+                        SELECT 1 FROM jobs
+                        WHERE payload_json->>'rule_id' = %s
+                          AND status IN ('pending', 'leased', 'processing', 'retry')
+                    ) AS busy
+                    """,
+                    (int(rule_id), str(rule_id)),
+                )
+                if cur.fetchone()["busy"]:
+                    raise RuntimeError(
+                        "У правила есть незавершённые доставки или задачи; "
+                        "пересканирование отложено во избежание дубликатов"
+                    )
+                cur.execute(
+                    "UPDATE routing SET is_active = FALSE WHERE id = %s",
+                    (int(rule_id),),
+                )
+            conn.commit()
+        return bool(rule["is_active"])
+
+    def finish_rule_rescan(self, rule_id: int, *, was_active: bool) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE routing SET is_active = %s WHERE id = %s",
+                    (bool(was_active), int(rule_id)),
+                )
+                if cur.rowcount != 1:
+                    raise RuntimeError(f"Правило #{rule_id} исчезло при пересканировании")
+            conn.commit()
+
+    def reset_rule_history_for_replay(self, rule_id: int) -> tuple[int, int]:
+        """Explicit 'start over': archive old attempt keys, then reset only this rule.
+
+        Retain original attempt rows and Telegram receipts for audit. A new
+        replay must use new idempotency keys, otherwise accepted historical
+        writes are incorrectly counted as fresh deliveries.
+        """
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT is_active FROM routing WHERE id = %s FOR UPDATE",
+                    (int(rule_id),),
+                )
+                rule = cur.fetchone()
+                if rule is None or rule["is_active"]:
+                    raise RuntimeError("Для начала заново правило должно быть остановлено")
+                cur.execute(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM deliveries
+                        WHERE rule_id = %s AND status = 'processing'
+                    ) OR EXISTS(
+                        SELECT 1 FROM jobs
+                        WHERE payload_json->>'rule_id' = %s
+                          AND status IN ('pending', 'leased', 'processing', 'retry')
+                    ) AS busy
+                    """,
+                    (int(rule_id), str(rule_id)),
+                )
+                if cur.fetchone()["busy"]:
+                    raise RuntimeError("Остались активные задачи; архивирование отменено")
+
+                # Unique suffix incorporates immutable attempt primary key.
+                # Previously archived rows are excluded, including on repeat reset.
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts
+                    SET idempotency_key = idempotency_key || ':rescan:' || id::text,
+                        updated_at = NOW()
+                    WHERE rule_id = %s
+                      AND idempotency_key NOT LIKE '%%:rescan:%%'
+                    """,
+                    (int(rule_id),),
+                )
+                archived = int(cur.rowcount or 0)
+                cur.execute("DELETE FROM deliveries WHERE rule_id = %s", (int(rule_id),))
+                deleted = int(cur.rowcount or 0)
+            conn.commit()
+        return archived, deleted
 
     def clear_rule_deliveries(self, rule_id: int) -> int:
         with self.connect() as conn:
