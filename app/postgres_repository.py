@@ -5405,8 +5405,29 @@ class PostgresRepository(RepositoryProtocol):
                     UPDATE delivery_attempts
                     SET status = 'accepted', sent_message_ids_json = %s::jsonb, telegram_method = COALESCE(%s, telegram_method), updated_at = NOW(), error_text = NULL
                     WHERE idempotency_key = %s
+                      AND status IN ('sending', 'accepted')
                     """,
                     (_json_dumps([int(x) for x in (sent_message_ids or [])]), telegram_method, str(idempotency_key)),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+            return updated
+
+    def mark_delivery_attempt_verified(self, idempotency_key: str, *, sent_message_ids: list[int]) -> bool:
+        """Promote a target-confirmed delivery; never overwrite a verified id with a raw candidate."""
+        ids = [int(x) for x in sent_message_ids if int(x) > 0]
+        if not ids:
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts
+                    SET status = 'verified', sent_message_ids_json = %s::jsonb, error_text = NULL, updated_at = NOW()
+                    WHERE idempotency_key = %s
+                      AND status IN ('accepted', 'verified')
+                    """,
+                    (_json_dumps(ids), str(idempotency_key)),
                 )
                 updated = int(cur.rowcount or 0) > 0
             conn.commit()
