@@ -5504,6 +5504,35 @@ class PostgresRepository(RepositoryProtocol):
                 )
             conn.commit()
 
+    def mark_delivery_faulty_if_attempt_unverified(
+        self, delivery_id: int, idempotency_key: str, error_text: str
+    ) -> bool:
+        """Fenced failure: a second worker cannot downgrade a verified/sent delivery.
+
+        Serialize on the attempt row before checking its state, so a concurrent
+        verified transition cannot race a stale confirm-failure write.
+        """
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s FOR UPDATE",
+                    (str(idempotency_key),),
+                )
+                attempt = cur.fetchone()
+                if not attempt or str(attempt.get("status") or "") not in {"sending", "accepted", "failed_after_send"}:
+                    return False
+                cur.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'faulty', error_text = %s, attempt_count = attempt_count + 1
+                    WHERE id = %s AND status NOT IN ('sent', 'faulty')
+                    """,
+                    ((error_text or "")[:1000], int(delivery_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
     def mark_delivery_pending(self, delivery_id: int):
         with self.connect() as conn:
             with conn.cursor() as cur:
