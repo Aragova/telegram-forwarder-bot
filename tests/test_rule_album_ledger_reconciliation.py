@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -197,7 +196,9 @@ def test_rescan_never_deletes_shared_source_posts_and_keep_does_not_reset_queue(
     assert "db.reset_rule_history_for_replay" in fresh
     assert "db.reset_rule_history_for_replay" not in keep
     assert "db.mark_rule_messages_sent" not in keep
-    assert "db.drop_rule_pending_before_message" not in keep
+    assert "db.drop_rule_pending_before_message" in keep
+    assert "saved_first_pending_message_id" in keep
+    assert "previous_sent" in keep
 
 
 def test_repository_archives_attempt_keys_instead_of_deleting_history():
