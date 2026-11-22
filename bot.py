@@ -5717,6 +5717,51 @@ async def handle_video_caption_menu(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
+@dp.callback_query(lambda c: c.data.startswith("video_caption_mode_menu:"))
+async def handle_video_caption_mode_menu(callback: CallbackQuery):
+    """Open the two video caption-formatting choices in the current message."""
+    try:
+        rule_id = int(callback.data.split(":", 1)[1])
+    except (AttributeError, IndexError, ValueError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+
+    rule = await run_db(db.get_rule, rule_id)
+    if rule is None:
+        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+        return
+    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "video":
+        await answer_callback_safe(
+            callback, "Режим подписи доступен только для видео", show_alert=True
+        )
+        return
+
+    try:
+        menu_text = await run_db(build_video_caption_mode_menu_text, rule_id)
+        edited = await edit_message_text_safe(
+            message=callback.message,
+            text=menu_text,
+            parse_mode="HTML",
+            reply_markup=build_video_caption_mode_keyboard(rule_id),
+        )
+        if not edited:
+            await answer_callback_safe(
+                callback, "Не удалось открыть режим подписи", show_alert=True
+            )
+            return
+    except Exception:
+        logger.exception("Ошибка меню режима подписи видео rule_id=%s", rule_id)
+        await answer_callback_safe(
+            callback, "Не удалось открыть режим подписи", show_alert=True
+        )
+        return
+
+    await answer_callback_safe_once(callback)
+
+
 @dp.callback_query(lambda c: c.data.startswith("video_caption_edit:"))
 async def handle_video_caption_edit(callback: CallbackQuery):
     try:
