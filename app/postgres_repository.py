@@ -749,7 +749,7 @@ class PostgresRepository(RepositoryProtocol):
         UPDATE routing
            SET video_caption_delivery_mode = CASE
                WHEN video_caption_entities_json IS NOT NULL
-                AND BTRIM(video_caption_entities_json) NOT IN ('', '[]', 'null', '{}')
+                AND BTRIM(video_caption_entities_json::text) NOT IN ('', '[]', 'null', '{}')
                THEN 'builder_first'
                ELSE 'copy_first'
            END
