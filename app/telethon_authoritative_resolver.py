@@ -222,10 +222,25 @@ class TelethonAuthoritativeMessageResolver:
     def _is_safe_history_candidate(self, message: Any, *, expected_fp: dict[str, Any], before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None, target_thread_id: int | None, target_is_broadcast_channel: bool = False) -> bool:
         return self._history_candidate_rejection_reason(message, expected_fp=expected_fp, before_max_message_id=before_max_message_id, send_started_at=send_started_at, send_finished_at=send_finished_at, source_message_ids=source_message_ids, target_thread_id=target_thread_id, target_is_broadcast_channel=target_is_broadcast_channel) is None
 
-    async def resolve_authoritative_single_message(self, *, target_entity: Any, target_id: Any, sent: Any, expected_message: Any = None, expected_text: str = "", before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None, target_thread_id: int | None = None, target_is_broadcast_channel: bool = False) -> TelethonResolutionResult:
+    async def resolve_authoritative_single_message(self, *, target_entity: Any, target_id: Any, sent: Any, expected_message: Any = None, expected_text: str = "", before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None, target_thread_id: int | None = None, target_is_broadcast_channel: bool = False, require_strong_media_match: bool = False) -> TelethonResolutionResult:
         returned_candidate_id = _message_id(sent)
         expected_fp = build_media_fingerprint(expected_message or sent, text=expected_text)
         ok, message, reason = await self.validate_message_in_target(target_entity, target_id, returned_candidate_id, expected_fp, source_message_ids, target_thread_id, target_is_broadcast_channel)
+        if ok and require_strong_media_match:
+            # Never accept an old message from the same target, even if media
+            # or a repetitive caption happens to match.
+            candidate_fp = build_media_fingerprint(message)
+            score = _fingerprint_score(expected_fp, candidate_fp)
+            threshold = 80 if expected_fp.get("kind") == "document" else 90 if expected_fp.get("kind") == "photo" else 101
+            if score < threshold:
+                ok = False
+                reason = "weak_media_fingerprint"
+            elif (before_max_message_id is not None and returned_candidate_id <= before_max_message_id) or not self._in_window(message, send_started_at, send_finished_at, before_seconds=10, after_seconds=45):
+                ok = False
+                reason = "stale_or_pre_send_candidate"
+            elif getattr(message, "chat_id", None) is not None and str(getattr(message, "chat_id")) != str(target_id):
+                ok = False
+                reason = "wrong_peer"
         if ok:
             return TelethonResolutionResult(True, _message_id(message), returned_candidate_id=returned_candidate_id, resolution_method="returned_candidate_verified")
         best: list[tuple[int, Any]] = []
@@ -273,7 +288,7 @@ class TelethonAuthoritativeMessageResolver:
                     continue
                 safe_history_candidates.append(item)
                 score = _fingerprint_score(expected_fp, build_media_fingerprint(item))
-                if score >= 0:
+                if score >= (80 if expected_fp.get("kind") == "document" else 90 if expected_fp.get("kind") == "photo" else 101) if require_strong_media_match else score >= 0:
                     best.append((score, item))
             if best or safe_history_candidates:
                 break
@@ -291,7 +306,7 @@ class TelethonAuthoritativeMessageResolver:
                 authoritative = _message_id(winners[0])
                 logger.info("TELETHON_AUTHORITATIVE_TARGET_RESOLVED | target_id=%s | returned_candidate_id=%s | authoritative_message_id=%s | resolution_method=target_history_media_fingerprint", target_id, returned_candidate_id, authoritative)
                 return TelethonResolutionResult(True, authoritative, returned_candidate_id=returned_candidate_id, resolution_method="target_history_media_fingerprint")
-        if len(safe_history_candidates) == 1:
+        if len(safe_history_candidates) == 1 and not require_strong_media_match:
             authoritative = _message_id(safe_history_candidates[0])
             logger.info("TELETHON_AUTHORITATIVE_TARGET_RESOLVED | target_id=%s | returned_candidate_id=%s | authoritative_message_id=%s | resolution_method=target_history_unique_new_outbound", target_id, returned_candidate_id, authoritative)
             return TelethonResolutionResult(True, authoritative, returned_candidate_id=returned_candidate_id, resolution_method="target_history_unique_new_outbound")
