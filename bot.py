@@ -8965,6 +8965,7 @@ def _register_admin_handlers() -> None:
         stop_forwarding=stop_forwarding,
         is_posting_active=lambda: posting_active,
         ensure_rule_callback_access=ensure_rule_callback_access,
+        show_admin_rule_manager=show_admin_rule_manager,
     )
     register_admin_menu_handlers(dp, ctx)
     register_admin_channel_handlers(dp, ctx)
