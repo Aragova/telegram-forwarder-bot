@@ -5624,7 +5624,7 @@ class PostgresRepository(RepositoryProtocol):
                 cur.execute(
                     """
                     SELECT id, status, operation_kind, target_id, idempotency_key,
-                           sent_message_ids_json
+                           delivery_id, source_message_ids_json, sent_message_ids_json
                     FROM delivery_attempts WHERE id = %s FOR UPDATE
                     """,
                     (int(attempt_id),),
@@ -5671,6 +5671,8 @@ class PostgresRepository(RepositoryProtocol):
                     raise RuntimeError("Album changed or partially processed; no mutation")
 
                 delivery_ids = [int(x["id"]) for x in rows]
+                original_delivery_id = int(attempt.get("delivery_id") or 0)
+                original_ids = _safe_json_loads(attempt.get("source_message_ids_json"), [])
                 cur.execute(
                     """
                     UPDATE delivery_attempts
@@ -5698,6 +5700,32 @@ class PostgresRepository(RepositoryProtocol):
                     )
                     if cur.rowcount != 1:
                         raise RuntimeError("Album row changed concurrently; rolled back")
+                # Retain old->new delivery-ID provenance in the *same* commit.
+                cur.execute(
+                    """
+                    INSERT INTO audit_log (
+                        created_at, event_type, rule_id, delivery_id,
+                        source_id, source_thread_id, target_id, status,
+                        old_value_json, new_value_json, extra_json
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        utc_now_iso(), "album_ledger_reconciled", int(rule_id),
+                        delivery_ids[0], str(source_channel), source_thread_id,
+                        target_id, "verified",
+                        _json_dumps({
+                            "attempt_id": int(attempt_id),
+                            "old_delivery_id": original_delivery_id,
+                            "old_delivery_ids": original_ids,
+                        }),
+                        _json_dumps({
+                            "new_delivery_ids": delivery_ids,
+                            "target_message_ids": target_ids,
+                        }),
+                        _json_dumps({"media_group_id": str(media_group_id),
+                                     "verification": "telegram_group_media_caption"}),
+                    ),
+                )
             conn.commit()
         return len(delivery_ids)
 
