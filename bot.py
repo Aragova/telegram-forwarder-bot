@@ -31,7 +31,7 @@ from aiogram.types import (
 
 from app.config import settings
 from app.repository_models import utc_now_iso
-from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder
+from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder
 from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view
 from app.repository import RepositoryProtocol
 from app.repository_factory import create_repository
@@ -2451,6 +2451,8 @@ async def handle_invoices_button(message: Message):
 @dp.message(lambda m: m.text == "❌ Отмена")
 async def handle_cancel(message: Message):
     user_id = message.from_user.id if message.from_user else None
+    if user_id:
+        clear_new_rule_folder(user_id)
     state = user_states.get(user_id) if user_id else None
 
     if not state:
