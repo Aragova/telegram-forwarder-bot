@@ -12,6 +12,7 @@ from .delivery_idempotency import (
 )
 from .runtime_utils import run_db
 from .telethon_authoritative_resolver import TelethonSendOutcome
+from .video_processor import VideoPreSendError
 
 logger = logging.getLogger("forwarder")
 
@@ -169,6 +170,18 @@ class VideoSendDelivery:
                 caption_entities_json=caption_payload["caption_entities_json"],
                 caption_send_mode=caption_payload["selected_mode"],
             )
+        except VideoPreSendError as exc:
+            # The Telegram request has not started. This row may safely
+            # transition back to failed_before_send for a worker retry.
+            error_text = str(exc)
+            logger.warning("VIDEO_SEND_PREFLIGHT_FAILED | delivery_id=%s | action=safe_retry | reason=%s", delivery_id, error_text)
+            if has_attempt_ledger:
+                await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=error_text)
+            return {
+                "ok": False, "fallback_to_legacy": False,
+                "retryable": True, "accepted": False,
+                "error_text": error_text,
+            }
         except TelegramRetryAfter as exc:
             # Telegram explicitly rejected this request before publishing it.
             # Release the ledger for a delayed worker retry; do not confuse
