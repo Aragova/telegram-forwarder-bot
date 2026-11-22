@@ -4,7 +4,7 @@ import logging
 
 from .runtime_utils import run_db
 from .repost_caption import get_repost_caption_override, caption_override_content
-from .sender_primitives import DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK, _prepare_html_text
+from .sender_primitives import DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK, _prepare_html_text, _telethon_entities_to_bot
 from .telegram_send_result import telegram_send_result_from_raw
 
 logger = logging.getLogger("forwarder")
@@ -426,7 +426,10 @@ class RepostSingleDelivery:
             )
             return False
 
-        content = owner._content_from_message_or_post(message=message, post_row=post_row)
+        content = (
+            custom_caption if custom_caption is not None
+            else owner._content_from_message_or_post(message=message, post_row=post_row)
+        )
         built_text, _built_entities = owner._build_text_and_entities_from_content(content)
 
         # =========================================================
@@ -759,7 +762,17 @@ class RepostSingleDelivery:
         # =========================================================
         # 6) TEXT FALLBACK
         # =========================================================
-        html_text = _prepare_html_text(built_text)
+        # Never silently degrade a failed media repost to a text-only "sent".
+        # With custom caption ON a media failure must be visible and retriable.
+        media_downgrade_blocked = bool(custom_caption is not None and getattr(message, "media", None))
+        html_text = (
+            None if media_downgrade_blocked
+            else built_text if custom_caption is not None
+            else _prepare_html_text(built_text)
+        )
+        bot_entities = (
+            _telethon_entities_to_bot(_built_entities) if custom_caption is not None else None
+        )
 
         await owner._log_delivery_pipeline_step(
             rule_id=rule.id,
@@ -785,7 +798,8 @@ class RepostSingleDelivery:
                     chat_id=target_id,
                     message_thread_id=target_thread_id,
                     text=html_text,
-                    parse_mode="HTML",
+                    parse_mode=None if custom_caption is not None else "HTML",
+                    **({"entities": bot_entities} if custom_caption is not None else {}),
                     disable_web_page_preview=True,
                 )
 
@@ -861,7 +875,10 @@ class RepostSingleDelivery:
                 source_channel=source_channel,
                 target_id=target_id,
                 source_message_ids=source_message_ids,
-                error_text="Текстовый fallback невозможен: текст пустой",
+                error_text=(
+                    "custom_caption_media_send_failed_no_text_only_downgrade"
+                    if media_downgrade_blocked else "Текстовый fallback невозможен: текст пустой"
+                ),
                 extra={
                     "caption_delivery_mode": caption_mode,
                     "requires_builder": requires_builder,
