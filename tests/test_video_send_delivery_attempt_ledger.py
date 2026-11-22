@@ -75,7 +75,7 @@ def _build_service(repo: FakeRepo) -> SenderService:
 
 def test_video_send_cache_hit_skips_actual_send(tmp_path: Path):
     repo = FakeRepo()
-    repo.attempt = {"status": "accepted", "sent_message_ids_json": [777]}
+    repo.attempt = {"status": "verified", "sent_message_ids_json": [777]}
     service = _build_service(repo)
 
     async def _should_not_call(*_args, **_kwargs):
