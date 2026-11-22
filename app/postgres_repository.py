@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone, timedelta
@@ -408,6 +409,8 @@ class PostgresRepository(RepositoryProtocol):
             created_by BIGINT NULL,
             created_date TEXT NOT NULL,
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            rescan_owner_token TEXT NULL,
+            rescan_started_at TIMESTAMPTZ NULL,
             next_run_at TEXT NULL,
             last_sent_at TEXT NULL,
 
@@ -734,6 +737,8 @@ class PostgresRepository(RepositoryProtocol):
             created_at TEXT NOT NULL
         );
 
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_owner_token TEXT NULL;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_started_at TIMESTAMPTZ NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'repost';
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_trim_seconds BIGINT DEFAULT 120;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_clip_duration_seconds INTEGER DEFAULT 118;
@@ -4107,21 +4112,28 @@ class PostgresRepository(RepositoryProtocol):
 
         return str(row["source_id"]), row["source_thread_id"]
 
-    def begin_rule_rescan(self, rule_id: int) -> bool:
-        """Pause one rule and refuse to replace state owned by live jobs.
+    def begin_rule_rescan(self, rule_id: int) -> tuple[bool, str]:
+        """Acquire a PostgreSQL-backed exclusive rescan owner before parsing.
 
-        Locking routing matches scheduler's atomic rule lock. Other rules
-        sharing the same source are deliberately never touched.
+        Ownership survives individual DB transactions and excludes independent
+        handlers/processes. Crashed scans remain paused and require explicit
+        operator recovery rather than risking an unverified automatic replay.
         """
+        owner_token = uuid.uuid4().hex
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT is_active FROM routing WHERE id = %s FOR UPDATE",
+                    "SELECT is_active, rescan_owner_token FROM routing WHERE id = %s FOR UPDATE",
                     (int(rule_id),),
                 )
                 rule = cur.fetchone()
                 if rule is None:
                     raise RuntimeError(f"Правило #{rule_id} не найдено")
+                if rule["rescan_owner_token"] is not None:
+                    raise RuntimeError(
+                        "Пересканирование этого правила уже выполняется. "
+                        "Повторный запуск запрещён до завершения текущего."
+                    )
                 cur.execute(
                     """
                     SELECT EXISTS(
@@ -4141,24 +4153,43 @@ class PostgresRepository(RepositoryProtocol):
                         "пересканирование отложено во избежание дубликатов"
                     )
                 cur.execute(
-                    "UPDATE routing SET is_active = FALSE WHERE id = %s",
-                    (int(rule_id),),
+                    """
+                    UPDATE routing
+                    SET is_active = FALSE, rescan_owner_token = %s,
+                        rescan_started_at = NOW()
+                    WHERE id = %s AND rescan_owner_token IS NULL
+                    """,
+                    (owner_token, int(rule_id)),
                 )
+                if cur.rowcount != 1:
+                    raise RuntimeError("Другое пересканирование получило блокировку")
             conn.commit()
-        return bool(rule["is_active"])
+        return bool(rule["is_active"]), owner_token
 
-    def finish_rule_rescan(self, rule_id: int, *, was_active: bool) -> None:
+    def finish_rule_rescan(
+        self, rule_id: int, *, was_active: bool, owner_token: str,
+    ) -> None:
+        """Only the original owner can resume or release a rescan."""
+        if not owner_token:
+            raise ValueError("Missing rescan owner")
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE routing SET is_active = %s WHERE id = %s",
-                    (bool(was_active), int(rule_id)),
+                    """
+                    UPDATE routing
+                    SET is_active = %s, rescan_owner_token = NULL,
+                        rescan_started_at = NULL
+                    WHERE id = %s AND rescan_owner_token = %s
+                    """,
+                    (bool(was_active), int(rule_id), str(owner_token)),
                 )
                 if cur.rowcount != 1:
-                    raise RuntimeError(f"Правило #{rule_id} исчезло при пересканировании")
+                    raise RuntimeError(
+                        "Владелец пересканирования изменился; нельзя менять статус правила"
+                    )
             conn.commit()
 
-    def reset_rule_history_for_replay(self, rule_id: int) -> tuple[int, int]:
+    def reset_rule_history_for_replay(self, rule_id: int, *, owner_token: str) -> tuple[int, int]:
         """Explicit 'start over': archive old attempt keys, then reset only this rule.
 
         Retain original attempt rows and Telegram receipts for audit. A new
@@ -4168,12 +4199,16 @@ class PostgresRepository(RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT is_active FROM routing WHERE id = %s FOR UPDATE",
+                    "SELECT is_active, rescan_owner_token FROM routing WHERE id = %s FOR UPDATE",
                     (int(rule_id),),
                 )
                 rule = cur.fetchone()
-                if rule is None or rule["is_active"]:
-                    raise RuntimeError("Для начала заново правило должно быть остановлено")
+                if (rule is None or rule["is_active"]
+                        or not owner_token
+                        or rule["rescan_owner_token"] != owner_token):
+                    raise RuntimeError(
+                        "Для начала заново нужно владеть остановленным пересканированием"
+                    )
                 cur.execute(
                     """
                     SELECT EXISTS(
