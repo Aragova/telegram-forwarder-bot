@@ -487,7 +487,7 @@ def test_reactivation_does_not_reintroduce_deleted_cached_posts(
             self.row = None
         def execute(self, sql, params=None):
             query = " ".join(str(sql).split())
-            if query.startswith("SELECT id, source_id, source_thread_id, rescan_queue_built"):
+            if "RETURNING id, source_id, source_thread_id, rescan_queue_built" in query:
                 self.row = {
                     "id": 214, "source_id": "-100123",
                     "source_thread_id": None,
@@ -526,3 +526,8 @@ def test_scan_finish_sets_persistent_queue_marker_before_resuming():
     assert "queue_rebuilt=successful" in bot
     assert "queue_rebuilt=scan_complete" in bot
     assert "rescan_queue_built BOOLEAN NOT NULL DEFAULT FALSE" in source
+    activate = source.split("def activate_rule_with_backfill(", 1)[1].split(
+        "def get_rule_source_scope(", 1
+    )[0]
+    assert "RETURNING id, source_id, source_thread_id, rescan_queue_built" in activate
+    assert "SELECT id, source_id, source_thread_id, rescan_queue_built" not in activate
