@@ -3583,7 +3583,7 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return post_id
 
-    def save_post_batch(self, posts_data):
+    def save_post_batch(self, posts_data, *, preserve_existing_deliveries: bool = False):
         count = 0
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -3663,7 +3663,10 @@ class PostgresRepository(RepositoryProtocol):
                                 _json_dumps(content) or "{}", media_group_id,
                             ),
                         )
-                    self._create_deliveries_for_post_conn(conn, post_id, str(source_channel), source_thread_id)
+                    if inserted or not preserve_existing_deliveries:
+                        self._create_deliveries_for_post_conn(
+                            conn, post_id, str(source_channel), source_thread_id,
+                        )
 
             conn.commit()
             return count
