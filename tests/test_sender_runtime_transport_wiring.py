@@ -83,6 +83,9 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
         await runtime._init_sender_runtime(create_ui_policy=False)
 
         raw_bot = runtime.bot
+        assert raw_bot.init_kwargs["session"].api.is_local is True
+        assert raw_bot.init_kwargs["session"].api.api_url("123456:ABC", "sendVideo").startswith(runtime.settings.bot_api_base)
+        assert "base_url" not in raw_bot.init_kwargs
         sender_bot = sender_service_kwargs["bot"]
         sender_telethon = sender_service_kwargs["telethon_client"]
 

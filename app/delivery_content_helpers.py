@@ -89,6 +89,14 @@ def normalize_caption_delivery_mode(mode: Any) -> str:
     return normalized_mode
 
 
+def normalize_video_caption_delivery_mode(mode: Any, raw_caption_entities: Any = None) -> str:
+    """Video offers two explicit transports; legacy auto retains its prior effective choice."""
+    normalized = str(mode or "").strip().lower()
+    if normalized in {"copy_first", "builder_first"}:
+        return normalized
+    return "builder_first" if normalize_caption_entities(raw_caption_entities) else "copy_first"
+
+
 def is_custom_emoji_entity(entity: Any) -> bool:
     try:
         if isinstance(entity, dict):
@@ -173,16 +181,13 @@ def build_video_caption_delivery_payload(
 ) -> dict[str, Any]:
     caption_text = caption or ""
     caption_entities = normalize_caption_entities(raw_caption_entities)
-    normalized_delivery_mode = normalize_caption_delivery_mode(caption_delivery_mode)
+    normalized_delivery_mode = normalize_video_caption_delivery_mode(caption_delivery_mode, caption_entities)
     requires_premium = video_caption_requires_premium(caption_entities)
     has_any_entities = bool(caption_entities)
 
-    if normalized_delivery_mode == "builder_first":
-        selected_mode = "premium"
-    elif normalized_delivery_mode == "copy_first":
-        selected_mode = "plain"
-    else:
-        selected_mode = "premium" if has_any_entities else "plain"
+    # The selected caption formatting mode is explicit; Auto no longer chooses it.
+    # The delivery implementation uses a compatible sending backend for each mode.
+    selected_mode = "premium" if normalized_delivery_mode == "builder_first" else "plain"
 
     caption_entities_json = None
     if caption_entities:

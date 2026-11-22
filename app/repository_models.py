@@ -140,7 +140,7 @@ class Rule:
     video_caption_entities_json: str | None = None
 
     caption_delivery_mode: str = "auto"
-    video_caption_delivery_mode: str = "auto"
+    video_caption_delivery_mode: str = "copy_first"
 
     schedule_mode: str = "interval"
     fixed_times_json: str | None = None

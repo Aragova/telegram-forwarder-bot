@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from aiogram.exceptions import TelegramEntityTooLarge
+
 from .delivery_idempotency import (
     build_delivery_idempotency_key,
     extract_sent_message_ids_from_attempt,
@@ -138,17 +140,34 @@ class VideoSendDelivery:
         if not video_info:
             return {"ok": False, "fallback_to_legacy": True, "retryable": False}
 
-        sent_msg = await owner.video_processor.send_with_retry(
-            owner.bot,
-            payload.get("target_id"),
-            payload.get("target_thread_id"),
-            str(processed_video_path),
-            str(thumbnail_path) if thumbnail_path else None,
-            caption_payload["caption"] or "",
-            video_info["duration"],
-            caption_entities_json=caption_payload["caption_entities_json"],
-            caption_send_mode=caption_payload["selected_mode"],
-        )
+        try:
+            sent_msg = await owner.video_processor.send_with_retry(
+                owner.bot,
+                payload.get("target_id"),
+                payload.get("target_thread_id"),
+                str(processed_video_path),
+                str(thumbnail_path) if thumbnail_path else None,
+                caption_payload["caption"] or "",
+                video_info["duration"],
+                caption_entities_json=caption_payload["caption_entities_json"],
+                caption_send_mode=caption_payload["selected_mode"],
+            )
+        except TelegramEntityTooLarge as exc:
+            error_text = f"TelegramEntityTooLarge: {exc}"
+            logger.error(
+                "VIDEO_SEND_SIZE_REJECTED | delivery_id=%s | rule_id=%s | file_size_bytes=%s | retryable=False",
+                delivery_id,
+                rule_id,
+                Path(processed_video_path).stat().st_size,
+            )
+            if has_attempt_ledger:
+                await run_db(
+                    owner.db.mark_delivery_attempt_failed,
+                    idempotency_key,
+                    status="failed_before_send",
+                    error_text=error_text,
+                )
+            return {"ok": False, "fallback_to_legacy": False, "retryable": False, "error_text": error_text}
         if not sent_msg:
             logger.warning("VIDEO STAGE RETRY | неуспешная отправка для delivery_id=%s", delivery_id)
             if has_attempt_ledger:

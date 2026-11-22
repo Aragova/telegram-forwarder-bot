@@ -173,7 +173,7 @@ class PostgresRepository(RepositoryProtocol):
             video_caption=data.get("video_caption"),
             video_caption_entities_json=data.get("video_caption_entities_json"),
             caption_delivery_mode=data.get("caption_delivery_mode", "auto"),
-            video_caption_delivery_mode=data.get("video_caption_delivery_mode", "auto"),
+            video_caption_delivery_mode=data.get("video_caption_delivery_mode", "copy_first"),
             repost_campaign_enabled=bool(data.get("repost_campaign_enabled") or False),
             repost_campaign_clean_channel_enabled=bool(
                 data.get("repost_campaign_clean_channel_enabled")
@@ -403,7 +403,7 @@ class PostgresRepository(RepositoryProtocol):
             video_caption TEXT NULL,
             video_caption_entities_json TEXT NULL,
             caption_delivery_mode TEXT NOT NULL DEFAULT 'auto',
-            video_caption_delivery_mode TEXT NOT NULL DEFAULT 'auto',
+            video_caption_delivery_mode TEXT NOT NULL DEFAULT 'copy_first',
 
             created_by BIGINT NULL,
             created_date TEXT NOT NULL,
@@ -743,7 +743,19 @@ class PostgresRepository(RepositoryProtocol):
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_caption TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_caption_entities_json TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS caption_delivery_mode TEXT NOT NULL DEFAULT 'auto';
-        ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_caption_delivery_mode TEXT NOT NULL DEFAULT 'auto';
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_caption_delivery_mode TEXT NOT NULL DEFAULT 'copy_first';
+        ALTER TABLE routing ALTER COLUMN video_caption_delivery_mode SET DEFAULT 'copy_first';
+        -- Preserve the old effective transport for existing auto video rules.
+        UPDATE routing
+           SET video_caption_delivery_mode = CASE
+               WHEN video_caption_entities_json IS NOT NULL
+                AND BTRIM(video_caption_entities_json) NOT IN ('', '[]', 'null', '{}')
+               THEN 'builder_first'
+               ELSE 'copy_first'
+           END
+         WHERE mode = 'video'
+           AND (video_caption_delivery_mode IS NULL
+                OR LOWER(BTRIM(video_caption_delivery_mode)) NOT IN ('copy_first', 'builder_first'));
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS schedule_mode TEXT NOT NULL DEFAULT 'interval';
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS fixed_times_json TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_intro_horizontal_id BIGINT NULL;
@@ -4505,7 +4517,7 @@ class PostgresRepository(RepositoryProtocol):
         rule_id: int,
         video_caption_delivery_mode: str,
     ) -> bool:
-        allowed = {"copy_first", "builder_first", "auto"}
+        allowed = {"copy_first", "builder_first"}
         normalized = (video_caption_delivery_mode or "").strip().lower()
 
         if normalized not in allowed:
@@ -6956,7 +6968,7 @@ class PostgresRepository(RepositoryProtocol):
                 "video_caption": rule.video_caption,
                 "video_caption_entities_json": rule.video_caption_entities_json,
                 "caption_delivery_mode": getattr(rule, "caption_delivery_mode", "auto"),
-                "video_caption_delivery_mode": getattr(rule, "video_caption_delivery_mode", "auto"),
+                "video_caption_delivery_mode": getattr(rule, "video_caption_delivery_mode", "copy_first"),
                 "is_active": bool(rule.is_active),
                 "next_run_at": rule.next_run_at,
                 "last_sent_at": rule.last_sent_at,

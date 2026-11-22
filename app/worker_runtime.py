@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from aiogram.exceptions import TelegramEntityTooLarge
+
 from .delivery_result import normalize_delivery_result
 from .job_service import (
     enqueue_video_download,
@@ -711,8 +713,15 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             return True
         attempts = int(job.get("attempts") or 0) + 1
         max_attempts = int(job.get("max_attempts") or 3)
-        if attempts >= max_attempts:
+        terminal_too_large = job_type in _HEAVY_STAGE_TYPES and isinstance(exc, TelegramEntityTooLarge)
+        if terminal_too_large or attempts >= max_attempts:
             await asyncio.to_thread(repo.fail_job, job_id, str(exc))
+            if terminal_too_large:
+                cleanup_video_artifacts(payload, mode="final_failure")
+                logger.warning(
+                    "VIDEO_SEND_TOO_LARGE_TERMINAL | job_id=%s | job_type=%s | delivery_id=%s",
+                    job_id, job_type, payload.get("delivery_id"),
+                )
             logger.warning("JOB FAILED | Задача #%s завершилась ошибкой: %s", job_id, exc)
         else:
             delay = compute_retry_delay_seconds(queue, attempts, job_type, policy)

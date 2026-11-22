@@ -11,6 +11,7 @@ from .delivery_content_helpers import (
     content_requires_builder,
     extract_text_from_content,
     normalize_caption_delivery_mode,
+    normalize_video_caption_delivery_mode,
 )
 from .sender_primitives import (
     _detect_message_media_kind,
@@ -440,7 +441,10 @@ class SenderContentHelpers:
 
 
     def get_rule_video_caption_delivery_mode(self, rule) -> str:
-        return normalize_caption_delivery_mode(getattr(rule, "video_caption_delivery_mode", "auto"))
+        return normalize_video_caption_delivery_mode(
+            getattr(rule, "video_caption_delivery_mode", "copy_first"),
+            getattr(rule, "video_caption_entities_json", None),
+        )
 
 
     def resolve_repost_caption_delivery_strategy(
