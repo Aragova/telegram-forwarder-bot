@@ -10,7 +10,7 @@ from .telethon_authoritative_resolver import TelethonAuthoritativeMessageResolve
 from .config import settings as config
 from .video_clip_duration import calculate_center_clip_window
 from aiogram import Bot
-from aiogram.exceptions import TelegramEntityTooLarge
+from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from .bot_api_session import create_bot_api_session
 from .subprocess_safety import (
     communicate_safely,
@@ -1482,6 +1482,18 @@ class VideoProcessor:
 
                 return sent_msg
 
+            except TelegramRetryAfter as exc:
+                # The Bot API explicitly refused this request. Retrying via
+                # the job scheduler is safe, unlike retrying a network timeout.
+                self._stage_failed(
+                    stage_logger, "send", error_text=str(exc),
+                    extra={"retryable": True, "retry_after_seconds": int(exc.retry_after)},
+                )
+                logger.warning(
+                    "VIDEO_SEND_RATE_LIMITED | transport=bot_api | retry_after=%s | action=retry_safe_rejection",
+                    exc.retry_after,
+                )
+                raise
             except TelegramEntityTooLarge as exc:
                 logger.error(
                     "VIDEO_SEND_TOO_LARGE | transport=%s | file_size_bytes=%s | action=no_retry",
