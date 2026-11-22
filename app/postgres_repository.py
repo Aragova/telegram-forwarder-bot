@@ -3652,8 +3652,16 @@ class PostgresRepository(RepositoryProtocol):
                             UPDATE posts
                             SET content_json = %s, media_group_id = %s, is_faulty = FALSE
                             WHERE id = %s
+                              AND (
+                                  content_json IS DISTINCT FROM %s
+                                  OR media_group_id IS DISTINCT FROM %s
+                                  OR is_faulty = TRUE
+                              )
                             """,
-                            (_json_dumps(content) or "{}", media_group_id, post_id),
+                            (
+                                _json_dumps(content) or "{}", media_group_id, post_id,
+                                _json_dumps(content) or "{}", media_group_id,
+                            ),
                         )
                     self._create_deliveries_for_post_conn(conn, post_id, str(source_channel), source_thread_id)
 
