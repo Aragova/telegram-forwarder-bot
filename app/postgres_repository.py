@@ -3463,6 +3463,8 @@ class PostgresRepository(RepositoryProtocol):
         rule_id: int,
         source_id: str,
         source_thread_id: int | None,
+        *,
+        allowed_message_ids: set[int] | None = None,
     ) -> int:
         with conn.cursor() as cur:
             if source_thread_id is None:
@@ -3492,6 +3494,9 @@ class PostgresRepository(RepositoryProtocol):
             inserted = 0
             now_iso = utc_now_iso()
             for row in rows:
+                if (allowed_message_ids is not None
+                        and int(row["message_id"]) not in allowed_message_ids):
+                    continue
                 if self._is_self_target_echo_post_for_rule_conn(
                     conn,
                     rule_id=int(rule_id),
@@ -4251,7 +4256,9 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return count
 
-    def backfill_rule(self, rule_id: int) -> int:
+    def backfill_rule(
+        self, rule_id: int, *, allowed_message_ids: set[int] | None = None,
+    ) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -4274,6 +4281,7 @@ class PostgresRepository(RepositoryProtocol):
                 int(row["id"]),
                 str(row["source_id"]),
                 row["source_thread_id"],
+                allowed_message_ids=allowed_message_ids,
             )
             conn.commit()
             return inserted
@@ -4437,6 +4445,31 @@ class PostgresRepository(RepositoryProtocol):
                 count = int(cur.rowcount or 0)
             conn.commit()
             return count
+
+    def drop_rule_pending_not_in_message_ids(
+        self, rule_id: int, *, source_channel: str,
+        source_thread_id: int | None, seen_message_ids: set[int],
+    ) -> int:
+        """Prune only this rule's pending cache rows absent from full Telegram scan."""
+        observed = sorted(int(x) for x in seen_message_ids)
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM deliveries d
+                    USING posts p
+                    WHERE d.post_id = p.id
+                      AND d.rule_id = %s
+                      AND d.status = 'pending'
+                      AND p.source_channel = %s
+                      AND p.source_thread_id IS NOT DISTINCT FROM %s
+                      AND NOT (p.message_id = ANY(%s::bigint[]))
+                    """,
+                    (int(rule_id), str(source_channel), source_thread_id, observed),
+                )
+                count = int(cur.rowcount or 0)
+            conn.commit()
+        return count
 
     def get_rule_next_run_at(self, rule_id: int) -> str | None:
         with self.connect() as conn:
