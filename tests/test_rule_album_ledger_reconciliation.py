@@ -313,7 +313,7 @@ class RescanCursor:
         elif "SET is_active = FALSE, rescan_owner_token =" in q:
             self.owner, self.active = args[0], False
         elif "SET is_active = %s, rescan_owner_token = NULL" in q:
-            if self.owner != args[2]:
+            if self.owner != args[3]:
                 self.rowcount = 0
             else:
                 self.active, self.owner = args[0], None
@@ -475,3 +475,54 @@ def test_user_cannot_manually_reactivate_rule_during_rescan():
     )[0]
     assert "WHERE id = %s AND rescan_owner_token IS NULL" in toggle
     assert "WHERE id = %s AND rescan_owner_token IS NULL" in activate
+
+
+@pytest.mark.parametrize("completed_scan,expected_backfill", [(True, 0), (False, 1)])
+def test_reactivation_does_not_reintroduce_deleted_cached_posts(
+    completed_scan, expected_backfill,
+):
+    class ActivationCursor:
+        rowcount = 1
+        def __init__(self):
+            self.row = None
+        def execute(self, sql, params=None):
+            query = " ".join(str(sql).split())
+            if query.startswith("SELECT id, source_id, source_thread_id, rescan_queue_built"):
+                self.row = {
+                    "id": 214, "source_id": "-100123",
+                    "source_thread_id": None,
+                    "rescan_queue_built": completed_scan,
+                }
+            else:
+                self.row = None
+        def fetchone(self):
+            return self.row
+
+    cursor = ActivationCursor()
+    connection = FakeConnection(cursor)
+    repo = object.__new__(PostgresRepository)
+    backfilled = []
+    repo._backfill_deliveries_for_rule_conn = lambda *args, **kw: backfilled.append(args)
+    repo._compute_next_run_for_rule_conn = lambda *_args: "2026-11-23T00:00:00+00:00"
+
+    @contextmanager
+    def connect():
+        yield connection
+
+    repo.connect = connect
+    assert repo.activate_rule_with_backfill(214) is True
+    assert len(backfilled) == expected_backfill
+    assert connection.commits == 1
+
+
+def test_scan_finish_sets_persistent_queue_marker_before_resuming():
+    source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+    finish = source.split("def finish_rule_rescan(", 1)[1].split(
+        "def reset_rule_history_for_replay(", 1
+    )[0]
+    assert "rescan_queue_built = rescan_queue_built OR %s" in finish
+    assert "WHERE id = %s AND rescan_owner_token = %s" in finish
+    bot = Path("bot.py").read_text(encoding="utf-8")
+    assert "queue_rebuilt=successful" in bot
+    assert "queue_rebuilt=scan_complete" in bot
+    assert "rescan_queue_built BOOLEAN NOT NULL DEFAULT FALSE" in source
