@@ -411,6 +411,7 @@ class PostgresRepository(RepositoryProtocol):
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             rescan_owner_token TEXT NULL,
             rescan_started_at TIMESTAMPTZ NULL,
+            rescan_queue_built BOOLEAN NOT NULL DEFAULT FALSE,
             next_run_at TEXT NULL,
             last_sent_at TEXT NULL,
 
@@ -739,6 +740,7 @@ class PostgresRepository(RepositoryProtocol):
 
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_owner_token TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_started_at TIMESTAMPTZ NULL;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_queue_built BOOLEAN NOT NULL DEFAULT FALSE;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'repost';
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_trim_seconds BIGINT DEFAULT 120;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_clip_duration_seconds INTEGER DEFAULT 118;
@@ -4050,7 +4052,7 @@ class PostgresRepository(RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, source_id, source_thread_id
+                    SELECT id, source_id, source_thread_id, rescan_queue_built
                     FROM routing
                     WHERE id = %s
                     LIMIT 1
@@ -4076,12 +4078,16 @@ class PostgresRepository(RepositoryProtocol):
                     conn.commit()
                     return False
 
-            self._backfill_deliveries_for_rule_conn(
-                conn,
-                int(row["id"]),
-                str(row["source_id"]),
-                row["source_thread_id"],
-            )
+            # A completed, observed-ID-filtered rescan has already built its
+            # authoritative queue. An unfiltered backfill would reintroduce
+            # messages deleted from Telegram when this rule is re-enabled.
+            if not bool(row["rescan_queue_built"]):
+                self._backfill_deliveries_for_rule_conn(
+                    conn,
+                    int(row["id"]),
+                    str(row["source_id"]),
+                    row["source_thread_id"],
+                )
 
             next_run_iso = self._compute_next_run_for_rule_conn(conn, rule_id)
 
@@ -4173,6 +4179,7 @@ class PostgresRepository(RepositoryProtocol):
 
     def finish_rule_rescan(
         self, rule_id: int, *, was_active: bool, owner_token: str,
+        queue_rebuilt: bool = False,
     ) -> None:
         """Only the original owner can resume or release a rescan."""
         if not owner_token:
@@ -4183,10 +4190,11 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     UPDATE routing
                     SET is_active = %s, rescan_owner_token = NULL,
-                        rescan_started_at = NULL
+                        rescan_started_at = NULL,
+                        rescan_queue_built = rescan_queue_built OR %s
                     WHERE id = %s AND rescan_owner_token = %s
                     """,
-                    (bool(was_active), int(rule_id), str(owner_token)),
+                    (bool(was_active), bool(queue_rebuilt), int(rule_id), str(owner_token)),
                 )
                 if cur.rowcount != 1:
                     raise RuntimeError(
