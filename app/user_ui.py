@@ -933,7 +933,7 @@ def build_user_rule_card_keyboard(*, rule_id: int, is_active: bool, schedule_mod
             build_button(text=("⏸ Выключить" if is_active else "▶️ Включить"), callback_data=(f"user_rule_toggle:{rule_id}" if is_active else f"user_rule_toggle:{rule_id}"), style=("danger" if is_active else "success")),
         ]
     )
-    rows.append([build_button(text="⬅️ К правилам", callback_data="user_rules"), build_button(text="🏠 Главное меню", callback_data="user_main")])
+    rows.append([build_button(text="⬅️ К правилам", callback_data=f"rf:back:{rule_id}"), build_button(text="🏠 Главное меню", callback_data="user_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
