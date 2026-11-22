@@ -557,7 +557,7 @@ async def _run_rescan_rule_fresh_job(
             prefix_text=(
                 f"✅ Правило #{rule_id} пересканировано заново.\n"
                 f"Новых/обновлённых постов источника: {parsed_count}\n"
-                f"Очередь правила собрана заново: {rebuilt_count}\\n"
+                f"Очередь правила собрана заново: {rebuilt_count}\n"
                 f"Архивировано старых попыток: {archived_attempts}"
             ),
         )
@@ -638,8 +638,6 @@ async def _run_rescan_rule_keep_job(
             # This branch is non-destructive even if Telegram history parsing
             # fails, so it is safe to restore the previous active state.
             await run_db(db.finish_rule_rescan, rule_id, was_active=was_active)
-        restored_sent_count = 0  # No restoration needed: original sent rows survive.
-        removed_before = 0
 
         await run_db(
             db.log_rule_change,
@@ -657,8 +655,7 @@ async def _run_rescan_rule_keep_job(
                 "mode": "keep_position",
                 "parsed_count": parsed_count,
                 "rebuilt_count": rebuilt_count,
-                "restored_sent_count": restored_sent_count,
-                "removed_before": removed_before,
+                "preserved_delivery_state": True,
                 "source_id": str(rule.source_id),
                 "source_thread_id": rule.source_thread_id,
             },
