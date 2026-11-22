@@ -211,3 +211,87 @@ def test_repository_archives_attempt_keys_instead_of_deleting_history():
     assert "DELETE FROM deliveries WHERE rule_id = %s" in fn
     assert "is_active = FALSE" in source
     assert "UPDATE posts" in source
+
+
+def test_history_rescan_preserves_shared_existing_deliveries():
+    import asyncio
+
+    from app.parser import parse_channel_history
+
+    class Client:
+        async def get_entity(self, entity):
+            return entity
+
+        async def iter_messages(self, *_args, **_kwargs):
+            yield SimpleNamespace(
+                id=101, text="hello", message="hello", raw_text="hello",
+                entities=[], media=None, date=None, grouped_id=None,
+            )
+
+    class Database:
+        def __init__(self):
+            self.calls = []
+
+        def save_post_batch(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            return len(messages)
+
+        def delete_channel_posts(self, *_args):
+            raise AssertionError("Shared source deletion is forbidden")
+
+    db = Database()
+    count = asyncio.run(parse_channel_history(
+        Client(), db, "-100123", clean_start=False,
+        preserve_existing_deliveries=True,
+    ))
+    assert count == 1
+    assert len(db.calls) == 1
+    assert db.calls[0][1] == {"preserve_existing_deliveries": True}
+
+
+def test_normal_parser_does_not_require_extra_repository_keyword():
+    import asyncio
+
+    from app.parser import parse_channel_history
+
+    class Client:
+        async def get_entity(self, entity):
+            return entity
+
+        async def iter_messages(self, *_args, **_kwargs):
+            yield SimpleNamespace(
+                id=102, text="normal", message="normal", raw_text="normal",
+                entities=[], media=None, date=None, grouped_id=None,
+            )
+
+    class LegacyDatabase:
+        def __init__(self):
+            self.seen = 0
+
+        def save_post_batch(self, batch):
+            self.seen += len(batch)
+            return len(batch)
+
+    db = LegacyDatabase()
+    assert asyncio.run(parse_channel_history(Client(), db, "-100123")) == 1
+    assert db.seen == 1
+
+
+def test_rescan_batch_refresh_skips_recreating_old_delivery_rows():
+    source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+    code = source.split("def save_post_batch(", 1)[1].split(
+        "def delete_channel_posts(", 1
+    )[0]
+    assert "if inserted or not preserve_existing_deliveries" in code
+    assert "content_json IS DISTINCT FROM" in code
+    parser = Path("app/parser.py").read_text(encoding="utf-8")
+    assert "preserve_existing_deliveries=True" in parser
+    bot = Path("bot.py").read_text(encoding="utf-8")
+    fresh = bot.split("async def _run_rescan_rule_fresh_job(", 1)[1].split(
+        "async def _run_rescan_rule_keep_job(", 1
+    )[0]
+    keep = bot.split("async def _run_rescan_rule_keep_job(", 1)[1].split(
+        "\n@dataclass(slots=True)", 1
+    )[0]
+    assert fresh.count("preserve_existing_deliveries=True") == 2
+    assert keep.count("preserve_existing_deliveries=True") == 2
