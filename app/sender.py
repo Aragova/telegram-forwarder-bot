@@ -1296,13 +1296,16 @@ class SenderService:
                     target_id=str(target_id), delivery_method="idempotency_cache_reconciled",
                 )
                 return True
-            error = "copy_single_uncertain_no_fallback: accepted or in-flight target ID unverified; manual review required"
+            error = "copy_single_uncertain_no_fallback: cached attempt awaiting authoritative target confirmation"
             logger.warning(
-                "REPOST_SINGLE_CACHE_UNRESOLVED | rule_id=%s | delivery_id=%s | attempt_status=%s | candidate_ids=%s | action=no_second_send",
+                "REPOST_SINGLE_CACHE_UNRESOLVED | rule_id=%s | delivery_id=%s | attempt_status=%s | "
+                "candidate_ids=%s | action=read_only_retry_no_second_send",
                 rule_id, delivery_id, attempt_status, cached_ids,
             )
-            await run_db(self._mark_delivery_faulty_sync, delivery_id, error)
-            return _terminal_non_retryable_result(error)
+            # Another worker may still own the send/verification. Do not
+            # downgrade its successful delivery to faulty from this contender.
+            return {"ok": False, "retryable": True, "accepted": False,
+                    "error_text": error, "manual_review_required": True}
         await run_db(self.db.create_delivery_attempt, delivery_id=int(delivery_id), rule_id=int(rule_id), tenant_id=1, job_id=None, idempotency_key=idempotency_key, operation_kind="single", status="created", target_id=str(target_id), source_message_ids=[int(message_id)])
         logger.info("DELIVERY_ATTEMPT_CREATED | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
         acquired = await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="copy_single")
@@ -1418,14 +1421,15 @@ class SenderService:
             )
             return True
         if attempt_status in {"sending", "accepted", "failed_after_send"}:
-            error = "telethon_send_accepted_target_id_unresolved_non_retryable: album attempt not previously verified; manual review required"
+            error = "telethon_send_accepted_target_id_unresolved_non_retryable: album cache awaiting confirmation"
             logger.warning(
-                "REPOST_ALBUM_CACHE_UNRESOLVED | rule_id=%s | delivery_ids=%s | status=%s | candidate_ids=%s | action=no_second_send",
+                "REPOST_ALBUM_CACHE_UNRESOLVED | rule_id=%s | delivery_ids=%s | status=%s | "
+                "candidate_ids=%s | action=read_only_retry_no_second_send",
                 rule_id, album_delivery_ids, attempt_status, cached_ids,
             )
-            for disputed_id in album_delivery_ids:
-                await run_db(self._mark_delivery_faulty_sync, disputed_id, error)
-            return _terminal_non_retryable_result(error)
+            # Never mutate another live worker's deliveries on a cache miss.
+            return {"ok": False, "retryable": True, "accepted": False,
+                    "error_text": error, "manual_review_required": True}
         await run_db(self.db.create_delivery_attempt, delivery_id=int(delivery_id or 0), rule_id=int(rule_id), tenant_id=1, job_id=None, idempotency_key=idempotency_key, operation_kind="album", status="created", target_id=str(target_id), source_message_ids=album_source_ids)
         logger.info("DELIVERY_ATTEMPT_CREATED | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
         acquired = await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="copy_album")
