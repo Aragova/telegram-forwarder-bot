@@ -72,3 +72,82 @@ def test_accepted_unverified_processing_delivery_can_be_fenced_faulty():
     updated, cur = run_case("accepted", "processing")
     assert updated is True
     assert cur.delivery_status == "faulty"
+
+
+class OrphanCursor:
+    def __init__(self, *, status="sending", has_live_owner=False, process_count=2):
+        self.status = status
+        self.has_live_owner = has_live_owner
+        self.process_count = process_count
+        self.phase = ""
+        self.rowcount = 0
+        self.queries = []
+
+    def execute(self, sql, params=()):
+        self.queries.append((sql, params))
+        if "FROM delivery_attempts" in sql and "FOR UPDATE" in sql:
+            self.phase = "attempt"
+        elif "has_live_owner" in sql:
+            self.phase = "owner"
+            assert "lease_until > NOW()" in sql
+            assert "j.payload_json->'delivery_ids'" in sql
+            assert "j.id <> %s" in sql
+        elif "UPDATE deliveries" in sql:
+            self.phase = "deliveries"
+            assert "status='processing'" in sql
+            self.rowcount = self.process_count
+        elif "UPDATE delivery_attempts" in sql:
+            self.phase = "finalize"
+            self.status = "failed_after_send"
+            self.rowcount = 1
+
+    def fetchone(self):
+        if self.phase == "attempt":
+            return {"status": self.status}
+        if self.phase == "owner":
+            return {"has_live_owner": self.has_live_owner}
+        return None
+
+
+def orphan_case(status, has_live_owner=False, process_count=2):
+    cur = OrphanCursor(status=status, has_live_owner=has_live_owner, process_count=process_count)
+    conn = FakeConnection(cur)
+    repo = PostgresRepository.__new__(PostgresRepository)
+
+    @contextmanager
+    def connect():
+        yield conn
+
+    repo.connect = connect
+    count = repo.finalize_orphaned_repost_attempt(
+        idempotency_key="rule:214:target:-100:album",
+        job_id=62102,
+        rule_id=214,
+        delivery_ids=[171, 172],
+        error_text="manual review after unresolved send",
+    )
+    return count, cur
+
+
+def test_orphan_recovery_does_not_fault_verified_attempt():
+    count, cur = orphan_case("verified")
+    assert count == 0
+    assert not any("UPDATE deliveries" in sql for sql, _ in cur.queries)
+
+
+def test_orphan_recovery_never_faults_active_other_worker():
+    count, cur = orphan_case("sending", has_live_owner=True)
+    assert count == 0
+    assert not any("UPDATE deliveries" in sql for sql, _ in cur.queries)
+
+
+def test_orphan_recovery_finalizes_orphan_after_owner_lease_expires():
+    count, cur = orphan_case("sending")
+    assert count == 2
+    assert cur.status == "failed_after_send"
+
+
+def test_orphan_recovery_does_not_downgrade_already_sent_deliveries():
+    count, cur = orphan_case("accepted", process_count=0)
+    assert count == 0
+    assert cur.status == "accepted"
