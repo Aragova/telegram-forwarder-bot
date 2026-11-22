@@ -790,12 +790,15 @@ class SenderService:
         text: str,
         entities,
         source_message_ids: set[int] | None = None,
+        literal_caption: bool = False,
     ):
         from .sender_telethon_helpers import SenderTelethonHelpers
 
         kwargs = {"target_id": target_id, "target_thread_id": target_thread_id, "text": text, "entities": entities}
         if source_message_ids is not None:
             kwargs["source_message_ids"] = source_message_ids
+        if literal_caption:
+            kwargs["literal_caption"] = True
         return await SenderTelethonHelpers(self).send_text_via_telethon(**kwargs)
 
     async def _send_file_via_telethon(
