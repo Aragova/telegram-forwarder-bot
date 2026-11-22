@@ -165,6 +165,14 @@ def _delivery_ids_already_sent(repo, delivery_ids: list[int]) -> bool:
     return False
 
 
+def _delivery_ids_still_processing(repo, delivery_ids: list[int]) -> bool:
+    """Read-only check; terminal deliveries should not be deferred forever."""
+    return any(
+        str(_row_get(repo.get_delivery(int(delivery_id)), "status", "") or "").strip().lower() == "processing"
+        for delivery_id in delivery_ids
+    )
+
+
 def _complete_job_if_delivery_already_sent(
     repo, job_id: int, payload: dict, *, stage: str,
     worker_id: str | None = None, finalization_started: Event | None = None,
@@ -790,22 +798,29 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                     count = 0
                 if not count:
                     # Two competing last-attempt workers can veto one another.
-                    # Do NOT consume the final retry or leave a processing
-                    # delivery without any future recovery job. Defer without
-                    # incrementing attempts until an owner finishes or expires.
-                    delay = max(30, compute_retry_delay_seconds(queue, attempts, job_type, policy))
-                    await _finish_owned_job(
-                        repo, "defer", job_id, worker_id,
-                        "Orphan finalization vetoed/unavailable; recheck without second send",
-                        delay, finalization_started=finalization_started,
-                    )
-                    logger.warning(
-                        "REPOST_ORPHAN_FINALIZE_DEFERRED | job_id=%s | rule_id=%s | "
-                        "delay_sec=%s | attempts_unchanged=true | action=no_resend",
-                        job_id, payload.get("rule_id"), delay,
-                    )
-                    await _runtime_metrics.record_retry(job_type=job_type)
-                    return True
+                    # Defer while any delivery is still processing; otherwise
+                    # fail the exhausted job normally (no infinite deferral of
+                    # deliveries already resolved as sent/faulty/deleted).
+                    try:
+                        still_processing = await asyncio.to_thread(
+                            _delivery_ids_still_processing, repo, delivery_ids,
+                        )
+                    except Exception:
+                        still_processing = True  # DB outage must not abandon recovery.
+                    if still_processing:
+                        delay = max(30, compute_retry_delay_seconds(queue, attempts, job_type, policy))
+                        await _finish_owned_job(
+                            repo, "defer", job_id, worker_id,
+                            "Orphan finalization vetoed/unavailable; recheck without second send",
+                            delay, finalization_started=finalization_started,
+                        )
+                        logger.warning(
+                            "REPOST_ORPHAN_FINALIZE_DEFERRED | job_id=%s | rule_id=%s | "
+                            "delay_sec=%s | attempts_unchanged=true | action=no_resend",
+                            job_id, payload.get("rule_id"), delay,
+                        )
+                        await _runtime_metrics.record_retry(job_type=job_type)
+                        return True
             failed = await _finish_owned_job(repo, "fail", job_id, worker_id, error_text, finalization_started=finalization_started)
             if failed and job_type.startswith("video_"):
                 cleanup_video_artifacts(payload, mode="final_failure")
