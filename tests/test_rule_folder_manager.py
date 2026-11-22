@@ -79,7 +79,8 @@ def test_tenant_extra_retains_reactions_and_video_mode():
         rule_id=4, target_title="Видео", mode="video", folder_name=None,
         admin=False,
     )
-    assert "Длина видео" in text
+    assert "✍️ <b>Подпись</b>" in text
+    assert "Длина видео" not in text
     assert "Без папки" in text
     assert "user_rule_caption:4" in callbacks(kb)
     assert "user_rule_reactions:4" in callbacks(kb)
