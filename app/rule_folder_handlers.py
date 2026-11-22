@@ -232,6 +232,12 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
         tenant_id, admin = await _actor(ctx, user_id)
         data = (callback.data or "").split(":")
         action = data[1]
+        # A back/cancel/navigation press must invalidate pending text input.
+        if action not in {"create", "create_for", "rename", "search"}:
+            _inputs.pop(user_id, None)
+        # Only an active folder creation wizard may reserve a target folder.
+        if action not in {"add", "add_in"}:
+            clear_new_rule_folder(user_id)
         if action == "noop":
             await ctx.answer_callback_safe_once(callback)
             return
