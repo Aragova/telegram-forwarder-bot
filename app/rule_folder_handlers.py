@@ -374,7 +374,6 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 await _move(ctx, callback, tenant_id=tenant_id,
                             origin="b" + data[2])
             elif action in {"add", "add_in"}:
-                await ctx.answer_callback_safe_once(callback)
                 fid = int(data[2]) if action == "add_in" else 0
                 if fid:
                     if not await ctx.run_db(ctx.db.get_rule_folder, tenant_id, fid):
@@ -388,6 +387,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     if not source_rows:
                         await _error(ctx, callback, "Сначала добавьте источник")
                         return
+                    await ctx.answer_callback_safe_once(callback)
                     choices = [
                         ctx.channel_choice_cls(row["channel_id"], row["thread_id"],
                                                row["title"] or row["channel_id"])
