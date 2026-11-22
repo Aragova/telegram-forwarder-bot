@@ -535,7 +535,7 @@ async def _run_rescan_rule_fresh_job(
             await run_db(
                 db.finish_rule_rescan, rule_id,
                 was_active=(was_active if successful or not replay_committed else False),
-                owner_token=owner_token,
+                owner_token=owner_token, queue_rebuilt=successful,
             )
 
         await run_db(
@@ -629,6 +629,7 @@ async def _run_rescan_rule_keep_job(
             return
 
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
+        scan_complete = False
         try:
             old_next_run_at = await run_db(db.get_rule_next_run_at, rule_id)
             saved_first_pending_message_id = await run_db(
@@ -675,10 +676,12 @@ async def _run_rescan_rule_keep_job(
                 )
             invalidate_preview_cache(rule_id)
             await run_db(scheduler_service.set_next_run, rule_id, old_next_run_at)
+            scan_complete = True
         finally:
             await run_db(
                 db.finish_rule_rescan, rule_id,
                 was_active=was_active, owner_token=owner_token,
+                queue_rebuilt=scan_complete,
             )
 
         await run_db(
