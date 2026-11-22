@@ -191,6 +191,10 @@ async def _apply_move(ctx: Any, callback: CallbackQuery, *, tenant_id: int,
     except ValueError as exc:
         await _error(ctx, callback, str(exc))
         return
+    except Exception:
+        ctx.logger.exception("RULE_FOLDER_MOVE_FAILED | tenant_id=%s count=%s", tenant_id, len(rule_ids))
+        await _error(ctx, callback, "Не удалось переместить правила. Повторите действие.")
+        return
     if origin.startswith("s"):
         _origins[(callback.from_user.id, rule_ids[0])] = (
             folder_id if folder_id else 0, 0, False,
@@ -449,6 +453,9 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
         except (IndexError, ValueError, TypeError) as exc:
             ctx.logger.warning("RULE_FOLDER_UI_INVALID | action=%s user_id=%s error=%s", action, user_id, exc)
             await _error(ctx, callback, "Некорректные данные действия")
+        except Exception:
+            ctx.logger.exception("RULE_FOLDER_UI_FAILED | action=%s user_id=%s", action, user_id)
+            await _error(ctx, callback, "Не удалось выполнить действие. Повторите попытку.")
 
     @dp.message(lambda m: bool(getattr(m, "text", None))
                 and getattr(m.chat, "type", None) == "private"
@@ -485,8 +492,16 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 await ctx.send_message_safe(chat_id=message.chat.id, text=f"⚠️ {exc}. Повторите ввод.")
                 return
             if kind == "rename":
-                ok = await ctx.run_db(ctx.db.rename_rule_folder, tenant_id,
-                                      int(state["folder_id"]), name)
+                try:
+                    ok = await ctx.run_db(
+                        ctx.db.rename_rule_folder, tenant_id, int(state["folder_id"]), name,
+                    )
+                except Exception:
+                    ctx.logger.exception("RULE_FOLDER_RENAME_FAILED | tenant_id=%s", tenant_id)
+                    await ctx.send_message_safe(
+                        chat_id=message.chat.id, text="❌ Не удалось переименовать папку. Повторите попытку.",
+                    )
+                    return
                 if not ok:
                     await ctx.send_message_safe(chat_id=message.chat.id,
                                                 text="⚠️ Папка не найдена или такое название уже занято.")
@@ -497,7 +512,14 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     folder, page=int(state.get("list_page") or 0),
                 )
             else:
-                fid = await ctx.run_db(ctx.db.create_rule_folder, tenant_id, name)
+                try:
+                    fid = await ctx.run_db(ctx.db.create_rule_folder, tenant_id, name)
+                except Exception:
+                    ctx.logger.exception("RULE_FOLDER_CREATE_FAILED | tenant_id=%s", tenant_id)
+                    await ctx.send_message_safe(
+                        chat_id=message.chat.id, text="❌ Не удалось создать папку. Повторите попытку.",
+                    )
+                    return
                 if not fid:
                     await ctx.send_message_safe(chat_id=message.chat.id,
                                                 text="⚠️ Такая папка уже существует. Выберите другое название.")
@@ -520,6 +542,13 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                             await ctx.send_message_safe(
                                 chat_id=message.chat.id,
                                 text=f"⚠️ Папка создана, но правила не перемещены: {exc}",
+                            )
+                        except Exception:
+                            ctx.logger.exception("RULE_FOLDER_NEW_MOVE_FAILED | tenant_id=%s", tenant_id)
+                            await ctx.send_message_safe(
+                                chat_id=message.chat.id,
+                                text="⚠️ Папка создана, но перенос не удался. "
+                                     "Откройте папку и повторите перемещение.",
                             )
                 if moved and origin.startswith("s"):
                     _origins[(user_id, ids[0])] = (fid, 0, False)
