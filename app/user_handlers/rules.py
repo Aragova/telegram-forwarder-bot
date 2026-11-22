@@ -6,6 +6,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .context import UserHandlersContext
 from app import user_ui
 from app.rule_folders_ui import root_view, additional_functions_view
+from app.rule_folder_handlers import clear_new_rule_folder
 
 
 def build_user_rules_keyboard(rules, page: int = 0, *, rules_page_size: int = 8, compact_rule_text=None) -> InlineKeyboardMarkup:
@@ -72,6 +73,7 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
         user_id = callback.from_user.id if callback.from_user else 0
+        clear_new_rule_folder(user_id)
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         ctx.logger.info("пользователь открыл список правил user_id=%s tenant_id=%s", user_id, tenant_id)
         rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id) if hasattr(ctx.db, "get_rules_for_tenant") else []
