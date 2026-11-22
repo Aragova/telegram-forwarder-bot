@@ -496,27 +496,36 @@ async def _run_rescan_rule_fresh_job(
             )
             return
 
-        await run_db(db.clear_rule_deliveries, rule_id)
-
-        if rule.source_thread_id is None:
-            parsed_count = await parse_channel_history(
-                telethon_client,
-                db,
-                str(rule.source_id),
-                clean_start=True,
+        # Pause only this rule. Never delete shared source posts: doing so
+        # invalidates deliveries of *other* rules using the same channel.
+        was_active = await run_db(db.begin_rule_rescan, rule_id)
+        rescan_paused = True
+        try:
+            if rule.source_thread_id is None:
+                parsed_count = await parse_channel_history(
+                    telethon_client, db, str(rule.source_id), clean_start=False,
+                )
+            else:
+                parsed_count = await parse_group_history(
+                    telethon_client, db, str(rule.source_id),
+                    int(rule.source_thread_id), clean_start=False,
+                )
+            # Explicit replay: rotate stable attempt keys instead of deleting
+            # successful/accepted historical Telegram receipts.
+            archived_attempts, old_deliveries = await run_db(
+                db.reset_rule_history_for_replay, rule_id,
             )
-        else:
-            parsed_count = await parse_group_history(
-                telethon_client,
-                db,
-                str(rule.source_id),
-                int(rule.source_thread_id),
-                clean_start=True,
-            )
-
-        rebuilt_count = await run_db(db.backfill_rule, rule_id)
-        invalidate_preview_cache(rule_id)
-        await run_db(scheduler_service.set_next_run, rule_id, utc_now_iso())
+            rebuilt_count = await run_db(db.backfill_rule, rule_id)
+            invalidate_preview_cache(rule_id)
+            await run_db(scheduler_service.set_next_run, rule_id, utc_now_iso())
+            await run_db(db.finish_rule_rescan, rule_id, was_active=was_active)
+            rescan_paused = False
+        except Exception:
+            # After reset, automatic resume could publish a partially rebuilt
+            # queue. Leave the rule paused for operator investigation.
+            if rescan_paused and "old_deliveries" not in locals():
+                await run_db(db.finish_rule_rescan, rule_id, was_active=was_active)
+            raise
 
         await run_db(
             db.log_rule_change,
@@ -531,6 +540,8 @@ async def _run_rescan_rule_fresh_job(
                 "mode": "fresh",
                 "parsed_count": parsed_count,
                 "rebuilt_count": rebuilt_count,
+                "archived_attempts": archived_attempts,
+                "replayed_deliveries": old_deliveries,
                 "source_id": str(rule.source_id),
                 "source_thread_id": rule.source_thread_id,
             },
@@ -546,7 +557,8 @@ async def _run_rescan_rule_fresh_job(
             prefix_text=(
                 f"✅ Правило #{rule_id} пересканировано заново.\n"
                 f"Новых/обновлённых постов источника: {parsed_count}\n"
-                f"Очередь правила собрана заново: {rebuilt_count}"
+                f"Очередь правила собрана заново: {rebuilt_count}\\n"
+                f"Архивировано старых попыток: {archived_attempts}"
             ),
         )
 
@@ -605,50 +617,29 @@ async def _run_rescan_rule_keep_job(
             )
             return
 
-        saved_sent_message_ids = await run_db(db.get_rule_sent_message_ids, rule_id)
-        saved_first_pending_message_id = await run_db(db.get_rule_first_pending_message_id, rule_id)
         old_next_run_at = await run_db(db.get_rule_next_run_at, rule_id)
-
-        await run_db(db.clear_rule_deliveries, rule_id)
-
-        if rule.source_thread_id is None:
-            parsed_count = await parse_channel_history(
-                telethon_client,
-                db,
-                str(rule.source_id),
-                clean_start=True,
-            )
-        else:
-            parsed_count = await parse_group_history(
-                telethon_client,
-                db,
-                str(rule.source_id),
-                int(rule.source_thread_id),
-                clean_start=True,
-            )
-
-        rebuilt_count = await run_db(db.backfill_rule, rule_id)
-        invalidate_preview_cache(rule_id)
-
-        restored_sent_count = await run_db(
-            db.mark_rule_messages_sent,
-            rule_id=rule_id,
-            source_channel=str(rule.source_id),
-            source_thread_id=rule.source_thread_id,
-            message_ids=saved_sent_message_ids,
-        )
-
+        was_active = await run_db(db.begin_rule_rescan, rule_id)
+        try:
+            # The old implementation deleted/reinserted deliveries and broke
+            # their attempt-ledger links. Refresh in place instead.
+            if rule.source_thread_id is None:
+                parsed_count = await parse_channel_history(
+                    telethon_client, db, str(rule.source_id), clean_start=False,
+                )
+            else:
+                parsed_count = await parse_group_history(
+                    telethon_client, db, str(rule.source_id),
+                    int(rule.source_thread_id), clean_start=False,
+                )
+            rebuilt_count = await run_db(db.backfill_rule, rule_id)
+            invalidate_preview_cache(rule_id)
+            await run_db(scheduler_service.set_next_run, rule_id, old_next_run_at)
+        finally:
+            # This branch is non-destructive even if Telegram history parsing
+            # fails, so it is safe to restore the previous active state.
+            await run_db(db.finish_rule_rescan, rule_id, was_active=was_active)
+        restored_sent_count = 0  # No restoration needed: original sent rows survive.
         removed_before = 0
-        if saved_first_pending_message_id is not None:
-            removed_before = await run_db(
-                db.drop_rule_pending_before_message,
-                rule_id=rule_id,
-                source_channel=str(rule.source_id),
-                source_thread_id=rule.source_thread_id,
-                message_id=saved_first_pending_message_id,
-            )
-
-        await run_db(scheduler_service.set_next_run, rule_id, old_next_run_at)
 
         await run_db(
             db.log_rule_change,
@@ -656,8 +647,7 @@ async def _run_rescan_rule_keep_job(
             rule_id=rule_id,
             admin_id=admin_id,
             old_value={
-                "saved_sent_message_ids": saved_sent_message_ids,
-                "saved_first_pending_message_id": saved_first_pending_message_id,
+                "preserved_delivery_state": True,
                 "old_next_run_at": old_next_run_at,
             },
             new_value={
