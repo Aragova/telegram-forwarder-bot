@@ -647,6 +647,23 @@ class VideoProcessor:
             logger.error(f"❌ Ошибка получения информации о видео: {e}", exc_info=True)
             return None
 
+    async def _terminate_ffmpeg_process(self, process, *, grace_seconds=5.0):
+        """Terminate, kill if necessary, and always reap an orphaned subprocess."""
+        if process.returncode is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=grace_seconds)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
+
     # ==================== FFMPEG RUNNER ====================
 
     async def run_ffmpeg_with_progress(
@@ -763,40 +780,44 @@ class VideoProcessor:
                     if time.time() - last_progress_update > 300:
                         logger.error(f"   ⚠️ WATCHDOG: Нет прогресса >5 минут! Завершаю процесс.")
                         watchdog_triggered = True
-                        process.terminate()
-                        try:
-                            await asyncio.wait_for(process.wait(), timeout=5)
-                        except asyncio.TimeoutError:
-                            process.kill()
-                            await process.wait()
+                        await self._terminate_ffmpeg_process(process)
 
         watchdog_task = None
         if timeout is None:
             watchdog_task = asyncio.create_task(watchdog())
 
+        interrupted = False
         try:
             if timeout is None:
                 return_code = await process.wait()
             else:
                 return_code = await asyncio.wait_for(process.wait(), timeout=timeout)
         except asyncio.TimeoutError:
+            interrupted = True
             logger.error(f"   ❌ Таймаут {operation_name} (>{timeout} сек)")
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-            stdout_task.cancel()
-            stderr_task.cancel()
+            return False
+        except asyncio.CancelledError:
+            interrupted = True
+            logger.warning(
+                "FFMPEG_CANCELLED | operation=%s | action=terminate_and_reap_before_releasing_slot",
+                operation_name,
+            )
+            raise
+        finally:
+            # A cancelled asyncio.Task does not automatically terminate its
+            # subprocess. Keep stdout/stderr readers draining while we reap it
+            # so FFmpeg cannot hang on a full pipe during shutdown.
             if watchdog_task:
                 watchdog_task.cancel()
-            return False
-
-        if watchdog_task:
-            watchdog_task.cancel()
-        await stdout_task
-        await stderr_task
+            if process.returncode is None:
+                await self._terminate_ffmpeg_process(process)
+            if interrupted:
+                stdout_task.cancel()
+                stderr_task.cancel()
+            readers = [stdout_task, stderr_task]
+            if watchdog_task:
+                readers.append(watchdog_task)
+            await asyncio.gather(*readers, return_exceptions=True)
 
         stderr = await process.stderr.read()
         stderr_text = stderr.decode("utf-8", errors="ignore").strip()

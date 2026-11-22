@@ -1,0 +1,84 @@
+"""FFmpeg subprocess cleanup must complete when an owning worker is cancelled."""
+import asyncio
+import sys
+
+import pytest
+
+from app import video_processor as video_module
+from app.video_processor import VideoProcessor
+
+
+def test_ffmpeg_cancel_terminates_child_and_drains_reader_tasks(monkeypatch):
+    """Mimic watchdog loss of ownership during a hanging FFmpeg process."""
+    original = video_module.asyncio.create_subprocess_exec
+    started = asyncio.Event()
+    launched = []
+
+    async def fake_ffmpeg_spawn(*command, **kwargs):
+        # Run a real, harmless sleeping Python child instead of FFmpeg.
+        # The runner appends -progress / -nostats, which Python -c treats as argv.
+        proc = await original(
+            sys.executable, "-c", "import time; time.sleep(60)", **kwargs
+        )
+        launched.append(proc)
+        started.set()
+        return proc
+
+    monkeypatch.setattr(video_module.asyncio, "create_subprocess_exec", fake_ffmpeg_spawn)
+    processor = VideoProcessor.__new__(VideoProcessor)
+
+    async def scenario():
+        job = asyncio.create_task(
+            processor.run_ffmpeg_with_progress(
+                ["ffmpeg", "-i", "dummy.mp4"], "cancel regression",
+                timeout=600,
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=3.0)
+        job.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(job, timeout=8.0)
+        proc = launched[0]
+        assert proc.returncode is not None, "FFmpeg child survived worker cancellation"
+        assert await asyncio.wait_for(proc.wait(), timeout=0.5) == proc.returncode
+        # Reader/watchdog coroutines must have exited, not outlived the slot.
+        leaked = [
+            task for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and not task.done()
+            and getattr(task.get_coro(), "__qualname__", "").endswith(
+                ("run_ffmpeg_with_progress.<locals>.read_stdout",
+                 "run_ffmpeg_with_progress.<locals>.read_stderr")
+            )
+        ]
+        assert not leaked
+
+    asyncio.run(scenario())
+
+
+def test_ffmpeg_timeout_terminates_child(monkeypatch):
+    original = video_module.asyncio.create_subprocess_exec
+    launched = []
+
+    async def spawn(*command, **kwargs):
+        proc = await original(
+            sys.executable, "-c", "import time; time.sleep(60)", **kwargs
+        )
+        launched.append(proc)
+        return proc
+
+    monkeypatch.setattr(video_module.asyncio, "create_subprocess_exec", spawn)
+    processor = VideoProcessor.__new__(VideoProcessor)
+
+    async def scenario():
+        result = await asyncio.wait_for(
+            processor.run_ffmpeg_with_progress(
+                ["ffmpeg", "-i", "dummy.mp4"], "timeout regression",
+                timeout=0.05,
+            ),
+            timeout=8.0,
+        )
+        assert result is False
+        assert launched[0].returncode is not None
+
+    asyncio.run(scenario())
