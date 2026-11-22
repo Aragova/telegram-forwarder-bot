@@ -375,7 +375,10 @@ class RepostAlbumDelivery:
                         rule.id, delivery_ids, target_id, accepted_copy_sent_ids,
                     )
                     for disputed_id in delivery_ids:
-                        await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
+                        if idempotency_key and hasattr(owner.db, "mark_delivery_faulty_if_attempt_unverified"):
+                            await run_db(owner.db.mark_delivery_faulty_if_attempt_unverified, disputed_id, idempotency_key, error_text)
+                        else:
+                            await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
                     return False
         else:
             copy_result = {
@@ -902,7 +905,10 @@ class RepostAlbumDelivery:
                     rule.id, delivery_ids, target_id, reupload_candidate_sent_ids,
                 )
                 for disputed_id in delivery_ids:
-                    await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
+                    if idempotency_key and hasattr(owner.db, "mark_delivery_faulty_if_attempt_unverified"):
+                        await run_db(owner.db.mark_delivery_faulty_if_attempt_unverified, disputed_id, idempotency_key, error_text)
+                    else:
+                        await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
                 return False
 
         if reupload_result.get("transport_accepted") and not reupload_result.get("authoritative_resolved"):
