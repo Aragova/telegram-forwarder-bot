@@ -547,6 +547,16 @@ class RepostAlbumDelivery:
                         },
                     )
 
+                    if idempotency_key and hasattr(owner.db, "mark_delivery_attempt_verified"):
+                        retry_ids = normalize_valid_sent_message_ids(
+                            verified.get("sent_message_ids") or copy_retry_result.get("sent_message_ids") or []
+                        )
+                        if retry_ids:
+                            await run_db(
+                                owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                                sent_message_ids=retry_ids, telegram_method="copy_album_retry",
+                            )
+                            await run_db(owner.db.mark_delivery_attempt_verified, idempotency_key, sent_message_ids=retry_ids)
                     await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                     return True
         else:
@@ -796,6 +806,8 @@ class RepostAlbumDelivery:
                     },
                 )
 
+                if idempotency_key and sent_message_ids and hasattr(owner.db, "mark_delivery_attempt_verified"):
+                    await run_db(owner.db.mark_delivery_attempt_verified, idempotency_key, sent_message_ids=sent_message_ids)
                 if is_self_loop:
                     await run_db(
                         owner._mark_album_deliveries_sent_sync,
@@ -878,129 +890,20 @@ class RepostAlbumDelivery:
                 return True
 
             if upload_confirmed_by_send_result:
+                # Telethon accepted an album upload, but the channel has not
+                # confirmed all messages. Never count it as sent or resend it.
+                error_text = (
+                    "telethon_send_accepted_target_id_unresolved_non_retryable: "
+                    f"album verification incomplete (candidate_ids={reupload_candidate_sent_ids})"
+                )
                 logger.warning(
-                    "REUPLOAD_ALBUM | verify не подтвердил альбом, но отправка уже подтверждена Telethon | "
-                    "rule_id=%s | sent_count=%s | expected_count=%s | error=%s",
-                    rule.id,
-                    reupload_sent_count,
-                    expected_count,
-                    verified.get("error_text"),
+                    "REUPLOAD_ALBUM_ACCEPTED_UNVERIFIED | rule_id=%s | delivery_ids=%s | "
+                    "target_id=%s | candidate_ids=%s | action=manual_review_no_second_send",
+                    rule.id, delivery_ids, target_id, reupload_candidate_sent_ids,
                 )
-
-                await owner._log_delivery_pipeline_step(
-                    rule_id=rule.id,
-                    delivery_ids=delivery_ids,
-                    event_type="delivery_pipeline_step",
-                    pipeline_stage="verify_after_reupload",
-                    pipeline_result="soft_failed_upload_confirmed",
-                    source_channel=source_channel,
-                    target_id=target_id,
-                    source_message_ids=message_ids,
-                    error_text=verified.get("error_text"),
-                    extra={
-                        "verify_result": owner._serialize_pipeline_verify_result(verified),
-                        "sent_count": reupload_sent_count,
-                        "expected_count": expected_count,
-                        "sent_message_id": reupload_result.get("sent_message_id"),
-                        "source_message_ids": message_ids,
-                        "reason": "upload_confirmed_by_telethon_send_result",
-                    },
-                )
-
-                sent_message_ids = reupload_result.get("sent_message_ids") or []
-                logger.info(
-                    "DELIVERY_SENT_MESSAGE_IDS_EXTRACTED | rule_id=%s | delivery_id=%s | method=%s | source_message_ids=%s | sent_message_ids=%s | result_type=%s",
-                    rule.id,
-                    (delivery_ids[0] if delivery_ids else None),
-                    "reupload_album_unverified_success",
-                    message_ids,
-                    sent_message_ids,
-                    type(reupload_result).__name__,
-                )
-                valid_sent_message_ids = await owner._validate_sent_message_ids_for_delivery(
-                    rule_id=rule.id,
-                    delivery_id=(delivery_ids[0] if delivery_ids else None),
-                    source_channel=str(source_channel or ""),
-                    target_id=str(target_id),
-                    source_message_ids=message_ids,
-                    candidate_sent_message_ids=sent_message_ids,
-                    method="reupload_album_unverified_success",
-                )
-                sent_message_id = valid_sent_message_ids[0] if valid_sent_message_ids else None
-                reaction_message_id, reaction_target_reason = await owner._select_reaction_message_id(
-                    target_id=target_id,
-                    sent_message_ids=valid_sent_message_ids,
-                )
-
-                await owner._log_delivery_final_success(
-                    rule_id=rule.id,
-                    delivery_ids=delivery_ids,
-                    final_method="reupload_album_unverified_success",
-                    source_channel=source_channel,
-                    target_id=target_id,
-                    source_message_ids=message_ids,
-                    sent_message_id=sent_message_id,
-                    sent_message_ids=valid_sent_message_ids,
-                    reaction_message_id=reaction_message_id,
-                    verify_result=verified,
-                    extra={
-                        "caption_delivery_mode": caption_mode,
-                        "requires_builder": requires_builder,
-                        "reaction_target_reason": reaction_target_reason,
-                        "verify_ok": False,
-                        "verify_count": verified.get("count"),
-                        "verify_grouped_id": verified.get("grouped_id"),
-                        "verify_first_message_id": verified.get("first_message_id"),
-                        "first_sent_message_id": reupload_result.get("sent_message_id"),
-                        "candidate_sent_message_ids": sent_message_ids,
-                        "valid_sent_message_ids": valid_sent_message_ids,
-                        "sent_count": reupload_sent_count,
-                        "expected_count": expected_count,
-                    },
-                )
-
-                if reaction_message_id:
-                    try:
-                        logger.info(
-                            "REACTION_AFTER_REUPLOAD_UNVERIFIED_VALIDATED | start | rule_id=%s | delivery_id=%s | target_id=%s | message_id=%s | valid_sent_message_ids=%s",
-                            rule.id,
-                            (delivery_ids[0] if delivery_ids else None),
-                            target_id,
-                            reaction_message_id,
-                            valid_sent_message_ids,
-                        )
-                        await owner._add_reaction_for_rule_if_possible(
-                            rule=rule,
-                            target_id=target_id,
-                            sent_message_id=reaction_message_id,
-                            source_channel=str(source_channel or ""),
-                            source_message_ids=message_ids,
-                            delivery_id=(delivery_ids[0] if delivery_ids else None),
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "REACTION_AFTER_REUPLOAD_UNVERIFIED_VALIDATED | failed | rule_id=%s | delivery_id=%s | target_id=%s | message_id=%s | error=%s",
-                            rule.id,
-                            (delivery_ids[0] if delivery_ids else None),
-                            target_id,
-                            reaction_message_id,
-                            exc,
-                        )
-                else:
-                    logger.warning(
-                        "REACTION_SKIPPED_UNVERIFIED_ALBUM_SENT_IDS | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | method=%s | candidate_sent_message_ids=%s | source_message_ids=%s | reason=%s",
-                        rule.id,
-                        (delivery_ids[0] if delivery_ids else None),
-                        source_channel,
-                        target_id,
-                        "reupload_album_unverified_success",
-                        sent_message_ids,
-                        message_ids,
-                        verified.get("error_text") or "verify_album_sent_ids_not_found",
-                    )
-
-                await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
-                return True
+                for disputed_id in delivery_ids:
+                    await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
+                return False
 
         if reupload_result.get("transport_accepted") and not reupload_result.get("authoritative_resolved"):
             error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
