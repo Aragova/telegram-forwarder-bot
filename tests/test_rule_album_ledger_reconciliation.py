@@ -298,24 +298,28 @@ def test_rescan_batch_refresh_skips_recreating_old_delivery_rows():
 
 
 class RescanCursor:
-    def __init__(self, *, active=True, busy=False):
-        self.active = active
-        self.busy = busy
-        self.result = None
-        self.rowcount = 1
-        self.sql = []
+    def __init__(self, *, active=True, busy=False, owner=None):
+        self.active, self.busy, self.owner = active, busy, owner
+        self.result, self.rowcount, self.sql = None, 1, []
 
-    def execute(self, sql, _args=None):
-        query = " ".join(str(sql).split())
-        self.sql.append(query)
+    def execute(self, sql, args=None):
+        q = " ".join(str(sql).split())
+        self.sql.append(q)
         self.rowcount = 1
-        if query.startswith("SELECT is_active FROM routing"):
-            self.result = {"is_active": self.active}
-        elif "AS busy" in query:
+        if q.startswith("SELECT is_active, rescan_owner_token FROM routing"):
+            self.result = {"is_active": self.active, "rescan_owner_token": self.owner}
+        elif "AS busy" in q:
             self.result = {"busy": self.busy}
-        elif query.startswith("UPDATE delivery_attempts SET idempotency_key"):
+        elif "SET is_active = FALSE, rescan_owner_token =" in q:
+            self.owner, self.active = args[0], False
+        elif "SET is_active = %s, rescan_owner_token = NULL" in q:
+            if self.owner != args[2]:
+                self.rowcount = 0
+            else:
+                self.active, self.owner = args[0], None
+        elif q.startswith("UPDATE delivery_attempts SET idempotency_key"):
             self.rowcount = 12
-        elif query.startswith("DELETE FROM deliveries WHERE rule_id"):
+        elif q.startswith("DELETE FROM deliveries WHERE rule_id"):
             self.rowcount = 33
         else:
             self.result = None
@@ -324,8 +328,8 @@ class RescanCursor:
         return self.result
 
 
-def _rescan_repo(*, active=True, busy=False):
-    cursor = RescanCursor(active=active, busy=busy)
+def _rescan_repo(*, active=True, busy=False, owner=None):
+    cursor = RescanCursor(active=active, busy=busy, owner=owner)
     conn = FakeConnection(cursor)
     repo = object.__new__(PostgresRepository)
 
@@ -342,38 +346,120 @@ def test_rescan_refuses_jobs_already_in_flight():
     with pytest.raises(RuntimeError, match="незавершённые"):
         repo.begin_rule_rescan(214)
     assert conn.commits == 0
-    assert not any("UPDATE routing" in q for q in cursor.sql)
+    assert cursor.owner is None
 
 
-def test_rescan_pauses_only_selected_rule():
+def test_rescan_second_owner_rejected_across_modes():
     repo, cursor, conn = _rescan_repo()
-    assert repo.begin_rule_rescan(214) is True
-    assert conn.commits == 1
-    assert any(
-        "UPDATE routing SET is_active = FALSE WHERE id = %s" in q
-        for q in cursor.sql
-    )
+    was_active, owner = repo.begin_rule_rescan(214)
+    assert was_active is True and len(owner) == 32
+    assert cursor.owner == owner and cursor.active is False
+    with pytest.raises(RuntimeError, match="уже выполняется"):
+        repo.begin_rule_rescan(214)
+    with pytest.raises(RuntimeError, match="Владелец"):
+        repo.finish_rule_rescan(214, was_active=True, owner_token="wrong")
+    assert cursor.owner == owner and cursor.active is False
+    repo.finish_rule_rescan(214, was_active=was_active, owner_token=owner)
+    assert cursor.owner is None and cursor.active is True
 
 
-def test_explicit_replay_archives_attempts_and_resets_only_its_rule():
-    repo, cursor, conn = _rescan_repo(active=False)
-    assert repo.reset_rule_history_for_replay(214) == (12, 33)
+def test_explicit_replay_archives_attempts_with_matching_owner():
+    repo, cursor, conn = _rescan_repo(active=False, owner="valid")
+    assert repo.reset_rule_history_for_replay(214, owner_token="valid") == (12, 33)
     assert conn.commits == 1
-    assert any(
-        "UPDATE delivery_attempts SET idempotency_key" in q
-        for q in cursor.sql
-    )
-    assert any(
-        "DELETE FROM deliveries WHERE rule_id = %s" in q
-        for q in cursor.sql
-    )
+    assert any("UPDATE delivery_attempts SET idempotency_key" in q for q in cursor.sql)
+    assert any("DELETE FROM deliveries WHERE rule_id = %s" in q for q in cursor.sql)
     assert not any("DELETE FROM posts" in q for q in cursor.sql)
-    assert not any("DELETE FROM delivery_attempts" in q for q in cursor.sql)
 
 
-def test_explicit_replay_rejects_running_rule():
-    repo, cursor, conn = _rescan_repo(active=True)
-    with pytest.raises(RuntimeError, match="остановлено"):
-        repo.reset_rule_history_for_replay(214)
+@pytest.mark.parametrize("active,token", [(True, "valid"), (False, "wrong"), (False, "")])
+def test_replay_refuses_active_or_wrong_owner(active, token):
+    repo, cursor, conn = _rescan_repo(active=active, owner="valid")
+    with pytest.raises(RuntimeError, match="владеть остановленным"):
+        repo.reset_rule_history_for_replay(214, owner_token=token)
     assert conn.commits == 0
-    assert not any("UPDATE delivery_attempts" in q for q in cursor.sql)
+
+
+def test_backfill_filters_deleted_source_posts():
+    class Cursor:
+        rowcount = 1
+        def __init__(self):
+            self.inserted = []
+        def execute(self, sql, params=None):
+            if "INSERT INTO deliveries" in str(sql):
+                self.inserted.append(params[1])
+        def fetchall(self):
+            return [{"id": 1, "message_id": 101},
+                    {"id": 2, "message_id": 102},
+                    {"id": 3, "message_id": 103}]
+    class Conn:
+        def __init__(self):
+            self.cur = Cursor()
+        @contextmanager
+        def cursor(self):
+            yield self.cur
+    repo = object.__new__(PostgresRepository)
+    repo._is_self_target_echo_post_for_rule_conn = lambda *a, **kw: False
+    conn = Conn()
+    result = repo._backfill_deliveries_for_rule_conn(
+        conn, 214, "-100123", None, allowed_message_ids={101, 103},
+    )
+    assert result == 2 and conn.cur.inserted == [1, 3]
+
+
+def test_stale_pending_prune_is_rule_scoped():
+    class PruneCursor:
+        rowcount = 3
+        def __init__(self):
+            self.calls = []
+        def execute(self, sql, params=None):
+            self.calls.append((" ".join(str(sql).split()), params))
+    cur = PruneCursor()
+    connection = FakeConnection(cur)
+    repo = object.__new__(PostgresRepository)
+    @contextmanager
+    def connect():
+        yield connection
+    repo.connect = connect
+    assert repo.drop_rule_pending_not_in_message_ids(
+        214, source_channel="-100123", source_thread_id=None,
+        seen_message_ids={101, 103},
+    ) == 3
+    query, params = cur.calls[0]
+    assert "DELETE FROM deliveries d" in query
+    assert "d.rule_id = %s" in query and "d.status = 'pending'" in query
+    assert "p.source_thread_id IS NOT DISTINCT FROM %s" in query
+    assert params == (214, "-100123", None, [101, 103])
+
+
+def test_parser_seen_ids_ignore_deleted_source_and_fail_closed(monkeypatch):
+    import asyncio
+    from app import parser
+    class Client:
+        async def get_entity(self, value):
+            return value
+        async def iter_messages(self, *_args, **_kwargs):
+            for mid in (101, 103):
+                yield SimpleNamespace(
+                    id=mid, text="ok", message="ok", raw_text="ok",
+                    entities=[], media=None, date=None, grouped_id=None,
+                )
+    class Database:
+        def save_post_batch(self, batch, **_kwargs):
+            return len(batch)
+    count, seen = asyncio.run(parser.parse_channel_history(
+        Client(), Database(), "-100123",
+        preserve_existing_deliveries=True, collect_seen_message_ids=True,
+    ))
+    assert count == 2 and seen == {101, 103}
+    original = parser.message_to_content_dict
+    def fail_one(message):
+        if message.id == 103:
+            raise RuntimeError("bad message")
+        return original(message)
+    monkeypatch.setattr(parser, "message_to_content_dict", fail_one)
+    with pytest.raises(RuntimeError, match="неполного пересканирования"):
+        asyncio.run(parser.parse_channel_history(
+            Client(), Database(), "-100123",
+            preserve_existing_deliveries=True, collect_seen_message_ids=True,
+        ))
