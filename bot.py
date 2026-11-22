@@ -7256,7 +7256,13 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
         await answer_callback_safe_once(callback, "❌ Не удалось удалить правило", show_alert=True)
         await edit_message_text_safe(
             message=callback.message,
-            text="❌ Не удалось удалить правило",
+            text=(
+                f"❌ Не удалось удалить правило #{rule_id}.\n\n"
+                "Повторите операцию из дополнительных функций либо вернитесь к списку."
+            ),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [rule_ui_button("⬅️ К списку правил", f"rf:back:{rule_id}")],
+            ]),
         )
 
 @dp.message(
