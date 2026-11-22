@@ -178,7 +178,7 @@ def folder_delete_confirmation_view(folder: dict):
     text = (
         "⚠️ <b>УДАЛИТЬ ПАПКУ?</b>\n\n"
         f"📁 <b>{escape(str(folder['name']))}</b>\n\n"
-        "❗ Удалится только папка. Все правила останутся рабочими "
+        "❗ Удалится только папка. Сами правила останутся рабочими "
         "и будут видны в разделе «Без папки»."
     )
     return text, InlineKeyboardMarkup(inline_keyboard=[
