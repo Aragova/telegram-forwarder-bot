@@ -491,6 +491,18 @@ def build_sender_telethon_media_policy() -> TransportPolicy:
     )
 
 
+def build_sender_telethon_upload_policy() -> TransportPolicy:
+    """Serialize long media uploads independently of short text writes."""
+    return TransportPolicy(
+        max_attempts=1,
+        min_interval_sec=0.0,
+        max_concurrency=1,
+        retry_unknown_errors=False,
+        retry_non_idempotent_writes=False,
+        retry_unknown_operations=False,
+    )
+
+
 def build_reaction_policy() -> TransportPolicy:
     return TransportPolicy(
         max_attempts=1,
