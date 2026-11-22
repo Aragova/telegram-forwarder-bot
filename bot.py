@@ -3077,7 +3077,7 @@ async def handle_list_rules(message: Message):
         )
         if cleanup and bot:
             try:
-                await bot.delete_message(message.chat.id, cleanup.message_id)
+                await try_delete_message_safe(message.chat.id, cleanup.message_id)
             except Exception:
                 pass
         return
