@@ -76,6 +76,50 @@ def test_premium_video_resolves_actual_target_id_not_returned_370(tmp_path):
     assert fake.send_file_calls == 1
 
 
+def test_premium_video_does_not_match_different_media_with_same_caption(tmp_path):
+    fake = FakeTelethon(history=[_video_message(2183, document_id=999)])
+    result = asyncio.run(_processor(fake)._send_video_via_telethon(
+        TARGET, None, str(tmp_path / "video.mp4"), None, "caption",
+    ))
+    assert result.authoritative_resolved is False
+    assert result.authoritative_message_id is None
+    assert fake.send_file_calls == 1
+
+
+def test_strong_resolver_retries_reads_until_video_is_visible():
+    from app.telethon_authoritative_resolver import TelethonAuthoritativeMessageResolver
+
+    class DelayedHistory(FakeTelethon):
+        history_reads = 0
+
+        async def get_messages(self, entity, ids=None, limit=None):
+            if limit == 50:
+                self.history_reads += 1
+                if self.history_reads < 3:
+                    return []
+            return await super().get_messages(entity, ids=ids, limit=limit)
+
+    fake = DelayedHistory(history=[_video_message(2183)])
+    sent = asyncio.run(fake.send_file())
+    async def check():
+        resolver = TelethonAuthoritativeMessageResolver(fake)
+        return await resolver.resolve_authoritative_single_message(
+            target_entity=TARGET, target_id=TARGET, sent=sent,
+            expected_text="caption",
+            before_max_message_id=2182,
+            send_started_at=datetime.now(timezone.utc),
+            send_finished_at=datetime.now(timezone.utc),
+            target_is_broadcast_channel=True,
+            require_strong_media_match=True,
+            history_poll_delays=(0, 0, 0, 0),
+        )
+    result = asyncio.run(check())
+    assert result.ok is True
+    assert result.authoritative_message_id == 2183
+    assert fake.history_reads == 3
+
+
+
 def test_premium_video_rejects_ambiguous_identical_posts(tmp_path):
     fake = FakeTelethon(history=[_video_message(2183), _video_message(2184)])
     result = asyncio.run(_processor(fake)._send_video_via_telethon(
