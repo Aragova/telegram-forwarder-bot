@@ -1535,12 +1535,26 @@ class SenderService:
             if not rule:
                 raise RuntimeError(f"Правило #{rule_id} не найдено для video_delivery")
             outcome = await self._deliver_single_video(rule, int(delivery_id), int(message_id), str(source_channel), str(target_id), target_thread_id)
+            if isinstance(outcome, dict) and outcome.get("accepted_unresolved"):
+                # The media may already be published. Never turn this into a
+                # retryable download/send job or a second upload.
+                if has_attempt_ledger:
+                    await run_db(
+                        self.db.mark_delivery_attempt_accepted, idempotency_key,
+                        sent_message_ids=normalize_valid_sent_message_ids(outcome.get("candidate_sent_message_ids") or []),
+                        telegram_method="video_delivery_unresolved",
+                    )
+                error = str(outcome.get("error_text") or "video_send_accepted_target_id_unresolved_non_retryable")
+                logger.warning("VIDEO_DELIVERY_ACCEPTED_UNRESOLVED | rule_id=%s | delivery_id=%s | action=manual_review_no_resend", rule_id, delivery_id)
+                return {"ok": False, "retryable": False, "accepted": True, "transport_accepted": True, "authoritative_resolved": False, "error_text": error, "manual_review_required": True}
             ok = bool(outcome.get("ok")) if isinstance(outcome, dict) else bool(outcome)
             raw_sent_ids = outcome.get("sent_message_ids") if isinstance(outcome, dict) else None
             valid_sent_ids = normalize_valid_sent_message_ids(raw_sent_ids)
             post_send_accepted = bool(valid_sent_ids)
             if valid_sent_ids and has_attempt_ledger:
                 await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=valid_sent_ids, telegram_method="video_delivery")
+                if ok and hasattr(self.db, "mark_delivery_attempt_verified"):
+                    await run_db(self.db.mark_delivery_attempt_verified, idempotency_key, sent_message_ids=valid_sent_ids)
                 logger.info("DELIVERY_ATTEMPT_ACCEPTED | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s | sent_message_ids=%s", delivery_id, rule_id, target_id, idempotency_key, valid_sent_ids)
             elif raw_sent_ids is not None and has_attempt_ledger:
                 logger.warning("DELIVERY_ATTEMPT_ACCEPTED_SKIPPED_INVALID_IDS | operation=video_send | job_type=video_delivery | delivery_id=%s | idempotency_key=%s | raw_sent_message_ids=%s", delivery_id, idempotency_key, raw_sent_ids)
