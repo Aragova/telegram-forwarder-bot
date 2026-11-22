@@ -268,3 +268,23 @@ def test_folder_settings_and_catalog_back_remember_both_pages():
     assert "rf:delete:7:2" in callbacks(delete_kb)
     _, back = folder_handlers._input_prompt("rename", folder_id=7, page=2)
     assert back == "rf:folder_settings:7:2"
+
+
+def test_destructive_rule_actions_require_explicit_two_stage_confirmation():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    rollback_start = source.index("async def rollback_handler(")
+    rollback_end = source.index("@dp.callback_query", rollback_start)
+    rollback = source[rollback_start:rollback_end]
+    assert 'if not (callback.data or "").startswith("rollback_execute:")' in rollback
+    assert 'f"rollback_execute:{rule_id}"' in rollback
+    assert 'style="danger"' in rollback
+    assert "db.rollback_last_delivery" in rollback
+
+    delete_start = source.index("async def handle_delete_rule_callback(")
+    delete_end = source.index("@dp.message(", delete_start)
+    delete_rule = source[delete_start:delete_end]
+    assert 'if not (callback.data or "").startswith("delete_rule_execute:")' in delete_rule
+    assert 'f"delete_rule_execute:{rule_id}"' in delete_rule
+    assert 'style="danger"' in delete_rule
+    assert "db.delete_rule_with_audit" in delete_rule
+    assert 'f"rf:back:{rule_id}"' in delete_rule
