@@ -5548,6 +5548,151 @@ class PostgresRepository(RepositoryProtocol):
             conn.commit()
             return updated
 
+    def get_pending_album_ledger_candidates(self, rule_id: int) -> list[dict[str, Any]]:
+        """Read-only candidates; never infer success from accepted ledger alone."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT d.id AS delivery_id, d.status AS delivery_status,
+                           p.message_id, p.source_channel, p.source_thread_id,
+                           p.media_group_id, r.target_id, r.target_thread_id,
+                           a.id AS attempt_id, a.idempotency_key, a.status AS attempt_status,
+                           a.sent_message_ids_json
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
+                    JOIN delivery_attempts a ON a.idempotency_key =
+                        ('rule:' || r.id::text || ':target:' || r.target_id
+                         || ':media_group:' || p.media_group_id || ':album')
+                    WHERE d.rule_id = %s AND d.status = 'pending'
+                      AND r.mode = 'repost'
+                      AND p.media_group_id IS NOT NULL
+                      AND a.operation_kind = 'album'
+                      AND a.status IN ('accepted', 'verified')
+                    ORDER BY p.id, p.message_id
+                    """,
+                    (int(rule_id),),
+                )
+                return list(cur.fetchall())
+
+    def reconcile_confirmed_album_ledger(
+        self, *, rule_id: int, attempt_id: int, source_channel: str,
+        source_thread_id: int | None, media_group_id: str,
+        source_message_ids: list[int], target_message_ids: list[int],
+    ) -> int:
+        """Atomically promote one *externally verified* complete album.
+
+        Telegram reading and media/caption checks happen before this call.
+        All DB state and ownership are rechecked under row locks. Never
+        modifies processing/leased jobs, and never resends a Telegram post.
+        """
+        from app.delivery_idempotency import build_delivery_idempotency_key
+
+        source_ids = [int(x) for x in source_message_ids]
+        target_ids = [int(x) for x in target_message_ids]
+        if (not source_ids or len(source_ids) != len(target_ids)
+                or len(set(source_ids)) != len(source_ids)
+                or len(set(target_ids)) != len(target_ids)
+                or any(x <= 0 for x in source_ids + target_ids)):
+            raise ValueError("Invalid/partial album IDs")
+        if source_ids != sorted(source_ids) or target_ids != sorted(target_ids):
+            raise ValueError("Album IDs must be in source/target order")
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT target_id, mode FROM routing WHERE id = %s FOR UPDATE",
+                    (int(rule_id),),
+                )
+                rule = cur.fetchone()
+                if not rule or str(rule["mode"]) != "repost":
+                    raise RuntimeError("Rule missing or not in repost mode")
+                target_id = str(rule["target_id"])
+                key = build_delivery_idempotency_key(
+                    operation_kind="album", rule_id=rule_id,
+                    target_id=target_id, media_group_id=media_group_id,
+                )
+                cur.execute(
+                    """
+                    SELECT id, status, operation_kind, target_id, idempotency_key,
+                           sent_message_ids_json
+                    FROM delivery_attempts WHERE id = %s FOR UPDATE
+                    """,
+                    (int(attempt_id),),
+                )
+                attempt = cur.fetchone()
+                if not attempt or attempt["idempotency_key"] != key:
+                    raise RuntimeError("Attempt key changed; reconciliation aborted")
+                if (attempt["status"] not in ("accepted", "verified")
+                        or attempt["operation_kind"] != "album"
+                        or str(attempt["target_id"]) != target_id):
+                    raise RuntimeError("Attempt is not a recoverable album")
+                expected = _safe_json_loads(attempt["sent_message_ids_json"], [])
+                if expected != target_ids:
+                    raise RuntimeError("Accepted Telegram IDs changed; reconciliation aborted")
+
+                cur.execute(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM jobs
+                        WHERE payload_json->>'rule_id' = %s
+                          AND status IN ('pending', 'leased', 'processing', 'retry')
+                    ) AS busy
+                    """,
+                    (str(rule_id),),
+                )
+                if cur.fetchone()["busy"]:
+                    raise RuntimeError("Rule has a live job; no ledger recovery while sending")
+                cur.execute(
+                    """
+                    SELECT d.id, d.status, p.message_id
+                    FROM deliveries d JOIN posts p ON p.id = d.post_id
+                    WHERE d.rule_id = %s
+                      AND p.source_channel = %s
+                      AND p.source_thread_id IS NOT DISTINCT FROM %s
+                      AND p.media_group_id = %s
+                    ORDER BY p.message_id
+                    FOR UPDATE OF d
+                    """,
+                    (int(rule_id), str(source_channel), source_thread_id, str(media_group_id)),
+                )
+                rows = cur.fetchall()
+                if ([int(x["message_id"]) for x in rows] != source_ids
+                        or any(x["status"] != "pending" for x in rows)):
+                    raise RuntimeError("Album changed or partially processed; no mutation")
+
+                delivery_ids = [int(x["id"]) for x in rows]
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts
+                    SET status = 'verified', delivery_id = %s,
+                        source_message_ids_json = %s::jsonb,
+                        updated_at = NOW(), error_text = NULL
+                    WHERE id = %s
+                      AND status IN ('accepted', 'verified')
+                    """,
+                    (delivery_ids[0], _json_dumps(delivery_ids), int(attempt_id)),
+                )
+                if cur.rowcount != 1:
+                    raise RuntimeError("Attempt promotion lost a race")
+                for did, tid in zip(delivery_ids, target_ids):
+                    cur.execute(
+                        """
+                        UPDATE deliveries
+                        SET status = 'sent', sent_at = NOW(), error_text = NULL,
+                            sent_message_id = %s, sent_message_ids_json = %s::jsonb,
+                            target_id_snapshot = %s,
+                            delivery_method = 'reconciled_verified_album_ledger'
+                        WHERE id = %s AND status = 'pending'
+                        """,
+                        (int(tid), _json_dumps(target_ids), target_id, int(did)),
+                    )
+                    if cur.rowcount != 1:
+                        raise RuntimeError("Album row changed concurrently; rolled back")
+            conn.commit()
+        return len(delivery_ids)
+
     def mark_delivery_attempt_failed(self, idempotency_key: str, *, status: str, error_text: str) -> bool:
         normalized = str(status or "")
         if normalized not in {"failed_before_send", "failed_after_send"}:
