@@ -17,7 +17,7 @@ def rule_matches_query(rule, query: str) -> bool:
     needle = str(query or "").strip().casefold()
     if not needle:
         return False
-    id_match = re.fullmatch(r"#\\s*(\\d+)", needle)
+    id_match = re.fullmatch(r"#\s*(\d+)", needle)
     if id_match:
         return int(rule.id) == int(id_match.group(1))
     fields = (
