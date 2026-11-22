@@ -2,7 +2,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from aiogram.exceptions import TelegramEntityTooLarge
+from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from aiogram.methods import SendVideo
 
 from app.sender import SenderService
@@ -71,6 +71,79 @@ def _build_service(repo: FakeRepo) -> SenderService:
     service = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=repo)
     service.video_processor = FakeVideoProcessor()
     return service
+
+
+def test_pre_send_missing_video_fallback_does_not_claim_delivery(tmp_path: Path):
+    """Codex P1: a fallback must not leave a 'sending' write in the ledger."""
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=73, rule_id=1, tenant_id=1, target_id="-10073",
+        processed_video_path=str(tmp_path / "absent.mp4"),
+        artifact_version=1, pipeline_version=1,
+    ))
+    assert result["fallback_to_legacy"] is True
+    assert not any(c[0] in ("create", "sending", "accepted") for c in repo.calls)
+
+
+def test_unsupported_artifact_version_falls_back_before_acquiring_attempt(tmp_path: Path):
+    repo = FakeRepo()
+    service = _build_service(repo)
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"data")
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=74, rule_id=1, tenant_id=1, target_id="-10074",
+        processed_video_path=str(clip), artifact_version=2, pipeline_version=1,
+    ))
+    assert result["fallback_to_legacy"] is True
+    assert not any(c[0] in ("create", "sending", "accepted") for c in repo.calls)
+
+
+def test_missing_video_metadata_does_not_claim_attempt(tmp_path: Path):
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _no_metadata(*_args, **_kwargs):
+        return None
+
+    service.video_processor.get_video_info = _no_metadata
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"data")
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=75, rule_id=1, tenant_id=1, target_id="-10075",
+        processed_video_path=str(clip), artifact_version=1, pipeline_version=1,
+    ))
+    assert result["fallback_to_legacy"] is True
+    assert not any(c[0] in ("create", "sending", "accepted") for c in repo.calls)
+
+
+def test_bot_api_retry_after_is_rejected_and_scheduled_safely(tmp_path: Path):
+    """Codex P2: Telegram refused the send, so mark failed_before_send."""
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _rate_limited(*_args, **_kwargs):
+        raise TelegramRetryAfter(
+            method=SendVideo(chat_id=123, video="clip_id"),
+            message="Too Many Requests", retry_after=37,
+        )
+
+    service.video_processor.send_with_retry = _rate_limited
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"data")
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=76, rule_id=1, tenant_id=1, target_id="-10076",
+        processed_video_path=str(clip), artifact_version=1, pipeline_version=1,
+    ))
+    assert result["ok"] is False
+    assert result["retryable"] is True
+    assert result["accepted"] is False
+    assert result["retry_after_seconds"] == 37
+    assert result["fallback_to_legacy"] is False
+    assert any(c[0] == "sending" for c in repo.calls)
+    assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
+    assert not any(c[0] in ("accepted", "verified", "mark_delivery_sent") for c in repo.calls)
 
 
 def test_video_send_cache_hit_skips_actual_send(tmp_path: Path):
