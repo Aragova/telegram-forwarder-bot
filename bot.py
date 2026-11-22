@@ -504,11 +504,13 @@ async def _run_rescan_rule_fresh_job(
             if rule.source_thread_id is None:
                 parsed_count = await parse_channel_history(
                     telethon_client, db, str(rule.source_id), clean_start=False,
+                    preserve_existing_deliveries=True,
                 )
             else:
                 parsed_count = await parse_group_history(
                     telethon_client, db, str(rule.source_id),
                     int(rule.source_thread_id), clean_start=False,
+                    preserve_existing_deliveries=True,
                 )
             # Explicit replay: rotate stable attempt keys instead of deleting
             # successful/accepted historical Telegram receipts.
@@ -634,11 +636,13 @@ async def _run_rescan_rule_keep_job(
             if rule.source_thread_id is None:
                 parsed_count = await parse_channel_history(
                     telethon_client, db, str(rule.source_id), clean_start=False,
+                    preserve_existing_deliveries=True,
                 )
             else:
                 parsed_count = await parse_group_history(
                     telethon_client, db, str(rule.source_id),
                     int(rule.source_thread_id), clean_start=False,
+                    preserve_existing_deliveries=True,
                 )
             rebuilt_count = await run_db(db.backfill_rule, rule_id)
             removed_before = 0
