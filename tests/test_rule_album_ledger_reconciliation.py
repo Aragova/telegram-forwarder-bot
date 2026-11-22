@@ -295,3 +295,85 @@ def test_rescan_batch_refresh_skips_recreating_old_delivery_rows():
     )[0]
     assert fresh.count("preserve_existing_deliveries=True") == 2
     assert keep.count("preserve_existing_deliveries=True") == 2
+
+
+class RescanCursor:
+    def __init__(self, *, active=True, busy=False):
+        self.active = active
+        self.busy = busy
+        self.result = None
+        self.rowcount = 1
+        self.sql = []
+
+    def execute(self, sql, _args=None):
+        query = " ".join(str(sql).split())
+        self.sql.append(query)
+        self.rowcount = 1
+        if query.startswith("SELECT is_active FROM routing"):
+            self.result = {"is_active": self.active}
+        elif "AS busy" in query:
+            self.result = {"busy": self.busy}
+        elif query.startswith("UPDATE delivery_attempts SET idempotency_key"):
+            self.rowcount = 12
+        elif query.startswith("DELETE FROM deliveries WHERE rule_id"):
+            self.rowcount = 33
+        else:
+            self.result = None
+
+    def fetchone(self):
+        return self.result
+
+
+def _rescan_repo(*, active=True, busy=False):
+    cursor = RescanCursor(active=active, busy=busy)
+    conn = FakeConnection(cursor)
+    repo = object.__new__(PostgresRepository)
+
+    @contextmanager
+    def connect():
+        yield conn
+
+    repo.connect = connect
+    return repo, cursor, conn
+
+
+def test_rescan_refuses_jobs_already_in_flight():
+    repo, cursor, conn = _rescan_repo(busy=True)
+    with pytest.raises(RuntimeError, match="незавершённые"):
+        repo.begin_rule_rescan(214)
+    assert conn.commits == 0
+    assert not any("UPDATE routing" in q for q in cursor.sql)
+
+
+def test_rescan_pauses_only_selected_rule():
+    repo, cursor, conn = _rescan_repo()
+    assert repo.begin_rule_rescan(214) is True
+    assert conn.commits == 1
+    assert any(
+        "UPDATE routing SET is_active = FALSE WHERE id = %s" in q
+        for q in cursor.sql
+    )
+
+
+def test_explicit_replay_archives_attempts_and_resets_only_its_rule():
+    repo, cursor, conn = _rescan_repo(active=False)
+    assert repo.reset_rule_history_for_replay(214) == (12, 33)
+    assert conn.commits == 1
+    assert any(
+        "UPDATE delivery_attempts SET idempotency_key" in q
+        for q in cursor.sql
+    )
+    assert any(
+        "DELETE FROM deliveries WHERE rule_id = %s" in q
+        for q in cursor.sql
+    )
+    assert not any("DELETE FROM posts" in q for q in cursor.sql)
+    assert not any("DELETE FROM delivery_attempts" in q for q in cursor.sql)
+
+
+def test_explicit_replay_rejects_running_rule():
+    repo, cursor, conn = _rescan_repo(active=True)
+    with pytest.raises(RuntimeError, match="остановлено"):
+        repo.reset_rule_history_for_replay(214)
+    assert conn.commits == 0
+    assert not any("UPDATE delivery_attempts" in q for q in cursor.sql)
