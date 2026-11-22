@@ -536,26 +536,22 @@ class RepostSingleDelivery:
                     "SELF_LOOP_REACTION_TARGET_RESOLVED | rule_id=%s | delivery_id=%s | source_message_ids=%s | accepted_target_message_ids=%s | reaction_target_message_id=%s | method=reupload_single",
                     rule.id, delivery_id, source_message_ids, accepted_target_message_ids, reaction_target_message_id,
                 )
-            reaction_step = await owner._run_post_send_step_safe(
-                step_name="reaction_after_reupload_single",
-                rule_id=rule.id,
-                delivery_id=delivery_id,
-                idempotency_key=idempotency_key,
-                accepted_sent_message_ids=accepted_target_message_ids,
-                coro_factory=lambda: owner._add_reaction_for_rule_if_possible(
+            try:
+                reaction_result = await owner._add_reaction_for_rule_if_possible(
                     rule=rule,
                     target_id=target_id,
                     sent_message_id=authoritative_sent_message_id,
                     source_channel=str(source_channel or ""),
                     source_message_ids=source_message_ids,
                     delivery_id=delivery_id,
-                ),
-            )
-            reaction_result = reaction_step.get("result") if reaction_step.get("ok") else None
-            if is_self_loop and _reaction_applied_or_enqueued(reaction_result):
-                logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, reaction_target_message_id)
-            elif is_self_loop:
-                logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_target_message_id, reaction_step.get("error") or reaction_result)
+                )
+                if is_self_loop and _reaction_applied_or_enqueued(reaction_result):
+                    logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, reaction_target_message_id)
+                elif is_self_loop:
+                    logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_target_message_id, reaction_result)
+            except Exception as exc:
+                if is_self_loop:
+                    logger.warning("SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | reaction_target_message_id=%s | error=%s", rule.id, reaction_target_message_id, exc)
 
             await owner._log_delivery_final_success(
                 rule_id=rule.id,
