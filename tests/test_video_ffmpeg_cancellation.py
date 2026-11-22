@@ -133,3 +133,69 @@ def test_thumbnail_cancel_drains_large_stderr_until_reaped(tmp_path, monkeypatch
         assert children[0].returncode is not None
 
     asyncio.run(check())
+
+
+
+@pytest.mark.parametrize("operation", ["runner", "thumbnail"])
+def test_second_cancellation_cannot_orphan_ffmpeg(tmp_path, monkeypatch, operation):
+    """A graceful-shutdown cancel during SIGTERM grace must still kill and reap FFmpeg."""
+    import textwrap
+    from pathlib import Path
+
+    original_spawn = video_module.asyncio.create_subprocess_exec
+    ready = tmp_path / f"ready_{operation}.flag"
+    program = textwrap.dedent(
+        f"""
+        import pathlib, signal, time
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        pathlib.Path({str(ready)!r}).write_text('ready')
+        while True:
+            time.sleep(0.05)
+        """
+    )
+    children = []
+
+    async def launch(*args, **kwargs):
+        proc = await original_spawn(sys.executable, "-c", program, **kwargs)
+        children.append(proc)
+        return proc
+
+    monkeypatch.setattr(video_module.asyncio, "create_subprocess_exec", launch)
+    processor = VideoProcessor.__new__(VideoProcessor)
+
+    async def scenario():
+        termination_started = asyncio.Event()
+        real_terminate = processor._terminate_ffmpeg_process
+
+        async def quick_terminate(proc):
+            termination_started.set()
+            return await real_terminate(proc, grace_seconds=0.25)
+
+        processor._terminate_ffmpeg_process = quick_terminate
+        if operation == "runner":
+            task = asyncio.create_task(
+                processor.run_ffmpeg_with_progress(
+                    ["ffmpeg", "-i", "fake.mp4"], "double cancel regression",
+                    timeout=600,
+                )
+            )
+        else:
+            video = tmp_path / "source.mp4"
+            video.write_bytes(b"dummy")
+            task = asyncio.create_task(
+                processor.create_thumbnail_fast(str(video), str(tmp_path / "thumb.jpg"))
+            )
+        for _ in range(150):
+            if ready.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert ready.exists(), "Subprocess did not install SIGTERM ignore handler"
+        task.cancel()
+        await asyncio.wait_for(termination_started.wait(), timeout=2.0)
+        task.cancel()  # second cancellation while the SIGTERM grace wait is active
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=3.0)
+        assert children[0].returncode is not None, "Child survived repeated cancellation"
+        assert await asyncio.wait_for(children[0].wait(), timeout=0.5) == children[0].returncode
+
+    asyncio.run(scenario())

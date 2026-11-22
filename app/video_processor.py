@@ -647,6 +647,28 @@ class VideoProcessor:
             logger.error(f"❌ Ошибка получения информации о видео: {e}", exc_info=True)
             return None
 
+    async def _await_critical_cleanup(self, cleanup_coro):
+        """Do not release the worker slot while subprocess cleanup is still running.
+
+        A second cancel() may arrive during SIGTERM grace period (heartbeat
+        followed by graceful shutdown). Keep a separate cleanup Task alive
+        through repeated cancellation, then propagate cancellation.
+        """
+        cleanup_task = asyncio.create_task(cleanup_coro)
+        was_cancelled = False
+        while True:
+            try:
+                await asyncio.shield(cleanup_task)
+                break
+            except asyncio.CancelledError:
+                was_cancelled = True
+                if cleanup_task.done():
+                    break
+        result = cleanup_task.result()
+        if was_cancelled:
+            raise asyncio.CancelledError
+        return result
+
     async def _terminate_ffmpeg_process(self, process, *, grace_seconds=5.0):
         """Terminate, kill if necessary, and always reap an orphaned subprocess."""
         if process.returncode is None:
@@ -804,20 +826,22 @@ class VideoProcessor:
             )
             raise
         finally:
-            # A cancelled asyncio.Task does not automatically terminate its
-            # subprocess. Keep stdout/stderr readers draining while we reap it
-            # so FFmpeg cannot hang on a full pipe during shutdown.
-            if watchdog_task:
-                watchdog_task.cancel()
-            if process.returncode is None:
-                await self._terminate_ffmpeg_process(process)
-            if interrupted:
-                stdout_task.cancel()
-                stderr_task.cancel()
-            readers = [stdout_task, stderr_task]
-            if watchdog_task:
-                readers.append(watchdog_task)
-            await asyncio.gather(*readers, return_exceptions=True)
+            # This cleanup task MUST finish even if the same worker receives a
+            # second cancellation. PIPE readers stay alive during reap.
+            async def cleanup():
+                if watchdog_task:
+                    watchdog_task.cancel()
+                if process.returncode is None:
+                    await self._terminate_ffmpeg_process(process)
+                if interrupted:
+                    stdout_task.cancel()
+                    stderr_task.cancel()
+                readers = [stdout_task, stderr_task]
+                if watchdog_task:
+                    readers.append(watchdog_task)
+                await asyncio.gather(*readers, return_exceptions=True)
+
+            await self._await_critical_cleanup(cleanup())
 
         stderr = await process.stderr.read()
         stderr_text = stderr.decode("utf-8", errors="ignore").strip()
@@ -1109,12 +1133,16 @@ class VideoProcessor:
             await asyncio.wait_for(asyncio.shield(communicate_task), timeout=60)
         except asyncio.TimeoutError:
             logger.warning("THUMBNAIL_FFMPEG_TIMEOUT | path=%s", thumbnail_path)
-            await self._terminate_ffmpeg_process(process)
-            await communicate_task
+            async def cleanup_timeout():
+                await self._terminate_ffmpeg_process(process)
+                await communicate_task
+            await self._await_critical_cleanup(cleanup_timeout())
             return False
         except asyncio.CancelledError:
-            await self._terminate_ffmpeg_process(process)
-            await communicate_task
+            async def cleanup_cancel():
+                await self._terminate_ffmpeg_process(process)
+                await communicate_task
+            await self._await_critical_cleanup(cleanup_cancel())
             raise
 
         if process.returncode == 0 and os.path.isfile(thumbnail_path):
