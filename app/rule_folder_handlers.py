@@ -42,6 +42,12 @@ def clear_new_rule_folder(user_id: int) -> None:
     _pending_new_rule.pop(int(user_id), None)
 
 
+def clear_folder_input(user_id: int | None) -> None:
+    """Cancel in-progress search/name prompts when leaving their screen."""
+    if user_id is not None:
+        _inputs.pop(int(user_id), None)
+
+
 def consume_new_rule_folder(user_id: int) -> int | None:
     pending = _pending_new_rule.pop(int(user_id), None)
     if not pending or monotonic() - pending[1] > 900:
@@ -192,7 +198,7 @@ async def _apply_move(ctx: Any, callback: CallbackQuery, *, tenant_id: int,
                        folder_id=folder_id if folder_id else 0, page=0)
 
 
-def _input_prompt(kind: str, *, folder_id: int = 0, origin: str = ""):
+def _input_prompt(kind: str, *, folder_id: int = 0, origin: str = "", page: int = 0):
     if kind == "search":
         return (
             "🔎 <b>ПОИСК ПРАВИЛА</b>\n\n"
@@ -212,7 +218,7 @@ def _input_prompt(kind: str, *, folder_id: int = 0, origin: str = ""):
         "📁 <b>НОВАЯ ПАПКА</b>\n\n"
         "Придумайте название для организации правил.\n\n"
         "✍️ Отправьте название длиной от 1 до 64 символов.",
-        f"rf:move_back:{origin}" if origin else "rf:root",
+        f"rf:move_page:{origin}:{page}" if origin else "rf:root",
     )
 
 
@@ -279,7 +285,8 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 ctx.user_states.pop(user_id, None)
                 text, back = _input_prompt("search")
                 _inputs[user_id] = {"kind": "search", "chat_id": callback.message.chat.id,
-                                    "message_id": callback.message.message_id}
+                                    "message_id": callback.message.message_id,
+                                    "origin_message": callback.message}
                 await _render(ctx, callback, text, InlineKeyboardMarkup(inline_keyboard=[
                     [_button("⬅️ Назад", back)],
                 ]))
@@ -292,13 +299,15 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                                folder_id=-1, page=int(data[2]), search=term)
             elif action in {"create", "create_for", "rename"}:
                 origin = data[2] if action == "create_for" else ""
+                folder_page = int(data[3]) if action == "create_for" and len(data) > 3 else 0
                 fid = int(data[2]) if action == "rename" else 0
                 kind = "rename" if action == "rename" else "create"
                 ctx.user_states.pop(user_id, None)
-                text, back = _input_prompt(kind, folder_id=fid, origin=origin)
+                text, back = _input_prompt(kind, folder_id=fid, origin=origin, page=folder_page)
                 _inputs[user_id] = {"kind": kind, "folder_id": fid, "origin": origin,
                                     "chat_id": callback.message.chat.id,
-                                    "message_id": callback.message.message_id}
+                                    "message_id": callback.message.message_id,
+                                    "origin_message": callback.message}
                 await _render(ctx, callback, text, InlineKeyboardMarkup(inline_keyboard=[
                     [_button("⬅️ Отмена", back)],
                 ]))
@@ -424,7 +433,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
     async def folder_input(message: Message):
         user_id = int(message.from_user.id)
         state = _inputs.get(user_id)
-        if not state:
+        if not state or state.get("chat_id") != message.chat.id:
             return
         tenant_id, admin = await _actor(ctx, user_id)
         raw = (message.text or "").strip()
@@ -467,33 +476,55 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                                                 text="⚠️ Такая папка уже существует. Выберите другое название.")
                     return
                 origin = str(state.get("origin") or "")
+                moved = False
+                ids = []
                 if origin:
                     if origin.startswith("s"):
                         ids = [int(origin[1:])]
-                    else:
+                    elif origin.startswith("b"):
                         selection = _selected.get(user_id)
-                        ids = sorted(selection[1]) if selection and selection[0] == int(origin[1:]) else []
+                        if selection and selection[0] == int(origin[1:]):
+                            ids = sorted(selection[1])
                     if ids:
                         try:
                             await ctx.run_db(ctx.db.assign_rules_to_folder, tenant_id, ids, fid)
+                            moved = True
                         except ValueError as exc:
-                            await ctx.send_message_safe(chat_id=message.chat.id,
-                                                        text=f"⚠️ Папка создана, но правила не перемещены: {exc}")
-                        _selected.pop(user_id, None)
-                folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
-                text, kb = folder_index_view(folders, 0)
+                            await ctx.send_message_safe(
+                                chat_id=message.chat.id,
+                                text=f"⚠️ Папка создана, но правила не перемещены: {exc}",
+                            )
+                if moved and origin.startswith("s"):
+                    rule = await ctx.run_db(ctx.db.get_rule, ids[0])
+                    if rule:
+                        text, kb = additional_functions_view(
+                            rule_id=ids[0],
+                            target_title=str(rule.target_title or rule.target_id),
+                            mode=str(rule.mode or "repost"),
+                            folder_name=name, admin=admin,
+                        )
+                    else:
+                        folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
+                        text, kb = folder_index_view(folders, 0)
+                elif moved and origin.startswith("b"):
+                    _selected.pop(user_id, None)
+                    own_rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+                    text, kb = rule_catalog_view(
+                        [r for r in own_rules if int(r.id) in set(ids)],
+                        folder_id=fid, folder_name=name, page=0,
+                    )
+                else:
+                    folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
+                    text, kb = folder_index_view(folders, 0)
             _inputs.pop(user_id, None)
         # Remove the message with user input; preserve a single navigable UI screen.
-        try:
-            await ctx.get_bot().delete_message(message.chat.id, message.message_id)
-        except Exception:
-            pass
-        try:
-            await ctx.get_bot().edit_message_text(
-                chat_id=state["chat_id"], message_id=state["message_id"],
-                text=text, parse_mode="HTML", reply_markup=kb,
+        await ctx.try_delete_message_safe(message.chat.id, message.message_id)
+        edited = await ctx.edit_message_text_safe(
+            message=state["origin_message"], text=text,
+            parse_mode="HTML", reply_markup=kb,
+        )
+        if not edited:
+            ctx.logger.warning("RULE_FOLDER_UI_EDIT_FAILED | user_id=%s", user_id)
+            await ctx.send_message_safe(
+                chat_id=message.chat.id, text=text, parse_mode="HTML", reply_markup=kb,
             )
-        except Exception as exc:
-            ctx.logger.warning("RULE_FOLDER_UI_EDIT_FAILED | user_id=%s error=%s", user_id, exc)
-            await ctx.send_message_safe(chat_id=message.chat.id, text=text,
-                                        parse_mode="HTML", reply_markup=kb)
