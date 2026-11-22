@@ -285,3 +285,95 @@ def test_custom_text_send_has_caption_instead_of_source():
     assert result.authoritative_message_id == 801
     assert owner.called["text"] == "NEW TEXT"
     assert isinstance(owner.called["entities"][0], MessageEntityBold)
+
+
+def test_bot_api_entities_are_normalized_without_losing_identity():
+    from app.delivery_content_helpers import normalize_caption_entities
+    entities = normalize_caption_entities([
+        {"type": "strikethrough", "offset": 0, "length": 3},
+        {"type": "expandable_blockquote", "offset": 0, "length": 4},
+        {"type": "text_mention", "offset": 5, "length": 4, "user_id": 123456},
+    ])
+    assert entities == [
+        {"type": "strike", "offset": 0, "length": 3},
+        {"type": "expandable_blockquote", "offset": 0, "length": 4},
+        {"type": "text_link", "offset": 5, "length": 4, "url": "tg://user?id=123456"},
+    ]
+
+
+def test_premium_telethon_and_botapi_entities_survive_roundtrip():
+    from telethon.tl import types as tl
+    from app.delivery_content_helpers import normalize_caption_entities
+    from app.sender_primitives import _telethon_entities_to_bot
+    text = "Abcd text user"
+    content = {"text": text, "entities": normalize_caption_entities([
+        {"type": "strikethrough", "offset": 0, "length": 4},
+        {"type": "spoiler", "offset": 5, "length": 4},
+        {"type": "expandable_blockquote", "offset": 0, "length": 9},
+        {"type": "text_mention", "offset": 10, "length": 4, "user_id": 123456},
+        {"type": "pre", "offset": 0, "length": 4, "language": "python"},
+    ])}
+    raw_text, telethon_entities = SenderContentHelpers(owner=None).build_text_and_entities_from_content(content)
+    assert raw_text == text
+    assert any(isinstance(e, tl.MessageEntityStrike) for e in telethon_entities)
+    assert any(isinstance(e, tl.MessageEntitySpoiler) for e in telethon_entities)
+    assert any(isinstance(e, tl.MessageEntityBlockquote) and e.collapsed for e in telethon_entities)
+    assert any(isinstance(e, tl.MessageEntityTextUrl) and e.url == "tg://user?id=123456"
+               for e in telethon_entities)
+    bot = _telethon_entities_to_bot(telethon_entities)
+    types = {e.type for e in bot}
+    assert {"strikethrough", "spoiler", "expandable_blockquote", "text_link", "pre"} <= types
+    assert next(e for e in bot if e.type == "pre").language == "python"
+
+
+def test_plain_caption_never_runs_implicit_markdown_in_telethon(monkeypatch):
+    from app import sender_telethon_helpers as module
+    class Client:
+        sent = None
+        async def send_message(self, **kwargs):
+            self.sent = kwargs
+            return SimpleNamespace(id=812)
+    class Resolver:
+        def __init__(self, _client): pass
+        async def get_before_max_message_id(self, *_args): return 811
+        async def resolve_authoritative_single_message(self, **kwargs):
+            assert kwargs["expected_text"] == "Literal **stars**"
+            return SimpleNamespace(ok=True, authoritative_message_id=812,
+                                   resolution_method="direct", error_text=None)
+    monkeypatch.setattr(module, "TelethonAuthoritativeMessageResolver", Resolver)
+    client = Client()
+    owner = SimpleNamespace(
+        telethon=client,
+        _clone_telethon_entities=SenderContentHelpers(owner=None).clone_telethon_entities,
+    )
+    sender = module.SenderTelethonHelpers(owner)
+    async def target(_id): return "-100123", True
+    sender._resolve_target_entity_and_broadcast_flag = target
+    outcome = asyncio.run(sender.send_text_via_telethon(
+        target_id="-100123", target_thread_id=None,
+        text="Literal **stars**", entities=[], literal_caption=True,
+    ))
+    assert outcome.authoritative_message_id == 812
+    assert client.sent["message"] == "Literal **stars**"
+    assert "parse_mode" in client.sent and client.sent["parse_mode"] is None
+
+
+def test_original_source_text_is_never_used_by_custom_single_fallback():
+    source = Path("app/repost_single_delivery.py").read_text(encoding="utf-8")
+    assert "custom_caption if custom_caption is not None" in source
+    assert "custom_caption_media_send_failed_no_text_only_downgrade" in source
+    assert "media_downgrade_blocked" in source
+    assert 'parse_mode=None if custom_caption is not None else "HTML"' in source
+    assert "entities\": bot_entities" in source
+
+
+def test_custom_caption_media_send_disables_markdown_on_both_paths():
+    source = Path("app/sender_telethon_helpers.py").read_text(encoding="utf-8")
+    single = source.split("async def send_file_via_telethon(", 1)[1].split(
+        "async def send_album_via_telethon(", 1
+    )[0]
+    album = source.split("async def send_album_via_telethon(", 1)[1].split(
+        "async def verify_album_delivery(", 1
+    )[0]
+    assert single.count('send_kwargs["parse_mode"] = None') == 2
+    assert album.count('send_kwargs["parse_mode"] = None') == 2
