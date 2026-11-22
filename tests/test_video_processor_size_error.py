@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
+from telethon.errors import FloodWaitError
 from aiogram.methods import SendVideo
 
 from app.video_processor import VideoProcessor
@@ -66,3 +67,35 @@ def test_send_with_retry_propagates_rejected_429_without_second_post(tmp_path):
         ))
     assert err.value.retry_after == 21
     assert bot.calls == 1
+
+
+def test_send_with_retry_propagates_telethon_floodwait(tmp_path):
+    processor = VideoProcessor.__new__(VideoProcessor)
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"video")
+
+    class ThrottledTelethon:
+        calls = 0
+
+        async def send_file(self, **_kwargs):
+            self.calls += 1
+            raise FloodWaitError(request=None, capture=120)
+
+        async def get_entity(self, _):
+            return type("Target", (), {"broadcast": True, "megagroup": False})()
+
+        async def get_messages(self, _entity, ids=None, limit=None):
+            return []
+
+    client = ThrottledTelethon()
+    processor.telethon = client
+
+    with pytest.raises(FloodWaitError) as err:
+        asyncio.run(processor.send_with_retry(
+            None, destination_channel=-100123, target_thread_id=None,
+            video_path=str(clip), thumbnail_path=None,
+            caption="", duration=10,
+            caption_send_mode="premium", max_retries=3,
+        ))
+    assert err.value.seconds == 120
+    assert client.calls == 1
