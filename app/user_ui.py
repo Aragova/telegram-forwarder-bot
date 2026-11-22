@@ -897,8 +897,10 @@ def build_user_rule_card_text(snapshot: dict[str, Any]) -> str:
         f"📍 Позиция: {position}",
     ]
     if mode_raw == "repost":
-        caption_mode = user_rule_caption_mode_label(snapshot.get("caption_delivery_mode"))
-        lines.extend(["", "──────────────", "", f"✍️ Подпись: {caption_mode}"])
+        has_caption = bool(str(snapshot.get("repost_caption") or "").strip())
+        caption_enabled = has_caption and bool(snapshot.get("repost_caption_enabled"))
+        caption_state = "🟢 Моя" if caption_enabled else ("⚪ OFF · оригинал" if has_caption else "Оригинал")
+        lines.extend(["", "──────────────", "", f"✍️ Подпись: {caption_state}"])
     return "\n".join(lines)
 
 
@@ -922,6 +924,8 @@ def build_user_rule_card_keyboard(*, rule_id: int, is_active: bool, schedule_mod
                 build_button(text="✍️ Подпись", callback_data=f"user_rule_caption:{rule_id}"),
             ]
         )
+    else:
+        rows.append([build_button(text="✍️ Подпись", callback_data=f"user_rule_repost_caption:{rule_id}")])
     rows.append([build_button(text="⚙️ Дополнительные функции", callback_data=f"user_rule_extra:{rule_id}", style="primary")])
     rows.append(
         [
@@ -947,8 +951,6 @@ def build_user_rule_extra_keyboard(*, rule_id: int, mode: str) -> InlineKeyboard
     is_video = str(mode or "repost").strip().lower() == "video"
     target_mode = "repost" if is_video else "video"
     rows.append([build_button(text=("🔁 Сменить режим: Репост" if is_video else "🔁 Сменить режим: Видеоредактор"), callback_data=f"user_rule_switch_mode:{rule_id}:{target_mode}")])
-    if not is_video:
-        rows.append([build_button(text="✍️ Режим подписи", callback_data=f"user_rule_caption_mode:{rule_id}")])
     rows.extend(
         [
             [build_button(text="⚙️ Реакции", callback_data=f"user_rule_reactions:{rule_id}")],
