@@ -62,3 +62,4 @@ class AdminHandlersContext:
     stop_forwarding: Callable[..., Any] | None = None
     is_posting_active: Callable[[], bool] | None = None
     ensure_rule_callback_access: Callable[..., Any] | None = None
+    show_admin_rule_manager: Callable[..., Any] | None = None
