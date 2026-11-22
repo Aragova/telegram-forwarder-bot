@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
+from telethon.errors import FloodWaitError
 from aiogram.methods import SendVideo
 
 from app.sender import SenderService
@@ -170,6 +171,28 @@ def test_bot_api_retry_after_is_rejected_and_scheduled_safely(tmp_path: Path):
     assert any(c[0] == "sending" for c in repo.calls)
     assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
     assert not any(c[0] in ("accepted", "verified", "mark_delivery_sent") for c in repo.calls)
+
+
+def test_telethon_flood_wait_is_retryable_and_not_accepted(tmp_path: Path):
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _flood(*_args, **_kwargs):
+        raise FloodWaitError(request=None, capture=120)
+
+    service.video_processor.send_with_retry = _flood
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"data")
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=78, rule_id=1, tenant_id=1, target_id="-10078",
+        processed_video_path=str(clip), artifact_version=1, pipeline_version=1,
+    ))
+    assert result["ok"] is False
+    assert result["retryable"] is True
+    assert result["accepted"] is False
+    assert result["retry_after_seconds"] == 120
+    assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
+    assert not any(c[0] in ("accepted", "mark_delivery_sent", "verified") for c in repo.calls)
 
 
 def test_video_send_cache_hit_skips_actual_send(tmp_path: Path):
