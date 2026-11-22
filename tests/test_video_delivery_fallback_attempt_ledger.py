@@ -11,6 +11,7 @@ class FakeRepo:
     def __init__(self):
         self.calls = []
         self.attempt = None
+        self.faulty = []
 
     def get_delivery_attempt_by_idempotency_key(self, _key):
         return self.attempt
@@ -29,6 +30,10 @@ class FakeRepo:
 
     def mark_delivery_attempt_failed(self, key, **kwargs):
         self.calls.append(("failed", key, kwargs))
+        return True
+
+    def mark_delivery_faulty(self, delivery_id, error_text):
+        self.faulty.append((delivery_id, error_text))
         return True
 
     def get_rule(self, _rule_id):
@@ -58,6 +63,15 @@ def test_video_delivery_cache_hit_skips_actual_send():
         raise AssertionError("video_delivery should not send on cache hit")
 
     service._deliver_single_video = _should_not_call  # type: ignore[method-assign]
+
+    async def _confirm(**kwargs):
+        return list(kwargs["candidate_sent_message_ids"])
+
+    async def _react(**_kwargs):
+        return {"applied": True}
+
+    service._confirm_target_delivery_message_ids_with_retry = _confirm
+    service._add_reaction_for_rule_if_possible = _react
     ok = asyncio.run(
         service.execute_video_delivery_from_job(
             rule_id=1,
