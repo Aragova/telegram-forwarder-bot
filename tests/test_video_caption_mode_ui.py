@@ -1,4 +1,4 @@
-"""Video UI offers explicit local Bot API and Telethon choices only."""
+"""Video caption UI offers two formatting choices, never a transport selector."""
 from pathlib import Path
 
 
@@ -10,6 +10,12 @@ def test_video_mode_menu_has_two_buttons_and_repost_keeps_auto():
     assert "set_video_caption_mode_builder_first" in menu
     assert "set_video_caption_mode_auto" not in menu
     assert "🤖 Авто" not in text
+    assert "🎛 <b>Режим подписи</b>" in text
+    assert "обычные смайлики" in text
+    assert "premium emoji" in text
+    assert "Telegram Bot API" not in text
+    assert "Telethon" not in text
+    assert 'text="🎛 Режим подписи"' in source
     assert "set_caption_mode_auto" in source
     assert "def handle_set_caption_mode_auto(" not in source
 

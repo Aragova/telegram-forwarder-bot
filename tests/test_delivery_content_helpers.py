@@ -196,3 +196,20 @@ def test_video_only_two_modes_and_legacy_auto_compat():
     assert ordinary["caption_delivery_mode"] == "copy_first"
     assert premium["selected_mode"] == "premium"
     assert premium["caption_delivery_mode"] == "builder_first"
+
+
+
+def test_plain_caption_keeps_unicode_emoji_but_premium_keeps_entities():
+    caption = "Привет 🙂 ❤️ Тест"
+    custom = [{"type": "custom_emoji", "offset": 7, "length": 2, "custom_emoji_id": "123456"}]
+    basic = build_video_caption_delivery_payload(
+        caption=caption, raw_caption_entities=custom, caption_delivery_mode="copy_first",
+    )
+    premium = build_video_caption_delivery_payload(
+        caption=caption, raw_caption_entities=custom, caption_delivery_mode="builder_first",
+    )
+    assert basic["caption"] == caption
+    assert basic["selected_mode"] == "plain"
+    assert premium["caption"] == caption
+    assert premium["selected_mode"] == "premium"
+    assert json.loads(premium["caption_entities_json"]) == custom

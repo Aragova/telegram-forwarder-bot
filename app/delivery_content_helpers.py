@@ -185,7 +185,8 @@ def build_video_caption_delivery_payload(
     requires_premium = video_caption_requires_premium(caption_entities)
     has_any_entities = bool(caption_entities)
 
-    # An explicit choice determines the sender, regardless of formatting.
+    # The selected caption formatting mode is explicit; Auto no longer chooses it.
+    # The delivery implementation uses a compatible sending backend for each mode.
     selected_mode = "premium" if normalized_delivery_mode == "builder_first" else "plain"
 
     caption_entities_json = None

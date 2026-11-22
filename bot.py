@@ -1348,7 +1348,7 @@ def build_video_caption_menu_keyboard(rule_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="🎛 Отправка видео",
+                    text="🎛 Режим подписи",
                     callback_data=f"video_caption_mode_menu:{rule_id}",
                 )
             ],
@@ -1458,12 +1458,12 @@ def build_video_caption_mode_menu_text(rule_id: int) -> str:
     )
 
     return (
-        "🎛 <b>Отправка видео</b>\n\n"
-        "Выберите, кто будет публиковать обработанные видео.\n\n"
+        "🎛 <b>Режим подписи</b>\n\n"
+        "Выберите, как сохранить оформление подписи под видео.\n\n"
         "⚡ <b>Обычный</b>\n"
-        "Отправка ботом через локальный Telegram Bot API. Простая подпись без premium-оформления.\n\n"
+        "Простая подпись: текст и обычные смайлики. Premium-оформление не сохраняется.\n\n"
         "💎 <b>Премиум</b>\n"
-        "Отправка через подключённый Telegram-аккаунт (Telethon). Сохраняет жирный текст, ссылки и custom emoji.\n\n"
+        "Сохраняется оригинальное оформление: жирный текст, ссылки, premium emoji и другие элементы форматирования.\n\n"
         f"Текущий режим: {current_mode}"
     )
 
