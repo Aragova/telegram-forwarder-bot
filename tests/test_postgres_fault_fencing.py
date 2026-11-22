@@ -75,21 +75,27 @@ def test_accepted_unverified_processing_delivery_can_be_fenced_faulty():
 
 
 class OrphanCursor:
-    def __init__(self, *, status="sending", has_live_owner=False, process_count=2):
+    def __init__(self, *, status="sending", has_live_owner=False, process_count=2,
+                 current_job_owner="w", current_job_status="processing"):
         self.status = status
         self.has_live_owner = has_live_owner
         self.process_count = process_count
+        self.current_job_owner = current_job_owner
+        self.current_job_status = current_job_status
         self.phase = ""
         self.rowcount = 0
         self.queries = []
 
     def execute(self, sql, params=()):
         self.queries.append((sql, params))
-        if "FROM delivery_attempts" in sql and "FOR UPDATE" in sql:
+        if "FROM jobs WHERE id = %s FOR UPDATE" in sql:
+            self.phase = "current_job"
+        elif "FROM delivery_attempts" in sql and "FOR UPDATE" in sql:
             self.phase = "attempt"
         elif "has_live_owner" in sql:
             self.phase = "owner"
             assert "lease_until > NOW()" in sql
+            assert "j.updated_at > NOW()" in sql
             assert "j.payload_json->'delivery_ids'" in sql
             assert "j.id <> %s" in sql
         elif "UPDATE deliveries" in sql:
@@ -102,6 +108,8 @@ class OrphanCursor:
             self.rowcount = 1
 
     def fetchone(self):
+        if self.phase == "current_job":
+            return {"status": self.current_job_status, "locked_by": self.current_job_owner}
         if self.phase == "attempt":
             return {"status": self.status}
         if self.phase == "owner":
@@ -109,8 +117,9 @@ class OrphanCursor:
         return None
 
 
-def orphan_case(status, has_live_owner=False, process_count=2):
-    cur = OrphanCursor(status=status, has_live_owner=has_live_owner, process_count=process_count)
+def orphan_case(status, has_live_owner=False, process_count=2, current_job_owner="w", current_job_status="processing"):
+    cur = OrphanCursor(status=status, has_live_owner=has_live_owner, process_count=process_count,
+                       current_job_owner=current_job_owner, current_job_status=current_job_status)
     conn = FakeConnection(cur)
     repo = PostgresRepository.__new__(PostgresRepository)
 
@@ -122,6 +131,7 @@ def orphan_case(status, has_live_owner=False, process_count=2):
     count = repo.finalize_orphaned_repost_attempt(
         idempotency_key="rule:214:target:-100:album",
         job_id=62102,
+        worker_id="w",
         rule_id=214,
         delivery_ids=[171, 172],
         error_text="manual review after unresolved send",
@@ -151,3 +161,16 @@ def test_orphan_recovery_does_not_downgrade_already_sent_deliveries():
     count, cur = orphan_case("accepted", process_count=0)
     assert count == 0
     assert cur.status == "accepted"
+
+
+def test_orphan_recovery_refuses_job_reassigned_to_other_worker():
+    count, cur = orphan_case("sending", current_job_owner="replacement")
+    assert count == 0
+    assert len(cur.queries) == 1
+    assert not any("UPDATE deliveries" in sql for sql, _ in cur.queries)
+
+
+def test_orphan_recovery_refuses_job_no_longer_processing():
+    count, cur = orphan_case("sending", current_job_status="retry")
+    assert count == 0
+    assert len(cur.queries) == 1
