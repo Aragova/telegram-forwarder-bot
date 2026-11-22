@@ -5425,9 +5425,12 @@ class PostgresRepository(RepositoryProtocol):
                     UPDATE delivery_attempts
                     SET status = 'verified', sent_message_ids_json = %s::jsonb, error_text = NULL, updated_at = NOW()
                     WHERE idempotency_key = %s
-                      AND status IN ('accepted', 'verified')
+                      AND (
+                          status = 'accepted'
+                          OR (status = 'verified' AND sent_message_ids_json = %s::jsonb)
+                      )
                     """,
-                    (_json_dumps(ids), str(idempotency_key)),
+                    (_json_dumps(ids), str(idempotency_key), _json_dumps(ids)),
                 )
                 updated = int(cur.rowcount or 0) > 0
             conn.commit()
