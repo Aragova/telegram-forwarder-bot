@@ -195,6 +195,21 @@ async def _finish_owned_job(repo, action: str, job_id: int, worker_id: str, *arg
     return bool(updated)
 
 
+def _await_chain(task: asyncio.Task, limit: int = 8) -> str:
+    """Diagnostic await location for stalled jobs, without message text or credentials."""
+    awaited: Any = task.get_coro()
+    names: list[str] = []
+    for _ in range(limit):
+        code = getattr(awaited, "cr_code", None) or getattr(awaited, "gi_code", None)
+        frame = getattr(awaited, "cr_frame", None) or getattr(awaited, "gi_frame", None)
+        if code is not None:
+            names.append(f"{code.co_name}:{frame.f_lineno if frame else '?'}")
+        awaited = getattr(awaited, "cr_await", None) or getattr(awaited, "gi_yieldfrom", None)
+        if awaited is None:
+            break
+    return " > ".join(names) or "<await-unavailable>"
+
+
 async def _heartbeat_active_job(
     repo, job_id: int, worker_id: str, job_type: str, running_task: asyncio.Task,
     *, interval_seconds: float = 15.0,
@@ -222,8 +237,8 @@ async def _heartbeat_active_job(
         elapsed = time.monotonic() - started
         if elapsed >= 120 and (last_stalled_log == 0.0 or elapsed - last_stalled_log >= 60):
             logger.warning(
-                "JOB_LONG_RUNNING | job_id=%s | job_type=%s | owner=%s | elapsed_sec=%s | action=inspect_external_io",
-                job_id, job_type, worker_id, round(elapsed),
+                "JOB_LONG_RUNNING | job_id=%s | job_type=%s | owner=%s | elapsed_sec=%s | await_chain=%s",
+                job_id, job_type, worker_id, round(elapsed), _await_chain(running_task),
             )
             last_stalled_log = elapsed
 
