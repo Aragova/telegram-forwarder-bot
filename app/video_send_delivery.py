@@ -121,6 +121,9 @@ class VideoSendDelivery:
         if not video_info:
             return {"ok": False, "fallback_to_legacy": True, "retryable": False}
 
+        # The fallback remains available until every pre-send check succeeds.
+        # Only now claim the write; no 'sending' record for an unsent artifact.
+        if has_attempt_ledger:
             await run_db(
                 owner.db.create_delivery_attempt,
                 delivery_id=int(delivery_id),
