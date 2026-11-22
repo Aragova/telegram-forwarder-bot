@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from html import escape
 from math import ceil
+import re
 
 from aiogram.types import InlineKeyboardMarkup
 
@@ -10,6 +11,24 @@ from app.user_ui import build_button
 
 CATALOG_PAGE_SIZE = 5
 FOLDER_PAGE_SIZE = 7
+
+def rule_matches_query(rule, query: str) -> bool:
+    """A #123 lookup matches that rule exactly; text matches channel details."""
+    needle = str(query or "").strip().casefold()
+    if not needle:
+        return False
+    id_match = re.fullmatch(r"#\\s*(\\d+)", needle)
+    if id_match:
+        return int(rule.id) == int(id_match.group(1))
+    fields = (
+        rule.id,
+        rule.source_title or rule.source_id,
+        rule.target_title or rule.target_id,
+        rule.source_id,
+        rule.target_id,
+    )
+    return any(needle in str(value).casefold() for value in fields)
+
 
 
 def _button(text: str, callback: str, *, style: str = "primary"):
