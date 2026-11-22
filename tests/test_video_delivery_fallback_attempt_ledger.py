@@ -84,6 +84,31 @@ def test_video_delivery_cache_hit_skips_actual_send():
     assert ok is True
 
 
+def test_legacy_bot_api_rate_limit_is_retryable_and_not_accepted():
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _rejected(*_args, **_kwargs):
+        return {
+            "ok": False, "retryable": True, "accepted": False,
+            "rejected_before_send": True, "retry_after_seconds": 49,
+            "error_text": "TelegramRetryAfter: retry_after=49",
+        }
+
+    service._deliver_single_video = _rejected
+    result = asyncio.run(service.execute_video_delivery_from_job(
+        rule_id=1, delivery_id=48, message_id=49,
+        source_channel="-100src", target_id="-100dst",
+    ))
+    assert isinstance(result, dict)
+    assert result["ok"] is False
+    assert result["retryable"] is True
+    assert result["accepted"] is False
+    assert result["retry_after_seconds"] == 49
+    assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
+    assert not any(c[0] in ("accepted", "mark_delivery_sent") for c in repo.calls)
+
+
 def test_video_delivery_uses_video_send_key_and_accepts_before_followup_error():
     repo = FakeRepo()
     service = _build_service(repo)
