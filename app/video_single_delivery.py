@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
+from telethon.errors import FloodWaitError
 
 from .runtime_utils import run_db
 from .sender_primitives import _detect_message_media_kind
@@ -296,11 +297,11 @@ class VideoSingleDelivery:
                 "ok": False, "retryable": True, "accepted": False,
                 "rejected_before_send": True, "error_text": str(exc),
             }
-        except TelegramRetryAfter as exc:
+        except (TelegramRetryAfter, FloodWaitError) as exc:
             # A definite Bot API flood-control rejection happens before the
             # video is posted; never finalize as accepted or faulty, and let
             # the worker retry only after the required delay.
-            delay = max(1, int(exc.retry_after))
+            delay = max(1, int(exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after))
             logger.warning(
                 "VIDEO_LEGACY_RATE_LIMITED | rule_id=%s | delivery_id=%s | retry_after=%s",
                 rule.id, delivery_id, delay,
@@ -311,7 +312,7 @@ class VideoSingleDelivery:
                 "accepted": False,
                 "rejected_before_send": True,
                 "retry_after_seconds": delay,
-                "error_text": f"TelegramRetryAfter: retry_after={delay}",
+                "error_text": f"{type(exc).__name__}: retry_after={delay}",
             }
         except Exception as exc:
             logger.exception("Ошибка video delivery rule=%s delivery=%s", rule.id, delivery_id)
