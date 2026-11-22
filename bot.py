@@ -496,27 +496,51 @@ async def _run_rescan_rule_fresh_job(
             )
             return
 
-        await run_db(db.clear_rule_deliveries, rule_id)
-
-        if rule.source_thread_id is None:
-            parsed_count = await parse_channel_history(
-                telethon_client,
-                db,
-                str(rule.source_id),
-                clean_start=True,
+        # A persisted owner token fences concurrent scans in every worker.
+        # This includes the entire Telegram parse, DB replay, and resume phase.
+        was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
+        replay_committed = False
+        successful = False
+        try:
+            scan_start_max_message_id = await run_db(
+                db.get_rule_scan_start_max_message_id, rule_id,
             )
-        else:
-            parsed_count = await parse_group_history(
-                telethon_client,
-                db,
-                str(rule.source_id),
-                int(rule.source_thread_id),
-                clean_start=True,
+            if rule.source_thread_id is None:
+                parsed_count, seen_message_ids = await parse_channel_history(
+                    telethon_client, db, str(rule.source_id), clean_start=False,
+                    preserve_existing_deliveries=True,
+                    collect_seen_message_ids=True,
+                )
+            else:
+                parsed_count, seen_message_ids = await parse_group_history(
+                    telethon_client, db, str(rule.source_id),
+                    int(rule.source_thread_id), clean_start=False,
+                    preserve_existing_deliveries=True,
+                    collect_seen_message_ids=True,
+                )
+            # Old accepted receipts stay in the audit ledger, but do not
+            # count toward a user's intentional new replay cycle.
+            archived_attempts, old_deliveries = await run_db(
+                db.reset_rule_history_for_replay, rule_id,
+                owner_token=owner_token,
             )
-
-        rebuilt_count = await run_db(db.backfill_rule, rule_id)
-        invalidate_preview_cache(rule_id)
-        await run_db(scheduler_service.set_next_run, rule_id, utc_now_iso())
+            replay_committed = True
+            rebuilt_count = await run_db(
+                db.backfill_rule, rule_id,
+                allowed_message_ids=seen_message_ids,
+                include_newer_than_message_id=scan_start_max_message_id,
+            )
+            invalidate_preview_cache(rule_id)
+            await run_db(scheduler_service.set_next_run, rule_id, utc_now_iso())
+            successful = True
+        finally:
+            # If replay committed but rebuild failed, leave the rule paused.
+            # For a read/parse failure no destructive reset happened.
+            await run_db(
+                db.finish_rule_rescan, rule_id,
+                was_active=(was_active if successful or not replay_committed else False),
+                owner_token=owner_token, queue_rebuilt=successful,
+            )
 
         await run_db(
             db.log_rule_change,
@@ -531,6 +555,8 @@ async def _run_rescan_rule_fresh_job(
                 "mode": "fresh",
                 "parsed_count": parsed_count,
                 "rebuilt_count": rebuilt_count,
+                "archived_attempts": archived_attempts,
+                "replayed_deliveries": old_deliveries,
                 "source_id": str(rule.source_id),
                 "source_thread_id": rule.source_thread_id,
             },
@@ -545,8 +571,9 @@ async def _run_rescan_rule_fresh_job(
             rule_id=rule_id,
             prefix_text=(
                 f"✅ Правило #{rule_id} пересканировано заново.\n"
-                f"Новых/обновлённых постов источника: {parsed_count}\n"
-                f"Очередь правила собрана заново: {rebuilt_count}"
+                f"Новых записей источника: {parsed_count}\n"
+                f"Очередь правила собрана заново: {rebuilt_count}\n"
+                f"Архивировано старых попыток: {archived_attempts}"
             ),
         )
 
@@ -569,7 +596,7 @@ async def _run_rescan_rule_fresh_job(
                     chat_id=chat_id,
                     text=(
                         f"✅ Правило #{rule_id} пересканировано заново.\n"
-                        f"Новых/обновлённых постов источника: {parsed_count}\n"
+                        f"Новых записей источника: {parsed_count}\n"
                         f"Очередь правила собрана заново: {rebuilt_count}"
                     ),
                 )
@@ -605,50 +632,66 @@ async def _run_rescan_rule_keep_job(
             )
             return
 
-        saved_sent_message_ids = await run_db(db.get_rule_sent_message_ids, rule_id)
-        saved_first_pending_message_id = await run_db(db.get_rule_first_pending_message_id, rule_id)
-        old_next_run_at = await run_db(db.get_rule_next_run_at, rule_id)
-
-        await run_db(db.clear_rule_deliveries, rule_id)
-
-        if rule.source_thread_id is None:
-            parsed_count = await parse_channel_history(
-                telethon_client,
-                db,
-                str(rule.source_id),
-                clean_start=True,
+        was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
+        scan_complete = False
+        try:
+            scan_start_max_message_id = await run_db(
+                db.get_rule_scan_start_max_message_id, rule_id,
             )
-        else:
-            parsed_count = await parse_group_history(
-                telethon_client,
-                db,
-                str(rule.source_id),
-                int(rule.source_thread_id),
-                clean_start=True,
+            old_next_run_at = await run_db(db.get_rule_next_run_at, rule_id)
+            saved_first_pending_message_id = await run_db(
+                db.get_rule_first_pending_message_id, rule_id,
             )
+            if saved_first_pending_message_id is None:
+                previous_sent = await run_db(db.get_rule_sent_message_ids, rule_id)
+                if previous_sent:
+                    saved_first_pending_message_id = max(previous_sent) + 1
 
-        rebuilt_count = await run_db(db.backfill_rule, rule_id)
-        invalidate_preview_cache(rule_id)
-
-        restored_sent_count = await run_db(
-            db.mark_rule_messages_sent,
-            rule_id=rule_id,
-            source_channel=str(rule.source_id),
-            source_thread_id=rule.source_thread_id,
-            message_ids=saved_sent_message_ids,
-        )
-
-        removed_before = 0
-        if saved_first_pending_message_id is not None:
-            removed_before = await run_db(
-                db.drop_rule_pending_before_message,
-                rule_id=rule_id,
+            # Keep existing delivery IDs and sent status. Only source posts
+            # seen in this complete Telegram scan may be newly queued.
+            if rule.source_thread_id is None:
+                parsed_count, seen_message_ids = await parse_channel_history(
+                    telethon_client, db, str(rule.source_id), clean_start=False,
+                    preserve_existing_deliveries=True,
+                    collect_seen_message_ids=True,
+                )
+            else:
+                parsed_count, seen_message_ids = await parse_group_history(
+                    telethon_client, db, str(rule.source_id),
+                    int(rule.source_thread_id), clean_start=False,
+                    preserve_existing_deliveries=True,
+                    collect_seen_message_ids=True,
+                )
+            rebuilt_count = await run_db(
+                db.backfill_rule, rule_id,
+                allowed_message_ids=seen_message_ids,
+                include_newer_than_message_id=scan_start_max_message_id,
+            )
+            removed_stale = await run_db(
+                db.drop_rule_pending_not_in_message_ids, rule_id,
                 source_channel=str(rule.source_id),
                 source_thread_id=rule.source_thread_id,
-                message_id=saved_first_pending_message_id,
+                seen_message_ids=seen_message_ids,
+                scan_start_max_message_id=scan_start_max_message_id,
             )
-
-        await run_db(scheduler_service.set_next_run, rule_id, old_next_run_at)
+            removed_before = 0
+            if saved_first_pending_message_id is not None:
+                # Preserve a previously selected "start at position" cutoff.
+                removed_before = await run_db(
+                    db.drop_rule_pending_before_message,
+                    rule_id=rule_id, source_channel=str(rule.source_id),
+                    source_thread_id=rule.source_thread_id,
+                    message_id=saved_first_pending_message_id,
+                )
+            invalidate_preview_cache(rule_id)
+            await run_db(scheduler_service.set_next_run, rule_id, old_next_run_at)
+            scan_complete = True
+        finally:
+            await run_db(
+                db.finish_rule_rescan, rule_id,
+                was_active=was_active, owner_token=owner_token,
+                queue_rebuilt=scan_complete,
+            )
 
         await run_db(
             db.log_rule_change,
@@ -656,7 +699,7 @@ async def _run_rescan_rule_keep_job(
             rule_id=rule_id,
             admin_id=admin_id,
             old_value={
-                "saved_sent_message_ids": saved_sent_message_ids,
+                "preserved_delivery_state": True,
                 "saved_first_pending_message_id": saved_first_pending_message_id,
                 "old_next_run_at": old_next_run_at,
             },
@@ -667,8 +710,9 @@ async def _run_rescan_rule_keep_job(
                 "mode": "keep_position",
                 "parsed_count": parsed_count,
                 "rebuilt_count": rebuilt_count,
-                "restored_sent_count": restored_sent_count,
+                "preserved_delivery_state": True,
                 "removed_before": removed_before,
+                "removed_stale": removed_stale,
                 "source_id": str(rule.source_id),
                 "source_thread_id": rule.source_thread_id,
             },
@@ -685,7 +729,7 @@ async def _run_rescan_rule_keep_job(
                 f"✅ Правило #{rule_id} пересканировано с сохранением позиции.\n"
                 f"Найдено постов источника: {parsed_count}\n"
                 f"Очередь пересобрана: {rebuilt_count}\n"
-                f"Восстановлено отправленных: {restored_sent_count}\n"
+                f"Исключено удалённых из источника: {removed_stale}\n"
                 f"Убрано pending до нужной точки: {removed_before}"
             ),
         )
@@ -711,7 +755,7 @@ async def _run_rescan_rule_keep_job(
                         f"✅ Правило #{rule_id} пересканировано с сохранением позиции.\n"
                         f"Найдено постов источника: {parsed_count}\n"
                         f"Очередь пересобрана: {rebuilt_count}\n"
-                        f"Восстановлено отправленных: {restored_sent_count}\n"
+                        f"Исключено удалённых из источника: {removed_stale}\n"
                         f"Убрано pending до нужной точки: {removed_before}"
                     ),
                 )

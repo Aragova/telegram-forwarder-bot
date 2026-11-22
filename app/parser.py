@@ -201,7 +201,17 @@ def message_to_content_dict(message):
 
     return content
 
-async def parse_channel_history(client, db, channel_id: str, clean_start: bool = False):
+def _save_history_batch(db, batch, *, preserve_existing_deliveries: bool):
+    if preserve_existing_deliveries:
+        return db.save_post_batch(batch, preserve_existing_deliveries=True)
+    return db.save_post_batch(batch)
+
+
+async def parse_channel_history(
+    client, db, channel_id: str, clean_start: bool = False,
+    *, preserve_existing_deliveries: bool = False,
+    collect_seen_message_ids: bool = False,
+):
     entity = int(channel_id) if str(channel_id).lstrip("-").isdigit() else channel_id
     channel = await client.get_entity(entity)
 
@@ -220,6 +230,7 @@ async def parse_channel_history(client, db, channel_id: str, clean_start: bool =
     messages_with_entities = 0
     messages_with_custom_emoji = 0
     content_build_errors = 0
+    seen_message_ids: set[int] = set()
 
     async for message in client.iter_messages(channel, limit=None, reverse=True, wait_time=1):
         total_seen += 1
@@ -247,6 +258,8 @@ async def parse_channel_history(client, db, channel_id: str, clean_start: bool =
                     str(message.grouped_id) if getattr(message, "grouped_id", None) else None,
                 )
             )
+            if collect_seen_message_ids:
+                seen_message_ids.add(int(message.id))
 
         except Exception as exc:
             content_build_errors += 1
@@ -260,7 +273,9 @@ async def parse_channel_history(client, db, channel_id: str, clean_start: bool =
 
         if len(batch) >= 100:
             try:
-                saved += db.save_post_batch(batch)
+                saved += _save_history_batch(
+                    db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
+                )
             except Exception as exc:
                 logger.exception(
                     "parse_channel_history_batch_save_failed: source=%s batch_size=%s error=%s",
@@ -274,7 +289,9 @@ async def parse_channel_history(client, db, channel_id: str, clean_start: bool =
 
     if batch:
         try:
-            saved += db.save_post_batch(batch)
+            saved += _save_history_batch(
+                    db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
+                )
         except Exception as exc:
             logger.exception(
                 "parse_channel_history_final_batch_save_failed: source=%s batch_size=%s error=%s",
@@ -295,9 +312,20 @@ async def parse_channel_history(client, db, channel_id: str, clean_start: bool =
         content_build_errors,
     )
 
+    if collect_seen_message_ids:
+        if content_build_errors:
+            raise RuntimeError(
+                "Нельзя обновить очередь после неполного пересканирования: "
+                f"ошибок разбора сообщений: {content_build_errors}"
+            )
+        return saved, seen_message_ids
     return saved
 
-async def parse_group_history(client, db, chat_id: str, thread_id: int, clean_start: bool = False):
+async def parse_group_history(
+    client, db, chat_id: str, thread_id: int, clean_start: bool = False,
+    *, preserve_existing_deliveries: bool = False,
+    collect_seen_message_ids: bool = False,
+):
     entity = int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id
     chat = await client.get_entity(entity)
 
@@ -317,6 +345,7 @@ async def parse_group_history(client, db, chat_id: str, thread_id: int, clean_st
     messages_with_entities = 0
     messages_with_custom_emoji = 0
     content_build_errors = 0
+    seen_message_ids: set[int] = set()
 
     async for message in client.iter_messages(chat, limit=None, reverse=True, reply_to=thread_id, wait_time=1):
         total_seen += 1
@@ -344,6 +373,8 @@ async def parse_group_history(client, db, chat_id: str, thread_id: int, clean_st
                     str(message.grouped_id) if getattr(message, "grouped_id", None) else None,
                 )
             )
+            if collect_seen_message_ids:
+                seen_message_ids.add(int(message.id))
 
         except Exception as exc:
             content_build_errors += 1
@@ -358,7 +389,9 @@ async def parse_group_history(client, db, chat_id: str, thread_id: int, clean_st
 
         if len(batch) >= 100:
             try:
-                saved += db.save_post_batch(batch)
+                saved += _save_history_batch(
+                    db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
+                )
             except Exception as exc:
                 logger.exception(
                     "parse_group_history_batch_save_failed: source=%s:%s batch_size=%s error=%s",
@@ -373,7 +406,9 @@ async def parse_group_history(client, db, chat_id: str, thread_id: int, clean_st
 
     if batch:
         try:
-            saved += db.save_post_batch(batch)
+            saved += _save_history_batch(
+                    db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
+                )
         except Exception as exc:
             logger.exception(
                 "parse_group_history_final_batch_save_failed: source=%s:%s batch_size=%s error=%s",
@@ -396,4 +431,11 @@ async def parse_group_history(client, db, chat_id: str, thread_id: int, clean_st
         content_build_errors,
     )
 
+    if collect_seen_message_ids:
+        if content_build_errors:
+            raise RuntimeError(
+                "Нельзя обновить очередь после неполного пересканирования: "
+                f"ошибок разбора сообщений: {content_build_errors}"
+            )
+        return saved, seen_message_ids
     return saved
