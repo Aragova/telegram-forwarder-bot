@@ -20,6 +20,7 @@ from .subprocess_safety import (
 )
 from aiogram.types import FSInputFile, MessageEntity
 from telethon import types as tl_types
+from telethon.errors import FloodWaitError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -256,6 +257,9 @@ class VideoProcessor:
             broadcast = bool(getattr(target_entity, "broadcast", False) and not getattr(target_entity, "megagroup", False))
             resolver = TelethonAuthoritativeMessageResolver(self.telethon)
             watermark = await resolver.get_before_max_message_id(target_entity, destination_channel)
+        except FloodWaitError:
+            # Explicit Telegram rejection: keep the wait duration intact.
+            raise
         except Exception as exc:
             # None of these reads sends media. They can be safely retried.
             raise VideoPreSendError(f"video_telethon_preflight: {type(exc).__name__}: {exc}") from exc
@@ -1496,6 +1500,16 @@ class VideoProcessor:
             except VideoPreSendError as exc:
                 self._stage_failed(stage_logger, "send", error_text=str(exc), extra={"retryable": True, "accepted": False})
                 logger.warning("VIDEO_SEND_PREFLIGHT_FAILED | action=safe_retry | error=%s", exc)
+                raise
+            except FloodWaitError as exc:
+                self._stage_failed(
+                    stage_logger, "send", error_text=str(exc),
+                    extra={"retryable": True, "accepted": False, "retry_after_seconds": int(exc.seconds)},
+                )
+                logger.warning(
+                    "VIDEO_SEND_FLOOD_WAIT | transport=telethon | retry_after=%s | action=retry_safe_rejection",
+                    exc.seconds,
+                )
                 raise
             except TelegramRetryAfter as exc:
                 # The Bot API explicitly refused this request. Retrying via
