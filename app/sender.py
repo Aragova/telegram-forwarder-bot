@@ -1,5 +1,5 @@
 from __future__ import annotations
-import logging, time
+import logging, time, asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any
 from telethon.tl import types as tl_types
@@ -1085,7 +1085,21 @@ class SenderService:
         }
         if allow_unverified_self_loop_target:
             kwargs["allow_unverified_self_loop_target"] = True
-        return await ReactionDelivery(self)._add_reaction_for_rule_if_possible(**kwargs)
+        try:
+            # Post-send reactions are secondary work. A stalled Telegram
+            # reaction RPC must never retain a light-worker slot forever
+            # after a publication has already been accepted.
+            return await asyncio.wait_for(
+                ReactionDelivery(self)._add_reaction_for_rule_if_possible(**kwargs),
+                timeout=35.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "POST_SEND_REACTION_TIMEOUT | rule_id=%s | delivery_id=%s | target_id=%s | "
+                "message_id=%s | timeout_sec=35 | action=continue_delivery_without_resend",
+                getattr(rule, "id", None), delivery_id, target_id, sent_message_id,
+            )
+            return {"applied": False, "enqueued": False, "reason": "reaction_timeout"}
 
     async def process_rule_once(self, rule):
         schedule_mode = getattr(rule, "schedule_mode", "interval") or "interval"
