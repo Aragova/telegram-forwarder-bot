@@ -32,7 +32,7 @@ from aiogram.types import (
 from app.config import settings
 from app.repository_models import utc_now_iso
 from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
-from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view
+from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view, _button as rule_ui_button
 from app.repository import RepositoryProtocol
 from app.repository_factory import create_repository
 from app.transport import wrap_bot, wrap_telethon_client
@@ -6621,7 +6621,7 @@ async def handle_start_from_number(callback: CallbackQuery):
     )
     await answer_callback_safe(callback)
 
-@dp.callback_query(lambda c: c.data.startswith("rollback:") or c.data.startswith("user_rule_rollback:"))
+@dp.callback_query(lambda c: c.data.startswith("rollback:") or c.data.startswith("user_rule_rollback:") or c.data.startswith("rollback_execute:"))
 async def rollback_handler(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -6629,6 +6629,25 @@ async def rollback_handler(callback: CallbackQuery):
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
     if not await ensure_rule_callback_access(callback, rule_id):
+        return
+
+    if not (callback.data or "").startswith("rollback_execute:"):
+        is_admin = _is_admin_user(callback.from_user.id if callback.from_user else None)
+        await answer_callback_safe_once(callback)
+        await edit_message_text_safe(
+            message=callback.message,
+            text=(
+                f"⚠️ <b>ОТКАТ ПРАВИЛА #{rule_id}</b>\n\n"
+                "⏪ Последняя отправленная логическая публикация будет возвращена "
+                "в очередь. Альбом обрабатывается как единая публикация.\n\n"
+                "🔻 Подтвердите действие или вернитесь в настройки."
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [rule_ui_button("⏪ Подтвердить откат", f"rollback_execute:{rule_id}", style="danger")],
+                [rule_ui_button("⬅️ Отмена", f"{'rule_extra_menu' if is_admin else 'user_rule_extra'}:{rule_id}")],
+            ]),
+        )
         return
 
     result = await run_db(
@@ -7183,7 +7202,7 @@ async def handle_enable_rule_callback(callback: CallbackQuery):
             text="❌ Не удалось включить правило",
         )
 
-@dp.callback_query(lambda c: c.data.startswith("delete_rule:") or c.data.startswith("user_rule_delete:"))
+@dp.callback_query(lambda c: c.data.startswith("delete_rule:") or c.data.startswith("user_rule_delete:") or c.data.startswith("delete_rule_execute:"))
 async def handle_delete_rule_callback(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
@@ -7191,6 +7210,25 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
     if not await ensure_rule_callback_access(callback, rule_id):
+        return
+
+    if not (callback.data or "").startswith("delete_rule_execute:"):
+        is_admin = _is_admin_user(callback.from_user.id if callback.from_user else None)
+        await answer_callback_safe_once(callback)
+        await edit_message_text_safe(
+            message=callback.message,
+            text=(
+                f"⚠️ <b>УДАЛЕНИЕ ПРАВИЛА #{rule_id}</b>\n\n"
+                "🗑 Будут удалены правило и его связанные данные. "
+                "Восстановить это действие через папку невозможно.\n\n"
+                "❗ Убедитесь, что выбрали правильный номер."
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [rule_ui_button("🗑 Да, удалить правило", f"delete_rule_execute:{rule_id}", style="danger")],
+                [rule_ui_button("⬅️ Отмена", f"{'rule_extra_menu' if is_admin else 'user_rule_extra'}:{rule_id}")],
+            ]),
+        )
         return
 
     ok = await run_db(
@@ -7202,30 +7240,18 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
     if ok:
         await answer_callback_safe_once(callback, "✅ Правило удалено")
         await ensure_rule_workers()
-        if _is_admin_user(callback.from_user.id if callback.from_user else None):
-            await edit_message_text_safe(
-                message=callback.message,
-                text="✅ Правило удалено",
-            )
-        else:
-            user_id = callback.from_user.id if callback.from_user else 0
-            tenant_id = await run_db(ensure_user_tenant, user_id)
-            logger.info("пользователь удалил правило rule_id=%s", rule_id)
-            rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
-            await edit_message_text_safe(
-                message=callback.message,
-                text=(
-                    "⚙️ Мои правила\n\n"
-                    "У вас пока нет правил.\n\n"
-                    "Создайте первое правило:\n"
-                    "1. выберите источник;\n"
-                    "2. выберите получателя;\n"
-                    "3. задайте интервал публикации."
-                    if not rules
-                    else "⚙️ Мои правила"
-                ),
-                reply_markup=build_user_rules_keyboard(rules, page=0),
-            )
+        await edit_message_text_safe(
+            message=callback.message,
+            text=(
+                f"✅ <b>ПРАВИЛО #{rule_id} УДАЛЕНО</b>\n\n"
+                "📂 Остальные правила и папки не затронуты.\n"
+                "⬅️ Вернитесь к прежнему списку."
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [rule_ui_button("⬅️ К списку правил", f"rf:back:{rule_id}")],
+            ]),
+        )
     else:
         await answer_callback_safe_once(callback, "❌ Не удалось удалить правило", show_alert=True)
         await edit_message_text_safe(
