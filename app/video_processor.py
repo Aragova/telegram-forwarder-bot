@@ -5,6 +5,8 @@ import asyncio
 import json
 from pathlib import Path
 import logging
+from datetime import datetime, timezone
+from .telethon_authoritative_resolver import TelethonAuthoritativeMessageResolver, TelethonSendOutcome
 from .config import settings as config
 from .video_clip_duration import calculate_center_clip_window
 from aiogram import Bot
@@ -243,22 +245,46 @@ class VideoProcessor:
             len(formatting_entities or []),
         )
 
-        sent_msg = await self.telethon.send_file(**send_kwargs)
-
+        # A Telethon result id may refer to another peer; resolve against
+        # the target channel before handing the message to delivery or reactions.
+        target_entity = await self.telethon.get_entity(entity)
+        broadcast = bool(getattr(target_entity, "broadcast", False) and not getattr(target_entity, "megagroup", False))
+        resolver = TelethonAuthoritativeMessageResolver(self.telethon)
+        watermark = await resolver.get_before_max_message_id(target_entity, destination_channel)
+        started_at = datetime.now(timezone.utc)
+        sent_msg = await self.telethon.send_file(**{**send_kwargs, "entity": target_entity})
+        finished_at = datetime.now(timezone.utc)
         if isinstance(sent_msg, list):
             sent_msg = sent_msg[0] if sent_msg else None
+        if sent_msg is None:
+            logger.warning("TELETHON_VIDEO_SEND | ACCEPTED_UNKNOWN | target=%s | empty_response=true | action=no_resend", destination_channel)
+            return TelethonSendOutcome(True, True, False, None, [], resolution_method="empty_response", error_text="empty_response_after_send")
 
-        logger.info(
-            "TELETHON_VIDEO_SEND | OK | target=%s | thread=%s | message_id=%s | duration=%s | size=%sx%s",
-            destination_channel,
-            target_thread_id,
-            getattr(sent_msg, "id", None),
-            duration,
-            width,
-            height,
+        raw_id = getattr(sent_msg, "id", None)
+        resolved = await resolver.resolve_authoritative_single_message(
+            target_entity=target_entity,
+            target_id=destination_channel,
+            sent=sent_msg,
+            expected_text=caption or "",
+            before_max_message_id=watermark,
+            send_started_at=started_at,
+            send_finished_at=finished_at,
+            target_thread_id=target_thread_id,
+            target_is_broadcast_channel=broadcast,
+            require_strong_media_match=True,
         )
-
-        return sent_msg
+        logger.info(
+            "TELETHON_VIDEO_SEND | ID_RESOLVED | target=%s | thread=%s | returned_candidate_id=%s | authoritative_message_id=%s | resolution_method=%s",
+            destination_channel, target_thread_id, raw_id, resolved.authoritative_message_id, resolved.resolution_method,
+        )
+        return TelethonSendOutcome(
+            True, True, resolved.ok, resolved.authoritative_message_id,
+            [resolved.authoritative_message_id] if resolved.ok and resolved.authoritative_message_id else [],
+            returned_candidate_id=raw_id,
+            returned_candidate_ids=[raw_id] if raw_id else [],
+            resolution_method=resolved.resolution_method,
+            error_text=resolved.error_text,
+        )
 
     # ==================== UTILS ====================
 
@@ -1386,6 +1412,10 @@ class VideoProcessor:
             local_api,
         )
 
+        # Sending media is non-idempotent; an uncertain response must not trigger a second post.
+        if max_retries != 1:
+            logger.info("VIDEO_SEND_RETRIES_DISABLED | requested=%s | effective=1", max_retries)
+        max_retries = 1
         for attempt in range(max_retries):
             try:
                 if normalized_mode == "premium":
@@ -1420,7 +1450,9 @@ class VideoProcessor:
 
                 logger.info("   ✅ Видео отправлено (попытка %s)", attempt + 1)
 
-                sent_message_id = getattr(sent_msg, "message_id", None)
+                sent_message_id = getattr(sent_msg, "authoritative_message_id", None)
+                if sent_message_id is None:
+                    sent_message_id = getattr(sent_msg, "message_id", None)
                 if sent_message_id is None:
                     sent_message_id = getattr(sent_msg, "id", None)
 
@@ -1467,8 +1499,12 @@ class VideoProcessor:
                     },
                 )
 
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(5 * (attempt + 1))
+                # The request may have reached Telegram even when it raised.
+                return TelethonSendOutcome(
+                    True, True, False, None, [],
+                    resolution_method="send_exception_unknown_acceptance",
+                    error_text=f"{type(e).__name__}: {e}",
+                )
 
         self._stage_failed(
             stage_logger,
