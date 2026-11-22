@@ -50,6 +50,20 @@ def normalize_caption_entities(raw_entities: Any) -> list[dict[str, Any]]:
                 continue
 
             entity_type = str(item.get("type") or "").strip().lower()
+            # Saved aiogram (Bot API) and Postgres source entity types differ.
+            if entity_type == "strikethrough":
+                entity_type = "strike"
+            # Bot API text_mention carries a User, while MTProto supports
+            # equivalent clickable tg://user?id links via MessageEntityTextUrl.
+            if entity_type == "text_mention":
+                try:
+                    mention_user_id = int(item.get("user_id") or 0)
+                except (TypeError, ValueError):
+                    mention_user_id = 0
+                if mention_user_id <= 0:
+                    continue
+                entity_type = "text_link"
+                item = {**item, "url": f"tg://user?id={mention_user_id}"}
             offset = item.get("offset")
             length = item.get("length")
 
