@@ -222,7 +222,7 @@ class TelethonAuthoritativeMessageResolver:
     def _is_safe_history_candidate(self, message: Any, *, expected_fp: dict[str, Any], before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None, target_thread_id: int | None, target_is_broadcast_channel: bool = False) -> bool:
         return self._history_candidate_rejection_reason(message, expected_fp=expected_fp, before_max_message_id=before_max_message_id, send_started_at=send_started_at, send_finished_at=send_finished_at, source_message_ids=source_message_ids, target_thread_id=target_thread_id, target_is_broadcast_channel=target_is_broadcast_channel) is None
 
-    async def resolve_authoritative_single_message(self, *, target_entity: Any, target_id: Any, sent: Any, expected_message: Any = None, expected_text: str = "", before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None, target_thread_id: int | None = None, target_is_broadcast_channel: bool = False, require_strong_media_match: bool = False) -> TelethonResolutionResult:
+    async def resolve_authoritative_single_message(self, *, target_entity: Any, target_id: Any, sent: Any, expected_message: Any = None, expected_text: str = "", before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None, target_thread_id: int | None = None, target_is_broadcast_channel: bool = False, require_strong_media_match: bool = False, history_poll_delays: tuple[float, ...] | None = None) -> TelethonResolutionResult:
         returned_candidate_id = _message_id(sent)
         expected_fp = build_media_fingerprint(expected_message or sent, text=expected_text)
         ok, message, reason = await self.validate_message_in_target(target_entity, target_id, returned_candidate_id, expected_fp, source_message_ids, target_thread_id, target_is_broadcast_channel)
@@ -256,7 +256,7 @@ class TelethonAuthoritativeMessageResolver:
             "media_kind": 0,
         }
         candidate_diagnostics: list[dict[str, Any]] = []
-        for delay in (0, 0.7, 1.5):
+        for delay in (history_poll_delays if history_poll_delays is not None else (0, 0.7, 1.5)):
             if delay:
                 await asyncio.sleep(delay)
             try:
