@@ -314,7 +314,10 @@ class SenderReuploadHelpers:
         content = caption_override if caption_override is not None else self.owner._content_from_message_or_post(message=message, post_row=post_row)
         raw_text, raw_entities = self.owner._build_text_and_entities_from_content(content)
 
-        if not getattr(message, "media", None):
+        if not getattr(message, "media", None) or (
+            caption_override is not None
+            and _sender_primitives._is_link_preview_only(message)
+        ):
             logger.info(
                 "REUPLOAD_MESSAGE | TEXT_ONLY | target=%s | thread=%s | text_len=%s | entities=%s",
                 target_id,
