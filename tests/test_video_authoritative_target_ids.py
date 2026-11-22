@@ -12,13 +12,11 @@ from app.telethon_authoritative_resolver import TelethonSendOutcome
 
 
 TARGET = -1004477194308
-NOW = datetime.now(timezone.utc)
-
 
 def _video_message(mid, *, document_id=123, caption="caption"):
     return SimpleNamespace(
         id=mid, chat_id=TARGET, post=True, out=False,
-        date=NOW, message=caption,
+        date=datetime.now(timezone.utc), message=caption,
         media=SimpleNamespace(document=SimpleNamespace(
             id=document_id, size=1234, mime_type="video/mp4", attributes=[]
         )),
