@@ -499,6 +499,9 @@ async def _run_rescan_rule_fresh_job(
         # A persisted owner token fences concurrent scans in every worker.
         # This includes the entire Telegram parse, DB replay, and resume phase.
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
+        scan_start_max_message_id = await run_db(
+            db.get_rule_scan_start_max_message_id, rule_id,
+        )
         replay_committed = False
         successful = False
         try:
@@ -525,6 +528,7 @@ async def _run_rescan_rule_fresh_job(
             rebuilt_count = await run_db(
                 db.backfill_rule, rule_id,
                 allowed_message_ids=seen_message_ids,
+                include_newer_than_message_id=scan_start_max_message_id,
             )
             invalidate_preview_cache(rule_id)
             await run_db(scheduler_service.set_next_run, rule_id, utc_now_iso())
@@ -629,6 +633,9 @@ async def _run_rescan_rule_keep_job(
             return
 
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
+        scan_start_max_message_id = await run_db(
+            db.get_rule_scan_start_max_message_id, rule_id,
+        )
         scan_complete = False
         try:
             old_next_run_at = await run_db(db.get_rule_next_run_at, rule_id)
@@ -658,12 +665,14 @@ async def _run_rescan_rule_keep_job(
             rebuilt_count = await run_db(
                 db.backfill_rule, rule_id,
                 allowed_message_ids=seen_message_ids,
+                include_newer_than_message_id=scan_start_max_message_id,
             )
             removed_stale = await run_db(
                 db.drop_rule_pending_not_in_message_ids, rule_id,
                 source_channel=str(rule.source_id),
                 source_thread_id=rule.source_thread_id,
                 seen_message_ids=seen_message_ids,
+                scan_start_max_message_id=scan_start_max_message_id,
             )
             removed_before = 0
             if saved_first_pending_message_id is not None:
