@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from aiogram.exceptions import TelegramEntityTooLarge
+from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 
 from .delivery_idempotency import (
     build_delivery_idempotency_key,
@@ -95,6 +95,32 @@ class VideoSendDelivery:
                 logger.warning("VIDEO_SEND_CACHE_UNRESOLVED | rule_id=%s | delivery_id=%s | status=%s | candidate_ids=%s | action=no_resend_manual_review", rule_id, delivery_id, status, cached_sent_ids)
                 await run_db(owner._mark_delivery_faulty_sync, delivery_id, error)
                 return {"ok": False, "retryable": False, "accepted": True, "error_text": error, "manual_review_required": True, "fallback_to_legacy": False}
+
+        if int(artifact_version or 1) != 1 or int(pipeline_version or 1) != 1:
+            logger.warning(
+                "VIDEO FALLBACK TO LEGACY | неподдерживаемая версия контракта artifact=%s pipeline=%s | delivery_id=%s",
+                artifact_version,
+                pipeline_version,
+                delivery_id,
+            )
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+        if not processed_video_path:
+            logger.warning("VIDEO STAGE FAILED | отсутствует processed_file_path для delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+        if not Path(processed_video_path).is_file():
+            logger.warning("VIDEO STAGE FAILED | обработанный файл не найден для delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+
+        rule = await run_db(owner.db.get_rule, rule_id)
+        if not rule:
+            logger.warning("VIDEO FALLBACK TO LEGACY | правило не найдено для send | delivery_id=%s", delivery_id)
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+
+        caption_payload = owner._build_video_caption_delivery_payload(rule)
+        video_info = await owner.video_processor.get_video_info(str(processed_video_path), use_cache=False)
+        if not video_info:
+            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
+
             await run_db(
                 owner.db.create_delivery_attempt,
                 delivery_id=int(delivery_id),
@@ -128,31 +154,6 @@ class VideoSendDelivery:
                 target_id,
                 idempotency_key,
             )
-        if int(artifact_version or 1) != 1 or int(pipeline_version or 1) != 1:
-            logger.warning(
-                "VIDEO FALLBACK TO LEGACY | неподдерживаемая версия контракта artifact=%s pipeline=%s | delivery_id=%s",
-                artifact_version,
-                pipeline_version,
-                delivery_id,
-            )
-            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
-        if not processed_video_path:
-            logger.warning("VIDEO STAGE FAILED | отсутствует processed_file_path для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
-        if not Path(processed_video_path).is_file():
-            logger.warning("VIDEO STAGE FAILED | обработанный файл не найден для delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
-
-        rule = await run_db(owner.db.get_rule, rule_id)
-        if not rule:
-            logger.warning("VIDEO FALLBACK TO LEGACY | правило не найдено для send | delivery_id=%s", delivery_id)
-            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
-
-        caption_payload = owner._build_video_caption_delivery_payload(rule)
-        video_info = await owner.video_processor.get_video_info(str(processed_video_path), use_cache=False)
-        if not video_info:
-            return {"ok": False, "fallback_to_legacy": True, "retryable": False}
-
         try:
             sent_msg = await owner.video_processor.send_with_retry(
                 owner.bot,
@@ -165,6 +166,26 @@ class VideoSendDelivery:
                 caption_entities_json=caption_payload["caption_entities_json"],
                 caption_send_mode=caption_payload["selected_mode"],
             )
+        except TelegramRetryAfter as exc:
+            # Telegram explicitly rejected this request before publishing it.
+            # Release the ledger for a delayed worker retry; do not confuse
+            # this with an ambiguous timeout after Telegram might have posted.
+            delay = max(1, int(exc.retry_after))
+            error_text = f"TelegramRetryAfter: retry_after={delay}"
+            logger.warning(
+                "VIDEO_SEND_RATE_LIMITED | delivery_id=%s | rule_id=%s | retry_after=%s | action=retry_after_rejection",
+                delivery_id, rule_id, delay,
+            )
+            if has_attempt_ledger:
+                await run_db(
+                    owner.db.mark_delivery_attempt_failed, idempotency_key,
+                    status="failed_before_send", error_text=error_text,
+                )
+            return {
+                "ok": False, "fallback_to_legacy": False, "retryable": True,
+                "accepted": False, "retry_after_seconds": delay,
+                "error_text": error_text,
+            }
         except TelegramEntityTooLarge as exc:
             error_text = f"TelegramEntityTooLarge: {exc}"
             logger.error(
