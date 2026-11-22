@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
+from telethon.errors import FloodWaitError
 
 from .delivery_idempotency import (
     build_delivery_idempotency_key,
@@ -182,12 +183,12 @@ class VideoSendDelivery:
                 "retryable": True, "accepted": False,
                 "error_text": error_text,
             }
-        except TelegramRetryAfter as exc:
+        except (TelegramRetryAfter, FloodWaitError) as exc:
             # Telegram explicitly rejected this request before publishing it.
             # Release the ledger for a delayed worker retry; do not confuse
             # this with an ambiguous timeout after Telegram might have posted.
-            delay = max(1, int(exc.retry_after))
-            error_text = f"TelegramRetryAfter: retry_after={delay}"
+            delay = max(1, int(exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after))
+            error_text = f"{type(exc).__name__}: retry_after={delay}"
             logger.warning(
                 "VIDEO_SEND_RATE_LIMITED | delivery_id=%s | rule_id=%s | retry_after=%s | action=retry_after_rejection",
                 delivery_id, rule_id, delay,
