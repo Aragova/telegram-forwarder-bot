@@ -1513,22 +1513,50 @@ class SenderService:
         try:
             attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key) if has_attempt_ledger else None
             cached_sent_ids = extract_sent_message_ids_from_attempt(attempt)
-            if attempt and str(attempt.get("status") or "").lower() in {"accepted", "verified"} and cached_sent_ids:
-                logger.info(
-                    "DELIVERY_ATTEMPT_CACHE_HIT | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s | sent_message_ids=%s",
-                    delivery_id,
-                    rule_id,
-                    target_id,
-                    idempotency_key,
-                    cached_sent_ids,
-                )
-                await run_db(self._mark_delivery_sent_sync, int(delivery_id), sent_message_id=int(cached_sent_ids[0]), sent_message_ids=cached_sent_ids, target_id=str(target_id), delivery_method="idempotency_cache")
-                return True
+            status = str((attempt or {}).get("status") or "").lower()
+            if status in {"sending", "accepted", "verified", "failed_after_send"}:
+                valid_cached_ids = []
+                if cached_sent_ids:
+                    try:
+                        valid_cached_ids = await self._confirm_target_delivery_message_ids_with_retry(
+                            rule_id=rule_id, delivery_id=delivery_id,
+                            source_channel=source_channel, target_id=target_id,
+                            source_message_ids=[int(message_id)],
+                            candidate_sent_message_ids=cached_sent_ids,
+                            method="video_delivery_cache_verify",
+                            max_age_seconds=86400 * 30,
+                        )
+                    except Exception as exc:
+                        logger.warning("VIDEO_DELIVERY_CACHE_VERIFY_FAILED | rule_id=%s | delivery_id=%s | error=%s", rule_id, delivery_id, exc)
+                if valid_cached_ids:
+                    if hasattr(self.db, "mark_delivery_attempt_verified"):
+                        await run_db(self.db.mark_delivery_attempt_verified, idempotency_key, sent_message_ids=valid_cached_ids)
+                    rule = await run_db(self.db.get_rule, rule_id)
+                    if rule:
+                        await self._run_post_send_step_safe(
+                            step_name="reaction_after_video_delivery_cache_verify",
+                            rule_id=rule_id, delivery_id=delivery_id,
+                            idempotency_key=idempotency_key,
+                            accepted_sent_message_ids=valid_cached_ids,
+                            coro_factory=lambda: self._add_reaction_for_rule_if_possible(
+                                rule=rule, target_id=target_id, sent_message_id=int(valid_cached_ids[0]),
+                                source_channel=source_channel, source_message_ids=[int(message_id)],
+                                delivery_id=delivery_id,
+                            ),
+                        )
+                    await run_db(self._mark_delivery_sent_sync, int(delivery_id), sent_message_id=int(valid_cached_ids[0]), sent_message_ids=valid_cached_ids, target_id=str(target_id), delivery_method="video_delivery_cache_verified")
+                    return True
+                error = "video_send_accepted_target_id_unresolved_non_retryable"
+                logger.warning("VIDEO_DELIVERY_CACHE_UNRESOLVED | rule_id=%s | delivery_id=%s | status=%s | candidate_ids=%s | action=no_resend", rule_id, delivery_id, status, cached_sent_ids)
+                await run_db(self._mark_delivery_faulty_sync, delivery_id, error)
+                return {"ok": False, "retryable": False, "accepted": True, "error_text": error, "manual_review_required": True}
 
             if has_attempt_ledger:
                 await run_db(self.db.create_delivery_attempt, delivery_id=int(delivery_id), rule_id=int(rule_id), tenant_id=1, job_id=None, idempotency_key=idempotency_key, operation_kind="video_send", status="created", telegram_method=None, target_id=str(target_id), source_message_ids=[int(message_id)] if message_id else None, sent_message_ids=None, error_text=None)
                 logger.info("DELIVERY_ATTEMPT_CREATED | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s", delivery_id, rule_id, target_id, idempotency_key)
-                await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="video_delivery")
+                acquired = await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="video_delivery")
+                if not acquired:
+                    return {"ok": False, "retryable": False, "accepted": True, "error_text": "video_delivery_attempt_not_acquired"}
                 logger.info("DELIVERY_ATTEMPT_SENDING | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s", delivery_id, rule_id, target_id, idempotency_key)
 
             rule = await run_db(self.db.get_rule, int(rule_id))
@@ -1559,22 +1587,13 @@ class SenderService:
             elif raw_sent_ids is not None and has_attempt_ledger:
                 logger.warning("DELIVERY_ATTEMPT_ACCEPTED_SKIPPED_INVALID_IDS | operation=video_send | job_type=video_delivery | delivery_id=%s | idempotency_key=%s | raw_sent_message_ids=%s", delivery_id, idempotency_key, raw_sent_ids)
             if post_send_accepted and not ok:
+                error = "video_send_accepted_target_id_unresolved_non_retryable"
                 logger.warning(
-                    "DELIVERY_SENT_UNVERIFIED_AFTER_ACCEPTED | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | sent_message_ids=%s",
-                    delivery_id,
-                    rule_id,
-                    target_id,
-                    valid_sent_ids,
+                    "VIDEO_DELIVERY_ACCEPTED_UNVERIFIED | delivery_id=%s | rule_id=%s | target_id=%s | candidate_ids=%s | action=no_resend",
+                    delivery_id, rule_id, target_id, valid_sent_ids,
                 )
-                ok = True
-                await run_db(
-                    self._mark_delivery_sent_sync,
-                    int(delivery_id),
-                    sent_message_id=int(valid_sent_ids[0]),
-                    sent_message_ids=valid_sent_ids,
-                    target_id=str(target_id),
-                    delivery_method="video_delivery_unverified",
-                )
+                await run_db(self._mark_delivery_faulty_sync, delivery_id, error)
+                return {"ok": False, "retryable": False, "accepted": True, "error_text": error, "manual_review_required": True}
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
             if not ok and has_attempt_ledger:
