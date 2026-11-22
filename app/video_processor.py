@@ -10,7 +10,12 @@ from .video_clip_duration import calculate_center_clip_window
 from aiogram import Bot
 from aiogram.exceptions import TelegramEntityTooLarge
 from .bot_api_session import create_bot_api_session
-from .subprocess_safety import communicate_safely
+from .subprocess_safety import (
+    communicate_safely,
+    await_critical_cleanup,
+    terminate_and_reap,
+    iter_stream_lines,
+)
 from aiogram.types import FSInputFile, MessageEntity
 from telethon import types as tl_types
 
@@ -649,43 +654,12 @@ class VideoProcessor:
             return None
 
     async def _await_critical_cleanup(self, cleanup_coro):
-        """Do not release the worker slot while subprocess cleanup is still running.
-
-        A second cancel() may arrive during SIGTERM grace period (heartbeat
-        followed by graceful shutdown). Keep a separate cleanup Task alive
-        through repeated cancellation, then propagate cancellation.
-        """
-        cleanup_task = asyncio.create_task(cleanup_coro)
-        was_cancelled = False
-        while True:
-            try:
-                await asyncio.shield(cleanup_task)
-                break
-            except asyncio.CancelledError:
-                was_cancelled = True
-                if cleanup_task.done():
-                    break
-        result = cleanup_task.result()
-        if was_cancelled:
-            raise asyncio.CancelledError
-        return result
+        """Compatibility adapter; canonical implementation is subprocess_safety."""
+        return await await_critical_cleanup(cleanup_coro)
 
     async def _terminate_ffmpeg_process(self, process, *, grace_seconds=5.0):
-        """Terminate, kill if necessary, and always reap an orphaned subprocess."""
-        if process.returncode is None:
-            try:
-                process.terminate()
-            except ProcessLookupError:
-                pass
-        try:
-            await asyncio.wait_for(process.wait(), timeout=grace_seconds)
-        except asyncio.TimeoutError:
-            if process.returncode is None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-            await process.wait()
+        """Compatibility adapter; use one canonical SIGTERM / SIGKILL policy."""
+        return await terminate_and_reap(process, grace_seconds=grace_seconds)
 
     # ==================== FFMPEG RUNNER ====================
 
@@ -722,10 +696,7 @@ class VideoProcessor:
 
         async def read_stdout():
             nonlocal last_out_time_ms, last_progress_update, current_fps, current_speed, current_size
-            while True:
-                line = await process.stdout.readline()
-                if not line:
-                    break
+            async for line in iter_stream_lines(process.stdout):
                 line = line.decode("utf-8", errors="ignore").strip()
                 if not line:
                     continue
@@ -780,10 +751,7 @@ class VideoProcessor:
                             )
 
         async def read_stderr():
-            while True:
-                line = await process.stderr.readline()
-                if not line:
-                    break
+            async for line in iter_stream_lines(process.stderr):
                 line = line.decode("utf-8", errors="ignore").strip()
                 if line:
                     stderr_buffer.append(line)

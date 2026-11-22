@@ -199,3 +199,69 @@ def test_second_cancellation_cannot_orphan_ffmpeg(tmp_path, monkeypatch, operati
         assert await asyncio.wait_for(children[0].wait(), timeout=0.5) == children[0].returncode
 
     asyncio.run(scenario())
+
+
+
+def test_chunked_reader_drains_long_line_without_limit_overrun():
+    from app.subprocess_safety import iter_stream_lines
+
+    async def scenario():
+        stream = asyncio.StreamReader(limit=32)
+        huge = b"X" * 2_000_000
+        stream.feed_data(huge)
+        stream.feed_eof()
+        result = [
+            block async for block in iter_stream_lines(
+                stream, chunk_size=4 * 1024, max_segment_bytes=2 * 1024,
+            )
+        ]
+        assert b"".join(result) == huge
+        assert max(map(len, result)) <= 2048
+
+    asyncio.run(scenario())
+
+
+def test_runner_cancel_drains_stderr_without_newline(tmp_path, monkeypatch):
+    """FFmpeg writes a huge final log line on SIGTERM: no orphan or hanging readers."""
+    import textwrap
+
+    original = video_module.asyncio.create_subprocess_exec
+    children = []
+    ready = tmp_path / "stderr_ready.flag"
+    program = textwrap.dedent(
+        f"""
+        import pathlib, signal, sys, time
+        def terminate(signum, frame):
+            sys.stderr.buffer.write(b'Z' * 2_000_000)
+            sys.stderr.buffer.flush()
+            sys.exit(1)
+        signal.signal(signal.SIGTERM, terminate)
+        pathlib.Path({str(ready)!r}).write_text('ready')
+        while True:
+            time.sleep(0.2)
+        """
+    )
+
+    async def spawn(*args, **kwargs):
+        child = await original(sys.executable, "-c", program, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(video_module.asyncio, "create_subprocess_exec", spawn)
+    processor = VideoProcessor.__new__(VideoProcessor)
+
+    async def scenario():
+        task = asyncio.create_task(processor.run_ffmpeg_with_progress(
+            ["ffmpeg", "-i", "dummy.mp4"], "long stderr regression", timeout=600,
+        ))
+        for _ in range(150):
+            if ready.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert ready.exists()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=7)
+        assert children[0].returncode is not None
+
+    asyncio.run(scenario())
