@@ -116,6 +116,7 @@ class RepositoryProtocol(Protocol):
     def begin_rule_rescan(self, rule_id: int) -> tuple[bool, str]: ...
     def finish_rule_rescan(
         self, rule_id: int, *, was_active: bool, owner_token: str,
+        queue_rebuilt: bool = False,
     ) -> None: ...
     def reset_rule_history_for_replay(
         self, rule_id: int, *, owner_token: str,
