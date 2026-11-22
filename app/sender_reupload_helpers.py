@@ -18,7 +18,7 @@ class SenderReuploadHelpers:
     def __init__(self, owner):
         self.owner = owner
 
-    async def send_album_one_by_one(self, messages, target_id, target_thread_id, post_rows: list[dict] | None = None):
+    async def send_album_one_by_one(self, messages, target_id, target_thread_id, post_rows: list[dict] | None = None, caption_override: dict | None = None):
         sent_ids: list[int] = []
         accepted_transport_count = 0
 
@@ -38,6 +38,8 @@ class SenderReuploadHelpers:
                     target_id=target_id,
                     target_thread_id=target_thread_id,
                     post_row=post_row,
+                    **({"caption_override": (caption_override if idx == 0 else {"text": "", "entities": []})}
+                       if caption_override is not None else {}),
                 )
 
                 if isinstance(outcome, TelethonSendOutcome):
@@ -99,7 +101,7 @@ class SenderReuploadHelpers:
                 "error_text": str(exc),
             }
 
-    async def reupload_album(self, messages, target_id, target_thread_id, post_rows: list[dict] | None = None, is_self_loop: bool = False):
+    async def reupload_album(self, messages, target_id, target_thread_id, post_rows: list[dict] | None = None, is_self_loop: bool = False, caption_override: dict | None = None):
         downloaded_paths: list[Path] = []
 
         try:
@@ -124,6 +126,7 @@ class SenderReuploadHelpers:
                 target_thread_id=target_thread_id,
                 post_rows=post_rows,
                 is_self_loop=is_self_loop,
+                **({"caption_override": caption_override} if caption_override is not None else {}),
             )
 
             logger.info(
@@ -154,8 +157,12 @@ class SenderReuploadHelpers:
                 logger.warning("REUPLOAD_ALBUM | TELETHON_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
                 return telethon_result
 
-            caption_index = None
-            caption_text = None
+            caption_index = 0 if caption_override is not None else None
+            caption_text = str(caption_override["text"]) if caption_override is not None else None
+            caption_entities = None
+            if caption_override is not None:
+                _text, tl_entities = self.owner._build_text_and_entities_from_content(caption_override)
+                caption_entities = _sender_primitives._telethon_entities_to_bot(tl_entities)
 
             for idx, message in enumerate(messages):
                 post_row = post_rows[idx] if post_rows and idx < len(post_rows) else None
@@ -163,7 +170,7 @@ class SenderReuploadHelpers:
                 raw_text, _raw_entities = self.owner._build_text_and_entities_from_content(content)
 
                 text_value = (raw_text or "").strip()
-                if text_value:
+                if text_value and caption_override is None:
                     caption_index = idx
                     caption_text = text_value
                     break
@@ -224,9 +231,13 @@ class SenderReuploadHelpers:
 
                 item_caption = None
                 item_parse_mode = None
+                item_entities = None
 
                 if caption_index == idx and caption_text:
-                    if caption_html:
+                    if caption_override is not None:
+                        item_caption = caption_text
+                        item_entities = caption_entities
+                    elif caption_html:
                         item_caption = caption_html
                         item_parse_mode = "HTML"
                     else:
@@ -239,6 +250,7 @@ class SenderReuploadHelpers:
                             media=input_file,
                             caption=item_caption,
                             parse_mode=item_parse_mode,
+                            caption_entities=item_entities,
                         )
                     )
                 elif mime.startswith("video/"):
@@ -247,6 +259,7 @@ class SenderReuploadHelpers:
                             media=input_file,
                             caption=item_caption,
                             parse_mode=item_parse_mode,
+                            caption_entities=item_entities,
                         )
                     )
                 else:
@@ -255,6 +268,7 @@ class SenderReuploadHelpers:
                             media=input_file,
                             caption=item_caption,
                             parse_mode=item_parse_mode,
+                            caption_entities=item_entities,
                         )
                     )
 
@@ -296,8 +310,8 @@ class SenderReuploadHelpers:
                 except Exception:
                     pass
 
-    async def reupload_message(self, message, target_id, target_thread_id, post_row: dict | None = None, is_self_loop: bool = False) -> TelethonSendOutcome:
-        content = self.owner._content_from_message_or_post(message=message, post_row=post_row)
+    async def reupload_message(self, message, target_id, target_thread_id, post_row: dict | None = None, is_self_loop: bool = False, caption_override: dict | None = None) -> TelethonSendOutcome:
+        content = caption_override if caption_override is not None else self.owner._content_from_message_or_post(message=message, post_row=post_row)
         raw_text, raw_entities = self.owner._build_text_and_entities_from_content(content)
 
         if not getattr(message, "media", None):
@@ -325,14 +339,16 @@ class SenderReuploadHelpers:
                     logger.warning("REUPLOAD_MESSAGE | TELETHON_TEXT_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
                 return telethon_outcome
 
-            html_text = _sender_primitives._prepare_html_text(raw_text)
+            html_text = raw_text if caption_override is not None else _sender_primitives._prepare_html_text(raw_text)
+            bot_entities = _sender_primitives._telethon_entities_to_bot(raw_entities) if caption_override is not None else None
             if html_text:
                 logger.info("REUPLOAD_MESSAGE | BOTAPI_TEXT_FALLBACK | START")
                 sent = await self.owner.bot.send_message(
                     chat_id=target_id,
                     message_thread_id=target_thread_id,
                     text=html_text,
-                    parse_mode="HTML",
+                    parse_mode=None if caption_override is not None else "HTML",
+                    entities=bot_entities,
                     disable_web_page_preview=True,
                 )
                 logger.info("REUPLOAD_MESSAGE | BOTAPI_TEXT_FALLBACK | OK | sent_message_id=%s", sent.message_id)
@@ -369,6 +385,7 @@ class SenderReuploadHelpers:
                 force_document=not (mime.startswith("image/") or mime.startswith("video/")),
                 post_row=post_row,
                 is_self_loop=is_self_loop,
+                **({"caption_override": caption_override} if caption_override is not None else {}),
             )
             if isinstance(telethon_outcome, int) and telethon_outcome > 0:
                 return TelethonSendOutcome(True, True, True, int(telethon_outcome), [int(telethon_outcome)], resolution_method="legacy_telethon_helper")
@@ -379,7 +396,8 @@ class SenderReuploadHelpers:
                     logger.warning("REUPLOAD_MESSAGE | TELETHON_FILE_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
                 return telethon_outcome
 
-            html_text = _sender_primitives._prepare_html_text(raw_text)
+            html_text = raw_text if caption_override is not None else _sender_primitives._prepare_html_text(raw_text)
+            bot_entities = _sender_primitives._telethon_entities_to_bot(raw_entities) if caption_override is not None else None
             input_file = FSInputFile(path)
 
             logger.info("REUPLOAD_MESSAGE | BOTAPI_MEDIA_FALLBACK | START | mime=%s", mime)
@@ -390,7 +408,8 @@ class SenderReuploadHelpers:
                     message_thread_id=target_thread_id,
                     photo=input_file,
                     caption=html_text,
-                    parse_mode="HTML" if html_text else None,
+                    parse_mode="HTML" if html_text and caption_override is None else None,
+                    caption_entities=bot_entities,
                 )
             elif mime.startswith("video/"):
                 sent = await self.owner.bot.send_video(
@@ -398,7 +417,8 @@ class SenderReuploadHelpers:
                     message_thread_id=target_thread_id,
                     video=input_file,
                     caption=html_text,
-                    parse_mode="HTML" if html_text else None,
+                    parse_mode="HTML" if html_text and caption_override is None else None,
+                    caption_entities=bot_entities,
                     supports_streaming=True,
                 )
             else:
@@ -407,7 +427,8 @@ class SenderReuploadHelpers:
                     message_thread_id=target_thread_id,
                     document=input_file,
                     caption=html_text,
-                    parse_mode="HTML" if html_text else None,
+                    parse_mode="HTML" if html_text and caption_override is None else None,
+                    caption_entities=bot_entities,
                 )
 
             logger.info("REUPLOAD_MESSAGE | BOTAPI_MEDIA_FALLBACK | OK | sent_message_id=%s", sent.message_id)
