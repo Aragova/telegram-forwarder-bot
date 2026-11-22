@@ -1305,7 +1305,8 @@ class SenderService:
             # Another worker may still own the send/verification. Do not
             # downgrade its successful delivery to faulty from this contender.
             return {"ok": False, "retryable": True, "accepted": False,
-                    "error_text": error, "manual_review_required": True}
+                    "error_text": error, "manual_review_required": True,
+                    "idempotency_key": idempotency_key}
         await run_db(self.db.create_delivery_attempt, delivery_id=int(delivery_id), rule_id=int(rule_id), tenant_id=1, job_id=None, idempotency_key=idempotency_key, operation_kind="single", status="created", target_id=str(target_id), source_message_ids=[int(message_id)])
         logger.info("DELIVERY_ATTEMPT_CREATED | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
         acquired = await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="copy_single")
@@ -1457,7 +1458,8 @@ class SenderService:
             )
             # Never mutate another live worker's deliveries on a cache miss.
             return {"ok": False, "retryable": True, "accepted": False,
-                    "error_text": error, "manual_review_required": True}
+                    "error_text": error, "manual_review_required": True,
+                    "idempotency_key": idempotency_key}
         await run_db(self.db.create_delivery_attempt, delivery_id=int(delivery_id or 0), rule_id=int(rule_id), tenant_id=1, job_id=None, idempotency_key=idempotency_key, operation_kind="album", status="created", target_id=str(target_id), source_message_ids=album_source_ids)
         logger.info("DELIVERY_ATTEMPT_CREATED | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
         acquired = await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="copy_album")
