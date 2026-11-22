@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 from app.rule_folders_repository import RuleFoldersRepositoryMixin, normalize_folder_name
+from app import rule_folder_handlers as folder_handlers
 from app.rule_folders_ui import (
     additional_functions_view,
     folder_delete_confirmation_view,
@@ -12,6 +14,7 @@ from app.rule_folders_ui import (
     move_picker_view,
     root_view,
     rule_catalog_view,
+    rule_matches_query,
 )
 
 
@@ -199,3 +202,48 @@ def test_move_to_unfiled_never_deletes_the_rule():
     sql = " ".join(q for q, _ in repo.connection.cursor_obj.queries)
     assert "DELETE FROM rule_folder_assignments" in sql
     assert "DELETE FROM routing" not in sql
+
+
+def test_hash_prefixed_rule_search_finds_exact_id_and_not_partial_id():
+    assert rule_matches_query(FakeRule(214), "#214")
+    assert rule_matches_query(FakeRule(214), "# 214")
+    assert not rule_matches_query(FakeRule(1214), "#214")
+    assert not rule_matches_query(FakeRule(214), "#215")
+    assert rule_matches_query(FakeRule(214), "длинное название")
+    assert rule_matches_query(FakeRule(214), "-1002")
+    assert not rule_matches_query(FakeRule(214), "")
+
+
+def test_new_folder_picker_cancel_returns_to_same_picker_page():
+    folders = [{"id": i, "name": f"Папка {i}", "rules_count": 1} for i in range(18)]
+    _, kb = move_picker_view(folders=folders, active_name="Приватные",
+                             origin="s214", rule_count=1, page=1)
+    assert "rf:create_for:s214:1" in callbacks(kb)
+    assert "rf:move_back:s214" in callbacks(kb)
+    prompt, back = folder_handlers._input_prompt("create", origin="s214", page=1)
+    assert "НОВАЯ ПАПКА" in prompt
+    assert back == "rf:move_page:s214:1"
+
+
+def test_cancel_pending_folder_input_does_not_keep_a_rename_wizard():
+    uid = 785001
+    folder_handlers._inputs[uid] = {"kind": "rename", "folder_id": 7}
+    folder_handlers.clear_folder_input(uid)
+    assert uid not in folder_handlers._inputs
+
+
+def test_live_admin_reply_keyboard_opens_folder_root_and_not_legacy_reply_menu():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    start = source.index("async def handle_admin_reply_keyboard_router(")
+    end = source.index("@dp.callback_query", start)
+    block = source[start:end]
+    assert 'if canonical == "🔄 Правила":' in block
+    assert "await show_admin_rule_manager(message, message.from_user.id)" in block
+    assert '"🔄 Раздел: Правила", reply_markup=get_rules_menu()' not in block
+
+
+def test_folder_input_uses_safe_message_edits_and_private_chat_guard():
+    source = Path("app/rule_folder_handlers.py").read_text(encoding="utf-8")
+    assert 'getattr(m.chat, "type", None) == "private"' in source
+    assert 'ctx.edit_message_text_safe(' in source
+    assert 'ctx.try_delete_message_safe(' in source
