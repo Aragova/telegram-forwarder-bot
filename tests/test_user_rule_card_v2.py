@@ -190,7 +190,7 @@ def test_navigation_callbacks_exist():
     logs_callbacks = _callbacks(user_ui.build_user_rule_logs_keyboard(rule_id=1, has_logs=True))
 
     assert any(cb.startswith("user_rule_open:") for cb in extra_callbacks)
-    assert "user_rules" in card_callbacks
+    assert "rf:back:1" in card_callbacks
     assert "user_main" in card_callbacks
     assert any(cb.startswith("user_rule_logs_refresh:") for cb in logs_callbacks)
     assert any(cb.startswith("user_rule_toggle:") for cb in card_callbacks)
