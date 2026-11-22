@@ -2,6 +2,9 @@ import asyncio
 import logging
 from pathlib import Path
 
+from aiogram.exceptions import TelegramEntityTooLarge
+from aiogram.methods import SendVideo
+
 from app.sender import SenderService
 
 
@@ -290,3 +293,38 @@ def test_video_send_wrapper_failed_send_result_contract(tmp_path: Path):
     assert result["ok"] is False
     assert result["retryable"] is True
     assert result["fallback_to_legacy"] is False
+
+
+
+def test_video_send_size_error_is_non_retryable_and_not_accepted(tmp_path: Path):
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _reject_too_large(*_args, **_kwargs):
+        raise TelegramEntityTooLarge(
+            method=SendVideo(chat_id=123, video="video_file_id"),
+            message="Request Entity Too Large",
+        )
+
+    service.video_processor.send_with_retry = _reject_too_large
+    processed_file = tmp_path / "video.mp4"
+    processed_file.write_bytes(b"video")
+
+    result = asyncio.run(
+        service.execute_video_send_from_processed_job(
+            delivery_id=17,
+            rule_id=1,
+            tenant_id=1,
+            target_id="-1007",
+            processed_video_path=str(processed_file),
+            artifact_version=1,
+            pipeline_version=1,
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["retryable"] is False
+    assert result["fallback_to_legacy"] is False
+    assert "TelegramEntityTooLarge" in result["error_text"]
+    assert any(call[0] == "failed" for call in repo.calls)
+    assert not any(call[0] == "accepted" for call in repo.calls)

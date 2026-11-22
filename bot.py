@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.client.session.aiohttp import AiohttpSession
+from app.bot_api_session import create_bot_api_session
 from aiogram.filters import Command
 from aiogram.types import (
     BotCommand,
@@ -8222,7 +8222,7 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
 
     bot = Bot(
         token=settings.bot_token,
-        base_url=f"{settings.bot_api_base}/bot",
+        session=create_bot_api_session(settings.bot_api_base),
     )
     if user_handlers_ctx is not None:
         user_handlers_ctx.bot = bot

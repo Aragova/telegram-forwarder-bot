@@ -8,6 +8,8 @@ import logging
 from .config import settings as config
 from .video_clip_duration import calculate_center_clip_window
 from aiogram import Bot
+from aiogram.exceptions import TelegramEntityTooLarge
+from .bot_api_session import create_bot_api_session
 from aiogram.types import FSInputFile, MessageEntity
 from telethon import types as tl_types
 
@@ -24,7 +26,7 @@ class VideoProcessor:
 
         self.bot = bot or Bot(
             token=config.bot_token,
-            base_url=f"{config.bot_api_base}/bot",
+            session=create_bot_api_session(config.bot_api_base),
         )
 
         self.telethon = telethon_client
@@ -1343,6 +1345,16 @@ class VideoProcessor:
             logger.warning("Неизвестный caption_send_mode=%s, fallback -> plain", normalized_mode)
             normalized_mode = "plain"
 
+        file_size_bytes = os.path.getsize(video_path)
+        api_session = getattr(bot, "session", None)
+        local_api = bool(getattr(getattr(api_session, "api", None), "is_local", False))
+        logger.info(
+            "VIDEO_SEND_ROUTE | transport=%s | file_size_bytes=%s | local_bot_api=%s",
+            "telethon" if normalized_mode == "premium" else "bot",
+            file_size_bytes,
+            local_api,
+        )
+
         for attempt in range(max_retries):
             try:
                 if normalized_mode == "premium":
@@ -1395,6 +1407,19 @@ class VideoProcessor:
 
                 return sent_msg
 
+            except TelegramEntityTooLarge as exc:
+                logger.error(
+                    "VIDEO_SEND_TOO_LARGE | transport=%s | file_size_bytes=%s | action=no_retry",
+                    "telethon" if normalized_mode == "premium" else "bot",
+                    file_size_bytes,
+                )
+                self._stage_failed(
+                    stage_logger,
+                    "send",
+                    error_text=str(exc),
+                    extra={"file_size_bytes": file_size_bytes, "retryable": False},
+                )
+                raise
             except Exception as e:
                 logger.error("   ❌ Ошибка отправки (%s/%s): %s", attempt + 1, max_retries, e)
 

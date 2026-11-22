@@ -12,6 +12,7 @@ from typing import Any, Callable
 from aiogram import Bot
 
 from app.config import settings
+from app.bot_api_session import create_bot_api_session
 from app.payments.lava_top_client import sanitize_lava_response_for_log
 from app.payments.payment_service import LavaClientOrderRef, parse_lava_client_order_id
 from app.subscription_service import SubscriptionService
@@ -180,7 +181,7 @@ class LavaWebhookActivationService:
             return
 
         async def _send() -> None:
-            bot = Bot(token=settings.bot_token)
+            bot = Bot(token=settings.bot_token, session=create_bot_api_session(settings.bot_api_base))
             try:
                 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
