@@ -1255,7 +1255,6 @@ def _filter_user_rule_card_keyboard(keyboard: InlineKeyboardMarkup, rule_id: int
         f"video_intro_menu:{rule_id}": f"user_rule_intros:{rule_id}",
         f"video_caption_menu:{rule_id}": f"user_rule_caption:{rule_id}",
         f"repost_caption_menu:{rule_id}": f"user_rule_repost_caption:{rule_id}",
-        f"repost_caption_menu:{rule_id}": f"user_rule_repost_caption:{rule_id}",
         f"trigger_now:{rule_id}": f"user_rule_send_now:{rule_id}",
         f"delete_rule:{rule_id}": f"user_rule_delete:{rule_id}",
         f"rule_extra_menu:{rule_id}": f"user_rule_extra:{rule_id}",
@@ -1370,11 +1369,11 @@ def build_repost_caption_menu_text(rule_id: int) -> str:
         getattr(rule, "repost_caption_delivery_mode", "copy_first")
     )
     return (
-        "✍️ <b>Подпись репостов</b>\\n\\n"
-        f"📝 <b>Текущая подпись:</b> {caption_status}\\n"
-        f"📌 <b>Статус:</b> {status}\\n"
-        f"🎛 <b>Оформление:</b> {mode}\\n\\n"
-        "Если подпись включена, она заменяет оригинальный текст поста.\\n"
+        "✍️ <b>Подпись репостов</b>\n\n"
+        f"📝 <b>Текущая подпись:</b> {caption_status}\n"
+        f"📌 <b>Статус:</b> {status}\n"
+        f"🎛 <b>Оформление:</b> {mode}\n\n"
+        "Если подпись включена, она заменяет оригинальный текст поста.\n"
         "При выключении или очистке автоматически возвращается оригинал."
     )
 
@@ -1407,9 +1406,9 @@ def build_repost_caption_mode_menu_text(rule_id: int) -> str:
         getattr(rule, "repost_caption_delivery_mode", "copy_first")
     )
     return (
-        "🎛 <b>Режим подписи репоста</b>\\n\\n"
-        "⚡ <b>Обычный</b> — текст и обычные смайлики.\\n"
-        "💎 <b>Премиум</b> — жирный текст, ссылки и premium emoji.\\n\\n"
+        "🎛 <b>Режим подписи репоста</b>\n\n"
+        "⚡ <b>Обычный</b> — текст и обычные смайлики.\n"
+        "💎 <b>Премиум</b> — жирный текст, ссылки и premium emoji.\n\n"
         f"Текущий режим: {mode}"
     )
 
@@ -5811,10 +5810,10 @@ async def handle_repost_caption_edit(callback: CallbackQuery):
     edited = await edit_message_text_safe(
         message=callback.message,
         text=(
-            "✏️ <b>Изменение подписи репостов</b>\\n\\n"
-            f"Правило #{rule_id}\\n\\n"
-            "Отправьте новый текст одним сообщением (до 1024 символов).\\n"
-            "Оформление и premium emoji сохраняются в режиме 💎 Премиум.\\n\\n"
+            "✏️ <b>Изменение подписи репостов</b>\n\n"
+            f"Правило #{rule_id}\n\n"
+            "Отправьте новый текст одним сообщением (до 1024 символов).\n"
+            "Оформление и premium emoji сохраняются в режиме 💎 Премиум.\n\n"
             "Для возврата оригинальной подписи используйте «Выключить» или «Очистить»."
         ),
         parse_mode="HTML",
