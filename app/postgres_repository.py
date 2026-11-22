@@ -4026,7 +4026,7 @@ class PostgresRepository(RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE routing SET is_active = %s WHERE id = %s",
+                    "UPDATE routing SET is_active = %s WHERE id = %s AND rescan_owner_token IS NULL",
                     (bool(is_active), rule_id),
                 )
                 updated = cur.rowcount > 0
@@ -4067,7 +4067,7 @@ class PostgresRepository(RepositoryProtocol):
                     """
                     UPDATE routing
                     SET is_active = TRUE
-                    WHERE id = %s
+                    WHERE id = %s AND rescan_owner_token IS NULL
                     """,
                     (rule_id,),
                 )
