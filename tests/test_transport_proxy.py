@@ -124,3 +124,127 @@ def test_proxy_propagates_policy_exception_without_wrapping():
         assert raw_bot.direct_calls == []
 
     asyncio.run(scenario())
+
+
+def test_telethon_control_reads_are_not_blocked_by_large_media_download():
+    """Regression: one 180s download must not saturate control reads."""
+    from app.transport_policy import build_sender_telethon_policy
+
+    async def scenario():
+        download_started = asyncio.Event()
+        release_download = asyncio.Event()
+
+        class Raw:
+            async def download_media(self, *_args, **_kwargs):
+                download_started.set()
+                await release_download.wait()
+                return "/tmp/media.mp4"
+
+            async def get_messages(self, *_args, **_kwargs):
+                return ["confirmed"]
+
+        proxy = wrap_telethon_client(
+            Raw(), label="sender.telethon", policy=build_sender_telethon_policy(),
+        )
+        bulk = asyncio.create_task(proxy.download_media("large-video"))
+        await asyncio.wait_for(download_started.wait(), timeout=1.0)
+        try:
+            # With the old single semaphore (concurrency=1), this hung until
+            # the large download finished. New control lane must be independent.
+            assert await asyncio.wait_for(proxy.get_messages("target", ids=12), timeout=0.5) == ["confirmed"]
+            assert not bulk.done()
+        finally:
+            release_download.set()
+            assert await asyncio.wait_for(bulk, timeout=1.0) == "/tmp/media.mp4"
+
+    asyncio.run(scenario())
+
+
+def test_telethon_control_rpc_timeout_releases_its_lane():
+    from app.transport_policy import build_sender_telethon_policy
+
+    async def scenario():
+        class Raw:
+            async def get_messages(self, *_args, **_kwargs):
+                await asyncio.Event().wait()
+
+            async def get_entity(self, *_args, **_kwargs):
+                return "target"
+
+        proxy = wrap_telethon_client(Raw(), label="sender.telethon", policy=build_sender_telethon_policy())
+        proxy._control_read_timeout_sec = 0.03
+        with pytest.raises(asyncio.TimeoutError):
+            await proxy.get_messages("target", ids=12)
+        # A cancelled read cannot permanently hold the semaphore.
+        assert await asyncio.wait_for(proxy.get_entity("target"), timeout=0.5) == "target"
+
+    asyncio.run(scenario())
+
+
+def test_telethon_write_operations_remain_serialized_after_lane_split():
+    from app.transport_policy import build_sender_telethon_policy
+
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        active = 0
+        maximum_active = 0
+
+        class Raw:
+            async def send_message(self, *_args, **_kwargs):
+                nonlocal active, maximum_active
+                active += 1
+                maximum_active = max(maximum_active, active)
+                started.set()
+                try:
+                    await release.wait()
+                    return "sent"
+                finally:
+                    active -= 1
+
+        proxy = wrap_telethon_client(Raw(), label="sender.telethon", policy=build_sender_telethon_policy())
+        first = asyncio.create_task(proxy.send_message("target", "one"))
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        second = asyncio.create_task(proxy.send_message("target", "two"))
+        await asyncio.sleep(0.02)
+        try:
+            assert active == 1
+            assert not second.done()
+        finally:
+            release.set()
+            assert await asyncio.wait_for(first, timeout=1.0) == "sent"
+            assert await asyncio.wait_for(second, timeout=1.0) == "sent"
+        assert maximum_active == 1
+
+    asyncio.run(scenario())
+
+
+def test_telethon_bulk_upload_does_not_block_short_message_write():
+    from app.transport_policy import build_sender_telethon_policy
+
+    async def scenario():
+        upload_started = asyncio.Event()
+        release_upload = asyncio.Event()
+
+        class Raw:
+            async def send_file(self, *_args, **_kwargs):
+                upload_started.set()
+                await release_upload.wait()
+                return "uploaded"
+
+            async def send_message(self, *_args, **_kwargs):
+                return "short-message-sent"
+
+        proxy = wrap_telethon_client(
+            Raw(), label="sender.telethon", policy=build_sender_telethon_policy(),
+        )
+        upload = asyncio.create_task(proxy.send_file("target", file="large-video.mp4"))
+        await asyncio.wait_for(upload_started.wait(), timeout=1.0)
+        try:
+            assert await asyncio.wait_for(proxy.send_message("target", "hello"), timeout=0.5) == "short-message-sent"
+            assert not upload.done()
+        finally:
+            release_upload.set()
+            assert await asyncio.wait_for(upload, timeout=1.0) == "uploaded"
+
+    asyncio.run(scenario())

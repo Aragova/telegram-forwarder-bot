@@ -228,6 +228,11 @@ class RepostSingleDelivery:
                     return False
                 candidate_sent_message_ids = accepted_target_message_ids
                 authoritative_sent_message_id = int(accepted_target_message_ids[0])
+                if idempotency_key and hasattr(owner.db, "mark_delivery_attempt_verified"):
+                    await run_db(
+                        owner.db.mark_delivery_attempt_verified,
+                        idempotency_key, sent_message_ids=accepted_target_message_ids,
+                    )
                 reaction_target_message_id = authoritative_sent_message_id
                 if is_self_loop:
                     logger.info(
@@ -281,16 +286,34 @@ class RepostSingleDelivery:
                 )
                 return True
             if valid_sent_ids:
-                logger.warning("DELIVERY_SENT_UNVERIFIED_AFTER_ACCEPTED | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_ids=%s | warnings=%s", rule.id, delivery_id, target_id, valid_sent_ids, post_send_warnings)
-                await run_db(
-                    owner._mark_delivery_sent_sync,
-                    delivery_id,
-                    sent_message_id=int(valid_sent_ids[0]),
-                    sent_message_ids=valid_sent_ids,
-                    target_id=str(target_id),
-                    delivery_method="copy_single_unverified",
+                # Bot API returned an ID but the target could not be read.
+                # Treat this as acceptance with UNKNOWN visibility, not a
+                # successful publication. No reupload/retry without review.
+                error_text = (
+                    "copy_single_uncertain_no_fallback: target message ID not confirmed "
+                    f"(candidate_ids={valid_sent_ids})"
                 )
-                return True
+                logger.warning(
+                    "REPOST_COPY_ACCEPTED_UNVERIFIED | rule_id=%s | delivery_id=%s | target_id=%s | "
+                    "candidate_ids=%s | action=manual_review_no_second_send",
+                    rule.id, delivery_id, target_id, valid_sent_ids,
+                )
+                if idempotency_key and hasattr(owner.db, "mark_delivery_faulty_if_attempt_unverified"):
+                    await run_db(owner.db.mark_delivery_faulty_if_attempt_unverified, delivery_id, idempotency_key, error_text)
+                else:
+                    await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+                await owner._log_delivery_final_failure(
+                    rule_id=rule.id,
+                    delivery_ids=delivery_ids,
+                    final_method="copy_single_accepted_unverified",
+                    source_channel=source_channel,
+                    target_id=target_id,
+                    source_message_ids=source_message_ids,
+                    error_text=error_text,
+                    attempts_debug=[{"stage": "copy_single", "attempted": True, "candidate_sent_message_ids": valid_sent_ids}],
+                    extra={"manual_review_required": True, "second_send_blocked": True},
+                )
+                return False
             if copy_result.get("attempted"):
                 if is_self_loop and send_result.error_text:
                     logger.info("SELF_LOOP_COPY_TO_REUPLOAD_ALLOWED | rule_id=%s | delivery_id=%s | error=%s", rule.id, delivery_id, send_result.error_text)
@@ -519,6 +542,11 @@ class RepostSingleDelivery:
                 await run_db(owner._mark_delivery_faulty_sync, delivery_id, "self_loop_sent_id_collision")
                 return False
             authoritative_sent_message_id = int(accepted_target_message_ids[0])
+            if idempotency_key and hasattr(owner.db, "mark_delivery_attempt_verified"):
+                await run_db(
+                    owner.db.mark_delivery_attempt_verified,
+                    idempotency_key, sent_message_ids=valid_sent_message_ids,
+                )
             if is_self_loop and hasattr(owner, "_verify_self_loop_video_metadata"):
                 await owner._run_post_send_step_safe(
                     step_name="self_loop_video_metadata_verify",
@@ -580,6 +608,22 @@ class RepostSingleDelivery:
 
         logger.warning("REUPLOAD_SINGLE_TARGET_VERIFY_FAILED | rule_id=%s | delivery_id=%s | source_channel=%s | source_message_id=%s | target_id=%s | candidate_sent_message_ids=%s | reason=target_message_not_found_after_send", rule.id, delivery_id, source_channel, message_id, target_id, candidate_sent_message_ids)
         logger.warning("DELIVERY_FALSE_SUCCESS_PREVENTED | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s | action=retry_or_faulty", rule.id, delivery_id, "reupload_single", target_id, candidate_sent_message_ids)
+
+        if candidate_sent_message_ids and not is_self_loop:
+            error_text = (
+                "telethon_send_accepted_target_id_unresolved_non_retryable: "
+                f"reupload target not confirmed (candidate_ids={candidate_sent_message_ids})"
+            )
+            logger.warning(
+                "REUPLOAD_SINGLE_ACCEPTED_UNVERIFIED | rule_id=%s | delivery_id=%s | "
+                "candidate_ids=%s | action=manual_review_no_second_send",
+                rule.id, delivery_id, candidate_sent_message_ids,
+            )
+            if idempotency_key and hasattr(owner.db, "mark_delivery_faulty_if_attempt_unverified"):
+                await run_db(owner.db.mark_delivery_faulty_if_attempt_unverified, delivery_id, idempotency_key, error_text)
+            else:
+                await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+            return False
 
         if is_self_loop and candidate_sent_message_ids:
             logger.warning(

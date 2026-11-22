@@ -1,5 +1,5 @@
 from __future__ import annotations
-import logging, time
+import logging, time, asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any
 from telethon.tl import types as tl_types
@@ -33,6 +33,7 @@ from .sender_primitives import (
 )
 
 logger = logging.getLogger("forwarder")
+POST_SEND_REACTION_TIMEOUT_SEC = 35.0
 
 TERMINAL_NON_RETRYABLE_DELIVERY_REASONS = (
     "copy_single_uncertain_no_fallback",
@@ -1073,7 +1074,6 @@ class SenderService:
         allow_unverified_self_loop_target: bool = False,
     ) -> dict:
         from .reaction_delivery import ReactionDelivery
-
         kwargs = {
             "rule": rule,
             "target_id": target_id,
@@ -1085,7 +1085,17 @@ class SenderService:
         }
         if allow_unverified_self_loop_target:
             kwargs["allow_unverified_self_loop_target"] = True
-        return await ReactionDelivery(self)._add_reaction_for_rule_if_possible(**kwargs)
+        try:
+            return await asyncio.wait_for(
+                ReactionDelivery(self)._add_reaction_for_rule_if_possible(**kwargs),
+                timeout=POST_SEND_REACTION_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "POST_SEND_REACTION_TIMEOUT | rule_id=%s | delivery_id=%s | target_id=%s | message_id=%s",
+                getattr(rule, "id", None), delivery_id, target_id, sent_message_id,
+            )
+            return {"applied": False, "enqueued": False, "reason": "reaction_timeout"}
 
     async def process_rule_once(self, rule):
         schedule_mode = getattr(rule, "schedule_mode", "interval") or "interval"
@@ -1260,13 +1270,60 @@ class SenderService:
         idempotency_key = build_delivery_idempotency_key(operation_kind="single", delivery_id=int(delivery_id), target_id=str(target_id))
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
-        if isinstance(attempt, dict) and str(attempt.get("status") or "") in {"accepted", "verified"} and cached_ids:
-            logger.info("DELIVERY_ATTEMPT_CACHE_HIT | operation=single | key=%s | delivery_id=%s | sent_message_ids=%s", idempotency_key, delivery_id, cached_ids)
-            await run_db(self._mark_delivery_sent_sync, int(delivery_id), sent_message_id=int(cached_ids[0]), sent_message_ids=cached_ids, target_id=str(target_id), delivery_method="idempotency_cache")
+        attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
+        if attempt_status == "verified" and cached_ids:
+            logger.info("DELIVERY_ATTEMPT_VERIFIED_CACHE_HIT | operation=single | key=%s | delivery_id=%s | sent_message_ids=%s", idempotency_key, delivery_id, cached_ids)
+            await run_db(self._mark_delivery_sent_sync, int(delivery_id), sent_message_id=int(cached_ids[0]), sent_message_ids=cached_ids, target_id=str(target_id), delivery_method="idempotency_verified_cache")
             return True
+        if attempt_status in {"sending", "accepted", "failed_after_send"}:
+            # An accepted ID is not necessarily visible in this target. Never
+            # issue another send after an ambiguous response or worker restart.
+            verified_ids = []
+            if attempt_status == "accepted" and cached_ids:
+                verified_ids = await self._confirm_target_delivery_message_ids_with_retry(
+                    rule_id=rule_id, delivery_id=delivery_id,
+                    source_channel=str(source_channel), target_id=str(target_id),
+                    source_message_ids=[int(message_id)],
+                    candidate_sent_message_ids=cached_ids, method="repost_single_cache_reconcile",
+                    max_age_seconds=86400 * 30,
+                )
+            if verified_ids:
+                promoted = bool(
+                    hasattr(self.db, "mark_delivery_attempt_verified")
+                    and await run_db(
+                        self.db.mark_delivery_attempt_verified, idempotency_key,
+                        sent_message_ids=verified_ids,
+                    )
+                )
+                if promoted:
+                    await run_db(
+                        self._mark_delivery_sent_sync, int(delivery_id),
+                        sent_message_id=int(verified_ids[0]), sent_message_ids=verified_ids,
+                        target_id=str(target_id), delivery_method="idempotency_cache_reconciled",
+                    )
+                    return True
+                logger.warning(
+                    "REPOST_SINGLE_CACHE_PROMOTION_REJECTED | rule_id=%s | delivery_id=%s | "
+                    "candidate_ids=%s | action=defer_no_delivery_mutation",
+                    rule_id, delivery_id, verified_ids,
+                )
+            error = "copy_single_uncertain_no_fallback: cached attempt awaiting authoritative target confirmation"
+            logger.warning(
+                "REPOST_SINGLE_CACHE_UNRESOLVED | rule_id=%s | delivery_id=%s | attempt_status=%s | "
+                "candidate_ids=%s | action=read_only_retry_no_second_send",
+                rule_id, delivery_id, attempt_status, cached_ids,
+            )
+            # Another worker may still own the send/verification. Do not
+            # downgrade its successful delivery to faulty from this contender.
+            return {"ok": False, "retryable": True, "accepted": False,
+                    "error_text": error, "manual_review_required": True,
+                    "idempotency_key": idempotency_key}
         await run_db(self.db.create_delivery_attempt, delivery_id=int(delivery_id), rule_id=int(rule_id), tenant_id=1, job_id=None, idempotency_key=idempotency_key, operation_kind="single", status="created", target_id=str(target_id), source_message_ids=[int(message_id)])
         logger.info("DELIVERY_ATTEMPT_CREATED | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
-        await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="copy_single")
+        acquired = await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="copy_single")
+        if not acquired:
+            logger.warning("REPOST_SINGLE_SEND_ATTEMPT_NOT_ACQUIRED | rule_id=%s | delivery_id=%s | key=%s | action=no_send", rule_id, delivery_id, idempotency_key)
+            return _terminal_non_retryable_result("copy_single_uncertain_no_fallback: concurrent attempt owns the write")
         logger.info("DELIVERY_ATTEMPT_SENDING | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
         try:
             rule = await run_db(self.db.get_rule, int(rule_id))
@@ -1359,8 +1416,9 @@ class SenderService:
         idempotency_key = build_delivery_idempotency_key(operation_kind="album", rule_id=int(rule_id), target_id=str(target_id), media_group_id=media_group_id, source_message_ids=album_source_ids)
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
-        if isinstance(attempt, dict) and str(attempt.get("status") or "") in {"accepted", "verified"} and cached_ids:
-            logger.info("DELIVERY_ATTEMPT_CACHE_HIT | operation=album | key=%s | sent_message_ids=%s", idempotency_key, cached_ids)
+        attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
+        if attempt_status == "verified" and cached_ids:
+            logger.info("DELIVERY_ATTEMPT_VERIFIED_CACHE_HIT | operation=album | key=%s | sent_message_ids=%s", idempotency_key, cached_ids)
             await run_db(
                 self._mark_album_deliveries_sent_sync,
                 album_delivery_ids,
@@ -1374,9 +1432,51 @@ class SenderService:
                 album_delivery_ids,
             )
             return True
+        if attempt_status == "accepted" and cached_ids and len(cached_ids) == len(album_delivery_ids):
+            # A previously accepted copy may already exist in Telegram. Only
+            # READ the target history; never send the album a second time.
+            verification = await self._verify_album_delivery(
+                target_id=str(target_id),
+                expected_count=len(album_delivery_ids),
+                sent_message_ids=cached_ids,
+                target_thread_id=target_thread_id,
+            )
+            verified_ids = normalize_valid_sent_message_ids(
+                (verification.get("sent_message_ids") or cached_ids) if verification.get("ok") else []
+            )
+            if verification.get("ok") and len(verified_ids) == len(album_delivery_ids):
+                promoted = await run_db(
+                    self.db.mark_delivery_attempt_verified,
+                    idempotency_key, sent_message_ids=verified_ids,
+                )
+                if promoted:
+                    await run_db(
+                        self._mark_album_deliveries_sent_sync,
+                        album_delivery_ids, sent_message_ids=verified_ids,
+                        target_id=str(target_id), delivery_method="idempotency_album_cache_reconciled",
+                    )
+                    logger.info(
+                        "REPOST_ALBUM_CACHE_RECONCILED | rule_id=%s | delivery_ids=%s | target_ids=%s",
+                        rule_id, album_delivery_ids, verified_ids,
+                    )
+                    return True
+        if attempt_status in {"sending", "accepted", "failed_after_send"}:
+            error = "telethon_send_accepted_target_id_unresolved_non_retryable: album cache awaiting confirmation"
+            logger.warning(
+                "REPOST_ALBUM_CACHE_UNRESOLVED | rule_id=%s | delivery_ids=%s | status=%s | "
+                "candidate_ids=%s | action=read_only_retry_no_second_send",
+                rule_id, album_delivery_ids, attempt_status, cached_ids,
+            )
+            # Never mutate another live worker's deliveries on a cache miss.
+            return {"ok": False, "retryable": True, "accepted": False,
+                    "error_text": error, "manual_review_required": True,
+                    "idempotency_key": idempotency_key}
         await run_db(self.db.create_delivery_attempt, delivery_id=int(delivery_id or 0), rule_id=int(rule_id), tenant_id=1, job_id=None, idempotency_key=idempotency_key, operation_kind="album", status="created", target_id=str(target_id), source_message_ids=album_source_ids)
         logger.info("DELIVERY_ATTEMPT_CREATED | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
-        await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="copy_album")
+        acquired = await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="copy_album")
+        if not acquired:
+            logger.warning("REPOST_ALBUM_SEND_ATTEMPT_NOT_ACQUIRED | rule_id=%s | delivery_id=%s | action=no_send", rule_id, delivery_id)
+            return _terminal_non_retryable_result("telethon_send_accepted_target_id_unresolved_non_retryable: concurrent album attempt")
         logger.info("DELIVERY_ATTEMPT_SENDING | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
         try:
             rule = await run_db(self.db.get_rule, int(rule_id))

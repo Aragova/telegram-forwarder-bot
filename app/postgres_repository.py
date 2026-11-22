@@ -5504,6 +5504,124 @@ class PostgresRepository(RepositoryProtocol):
                 )
             conn.commit()
 
+    def mark_delivery_faulty_if_attempt_unverified(
+        self, delivery_id: int, idempotency_key: str, error_text: str
+    ) -> bool:
+        """Fenced failure: a second worker cannot downgrade a verified/sent delivery.
+
+        Serialize on the attempt row before checking its state, so a concurrent
+        verified transition cannot race a stale confirm-failure write.
+        """
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s FOR UPDATE",
+                    (str(idempotency_key),),
+                )
+                attempt = cur.fetchone()
+                if not attempt or str(attempt.get("status") or "") not in {"sending", "accepted", "failed_after_send"}:
+                    return False
+                cur.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'faulty', error_text = %s, attempt_count = attempt_count + 1
+                    WHERE id = %s AND status NOT IN ('sent', 'faulty')
+                    """,
+                    ((error_text or "")[:1000], int(delivery_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def finalize_orphaned_repost_attempt(
+        self, *, idempotency_key: str, job_id: int, worker_id: str, rule_id: int,
+        delivery_ids: list[int], error_text: str,
+    ) -> int:
+        """Terminal, fenced manual review when no other live repost job owns the write.
+
+        Never re-send on an unknown response. The row lock orders this
+        transition against mark_delivery_attempt_verified.
+        """
+        ids = [int(x) for x in delivery_ids if int(x) > 0]
+        if not ids:
+            return 0
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                # Serialize with job lease recovery/finalization. The caller
+                # must still own this exact processing job, not merely its ID.
+                cur.execute(
+                    "SELECT status, locked_by FROM jobs WHERE id = %s FOR UPDATE",
+                    (int(job_id),),
+                )
+                current_job = cur.fetchone()
+                if not current_job or current_job.get("status") != "processing" or current_job.get("locked_by") != str(worker_id):
+                    return 0
+                cur.execute(
+                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s FOR UPDATE",
+                    (str(idempotency_key),),
+                )
+                attempt = cur.fetchone()
+                if not attempt or str(attempt.get("status") or "") not in {"sending", "accepted", "failed_after_send"}:
+                    return 0
+
+                # Another worker may still be sending or verifying this
+                # same rule/delivery. Never mark its live work as faulty.
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM jobs j
+                        WHERE j.id <> %s
+                          AND (
+                              (j.status = 'leased' AND j.lease_until > NOW())
+                              OR (j.status = 'processing' AND j.updated_at > NOW() - INTERVAL '60 seconds')
+                          )
+                          AND j.job_type IN ('repost_single', 'repost_album')
+                          AND j.payload_json->>'rule_id' = %s
+                          AND (
+                              j.payload_json->>'delivery_id' = ANY(%s)
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM jsonb_array_elements_text(
+                                      CASE WHEN jsonb_typeof(j.payload_json->'delivery_ids') = 'array'
+                                           THEN j.payload_json->'delivery_ids'
+                                           ELSE '[]'::jsonb END
+                                  ) AS member(id)
+                                  WHERE member.id = ANY(%s)
+                              )
+                          )
+                    ) AS has_live_owner
+                    """,
+                    (int(job_id), str(rule_id), [str(x) for x in ids], [str(x) for x in ids]),
+                )
+                owner = cur.fetchone()
+                if owner and bool(owner.get("has_live_owner")):
+                    return 0
+
+                cur.execute(
+                    """
+                    UPDATE deliveries
+                    SET status='faulty',
+                        error_text=%s,
+                        attempt_count=attempt_count+1
+                    WHERE id = ANY(%s)
+                      AND rule_id=%s
+                      AND status='processing'
+                    """,
+                    ((error_text or "")[:1000], ids, int(rule_id)),
+                )
+                marked = int(cur.rowcount or 0)
+                if marked:
+                    cur.execute(
+                        """
+                        UPDATE delivery_attempts
+                        SET status='failed_after_send', error_text=%s, updated_at=NOW()
+                        WHERE idempotency_key=%s AND status IN ('sending', 'accepted', 'failed_after_send')
+                        """,
+                        ((error_text or "")[:1000], str(idempotency_key)),
+                    )
+            conn.commit()
+            return marked
+
     def mark_delivery_pending(self, delivery_id: int):
         with self.connect() as conn:
             with conn.cursor() as cur:

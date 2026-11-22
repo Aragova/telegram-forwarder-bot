@@ -709,3 +709,25 @@ def test_default_reaction_pipeline_still_validates_target_not_found():
 
     assert result == {"applied": False, "enqueued": False, "reason": "target_not_found"}
     assert svc.telethon.calls == 3
+
+
+def test_stalled_post_send_reaction_returns_nonfatal_timeout(monkeypatch):
+    from app import sender as sender_module
+    from app import reaction_delivery as reaction_module
+
+    monkeypatch.setattr(sender_module, "POST_SEND_REACTION_TIMEOUT_SEC", 0.03)
+
+    async def _forever(self, **_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(reaction_module.ReactionDelivery, "_add_reaction_for_rule_if_possible", _forever)
+    svc = _service(None)
+    result = asyncio.run(svc._add_reaction_for_rule_if_possible(
+        rule=SimpleNamespace(id=141),
+        target_id="-1004477194308",
+        sent_message_id=2186,
+        source_channel="-100123",
+        source_message_ids=[457],
+        delivery_id=692691,
+    ))
+    assert result == {"applied": False, "enqueued": False, "reason": "reaction_timeout"}

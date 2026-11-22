@@ -158,3 +158,182 @@ def test_legacy_video_413_fails_once_without_job_retry():
     assert ok is True
     assert len(repo.failed) == 1 and repo.failed[0][0] == 55
     assert repo.retried == []
+
+
+def test_repost_orphan_finalizes_before_last_retry_job_failure():
+    class OrphanRepo(FakeRepo):
+        finalized = None
+
+        def heartbeat_job_processing(self, job_id, worker_id):
+            return True
+
+        def finalize_orphaned_repost_attempt(self, **kwargs):
+            self.finalized = kwargs
+            return 1
+
+    class RepostSender:
+        async def execute_repost_single_from_job(self, **_kwargs):
+            return {
+                "ok": False, "retryable": True, "accepted": False,
+                "manual_review_required": True,
+                "idempotency_key": "delivery:103:target:-100dst:single",
+                "error_text": "repost attempt orphaned after unclear Telegram response",
+            }
+
+    repo = OrphanRepo()
+    ok = asyncio.run(_process_job(
+        repo, RepostSender(), "w", "light",
+        {"id": 113, "job_type": "repost_single", "attempts": 2, "max_attempts": 3,
+         "payload_json": {"delivery_id": 103, "rule_id": 1, "message_id": 5,
+                          "source_channel": "-100src", "target_id": "-100dst"}},
+        policy=POLICY, state=_InFlightState(),
+    ))
+    assert ok is True
+    assert repo.finalized["job_id"] == 113
+    assert repo.finalized["delivery_ids"] == [103]
+    assert len(repo.failed) == 1
+    assert repo.retried == []
+
+
+def test_repost_orphan_finalization_skips_lost_worker_lease():
+    class OrphanRepo(FakeRepo):
+        finalized = False
+
+        def heartbeat_job_processing(self, job_id, worker_id):
+            return False
+
+        def finalize_orphaned_repost_attempt(self, **_kwargs):
+            self.finalized = True
+            return 1
+
+    class RepostSender:
+        async def execute_repost_single_from_job(self, **_kwargs):
+            return {
+                "ok": False, "retryable": True,
+                "manual_review_required": True,
+                "idempotency_key": "delivery:103:target:-100dst:single",
+                "error_text": "uncertain",
+            }
+
+    repo = OrphanRepo()
+    ok = asyncio.run(_process_job(
+        repo, RepostSender(), "w", "light",
+        {"id": 114, "job_type": "repost_single", "attempts": 2, "max_attempts": 3,
+         "payload_json": {"delivery_id": 103, "rule_id": 1, "message_id": 5,
+                          "source_channel": "-100src", "target_id": "-100dst"}},
+        policy=POLICY, state=_InFlightState(),
+    ))
+    assert ok is True
+    assert repo.finalized is False
+    assert repo.failed == []
+
+
+def test_repost_orphan_last_attempt_veto_defers_without_failing_or_resending():
+    class ContendedRepo(FakeRepo):
+        def __init__(self):
+            super().__init__()
+            self.deferred = []
+            self.finalize_calls = 0
+
+        def heartbeat_job_processing(self, job_id, worker_id):
+            return True
+
+        def finalize_orphaned_repost_attempt(self, **_kwargs):
+            self.finalize_calls += 1
+            return 0  # Another live worker owns the operation.
+
+        def defer_job(self, job_id, error, delay):
+            self.deferred.append((job_id, error, delay))
+            return True
+
+    class RepostSender:
+        def __init__(self):
+            self.calls = 0
+
+        async def execute_repost_single_from_job(self, **_kwargs):
+            self.calls += 1
+            return {"ok": False, "retryable": True, "manual_review_required": True,
+                    "idempotency_key": "delivery:103:target:-100dst:single", "error_text": "pending owner"}
+
+    repo = ContendedRepo()
+    sender = RepostSender()
+    job = {"id": 115, "job_type": "repost_single", "attempts": 2, "max_attempts": 3,
+           "payload_json": {"delivery_id": 103, "rule_id": 1, "message_id": 5,
+                            "source_channel": "-100src", "target_id": "-100dst"}}
+    assert asyncio.run(_process_job(repo, sender, "w", "light", job, policy=POLICY, state=_InFlightState()))
+    assert repo.finalize_calls == 1
+    assert len(repo.deferred) == 1
+    assert repo.deferred[0][0] == 115
+    assert repo.deferred[0][2] >= 30
+    assert repo.failed == []
+    assert sender.calls == 1
+
+
+def test_repost_orphan_finalizer_db_exception_defers_recovery():
+    class Repo(FakeRepo):
+        def __init__(self):
+            super().__init__()
+            self.deferred = []
+
+        def heartbeat_job_processing(self, _job_id, _worker_id):
+            return True
+
+        def finalize_orphaned_repost_attempt(self, **_kwargs):
+            raise RuntimeError("temporary database failure")
+
+        def defer_job(self, job_id, error, delay):
+            self.deferred.append((job_id, error, delay))
+            return True
+
+    class RepostSender:
+        async def execute_repost_single_from_job(self, **_kwargs):
+            return {"ok": False, "retryable": True, "manual_review_required": True,
+                    "idempotency_key": "delivery:103:target:-100dst:single", "error_text": "uncertain"}
+
+    repo = Repo()
+    assert asyncio.run(_process_job(
+        repo, RepostSender(), "w", "light",
+        {"id": 116, "job_type": "repost_single", "attempts": 2, "max_attempts": 3,
+         "payload_json": {"delivery_id": 103, "rule_id": 1, "message_id": 5,
+                          "source_channel": "-100src", "target_id": "-100dst"}},
+        policy=POLICY, state=_InFlightState(),
+    ))
+    assert repo.failed == []
+    assert len(repo.deferred) == 1
+    assert repo.deferred[0][2] >= 30
+
+
+def test_repost_orphan_zero_result_with_already_faulty_delivery_does_not_defer_forever():
+    class Repo(FakeRepo):
+        def __init__(self):
+            super().__init__()
+            self.deferred = []
+
+        def heartbeat_job_processing(self, _job_id, _worker_id):
+            return True
+
+        def finalize_orphaned_repost_attempt(self, **_kwargs):
+            return 0
+
+        def get_delivery(self, _delivery_id):
+            return {"status": "faulty"}
+
+        def defer_job(self, job_id, error, delay):
+            self.deferred.append(job_id)
+            return True
+
+    class Sender:
+        async def execute_repost_single_from_job(self, **_kwargs):
+            return {"ok": False, "retryable": True, "manual_review_required": True,
+                    "idempotency_key": "delivery:103:target:-100dst:single"}
+
+    repo = Repo()
+    assert asyncio.run(_process_job(
+        repo, Sender(), "w", "light",
+        {"id": 117, "job_type": "repost_single", "attempts": 2, "max_attempts": 3,
+         "payload_json": {"delivery_id": 103, "rule_id": 1, "message_id": 5,
+                          "source_channel": "-100src", "target_id": "-100dst"}},
+        policy=POLICY, state=_InFlightState(),
+    ))
+    assert repo.failed and repo.failed[0][0] == 117
+    assert repo.deferred == []

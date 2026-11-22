@@ -131,3 +131,40 @@ def test_repost_single_explicit_builder_first_skips_copy():
 
     assert owner.copy_single_called is False
     assert owner.reupload_message_called is True
+
+
+def test_copy_single_accepted_without_target_confirmation_is_not_counted_as_sent():
+    class UnconfirmedCopyOwner(_Owner):
+        def __init__(self):
+            super().__init__("copy_first")
+            self.faulty = []
+
+        async def _copy_single_via_bot(self, *_args):
+            self.copy_single_called = True
+            return {
+                "raw_result": SimpleNamespace(message_id=370),
+                "sent_ids": [370],
+                "attempted": True,
+                "raw_result_type": "MessageId",
+            }
+
+        async def _run_post_send_step_safe(self, *, coro_factory, **_kwargs):
+            return {"ok": True, "result": await coro_factory()}
+
+        async def _confirm_target_delivery_message_ids_with_retry(self, **_kwargs):
+            return []
+
+        def _mark_delivery_faulty_sync(self, delivery_id, error):
+            self.faulty.append((delivery_id, error))
+
+        def _mark_delivery_sent_sync(self, *_args, **_kwargs):
+            raise AssertionError("Unverified Bot API result cannot be counted as sent")
+
+        async def _reupload_message(self, *_args, **_kwargs):
+            raise AssertionError("No second send when Bot API already returned a message ID")
+
+    owner = UnconfirmedCopyOwner()
+    assert _deliver(owner) is False
+    assert owner.copy_single_called is True
+    assert len(owner.faulty) == 1
+    assert "copy_single_uncertain_no_fallback" in owner.faulty[0][1]

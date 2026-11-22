@@ -165,6 +165,14 @@ def _delivery_ids_already_sent(repo, delivery_ids: list[int]) -> bool:
     return False
 
 
+def _delivery_ids_still_processing(repo, delivery_ids: list[int]) -> bool:
+    """Read-only check; terminal deliveries should not be deferred forever."""
+    return any(
+        str(_row_get(repo.get_delivery(int(delivery_id)), "status", "") or "").strip().lower() == "processing"
+        for delivery_id in delivery_ids
+    )
+
+
 def _complete_job_if_delivery_already_sent(
     repo, job_id: int, payload: dict, *, stage: str,
     worker_id: str | None = None, finalization_started: Event | None = None,
@@ -753,6 +761,66 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         attempts = int(job.get("attempts") or 0) + 1
         max_attempts = int(job.get("max_attempts") or 3)
         if (not retryable) or attempts >= max_attempts:
+            # Unknown send result after a crashed/expired owner must not
+            # leave a delivery forever processing and block the whole rule.
+            # At the LAST retry, finish only orphaned entries, after a
+            # current lease check; never issue a second Telegram upload.
+            if (
+                retryable and attempts >= max_attempts
+                and job_type in {"repost_single", "repost_album"}
+                and isinstance(result, dict)
+                and result.get("manual_review_required")
+                and result.get("idempotency_key")
+                and hasattr(repo, "finalize_orphaned_repost_attempt")
+            ):
+                owner_ok = True
+                if hasattr(repo, "heartbeat_job_processing"):
+                    owner_ok = bool(await asyncio.to_thread(repo.heartbeat_job_processing, job_id, worker_id))
+                if not owner_ok:
+                    logger.warning("REPOST_ORPHAN_FINALIZE_LEASE_LOST | job_id=%s | action=skip", job_id)
+                    return True
+                try:
+                    candidates = payload.get("delivery_ids") or [payload.get("delivery_id")]
+                    delivery_ids = [int(x) for x in candidates if x is not None]
+                    count = await asyncio.to_thread(
+                        repo.finalize_orphaned_repost_attempt,
+                        idempotency_key=str(result["idempotency_key"]),
+                        job_id=job_id, worker_id=worker_id,
+                        rule_id=int(payload.get("rule_id") or 0),
+                        delivery_ids=delivery_ids, error_text=error_text,
+                    )
+                    logger.warning(
+                        "REPOST_ORPHAN_FINALIZED | job_id=%s | rule_id=%s | marked_manual_review=%s | action=no_resend",
+                        job_id, payload.get("rule_id"), count,
+                    )
+                except Exception:
+                    logger.exception("REPOST_ORPHAN_FINALIZE_ERROR | job_id=%s | action=defer_not_fail", job_id)
+                    count = 0
+                if not count:
+                    # Two competing last-attempt workers can veto one another.
+                    # Defer while any delivery is still processing; otherwise
+                    # fail the exhausted job normally (no infinite deferral of
+                    # deliveries already resolved as sent/faulty/deleted).
+                    try:
+                        still_processing = await asyncio.to_thread(
+                            _delivery_ids_still_processing, repo, delivery_ids,
+                        )
+                    except Exception:
+                        still_processing = True  # DB outage must not abandon recovery.
+                    if still_processing:
+                        delay = max(30, compute_retry_delay_seconds(queue, attempts, job_type, policy))
+                        await _finish_owned_job(
+                            repo, "defer", job_id, worker_id,
+                            "Orphan finalization vetoed/unavailable; recheck without second send",
+                            delay, finalization_started=finalization_started,
+                        )
+                        logger.warning(
+                            "REPOST_ORPHAN_FINALIZE_DEFERRED | job_id=%s | rule_id=%s | "
+                            "delay_sec=%s | attempts_unchanged=true | action=no_resend",
+                            job_id, payload.get("rule_id"), delay,
+                        )
+                        await _runtime_metrics.record_retry(job_type=job_type)
+                        return True
             failed = await _finish_owned_job(repo, "fail", job_id, worker_id, error_text, finalization_started=finalization_started)
             if failed and job_type.startswith("video_"):
                 cleanup_video_artifacts(payload, mode="final_failure")

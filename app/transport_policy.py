@@ -125,7 +125,14 @@ class TransportPolicy:
         for attempt in range(1, self.max_attempts + 1):
             attempt_started_at = time.monotonic()
             try:
+                slot_wait_started = time.monotonic()
                 async with self._semaphore:
+                    slot_wait_sec = time.monotonic() - slot_wait_started
+                    if slot_wait_sec >= 2.0:
+                        logger.warning(
+                            "TRANSPORT_SLOT_WAIT | backend=%s | label=%s | op=%s | waited_sec=%.1f",
+                            backend, label, op_name, slot_wait_sec,
+                        )
                     await self._wait_rate_slot(key)
 
                     result = await func()
@@ -454,6 +461,42 @@ def build_sender_telethon_policy() -> TransportPolicy:
         base_backoff_sec=0.8,
         max_backoff_sec=8.0,
         jitter_sec=0.25,
+        retry_unknown_errors=False,
+        retry_non_idempotent_writes=False,
+        retry_unknown_operations=False,
+    )
+
+
+def build_sender_telethon_read_policy() -> TransportPolicy:
+    """Independent bounded control lane: a large download must not block reads."""
+    return TransportPolicy(
+        max_attempts=1,
+        min_interval_sec=0.0,
+        max_concurrency=4,
+        retry_unknown_errors=False,
+        retry_non_idempotent_writes=False,
+        retry_unknown_operations=False,
+    )
+
+
+def build_sender_telethon_media_policy() -> TransportPolicy:
+    """Isolated bulk-download lane; writes keep the existing serial policy."""
+    return TransportPolicy(
+        max_attempts=1,
+        min_interval_sec=0.0,
+        max_concurrency=2,
+        retry_unknown_errors=False,
+        retry_non_idempotent_writes=False,
+        retry_unknown_operations=False,
+    )
+
+
+def build_sender_telethon_upload_policy() -> TransportPolicy:
+    """Serialize long media uploads independently of short text writes."""
+    return TransportPolicy(
+        max_attempts=1,
+        min_interval_sec=0.0,
+        max_concurrency=1,
         retry_unknown_errors=False,
         retry_non_idempotent_writes=False,
         retry_unknown_operations=False,
