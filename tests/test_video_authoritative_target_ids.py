@@ -4,6 +4,7 @@ The message accepted into the target channel has its own id; reactions must
 only use that authoritative target id, and ambiguity must never cause a resend.
 """
 import asyncio
+import pytest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -60,6 +61,24 @@ def _processor(fake):
 
     processor.get_video_info = video_info
     return processor
+
+
+def test_telethon_preflight_error_never_sends_video(tmp_path):
+    from app.video_processor import VideoPreSendError
+
+    class FailingPeer(FakeTelethon):
+        async def get_entity(self, _entity):
+            raise RuntimeError("cannot resolve peer")
+
+        async def send_file(self, **_kwargs):
+            raise AssertionError("network send must never start")
+
+    fake = FailingPeer(history=[])
+    with pytest.raises(VideoPreSendError, match="video_telethon_preflight"):
+        asyncio.run(_processor(fake)._send_video_via_telethon(
+            TARGET, None, str(tmp_path / "video.mp4"), None, "caption",
+        ))
+    assert fake.send_file_calls == 0
 
 
 def test_premium_video_resolves_actual_target_id_not_returned_370(tmp_path):
