@@ -5534,7 +5534,7 @@ class PostgresRepository(RepositoryProtocol):
             return updated
 
     def finalize_orphaned_repost_attempt(
-        self, *, idempotency_key: str, job_id: int, rule_id: int,
+        self, *, idempotency_key: str, job_id: int, worker_id: str, rule_id: int,
         delivery_ids: list[int], error_text: str,
     ) -> int:
         """Terminal, fenced manual review when no other live repost job owns the write.
@@ -5547,6 +5547,15 @@ class PostgresRepository(RepositoryProtocol):
             return 0
         with self.connect() as conn:
             with conn.cursor() as cur:
+                # Serialize with job lease recovery/finalization. The caller
+                # must still own this exact processing job, not merely its ID.
+                cur.execute(
+                    "SELECT status, locked_by FROM jobs WHERE id = %s FOR UPDATE",
+                    (int(job_id),),
+                )
+                current_job = cur.fetchone()
+                if not current_job or current_job.get("status") != "processing" or current_job.get("locked_by") != str(worker_id):
+                    return 0
                 cur.execute(
                     "SELECT status FROM delivery_attempts WHERE idempotency_key = %s FOR UPDATE",
                     (str(idempotency_key),),
@@ -5562,8 +5571,10 @@ class PostgresRepository(RepositoryProtocol):
                     SELECT EXISTS (
                         SELECT 1 FROM jobs j
                         WHERE j.id <> %s
-                          AND j.status IN ('leased', 'processing')
-                          AND j.lease_until > NOW()
+                          AND (
+                              (j.status = 'leased' AND j.lease_until > NOW())
+                              OR (j.status = 'processing' AND j.updated_at > NOW() - INTERVAL '60 seconds')
+                          )
                           AND j.job_type IN ('repost_single', 'repost_album')
                           AND j.payload_json->>'rule_id' = %s
                           AND (
