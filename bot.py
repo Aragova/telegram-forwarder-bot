@@ -1357,6 +1357,70 @@ def video_caption_delivery_mode_to_text(mode: str | None) -> str:
     normalized = (mode or "copy_first").strip().lower()
     return "💎 Премиум" if normalized == "builder_first" else "⚡ Обычный"
 
+def build_repost_caption_menu_text(rule_id: int) -> str:
+    rule = db.get_rule(rule_id)
+    if not rule:
+        return "❌ Правило не найдено"
+    has_caption = bool(str(getattr(rule, "repost_caption", None) or "").strip())
+    enabled = bool(getattr(rule, "repost_caption_enabled", False)) and has_caption
+    caption_status = "✅ Задана" if has_caption else "— Не задана"
+    status = "🟢 ON · своя подпись" if enabled else "⚪ OFF · оригинальный текст"
+    mode = video_caption_delivery_mode_to_text(
+        getattr(rule, "repost_caption_delivery_mode", "copy_first")
+    )
+    return (
+        "✍️ <b>Подпись репостов</b>\\n\\n"
+        f"📝 <b>Текущая подпись:</b> {caption_status}\\n"
+        f"📌 <b>Статус:</b> {status}\\n"
+        f"🎛 <b>Оформление:</b> {mode}\\n\\n"
+        "Если подпись включена, она заменяет оригинальный текст поста.\\n"
+        "При выключении или очистке автоматически возвращается оригинал."
+    )
+
+
+def build_repost_caption_menu_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+    rule = db.get_rule(rule_id)
+    has_caption = bool(str(getattr(rule, "repost_caption", None) or "").strip())
+    enabled = has_caption and bool(getattr(rule, "repost_caption_enabled", False))
+    rows = [
+        [InlineKeyboardButton(text="✏️ Изменить", callback_data=f"repost_caption_edit:{rule_id}")],
+        [InlineKeyboardButton(text="🎛 Режим подписи", callback_data=f"repost_caption_mode_menu:{rule_id}")],
+    ]
+    if has_caption:
+        rows.append([InlineKeyboardButton(
+            text="⏸ Выключить" if enabled else "▶️ Включить",
+            callback_data=f"repost_caption_toggle:{rule_id}",
+        )])
+    rows.extend([
+        [InlineKeyboardButton(text="🗑 Очистить", callback_data=f"repost_caption_clear:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_repost_caption_mode_menu_text(rule_id: int) -> str:
+    rule = db.get_rule(rule_id)
+    if not rule:
+        return "❌ Правило не найдено"
+    mode = video_caption_delivery_mode_to_text(
+        getattr(rule, "repost_caption_delivery_mode", "copy_first")
+    )
+    return (
+        "🎛 <b>Режим подписи репоста</b>\\n\\n"
+        "⚡ <b>Обычный</b> — текст и обычные смайлики.\\n"
+        "💎 <b>Премиум</b> — жирный текст, ссылки и premium emoji.\\n\\n"
+        f"Текущий режим: {mode}"
+    )
+
+
+def build_repost_caption_mode_keyboard(rule_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚡ Обычный", callback_data=f"set_repost_caption_mode_copy_first:{rule_id}")],
+        [InlineKeyboardButton(text="💎 Премиум", callback_data=f"set_repost_caption_mode_builder_first:{rule_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"repost_caption_menu:{rule_id}")],
+    ])
+
+
 def build_video_caption_menu_text(rule_id: int) -> str:
     rule = db.get_rule(rule_id)
     if not rule:
@@ -3507,8 +3571,8 @@ def build_rule_extra_keyboard(rule_id: int) -> InlineKeyboardMarkup:
     if mode == "repost":
         rows.append([
             InlineKeyboardButton(
-                text="✍️ Режим подписи",
-                callback_data=f"caption_mode_menu:{rule_id}",
+                text="✍️ Подпись",
+                callback_data=f"repost_caption_menu:{rule_id}",
             )
         ])
 
