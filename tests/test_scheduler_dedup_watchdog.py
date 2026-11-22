@@ -171,6 +171,13 @@ class _Repo:
                 count += 1
         return count
 
+    def heartbeat_job_processing(self, job_id: int, worker_id: str) -> bool:
+        job = self.jobs[int(job_id)]
+        if job["status"] != "processing" or job.get("locked_by") != worker_id:
+            return False
+        job["updated_at"] = datetime.now(timezone.utc)
+        return True
+
     def get_stuck_processing_jobs(self, stuck_seconds: int = 600, limit: int = 100):
         border = datetime.now(timezone.utc) - timedelta(seconds=stuck_seconds)
         return [
@@ -327,3 +334,72 @@ def test_repost_worker_does_not_inject_job_id_kwarg() -> None:
 
     asyncio.run(_run_one_job(repo, _StrictSender(), "light-1", "light"))
     assert repo.jobs[repost_job_id]["status"] == "done"
+
+
+
+def test_live_processing_job_heartbeat_prevents_watchdog_requeue() -> None:
+    repo = _Repo()
+    job_id = enqueue_repost_single(repo, 10)
+    job = repo.jobs[job_id]
+    job.update({
+        "status": "processing",
+        "locked_by": "worker:one",
+        "updated_at": datetime.now(timezone.utc) - timedelta(minutes=11),
+    })
+
+    assert repo.heartbeat_job_processing(job_id, "worker:other") is False
+    assert repo.heartbeat_job_processing(job_id, "worker:one") is True
+    result = asyncio.run(watchdog_tick(repo, stuck_processing_seconds=600))
+    assert result["requeued_stuck_processing"] == 0
+    assert job["status"] == "processing"
+
+
+def test_stale_heartbeat_cancels_its_local_task() -> None:
+    from app.worker_runtime import _heartbeat_active_job
+
+    repo = _Repo()
+    job_id = enqueue_repost_single(repo, 10)
+    job = repo.jobs[job_id]
+    job["status"] = "processing"
+    job["locked_by"] = "new:owner"
+
+    async def scenario():
+        blocked = asyncio.create_task(asyncio.sleep(20))
+        watcher = asyncio.create_task(
+            _heartbeat_active_job(
+                repo, job_id, "old:owner", "repost_single",
+                blocked, interval_seconds=0.01,
+            )
+        )
+        await asyncio.wait_for(watcher, timeout=1)
+        await asyncio.gather(blocked, return_exceptions=True)
+        return blocked.cancelled()
+
+    assert asyncio.run(scenario()) is True
+
+
+def test_live_heartbeat_keeps_running_task_owned() -> None:
+    from app.worker_runtime import _heartbeat_active_job
+
+    repo = _Repo()
+    job_id = enqueue_repost_single(repo, 10)
+    job = repo.jobs[job_id]
+    job["status"] = "processing"
+    job["locked_by"] = "valid:owner"
+
+    async def scenario():
+        task = asyncio.current_task()
+        watcher = asyncio.create_task(
+            _heartbeat_active_job(
+                repo, job_id, "valid:owner", "video_download",
+                task, interval_seconds=0.01,
+            )
+        )
+        await asyncio.sleep(0.045)
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+        return job["status"], job["updated_at"]
+
+    status, updated_at = asyncio.run(scenario())
+    assert status == "processing"
+    assert (datetime.now(timezone.utc) - updated_at).total_seconds() < 5

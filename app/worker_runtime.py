@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import time
+from uuid import uuid4
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -163,16 +164,68 @@ def _delivery_ids_already_sent(repo, delivery_ids: list[int]) -> bool:
     return False
 
 
-def _complete_job_if_delivery_already_sent(repo, job_id: int, payload: dict, *, stage: str) -> bool:
+def _complete_job_if_delivery_already_sent(repo, job_id: int, payload: dict, *, stage: str, worker_id: str | None = None) -> bool:
     delivery_ids = _extract_delivery_ids_from_payload(payload)
     if not delivery_ids:
         return False
     if not _delivery_ids_already_sent(repo, delivery_ids):
         return False
     logger.info("IDEMPOTENCY_GUARD_ALREADY_SENT | job_id=%s | stage=%s | delivery_ids=%s", int(job_id), stage, delivery_ids)
-    repo.complete_job(int(job_id))
-    logger.info("JOB_COMPLETED_BY_IDEMPOTENCY_GUARD | job_id=%s | stage=%s | delivery_ids=%s", int(job_id), stage, delivery_ids)
+    if worker_id and hasattr(repo, "finalize_owned_job"):
+        updated = repo.finalize_owned_job(int(job_id), worker_id, "complete")
+    else:
+        updated = repo.complete_job(int(job_id))
+    if not updated:
+        logger.warning(
+            "JOB_FENCED_STALE_COMPLETION | job_id=%s | stage=%s | owner=%s",
+            job_id, stage, worker_id,
+        )
+    else:
+        logger.info("JOB_COMPLETED_BY_IDEMPOTENCY_GUARD | job_id=%s | stage=%s | delivery_ids=%s", int(job_id), stage, delivery_ids)
     return True
+
+async def _finish_owned_job(repo, action: str, job_id: int, worker_id: str, *args) -> bool:
+    """Use owner-fenced transitions in PostgreSQL; preserve fake-repository test contracts."""
+    if hasattr(repo, "finalize_owned_job"):
+        updated = await asyncio.to_thread(repo.finalize_owned_job, job_id, worker_id, action, *args)
+    else:
+        updated = await asyncio.to_thread(getattr(repo, f"{action}_job"), job_id, *args)
+    if not updated:
+        logger.warning("JOB_FENCED_STALE_TRANSITION | job_id=%s | action=%s | owner=%s", job_id, action, worker_id)
+    return bool(updated)
+
+
+async def _heartbeat_active_job(
+    repo, job_id: int, worker_id: str, job_type: str, running_task: asyncio.Task,
+    *, interval_seconds: float = 15.0,
+) -> None:
+    """Keep a live execution from being requeued after 600s without progress DB writes.
+
+    The heartbeat is liveness, not successful Telegram progress. Ownership loss cancels
+    the stale local task; final job transitions use CAS to prevent stale updates.
+    """
+    if not hasattr(repo, "heartbeat_job_processing"):
+        return
+    started = time.monotonic()
+    last_stalled_log = 0.0
+    while True:
+        await asyncio.sleep(max(0.01, interval_seconds))
+        try:
+            owned = await asyncio.to_thread(repo.heartbeat_job_processing, job_id, worker_id)
+        except Exception as exc:
+            logger.warning("JOB_HEARTBEAT_DB_ERROR | job_id=%s | error=%s", job_id, exc)
+            continue
+        if not owned:
+            logger.error("JOB_HEARTBEAT_OWNERSHIP_LOST | job_id=%s | worker=%s | action=cancel_stale_task", job_id, worker_id)
+            running_task.cancel()
+            return
+        elapsed = time.monotonic() - started
+        if elapsed >= 120 and (last_stalled_log == 0.0 or elapsed - last_stalled_log >= 60):
+            logger.warning(
+                "JOB_LONG_RUNNING | job_id=%s | job_type=%s | owner=%s | elapsed_sec=%s | action=inspect_external_io",
+                job_id, job_type, worker_id, round(elapsed),
+            )
+            last_stalled_log = elapsed
 
 
 def _heavy_stage_key(job_type: str) -> str | None:
@@ -473,6 +526,9 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     started_at = time.perf_counter()
 
     logger.info("JOB PROCESSING | %s обрабатывает задачу #%s (%s)", worker_id, job_id, job_type)
+    heartbeat_task = asyncio.create_task(
+        _heartbeat_active_job(repo, job_id, worker_id, job_type, asyncio.current_task())
+    )
     result: dict[str, Any] | None = None
     try:
         if job_type in {"repost_single", "repost_album", "repost_campaign_send_copy", "repost_campaign_delete_copy", "video_delivery", "video_send"}:
@@ -482,6 +538,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 job_id,
                 payload,
                 stage="before_sender",
+            worker_id=worker_id,
             )
             if guarded:
                 return True
@@ -503,7 +560,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             )
             if result.get("fallback_to_legacy"):
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
-                await asyncio.to_thread(repo.complete_job, job_id)
+                await _finish_owned_job(repo, "complete", job_id, worker_id)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
@@ -514,7 +571,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 next_payload["thumbnail_path"] = None
                 next_payload["cleanup_paths"] = [result.get("source_video_path")] if result.get("source_video_path") else []
                 enqueue_video_process(repo, next_payload)
-                await asyncio.to_thread(repo.complete_job, job_id)
+                await _finish_owned_job(repo, "complete", job_id, worker_id)
                 _log_video_stage_event("VIDEO DOWNLOAD DONE | стадия скачивания завершена", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
@@ -527,7 +584,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             )
             if result.get("fallback_to_legacy"):
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
-                await asyncio.to_thread(repo.complete_job, job_id)
+                await _finish_owned_job(repo, "complete", job_id, worker_id)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
@@ -538,7 +595,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 next_payload["thumbnail_path"] = result.get("thumbnail_path")
                 next_payload["cleanup_paths"] = result.get("cleanup_paths") or payload.get("cleanup_paths") or []
                 enqueue_video_send(repo, next_payload)
-                await asyncio.to_thread(repo.complete_job, job_id)
+                await _finish_owned_job(repo, "complete", job_id, worker_id)
                 _log_video_stage_event("VIDEO PROCESS DONE | стадия обработки завершена", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
@@ -551,7 +608,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                         "invalid_file_attempts": int(result.get("invalid_file_attempts") or int(payload.get("invalid_file_attempts") or 0) + 1),
                     },
                 )
-                await asyncio.to_thread(repo.complete_job, job_id)
+                await _finish_owned_job(repo, "complete", job_id, worker_id)
                 cleanup_video_artifacts(payload, mode="restart_download")
                 _log_video_stage_event(
                     "VIDEO PROCESS RETRY DOWNLOAD | обнаружен битый файл, создана повторная download-задача",
@@ -567,7 +624,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             result = delivery_result.to_dict()
             if delivery_result.fallback_to_legacy:
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
-                await asyncio.to_thread(repo.complete_job, job_id)
+                await _finish_owned_job(repo, "complete", job_id, worker_id)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
@@ -607,7 +664,9 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 )
 
         if ok:
-            await asyncio.to_thread(repo.complete_job, job_id)
+            completed = await _finish_owned_job(repo, "complete", job_id, worker_id)
+            if not completed:
+                return True
             # Учитываем видео usage один раз на завершение конечной стадии доставки.
             # Это защищает от накрутки на download/process/retry этапах.
             if str(job_type) in {"video_send", "video_delivery"}:
@@ -622,6 +681,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             job_id,
             payload,
             stage="after_unsuccessful_result",
+            worker_id=worker_id,
         )
         if guarded:
             return True
@@ -645,13 +705,13 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         attempts = int(job.get("attempts") or 0) + 1
         max_attempts = int(job.get("max_attempts") or 3)
         if (not retryable) or attempts >= max_attempts:
-            await asyncio.to_thread(repo.fail_job, job_id, error_text)
+            await _finish_owned_job(repo, "fail", job_id, worker_id, error_text)
             if job_type.startswith("video_"):
                 cleanup_video_artifacts(payload, mode="final_failure")
             logger.warning("JOB FAILED | Задача #%s помечена как failed", job_id)
         else:
             delay = compute_retry_delay_seconds(queue, attempts, job_type, policy)
-            await asyncio.to_thread(repo.retry_job, job_id, error_text, delay)
+            await _finish_owned_job(repo, "retry", job_id, worker_id, error_text, delay)
             logger.warning("VIDEO STAGE RETRY | задача переведена в retry | #%s | через %s сек", job_id, delay)
             await _runtime_metrics.record_retry(job_type=job_type)
         return True
@@ -665,13 +725,13 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         )
 
         if hasattr(repo, "defer_job"):
-            await asyncio.to_thread(repo.defer_job, job_id, error_text, delay)
+            await _finish_owned_job(repo, "defer", job_id, worker_id, error_text, delay)
         else:
             logger.warning(
                 "TRANSPORT_RATE_LIMIT_DEFER_FALLBACK | job_id=%s | repository_missing_defer_job=true",
                 job_id,
             )
-            await asyncio.to_thread(repo.retry_job, job_id, error_text, delay)
+            await _finish_owned_job(repo, "retry", job_id, worker_id, error_text, delay)
 
         await asyncio.to_thread(
             _log_transport_rate_limited_diagnostic_event,
@@ -707,6 +767,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             job_id,
             payload,
             stage="after_exception",
+            worker_id=worker_id,
         )
         if guarded:
             logger.warning("JOB_EXCEPTION_SUPPRESSED_AFTER_SENT | job_id=%s | error=%s", job_id, exc)
@@ -715,7 +776,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         max_attempts = int(job.get("max_attempts") or 3)
         terminal_too_large = job_type in _HEAVY_STAGE_TYPES and isinstance(exc, TelegramEntityTooLarge)
         if terminal_too_large or attempts >= max_attempts:
-            await asyncio.to_thread(repo.fail_job, job_id, str(exc))
+            await _finish_owned_job(repo, "fail", job_id, worker_id, str(exc))
             if terminal_too_large:
                 cleanup_video_artifacts(payload, mode="final_failure")
                 logger.warning(
@@ -725,12 +786,14 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             logger.warning("JOB FAILED | Задача #%s завершилась ошибкой: %s", job_id, exc)
         else:
             delay = compute_retry_delay_seconds(queue, attempts, job_type, policy)
-            await asyncio.to_thread(repo.retry_job, job_id, str(exc), delay)
+            await _finish_owned_job(repo, "retry", job_id, worker_id, str(exc), delay)
             logger.warning("Задача переведена в retry | #%s | через %s сек: %s", job_id, delay, exc)
             await _runtime_metrics.record_retry(job_type=job_type)
         return True
     finally:
         _dec_in_flight(queue, job_type, state)
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
 
 
 async def _run_one_job(repo, sender_service, worker_id: str, queue: str, *, policy: WorkerResourcePolicy | None = None, state: _InFlightState | None = None) -> bool:
@@ -763,6 +826,7 @@ async def _worker_loop(repo, sender_service, *, queue: str, worker_id: str, poli
     queue_limit = int(policy.light_max_concurrency if queue == "light" else policy.heavy_max_concurrency)
 
     logger.info("%s worker запущен: %s | max_concurrency=%s", queue.capitalize(), worker_id, queue_limit)
+    last_saturation_log = 0.0
 
     try:
         while True:
@@ -795,7 +859,13 @@ async def _worker_loop(repo, sender_service, *, queue: str, worker_id: str, poli
                 done, pending = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED, timeout=0.3)
                 in_flight = set(pending)
                 if not done:
-                    logger.warning("%s worker достиг лимита concurrency | active=%s", queue.capitalize(), len(in_flight))
+                    now = time.monotonic()
+                    if now - last_saturation_log >= 30.0:
+                        logger.warning(
+                            "%s worker достиг лимита concurrency | active=%s | limit=%s",
+                            queue.capitalize(), len(in_flight), queue_limit,
+                        )
+                        last_saturation_log = now
                     break
 
             if len(in_flight) >= queue_limit:
@@ -806,18 +876,20 @@ async def _worker_loop(repo, sender_service, *, queue: str, worker_id: str, poli
             batch_size = policy.lease_batch_size_light if queue == "light" else policy.lease_batch_size_heavy
             lease_limit = max(1, min(available, int(batch_size)))
             leased: list[dict[str, Any]] = []
+            # Unique per batch: an old async attempt can never impersonate a new lease.
+            lease_owner = f"{worker_id}:{uuid4().hex}"
             if hasattr(repo, "lease_fair_jobs"):
                 try:
-                    leased = await asyncio.to_thread(repo.lease_fair_jobs, queue, worker_id, lease_limit, 30)
+                    leased = await asyncio.to_thread(repo.lease_fair_jobs, queue, lease_owner, lease_limit, 30)
                 except Exception as exc:
                     logger.warning(
                         "Fair leasing недоступен, используем fallback к обычному lease | queue=%s | ошибка=%s",
                         queue,
                         exc,
                     )
-                    leased = await asyncio.to_thread(repo.lease_jobs, queue, worker_id, lease_limit, 30)
+                    leased = await asyncio.to_thread(repo.lease_jobs, queue, lease_owner, lease_limit, 30)
             else:
-                leased = await asyncio.to_thread(repo.lease_jobs, queue, worker_id, lease_limit, 30)
+                leased = await asyncio.to_thread(repo.lease_jobs, queue, lease_owner, lease_limit, 30)
             if not leased:
                 await asyncio.sleep(0.2 if queue == "light" else 0.6)
                 continue
@@ -827,7 +899,7 @@ async def _worker_loop(repo, sender_service, *, queue: str, worker_id: str, poli
                     await asyncio.to_thread(repo.retry_job, int(job["id"]), "Контролируемый leasing: нет свободных execution slots", 1)
                     continue
                 logger.info("JOB LEASED | %s взял задачу #%s (%s)", worker_id, int(job["id"]), str(job["job_type"]))
-                task = asyncio.create_task(_process_job(repo, sender_service, worker_id, queue, job, policy=policy, state=state))
+                task = asyncio.create_task(_process_job(repo, sender_service, lease_owner, queue, job, policy=policy, state=state))
                 in_flight.add(task)
                 task.add_done_callback(lambda t: in_flight.discard(t))
 
