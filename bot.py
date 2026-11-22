@@ -1310,13 +1310,8 @@ def rule_label(row) -> str:
     return f"{state} #{row['id']} {src} → {tgt} [{interval_to_text(int(row['interval']))}]"
 
 def video_caption_delivery_mode_to_text(mode: str | None) -> str:
-    normalized = (mode or "auto").strip().lower()
-
-    if normalized == "copy_first":
-        return "⚡ Обычный"
-    if normalized == "builder_first":
-        return "💎 Премиум"
-    return "🤖 Авто"
+    normalized = (mode or "copy_first").strip().lower()
+    return "💎 Премиум" if normalized == "builder_first" else "⚡ Обычный"
 
 def build_video_caption_menu_text(rule_id: int) -> str:
     rule = db.get_rule(rule_id)
@@ -1325,7 +1320,7 @@ def build_video_caption_menu_text(rule_id: int) -> str:
 
     current_caption = (getattr(rule, "video_caption", None) or "").strip()
     current_mode = video_caption_delivery_mode_to_text(
-        getattr(rule, "video_caption_delivery_mode", "auto")
+        getattr(rule, "video_caption_delivery_mode", "copy_first")
     )
 
     if current_caption:
@@ -1353,7 +1348,7 @@ def build_video_caption_menu_keyboard(rule_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="🎛 Режим подписи",
+                    text="🎛 Отправка видео",
                     callback_data=f"video_caption_mode_menu:{rule_id}",
                 )
             ],
@@ -1459,18 +1454,16 @@ def build_video_caption_mode_menu_text(rule_id: int) -> str:
         return "❌ Правило не найдено"
 
     current_mode = video_caption_delivery_mode_to_text(
-        getattr(rule, "video_caption_delivery_mode", "auto")
+        getattr(rule, "video_caption_delivery_mode", "copy_first")
     )
 
     return (
-        "🎛 <b>Режим подписи</b>\n\n"
-        "Выберите, как бот должен отправлять подпись видео.\n\n"
+        "🎛 <b>Отправка видео</b>\n\n"
+        "Выберите, кто будет публиковать обработанные видео.\n\n"
         "⚡ <b>Обычный</b>\n"
-        "Самый быстрый режим. Подходит для простой подписи без premium-оформления.\n\n"
+        "Отправка ботом через локальный Telegram Bot API. Простая подпись без premium-оформления.\n\n"
         "💎 <b>Премиум</b>\n"
-        "Безопасный режим для custom emoji, жирного текста, ссылок и сложного оформления.\n\n"
-        "🤖 <b>Авто</b>\n"
-        "Бот сам определяет, нужна ли безопасная premium-отправка.\n\n"
+        "Отправка через подключённый Telegram-аккаунт (Telethon). Сохраняет жирный текст, ссылки и custom emoji.\n\n"
         f"Текущий режим: {current_mode}"
     )
 
@@ -3571,12 +3564,6 @@ def build_video_caption_mode_keyboard(rule_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="🤖 Авто",
-                    callback_data=f"set_video_caption_mode_auto:{rule_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
                     text="⬅️ Назад",
                     callback_data=f"video_caption_menu:{rule_id}",
                 )
@@ -4015,11 +4002,11 @@ def _apply_video_caption_delivery_mode_sync(
         }
 
     current_mode = (
-        getattr(rule, "video_caption_delivery_mode", "auto") or "auto"
+        getattr(rule, "video_caption_delivery_mode", "copy_first") or "copy_first"
     ).strip().lower()
-    normalized_new_mode = (new_mode or "auto").strip().lower()
+    normalized_new_mode = (new_mode or "").strip().lower()
 
-    if normalized_new_mode not in {"copy_first", "builder_first", "auto"}:
+    if normalized_new_mode not in {"copy_first", "builder_first"}:
         return {
             "ok": False,
             "reason": "bad_mode",
@@ -6055,7 +6042,7 @@ async def _apply_video_caption_delivery_mode(
 
     reason = result.get("reason")
     current_mode = result.get("current_mode")
-    saved_mode = result.get("new_mode") or (new_mode or "auto").strip().lower()
+    saved_mode = result.get("new_mode") or (new_mode or "copy_first").strip().lower()
 
     if not result.get("ok"):
         if reason == "rule_not_found":
@@ -6181,18 +6168,6 @@ async def handle_set_caption_mode_builder_first(callback: CallbackQuery):
 
     await _apply_video_caption_delivery_mode(callback, rule_id, "builder_first")
 
-
-@dp.callback_query(lambda c: c.data.startswith("set_video_caption_mode_auto:"))
-async def handle_set_caption_mode_auto(callback: CallbackQuery):
-    try:
-        rule_id = int(callback.data.split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-    if not await ensure_rule_callback_access(callback, rule_id):
-        return
-
-    await _apply_video_caption_delivery_mode(callback, rule_id, "auto")
 
 @dp.callback_query(lambda c: c.data.startswith("rule_refresh:"))
 async def handle_rule_refresh(callback: CallbackQuery):
