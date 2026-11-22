@@ -136,3 +136,66 @@ def test_repost_single_success_touches_rule_once_at_outer_level():
     )
     assert ok is True
     assert repo.touches == [(1, 3600)]
+
+
+def test_accepted_single_reconciliation_rejects_stale_verified_promotion():
+    class RacingRepo(FakeRepo):
+        def __init__(self):
+            self.sent = False
+            self.promoted = 0
+
+        def get_delivery_attempt_by_idempotency_key(self, _key):
+            return {"status": "accepted", "sent_message_ids_json": [370]}
+
+        def mark_delivery_attempt_verified(self, *_args, **_kwargs):
+            self.promoted += 1
+            return False  # Other worker finalized failed_after_send first.
+
+        def mark_delivery_sent_with_target_message(self, *_args, **_kwargs):
+            self.sent = True
+
+    repo = RacingRepo()
+    service = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=repo)
+
+    async def confirmed(**_kwargs):
+        return [370]
+
+    async def no_second_send(*_args, **_kwargs):
+        raise AssertionError("CAS loser must not send a second Telegram message")
+
+    service._confirm_target_delivery_message_ids_with_retry = confirmed
+    service._deliver_single = no_second_send
+    result = asyncio.run(service.execute_repost_single_from_job(
+        rule_id=1, delivery_id=14, message_id=15, source_channel="@src", target_id="-1002",
+    ))
+    assert result["ok"] is False
+    assert result["retryable"] is True
+    assert result["manual_review_required"] is True
+    assert repo.promoted == 1
+    assert repo.sent is False
+
+
+def test_accepted_single_reconciliation_marks_sent_only_after_cas_promotion():
+    class PromotableRepo(FakeRepo):
+        def __init__(self):
+            self.sent = None
+
+        def get_delivery_attempt_by_idempotency_key(self, _key):
+            return {"status": "accepted", "sent_message_ids_json": [370]}
+
+        def mark_delivery_attempt_verified(self, *_args, **_kwargs):
+            return True
+
+        def mark_delivery_sent_with_target_message(self, delivery_id, **kwargs):
+            self.sent = (delivery_id, kwargs)
+
+    repo = PromotableRepo()
+    service = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=repo)
+    async def confirmed(**_kwargs):
+        return [370]
+    service._confirm_target_delivery_message_ids_with_retry = confirmed
+    assert asyncio.run(service.execute_repost_single_from_job(
+        rule_id=1, delivery_id=14, message_id=15, source_channel="@src", target_id="-1002",
+    )) is True
+    assert repo.sent[0] == 14
+    assert repo.sent[1]["sent_message_id"] == 370
