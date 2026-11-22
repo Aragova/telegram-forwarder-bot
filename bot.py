@@ -31,7 +31,7 @@ from aiogram.types import (
 
 from app.config import settings
 from app.repository_models import utc_now_iso
-from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder
+from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
 from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view
 from app.repository import RepositoryProtocol
 from app.repository_factory import create_repository
@@ -2453,6 +2453,7 @@ async def handle_cancel(message: Message):
     user_id = message.from_user.id if message.from_user else None
     if user_id:
         clear_new_rule_folder(user_id)
+        clear_folder_input(user_id)
     state = user_states.get(user_id) if user_id else None
 
     if not state:
@@ -2886,6 +2887,7 @@ async def handle_live_status(message: Message):
 async def show_admin_rule_manager(message: Message, user_id: int) -> None:
     """Use one entry point for the live reply-keyboard router and start shortcuts."""
     clear_new_rule_folder(user_id)
+    clear_folder_input(user_id)
     tenant_id = await run_db(ensure_user_tenant, user_id)
     folders = await run_db(db.list_rule_folders, tenant_id)
     rules = await run_db(db.get_all_rules)
@@ -2921,6 +2923,7 @@ async def handle_admin_reply_keyboard_router(message: Message):
         message.from_user.id if message.from_user else None,
     )
     reset_user_state(message.from_user.id if message.from_user else None)
+    clear_folder_input(message.from_user.id if message.from_user else None)
 
     if canonical == "📈 Живой статус":
         await handle_live_status(message)
@@ -9039,6 +9042,7 @@ register_rule_folder_handlers(dp, SimpleNamespace(
     answer_callback_safe_once=answer_callback_safe_once,
     edit_message_text_safe=edit_message_text_safe,
     send_message_safe=send_message_safe,
+    try_delete_message_safe=try_delete_message_safe,
     refresh_rule_card_for_actor=refresh_rule_card_for_actor,
     get_main_menu=get_main_menu,
     user_states=user_states,
