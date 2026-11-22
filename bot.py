@@ -499,12 +499,12 @@ async def _run_rescan_rule_fresh_job(
         # A persisted owner token fences concurrent scans in every worker.
         # This includes the entire Telegram parse, DB replay, and resume phase.
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
-        scan_start_max_message_id = await run_db(
-            db.get_rule_scan_start_max_message_id, rule_id,
-        )
         replay_committed = False
         successful = False
         try:
+            scan_start_max_message_id = await run_db(
+                db.get_rule_scan_start_max_message_id, rule_id,
+            )
             if rule.source_thread_id is None:
                 parsed_count, seen_message_ids = await parse_channel_history(
                     telethon_client, db, str(rule.source_id), clean_start=False,
@@ -633,11 +633,11 @@ async def _run_rescan_rule_keep_job(
             return
 
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
-        scan_start_max_message_id = await run_db(
-            db.get_rule_scan_start_max_message_id, rule_id,
-        )
         scan_complete = False
         try:
+            scan_start_max_message_id = await run_db(
+                db.get_rule_scan_start_max_message_id, rule_id,
+            )
             old_next_run_at = await run_db(db.get_rule_next_run_at, rule_id)
             saved_first_pending_message_id = await run_db(
                 db.get_rule_first_pending_message_id, rule_id,
