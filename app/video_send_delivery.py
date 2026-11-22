@@ -61,7 +61,7 @@ class VideoSendDelivery:
             status = str((attempt or {}).get("status") or "").lower()
             if status in {"sending", "accepted", "verified", "failed_after_send"}:
                 verified_ids = []
-                if cached_sent_ids:
+                if status == "verified" and cached_sent_ids:
                     verified_ids = await owner._confirm_target_delivery_message_ids_with_retry(
                         rule_id=rule_id,
                         delivery_id=delivery_id,
