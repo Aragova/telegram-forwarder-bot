@@ -96,7 +96,8 @@ def test_user_card_hides_admin_only_buttons():
     joined = " ".join(callbacks)
 
     assert "rule_to_main_menu" not in joined
-    assert "user_rules" in joined
+    assert "rf:back:13" in callbacks
+    assert "user_rules" not in callbacks
 
     def _fake_build_rule_extra_keyboard(_rule_id: int) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
