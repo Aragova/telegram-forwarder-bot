@@ -249,11 +249,15 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not admin:
                     await _root(ctx, callback, tenant_id, admin)
                 else:
-                    _inputs.pop(user_id, None)
-                    await ctx.edit_message_text_safe(message=callback.message, text="📋 Главное меню")
-                    await ctx.send_message_safe(chat_id=callback.message.chat.id,
-                                                text="📋 Главное меню",
-                                                reply_markup=ctx.get_main_menu())
+                    clear_folder_input(user_id)
+                    await ctx.try_delete_message_safe(
+                        callback.message.chat.id, callback.message.message_id,
+                    )
+                    await ctx.send_message_safe(
+                        chat_id=callback.message.chat.id,
+                        text="📋 Главное меню",
+                        reply_markup=ctx.get_main_menu(),
+                    )
             elif action == "folders":
                 folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
                 await _render(ctx, callback, *folder_index_view(folders, int(data[2])))
