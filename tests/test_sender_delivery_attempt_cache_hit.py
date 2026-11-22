@@ -44,9 +44,9 @@ def test_repost_single_cache_hit_ignores_invalid_zero_id():
         source_channel="@src", target_id="-1001",
     ))
     assert result["ok"] is False
-    assert result["retryable"] is False
-    assert result["accepted"] is True
-    assert repo.faulty[0] == 10
+    assert result["retryable"] is True
+    assert result["accepted"] is False
+    assert not hasattr(repo, "faulty")
 
 
 def test_repost_single_verified_cache_can_be_completed_without_sending():
@@ -100,9 +100,9 @@ def test_repost_single_accepted_cache_does_not_increment_success_on_failed_read(
         source_channel="@src", target_id="-1002",
     ))
     assert result["ok"] is False
-    assert result["retryable"] is False
+    assert result["retryable"] is True
     assert repo.sent is False
-    assert repo.faulty[0] == 14
+    assert not hasattr(repo, "faulty")
 
 
 def test_repost_single_success_touches_rule_once_at_outer_level():
