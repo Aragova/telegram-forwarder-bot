@@ -1087,18 +1087,14 @@ class SenderService:
         if allow_unverified_self_loop_target:
             kwargs["allow_unverified_self_loop_target"] = True
         try:
-            # Post-send reactions are secondary work. A stalled Telegram
-            # reaction RPC must never retain a light-worker slot forever
-            # after a publication has already been accepted.
             return await asyncio.wait_for(
                 ReactionDelivery(self)._add_reaction_for_rule_if_possible(**kwargs),
                 timeout=POST_SEND_REACTION_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "POST_SEND_REACTION_TIMEOUT | rule_id=%s | delivery_id=%s | target_id=%s | "
-                "message_id=%s | timeout_sec=%s | action=continue_delivery_without_resend",
-                getattr(rule, "id", None), delivery_id, target_id, sent_message_id, POST_SEND_REACTION_TIMEOUT_SEC,
+                "POST_SEND_REACTION_TIMEOUT | rule_id=%s | delivery_id=%s | target_id=%s | message_id=%s",
+                getattr(rule, "id", None), delivery_id, target_id, sent_message_id,
             )
             return {"applied": False, "enqueued": False, "reason": "reaction_timeout"}
 
