@@ -3799,6 +3799,24 @@ async def refresh_rule_card_message(
             rule_card_refresh_inflight.discard(card_key)
 
 
+def _save_repost_caption_sync(
+    rule_id: int, caption: str | None, entities_json: str | None, admin_id: int,
+) -> dict[str, Any]:
+    previous = db.get_rule(rule_id)
+    ok = db.update_rule_repost_caption(rule_id, caption, entities_json)
+    if ok:
+        db.log_rule_change(
+            event_type="rule_repost_caption_changed",
+            rule_id=rule_id, admin_id=admin_id,
+            old_value={
+                "caption": previous.repost_caption if previous else None,
+                "enabled": previous.repost_caption_enabled if previous else False,
+            },
+            new_value={"caption": caption, "enabled": bool(caption)},
+        )
+    return {"ok": bool(ok)}
+
+
 def _save_video_caption_sync(
     rule_id: int,
     caption: str | None,
@@ -7327,6 +7345,41 @@ async def handle_stateful_private_inputs(message: Message):
                 ]
             ),
         )
+        return
+
+    # =========================================================
+    # Подпись репоста: та же схема редактирования, что у видеоредактора.
+    # =========================================================
+    if action == "repost_caption":
+        rule_id = int(state["rule_id"])
+        caption = None if text == "-" else (message.text or "").strip()
+        if caption and len(caption.encode("utf-16-le")) // 2 > 1024:
+            await reply_message_safe(
+                message, "❌ Подпись слишком длинная. Максимум 1024 символа Telegram."
+            )
+            return
+        if not caption:
+            caption = None
+        entities_json = serialize_message_entities(message.entities) if caption else None
+        result = await run_db(
+            _save_repost_caption_sync, rule_id, caption, entities_json,
+            message.from_user.id if message.from_user else settings.admin_id,
+        )
+        if result["ok"]:
+            invalidate_rule_card_cache(rule_id)
+            await try_delete_message_safe(message.chat.id, message.message_id)
+            prompt_chat_id, prompt_message_id = _state_prompt_ids(state)
+            if prompt_chat_id and prompt_message_id:
+                await try_delete_message_safe(prompt_chat_id, prompt_message_id)
+            reset_user_state(user_id)
+            await send_message_safe(
+                chat_id=message.chat.id,
+                text=await run_db(build_repost_caption_menu_text, rule_id),
+                parse_mode="HTML",
+                reply_markup=await run_db(build_repost_caption_menu_keyboard, rule_id),
+            )
+        else:
+            await reply_message_safe(message, "❌ Не удалось сохранить подпись. Повторите ввод.")
         return
 
     # =========================================================
