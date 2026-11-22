@@ -1448,6 +1448,15 @@ class VideoProcessor:
 
                     sent_msg = await bot.send_video(**send_kwargs)
 
+                if isinstance(sent_msg, TelethonSendOutcome) and not sent_msg.authoritative_resolved:
+                    logger.warning("VIDEO_SEND_ACCEPTED_UNRESOLVED | transport=%s | candidate_id=%s | action=no_resend", normalized_mode, sent_msg.returned_candidate_id)
+                    self._stage_failed(
+                        stage_logger, "send",
+                        error_text="Telegram accepted/unknown, target message id unresolved",
+                        extra={"transport_accepted": True, "retryable": False},
+                    )
+                    return sent_msg
+
                 logger.info("   ✅ Видео отправлено (попытка %s)", attempt + 1)
 
                 sent_message_id = getattr(sent_msg, "authoritative_message_id", None)
