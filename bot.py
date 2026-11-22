@@ -618,6 +618,15 @@ async def _run_rescan_rule_keep_job(
             return
 
         old_next_run_at = await run_db(db.get_rule_next_run_at, rule_id)
+        saved_first_pending_message_id = await run_db(
+            db.get_rule_first_pending_message_id, rule_id,
+        )
+        if saved_first_pending_message_id is None:
+            # Completed rules can still have excluded historical posts.
+            # Preserve their boundary when refreshing the source.
+            previous_sent = await run_db(db.get_rule_sent_message_ids, rule_id)
+            if previous_sent:
+                saved_first_pending_message_id = max(previous_sent) + 1
         was_active = await run_db(db.begin_rule_rescan, rule_id)
         try:
             # The old implementation deleted/reinserted deliveries and broke
@@ -632,6 +641,16 @@ async def _run_rescan_rule_keep_job(
                     int(rule.source_thread_id), clean_start=False,
                 )
             rebuilt_count = await run_db(db.backfill_rule, rule_id)
+            removed_before = 0
+            if saved_first_pending_message_id is not None:
+                # Parsing may reinsert old posts previously excluded by
+                # "start from position". Keep the original pending boundary.
+                removed_before = await run_db(
+                    db.drop_rule_pending_before_message,
+                    rule_id=rule_id, source_channel=str(rule.source_id),
+                    source_thread_id=rule.source_thread_id,
+                    message_id=saved_first_pending_message_id,
+                )
             invalidate_preview_cache(rule_id)
             await run_db(scheduler_service.set_next_run, rule_id, old_next_run_at)
         finally:
@@ -646,6 +665,7 @@ async def _run_rescan_rule_keep_job(
             admin_id=admin_id,
             old_value={
                 "preserved_delivery_state": True,
+                "saved_first_pending_message_id": saved_first_pending_message_id,
                 "old_next_run_at": old_next_run_at,
             },
             new_value={
@@ -656,6 +676,7 @@ async def _run_rescan_rule_keep_job(
                 "parsed_count": parsed_count,
                 "rebuilt_count": rebuilt_count,
                 "preserved_delivery_state": True,
+                "removed_before": removed_before,
                 "source_id": str(rule.source_id),
                 "source_thread_id": rule.source_thread_id,
             },
