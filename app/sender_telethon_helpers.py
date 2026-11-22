@@ -307,8 +307,13 @@ class SenderTelethonHelpers:
         force_document: bool = False,
         post_row: dict | None = None,
         is_self_loop: bool = False,
+        caption_override: dict | None = None,
     ) -> TelethonSendOutcome:
-        content = self.owner._content_from_message_or_post(message=message, post_row=post_row)
+        content = (
+            caption_override
+            if caption_override is not None
+            else self.owner._content_from_message_or_post(message=message, post_row=post_row)
+        )
         raw_text, raw_entities = self.owner._build_text_and_entities_from_content(content)
         formatting_entities = self.owner._clone_telethon_entities(raw_entities, raw_text)
 
@@ -513,6 +518,7 @@ class SenderTelethonHelpers:
         target_thread_id,
         post_rows: list[dict] | None = None,
         is_self_loop: bool = False,
+        caption_override: dict | None = None,
     ) -> dict:
         downloaded_paths: list[Path] = []
 
@@ -522,8 +528,8 @@ class SenderTelethonHelpers:
 
             entity, target_is_broadcast_channel = await self._resolve_target_entity_and_broadcast_flag(target_id)
 
-            caption_text = ""
-            caption_entities = None
+            caption_text = str(caption_override.get("text") or "") if caption_override is not None else ""
+            caption_entities = caption_override.get("entities") if caption_override is not None else None
             media_items = []
 
             for idx, message in enumerate(messages):
@@ -631,8 +637,8 @@ class SenderTelethonHelpers:
 
         try:
             files: list[str] = []
-            caption_text = ""
-            caption_entities = None
+            caption_text = str(caption_override.get("text") or "") if caption_override is not None else ""
+            caption_entities = caption_override.get("entities") if caption_override is not None else None
 
             for idx, message in enumerate(messages):
                 file_path = await self.owner.telethon.download_media(
