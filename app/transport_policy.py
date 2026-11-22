@@ -460,6 +460,30 @@ def build_sender_telethon_policy() -> TransportPolicy:
     )
 
 
+def build_sender_telethon_read_policy() -> TransportPolicy:
+    """Independent bounded control lane: a large download must not block reads."""
+    return TransportPolicy(
+        max_attempts=1,
+        min_interval_sec=0.0,
+        max_concurrency=4,
+        retry_unknown_errors=False,
+        retry_non_idempotent_writes=False,
+        retry_unknown_operations=False,
+    )
+
+
+def build_sender_telethon_media_policy() -> TransportPolicy:
+    """Isolated bulk-download lane; writes keep the existing serial policy."""
+    return TransportPolicy(
+        max_attempts=1,
+        min_interval_sec=0.0,
+        max_concurrency=2,
+        retry_unknown_errors=False,
+        retry_non_idempotent_writes=False,
+        retry_unknown_operations=False,
+    )
+
+
 def build_reaction_policy() -> TransportPolicy:
     return TransportPolicy(
         max_attempts=1,
