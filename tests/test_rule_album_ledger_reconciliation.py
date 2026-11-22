@@ -463,3 +463,15 @@ def test_parser_seen_ids_ignore_deleted_source_and_fail_closed(monkeypatch):
             Client(), Database(), "-100123",
             preserve_existing_deliveries=True, collect_seen_message_ids=True,
         ))
+
+
+def test_user_cannot_manually_reactivate_rule_during_rescan():
+    source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+    toggle = source.split("def set_rule_active(", 1)[1].split(
+        "def activate_rule_with_backfill(", 1
+    )[0]
+    activate = source.split("def activate_rule_with_backfill(", 1)[1].split(
+        "def get_rule_source_scope(", 1
+    )[0]
+    assert "WHERE id = %s AND rescan_owner_token IS NULL" in toggle
+    assert "WHERE id = %s AND rescan_owner_token IS NULL" in activate
