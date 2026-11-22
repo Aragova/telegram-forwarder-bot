@@ -235,7 +235,7 @@ def additional_functions_view(
         "",
         "🔁 <b>Режим</b> — переключение между репостом и видеоредактором.",
         ("🎞 <b>Длина видео</b> — продолжительность обрабатываемого фрагмента."
-         if is_video else "✍️ <b>Подпись</b> — собственный текст или оригинал публикации."),
+         if is_video and admin else "✍️ <b>Подпись</b> — собственный текст или оригинал публикации."),
         "",
         "━━━━━━━━━━━━━━",
         "⚡ <b>ПУБЛИКАЦИИ</b>",
@@ -266,7 +266,7 @@ def additional_functions_view(
     )
     rows = [[
         _button("🎛 Режим", mode_cb),
-        _button("🎞 Длина видео" if is_video else "✍️ Подпись",
+        _button("🎞 Длина видео" if is_video and admin else "✍️ Подпись",
                 cb("rule_video_clip_duration", "user_rule_caption") if is_video
                 else cb("repost_caption_menu", "user_rule_repost_caption")),
     ], [
