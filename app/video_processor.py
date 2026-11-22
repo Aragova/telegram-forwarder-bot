@@ -1102,15 +1102,19 @@ class VideoProcessor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        # Keep communicate alive even if its caller times out or is canceled.
+        # process.wait() itself can hang after SIGKILL while PIPE readers are gone.
+        communicate_task = asyncio.create_task(process.communicate())
         try:
-            # Drain both pipes: process.wait() alone can deadlock on full stderr.
-            await asyncio.wait_for(process.communicate(), timeout=60)
+            await asyncio.wait_for(asyncio.shield(communicate_task), timeout=60)
         except asyncio.TimeoutError:
             logger.warning("THUMBNAIL_FFMPEG_TIMEOUT | path=%s", thumbnail_path)
             await self._terminate_ffmpeg_process(process)
+            await communicate_task
             return False
         except asyncio.CancelledError:
             await self._terminate_ffmpeg_process(process)
+            await communicate_task
             raise
 
         if process.returncode == 0 and os.path.isfile(thumbnail_path):

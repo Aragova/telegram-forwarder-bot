@@ -82,3 +82,54 @@ def test_ffmpeg_timeout_terminates_child(monkeypatch):
         assert launched[0].returncode is not None
 
     asyncio.run(scenario())
+
+
+
+def test_thumbnail_cancel_drains_large_stderr_until_reaped(tmp_path, monkeypatch):
+    """SIGTERM handler fills stderr; cancelled communicate must continue draining."""
+    import os
+    import textwrap
+
+    original = video_module.asyncio.create_subprocess_exec
+    children = []
+    ready = tmp_path / "ffmpeg_ready.flag"
+    program = textwrap.dedent(
+        f"""
+        import pathlib, signal, sys, time
+        def terminate(signum, frame):
+            sys.stderr.buffer.write(b'X' * 2_000_000)
+            sys.stderr.buffer.flush()
+            sys.exit(1)
+        signal.signal(signal.SIGTERM, terminate)
+        pathlib.Path({str(ready)!r}).write_text('ready')
+        while True:
+            time.sleep(0.2)
+        """
+    )
+
+    async def launch(*command, **kwargs):
+        child = await original(sys.executable, "-c", program, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(video_module.asyncio, "create_subprocess_exec", launch)
+    processor = VideoProcessor.__new__(VideoProcessor)
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake")
+    preview = tmp_path / "thumb.jpg"
+
+    async def check():
+        task = asyncio.create_task(
+            processor.create_thumbnail_fast(str(video), str(preview))
+        )
+        for _ in range(100):
+            if ready.exists():
+                break
+            await asyncio.sleep(0.02)
+        assert ready.exists(), "Subprocess never registered SIGTERM handler"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=7.0)
+        assert children[0].returncode is not None
+
+    asyncio.run(check())
