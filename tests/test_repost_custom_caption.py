@@ -377,3 +377,52 @@ def test_custom_caption_media_send_disables_markdown_on_both_paths():
     )[0]
     assert single.count('send_kwargs["parse_mode"] = None') == 2
     assert album.count('send_kwargs["parse_mode"] = None') == 2
+
+
+
+def test_link_preview_not_considered_downloadable_attachment():
+    from telethon.tl import types
+    from app.sender_primitives import _is_link_preview_only
+    link_post = SimpleNamespace(
+        id=11,
+        media=types.MessageMediaWebPage(webpage=types.WebPageEmpty(id=112)),
+    )
+    photo_post = SimpleNamespace(id=12, media=object())
+    assert _is_link_preview_only(link_post)
+    assert not _is_link_preview_only(photo_post)
+
+
+def test_link_preview_with_custom_caption_uses_text_path_not_media_download():
+    from telethon.tl import types
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    class Telegram:
+        async def download_media(self, *_args, **_kwargs):
+            raise AssertionError("A link preview must not be downloaded as a media attachment")
+    class Owner:
+        def __init__(self):
+            self.telethon = Telegram()
+            self.sent = None
+        def _build_text_and_entities_from_content(self, content):
+            return SenderContentHelpers(owner=None).build_text_and_entities_from_content(content)
+        async def _send_text_via_telethon(self, **kwargs):
+            self.sent = kwargs
+            return 941
+    owner = Owner()
+    post = SimpleNamespace(id=20, media=types.MessageMediaWebPage(
+        webpage=types.WebPageEmpty(id=21),
+    ))
+    outcome = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
+        post, "-1001", None,
+        caption_override={"text": "Literal **stars**", "entities": []},
+    ))
+    assert outcome.authoritative_message_id == 941
+    assert owner.sent["text"] == "Literal **stars**"
+    assert owner.sent["literal_caption"] is True
+
+
+def test_link_preview_excluded_from_custom_caption_downgrade_block():
+    source = Path("app/repost_single_delivery.py").read_text(encoding="utf-8")
+    assert "not _is_link_preview_only(message)" in source
+    assert "_is_link_preview_only(message)" in Path(
+        "app/sender_reupload_helpers.py"
+    ).read_text(encoding="utf-8")
