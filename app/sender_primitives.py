@@ -269,6 +269,11 @@ def _prepare_html_text(text: str | None) -> str | None:
 def _normalize_reaction_emoji(value: str | None) -> str:
     return (value or "").replace("\ufe0f", "").strip()
 
+def _is_link_preview_only(message) -> bool:
+    """A Telegram webpage preview isn't a downloadable media attachment."""
+    return isinstance(getattr(message, "media", None), types.MessageMediaWebPage)
+
+
 def _detect_message_media_kind(message) -> str:
     """
     Возвращает:
