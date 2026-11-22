@@ -17,7 +17,7 @@ EXPLICIT START OVER: parse without destructive source delete, archive prior deli
 then delete only the selected rule's deliveries in the same transaction and rebuild. Old receipts remain in PostgreSQL for audit.
 Explicit start over intentionally replays old posts and can create duplicate channel content. It must not be used as a repair shortcut.
 Do not rescan if any active jobs or processing deliveries exist. If a destructive reset fails after committing, leave the rule paused.
-Two nullable routing columns (rescan_owner_token, rescan_started_at) are added idempotently on database initialization. No changes to reaction sessions.
+Two nullable routing columns (rescan_owner_token, rescan_started_at) and a default-false rescan_queue_built flag are added idempotently on database initialization. No changes to reaction sessions.
 
 ## Safe repair of existing rule 214
 Take a PostgreSQL backup before any --apply. Commands run from the existing server using its authorized Telethon session:
@@ -69,3 +69,16 @@ Never perform a global queue reset to recover this incident.
 An owner token on an inactive rule is a safety latch, **not** permission to
 reset deliveries. Verify the original process is no longer running and that
 there are no active jobs, then obtain a DB snapshot before any manual recovery.
+
+## Review #509 follow-up: activation after a completed scan
+
+Enabling an inactive rule previously ran unfiltered backfill against all cached
+posts. That would recreate deliveries for source messages removed from Telegram,
+even after a correctly filtered "start over" or "keep position" rescan.
+
+The selected rule now records `rescan_queue_built = TRUE` in the SAME owner-
+fenced transaction that finishes a successful rescan. Future enable/activation
+reuses its already rebuilt queue rather than scanning unrelated cached posts.
+Rules that have never completed a rescan keep their existing initial backfill
+behavior. New source posts continue to get deliveries from the ordinary parser
+path. Manual activation remains blocked while a rescan owner holds the rule.
