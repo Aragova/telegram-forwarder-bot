@@ -7,6 +7,7 @@ from app.delivery_content_helpers import (
     content_requires_builder,
     extract_text_from_content,
     normalize_caption_delivery_mode,
+    normalize_video_caption_delivery_mode,
     normalize_caption_entities,
     video_caption_requires_premium,
 )
@@ -98,7 +99,7 @@ def test_build_video_caption_delivery_payload_modes_and_manual_caption_priority(
     )
     assert auto_payload["caption"] == "ручная подпись"
     assert auto_payload["caption_entities"] == raw_entities
-    assert auto_payload["caption_delivery_mode"] == "auto"
+    assert auto_payload["caption_delivery_mode"] == "builder_first"
     assert auto_payload["selected_mode"] == "premium"
     assert auto_payload["has_any_entities"] is True
     assert auto_payload["requires_premium"] is False
@@ -131,7 +132,7 @@ def test_build_video_caption_delivery_payload_malformed_entities_keeps_existing_
         "caption": "",
         "caption_entities": [],
         "caption_entities_json": None,
-        "caption_delivery_mode": "auto",
+        "caption_delivery_mode": "copy_first",
         "requires_premium": False,
         "has_any_entities": False,
         "selected_mode": "plain",
@@ -175,3 +176,23 @@ def test_content_requires_builder_checks_alternate_entity_fields():
             {"_": "MessageEntityCustomEmoji", "document_id": "123"}
         ],
     }) is True
+
+
+
+def test_video_only_two_modes_and_legacy_auto_compat():
+    bold = [{"type": "bold", "offset": 0, "length": 4}]
+    assert normalize_video_caption_delivery_mode(None) == "copy_first"
+    assert normalize_video_caption_delivery_mode("copy_first", bold) == "copy_first"
+    assert normalize_video_caption_delivery_mode("builder_first", []) == "builder_first"
+    assert normalize_video_caption_delivery_mode("auto", bold) == "builder_first"
+    assert normalize_video_caption_delivery_mode("auto", []) == "copy_first"
+    ordinary = build_video_caption_delivery_payload(
+        caption="text", raw_caption_entities=bold, caption_delivery_mode="copy_first"
+    )
+    premium = build_video_caption_delivery_payload(
+        caption="text", raw_caption_entities=[], caption_delivery_mode="builder_first"
+    )
+    assert ordinary["selected_mode"] == "plain"
+    assert ordinary["caption_delivery_mode"] == "copy_first"
+    assert premium["selected_mode"] == "premium"
+    assert premium["caption_delivery_mode"] == "builder_first"

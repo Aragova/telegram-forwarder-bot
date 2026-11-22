@@ -225,3 +225,15 @@ def test_content_from_message_or_post_merges_live_entities_when_post_row_stale()
     assert result["entities"]
     assert result["entities"][0]["type"] == "custom_emoji"
     assert result["entities"][0]["custom_emoji_id"] == "123"
+
+
+
+def test_video_sender_legacy_auto_and_explicit_choices():
+    helpers = SenderContentHelpers(owner=SimpleNamespace())
+    bold = '[{"type":"bold","offset":0,"length":2}]'
+    legacy = SimpleNamespace(video_caption_delivery_mode="auto", video_caption_entities_json=bold)
+    ordinary = SimpleNamespace(video_caption_delivery_mode="copy_first", video_caption_entities_json=bold)
+    premium = SimpleNamespace(video_caption_delivery_mode="builder_first", video_caption_entities_json=None)
+    assert helpers.get_rule_video_caption_delivery_mode(legacy) == "builder_first"
+    assert helpers.get_rule_video_caption_delivery_mode(ordinary) == "copy_first"
+    assert helpers.get_rule_video_caption_delivery_mode(premium) == "builder_first"
