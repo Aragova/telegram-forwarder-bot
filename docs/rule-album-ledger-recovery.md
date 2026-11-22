@@ -82,3 +82,19 @@ reuses its already rebuilt queue rather than scanning unrelated cached posts.
 Rules that have never completed a rescan keep their existing initial backfill
 behavior. New source posts continue to get deliveries from the ordinary parser
 path. Manual activation remains blocked while a rescan owner holds the rule.
+
+## Review #509 follow-up: protect live arrivals during history rescans
+
+A source message can arrive after Telegram's reverse history iterator finishes,
+while the normal real-time handler is still saving new posts into PostgreSQL.
+A naive "not in observed set" filter would delete that valid pending delivery,
+or fail to reconstruct it during a fresh replay.
+
+After acquiring the per-rule owner, rescans capture the highest cached source
+Telegram message ID **before** the historical scan. Telegram channel message IDs
+increase monotonically. Only rows at or below this snapshot high-water mark
+may be classified stale based on absence from the iterator. The replay backfill
+always includes posts above this boundary even if they were not present in the
+historical scan result. Rows that arrive after the iteration but before the
+rebuild therefore remain eligible. All of this happens without deleting shared
+source posts or loosening the idempotency checks on previously sent albums.
