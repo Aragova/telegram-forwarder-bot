@@ -1275,7 +1275,7 @@ def _filter_user_rule_card_keyboard(keyboard: InlineKeyboardMarkup, rule_id: int
 
     filtered_rows.append(
         [
-            InlineKeyboardButton(text="⬅️ К правилам", callback_data="user_rules"),
+            InlineKeyboardButton(text="⬅️ К правилам", callback_data=f"rf:back:{rule_id}"),
             InlineKeyboardButton(text="🏠 Главное меню", callback_data="user_main"),
         ]
     )
@@ -2866,7 +2866,7 @@ async def handle_start_shortcuts(callback: CallbackQuery):
         await send_message_safe(chat_id=callback.message.chat.id, text="Выберите тип записи", reply_markup=get_channel_type_keyboard())
         return
     if action == "create_rule":
-        await send_message_safe(chat_id=callback.message.chat.id, text="Раздел правил", reply_markup=get_rules_menu())
+        await show_admin_rule_manager(callback.message, callback.from_user.id)
         return
 
 @dp.message(lambda m: m.text == "📈 Живой статус")
@@ -2881,6 +2881,25 @@ async def handle_live_status(message: Message):
         _start_dashboard_task(message.from_user.id, msg)
 
 
+
+
+async def show_admin_rule_manager(message: Message, user_id: int) -> None:
+    """Use one entry point for the live reply-keyboard router and start shortcuts."""
+    clear_new_rule_folder(user_id)
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    folders = await run_db(db.list_rule_folders, tenant_id)
+    rules = await run_db(db.get_all_rules)
+    text, markup = root_view(total_rules=len(rules), folders_count=len(folders), admin=True)
+    cleanup = await send_message_safe(
+        chat_id=message.chat.id,
+        text="🔄 Открываю правила",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await send_message_safe(
+        chat_id=message.chat.id, text=text, parse_mode="HTML", reply_markup=markup,
+    )
+    if cleanup is not None:
+        await try_delete_message_safe(message.chat.id, cleanup.message_id)
 
 
 @dp.message(
@@ -2907,7 +2926,7 @@ async def handle_admin_reply_keyboard_router(message: Message):
         await handle_live_status(message)
         return
     if canonical == "🔄 Правила":
-        await reply_message_safe(message, "🔄 Раздел: Правила", reply_markup=get_rules_menu())
+        await show_admin_rule_manager(message, message.from_user.id)
         return
     if canonical == "📡 Каналы":
         await reply_message_safe(message, "📡 Раздел: Каналы", reply_markup=get_channels_menu())
@@ -3046,11 +3065,7 @@ async def handle_list_rules(message: Message):
 
     if not rules:
         if is_admin_mode:
-            await send_message_safe(
-                chat_id=message.chat.id,
-                text="Правил пока нет",
-                reply_markup=get_rules_menu(),
-            )
+            await show_admin_rule_manager(message, user_id)
         else:
             await send_message_safe(
                 chat_id=message.chat.id,
