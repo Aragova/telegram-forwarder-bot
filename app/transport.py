@@ -1,6 +1,21 @@
 from __future__ import annotations
 
-from app.transport_policy import TransportPolicy
+import asyncio
+import logging
+import time
+
+from app.transport_policy import (
+    TransportPolicy,
+    build_sender_telethon_read_policy,
+    build_sender_telethon_media_policy,
+)
+
+logger = logging.getLogger("forwarder.transport")
+
+# Short, read-only RPCs must not occupy worker slots indefinitely.
+_TELETHON_READ_TIMEOUT_SEC = 15.0
+_TELETHON_CONTROL_OPS = frozenset({"get_messages", "get_entity", "get_input_entity", "get_me"})
+_TELETHON_MEDIA_OPS = frozenset({"download_media"})
 
 
 class BotTransportProxy:
@@ -59,6 +74,11 @@ class TelethonTransportProxy:
         self._policy = policy
         self._is_transport_proxy = True
         self._transport_backend = "telethon"
+        # Only production TransportPolicy has separate lanes. Custom injected
+        # test policies keep their existing delegation contract.
+        self._read_policy = build_sender_telethon_read_policy() if isinstance(policy, TransportPolicy) else policy
+        self._media_policy = build_sender_telethon_media_policy() if isinstance(policy, TransportPolicy) else policy
+        self._control_read_timeout_sec = _TELETHON_READ_TIMEOUT_SEC
 
     @property
     def raw(self):
@@ -79,12 +99,45 @@ class TelethonTransportProxy:
             return attr
 
         async def _wrapped(*args, **kwargs):
-            return await self._policy.execute(
+            if name in _TELETHON_CONTROL_OPS:
+                selected_policy = self._read_policy
+                lane = "control"
+            elif name in _TELETHON_MEDIA_OPS:
+                selected_policy = self._media_policy
+                lane = "bulk"
+            else:
+                selected_policy = self._policy
+                lane = "send"
+
+            started = time.monotonic()
+            operation = selected_policy.execute(
                 backend="telethon",
                 key=f"{self._label}.{name}",
                 op_name=name,
                 func=lambda: attr(*args, **kwargs),
             )
+            try:
+                if lane == "control":
+                    # Safe to cancel READ operations. Never wrap sends or
+                    # uploads in this timeout: acceptance may be ambiguous.
+                    result = await asyncio.wait_for(operation, timeout=self._control_read_timeout_sec)
+                else:
+                    result = await operation
+            except asyncio.TimeoutError:
+                if lane == "control":
+                    logger.warning(
+                        "TELETHON_CONTROL_READ_TIMEOUT | op=%s | timeout_sec=%s | action=free_control_slot",
+                        name, self._control_read_timeout_sec,
+                    )
+                raise
+            finally:
+                elapsed = time.monotonic() - started
+                if elapsed >= 3.0:
+                    logger.warning(
+                        "TELETHON_TRANSPORT_SLOW | lane=%s | op=%s | elapsed_sec=%.1f",
+                        lane, name, elapsed,
+                    )
+            return result
 
         return _wrapped
 
