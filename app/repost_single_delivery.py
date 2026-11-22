@@ -4,7 +4,10 @@ import logging
 
 from .runtime_utils import run_db
 from .repost_caption import get_repost_caption_override, caption_override_content
-from .sender_primitives import DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK, _prepare_html_text, _telethon_entities_to_bot
+from .sender_primitives import (
+    DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK, _prepare_html_text,
+    _telethon_entities_to_bot, _is_link_preview_only,
+)
 from .telegram_send_result import telegram_send_result_from_raw
 
 logger = logging.getLogger("forwarder")
@@ -764,7 +767,11 @@ class RepostSingleDelivery:
         # =========================================================
         # Never silently degrade a failed media repost to a text-only "sent".
         # With custom caption ON a media failure must be visible and retriable.
-        media_downgrade_blocked = bool(custom_caption is not None and getattr(message, "media", None))
+        media_downgrade_blocked = bool(
+            custom_caption is not None
+            and getattr(message, "media", None)
+            and not _is_link_preview_only(message)
+        )
         html_text = (
             None if media_downgrade_blocked
             else built_text if custom_caption is not None
