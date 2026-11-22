@@ -15,6 +15,7 @@ class Repo:
     def __init__(self):
         self.accepted = []
         self.sent = []
+        self.faulty = []
 
     def get_delivery_attempt_by_idempotency_key(self, _key):
         return None
@@ -30,6 +31,9 @@ class Repo:
 
     def mark_delivery_attempt_failed(self, *_args, **_kwargs):
         raise AssertionError("must not fail after accepted")
+
+    def mark_delivery_faulty(self, delivery_id, error_text):
+        self.faulty.append((delivery_id, error_text))
 
     def get_rule(self, _rule_id):
         return DummyRule()
@@ -66,7 +70,7 @@ def test_post_send_safe_swallows_exception():
     asyncio.run(run())
 
 
-def test_video_send_verify_failure_after_accepted_is_non_fatal():
+def test_video_send_verify_failure_after_accepted_is_non_retryable_without_duplicate():
     repo = Repo()
     s = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=repo)
     s.video_processor = VideoProcessorStub()
@@ -90,12 +94,15 @@ def test_video_send_verify_failure_after_accepted_is_non_fatal():
             processed_video_path=__file__,
         )
     )
-    assert result.get("ok") is True
+    assert result.get("ok") is False
+    assert result.get("retryable") is False
+    assert result.get("accepted") is True
     assert repo.accepted
-    assert repo.sent
+    assert not repo.sent
+    assert repo.faulty
 
 
-def test_video_delivery_post_send_failure_after_accepted_is_non_fatal():
+def test_video_delivery_post_send_failure_after_accepted_is_non_retryable():
     repo = Repo()
     s = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=repo)
 
@@ -113,9 +120,12 @@ def test_video_delivery_post_send_failure_after_accepted_is_non_fatal():
             target_id="-1001",
         )
     )
-    assert result is True
+    assert result["ok"] is False
+    assert result["retryable"] is False
+    assert result["accepted"] is True
     assert repo.accepted
-    assert repo.sent
+    assert not repo.sent
+    assert repo.faulty
 
 
 def test_single_delivery_source_extracted_from_sender():

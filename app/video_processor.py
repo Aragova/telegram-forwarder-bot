@@ -5,10 +5,12 @@ import asyncio
 import json
 from pathlib import Path
 import logging
+from datetime import datetime, timezone
+from .telethon_authoritative_resolver import TelethonAuthoritativeMessageResolver, TelethonSendOutcome
 from .config import settings as config
 from .video_clip_duration import calculate_center_clip_window
 from aiogram import Bot
-from aiogram.exceptions import TelegramEntityTooLarge
+from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from .bot_api_session import create_bot_api_session
 from .subprocess_safety import (
     communicate_safely,
@@ -18,9 +20,14 @@ from .subprocess_safety import (
 )
 from aiogram.types import FSInputFile, MessageEntity
 from telethon import types as tl_types
+from telethon.errors import FloodWaitError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class VideoPreSendError(RuntimeError):
+    """Failure known to precede any Telegram video-send request."""
 
 
 class VideoProcessor:
@@ -199,7 +206,7 @@ class VideoProcessor:
 
         video_info = await self.get_video_info(video_path, use_cache=False)
         if not video_info:
-            raise RuntimeError(f"Не удалось получить video_info для Telethon-отправки: {video_path}")
+            raise VideoPreSendError(f"Не удалось получить video_info до Telethon send_file: {video_path}")
 
         width = int(video_info.get("width") or 0)
         height = int(video_info.get("height") or 0)
@@ -243,22 +250,56 @@ class VideoProcessor:
             len(formatting_entities or []),
         )
 
-        sent_msg = await self.telethon.send_file(**send_kwargs)
-
+        # A Telethon result id may refer to another peer; resolve against
+        # the target channel before handing the message to delivery or reactions.
+        try:
+            target_entity = await self.telethon.get_entity(entity)
+            broadcast = bool(getattr(target_entity, "broadcast", False) and not getattr(target_entity, "megagroup", False))
+            resolver = TelethonAuthoritativeMessageResolver(self.telethon)
+            watermark = await resolver.get_before_max_message_id(target_entity, destination_channel)
+        except FloodWaitError:
+            # Explicit Telegram rejection: keep the wait duration intact.
+            raise
+        except Exception as exc:
+            # None of these reads sends media. They can be safely retried.
+            raise VideoPreSendError(f"video_telethon_preflight: {type(exc).__name__}: {exc}") from exc
+        started_at = datetime.now(timezone.utc)
+        sent_msg = await self.telethon.send_file(**{**send_kwargs, "entity": target_entity})
+        finished_at = datetime.now(timezone.utc)
         if isinstance(sent_msg, list):
             sent_msg = sent_msg[0] if sent_msg else None
+        if sent_msg is None:
+            logger.warning("TELETHON_VIDEO_SEND | ACCEPTED_UNKNOWN | target=%s | empty_response=true | action=no_resend", destination_channel)
+            return TelethonSendOutcome(True, True, False, None, [], resolution_method="empty_response", error_text="empty_response_after_send")
 
-        logger.info(
-            "TELETHON_VIDEO_SEND | OK | target=%s | thread=%s | message_id=%s | duration=%s | size=%sx%s",
-            destination_channel,
-            target_thread_id,
-            getattr(sent_msg, "id", None),
-            duration,
-            width,
-            height,
+        raw_id = getattr(sent_msg, "id", None)
+        resolved = await resolver.resolve_authoritative_single_message(
+            target_entity=target_entity,
+            target_id=destination_channel,
+            sent=sent_msg,
+            expected_text=caption or "",
+            before_max_message_id=watermark,
+            send_started_at=started_at,
+            send_finished_at=finished_at,
+            target_thread_id=target_thread_id,
+            target_is_broadcast_channel=broadcast,
+            require_strong_media_match=True,
+            # Rule #141: the real post became visible ~6 seconds after send_file
+            # returned. Retry only safe history reads, never the media upload.
+            history_poll_delays=(0, 1, 2, 3, 4, 5),
         )
-
-        return sent_msg
+        logger.info(
+            "TELETHON_VIDEO_SEND | ID_RESOLVED | target=%s | thread=%s | returned_candidate_id=%s | authoritative_message_id=%s | resolution_method=%s",
+            destination_channel, target_thread_id, raw_id, resolved.authoritative_message_id, resolved.resolution_method,
+        )
+        return TelethonSendOutcome(
+            True, True, resolved.ok, resolved.authoritative_message_id,
+            [resolved.authoritative_message_id] if resolved.ok and resolved.authoritative_message_id else [],
+            returned_candidate_id=raw_id,
+            returned_candidate_ids=[raw_id] if raw_id else [],
+            resolution_method=resolved.resolution_method,
+            error_text=resolved.error_text,
+        )
 
     # ==================== UTILS ====================
 
@@ -1376,7 +1417,10 @@ class VideoProcessor:
             logger.warning("Неизвестный caption_send_mode=%s, fallback -> plain", normalized_mode)
             normalized_mode = "plain"
 
-        file_size_bytes = os.path.getsize(video_path)
+        try:
+            file_size_bytes = os.path.getsize(video_path)
+        except OSError as exc:
+            raise VideoPreSendError(f"video_file_preflight: {type(exc).__name__}: {exc}") from exc
         api_session = getattr(bot, "session", None)
         local_api = bool(getattr(getattr(api_session, "api", None), "is_local", False))
         logger.info(
@@ -1386,6 +1430,10 @@ class VideoProcessor:
             local_api,
         )
 
+        # Sending media is non-idempotent; an uncertain response must not trigger a second post.
+        if max_retries != 1:
+            logger.info("VIDEO_SEND_RETRIES_DISABLED | requested=%s | effective=1", max_retries)
+        max_retries = 1
         for attempt in range(max_retries):
             try:
                 if normalized_mode == "premium":
@@ -1418,9 +1466,20 @@ class VideoProcessor:
 
                     sent_msg = await bot.send_video(**send_kwargs)
 
+                if isinstance(sent_msg, TelethonSendOutcome) and not sent_msg.authoritative_resolved:
+                    logger.warning("VIDEO_SEND_ACCEPTED_UNRESOLVED | transport=%s | candidate_id=%s | action=no_resend", normalized_mode, sent_msg.returned_candidate_id)
+                    self._stage_failed(
+                        stage_logger, "send",
+                        error_text="Telegram accepted/unknown, target message id unresolved",
+                        extra={"transport_accepted": True, "retryable": False},
+                    )
+                    return sent_msg
+
                 logger.info("   ✅ Видео отправлено (попытка %s)", attempt + 1)
 
-                sent_message_id = getattr(sent_msg, "message_id", None)
+                sent_message_id = getattr(sent_msg, "authoritative_message_id", None)
+                if sent_message_id is None:
+                    sent_message_id = getattr(sent_msg, "message_id", None)
                 if sent_message_id is None:
                     sent_message_id = getattr(sent_msg, "id", None)
 
@@ -1438,6 +1497,32 @@ class VideoProcessor:
 
                 return sent_msg
 
+            except VideoPreSendError as exc:
+                self._stage_failed(stage_logger, "send", error_text=str(exc), extra={"retryable": True, "accepted": False})
+                logger.warning("VIDEO_SEND_PREFLIGHT_FAILED | action=safe_retry | error=%s", exc)
+                raise
+            except FloodWaitError as exc:
+                self._stage_failed(
+                    stage_logger, "send", error_text=str(exc),
+                    extra={"retryable": True, "accepted": False, "retry_after_seconds": int(exc.seconds)},
+                )
+                logger.warning(
+                    "VIDEO_SEND_FLOOD_WAIT | transport=telethon | retry_after=%s | action=retry_safe_rejection",
+                    exc.seconds,
+                )
+                raise
+            except TelegramRetryAfter as exc:
+                # The Bot API explicitly refused this request. Retrying via
+                # the job scheduler is safe, unlike retrying a network timeout.
+                self._stage_failed(
+                    stage_logger, "send", error_text=str(exc),
+                    extra={"retryable": True, "retry_after_seconds": int(exc.retry_after)},
+                )
+                logger.warning(
+                    "VIDEO_SEND_RATE_LIMITED | transport=bot_api | retry_after=%s | action=retry_safe_rejection",
+                    exc.retry_after,
+                )
+                raise
             except TelegramEntityTooLarge as exc:
                 logger.error(
                     "VIDEO_SEND_TOO_LARGE | transport=%s | file_size_bytes=%s | action=no_retry",
@@ -1467,8 +1552,12 @@ class VideoProcessor:
                     },
                 )
 
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(5 * (attempt + 1))
+                # The request may have reached Telegram even when it raised.
+                return TelethonSendOutcome(
+                    True, True, False, None, [],
+                    resolution_method="send_exception_unknown_acceptance",
+                    error_text=f"{type(e).__name__}: {e}",
+                )
 
         self._stage_failed(
             stage_logger,

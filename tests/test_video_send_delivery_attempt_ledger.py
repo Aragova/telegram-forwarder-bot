@@ -2,7 +2,8 @@ import asyncio
 import logging
 from pathlib import Path
 
-from aiogram.exceptions import TelegramEntityTooLarge
+from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
+from telethon.errors import FloodWaitError
 from aiogram.methods import SendVideo
 
 from app.sender import SenderService
@@ -44,6 +45,14 @@ class FakeRepo:
         self.calls.append(("failed", key, kwargs))
         return True
 
+    def mark_delivery_faulty(self, delivery_id, error_text):
+        self.calls.append(("faulty", delivery_id, error_text))
+        return True
+
+    def mark_delivery_attempt_verified(self, key, *, sent_message_ids):
+        self.calls.append(("verified", key, list(sent_message_ids)))
+        return True
+
     def get_rule(self, _rule_id):
         return _Rule()
 
@@ -65,15 +74,145 @@ def _build_service(repo: FakeRepo) -> SenderService:
     return service
 
 
+def test_pre_send_missing_video_fallback_does_not_claim_delivery(tmp_path: Path):
+    """Codex P1: a fallback must not leave a 'sending' write in the ledger."""
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=73, rule_id=1, tenant_id=1, target_id="-10073",
+        processed_video_path=str(tmp_path / "absent.mp4"),
+        artifact_version=1, pipeline_version=1,
+    ))
+    assert result["fallback_to_legacy"] is True
+    assert not any(c[0] in ("create", "sending", "accepted") for c in repo.calls)
+
+
+def test_unsupported_artifact_version_falls_back_before_acquiring_attempt(tmp_path: Path):
+    repo = FakeRepo()
+    service = _build_service(repo)
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"data")
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=74, rule_id=1, tenant_id=1, target_id="-10074",
+        processed_video_path=str(clip), artifact_version=2, pipeline_version=1,
+    ))
+    assert result["fallback_to_legacy"] is True
+    assert not any(c[0] in ("create", "sending", "accepted") for c in repo.calls)
+
+
+def test_missing_video_metadata_does_not_claim_attempt(tmp_path: Path):
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _no_metadata(*_args, **_kwargs):
+        return None
+
+    service.video_processor.get_video_info = _no_metadata
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"data")
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=75, rule_id=1, tenant_id=1, target_id="-10075",
+        processed_video_path=str(clip), artifact_version=1, pipeline_version=1,
+    ))
+    assert result["fallback_to_legacy"] is True
+    assert not any(c[0] in ("create", "sending", "accepted") for c in repo.calls)
+
+
+def test_pre_send_telethon_lookup_error_is_retryable_and_never_accepted(tmp_path: Path):
+    from app.video_processor import VideoPreSendError
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _preflight_failure(*_args, **_kwargs):
+        raise VideoPreSendError("telegram peer lookup failed before send_file")
+
+    service.video_processor.send_with_retry = _preflight_failure
+    path = tmp_path / "ready.mp4"
+    path.write_bytes(b"data")
+
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=77, rule_id=1, tenant_id=1,
+        target_id="-10077", processed_video_path=str(path),
+        artifact_version=1, pipeline_version=1,
+    ))
+    assert result["ok"] is False
+    assert result["retryable"] is True
+    assert result["accepted"] is False
+    assert result["fallback_to_legacy"] is False
+    assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
+    assert not any(c[0] in ("accepted", "verified", "mark_delivery_sent") for c in repo.calls)
+
+
+def test_bot_api_retry_after_is_rejected_and_scheduled_safely(tmp_path: Path):
+    """Codex P2: Telegram refused the send, so mark failed_before_send."""
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _rate_limited(*_args, **_kwargs):
+        raise TelegramRetryAfter(
+            method=SendVideo(chat_id=123, video="clip_id"),
+            message="Too Many Requests", retry_after=37,
+        )
+
+    service.video_processor.send_with_retry = _rate_limited
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"data")
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=76, rule_id=1, tenant_id=1, target_id="-10076",
+        processed_video_path=str(clip), artifact_version=1, pipeline_version=1,
+    ))
+    assert result["ok"] is False
+    assert result["retryable"] is True
+    assert result["accepted"] is False
+    assert result["retry_after_seconds"] == 37
+    assert result["fallback_to_legacy"] is False
+    assert any(c[0] == "sending" for c in repo.calls)
+    assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
+    assert not any(c[0] in ("accepted", "verified", "mark_delivery_sent") for c in repo.calls)
+
+
+def test_telethon_flood_wait_is_retryable_and_not_accepted(tmp_path: Path):
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _flood(*_args, **_kwargs):
+        raise FloodWaitError(request=None, capture=120)
+
+    service.video_processor.send_with_retry = _flood
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"data")
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=78, rule_id=1, tenant_id=1, target_id="-10078",
+        processed_video_path=str(clip), artifact_version=1, pipeline_version=1,
+    ))
+    assert result["ok"] is False
+    assert result["retryable"] is True
+    assert result["accepted"] is False
+    assert result["retry_after_seconds"] == 120
+    assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
+    assert not any(c[0] in ("accepted", "mark_delivery_sent", "verified") for c in repo.calls)
+
+
 def test_video_send_cache_hit_skips_actual_send(tmp_path: Path):
     repo = FakeRepo()
-    repo.attempt = {"status": "accepted", "sent_message_ids_json": [777]}
+    repo.attempt = {"status": "verified", "sent_message_ids_json": [777]}
     service = _build_service(repo)
 
     async def _should_not_call(*_args, **_kwargs):
         raise AssertionError("video send should not be called on cache hit")
 
     service.video_processor.send_with_retry = _should_not_call  # type: ignore[method-assign]
+
+    async def _confirm(**kwargs):
+        return list(kwargs["candidate_sent_message_ids"])
+
+    async def _react(**_kwargs):
+        return {"applied": True}
+
+    service._confirm_target_delivery_message_ids_with_retry = _confirm  # type: ignore[method-assign]
+    service._add_reaction_for_rule_if_possible = _react  # type: ignore[method-assign]
     processed_file = tmp_path / "video.mp4"
     processed_file.write_bytes(b"ok")
     result = asyncio.run(
@@ -97,7 +236,74 @@ def test_video_send_cache_hit_skips_actual_send(tmp_path: Path):
     assert kwargs["sent_message_id"] == 777
     assert kwargs["sent_message_ids"] == [777]
     assert kwargs["target_id"] == "-1001"
-    assert kwargs["delivery_method"] == "idempotency_cache"
+    assert kwargs["delivery_method"] == "video_cache_verified"
+
+
+def test_accepted_cache_wrong_peer_id_is_never_resent(tmp_path: Path):
+    repo = FakeRepo()
+    repo.attempt = {"status": "accepted", "sent_message_ids_json": [370]}
+    service = _build_service(repo)
+
+    async def _should_not_send(*_args, **_kwargs):
+        raise AssertionError("Never resend an accepted video to repair its id")
+
+    async def _unconfirmed(**_kwargs):
+        return []
+
+    service.video_processor.send_with_retry = _should_not_send
+    service._confirm_target_delivery_message_ids_with_retry = _unconfirmed
+    processed_file = tmp_path / "video.mp4"
+    processed_file.write_bytes(b"ok")
+
+    result = asyncio.run(
+        service.execute_video_send_from_job(
+            delivery_id=141, rule_id=141, tenant_id=1,
+            target_id="-1004477194308",
+            processed_video_path=str(processed_file),
+            artifact_version=1, pipeline_version=1,
+        )
+    )
+    assert result["ok"] is False
+    assert result["retryable"] is False
+    assert result["accepted"] is True
+    assert result["manual_review_required"] is True
+    assert not any(c[0] == "mark_delivery_sent" for c in repo.calls)
+    assert any(c[0] == "faulty" for c in repo.calls)
+
+
+def test_unresolved_telethon_video_is_not_marked_sent_or_reacted(tmp_path: Path):
+    from app.telethon_authoritative_resolver import TelethonSendOutcome
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _unresolved(*_args, **_kwargs):
+        return TelethonSendOutcome(
+            True, True, False, None, [],
+            returned_candidate_id=370,
+            returned_candidate_ids=[370],
+            resolution_method="unresolved",
+        )
+
+    async def _never_react(**_kwargs):
+        raise AssertionError("Do not react to an unverified message id")
+
+    service.video_processor.send_with_retry = _unresolved
+    service._add_reaction_for_rule_if_possible = _never_react
+    processed_file = tmp_path / "video.mp4"
+    processed_file.write_bytes(b"ok")
+
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=141, rule_id=141, tenant_id=1,
+        target_id="-1004477194308", processed_video_path=str(processed_file),
+        artifact_version=1, pipeline_version=1,
+    ))
+    assert result["ok"] is False
+    assert result["retryable"] is False
+    assert result["accepted"] is True
+    assert any(c[0] == "accepted" and c[2] == [370] for c in repo.calls)
+    assert any(c[0] == "faulty" for c in repo.calls)
+    assert not any(c[0] == "mark_delivery_sent" for c in repo.calls)
 
 
 def test_video_send_marks_accepted_before_followup_error(tmp_path: Path):
@@ -158,9 +364,10 @@ def test_video_send_skips_accept_for_invalid_zero_sent_id(tmp_path: Path):
     )
 
     accepted_calls = [call for call in repo.calls if call[0] == "accepted"]
-    assert not accepted_calls
+    assert accepted_calls  # acceptance with unknown target id is retained
+    assert accepted_calls[0][2] == []
     assert result["ok"] is False
-    assert result["retryable"] is True
+    assert result["retryable"] is False
 
 
 def test_video_send_reaction_after_send_passes_rule_id(tmp_path: Path):
@@ -175,7 +382,7 @@ def test_video_send_reaction_after_send_passes_rule_id(tmp_path: Path):
         reaction_calls.append((args, kwargs))
 
     service._confirm_target_delivery_message_ids_with_retry = _confirm  # type: ignore[method-assign]
-    service._add_reaction_if_possible = _react  # type: ignore[method-assign]
+    service._add_reaction_for_rule_if_possible = _react  # type: ignore[method-assign]
     processed_file = tmp_path / "video.mp4"
     processed_file.write_bytes(b"ok")
 
@@ -193,7 +400,13 @@ def test_video_send_reaction_after_send_passes_rule_id(tmp_path: Path):
     )
 
     assert result["ok"] is True
-    assert reaction_calls == [(("-1004", 778), {"rule_id": 51})]
+    assert len(reaction_calls) == 1
+    args, kwargs = reaction_calls[0]
+    assert args == ()
+    assert kwargs["rule"].id == 1
+    assert kwargs["sent_message_id"] == 778
+    assert kwargs["target_id"] == "-1004"
+    assert kwargs["delivery_id"] == 13
 
 
 def test_video_send_extracted_log_uses_payload_source_message_ids(tmp_path: Path, caplog):
@@ -207,7 +420,7 @@ def test_video_send_extracted_log_uses_payload_source_message_ids(tmp_path: Path
         return None
 
     service._confirm_target_delivery_message_ids_with_retry = _confirm  # type: ignore[method-assign]
-    service._add_reaction_if_possible = _react  # type: ignore[method-assign]
+    service._add_reaction_for_rule_if_possible = _react  # type: ignore[method-assign]
     processed_file = tmp_path / "video.mp4"
     processed_file.write_bytes(b"ok")
 
@@ -245,7 +458,7 @@ def test_video_send_wrapper_success_result_contract(tmp_path: Path):
         return None
 
     service._confirm_target_delivery_message_ids_with_retry = _confirm  # type: ignore[method-assign]
-    service._add_reaction_if_possible = _react  # type: ignore[method-assign]
+    service._add_reaction_for_rule_if_possible = _react  # type: ignore[method-assign]
     processed_file = tmp_path / "video.mp4"
     processed_file.write_bytes(b"ok")
 
@@ -291,7 +504,8 @@ def test_video_send_wrapper_failed_send_result_contract(tmp_path: Path):
     )
 
     assert result["ok"] is False
-    assert result["retryable"] is True
+    assert result["retryable"] is False
+    assert result["accepted"] is True
     assert result["fallback_to_legacy"] is False
 
 
