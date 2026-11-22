@@ -424,12 +424,14 @@ def test_stale_pending_prune_is_rule_scoped():
     assert repo.drop_rule_pending_not_in_message_ids(
         214, source_channel="-100123", source_thread_id=None,
         seen_message_ids={101, 103},
+        scan_start_max_message_id=103,
     ) == 3
     query, params = cur.calls[0]
     assert "DELETE FROM deliveries d" in query
     assert "d.rule_id = %s" in query and "d.status = 'pending'" in query
     assert "p.source_thread_id IS NOT DISTINCT FROM %s" in query
-    assert params == (214, "-100123", None, [101, 103])
+    assert params == (214, "-100123", None, [101, 103], 103)
+    assert "p.message_id <= %s" in query
 
 
 def test_parser_seen_ids_ignore_deleted_source_and_fail_closed(monkeypatch):
@@ -531,3 +533,48 @@ def test_scan_finish_sets_persistent_queue_marker_before_resuming():
     )[0]
     assert "RETURNING id, source_id, source_thread_id, rescan_queue_built" in activate
     assert "SELECT id, source_id, source_thread_id, rescan_queue_built" not in activate
+
+
+def test_mid_scan_live_arrival_survives_replay_backfill():
+    class Rows:
+        rowcount = 1
+        def __init__(self):
+            self.inserted = []
+        def execute(self, sql, params=None):
+            if "INSERT INTO deliveries" in str(sql):
+                self.inserted.append(params[1])
+        def fetchall(self):
+            return [{"id": 1, "message_id": 101},
+                    {"id": 2, "message_id": 102},  # stale before scan
+                    {"id": 3, "message_id": 103},
+                    {"id": 4, "message_id": 104}]  # live arrival after scan start
+    class Conn:
+        def __init__(self):
+            self.cur = Rows()
+        @contextmanager
+        def cursor(self):
+            yield self.cur
+    repo = object.__new__(PostgresRepository)
+    repo._is_self_target_echo_post_for_rule_conn = lambda *a, **kw: False
+    conn = Conn()
+    result = repo._backfill_deliveries_for_rule_conn(
+        conn, 214, "-100123", None, allowed_message_ids={101, 103},
+        include_newer_than_message_id=103,
+    )
+    assert result == 3
+    assert conn.cur.inserted == [1, 3, 4]
+
+
+def test_scan_high_water_is_captured_inside_owner_finally_scope():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    for start, end in [
+        ("async def _run_rescan_rule_fresh_job(", "async def _run_rescan_rule_keep_job("),
+        ("async def _run_rescan_rule_keep_job(", "\n@dataclass(slots=True)"),
+    ]:
+        block = source.split(start, 1)[1].split(end, 1)[0]
+        assert "db.get_rule_scan_start_max_message_id" in block
+        assert block.index("        try:") < block.index(
+            "db.get_rule_scan_start_max_message_id"
+        )
+        assert "include_newer_than_message_id=scan_start_max_message_id" in block
+    assert "scan_start_max_message_id=scan_start_max_message_id" in source
