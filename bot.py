@@ -8,6 +8,7 @@ import re
 import time
 from html import escape
 from dataclasses import dataclass
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,8 @@ from aiogram.types import (
 
 from app.config import settings
 from app.repository_models import utc_now_iso
+from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder
+from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view
 from app.repository import RepositoryProtocol
 from app.repository_factory import create_repository
 from app.transport import wrap_bot, wrap_telethon_client
@@ -3060,16 +3063,21 @@ async def handle_list_rules(message: Message):
         return
 
     if is_admin_mode:
-        await send_message_safe(
-            chat_id=message.chat.id,
-            text="📜 Список правил:",
+        text, markup = rule_catalog_view(
+            rules, folder_id=-1, folder_name="", page=0,
+        )
+        cleanup = await send_message_safe(
+            chat_id=message.chat.id, text="📜 Открываю список",
             reply_markup=ReplyKeyboardRemove(),
         )
         await send_message_safe(
-            chat_id=message.chat.id,
-            text="📜 Список правил:",
-            reply_markup=rules_list_keyboard(rules, page=0),
+            chat_id=message.chat.id, text=text, reply_markup=markup, parse_mode="HTML",
         )
+        if cleanup and bot:
+            try:
+                await bot.delete_message(message.chat.id, cleanup.message_id)
+            except Exception:
+                pass
         return
 
     if not rules:
@@ -3099,23 +3107,15 @@ async def handle_rules_back(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
+    user_id = callback.from_user.id if callback.from_user else settings.admin_id
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    folders = await run_db(db.list_rule_folders, tenant_id)
     rules = await run_db(db.get_all_rules)
-    if not rules:
-        await edit_message_text_safe(
-            message=callback.message,
-            text="Правил пока нет",
-        )
-        return
-
-    await edit_message_text_safe(
-        message=callback.message,
-        text="🔄 Раздел: Правила",
+    text, markup = root_view(
+        total_rules=len(rules), folders_count=len(folders), admin=True,
     )
-
-    await send_message_safe(
-        chat_id=callback.message.chat.id,
-        text="🔄 Раздел: Правила",
-        reply_markup=get_rules_menu(),
+    await edit_message_text_safe(
+        message=callback.message, text=text, reply_markup=markup, parse_mode="HTML",
     )
 
 
@@ -3175,13 +3175,15 @@ async def handle_rules_page(callback: CallbackQuery):
 
     elif action == "list":
         rules = all_rules
-        text = "📜 Список правил:"
-        markup = rules_list_keyboard(rules, page=page)
+        text, markup = rule_catalog_view(
+            rules, folder_id=-1, folder_name="", page=page,
+        )
 
     await edit_message_text_safe(
         message=callback.message,
         text=text,
         reply_markup=markup,
+        parse_mode="HTML",
     )
 
 def build_rule_card_text(row) -> str:
@@ -3538,7 +3540,7 @@ def build_rule_card_keyboard(
     rows.append([
         InlineKeyboardButton(
             text="🔄 К правилам",
-            callback_data="rule_to_list",
+            callback_data=f"rf:back:{rule_id}",
         ),
         InlineKeyboardButton(
             text="📋 Главное меню",
@@ -3959,6 +3961,12 @@ def _create_rule_sync(
     )
 
     if rule_id:
+        folder_id = consume_new_rule_folder(admin_id)
+        if folder_id is not None:
+            try:
+                db.assign_rules_to_folder(int(tenant.get("id") or 1), [int(rule_id)], folder_id)
+            except ValueError as exc:
+                logger.warning("RULE_FOLDER_AUTO_ASSIGN_FAILED | rule_id=%s error=%s", rule_id, exc)
         db.log_rule_change(
             event_type="rule_created",
             rule_id=rule_id,
@@ -6181,14 +6189,24 @@ async def handle_rule_extra_menu(callback: CallbackQuery):
     await answer_callback_safe_once(callback)
 
     try:
+        rule = await run_db(db.get_rule, rule_id)
+        if not rule:
+            await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+            return
+        user_id = callback.from_user.id if callback.from_user else 0
+        tenant_id = await run_db(db.get_rule_tenant_id, rule_id)
+        folders = await run_db(db.get_rule_folder_map, tenant_id)
+        entry = folders.get(rule_id)
+        text, markup = additional_functions_view(
+            rule_id=rule_id,
+            target_title=str(rule.target_title or rule.target_id),
+            mode=str(rule.mode or "repost"),
+            folder_name=entry["name"] if entry else None,
+            admin=_is_admin_user(user_id),
+        )
         await edit_message_text_safe(
-            message=callback.message,
-            text=f"⚙️ Дополнительные функции правила #{rule_id}",
-            reply_markup=(
-                await run_db(build_rule_extra_keyboard, rule_id)
-                if _is_admin_user(callback.from_user.id if callback.from_user else None)
-                else await run_db(build_user_rule_extra_keyboard, rule_id)
-            ),
+            message=callback.message, text=text,
+            reply_markup=markup, parse_mode="HTML",
         )
     except Exception as exc:
         if "message is not modified" in str(exc).lower():
@@ -6544,18 +6562,12 @@ async def handle_rule_to_list(callback: CallbackQuery):
     _mark_debounce(rule_to_list_last_ts, debounce_key)
 
     rules = await run_db(db.get_all_rules)
-
-    if not rules:
-        await edit_message_text_safe(
-            message=callback.message,
-            text="Правил пока нет",
-        )
-        return
-
+    text, keyboard = rule_catalog_view(
+        rules, folder_id=-1, folder_name="", page=0,
+    )
     await edit_message_text_safe(
-        message=callback.message,
-        text="📜 Список правил:",
-        reply_markup=rules_list_keyboard(rules, page=0),
+        message=callback.message, text=text,
+        reply_markup=keyboard, parse_mode="HTML",
     )
 
 @dp.callback_query(lambda c: c.data.startswith("start_from_number:") or c.data.startswith("user_rule_start_from:"))
@@ -9000,6 +9012,22 @@ def _parse_args() -> argparse.Namespace:
 
 _register_admin_handlers()
 _register_user_saas_handlers()
+register_rule_folder_handlers(dp, SimpleNamespace(
+    get_bot=lambda: bot,
+    db=db,
+    run_db=run_db,
+    ensure_user_tenant=ensure_user_tenant,
+    ensure_rule_callback_access=ensure_rule_callback_access,
+    is_admin_user=is_admin_user,
+    answer_callback_safe_once=answer_callback_safe_once,
+    edit_message_text_safe=edit_message_text_safe,
+    send_message_safe=send_message_safe,
+    refresh_rule_card_for_actor=refresh_rule_card_for_actor,
+    get_main_menu=get_main_menu,
+    user_states=user_states,
+    channel_choice_cls=ChannelChoice,
+    logger=logger,
+))
 register_repost_campaign_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_schedule_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_report_handlers(dp, campaign_handlers_ctx)
