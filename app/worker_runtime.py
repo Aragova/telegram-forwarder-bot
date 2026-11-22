@@ -759,6 +759,11 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             logger.warning("JOB FAILED | Задача #%s помечена как failed", job_id)
         else:
             delay = compute_retry_delay_seconds(queue, attempts, job_type, policy)
+            # Explicit Bot API rate limits are rejected BEFORE publishing.
+            # Honor Telegram's retry_after instead of the shorter worker
+            # backoff, while keeping ambiguous accepted sends terminal.
+            if isinstance(result, dict) and result.get("retry_after_seconds"):
+                delay = max(delay, int(result["retry_after_seconds"]) + 1)
             await _finish_owned_job(repo, "retry", job_id, worker_id, error_text, delay, finalization_started=finalization_started)
             logger.warning("VIDEO STAGE RETRY | задача переведена в retry | #%s | через %s сек", job_id, delay)
             await _runtime_metrics.record_retry(job_type=job_type)
