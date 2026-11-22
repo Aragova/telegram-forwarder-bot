@@ -777,7 +777,8 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                     count = await asyncio.to_thread(
                         repo.finalize_orphaned_repost_attempt,
                         idempotency_key=str(result["idempotency_key"]),
-                        job_id=job_id, rule_id=int(payload.get("rule_id") or 0),
+                        job_id=job_id, worker_id=worker_id,
+                        rule_id=int(payload.get("rule_id") or 0),
                         delivery_ids=delivery_ids, error_text=error_text,
                     )
                     logger.warning(
