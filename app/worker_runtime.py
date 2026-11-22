@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import time
+from threading import Event
 from uuid import uuid4
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -164,13 +165,20 @@ def _delivery_ids_already_sent(repo, delivery_ids: list[int]) -> bool:
     return False
 
 
-def _complete_job_if_delivery_already_sent(repo, job_id: int, payload: dict, *, stage: str, worker_id: str | None = None) -> bool:
+def _complete_job_if_delivery_already_sent(
+    repo, job_id: int, payload: dict, *, stage: str,
+    worker_id: str | None = None, finalization_started: Event | None = None,
+) -> bool:
     delivery_ids = _extract_delivery_ids_from_payload(payload)
     if not delivery_ids:
         return False
     if not _delivery_ids_already_sent(repo, delivery_ids):
         return False
     logger.info("IDEMPOTENCY_GUARD_ALREADY_SENT | job_id=%s | stage=%s | delivery_ids=%s", int(job_id), stage, delivery_ids)
+    # Finalization may commit before the DB thread returns. Signal heartbeat
+    # before the CAS so own completion never looks like an external takeover.
+    if finalization_started is not None:
+        finalization_started.set()
     if worker_id and hasattr(repo, "finalize_owned_job"):
         updated = repo.finalize_owned_job(int(job_id), worker_id, "complete")
     else:
@@ -184,15 +192,24 @@ def _complete_job_if_delivery_already_sent(repo, job_id: int, payload: dict, *, 
         logger.info("JOB_COMPLETED_BY_IDEMPOTENCY_GUARD | job_id=%s | stage=%s | delivery_ids=%s", int(job_id), stage, delivery_ids)
     return True
 
-async def _finish_owned_job(repo, action: str, job_id: int, worker_id: str, *args) -> bool:
-    """Use owner-fenced transitions in PostgreSQL; preserve fake-repository test contracts."""
+async def _finish_owned_job(
+    repo, action: str, job_id: int, worker_id: str, *args,
+    finalization_started: Event | None = None,
+) -> bool:
+    """Stop heartbeat false positives during CAS, then reject stale executions."""
+    if finalization_started is not None:
+        finalization_started.set()
     if hasattr(repo, "finalize_owned_job"):
         updated = await asyncio.to_thread(repo.finalize_owned_job, job_id, worker_id, action, *args)
     else:
         updated = await asyncio.to_thread(getattr(repo, f"{action}_job"), job_id, *args)
     if not updated:
         logger.warning("JOB_FENCED_STALE_TRANSITION | job_id=%s | action=%s | owner=%s", job_id, action, worker_id)
-    return bool(updated)
+        # CancelledError bypasses the worker's generic Exception/retry handler.
+        # The old invocation must never reach file cleanup, usage or follow-up
+        # changes after a rejected CAS.
+        raise asyncio.CancelledError(f"Stale lease owner for job {job_id}, action {action}")
+    return True
 
 
 def _await_chain(task: asyncio.Task, limit: int = 8) -> str:
@@ -212,7 +229,7 @@ def _await_chain(task: asyncio.Task, limit: int = 8) -> str:
 
 async def _heartbeat_active_job(
     repo, job_id: int, worker_id: str, job_type: str, running_task: asyncio.Task,
-    *, interval_seconds: float = 15.0,
+    *, interval_seconds: float = 15.0, finalization_started: Event | None = None,
 ) -> None:
     """Keep a live execution from being requeued after 600s without progress DB writes.
 
@@ -231,6 +248,11 @@ async def _heartbeat_active_job(
             logger.warning("JOB_HEARTBEAT_DB_ERROR | job_id=%s | error=%s", job_id, exc)
             continue
         if not owned:
+            if finalization_started is not None and finalization_started.is_set():
+                # This job may have just committed its own terminal CAS.
+                # Never cancel the post-commit usage / cleanup path.
+                logger.debug("JOB_HEARTBEAT_OWN_FINALIZATION | job_id=%s | owner=%s", job_id, worker_id)
+                return
             logger.error("JOB_HEARTBEAT_OWNERSHIP_LOST | job_id=%s | worker=%s | action=cancel_stale_task", job_id, worker_id)
             running_task.cancel()
             return
@@ -541,8 +563,12 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     started_at = time.perf_counter()
 
     logger.info("JOB PROCESSING | %s обрабатывает задачу #%s (%s)", worker_id, job_id, job_type)
+    finalization_started = Event()
     heartbeat_task = asyncio.create_task(
-        _heartbeat_active_job(repo, job_id, worker_id, job_type, asyncio.current_task())
+        _heartbeat_active_job(
+            repo, job_id, worker_id, job_type, asyncio.current_task(),
+            finalization_started=finalization_started,
+        )
     )
     result: dict[str, Any] | None = None
     try:
@@ -554,6 +580,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 payload,
                 stage="before_sender",
             worker_id=worker_id,
+            finalization_started=finalization_started,
             )
             if guarded:
                 return True
@@ -575,7 +602,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             )
             if result.get("fallback_to_legacy"):
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
-                await _finish_owned_job(repo, "complete", job_id, worker_id)
+                await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
@@ -586,7 +613,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 next_payload["thumbnail_path"] = None
                 next_payload["cleanup_paths"] = [result.get("source_video_path")] if result.get("source_video_path") else []
                 enqueue_video_process(repo, next_payload)
-                await _finish_owned_job(repo, "complete", job_id, worker_id)
+                await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO DOWNLOAD DONE | стадия скачивания завершена", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
@@ -599,7 +626,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             )
             if result.get("fallback_to_legacy"):
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
-                await _finish_owned_job(repo, "complete", job_id, worker_id)
+                await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
@@ -610,7 +637,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 next_payload["thumbnail_path"] = result.get("thumbnail_path")
                 next_payload["cleanup_paths"] = result.get("cleanup_paths") or payload.get("cleanup_paths") or []
                 enqueue_video_send(repo, next_payload)
-                await _finish_owned_job(repo, "complete", job_id, worker_id)
+                await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO PROCESS DONE | стадия обработки завершена", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
@@ -623,7 +650,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                         "invalid_file_attempts": int(result.get("invalid_file_attempts") or int(payload.get("invalid_file_attempts") or 0) + 1),
                     },
                 )
-                await _finish_owned_job(repo, "complete", job_id, worker_id)
+                await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 cleanup_video_artifacts(payload, mode="restart_download")
                 _log_video_stage_event(
                     "VIDEO PROCESS RETRY DOWNLOAD | обнаружен битый файл, создана повторная download-задача",
@@ -639,7 +666,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             result = delivery_result.to_dict()
             if delivery_result.fallback_to_legacy:
                 enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
-                await _finish_owned_job(repo, "complete", job_id, worker_id)
+                await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
@@ -652,7 +679,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             result = delivery_result.to_dict()
             ok = delivery_result.ok
         else:
-            await _finish_owned_job(repo, "fail", job_id, worker_id, f"Неподдерживаемый job_type: {job_type}")
+            await _finish_owned_job(repo, "fail", job_id, worker_id, f"Неподдерживаемый job_type: {job_type}", finalization_started=finalization_started)
             logger.warning("JOB FAILED | %s завершил задачу #%s с ошибкой: неподдерживаемый тип", worker_id, job_id)
             return True
 
@@ -678,7 +705,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 )
 
         if ok:
-            completed = await _finish_owned_job(repo, "complete", job_id, worker_id)
+            completed = await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
             if not completed:
                 return True
             if job_type == "video_send":
@@ -698,6 +725,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             payload,
             stage="after_unsuccessful_result",
             worker_id=worker_id,
+            finalization_started=finalization_started,
         )
         if guarded:
             return True
@@ -725,13 +753,13 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         attempts = int(job.get("attempts") or 0) + 1
         max_attempts = int(job.get("max_attempts") or 3)
         if (not retryable) or attempts >= max_attempts:
-            failed = await _finish_owned_job(repo, "fail", job_id, worker_id, error_text)
+            failed = await _finish_owned_job(repo, "fail", job_id, worker_id, error_text, finalization_started=finalization_started)
             if failed and job_type.startswith("video_"):
                 cleanup_video_artifacts(payload, mode="final_failure")
             logger.warning("JOB FAILED | Задача #%s помечена как failed", job_id)
         else:
             delay = compute_retry_delay_seconds(queue, attempts, job_type, policy)
-            await _finish_owned_job(repo, "retry", job_id, worker_id, error_text, delay)
+            await _finish_owned_job(repo, "retry", job_id, worker_id, error_text, delay, finalization_started=finalization_started)
             logger.warning("VIDEO STAGE RETRY | задача переведена в retry | #%s | через %s сек", job_id, delay)
             await _runtime_metrics.record_retry(job_type=job_type)
         return True
@@ -745,13 +773,13 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         )
 
         if hasattr(repo, "defer_job"):
-            await _finish_owned_job(repo, "defer", job_id, worker_id, error_text, delay)
+            await _finish_owned_job(repo, "defer", job_id, worker_id, error_text, delay, finalization_started=finalization_started)
         else:
             logger.warning(
                 "TRANSPORT_RATE_LIMIT_DEFER_FALLBACK | job_id=%s | repository_missing_defer_job=true",
                 job_id,
             )
-            await _finish_owned_job(repo, "retry", job_id, worker_id, error_text, delay)
+            await _finish_owned_job(repo, "retry", job_id, worker_id, error_text, delay, finalization_started=finalization_started)
 
         await asyncio.to_thread(
             _log_transport_rate_limited_diagnostic_event,
@@ -788,6 +816,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             payload,
             stage="after_exception",
             worker_id=worker_id,
+            finalization_started=finalization_started,
         )
         if guarded:
             logger.warning("JOB_EXCEPTION_SUPPRESSED_AFTER_SENT | job_id=%s | error=%s", job_id, exc)
@@ -796,7 +825,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         max_attempts = int(job.get("max_attempts") or 3)
         terminal_too_large = job_type in _HEAVY_STAGE_TYPES and isinstance(exc, TelegramEntityTooLarge)
         if terminal_too_large or attempts >= max_attempts:
-            failed = await _finish_owned_job(repo, "fail", job_id, worker_id, str(exc))
+            failed = await _finish_owned_job(repo, "fail", job_id, worker_id, str(exc), finalization_started=finalization_started)
             if failed and terminal_too_large:
                 cleanup_video_artifacts(payload, mode="final_failure")
                 logger.warning(
@@ -806,7 +835,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             logger.warning("JOB FAILED | Задача #%s завершилась ошибкой: %s", job_id, exc)
         else:
             delay = compute_retry_delay_seconds(queue, attempts, job_type, policy)
-            await _finish_owned_job(repo, "retry", job_id, worker_id, str(exc), delay)
+            await _finish_owned_job(repo, "retry", job_id, worker_id, str(exc), delay, finalization_started=finalization_started)
             logger.warning("Задача переведена в retry | #%s | через %s сек: %s", job_id, delay, exc)
             await _runtime_metrics.record_retry(job_type=job_type)
         return True
