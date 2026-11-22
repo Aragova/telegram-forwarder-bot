@@ -118,6 +118,32 @@ def test_missing_video_metadata_does_not_claim_attempt(tmp_path: Path):
     assert not any(c[0] in ("create", "sending", "accepted") for c in repo.calls)
 
 
+def test_pre_send_telethon_lookup_error_is_retryable_and_never_accepted(tmp_path: Path):
+    from app.video_processor import VideoPreSendError
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def _preflight_failure(*_args, **_kwargs):
+        raise VideoPreSendError("telegram peer lookup failed before send_file")
+
+    service.video_processor.send_with_retry = _preflight_failure
+    path = tmp_path / "ready.mp4"
+    path.write_bytes(b"data")
+
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=77, rule_id=1, tenant_id=1,
+        target_id="-10077", processed_video_path=str(path),
+        artifact_version=1, pipeline_version=1,
+    ))
+    assert result["ok"] is False
+    assert result["retryable"] is True
+    assert result["accepted"] is False
+    assert result["fallback_to_legacy"] is False
+    assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
+    assert not any(c[0] in ("accepted", "verified", "mark_delivery_sent") for c in repo.calls)
+
+
 def test_bot_api_retry_after_is_rejected_and_scheduled_safely(tmp_path: Path):
     """Codex P2: Telegram refused the send, so mark failed_before_send."""
     repo = FakeRepo()
