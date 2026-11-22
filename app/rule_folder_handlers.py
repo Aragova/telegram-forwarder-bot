@@ -192,6 +192,9 @@ async def _apply_move(ctx: Any, callback: CallbackQuery, *, tenant_id: int,
         await _error(ctx, callback, str(exc))
         return
     if origin.startswith("s"):
+        _origins[(callback.from_user.id, rule_ids[0])] = (
+            folder_id if folder_id else 0, 0, False,
+        )
         await _extra(ctx, callback, tenant_id, rule_ids[0])
     else:
         _selected.pop(callback.from_user.id, None)
@@ -519,6 +522,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                                 text=f"⚠️ Папка создана, но правила не перемещены: {exc}",
                             )
                 if moved and origin.startswith("s"):
+                    _origins[(user_id, ids[0])] = (fid, 0, False)
                     rule = await ctx.run_db(ctx.db.get_rule, ids[0])
                     if rule:
                         text, kb = additional_functions_view(
@@ -529,6 +533,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                         )
                     else:
                         folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
+                        _folder_index_page[user_id] = 0
                         text, kb = folder_index_view(folders, 0)
                 elif moved and origin.startswith("b"):
                     _selected.pop(user_id, None)
@@ -539,6 +544,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     )
                 else:
                     folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
+                    _folder_index_page[user_id] = 0
                     text, kb = folder_index_view(folders, 0)
             _inputs.pop(user_id, None)
         # Remove the message with user input; preserve a single navigable UI screen.
