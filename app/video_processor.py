@@ -1100,9 +1100,18 @@ class VideoProcessor:
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
         )
-        await process.wait()
+        try:
+            # Drain both pipes: process.wait() alone can deadlock on full stderr.
+            await asyncio.wait_for(process.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            logger.warning("THUMBNAIL_FFMPEG_TIMEOUT | path=%s", thumbnail_path)
+            await self._terminate_ffmpeg_process(process)
+            return False
+        except asyncio.CancelledError:
+            await self._terminate_ffmpeg_process(process)
+            raise
 
         if process.returncode == 0 and os.path.isfile(thumbnail_path):
             logger.info(f"   🖼️ Превью создано: {os.path.getsize(thumbnail_path) / 1024:.0f} KB")
