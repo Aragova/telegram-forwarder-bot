@@ -272,6 +272,9 @@ class VideoProcessor:
             target_thread_id=target_thread_id,
             target_is_broadcast_channel=broadcast,
             require_strong_media_match=True,
+            # Rule #141: the real post became visible ~6 seconds after send_file
+            # returned. Retry only safe history reads, never the media upload.
+            history_poll_delays=(0, 1, 2, 3, 4, 5),
         )
         logger.info(
             "TELETHON_VIDEO_SEND | ID_RESOLVED | target=%s | thread=%s | returned_candidate_id=%s | authoritative_message_id=%s | resolution_method=%s",
