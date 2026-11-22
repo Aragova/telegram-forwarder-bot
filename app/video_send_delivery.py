@@ -206,6 +206,7 @@ class VideoSendDelivery:
         valid_sent_ids = normalize_valid_sent_message_ids(sent_message_ids)
         if has_attempt_ledger:
             await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=valid_sent_ids, telegram_method="video_send")
+            logger.info("DELIVERY_ATTEMPT_ACCEPTED | operation_kind=video_send | delivery_id=%s | rule_id=%s | candidate_sent_ids=%s", delivery_id, rule_id, valid_sent_ids)
         if not valid_sent_ids:
             error = "video_send_accepted_without_ids_non_retryable"
             await run_db(owner._mark_delivery_faulty_sync, delivery_id, error)
