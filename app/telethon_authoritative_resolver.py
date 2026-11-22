@@ -288,7 +288,12 @@ class TelethonAuthoritativeMessageResolver:
                     continue
                 safe_history_candidates.append(item)
                 score = _fingerprint_score(expected_fp, build_media_fingerprint(item))
-                if score >= (80 if expected_fp.get("kind") == "document" else 90 if expected_fp.get("kind") == "photo" else 101) if require_strong_media_match else score >= 0:
+                if require_strong_media_match:
+                    required_score = 80 if expected_fp.get("kind") == "document" else 90 if expected_fp.get("kind") == "photo" else 101
+                    matched = score >= required_score
+                else:
+                    matched = score >= 0
+                if matched:
                     best.append((score, item))
             if best or safe_history_candidates:
                 break
