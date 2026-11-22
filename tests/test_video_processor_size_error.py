@@ -104,3 +104,23 @@ def test_send_with_retry_propagates_telethon_floodwait(tmp_path):
         ))
     assert err.value.seconds == 120
     assert client.calls == 1
+
+
+def test_telethon_missing_ffprobe_metadata_is_pre_send_retryable(tmp_path):
+    from app.video_processor import VideoPreSendError
+
+    processor = VideoProcessor.__new__(VideoProcessor)
+    processor.telethon = object()
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"video")
+
+    async def fake_missing_info(*_args, **_kwargs):
+        return None
+
+    processor.get_video_info = fake_missing_info
+    with pytest.raises(VideoPreSendError, match="video_info"):
+        asyncio.run(processor.send_with_retry(
+            None, destination_channel=-100123, target_thread_id=None,
+            video_path=str(clip), thumbnail_path=None,
+            caption="", duration=10, caption_send_mode="premium", max_retries=3,
+        ))
