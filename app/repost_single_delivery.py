@@ -298,7 +298,10 @@ class RepostSingleDelivery:
                     "candidate_ids=%s | action=manual_review_no_second_send",
                     rule.id, delivery_id, target_id, valid_sent_ids,
                 )
-                await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+                if idempotency_key and hasattr(owner.db, "mark_delivery_faulty_if_attempt_unverified"):
+                    await run_db(owner.db.mark_delivery_faulty_if_attempt_unverified, delivery_id, idempotency_key, error_text)
+                else:
+                    await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
                 await owner._log_delivery_final_failure(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
@@ -616,7 +619,10 @@ class RepostSingleDelivery:
                 "candidate_ids=%s | action=manual_review_no_second_send",
                 rule.id, delivery_id, candidate_sent_message_ids,
             )
-            await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+            if idempotency_key and hasattr(owner.db, "mark_delivery_faulty_if_attempt_unverified"):
+                await run_db(owner.db.mark_delivery_faulty_if_attempt_unverified, delivery_id, idempotency_key, error_text)
+            else:
+                await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
             return False
 
         if is_self_loop and candidate_sent_message_ids:
