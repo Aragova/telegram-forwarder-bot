@@ -5743,47 +5743,195 @@ def _build_intro_handlers_context() -> IntroHandlersContext:
 intro_handlers_ctx = _build_intro_handlers_context()
 register_intro_handlers(dp, intro_handlers_ctx)
 
-@dp.callback_query(lambda c: c.data.startswith("caption_mode_menu:") or c.data.startswith("user_rule_caption_mode:"))
-async def handle_caption_mode_menu(callback: CallbackQuery):
+@dp.callback_query(lambda c: (
+    c.data.startswith("repost_caption_menu:")
+    or c.data.startswith("caption_mode_menu:")
+    or c.data.startswith("user_rule_caption_mode:")
+))
+async def handle_repost_caption_menu(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
-    except Exception:
+    except (IndexError, ValueError, AttributeError):
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
     if not await ensure_rule_callback_access(callback, rule_id):
         return
-
     rule = await run_db(db.get_rule, rule_id)
-    if not rule:
-        await answer_callback_safe(callback, "Правило не найдено", show_alert=True)
+    if not rule or (getattr(rule, "mode", "repost") or "repost") != "repost":
+        await answer_callback_safe(callback, "Режим доступен только для репоста", show_alert=True)
         return
+    edited = await edit_message_text_safe(
+        message=callback.message,
+        text=await run_db(build_repost_caption_menu_text, rule_id),
+        reply_markup=await run_db(build_repost_caption_menu_keyboard, rule_id),
+        parse_mode="HTML",
+    )
+    await answer_callback_safe_once(callback, "Открыто" if edited else "Уже открыто")
 
-    if (getattr(rule, "mode", "repost") or "repost").strip().lower() != "repost":
-        await answer_callback_safe(
-            callback,
-            "Это меню доступно только для режима репоста",
-            show_alert=True,
-        )
-        return
 
-    current_mode = await run_db(get_rule_caption_mode_value, rule_id)
-
+@dp.callback_query(lambda c: c.data.startswith("repost_caption_edit:"))
+async def handle_repost_caption_edit(callback: CallbackQuery):
     try:
-        await edit_message_text_safe(
-            message=callback.message,
-            text=build_caption_mode_text(current_mode),
-            parse_mode="HTML",
-            reply_markup=build_caption_mode_keyboard(rule_id),
-        )
-    except Exception as exc:
-        if "message is not modified" in str(exc).lower():
-            await answer_callback_safe_once(callback, "Уже открыто")
-            return
-        logger.exception("Ошибка открытия меню режима подписи rule_id=%s: %s", rule_id, exc)
-        await answer_callback_safe(callback, "Не удалось открыть меню", show_alert=True)
+        rule_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError, AttributeError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
-
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule or rule.mode != "repost":
+        await answer_callback_safe(callback, "Правило репоста не найдено", show_alert=True)
+        return
+    cancel = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"repost_caption_menu:{rule_id}")
+    ]])
+    edited = await edit_message_text_safe(
+        message=callback.message,
+        text=(
+            "✏️ <b>Изменение подписи репостов</b>\\n\\n"
+            f"Правило #{rule_id}\\n\\n"
+            "Отправьте новый текст одним сообщением (до 1024 символов).\\n"
+            "Оформление и premium emoji сохраняются в режиме 💎 Премиум.\\n\\n"
+            "Для возврата оригинальной подписи используйте «Выключить» или «Очистить»."
+        ),
+        parse_mode="HTML",
+        reply_markup=cancel,
+    )
+    if not edited:
+        await answer_callback_safe_once(callback, "Не удалось открыть ввод", show_alert=True)
+        return
+    user_states[callback.from_user.id] = {
+        "action": "repost_caption",
+        "rule_id": rule_id,
+        "prompt_chat_id": callback.message.chat.id,
+        "prompt_message_id": callback.message.message_id,
+    }
     await answer_callback_safe_once(callback)
+
+
+@dp.callback_query(lambda c: c.data.startswith("repost_caption_toggle:"))
+async def handle_repost_caption_toggle(callback: CallbackQuery):
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError, AttributeError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    previous = await run_db(db.get_rule, rule_id)
+    if not previous or previous.mode != "repost":
+        await answer_callback_safe(callback, "Правило репоста не найдено", show_alert=True)
+        return
+    new_value = not bool(previous.repost_caption_enabled)
+    if not await run_db(db.set_rule_repost_caption_enabled, rule_id, new_value):
+        await answer_callback_safe(callback, "Сначала задайте подпись", show_alert=True)
+        return
+    await run_db(
+        db.log_rule_change, event_type="rule_repost_caption_toggled",
+        rule_id=rule_id, admin_id=callback.from_user.id,
+        old_value={"enabled": bool(previous.repost_caption_enabled)},
+        new_value={"enabled": new_value},
+    )
+    invalidate_rule_card_cache(rule_id)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=await run_db(build_repost_caption_menu_text, rule_id),
+        reply_markup=await run_db(build_repost_caption_menu_keyboard, rule_id),
+        parse_mode="HTML",
+    )
+    await answer_callback_safe_once(callback, "Включена" if new_value else "Оригинал восстановлен")
+
+
+@dp.callback_query(lambda c: c.data.startswith("repost_caption_clear:"))
+async def handle_repost_caption_clear(callback: CallbackQuery):
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError, AttributeError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    previous = await run_db(db.get_rule, rule_id)
+    if not previous or previous.mode != "repost":
+        await answer_callback_safe(callback, "Правило репоста не найдено", show_alert=True)
+        return
+    if not await run_db(db.update_rule_repost_caption, rule_id, None, None):
+        await answer_callback_safe(callback, "Не удалось очистить подпись", show_alert=True)
+        return
+    await run_db(
+        db.log_rule_change, event_type="rule_repost_caption_cleared",
+        rule_id=rule_id, admin_id=callback.from_user.id,
+        old_value={"caption": previous.repost_caption, "enabled": previous.repost_caption_enabled},
+        new_value={"caption": None, "enabled": False},
+    )
+    invalidate_rule_card_cache(rule_id)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=await run_db(build_repost_caption_menu_text, rule_id),
+        reply_markup=await run_db(build_repost_caption_menu_keyboard, rule_id),
+        parse_mode="HTML",
+    )
+    await answer_callback_safe_once(callback, "Оригинальная подпись восстановлена")
+
+
+@dp.callback_query(lambda c: c.data.startswith("repost_caption_mode_menu:"))
+async def handle_repost_caption_mode_menu(callback: CallbackQuery):
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError, AttributeError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    rule = await run_db(db.get_rule, rule_id)
+    if not rule or rule.mode != "repost":
+        await answer_callback_safe(callback, "Правило репоста не найдено", show_alert=True)
+        return
+    await edit_message_text_safe(
+        message=callback.message,
+        text=await run_db(build_repost_caption_mode_menu_text, rule_id),
+        reply_markup=build_repost_caption_mode_keyboard(rule_id),
+        parse_mode="HTML",
+    )
+    await answer_callback_safe_once(callback)
+
+
+@dp.callback_query(lambda c: c.data.startswith("set_repost_caption_mode_"))
+async def handle_repost_caption_mode_select(callback: CallbackQuery):
+    try:
+        value, rule_id_raw = callback.data.rsplit(":", 1)
+        rule_id = int(rule_id_raw)
+        mode = value.removeprefix("set_repost_caption_mode_")
+    except (ValueError, AttributeError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if mode not in {"copy_first", "builder_first"}:
+        await answer_callback_safe(callback, "Неизвестный режим", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    previous = await run_db(db.get_rule, rule_id)
+    if not previous or previous.mode != "repost":
+        await answer_callback_safe(callback, "Правило репоста не найдено", show_alert=True)
+        return
+    if not await run_db(db.update_rule_repost_caption_delivery_mode, rule_id, mode):
+        await answer_callback_safe(callback, "Не удалось сохранить режим", show_alert=True)
+        return
+    await run_db(
+        db.log_rule_change, event_type="rule_repost_caption_mode_changed",
+        rule_id=rule_id, admin_id=callback.from_user.id,
+        old_value={"mode": previous.repost_caption_delivery_mode},
+        new_value={"mode": mode},
+    )
+    invalidate_rule_card_cache(rule_id)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=await run_db(build_repost_caption_mode_menu_text, rule_id),
+        reply_markup=build_repost_caption_mode_keyboard(rule_id),
+        parse_mode="HTML",
+    )
+    await answer_callback_safe_once(callback, "Режим сохранён")
+
 
 @dp.callback_query(lambda c: c.data.startswith("video_caption_menu:") or c.data.startswith("user_rule_caption:"))
 async def handle_video_caption_menu(callback: CallbackQuery):
