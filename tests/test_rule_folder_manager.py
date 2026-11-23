@@ -18,6 +18,8 @@ from app.rule_folders_ui import (
     root_view,
     rule_catalog_view,
     rule_matches_query,
+    CATALOG_PAGE_SIZE,
+    RULE_BUTTONS_PER_ROW,
 )
 
 
@@ -54,15 +56,16 @@ def test_catalog_preserves_full_titles_in_message_not_inline_buttons():
     labels = [b.text for row in kb.inline_keyboard for b in row]
     assert all("название источника" not in label for label in labels)
     assert "rf:list:-1:1" in callbacks(kb)
-    assert len([cb for cb in callbacks(kb) if cb and cb.startswith("rf:open:")]) == 5
+    assert len([cb for cb in callbacks(kb) if cb and cb.startswith("rf:open:")]) == 10
+    assert "rf:open:109:-1:0" in callbacks(kb)
 
 
 def test_search_results_return_to_correct_page():
-    rules = [FakeRule(i) for i in range(10)]
+    rules = [FakeRule(i) for i in range(11)]
     text, kb = rule_catalog_view(rules, folder_id=-1, folder_name="", page=1,
                                  search_term="длинное")
     assert "РЕЗУЛЬТАТЫ ПОИСКА" in text
-    assert "rf:open_search:5:1" in callbacks(kb)
+    assert "rf:open_search:10:1" in callbacks(kb)
     assert "rf:results:0" in callbacks(kb)
 
 
@@ -257,14 +260,14 @@ def test_folder_input_uses_safe_message_edits_and_private_chat_guard():
 
 
 def test_folder_settings_and_catalog_back_remember_both_pages():
-    rules = [FakeRule(200 + i) for i in range(16)]
+    rules = [FakeRule(200 + i) for i in range(28)]
     text, kb = rule_catalog_view(
         rules, folder_id=7, folder_name="Публичные", page=2, folders_page=3,
     )
     assert "Публичные" in text
     assert "rf:folder_settings:7:2" in callbacks(kb)
     assert "rf:folders:3" in callbacks(kb)
-    folder = {"id": 7, "name": "Публичные", "rules_count": 16}
+    folder = {"id": 7, "name": "Публичные", "rules_count": 28}
     _, settings_kb = folder_settings_view(folder, page=2)
     assert "rf:list:7:2" in callbacks(settings_kb)
     assert "rf:rename:7:2" in callbacks(settings_kb)
@@ -338,9 +341,9 @@ def test_import_catalog_uses_rules_from_outside_destination_and_paginates():
         candidates, folder_id=9, folder_name="ПРИВАТЫ",
         page=0, selected={201, 206}, assignments=mapping,
     )
-    assert "ДОБАВЛЕНИЕ СУЩЕСТВУЮЩИХ" in text
+    assert "В ПАПКУ:" in text
     assert "Публичные" in text
-    assert "✅ <b>Выбрано:</b> 2" in text
+    assert "✅ Выбрано: 2" in text
     assert "rf:fill_pick:9:0:201" in callbacks(kb)
     assert "rf:fill:9:1" in callbacks(kb)
     assert "rf:fill_page_all:9:0" in callbacks(kb)
@@ -348,9 +351,9 @@ def test_import_catalog_uses_rules_from_outside_destination_and_paginates():
     assert "rf:list:9:0" in callbacks(kb)
     _, later_kb = folder_fill_view(
         candidates, folder_id=9, folder_name="ПРИВАТЫ",
-        page=2, selected={201, 206}, assignments=mapping,
+        page=1, selected={201, 206}, assignments=mapping,
     )
-    assert "rf:fill_pick:9:2:211" in callbacks(later_kb)
+    assert "rf:fill_pick:9:1:211" in callbacks(later_kb)
 
 
 def test_import_catalog_escapes_html_and_has_short_rule_buttons():
@@ -431,17 +434,18 @@ def test_rich_rule_card_preserves_snapshot_counters_and_routes():
         "video_clip_duration_seconds": 118,
     }
     text = bot.build_rule_card_text(row)
-    for heading in ("<b>ПРАВИЛО #214</b>", "<b>МАРШРУТ ПУБЛИКАЦИИ</b>",
-                    "<b>СОСТОЯНИЕ</b>", "<b>СТАТИСТИКА ПУБЛИКАЦИЙ</b>",
-                    "<b>ОФОРМЛЕНИЕ</b>"):
+    for heading in ("<b>ПРАВИЛО #214</b>", "<b>ПУБЛИКАЦИИ</b>"):
         assert heading in text
+    assert "━━━━━━━━━━━━━━" not in text
+    assert len(text.splitlines()) <= 13
     assert "Новости &lt;VIP&gt;" in text
     assert "ПРИВАТЫ &amp; Stars" in text
-    assert "<b>В очереди:</b> 5" in text
-    assert "<b>В обработке:</b> 2" in text
-    assert "<b>Отправлено:</b> 39" in text
-    assert "<b>Ошибки:</b> 1" in text
-    assert "<b>Позиция:</b> 40 / 44" in text
+    assert "Очередь: <b>5</b>" in text
+    assert "Обработка: <b>2</b>" in text
+    assert "Отправлено: <b>39</b>" in text
+    assert "Ошибки: <b>1</b>" in text
+    assert "Позиция: <b>40 / 44</b>" in text
+    assert "<b>Длина видео:</b>" in text
 
 
 def test_rich_rule_card_has_styled_controls_without_losing_callbacks():
@@ -455,7 +459,8 @@ def test_rich_rule_card_has_styled_controls_without_losing_callbacks():
                      "video_caption_menu:214", "rule_extra_menu:214",
                      "rule_refresh:214", "enable_rule:214", "rf:back:214"):
         assert callback in values
-    assert any(len(row) == 2 for row in kb.inline_keyboard)
+    assert len(kb.inline_keyboard) == 5
+    assert all(len(row) == 2 for row in kb.inline_keyboard)
     tenant_kb = bot._filter_user_rule_card_keyboard(kb, 214)
     assert "user_rule_extra:214" in callbacks(tenant_kb)
     assert "rf:back:214" in callbacks(tenant_kb)
@@ -502,9 +507,9 @@ def test_empty_destination_handler_renders_candidates_from_entire_tenant():
         assert rendered
         text = rendered[0]["text"]
         assert "ПРИВАТЫ" in text
-        assert "Правило #214" in text
-        assert "Правило #215" in text
-        assert "Правило #216" in text
+        assert "<b>#214</b>" in text
+        assert "<b>#215</b>" in text
+        assert "<b>#216</b>" in text
         assert "ПУБЛИЧНЫЕ" in text
         assert "rf:fill_pick:9:0:214" in callbacks(rendered[0]["reply_markup"])
     finally:
@@ -547,3 +552,91 @@ def test_folder_move_respects_legacy_owner_permission_and_blocks_wrong_owner():
             tenant_id=2, rule_ids=[214, 216], folder_id=10, owner_admin_id=777,
         )
     assert other.connection.commits == 0
+
+
+
+def test_catalog_95_rules_show_ten_lines_two_rows_of_five_buttons():
+    assert CATALOG_PAGE_SIZE == 10
+    assert RULE_BUTTONS_PER_ROW == 5
+    rules = [FakeRule(i) for i in range(1, 96)]
+    text, kb = rule_catalog_view(rules, folder_id=-1, folder_name="", page=0)
+    assert len([line for line in text.splitlines() if "<b>#" in line]) == 10
+    button_rows = [
+        row for row in kb.inline_keyboard
+        if any((b.callback_data or "").startswith("rf:open:") for b in row)
+    ]
+    assert [len(row) for row in button_rows] == [5, 5]
+    assert "rf:open:1:-1:0" in callbacks(kb)
+    assert "rf:open:10:-1:0" in callbacks(kb)
+    assert "rf:open:11:-1:0" not in callbacks(kb)
+    assert "rf:list:-1:1" in callbacks(kb)
+    assert any(b.text == "1/10" for row in kb.inline_keyboard for b in row)
+    assert any(
+        [b.callback_data for b in row] == ["rf:search", "rf:batch:-1:0"]
+        for row in kb.inline_keyboard
+    )
+    assert kb.inline_keyboard[-1][0].callback_data == "rf:root"
+    second_text, second_kb = rule_catalog_view(
+        rules, folder_id=-1, folder_name="", page=1,
+    )
+    assert "rf:open:11:-1:1" in callbacks(second_kb)
+    assert "rf:open:1:-1:0" not in callbacks(second_kb)
+    assert "<b>#20</b>" in second_text
+
+
+def test_catalog_selection_uses_two_rows_of_five_and_select_page_action():
+    rules = [FakeRule(i) for i in range(1, 18)]
+    text, kb = rule_catalog_view(
+        rules, folder_id=9, folder_name="ПРИВАТЫ",
+        page=0, selected={1, 3, 12},
+    )
+    assert "✅ <b>Выбрано:</b> 3" in text
+    pick_rows = [
+        row for row in kb.inline_keyboard
+        if any((b.callback_data or "").startswith("rf:pick:") for b in row)
+    ]
+    assert [len(row) for row in pick_rows] == [5, 5]
+    assert "rf:batch_page_all:9:0" in callbacks(kb)
+    assert "rf:unfile:9:0" in callbacks(kb)
+    assert "rf:bulk_to:9" in callbacks(kb)
+    assert kb.inline_keyboard[-1][0].callback_data == "rf:list:9:0"
+    last_text, last_kb = rule_catalog_view(
+        rules, folder_id=9, folder_name="ПРИВАТЫ",
+        page=1, selected={1, 3, 12},
+    )
+    assert len([line for line in last_text.splitlines() if "<b>#" in line]) == 7
+    assert any(b.text == "✅ Выбрать 7" for row in last_kb.inline_keyboard for b in row)
+
+
+def test_import_selection_is_ten_per_page_and_five_columns():
+    rules = [FakeRule(i) for i in range(1, 31)]
+    text, kb = folder_fill_view(
+        rules, folder_id=9, folder_name="ПРИВАТЫ",
+        page=0, selected={1, 11, 21}, assignments={},
+    )
+    assert len([line for line in text.splitlines() if "<b>#" in line]) == 10
+    pick_rows = [
+        row for row in kb.inline_keyboard
+        if any((b.callback_data or "").startswith("rf:fill_pick:") for b in row)
+    ]
+    assert [len(row) for row in pick_rows] == [5, 5]
+    assert "rf:fill:9:1" in callbacks(kb)
+    assert "rf:fill_apply:9" in callbacks(kb)
+    assert kb.inline_keyboard[-1][0].callback_data == "rf:list:9:0"
+    assert all("📤 <b>Источник:" not in line for line in text.splitlines())
+
+
+def test_rule_card_repost_compact_buttons_keep_campaign_mode():
+    import bot
+    kb = bot.build_rule_card_keyboard(
+        rule_id=214, is_active=True, schedule_mode="fixed", mode="repost",
+    )
+    cb = callbacks(kb)
+    assert "set_interval_mode:214" in cb
+    assert "change_fixed_times:214" in cb
+    assert "change_next_run:214" in cb
+    assert "rule_extra_menu:214" in cb
+    assert "disable_rule:214" in cb
+    assert cb[-2:] == ["rf:back:214", "rule_to_main_menu"]
+    assert all(len(row) <= 2 for row in kb.inline_keyboard)
+    assert 4 <= len(kb.inline_keyboard) <= 5
