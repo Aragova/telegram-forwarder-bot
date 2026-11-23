@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import tempfile
-from pathlib import Path
 
 from aiogram import Dispatcher
-from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import CallbackQuery, BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.repost_campaign_context import RepostCampaignHandlersContext, build_repost_campaign_runtime
 from app.repost_campaign_top_time_view_service import RepostCampaignTopTimeViewService
@@ -35,20 +33,12 @@ from app.repost_campaign_ui import (
 )
 
 async def _send_export_document(ctx: RepostCampaignHandlersContext, callback: CallbackQuery, *, filename: str, content: bytes) -> None:
-    tmp_path: Path | None = None
-    try:
-        suffix = Path(filename).suffix or ".txt"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(content)
-            tmp_path = Path(tmp.name)
-        if ctx.send_document_safe is not None:
-            await ctx.send_document_safe(
-                chat_id=callback.message.chat.id,
-                document=FSInputFile(str(tmp_path), filename=filename),
-            )
-    finally:
-        if tmp_path:
-            tmp_path.unlink(missing_ok=True)
+    # Data is already in RAM: do not block the event loop with disk I/O.
+    if ctx.send_document_safe is not None:
+        await ctx.send_document_safe(
+            chat_id=callback.message.chat.id,
+            document=BufferedInputFile(content, filename=filename),
+        )
 
 
 def register_repost_campaign_report_handlers(dp: Dispatcher, ctx: RepostCampaignHandlersContext) -> None:

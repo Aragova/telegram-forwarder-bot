@@ -22,6 +22,12 @@ MAX_TELEGRAM_THUMB_BYTES = 20 * 1024
 MAX_TELEGRAM_THUMB_SIDE = 320
 
 
+def _create_thumb_temp_path(prefix: str) -> Path:
+    """Create and close a temporary file before ffmpeg/Telethon writes to it."""
+    with tempfile.NamedTemporaryFile(prefix=prefix, suffix=".jpg", delete=False) as handle:
+        return Path(handle.name)
+
+
 def _positive_int(value: Any) -> int:
     try:
         result = int(round(float(value)))
@@ -146,7 +152,7 @@ class SenderTelethonHelpers:
         selected_thumb = self._select_source_photo_thumb(thumbs)
         if not selected_thumb:
             return None, "none"
-        tmp = Path(tempfile.NamedTemporaryFile(prefix="telegram_video_thumb_", suffix=".jpg", delete=False).name)
+        tmp = await asyncio.to_thread(_create_thumb_temp_path, "telegram_video_thumb_")
         try:
             downloaded = await self.owner.telethon.download_media(message, file=str(tmp), thumb=selected_thumb)
             path = Path(downloaded) if downloaded else tmp
@@ -156,6 +162,9 @@ class SenderTelethonHelpers:
                 return path, "telegram"
             path.unlink(missing_ok=True)
             return None, "none"
+        except asyncio.CancelledError:
+            tmp.unlink(missing_ok=True)
+            raise
         except Exception as exc:
             logger.warning("VIDEO_REUPLOAD_THUMB | source=telegram | path=%s | valid=False | error=%s", tmp, exc)
             tmp.unlink(missing_ok=True)
@@ -167,7 +176,7 @@ class SenderTelethonHelpers:
             seek_seconds = 2.0
         elif duration > 1:
             seek_seconds = max(0.5, min(float(duration) / 2.0, float(duration) - 0.1))
-        tmp = Path(tempfile.NamedTemporaryFile(prefix="generated_video_thumb_", suffix=".jpg", delete=False).name)
+        tmp = await asyncio.to_thread(_create_thumb_temp_path, "generated_video_thumb_")
         try:
             last_error = ""
             for quality in (5, 8, 12, 16, 20):

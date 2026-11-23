@@ -1027,6 +1027,7 @@ async def _worker_loop(repo, sender_service, *, queue: str, worker_id: str, poli
 
     except asyncio.CancelledError:
         logger.info("Worker получил сигнал отмены | queue=%s | worker_id=%s", queue, worker_id)
+        raise
     finally:
         if in_flight:
             logger.info("Worker ждёт завершения in-flight задач | queue=%s | count=%s", queue, len(in_flight))

@@ -88,16 +88,19 @@ class PostgresClient:
         self.ensure_driver()
         conn = self._get_thread_connection()
 
+        committed = False
         try:
             yield conn
             conn.commit()
-
-        except Exception:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            raise
+            committed = True
+        finally:
+            # Roll back also on GeneratorExit/KeyboardInterrupt, not just Exception.
+            # The thread-local connection remains available for subsequent operations.
+            if not committed:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
 
     def close_thread_connection(self) -> None:
         conn = getattr(self._local, "conn", None)
