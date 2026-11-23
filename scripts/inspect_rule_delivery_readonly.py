@@ -77,12 +77,12 @@ def main():
 
                 cur.execute("""
                     SELECT id AS audit_id, created_at, event_type, status, error_text,
-                           extra_json->>'pipeline_stage' AS pipeline_stage,
-                           extra_json->>'pipeline_result' AS pipeline_result,
-                           extra_json->>'resolution_method' AS resolution_method,
-                           extra_json->>'returned_candidate_id' AS returned_candidate_id,
-                           extra_json->>'sent_message_id' AS audit_sent_id,
-                           extra_json->>'skip_reason' AS skip_reason
+                           extra_json::jsonb->>'pipeline_stage' AS pipeline_stage,
+                           extra_json::jsonb->>'pipeline_result' AS pipeline_result,
+                           extra_json::jsonb->>'resolution_method' AS resolution_method,
+                           extra_json::jsonb->>'returned_candidate_id' AS returned_candidate_id,
+                           extra_json::jsonb->>'sent_message_id' AS audit_sent_id,
+                           extra_json::jsonb->>'skip_reason' AS skip_reason
                     FROM audit_log
                     WHERE delivery_id = %s
                     ORDER BY id DESC LIMIT 45
@@ -96,10 +96,15 @@ def main():
                     WHERE payload_json->>'delivery_id' = %s
                        OR (
                           jsonb_typeof(payload_json->'delivery_ids') = 'array'
-                          AND payload_json->'delivery_ids' @> to_jsonb(ARRAY[%s::int])
+                          AND EXISTS (
+                            SELECT 1 FROM jsonb_array_elements_text(
+                              COALESCE(payload_json->'delivery_ids', '[]'::jsonb)
+                            ) item(value)
+                            WHERE item.value = %s
+                          )
                        )
                     ORDER BY id DESC LIMIT 20
-                """, (str(did),did))
+                """, (str(did),str(did)))
                 jobs = cur.fetchall()
                 result["deliveries"].append({
                     "delivery": clean(delivery),
