@@ -40,12 +40,15 @@ def _callbacks(markup):
 
 def test_feature_flag_can_disable_without_deleting_classic_ui(monkeypatch):
     monkeypatch.delenv("VIMI_RICH_RULE_LIST", raising=False)
-    assert rich_rule_list_enabled()
+    assert rich_rule_list_enabled(admin=True)
+    assert not rich_rule_list_enabled(admin=False)
     for disabled in ["0", "false", "Off", "NO"]:
         monkeypatch.setenv("VIMI_RICH_RULE_LIST", disabled)
-        assert not rich_rule_list_enabled()
+        assert not rich_rule_list_enabled(admin=True)
+        assert not rich_rule_list_enabled(admin=False)
     monkeypatch.setenv("VIMI_RICH_RULE_LIST", "1")
-    assert rich_rule_list_enabled()
+    assert rich_rule_list_enabled(admin=False)
+    assert rich_rule_list_enabled(admin=True)
 
 
 def test_real_rich_buttons_replace_number_buttons_and_preserve_callbacks():
