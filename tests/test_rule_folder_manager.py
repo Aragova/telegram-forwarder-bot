@@ -136,10 +136,14 @@ class _Cursor:
     def execute(self, query, params=None):
         self._last = str(query)
         self.queries.append((str(query), params))
+        if "INSERT INTO rule_folder_assignments" in self._last:
+            self.rowcount = self.owned
 
     def fetchone(self):
         if "SELECT id FROM rule_folders" in self._last:
             return {"id": 10} if self.folder_exists else None
+        if "SELECT COUNT(*)" in self._last and "rule_folder_assignments" in self._last:
+            return {"cnt": 0}
         return {"cnt": self.owned}
 
     def __enter__(self):
