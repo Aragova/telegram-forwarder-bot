@@ -599,6 +599,38 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     selection[1].add(rid)
                 await _catalog(ctx, callback, tenant_id=tenant_id, admin=admin,
                                folder_id=fid, page=page, batch=True)
+            elif action == "batch_page_all":
+                fid, page = int(data[2]), int(data[3])
+                selection = _selected.get(user_id)
+                if not selection or selection[0] != fid:
+                    await _error(ctx, callback, "Выбор устарел")
+                    return
+                rules = await _workspace_rules(ctx, tenant_id, admin, user_id)
+                if fid >= 0:
+                    mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+                    if fid > 0 and not await ctx.run_db(ctx.db.get_rule_folder, tenant_id, fid):
+                        await _error(ctx, callback, "Папка не найдена")
+                        return
+                    rules = [
+                        rule for rule in rules
+                        if int(mapping.get(int(rule.id), {}).get("id") or 0) == fid
+                    ]
+                available = {int(rule.id) for rule in rules}
+                selection[1].intersection_update(available)
+                start = max(0, page) * CATALOG_PAGE_SIZE
+                current = rules[start:start + CATALOG_PAGE_SIZE]
+                if not current:
+                    await _error(ctx, callback, "На странице нет правил")
+                    return
+                page_ids = {int(rule.id) for rule in current}
+                if page_ids.issubset(selection[1]):
+                    selection[1].difference_update(page_ids)
+                else:
+                    selection[1].update(page_ids)
+                await _catalog(
+                    ctx, callback, tenant_id=tenant_id, admin=admin,
+                    folder_id=fid, page=page, batch=True,
+                )
             elif action == "batch_reset":
                 _selected.pop(user_id, None)
                 await _catalog(ctx, callback, tenant_id=tenant_id, admin=admin,
