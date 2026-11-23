@@ -375,10 +375,9 @@ def test_additional_functions_has_single_unfile_only_for_foldered_rules():
     assert "rf:unfile_one:214" not in callbacks(without)
 
 
-@pytest.mark.asyncio
-async def test_batch_unfile_scope_rejects_other_tenant_and_other_folder():
+def test_batch_unfile_scope_rejects_other_tenant_and_other_folder():
+    import asyncio
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
 
     rules = [FakeRule(214), FakeRule(215), FakeRule(216)]
     mapping = {
@@ -386,9 +385,11 @@ async def test_batch_unfile_scope_rejects_other_tenant_and_other_folder():
         216: {"id": 9},
     }
     calls = []
+
     async def run_db(fn, *args):
         calls.append((fn.__name__, args))
         return fn(*args)
+
     ctx = SimpleNamespace(
         db=SimpleNamespace(
             get_rules_for_tenant=lambda tenant: rules,
@@ -396,9 +397,13 @@ async def test_batch_unfile_scope_rejects_other_tenant_and_other_folder():
         ),
         run_db=run_db,
     )
-    with pytest.raises(ValueError, match="Список изменился"):
-        await folder_handlers._selected_folder_rule_ids(ctx, 2, 9, {214, 215})
-    assert await folder_handlers._selected_folder_rule_ids(ctx, 2, 9, {214, 216}) == [214, 216]
+
+    async def verify():
+        with pytest.raises(ValueError, match="Список изменился"):
+            await folder_handlers._selected_folder_rule_ids(ctx, 2, 9, {214, 215})
+        assert await folder_handlers._selected_folder_rule_ids(ctx, 2, 9, {214, 216}) == [214, 216]
+
+    asyncio.run(verify())
     assert [x[0] for x in calls].count("get_rules_for_tenant") == 2
 
 
