@@ -1269,14 +1269,17 @@ def _filter_user_rule_card_keyboard(keyboard: InlineKeyboardMarkup, rule_id: int
             callback_data = button.callback_data or ""
             mapped = callback_map.get(callback_data)
             if mapped:
-                filtered_row.append(InlineKeyboardButton(text=button.text, callback_data=mapped))
+                filtered_row.append(rule_ui_button(
+                    button.text, mapped,
+                    style=getattr(button, "style", None) or "primary",
+                ))
         if filtered_row:
             filtered_rows.append(filtered_row)
 
     filtered_rows.append(
         [
-            InlineKeyboardButton(text="⬅️ К правилам", callback_data=f"rf:back:{rule_id}"),
-            InlineKeyboardButton(text="🏠 Главное меню", callback_data="user_main"),
+            rule_ui_button("⬅️ К правилам", f"rf:back:{rule_id}", style="primary"),
+            rule_ui_button("🏠 Главное меню", "user_main", style="primary"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=filtered_rows)
@@ -3222,6 +3225,16 @@ def build_rule_card_text(row) -> str:
     """
     rule_id = int(row["id"])
     target_title = row["target_title"] or row["target_id"]
+    source_title = (
+        (row["source_title"] or row["source_id"])
+        if "source_title" in row.keys() else row["source_id"]
+    )
+    source_thread = row["source_thread_id"] if "source_thread_id" in row.keys() else None
+    target_thread = row["target_thread_id"] if "target_thread_id" in row.keys() else None
+    if source_thread:
+        source_title = f"{source_title} (тема {source_thread})"
+    if target_thread:
+        target_title = f"{target_title} (тема {target_thread})"
 
     status_line = build_rule_status_line(row)
     wait_line = build_rule_wait_line(row)
@@ -3275,10 +3288,10 @@ def build_rule_card_text(row) -> str:
     if mode == "repost":
         caption_mode_value = get_rule_caption_mode_value(rule_id, row=row)
         caption_mode_text = caption_delivery_mode_to_text(caption_mode_value)
-        caption_mode_line = f"\n✍️ Режим подписи: {safe_html(caption_mode_text)}"
+        caption_mode_line = f"✍️ <b>Режим подписи:</b> {safe_html(caption_mode_text)}"
     elif mode == "video":
         clip_seconds = int((row["video_clip_duration_seconds"] if "video_clip_duration_seconds" in row.keys() else None) or 118)
-        caption_mode_line = f"\n🎞 Длина видео: {safe_html(format_duration_ru(clip_seconds))}"
+        caption_mode_line = f"🎞 <b>Длина видео:</b> {safe_html(format_duration_ru(clip_seconds))}"
 
     repost_campaign_line = ""
     if (
@@ -3302,19 +3315,33 @@ def build_rule_card_text(row) -> str:
                 logger.exception("Не удалось собрать сводку рекламной кампании, rule_id=%s", rule_id)
                 repost_campaign_line = "\n💰 Рекламная кампания"
 
-    return (
-        f"<b>Правило #{row['id']}</b>\n"
-        f"👉 {safe_html(target_title)}\n\n"
-        f"{safe_html(status_line)}\n"
-        f"{safe_html(wait_line)}\n"
-        f"📦 В очереди: {logical_pending}\n"
-        f"⏳ В обработке: {processing}\n"
-        f"✅ Отправлено: {completed}\n"
-        f"⚠️ Ошибки: {faulty}\n"
-        f"📍 Позиция: {safe_html(position_text)}"
-        f"{caption_mode_line}"
-        f"{repost_campaign_line}"
-    )
+    # Rich presentation reuses the existing queue snapshot and never alters
+    # delivery counters, schedule calculations or fallback behaviour.
+    details = [
+        f"📋 <b>ПРАВИЛО #{rule_id}</b>",
+        "",
+        "🔗 <b>МАРШРУТ ПУБЛИКАЦИИ</b>",
+        f"📤 <b>Источник:</b> {safe_html(source_title)}",
+        f"📥 <b>Получатель:</b> {safe_html(target_title)}",
+        "",
+        "━━━━━━━━━━━━━━",
+        "📡 <b>СОСТОЯНИЕ</b>",
+        safe_html(status_line),
+        safe_html(wait_line),
+        "",
+        "━━━━━━━━━━━━━━",
+        "📊 <b>СТАТИСТИКА ПУБЛИКАЦИЙ</b>",
+        f"📦 <b>В очереди:</b> {logical_pending}",
+        f"⏳ <b>В обработке:</b> {processing}",
+        f"✅ <b>Отправлено:</b> {completed}",
+        f"⚠️ <b>Ошибки:</b> {faulty}",
+        f"📍 <b>Позиция:</b> {safe_html(position_text)}",
+    ]
+    if caption_mode_line:
+        details.extend(["", "━━━━━━━━━━━━━━", "🎛 <b>ОФОРМЛЕНИЕ</b>", caption_mode_line])
+    if repost_campaign_line:
+        details.extend(["", "━━━━━━━━━━━━━━", repost_campaign_line.strip()])
+    return "\n".join(details)
 
 def build_start_position_text(
     item: dict[str, Any],
@@ -3468,107 +3495,50 @@ def build_rule_card_keyboard(
     schedule_mode: str = "interval",
     mode: str = "repost",
 ) -> InlineKeyboardMarkup:
+    """Compact rich controls. Keep all original callbacks and permissions."""
     rows: list[list[InlineKeyboardButton]] = []
-
-    # 1 строка
     if schedule_mode == "fixed":
+        rows.append([rule_ui_button(
+            "🟢 Плавающий график", f"set_interval_mode:{rule_id}", style="primary",
+        )])
         rows.append([
-            InlineKeyboardButton(
-                text="🟢 Сделать плавающим",
-                callback_data=f"set_interval_mode:{rule_id}",
-            )
+            rule_ui_button("⏰ Фикс. время", f"change_fixed_times:{rule_id}", style="primary"),
+            rule_ui_button("🕒 Время", f"change_next_run:{rule_id}", style="primary"),
         ])
     else:
+        rows.append([rule_ui_button(
+            "📌 Фиксированный график", f"change_fixed_times:{rule_id}", style="primary",
+        )])
         rows.append([
-            InlineKeyboardButton(
-                text="📌 Сделать фиксированным",
-                callback_data=f"change_fixed_times:{rule_id}",
-            )
+            rule_ui_button("⏱ Интервал", f"change_interval:{rule_id}", style="primary"),
+            rule_ui_button("🕒 Время", f"change_next_run:{rule_id}", style="primary"),
         ])
-
-    # 2 строка
-    if schedule_mode == "fixed":
-        rows.append([
-            InlineKeyboardButton(
-                text="⏰ Фикс. время",
-                callback_data=f"change_fixed_times:{rule_id}",
-            ),
-            InlineKeyboardButton(
-                text="🕒 Время",
-                callback_data=f"change_next_run:{rule_id}",
-            ),
-        ])
-    else:
-        rows.append([
-            InlineKeyboardButton(
-                text="⏱ Интервал",
-                callback_data=f"change_interval:{rule_id}",
-            ),
-            InlineKeyboardButton(
-                text="🕒 Время",
-                callback_data=f"change_next_run:{rule_id}",
-            ),
-        ])
-
-    # 3 / 4 / 5 строки
     if mode == "video":
         rows.append([
-            InlineKeyboardButton(
-                text="🎬 Заставки",
-                callback_data=f"video_intro_menu:{rule_id}",
-            ),
-            InlineKeyboardButton(
-                text="📝 Подпись",
-                callback_data=f"video_caption_menu:{rule_id}",
-            ),
+            rule_ui_button("🎬 Заставки", f"video_intro_menu:{rule_id}", style="primary"),
+            rule_ui_button("✍️ Подпись", f"video_caption_menu:{rule_id}", style="primary"),
         ])
-        rows.append([
-            InlineKeyboardButton(
-                text="⚙️ Дополнительные функции",
-                callback_data=f"rule_extra_menu:{rule_id}",
-            )
-        ])
-    else:
-        rows.append([
-            InlineKeyboardButton(
-                text="⚙️ Дополнительные функции",
-                callback_data=f"rule_extra_menu:{rule_id}",
-            )
-        ])
-        if settings.repost_campaign_admin_test_enabled and mode == "repost":
-            rows.append([
-                InlineKeyboardButton(
-                    text="💰 Рекламная кампания",
-                    callback_data=f"rule_repost_campaign_menu:{rule_id}",
-                )
-            ])
-
-    control_text = "⏸ Выключить" if is_active else "▶️ Включить"
-    control_callback = f"disable_rule:{rule_id}" if is_active else f"enable_rule:{rule_id}"
-
+    rows.append([rule_ui_button(
+        "⚙️ Дополнительные функции", f"rule_extra_menu:{rule_id}", style="primary",
+    )])
+    if mode == "repost" and settings.repost_campaign_admin_test_enabled:
+        rows.append([rule_ui_button(
+            "💰 Рекламная кампания", f"rule_repost_campaign_menu:{rule_id}", style="primary",
+        )])
     rows.append([
-        InlineKeyboardButton(
-            text="🔄 Обновить",
-            callback_data=f"rule_refresh:{rule_id}",
-        ),
-        InlineKeyboardButton(
-            text=control_text,
-            callback_data=control_callback,
+        rule_ui_button("🔄 Обновить", f"rule_refresh:{rule_id}", style="primary"),
+        rule_ui_button(
+            "⏸ Выключить" if is_active else "▶️ Включить",
+            f"disable_rule:{rule_id}" if is_active else f"enable_rule:{rule_id}",
+            style="primary" if is_active else "success",
         ),
     ])
-
     rows.append([
-        InlineKeyboardButton(
-            text="🔄 К правилам",
-            callback_data=f"rf:back:{rule_id}",
-        ),
-        InlineKeyboardButton(
-            text="📋 Главное меню",
-            callback_data="rule_to_main_menu",
-        ),
+        rule_ui_button("⬅️ К правилам", f"rf:back:{rule_id}", style="primary"),
+        rule_ui_button("🏠 Главное меню", "rule_to_main_menu", style="primary"),
     ])
-
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def build_rule_extra_keyboard(rule_id: int) -> InlineKeyboardMarkup:
     rule = db.get_rule(rule_id)
