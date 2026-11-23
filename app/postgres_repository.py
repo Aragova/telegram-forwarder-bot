@@ -2477,6 +2477,32 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 cur.execute(q, tuple(params))
                 return cur.fetchone() is not None
 
+    def refresh_channel_title(self, channel_id: str, title: str) -> int:
+        """Update only changed root-channel names, never forum-topic labels.
+
+        Updating `channels.title` is sufficient: all rule views join this
+        table and immediately pick up the new text on their next rendering.
+        No routing, deliveries, scheduler or queue state is modified.
+        """
+        cleaned = str(title or "").strip()
+        if not cleaned:
+            return 0
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE channels
+                    SET title = %s
+                    WHERE channel_id = %s
+                      AND thread_id IS NULL
+                      AND title IS DISTINCT FROM %s
+                    """,
+                    (cleaned, str(channel_id), cleaned),
+                )
+                changed = int(cur.rowcount or 0)
+            conn.commit()
+        return changed
+
     def get_channels(self, channel_type: str | None = None):
         with self.connect() as conn:
             with conn.cursor() as cur:
