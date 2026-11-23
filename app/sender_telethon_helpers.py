@@ -11,6 +11,7 @@ from typing import Any
 
 from telethon.tl import types as tl_types
 
+from .background_tasks import start_background_task
 from .config import settings
 from .sender_primitives import _detect_message_media_kind
 from .subprocess_safety import communicate_safely
@@ -20,6 +21,36 @@ logger = logging.getLogger("forwarder")
 
 MAX_TELEGRAM_THUMB_BYTES = 20 * 1024
 MAX_TELEGRAM_THUMB_SIDE = 320
+
+
+def _create_thumb_temp_path(prefix: str) -> Path:
+    """Create and close a temporary file before ffmpeg/Telethon writes to it."""
+    with tempfile.NamedTemporaryFile(prefix=prefix, suffix=".jpg", delete=False) as handle:
+        return Path(handle.name)
+
+
+async def _create_thumb_temp_path_async(prefix: str) -> Path:
+    """Offload creation and remove the late-created file after cancellation.
+
+    shield prevents a cancelled caller from losing the thread result.
+    start_background_task retains the pending task until it completes.
+    """
+    creation = start_background_task(
+        asyncio.to_thread(_create_thumb_temp_path, prefix),
+        name=f"create-thumbnail-{prefix}",
+    )
+    try:
+        return await asyncio.shield(creation)
+    except asyncio.CancelledError:
+        def _remove_orphan(done: asyncio.Task[Path]) -> None:
+            if done.cancelled():
+                return
+            try:
+                done.result().unlink(missing_ok=True)
+            except Exception:
+                logger.exception("THUMB_TEMP_CLEANUP_FAILED | prefix=%s", prefix)
+        creation.add_done_callback(_remove_orphan)
+        raise
 
 
 def _positive_int(value: Any) -> int:
@@ -146,7 +177,7 @@ class SenderTelethonHelpers:
         selected_thumb = self._select_source_photo_thumb(thumbs)
         if not selected_thumb:
             return None, "none"
-        tmp = Path(tempfile.NamedTemporaryFile(prefix="telegram_video_thumb_", suffix=".jpg", delete=False).name)
+        tmp = await _create_thumb_temp_path_async("telegram_video_thumb_")
         try:
             downloaded = await self.owner.telethon.download_media(message, file=str(tmp), thumb=selected_thumb)
             path = Path(downloaded) if downloaded else tmp
@@ -156,6 +187,12 @@ class SenderTelethonHelpers:
                 return path, "telegram"
             path.unlink(missing_ok=True)
             return None, "none"
+        except asyncio.CancelledError:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("VIDEO_THUMB_CANCEL_CLEANUP_FAILED | path=%s", tmp)
+            raise
         except Exception as exc:
             logger.warning("VIDEO_REUPLOAD_THUMB | source=telegram | path=%s | valid=False | error=%s", tmp, exc)
             tmp.unlink(missing_ok=True)
@@ -167,7 +204,7 @@ class SenderTelethonHelpers:
             seek_seconds = 2.0
         elif duration > 1:
             seek_seconds = max(0.5, min(float(duration) / 2.0, float(duration) - 0.1))
-        tmp = Path(tempfile.NamedTemporaryFile(prefix="generated_video_thumb_", suffix=".jpg", delete=False).name)
+        tmp = await _create_thumb_temp_path_async("generated_video_thumb_")
         try:
             last_error = ""
             for quality in (5, 8, 12, 16, 20):
@@ -190,7 +227,10 @@ class SenderTelethonHelpers:
             return None, "none", seek_seconds
         except asyncio.CancelledError:
             # The subprocess is already reaped by communicate_safely().
-            tmp.unlink(missing_ok=True)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("VIDEO_THUMB_CANCEL_CLEANUP_FAILED | path=%s", tmp)
             raise
         except Exception as exc:
             tmp.unlink(missing_ok=True)

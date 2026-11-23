@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+from app.background_tasks import start_background_task
 
 from aiogram import Dispatcher
 from aiogram.types import Message
@@ -87,7 +87,7 @@ def register_admin_channel_handlers(dp: Dispatcher, ctx: AdminHandlersContext) -
                     else:
                         await ctx.send_message_safe(chat_id=message.chat.id, text=f"✅ Добавлен {'источник' if channel_type == 'source' else 'получатель'}: {title}", reply_markup=ctx.get_main_menu())
                         if channel_type == "source":
-                            asyncio.create_task(ctx.parse_channel_history(ctx.telethon_client, ctx.db, chat_id, clean_start=False))
+                            start_background_task(ctx.parse_channel_history(ctx.telethon_client, ctx.db, chat_id, clean_start=False), name="parse-source-history")
             except Exception as exc:
                 ctx.logger.exception("Ошибка добавления канала | action=%s | chat_id=%s | error=%s", action, chat_id, exc)
                 await ctx.send_message_safe(chat_id=message.chat.id, text=f"❌ Ошибка доступа к каналу/чату: {exc}", reply_markup=ctx.get_main_menu())

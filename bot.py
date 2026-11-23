@@ -15,6 +15,7 @@ from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramRetryAfter
 from app.bot_api_session import create_bot_api_session
+from app.background_tasks import start_background_task
 from app.channel_title_sync import channel_title_sync_loop
 from aiogram.filters import Command
 from aiogram.types import (
@@ -1683,7 +1684,7 @@ async def dashboard_worker(user_id: int, message: Message):
                 )
 
     except asyncio.CancelledError:
-        pass
+        raise
     finally:
         if dashboard_tasks.get(user_id) is current_task:
             dashboard_tasks.pop(user_id, None)
@@ -7370,7 +7371,7 @@ async def handle_stateful_private_inputs(message: Message):
             return
         await run_db(db.add_channel_for_tenant, tenant_id, chat_id, thread_id, channel_type, title, user_id_safe)
         if channel_type == "source":
-            asyncio.create_task(parse_group_history(telethon_client, db, chat_id, thread_id, clean_start=False))
+            start_background_task(parse_group_history(telethon_client, db, chat_id, thread_id, clean_start=False), name="parse-group-history")
         reset_user_state(user_id_safe)
         await answer_user_inline_message(
             message,
@@ -7859,8 +7860,9 @@ async def handle_stateful_private_inputs(message: Message):
                     await run_db(db.add_channel_for_tenant, tenant_id, chat_id, thread_id, channel_type, title, actor_id)
                 await send_message_safe(chat_id=message.chat.id, text=f"✅ Добавлена запись: {title} / тема {thread_id}", reply_markup=get_main_menu())
                 if channel_type == "source":
-                    asyncio.create_task(
-                        parse_group_history(telethon_client, db, chat_id, thread_id, clean_start=False)
+                    start_background_task(
+                        parse_group_history(telethon_client, db, chat_id, thread_id, clean_start=False),
+                        name="parse-group-history",
                     )
         finally:
             reset_user_state(user_id)
@@ -8780,8 +8782,8 @@ async def _start_bot_role() -> None:
     posting_active = False
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=True)
-    asyncio.create_task(heartbeat_loop("bot", db))
-    asyncio.create_task(watchdog_loop(db))
+    start_background_task(heartbeat_loop("bot", db), name="bot-heartbeat")
+    start_background_task(watchdog_loop(db), name="health-watchdog")
     _start_repost_campaign_runtime_tasks(role="bot")
     _start_channel_title_sync_runtime()
     logger.info("STARTUP | Роль UI (bot) запущена")
@@ -8798,7 +8800,7 @@ async def _start_scheduler_role() -> None:
     posting_active = False
     await _init_db_runtime()
     logger.info("STARTUP | Запуск роли scheduler")
-    asyncio.create_task(heartbeat_loop("scheduler", db))
+    start_background_task(heartbeat_loop("scheduler", db), name="scheduler-heartbeat")
     watchdog_task = asyncio.create_task(run_watchdog_loop(db, interval_seconds=10.0))
     try:
         await run_scheduler_loop(
@@ -8817,7 +8819,7 @@ async def _start_worker_role() -> None:
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=False)
     logger.info("STARTUP | Запуск роли worker")
-    asyncio.create_task(heartbeat_loop("worker", db))
+    start_background_task(heartbeat_loop("worker", db), name="worker-heartbeat")
     await _run_worker_role_loop()
 
 
@@ -8827,10 +8829,10 @@ async def _start_all_role() -> None:
     posting_active = False
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=True)
-    asyncio.create_task(heartbeat_loop("bot", db))
-    asyncio.create_task(heartbeat_loop("scheduler", db))
-    asyncio.create_task(heartbeat_loop("worker", db))
-    asyncio.create_task(watchdog_loop(db))
+    start_background_task(heartbeat_loop("bot", db), name="bot-heartbeat")
+    start_background_task(heartbeat_loop("scheduler", db), name="scheduler-heartbeat")
+    start_background_task(heartbeat_loop("worker", db), name="worker-heartbeat")
+    start_background_task(watchdog_loop(db), name="health-watchdog")
     _start_repost_campaign_runtime_tasks(role="all")
     _start_channel_title_sync_runtime()
     if scheduler_runtime_task is None or scheduler_runtime_task.done():
