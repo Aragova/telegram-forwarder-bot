@@ -108,3 +108,17 @@ def test_no_instant_cancel_during_bot_shutdown():
     body = source[start:end]
     assert "await drain_job_workers(" in body
     assert "task.cancel()" not in body
+
+
+def test_all_role_keeps_bot_session_open_until_after_worker_drain():
+    """Polling must not close a session while workers may be sending media."""
+    source = Path("bot.py").read_text(encoding="utf-8")
+    start = source.index("async def _start_all_role()")
+    end = source.index("async def start_job_workers_runtime()", start)
+    all_role = source[start:end]
+    assert "close_bot_session=False" in all_role
+
+    shutdown_start = source.index("async def _shutdown_runtime(")
+    shutdown_end = source.index("async def _run_scheduler_role_loop()", shutdown_start)
+    shutdown = source[shutdown_start:shutdown_end]
+    assert shutdown.index("await stop_job_workers_runtime()") < shutdown.index("await bot.session.close()")

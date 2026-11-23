@@ -8868,6 +8868,10 @@ async def _start_all_role() -> None:
         bot,
         polling_timeout=30,
         handle_as_tasks=True,
+        # The runtime shutdown owns the session. Workers may still be
+        # uploading media when polling stops; closing Bot API here would
+        # interrupt their in-flight delivery before drain completes.
+        close_bot_session=False,
     )
 
 
