@@ -18,18 +18,22 @@ from app.rule_folders_ui import (
     _button,
     additional_functions_view,
     folder_delete_confirmation_view,
+    folder_fill_candidates,
+    folder_fill_view,
     folder_index_view,
     folder_settings_view,
     move_picker_view,
     root_view,
     rule_catalog_view,
     rule_matches_query,
+    CATALOG_PAGE_SIZE,
 )
 
 # These are navigation/input caches only. Persistent assignments stay in PostgreSQL.
 _searches: dict[int, str] = {}
 _origins: dict[tuple[int, int], tuple[int, int, bool]] = {}
 _selected: dict[int, tuple[int, set[int]]] = {}
+_fill_selected: dict[int, tuple[int, set[int]]] = {}
 _folder_index_page: dict[int, int] = {}
 _inputs: dict[int, dict[str, Any]] = {}
 _pending_new_rule: dict[int, tuple[int, float]] = {}
@@ -118,6 +122,45 @@ async def _catalog(ctx: Any, callback: CallbackQuery, *, tenant_id: int, admin: 
     ))
 
 
+async def _fill_catalog(
+    ctx: Any, callback: CallbackQuery, *, tenant_id: int, folder_id: int, page: int,
+) -> None:
+    """Select from all rules of this tenant, not from the destination folder."""
+    folder = await ctx.run_db(ctx.db.get_rule_folder, tenant_id, folder_id)
+    if not folder:
+        await _error(ctx, callback, "Папка не найдена")
+        return
+    rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+    assignments = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+    candidates = folder_fill_candidates(rules, assignments, folder_id)
+    choice = _fill_selected.get(callback.from_user.id)
+    if choice is None or choice[0] != folder_id:
+        choice = (folder_id, set())
+        _fill_selected[callback.from_user.id] = choice
+    choice[1].intersection_update({int(r.id) for r in candidates})
+    await _render(ctx, callback, *folder_fill_view(
+        candidates, folder_id=folder_id, folder_name=str(folder["name"]),
+        page=page, selected=choice[1], assignments=assignments,
+    ))
+
+
+async def _selected_folder_rule_ids(
+    ctx: Any, tenant_id: int, folder_id: int, selected_ids: set[int],
+) -> list[int]:
+    """Require every selected ID to be in this folder and owned by this tenant."""
+    if not selected_ids:
+        raise ValueError("Сначала выберите правила")
+    rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+    mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+    allowed = {
+        int(r.id) for r in rules
+        if int(mapping.get(int(r.id), {}).get("id") or 0) == folder_id
+    }
+    if not selected_ids.issubset(allowed):
+        raise ValueError("Список изменился. Повторите выбор правил")
+    return sorted(selected_ids)
+
+
 async def _extra(ctx: Any, callback: CallbackQuery, tenant_id: int, rule_id: int):
     if not await ctx.ensure_rule_callback_access(callback, rule_id):
         return
@@ -181,7 +224,13 @@ async def _apply_move(ctx: Any, callback: CallbackQuery, *, tenant_id: int,
         if not choice or choice[0] != int(origin[1:]) or not choice[1]:
             await _error(ctx, callback, "Выбор правил устарел")
             return
-        rule_ids = sorted(choice[1])
+        try:
+            rule_ids = await _selected_folder_rule_ids(
+                ctx, tenant_id, int(origin[1:]), choice[1],
+            ) if int(origin[1:]) > 0 else sorted(choice[1])
+        except ValueError as exc:
+            await _error(ctx, callback, str(exc))
+            return
     else:
         await _error(ctx, callback, "Некорректная операция")
         return
@@ -362,6 +411,20 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 ))
             elif action == "move":
                 await _move(ctx, callback, tenant_id=tenant_id, origin="s" + data[2])
+            elif action == "unfile_one":
+                rid = int(data[2])
+                if not await ctx.ensure_rule_callback_access(callback, rid):
+                    return
+                if int(await ctx.run_db(ctx.db.get_rule_tenant_id, rid)) != tenant_id:
+                    await _error(ctx, callback, "Нет доступа к правилу")
+                    return
+                assignments = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+                if rid not in assignments:
+                    await _error(ctx, callback, "Это правило уже находится вне папок")
+                    return
+                await ctx.run_db(ctx.db.assign_rules_to_folder, tenant_id, [rid], None)
+                _origins[(user_id, rid)] = (0, 0, False)
+                await _extra(ctx, callback, tenant_id, rid)
             elif action == "move_page":
                 await _move(ctx, callback, tenant_id=tenant_id,
                             origin=data[2], page=int(data[3]))
@@ -375,6 +438,87 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
             elif action == "apply":
                 await _apply_move(ctx, callback, tenant_id=tenant_id,
                                   origin=data[2], folder_id=int(data[3]))
+            elif action == "fill":
+                await _fill_catalog(
+                    ctx, callback, tenant_id=tenant_id,
+                    folder_id=int(data[2]), page=int(data[3]),
+                )
+            elif action == "fill_pick":
+                fid, page, rid = int(data[2]), int(data[3]), int(data[4])
+                choice = _fill_selected.get(user_id)
+                if not choice or choice[0] != fid:
+                    await _error(ctx, callback, "Список выбора устарел")
+                    return
+                rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+                mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+                eligible = {int(r.id) for r in folder_fill_candidates(rules, mapping, fid)}
+                if rid not in eligible:
+                    await _error(ctx, callback, "Это правило уже в папке или недоступно")
+                    return
+                if rid in choice[1]:
+                    choice[1].remove(rid)
+                else:
+                    choice[1].add(rid)
+                await _fill_catalog(ctx, callback, tenant_id=tenant_id, folder_id=fid, page=page)
+            elif action == "fill_page_all":
+                fid, page = int(data[2]), int(data[3])
+                choice = _fill_selected.get(user_id)
+                if not choice or choice[0] != fid:
+                    await _error(ctx, callback, "Список выбора устарел")
+                    return
+                rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+                mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+                candidates = folder_fill_candidates(rules, mapping, fid)
+                current = candidates[max(0, page) * CATALOG_PAGE_SIZE:(max(0, page) + 1) * CATALOG_PAGE_SIZE]
+                if not current:
+                    await _error(ctx, callback, "На странице нет правил")
+                    return
+                page_ids = {int(r.id) for r in current}
+                if page_ids.issubset(choice[1]):
+                    choice[1].difference_update(page_ids)
+                else:
+                    choice[1].update(page_ids)
+                await _fill_catalog(ctx, callback, tenant_id=tenant_id, folder_id=fid, page=page)
+            elif action == "fill_reset":
+                fid, page = int(data[2]), int(data[3])
+                _fill_selected.pop(user_id, None)
+                await _fill_catalog(ctx, callback, tenant_id=tenant_id, folder_id=fid, page=page)
+            elif action == "fill_apply":
+                fid = int(data[2])
+                choice = _fill_selected.get(user_id)
+                if not choice or choice[0] != fid or not choice[1]:
+                    await _error(ctx, callback, "Сначала выберите правила")
+                    return
+                if not await ctx.run_db(ctx.db.get_rule_folder, tenant_id, fid):
+                    await _error(ctx, callback, "Папка не найдена")
+                    return
+                rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+                mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+                eligible = {int(r.id) for r in folder_fill_candidates(rules, mapping, fid)}
+                if not choice[1].issubset(eligible):
+                    await _error(ctx, callback, "Часть правил изменила папку. Повторите выбор")
+                    return
+                ids = sorted(choice[1])
+                await ctx.run_db(ctx.db.assign_rules_to_folder, tenant_id, ids, fid)
+                _fill_selected.pop(user_id, None)
+                await _catalog(ctx, callback, tenant_id=tenant_id, admin=admin, folder_id=fid, page=0)
+            elif action == "unfile":
+                fid, page = int(data[2]), int(data[3])
+                if fid <= 0:
+                    await _error(ctx, callback, "Выберите обычную папку")
+                    return
+                choice = _selected.get(user_id)
+                if not choice or choice[0] != fid:
+                    await _error(ctx, callback, "Список выбора устарел")
+                    return
+                try:
+                    ids = await _selected_folder_rule_ids(ctx, tenant_id, fid, choice[1])
+                except ValueError as exc:
+                    await _error(ctx, callback, str(exc))
+                    return
+                await ctx.run_db(ctx.db.assign_rules_to_folder, tenant_id, ids, None)
+                _selected.pop(user_id, None)
+                await _catalog(ctx, callback, tenant_id=tenant_id, admin=admin, folder_id=fid, page=page)
             elif action == "batch":
                 await _catalog(ctx, callback, tenant_id=tenant_id, admin=admin,
                                folder_id=int(data[2]), page=int(data[3]), batch=True)
