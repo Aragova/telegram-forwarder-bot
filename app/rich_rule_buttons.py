@@ -11,7 +11,6 @@ import os
 from html import escape
 from typing import Any, Callable
 
-import httpx
 from aiogram.types import InlineKeyboardMarkup
 
 _RULE_CALLBACKS = frozenset({"open", "open_search", "pick", "fill_pick"})
@@ -164,12 +163,15 @@ async def try_edit_rich_catalog(
     html: str,
     footer: InlineKeyboardMarkup,
     logger: Any = None,
-    client_factory: Callable[..., Any] | None = None,
+    session_factory: Callable[[], Any] | None = None,
+    invalidate_cache: Callable[[int, int], Any] | None = None,
 ) -> bool:
     """Use configured LOCAL Bot API endpoint. Never log the bot token or URL.
 
     On an unsupported Bot API version / network failure return False, allowing
     the existing safe edit_message_text_safe() implementation to take over.
+    We use the existing aiogram aiohttp session and not HTTPX: HTTPX logs
+    entire token-bearing request URLs at INFO level.
     """
     log = logger or _LOGGER
     if bot is None or message is None:
@@ -182,10 +184,17 @@ async def try_edit_rich_catalog(
             html=html,
             footer=footer,
         )
-        factory = client_factory or httpx.AsyncClient
-        async with factory(timeout=10.0, trust_env=False) as client:
-            response = await client.post(url, json=payload)
-            data = response.json()
+        # Direct edits bypass UIErrorPolicy; invalidate its cached signature
+        # and edit timestamp BEFORE this request so both success and fallback
+        # can immediately navigate back without getting silently throttled.
+        if invalidate_cache is not None:
+            invalidate_cache(int(message.chat.id), int(message.message_id))
+        # Reuse aiogram's aiohttp transport. Unlike httpx (which logs every
+        # request URL at INFO), aiohttp emits no full bot-token request URLs.
+        session = await (session_factory() if session_factory else bot.session.create_session())
+        async with session.post(url, json=payload) as response:
+            data = await response.json()
+            status_code = response.status
         if data.get("ok") is True:
             return True
         description = str(data.get("description") or "").lower()
@@ -193,7 +202,7 @@ async def try_edit_rich_catalog(
             return True
         log.warning(
             "RICH_RULE_CATALOG_FALLBACK | api_code=%s status=%s",
-            data.get("error_code"), response.status_code,
+            data.get("error_code"), status_code,
         )
     except Exception as exc:
         # The exception text may contain the bot-token URL. Do not log it.
