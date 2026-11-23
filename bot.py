@@ -73,6 +73,8 @@ from app.ops_health_service import build_operational_snapshot
 from app.preflight_checks import PreflightError, run_preflight_checks
 from app.runtime_context import RuntimeContext
 from app.worker_runtime import run_heavy_worker, run_light_worker
+from app.worker_resource_policy import POLICY as WORKER_RESOURCE_POLICY
+from app.worker_shutdown import drain_job_workers
 from app.reaction_worker import ReactionWorker
 from app.scheduler_runtime import run_scheduler_loop
 from app.job_watchdog import run_watchdog_loop
@@ -8889,13 +8891,14 @@ async def stop_job_workers_runtime() -> None:
     if not job_worker_tasks:
         return
     tasks = list(job_worker_tasks)
+    await drain_job_workers(
+        tasks=tasks,
+        stop_event=job_workers_stop_event,
+        timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec + 20,
+        logger=logger,
+    )
     job_worker_tasks = []
-    if job_workers_stop_event is not None:
-        job_workers_stop_event.set()
     job_workers_stop_event = None
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
     logger.info("JOB WORKERS | остановлены")
 
 

@@ -978,6 +978,8 @@ async def _worker_loop(repo, sender_service, *, queue: str, worker_id: str, poli
                     )
 
             while in_flight and len(in_flight) >= queue_limit:
+                if stop_event is not None and stop_event.is_set():
+                    break
                 done, pending = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED, timeout=0.3)
                 in_flight = set(pending)
                 if not done:
@@ -990,6 +992,9 @@ async def _worker_loop(repo, sender_service, *, queue: str, worker_id: str, poli
                         last_saturation_log = now
                     break
 
+            if stop_event is not None and stop_event.is_set():
+                logger.info("WORKER_DRAIN | queue=%s | active=%s | action=stop_leasing", queue, len(in_flight))
+                break
             if len(in_flight) >= queue_limit:
                 await asyncio.sleep(0.2 if queue == "light" else 0.5)
                 continue
@@ -1017,6 +1022,12 @@ async def _worker_loop(repo, sender_service, *, queue: str, worker_id: str, poli
                 continue
 
             for job in leased:
+                if stop_event is not None and stop_event.is_set():
+                    # Lease returned after drain started. No Telegram send was begun.
+                    defer = getattr(repo, "defer_job", None) or repo.retry_job
+                    await asyncio.to_thread(defer, int(job["id"]), "Worker draining: job never started", 1)
+                    logger.info("WORKER_DRAIN | queue=%s | job_id=%s | action=defer_unstarted", queue, job["id"])
+                    continue
                 if len(in_flight) >= queue_limit:
                     await asyncio.to_thread(repo.retry_job, int(job["id"]), "Контролируемый leasing: нет свободных execution slots", 1)
                     continue
