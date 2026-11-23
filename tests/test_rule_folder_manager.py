@@ -486,6 +486,7 @@ def test_empty_destination_handler_renders_candidates_from_entire_tenant():
     )
     ctx = SimpleNamespace(
         db=db, run_db=run_db,
+        is_admin_user=lambda uid: False,
         answer_callback_safe_once=answer,
         edit_message_text_safe=edit_message_text_safe,
     )
@@ -508,3 +509,41 @@ def test_empty_destination_handler_renders_candidates_from_entire_tenant():
         assert "rf:fill_pick:9:0:214" in callbacks(rendered[0]["reply_markup"])
     finally:
         folder_handlers._fill_selected.pop(990018, None)
+
+
+
+def test_owner_workspace_includes_owned_legacy_tenant_rules_but_not_other_users():
+    import asyncio
+    from types import SimpleNamespace
+
+    async def run_db(fn, *args):
+        return fn(*args)
+
+    db = SimpleNamespace(
+        get_all_rules=lambda: [FakeRule(214), FakeRule(215), FakeRule(216)],
+        list_folder_manageable_rule_ids=lambda tenant_id, owner_id: {214, 216},
+        get_rules_for_tenant=lambda tenant_id: [FakeRule(214)],
+    )
+    ctx = SimpleNamespace(run_db=run_db, db=db)
+    admin_rules = asyncio.run(folder_handlers._workspace_rules(ctx, 2, True, 888))
+    assert [r.id for r in admin_rules] == [214, 216]
+    ordinary_rules = asyncio.run(folder_handlers._workspace_rules(ctx, 2, False, 777))
+    assert [r.id for r in ordinary_rules] == [214]
+
+
+def test_folder_move_respects_legacy_owner_permission_and_blocks_wrong_owner():
+    repo = _FakeFolderRepo(owned=2)
+    assert repo.assign_rules_to_folder(
+        tenant_id=2, rule_ids=[214, 216], folder_id=10, owner_admin_id=888,
+    ) == 2
+    queries = repo.connection.cursor_obj.queries
+    count_sqls = [sql for sql, _ in queries if "SELECT COUNT(*)::int AS cnt FROM routing" in sql]
+    assert any("created_by = %s" in sql for sql in count_sqls)
+    assert all("UPDATE routing" not in sql.lower() for sql, _ in queries)
+
+    other = _FakeFolderRepo(owned=1)
+    with pytest.raises(ValueError, match="не принадлежат аккаунту"):
+        other.assign_rules_to_folder(
+            tenant_id=2, rule_ids=[214, 216], folder_id=10, owner_admin_id=777,
+        )
+    assert other.connection.commits == 0
