@@ -3486,15 +3486,30 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                   AND r.source_id::text = r.target_id::text
                   AND r.source_id::text = %s
                   AND COALESCE(r.source_thread_id, -1) = COALESCE(%s, -1)
+                  AND r.source_thread_id IS NOT DISTINCT FROM r.target_thread_id
                   AND (
-                    r.target_thread_id IS NULL
-                    OR COALESCE(r.source_thread_id, -1) = COALESCE(r.target_thread_id, -1)
+                    (
+                      d.status = 'sent'
+                      AND (
+                        d.sent_message_id = %s
+                        OR COALESCE(d.sent_message_ids_json, '[]'::jsonb)
+                           @> jsonb_build_array(%s::bigint)
+                      )
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM delivery_attempts a
+                      WHERE a.delivery_id = d.id
+                        AND a.rule_id = r.id
+                        AND a.status = 'verified'
+                        AND a.target_id::text = r.target_id::text
+                        AND COALESCE(a.sent_message_ids_json, '[]'::jsonb)
+                            @> jsonb_build_array(%s::bigint)
+                    )
                   )
-                  AND d.status = 'sent'
-                  AND d.sent_message_id = %s
                 LIMIT 1
                 """,
-                (int(rule_id), str(source_channel), source_thread_id, int(message_id)),
+                (int(rule_id), str(source_channel), source_thread_id,
+                 int(message_id), int(message_id), int(message_id)),
             )
             row = cur.fetchone()
 

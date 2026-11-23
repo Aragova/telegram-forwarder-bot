@@ -31,7 +31,7 @@ class WorkerResourcePolicy:
 
     max_heavy_retries_in_flight: int = 20
 
-    graceful_shutdown_timeout_sec: int = 20
+    graceful_shutdown_timeout_sec: int = 600
     throughput_window_sec: int = 300
     retry_jitter_min_sec: int = 0
     retry_jitter_max_sec: int = 0
@@ -50,7 +50,7 @@ class WorkerResourcePolicy:
             backlog_soft_limit_heavy=_env_int("BACKLOG_SOFT_LIMIT_HEAVY", 100),
             backlog_hard_limit_heavy=_env_int("BACKLOG_HARD_LIMIT_HEAVY", 250),
             max_heavy_retries_in_flight=_env_int("MAX_HEAVY_RETRIES_IN_FLIGHT", 20),
-            graceful_shutdown_timeout_sec=_env_int("GRACEFUL_SHUTDOWN_TIMEOUT_SEC", 20),
+            graceful_shutdown_timeout_sec=_env_int("GRACEFUL_SHUTDOWN_TIMEOUT_SEC", 600),
             throughput_window_sec=_env_int("THROUGHPUT_WINDOW_SEC", 300),
             retry_jitter_min_sec=_env_int("HEAVY_RETRY_JITTER_MIN_SEC", 0, min_value=0),
             retry_jitter_max_sec=_env_int("HEAVY_RETRY_JITTER_MAX_SEC", 0, min_value=0),

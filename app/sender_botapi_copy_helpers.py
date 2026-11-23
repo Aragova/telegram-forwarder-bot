@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram.methods import CopyMessages
+from aiogram.exceptions import TelegramBadRequest
 
 from .sender_primitives import (
     DEBUG_FORCE_SKIP_COPY_ALBUM,
@@ -63,6 +64,7 @@ class SenderBotApiCopyHelpers:
                 "fallback_allowed": False,
                 "raw_result_type": "exception",
                 "error_text": str(exc),
+                "definitely_rejected": isinstance(exc, TelegramBadRequest),
             }
 
     async def copy_album_via_bot(
@@ -107,6 +109,8 @@ class SenderBotApiCopyHelpers:
                 "sent_message_id": None,
                 "sent_count": 0,
                 "error_text": "CopyMessages вернул пустой результат",
+                "attempted": True,
+                "definitely_rejected": False,
             }
 
         except Exception as exc:
@@ -115,4 +119,6 @@ class SenderBotApiCopyHelpers:
                 "sent_message_id": None,
                 "sent_count": 0,
                 "error_text": str(exc),
+                "attempted": True,
+                "definitely_rejected": isinstance(exc, TelegramBadRequest),
             }

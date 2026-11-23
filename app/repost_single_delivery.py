@@ -325,7 +325,9 @@ class RepostSingleDelivery:
                 )
                 return False
             if copy_result.get("attempted"):
-                if is_self_loop and send_result.error_text:
+                if is_self_loop and copy_result.get("definitely_rejected"):
+                    # Only a definite HTTP 400 rejection permits a second
+                    # transport method. A timeout may hide an accepted copy.
                     logger.info("SELF_LOOP_COPY_TO_REUPLOAD_ALLOWED | rule_id=%s | delivery_id=%s | error=%s", rule.id, delivery_id, send_result.error_text)
                 else:
                     error_text = "copy_single_uncertain_no_fallback: copy_message was attempted but target confirmation failed; manual review required"
@@ -357,7 +359,7 @@ class RepostSingleDelivery:
                 source_channel=source_channel,
                 target_id=target_id,
                 source_message_ids=source_message_ids,
-                error_text="copy_single пропущен политикой caption mode",
+                error_text=None,  # Policy skip is not a delivery failure.
                 extra={
                     "caption_delivery_mode": caption_mode,
                     "requires_builder": requires_builder,
@@ -462,6 +464,30 @@ class RepostSingleDelivery:
             is_self_loop=is_self_loop,
             **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
+        if (
+            getattr(reupload_outcome, "transport_attempted", False)
+            and not getattr(reupload_outcome, "transport_accepted", False)
+        ):
+            # A transport exception may occur after Telegram accepted the post.
+            # Never fall through to a text-only or another transport send.
+            error_text = "telethon_send_attempted_result_unknown_non_retryable"
+            logger.warning(
+                "REUPLOAD_SINGLE_MT_PROTO_UNCERTAIN | rule_id=%s | delivery_id=%s | action=no_second_send_manual_review",
+                rule.id, delivery_id,
+            )
+            await owner._log_delivery_pipeline_step(
+                rule_id=rule.id, delivery_ids=delivery_ids,
+                event_type="delivery_pipeline_step",
+                pipeline_stage="reupload_single_transport_uncertain",
+                pipeline_result="terminal_manual_review",
+                source_channel=source_channel, target_id=target_id,
+                source_message_ids=source_message_ids, error_text=error_text,
+                extra={"manual_review_required": True, "non_retryable": True,
+                       "transport_attempted": True, "action": "no_second_send"},
+            )
+            await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+            return False
+
         if getattr(reupload_outcome, "transport_accepted", False) and not getattr(reupload_outcome, "authoritative_resolved", False):
             error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
             logger.warning(

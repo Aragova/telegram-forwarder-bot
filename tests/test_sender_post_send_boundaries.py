@@ -730,7 +730,7 @@ def test_album_custom_emoji_logs_force_telethon(caplog):
     assert "custom_emoji_requires_telethon" in caplog.text
     assert any(
         event[0:3] == ("pipeline", "copy_album", "skipped")
-        and event[3] == "copy_album skipped because custom_emoji requires Telethon"
+        and event[3] is None
         for event in events
     )
 

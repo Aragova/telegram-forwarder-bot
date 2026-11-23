@@ -73,6 +73,8 @@ from app.ops_health_service import build_operational_snapshot
 from app.preflight_checks import PreflightError, run_preflight_checks
 from app.runtime_context import RuntimeContext
 from app.worker_runtime import run_heavy_worker, run_light_worker
+from app.worker_resource_policy import POLICY as WORKER_RESOURCE_POLICY
+from app.worker_shutdown import drain_job_workers
 from app.reaction_worker import ReactionWorker
 from app.scheduler_runtime import run_scheduler_loop
 from app.job_watchdog import run_watchdog_loop
@@ -5665,6 +5667,8 @@ def build_faulty_pages(limit: int = 200) -> list[dict[str, Any]]:
         status_label, error_type = classify_faulty_row(row)
         error_text = escape((row["error_text"] or "Причина не указана").strip())
         created_at_text = faulty_delivery_time_from_created_at(row["fault_created_at"] or row["created_at"])
+        if created_at_text == "дата неизвестна":
+            created_at_text = faulty_delivery_time_from_created_at(row["created_at"])
 
         problem_state = db.get_problem_state(f"rule_faulty_{row['rule_id']}")
         in_work_text = ""
@@ -5709,7 +5713,13 @@ def classify_faulty_row(row) -> tuple[str, str]:
 
     text = (row["error_text"] or "").lower()
 
-    if "entity too large" in text or "request entity too large" in text:
+    if (
+        "accepted_target_id_unresolved" in text
+        or "copy_single_uncertain_no_fallback" in text
+        or "target message id not confirmed" in text
+    ):
+        error_type = "🧭 Отправка требует сверки с Telegram"
+    elif "entity too large" in text or "request entity too large" in text:
         error_type = "📦 Слишком большой файл"
     elif "timeout" in text:
         error_type = "⏱ Таймаут"
@@ -5724,16 +5734,19 @@ def classify_faulty_row(row) -> tuple[str, str]:
 
     return status_label, error_type
 
-def faulty_delivery_time_from_created_at(created_at: str | None) -> str:
+def faulty_delivery_time_from_created_at(created_at: str | datetime | None) -> str:
     if not created_at:
-        return "время неизвестно"
+        return "дата неизвестна"
 
     try:
-        dt = datetime.fromisoformat(created_at)
-        dt_local = dt.astimezone(USER_TZ)
-        return dt_local.strftime("%d.%m.%Y %H:%M")
-    except Exception:
-        return "ошибка времени"
+        dt = created_at if isinstance(created_at, datetime) else datetime.fromisoformat(
+            str(created_at).strip().replace("Z", "+00:00")
+        )
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(USER_TZ).strftime("%d.%m.%Y %H:%M")
+    except (ValueError, TypeError, OverflowError):
+        return "дата неизвестна"
 
 def _build_intro_handlers_context() -> IntroHandlersContext:
     return IntroHandlersContext(
@@ -8855,6 +8868,10 @@ async def _start_all_role() -> None:
         bot,
         polling_timeout=30,
         handle_as_tasks=True,
+        # The runtime shutdown owns the session. Workers may still be
+        # uploading media when polling stops; closing Bot API here would
+        # interrupt their in-flight delivery before drain completes.
+        close_bot_session=False,
     )
 
 
@@ -8878,13 +8895,14 @@ async def stop_job_workers_runtime() -> None:
     if not job_worker_tasks:
         return
     tasks = list(job_worker_tasks)
+    await drain_job_workers(
+        tasks=tasks,
+        stop_event=job_workers_stop_event,
+        timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec + 20,
+        logger=logger,
+    )
     job_worker_tasks = []
-    if job_workers_stop_event is not None:
-        job_workers_stop_event.set()
     job_workers_stop_event = None
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
     logger.info("JOB WORKERS | остановлены")
 
 

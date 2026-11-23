@@ -64,6 +64,15 @@ class VideoPipelineStages:
             stage="download",
         )
         if not probe_ok:
+            if str(probe_error or "").startswith("временная ошибка проверки видео:"):
+                # A broken ffprobe process is recoverable, not a corrupt source.
+                return {
+                    "ok": False,
+                    "fallback_to_legacy": False,
+                    "retryable": True,
+                    "error_text": probe_error,
+                    "transient_validation_failure": True,
+                }
             previous_invalid_attempts = max(0, int(invalid_file_attempts or 0))
             current_job_attempt = max(1, int(job_attempt or 1))
             validation_attempt = previous_invalid_attempts + current_job_attempt
@@ -158,6 +167,15 @@ class VideoPipelineStages:
             stage="process",
         )
         if not probe_ok:
+            if str(probe_error or "").startswith("временная ошибка проверки видео:"):
+                # A broken ffprobe process is recoverable, not a corrupt source.
+                return {
+                    "ok": False,
+                    "fallback_to_legacy": False,
+                    "retryable": True,
+                    "error_text": probe_error,
+                    "transient_validation_failure": True,
+                }
             previous_invalid_attempts = max(0, int(invalid_file_attempts or 0))
             validation_attempt = previous_invalid_attempts + 1
             final_failed = validation_attempt > MAX_INVALID_MP4_RETRY
@@ -273,12 +291,21 @@ class VideoPipelineStages:
             "json",
             str(file_path),
         ]
-        process = await asyncio.create_subprocess_exec(
-            *probe_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await communicate_safely(process)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *probe_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await communicate_safely(process)
+        except (OSError, asyncio.TimeoutError) as exc:
+            # Tool availability / process failures are NOT proof the source MP4
+            # is corrupt. Preserve the file and let the job retry safely.
+            logger.warning(
+                "VIDEO VALIDATION TRANSIENT | stage=%s | delivery_id=%s | job_id=%s | error=%s | action=retry_without_delete",
+                stage, delivery_id, job_id, exc,
+            )
+            return False, f"временная ошибка проверки видео: {exc.__class__.__name__}"
         stderr_text = stderr.decode("utf-8", errors="ignore").strip()
         stdout_text = stdout.decode("utf-8", errors="ignore").strip()
 
@@ -292,8 +319,12 @@ class VideoPipelineStages:
         streams = probe_payload.get("streams") if isinstance(probe_payload, dict) else None
         format_info = probe_payload.get("format") if isinstance(probe_payload, dict) else None
         empty_probe_data = (not isinstance(streams, list) or not streams) or (not isinstance(format_info, dict) or not format_info)
+        has_video_stream = bool(
+            isinstance(streams, list)
+            and any(isinstance(item, dict) and item.get("codec_type") == "video" for item in streams)
+        )
 
-        if process.returncode == 0 and not empty_probe_data:
+        if process.returncode == 0 and not empty_probe_data and has_video_stream and file_size > 0:
             return True, None
 
         compact_stderr = (stderr_text or "").replace("\n", " | ").strip()
@@ -304,6 +335,10 @@ class VideoPipelineStages:
             reason = "битый MP4: Invalid data found when processing input"
         elif empty_probe_data:
             reason = "битый MP4: ffprobe вернул пустые stream/format данные"
+        elif not has_video_stream:
+            reason = "битый MP4: видеопоток отсутствует"
+        elif file_size == 0:
+            reason = "битый MP4: пустой файл"
         else:
             fallback = compact_stderr or "ffprobe завершился с ошибкой"
             reason = f"битый MP4: {fallback[:500]}"

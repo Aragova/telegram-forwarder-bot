@@ -10,12 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from telethon.tl import types as tl_types
+from telethon.errors import BadRequestError
 
 from .background_tasks import start_background_task
 from .config import settings
 from .sender_primitives import _detect_message_media_kind
 from .subprocess_safety import communicate_safely
-from .telethon_authoritative_resolver import TelethonAuthoritativeMessageResolver, TelethonSendOutcome, telethon_transport_failed
+from .telethon_authoritative_resolver import TelethonAuthoritativeMessageResolver, TelethonSendOutcome, telethon_transport_failed, telethon_not_attempted
 
 logger = logging.getLogger("forwarder")
 
@@ -364,6 +365,9 @@ class SenderTelethonHelpers:
         media_kind = _detect_message_media_kind(message)
         supports_streaming = media_kind == "video"
 
+        # A transport exception after send_file starts does not establish
+        # that Telegram rejected the request. Do not send again.
+        original_send_started = False
         try:
             logger.info(
                 "TELETHON_FILE_SEND | START_ORIGINAL_MEDIA | target=%s | thread=%s | media_kind=%s | caption_len=%s | entities_in=%s | entities_out=%s | supports_streaming=%s",
@@ -394,10 +398,8 @@ class SenderTelethonHelpers:
             resolver = TelethonAuthoritativeMessageResolver(self.owner.telethon)
             before_max_message_id = await resolver.get_before_max_message_id(entity, target_id)
             send_started_at = datetime.now(timezone.utc)
-            try:
-                sent = await self.owner.telethon.send_file(**send_kwargs)
-            except Exception:
-                raise
+            original_send_started = True
+            sent = await self.owner.telethon.send_file(**send_kwargs)
             send_finished_at = datetime.now(timezone.utc)
             returned_candidate_id = int(sent.id) if sent else None
             if not sent:
@@ -438,6 +440,9 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
+            if original_send_started and not isinstance(exc, BadRequestError):
+                logger.warning("TELETHON_FILE_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
+                return telethon_transport_failed(f"original_media_send_uncertain: {exc}")
 
         if not file_path:
             logger.warning(
@@ -445,7 +450,7 @@ class SenderTelethonHelpers:
                 target_id,
                 target_thread_id,
             )
-            return telethon_transport_failed("telethon_original_media_failed_no_file_path")
+            return telethon_not_attempted("telethon_original_media_failed_no_file_path")
 
         temp_thumb_path: Path | None = None
         video_attributes = None
@@ -458,6 +463,7 @@ class SenderTelethonHelpers:
                 force_document=force_document,
             )
 
+        fallback_send_started = False
         try:
             logger.info(
                 "TELETHON_FILE_SEND | START_FILE_PATH | target=%s | thread=%s | file=%s | media_kind=%s | caption_len=%s | entities_in=%s | entities_out=%s | duration=%s | width=%s | height=%s | attributes=%s | thumb_source=%s | thumb_path=%s | supports_streaming=%s",
@@ -501,10 +507,8 @@ class SenderTelethonHelpers:
             resolver = TelethonAuthoritativeMessageResolver(self.owner.telethon)
             before_max_message_id = await resolver.get_before_max_message_id(entity, target_id)
             send_started_at = datetime.now(timezone.utc)
-            try:
-                sent = await self.owner.telethon.send_file(**send_kwargs)
-            except Exception:
-                raise
+            fallback_send_started = True
+            sent = await self.owner.telethon.send_file(**send_kwargs)
             send_finished_at = datetime.now(timezone.utc)
             returned_candidate_id = int(sent.id) if sent else None
             if not sent:
@@ -549,7 +553,11 @@ class SenderTelethonHelpers:
                 file_path.name if file_path else None,
                 exc,
             )
-            return telethon_transport_failed(str(exc))
+            return (
+                telethon_transport_failed(str(exc))
+                if fallback_send_started
+                else telethon_not_attempted(str(exc))
+            )
         finally:
             if temp_thumb_path:
                 try:
@@ -569,9 +577,10 @@ class SenderTelethonHelpers:
     ) -> dict:
         downloaded_paths: list[Path] = []
 
+        original_send_started = False
         try:
             if not messages:
-                return telethon_transport_failed("Пустой список сообщений для Telethon album send").to_reupload_album_result(sent_count=0)
+                return telethon_not_attempted("Пустой список сообщений для Telethon album send").to_reupload_album_result(sent_count=0)
 
             entity, target_is_broadcast_channel = await self._resolve_target_entity_and_broadcast_flag(target_id)
 
@@ -584,7 +593,7 @@ class SenderTelethonHelpers:
             for idx, message in enumerate(messages):
                 media = getattr(message, "media", None)
                 if not media:
-                    return telethon_transport_failed("Один из элементов альбома не содержит media").to_reupload_album_result(sent_count=0)
+                    return telethon_not_attempted("Один из элементов альбома не содержит media").to_reupload_album_result(sent_count=0)
                 media_items.append(media)
 
                 post_row = post_rows[idx] if post_rows and idx < len(post_rows) else None
@@ -623,6 +632,7 @@ class SenderTelethonHelpers:
             resolver = TelethonAuthoritativeMessageResolver(self.owner.telethon)
             before_max_message_id = await resolver.get_before_max_message_id(entity, target_id)
             send_started_at = datetime.now(timezone.utc)
+            original_send_started = True
             sent = await self.owner.telethon.send_file(**send_kwargs)
             send_finished_at = datetime.now(timezone.utc)
             if not sent:
@@ -685,7 +695,13 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
+            if original_send_started and not isinstance(exc, BadRequestError):
+                logger.warning("TELETHON_ALBUM_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
+                return telethon_transport_failed(
+                    f"original_album_send_uncertain: {exc}"
+                ).to_reupload_album_result(sent_count=0)
 
+        fallback_send_started = False
         try:
             files: list[str] = []
             caption_text, caption_entities = (
@@ -699,7 +715,7 @@ class SenderTelethonHelpers:
                     file=str(settings.media_cache_path),
                 )
                 if not file_path:
-                    return telethon_transport_failed(f"Не удалось скачать элемент альбома {idx + 1}/{len(messages)}").to_reupload_album_result(sent_count=len(files))
+                    return telethon_not_attempted(f"Не удалось скачать элемент альбома {idx + 1}/{len(messages)}").to_reupload_album_result(sent_count=len(files))
 
                 path = Path(file_path)
                 downloaded_paths.append(path)
@@ -741,6 +757,7 @@ class SenderTelethonHelpers:
             resolver = TelethonAuthoritativeMessageResolver(self.owner.telethon)
             before_max_message_id = await resolver.get_before_max_message_id(entity, target_id)
             send_started_at = datetime.now(timezone.utc)
+            fallback_send_started = True
             sent = await self.owner.telethon.send_file(**send_kwargs)
             send_finished_at = datetime.now(timezone.utc)
             if not sent:
@@ -800,7 +817,11 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
-            return telethon_transport_failed(str(exc)).to_reupload_album_result(sent_count=0)
+            return (
+                telethon_transport_failed(str(exc))
+                if fallback_send_started
+                else telethon_not_attempted(str(exc))
+            ).to_reupload_album_result(sent_count=0)
 
         finally:
             for path in downloaded_paths:

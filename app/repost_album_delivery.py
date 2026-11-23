@@ -229,6 +229,17 @@ class RepostAlbumDelivery:
                 },
             )
 
+            if copy_result.get("attempted") and not copy_result["ok"] and not copy_result.get("definitely_rejected"):
+                # An exception/empty Bot API response is not a verified rejection.
+                error_text = "copy_album_uncertain_no_fallback: copyMessages result unknown"
+                logger.warning(
+                    "COPY_ALBUM_UNCERTAIN_NO_FALLBACK | rule_id=%s | delivery_ids=%s | action=no_second_send",
+                    rule.id, delivery_ids,
+                )
+                for disputed_id in delivery_ids:
+                    await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
+                return False
+
             if copy_result["ok"]:
                 accepted_copy_sent_ids = normalize_valid_sent_message_ids(copy_result.get("sent_message_ids") or [])
                 await owner._log_delivery_pipeline_step(
@@ -368,7 +379,15 @@ class RepostAlbumDelivery:
 
                     if idempotency_key and hasattr(owner.db, "mark_delivery_attempt_verified"):
                         await run_db(owner.db.mark_delivery_attempt_verified, idempotency_key, sent_message_ids=accepted_target_message_ids)
-                    await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
+                    if hasattr(owner, "_mark_album_deliveries_sent_sync"):
+                        await run_db(
+                            owner._mark_album_deliveries_sent_sync, delivery_ids,
+                            sent_message_ids=accepted_target_message_ids,
+                            target_id=str(target_id),
+                            delivery_method="copy_album_verified",
+                        )
+                    else:
+                        await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                     return True
                 if accepted_copy_sent_ids:
                     error_text = (
@@ -403,7 +422,7 @@ class RepostAlbumDelivery:
                 source_channel=source_channel,
                 target_id=target_id,
                 source_message_ids=message_ids,
-                error_text=copy_result["error_text"],
+                error_text=None,  # Policy skip; the reason is retained in extra.
                 extra={
                     "caption_delivery_mode": caption_mode,
                     "requires_builder": requires_builder,
@@ -454,6 +473,15 @@ class RepostAlbumDelivery:
                     "sent_count": copy_retry_result.get("sent_count"),
                 },
             )
+            if copy_retry_result.get("attempted") and not copy_retry_result["ok"] and not copy_retry_result.get("definitely_rejected"):
+                error_text = "copy_album_uncertain_no_fallback: retry result unknown"
+                logger.warning(
+                    "COPY_ALBUM_RETRY_UNCERTAIN_NO_FALLBACK | rule_id=%s | delivery_ids=%s | action=no_second_send",
+                    rule.id, delivery_ids,
+                )
+                for disputed_id in delivery_ids:
+                    await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
+                return False
             if copy_retry_result["ok"]:
                 await owner._log_delivery_pipeline_step(
                     rule_id=rule.id,
@@ -566,7 +594,15 @@ class RepostAlbumDelivery:
                                 sent_message_ids=retry_ids, telegram_method="copy_album_retry",
                             )
                             await run_db(owner.db.mark_delivery_attempt_verified, idempotency_key, sent_message_ids=retry_ids)
-                    await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
+                    if hasattr(owner, "_mark_album_deliveries_sent_sync"):
+                        await run_db(
+                            owner._mark_album_deliveries_sent_sync, delivery_ids,
+                            sent_message_ids=normalize_valid_sent_message_ids(verified.get("sent_message_ids") or copy_retry_result.get("sent_message_ids") or []),
+                            target_id=str(target_id),
+                            delivery_method="copy_album_retry_verified",
+                        )
+                    else:
+                        await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                     return True
         else:
             copy_retry_result = {
@@ -827,7 +863,15 @@ class RepostAlbumDelivery:
                         delivery_method="reupload_album_verified",
                     )
                 else:
-                    await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
+                    if hasattr(owner, "_mark_album_deliveries_sent_sync"):
+                        await run_db(
+                            owner._mark_album_deliveries_sent_sync, delivery_ids,
+                            sent_message_ids=sent_message_ids,
+                            target_id=str(target_id),
+                            delivery_method="reupload_album_verified",
+                        )
+                    else:
+                        await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                 return True
 
             if is_self_loop and reupload_candidate_sent_ids:
@@ -917,6 +961,27 @@ class RepostAlbumDelivery:
                     else:
                         await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
                 return False
+
+        if reupload_result.get("transport_attempted") and not reupload_result.get("transport_accepted"):
+            # A failed RPC may have committed the album in Telegram.
+            error_text = "telethon_send_attempted_result_unknown_non_retryable"
+            logger.warning(
+                "REUPLOAD_ALBUM_MT_PROTO_UNCERTAIN | rule_id=%s | delivery_ids=%s | action=no_second_send",
+                rule.id, delivery_ids,
+            )
+            await owner._log_delivery_pipeline_step(
+                rule_id=rule.id, delivery_ids=delivery_ids,
+                event_type="delivery_pipeline_step",
+                pipeline_stage="reupload_album_transport_uncertain",
+                pipeline_result="terminal_manual_review",
+                source_channel=source_channel, target_id=target_id,
+                source_message_ids=message_ids, error_text=error_text,
+                extra={"manual_review_required": True, "non_retryable": True,
+                       "transport_attempted": True, "action": "no_second_send"},
+            )
+            for disputed_id in delivery_ids:
+                await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
+            return False
 
         if reupload_result.get("transport_accepted") and not reupload_result.get("authoritative_resolved"):
             error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
@@ -1117,7 +1182,15 @@ class RepostAlbumDelivery:
                         },
                     )
 
-                    await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
+                    if hasattr(owner, "_mark_album_deliveries_sent_sync"):
+                        await run_db(
+                            owner._mark_album_deliveries_sent_sync, delivery_ids,
+                            sent_message_ids=sent_message_ids,
+                            target_id=str(target_id),
+                            delivery_method="reupload_album_retry_verified",
+                        )
+                    else:
+                        await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                     return True
         else:
             reupload_retry_result = {
@@ -1170,6 +1243,16 @@ class RepostAlbumDelivery:
                 "sent_count": one_by_one_result.get("sent_count"),
             },
         )
+
+        if one_by_one_result.get("transport_attempted") and not one_by_one_result.get("transport_accepted"):
+            error_text = "telethon_send_attempted_result_unknown_non_retryable"
+            logger.warning(
+                "ONE_BY_ONE_MT_PROTO_UNCERTAIN | rule_id=%s | delivery_ids=%s | action=no_second_send",
+                rule.id, delivery_ids,
+            )
+            for disputed_id in delivery_ids:
+                await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
+            return False
 
         if one_by_one_result.get("transport_accepted") and not one_by_one_result.get("authoritative_resolved"):
             error_text = "telethon_one_by_one_send_accepted_target_id_unresolved_non_retryable"
@@ -1228,7 +1311,15 @@ class RepostAlbumDelivery:
                 },
             )
 
-            await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
+            if hasattr(owner, "_mark_album_deliveries_sent_sync"):
+                await run_db(
+                    owner._mark_album_deliveries_sent_sync, delivery_ids,
+                    sent_message_ids=one_by_one_result.get("sent_message_ids") or [],
+                    target_id=str(target_id),
+                    delivery_method="one_by_one_fallback",
+                )
+            else:
+                await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
             return True
 
         # =========================================================
