@@ -274,3 +274,63 @@ def test_botapi_copy_transport_uncertain_requires_manual_confirmation():
     assert 'copy_result.get("definitely_rejected")' in source
     assert "copy_album_uncertain_no_fallback" in album
     assert "TelegramBadRequest" in helper
+
+
+def test_missing_download_before_send_does_not_claim_telegram_write():
+    """A failed source download is safely retryable, not an accepted send."""
+    bot = FakeBot()
+    owner = _owner(bot, video_path=None)
+    result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
+        SimpleNamespace(media=object()), "target", None,
+    ))
+    assert result.transport_attempted is False
+    assert result.transport_accepted is False
+    assert result.error_text == "download_failed_before_send"
+    assert bot.calls == []
+
+
+def test_invalid_album_input_before_send_is_not_ambiguous():
+    client, sender = _real_telethon_owner()
+    result = asyncio.run(sender.send_album_via_telethon(
+        target_id="target", target_thread_id=None,
+        messages=[SimpleNamespace(media=None, id=10)],
+    ))
+    assert result["transport_attempted"] is False
+    assert client.send_count == 0
+
+
+def test_definitely_rejected_original_media_without_fallback_is_pre_send_recoverable():
+    from telethon.errors import BadRequestError
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_messages(self, *args, **kwargs):
+            return []
+
+        async def send_file(self, **kwargs):
+            self.calls += 1
+            raise BadRequestError(None, "FILE_REFERENCE_EXPIRED")
+
+    client = Client()
+    owner = SimpleNamespace(
+        telethon=client,
+        _content_from_message_or_post=lambda **kwargs: {"text": "", "entities": []},
+        _build_text_and_entities_from_content=lambda content: ("", []),
+        _clone_telethon_entities=lambda entities, text: [],
+    )
+    sender = SenderTelethonHelpers(owner)
+
+    async def peer(*args, **kwargs):
+        return "target", False
+
+    sender._resolve_target_entity_and_broadcast_flag = peer
+    result = asyncio.run(sender.send_file_via_telethon(
+        target_id="target", target_thread_id=None,
+        message=SimpleNamespace(media=object(), id=10),
+        file_path=None, force_document=True,
+    ))
+    assert client.calls == 1
+    assert result.transport_attempted is False
+    assert result.error_text == "telethon_original_media_failed_no_file_path"

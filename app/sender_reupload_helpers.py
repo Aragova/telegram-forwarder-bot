@@ -379,7 +379,7 @@ class SenderReuploadHelpers:
         file_path = await self.owner.telethon.download_media(message, file=str(settings.media_cache_path))
         if not file_path:
             logger.warning("REUPLOAD_MESSAGE | DOWNLOAD_FAILED")
-            return telethon_transport_failed("download_failed_before_send")
+            return telethon_not_attempted("download_failed_before_send")
 
         try:
             path = Path(file_path)
