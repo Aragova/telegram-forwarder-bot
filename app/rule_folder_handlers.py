@@ -87,8 +87,9 @@ async def _render(
         if variant:
             html, footer = variant
             success = await try_edit_rich_catalog(
-                bot=ctx.get_bot(), message=callback.message, html=html,
-                footer=footer, logger=ctx.logger,
+                bot=getattr(ctx, "get_bot", lambda: None)(),
+                message=callback.message, html=html,
+                footer=footer, logger=getattr(ctx, "logger", None),
             )
             if success:
                 return
@@ -850,8 +851,9 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
             if variant:
                 html, footer = variant
                 edited = await try_edit_rich_catalog(
-                    bot=ctx.get_bot(), message=state["origin_message"],
-                    html=html, footer=footer, logger=ctx.logger,
+                    bot=getattr(ctx, "get_bot", lambda: None)(),
+                    message=state["origin_message"], html=html,
+                    footer=footer, logger=getattr(ctx, "logger", None),
                 )
         if not edited:
             edited = await ctx.edit_message_text_safe(
