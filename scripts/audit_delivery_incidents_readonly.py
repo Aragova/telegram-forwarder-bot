@@ -199,6 +199,30 @@ QUERIES = {
         HAVING COUNT(*) > 1
         ORDER BY saved_post_rows DESC LIMIT 300
     """,
+    "fixed_sent_receipts_recent": """
+        SELECT d.id delivery_id, d.rule_id, d.post_id, d.status,
+               d.created_at, d.sent_at, d.attempt_count, d.delivery_method,
+               d.sent_message_id, d.sent_message_ids_json, d.target_id_snapshot,
+               p.message_id source_message_id, p.source_channel, p.source_thread_id,
+               p.media_group_id, r.mode, r.schedule_mode,
+               r.source_id, r.target_id, r.target_thread_id,
+               (r.source_id=r.target_id AND r.source_thread_id IS NOT DISTINCT FROM r.target_thread_id) self_loop_exact,
+               COUNT(*) OVER () matching_total
+        FROM deliveries d JOIN posts p ON p.id=d.post_id
+        JOIN routing r ON r.id=d.rule_id
+        WHERE r.schedule_mode='fixed' AND d.status='sent' AND d.created_at >= %s
+        ORDER BY d.id DESC LIMIT %s
+    """,
+    "fixed_repeated_source_candidates": """
+        SELECT d.rule_id, p.source_channel, p.source_thread_id, p.message_id source_message_id,
+               COUNT(*) delivery_rows, ARRAY_AGG(d.id ORDER BY d.id) delivery_ids,
+               ARRAY_AGG(d.sent_message_id ORDER BY d.id) target_message_ids
+        FROM deliveries d JOIN routing r ON r.id=d.rule_id
+        JOIN posts p ON p.id=d.post_id
+        WHERE r.schedule_mode='fixed' AND d.status='sent' AND d.created_at >= %s
+        GROUP BY d.rule_id, p.source_channel, p.source_thread_id, p.message_id
+        HAVING COUNT(*)>1 ORDER BY delivery_rows DESC LIMIT 300
+    """,
     "fixed_rule_delivery_summary": """
         SELECT r.id rule_id, r.mode, r.schedule_mode, r.source_id, r.target_id,
                r.source_thread_id, r.target_thread_id,
@@ -262,7 +286,7 @@ def main():
                         params = ()
                     elif name in ("recent_problem_state", "duplicate_target_message_ids",
                                   "reingested_source_message_ids", "fixed_rule_delivery_summary",
-                                  "delivery_status_by_rule"):
+                                  "fixed_repeated_source_candidates", "delivery_status_by_rule"):
                         params = (start_iso,)
                     elif name in ("recent_job_errors", "recent_attempt_failures", "uncertain_attempts"):
                         params = (start_dt, args.limit)
