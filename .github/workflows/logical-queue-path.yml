@@ -27,8 +27,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # Avoid sdist setup scripts and unexpected pip upgrades.
-          python -m pip install --only-binary=:all: -r requirements.txt "pytest==9.0.3"
+          # Allow only pinned pyaes sdist required by Telethon; no surprise pip upgrade.
+          python -m pip install --only-binary=:all: --no-binary=pyaes "pyaes==1.6.1" -r requirements.txt "pytest==9.0.3"
 
       - name: Compile project
         run: python -m compileall app bot.py support_bot.py tests
