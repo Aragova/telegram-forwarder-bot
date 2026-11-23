@@ -4418,6 +4418,12 @@ async def edit_message_text_safe_result(
     )
 
 
+def invalidate_rule_rich_edit_cache(chat_id: int | str, message_id: int) -> None:
+    """Tell UIErrorPolicy when a Rich edit bypasses the ordinary text method."""
+    if ui_policy is not None:
+        ui_policy.invalidate_edit_cache(chat_id=chat_id, message_id=message_id)
+
+
 async def edit_message_text_safe(
     *,
     message,
@@ -8877,6 +8883,7 @@ def _register_user_saas_handlers() -> None:
         logger=logger,
         answer_callback_safe_once=lambda *a, **k: answer_callback_safe_once(*a, **k),
         edit_message_text_safe=lambda *a, **k: edit_message_text_safe(*a, **k),
+        invalidate_rich_edit_cache=invalidate_rule_rich_edit_cache,
         edit_message_reply_markup_safe=edit_message_reply_markup_safe,
         with_recovery_button=_with_recovery_button,
         recovery_has_items=_recovery_has_items,
@@ -9041,6 +9048,7 @@ register_rule_folder_handlers(dp, SimpleNamespace(
     is_admin_user=is_admin_user,
     answer_callback_safe_once=answer_callback_safe_once,
     edit_message_text_safe=edit_message_text_safe,
+    invalidate_rich_edit_cache=invalidate_rule_rich_edit_cache,
     send_message_safe=send_message_safe,
     try_delete_message_safe=try_delete_message_safe,
     refresh_rule_card_for_actor=refresh_rule_card_for_actor,
