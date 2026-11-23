@@ -90,6 +90,7 @@ async def _render(
                 bot=getattr(ctx, "get_bot", lambda: None)(),
                 message=callback.message, html=html,
                 footer=footer, logger=getattr(ctx, "logger", None),
+                invalidate_cache=getattr(ctx, "invalidate_rich_edit_cache", None),
             )
             if success:
                 return
@@ -854,6 +855,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     bot=getattr(ctx, "get_bot", lambda: None)(),
                     message=state["origin_message"], html=html,
                     footer=footer, logger=getattr(ctx, "logger", None),
+                    invalidate_cache=getattr(ctx, "invalidate_rich_edit_cache", None),
                 )
         if not edited:
             edited = await ctx.edit_message_text_safe(
