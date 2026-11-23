@@ -7,6 +7,7 @@ from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app import user_ui
+from app.rule_folder_handlers import clear_folder_input
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ def register_user_menu_handlers(dp: Dispatcher, ctx: UserMenuHandlersContext) ->
         if ctx._is_admin_user(callback.from_user.id if callback.from_user else None):
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
+        clear_folder_input(callback.from_user.id if callback.from_user else None)
         await ctx.answer_callback_safe_once(callback)
         payload = await ctx.build_user_main_payload(callback.from_user.id if callback.from_user else 0)
         await ctx.edit_message_text_safe(

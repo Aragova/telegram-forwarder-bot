@@ -19,6 +19,7 @@ from app.repository_models import (
 )
 from app.postgres_client import PostgresClient
 from app.repository import RepositoryProtocol
+from app.rule_folders_repository import RuleFoldersRepositoryMixin
 from app.repost_campaign_top_time import normalize_repost_campaign_top_time_settings
 from app.tenant_repository import TenantRepository
 from app.subscription_repository import SubscriptionRepository
@@ -119,7 +120,7 @@ def _default_campaign_invite_link_settings(rule_id: int) -> dict[str, Any]:
     }
 
 
-class PostgresRepository(RepositoryProtocol):
+class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def __init__(self) -> None:
         self.client = PostgresClient()
         self.tenant_repo = TenantRepository(self)
@@ -433,6 +434,25 @@ class PostgresRepository(RepositoryProtocol):
             repost_campaign_show_seconds BIGINT NOT NULL DEFAULT 0,
             repost_campaign_saved_post_id BIGINT NULL
         );
+
+        -- Organisation only: never used by worker/scheduler logic.
+        CREATE TABLE IF NOT EXISTS rule_folders (
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT NOT NULL,
+            name TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_folders_tenant_name
+            ON rule_folders (tenant_id, lower(name));
+        CREATE TABLE IF NOT EXISTS rule_folder_assignments (
+            rule_id BIGINT PRIMARY KEY REFERENCES routing(id) ON DELETE CASCADE,
+            tenant_id BIGINT NOT NULL,
+            folder_id BIGINT NOT NULL REFERENCES rule_folders(id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_rule_folder_assignments_folder
+            ON rule_folder_assignments (tenant_id, folder_id);
 
         CREATE TABLE IF NOT EXISTS problem_state(
             id BIGSERIAL PRIMARY KEY,

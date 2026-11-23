@@ -5,6 +5,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from .context import UserHandlersContext
 from app import user_ui
+from app.rule_folders_ui import root_view, additional_functions_view, rule_catalog_view
+from app.rule_folder_handlers import clear_new_rule_folder, clear_folder_input
 
 
 def build_user_rules_keyboard(rules, page: int = 0, *, rules_page_size: int = 8, compact_rule_text=None) -> InlineKeyboardMarkup:
@@ -71,22 +73,17 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
         user_id = callback.from_user.id if callback.from_user else 0
+        clear_new_rule_folder(user_id)
+        clear_folder_input(user_id)
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         ctx.logger.info("пользователь открыл список правил user_id=%s tenant_id=%s", user_id, tenant_id)
         rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id) if hasattr(ctx.db, "get_rules_for_tenant") else []
         await ctx.answer_callback_safe_once(callback)
-        text = (
-            "⚙️ Мои правила\n\n"
-            "У вас пока нет правил.\n\n"
-            "Создайте первое правило:\n"
-            "1. выберите источник;\n"
-            "2. выберите получателя;\n"
-            "3. настройте правило в карточке."
-            if not rules
-            else "⚙️ Мои правила"
+        folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
+        text, kb = root_view(total_rules=len(rules), folders_count=len(folders), admin=False)
+        await ctx.edit_message_text_safe(
+            message=callback.message, text=text, reply_markup=kb, parse_mode="HTML",
         )
-        kb = build_user_rules_keyboard(rules, page=0, rules_page_size=ctx.rules_page_size, compact_rule_text=ctx.compact_rule_text)
-        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
 
     @dp.callback_query(lambda c: c.data == "user_rules_noop")
     async def handle_user_rules_noop(callback: CallbackQuery):
@@ -97,27 +94,20 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
         if ctx.is_admin_user(callback.from_user.id if callback.from_user else None):
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
-        page = int((callback.data or "user_rules_page:0").split(":", 1)[1])
-        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, callback.from_user.id if callback.from_user else 0)
-        rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id) if hasattr(ctx.db, "get_rules_for_tenant") else []
-        await ctx.answer_callback_safe_once(callback)
-        if not rules:
-            await ctx.edit_message_text_safe(
-                message=callback.message,
-                text=(
-                    "⚙️ Мои правила\n\n"
-                    "У вас пока нет правил.\n\n"
-                    "Создайте первое правило:\n"
-                    "1. выберите источник;\n"
-                    "2. выберите получателя;\n"
-                    "3. настройте правило в карточке."
-                ),
-                reply_markup=build_user_rules_keyboard(rules, page=0, rules_page_size=ctx.rules_page_size, compact_rule_text=ctx.compact_rule_text),
-            )
+        try:
+            page = int((callback.data or "user_rules_page:0").split(":", 1)[1])
+        except (ValueError, IndexError):
+            await ctx.answer_callback_safe(callback, "Некорректная страница", show_alert=True)
             return
-        await ctx.edit_message_reply_markup_safe(
-            message=callback.message,
-            reply_markup=build_user_rules_keyboard(rules, page=page, rules_page_size=ctx.rules_page_size, compact_rule_text=ctx.compact_rule_text),
+        user_id = callback.from_user.id if callback.from_user else 0
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
+        rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+        text, keyboard = rule_catalog_view(
+            rules, folder_id=-1, folder_name="", page=page,
+        )
+        await ctx.answer_callback_safe_once(callback)
+        await ctx.edit_message_text_safe(
+            message=callback.message, text=text, reply_markup=keyboard, parse_mode="HTML",
         )
 
     @dp.callback_query(lambda c: c.data == "user_rules_add")
@@ -126,6 +116,7 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             await ctx.answer_callback_safe(callback, "Раздел только для пользователей", show_alert=True)
             return
         user_id = callback.from_user.id if callback.from_user else 0
+        clear_folder_input(user_id)
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         ctx.logger.info("пользователь начал создание правила user_id=%s tenant_id=%s", user_id, tenant_id)
         subscription = await ctx.run_db(ctx.subscription_service.get_active_subscription, tenant_id) or ctx.get_plan_info("FREE", "ru")
@@ -239,14 +230,19 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
         if not snapshot:
             await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
             return
+        tenant_id = await ctx.run_db(ctx.ensure_user_tenant, callback.from_user.id)
+        folders = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+        folder = folders.get(rule_id)
+        text, keyboard = additional_functions_view(
+            rule_id=rule_id,
+            target_title=str(snapshot.get("target_title") or snapshot.get("target_id") or "—"),
+            mode=str(snapshot.get("mode") or "repost"),
+            folder_name=folder["name"] if folder else None,
+            admin=False,
+        )
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(
-            message=callback.message,
-            text=user_ui.build_user_rule_extra_text(
-                rule_id=rule_id,
-                target_title=str(snapshot.get("target_title") or snapshot.get("target_id") or "—"),
-            ),
-            reply_markup=user_ui.build_user_rule_extra_keyboard(rule_id=rule_id, mode=str(snapshot.get("mode") or "repost")),
+            message=callback.message, text=text, reply_markup=keyboard, parse_mode="HTML",
         )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_logs:"))
