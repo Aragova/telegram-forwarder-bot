@@ -183,7 +183,7 @@ def rule_catalog_view(
             all_checked = page_ids.issubset(selected)
             rows.append([
                 _button(
-                    "☐ Снять на странице" if all_checked else "✅ Выбрать 10",
+                    "☐ Снять на странице" if all_checked else f"✅ Выбрать {len(current)}",
                     f"rf:batch_page_all:{folder_id}:{page}",
                 ),
                 _button("❌ Сбросить", f"rf:batch_reset:{folder_id}:{page}"),
@@ -272,7 +272,7 @@ def folder_fill_view(
         all_checked = page_ids.issubset(selected)
         rows.append([
             _button(
-                "☐ Снять на странице" if all_checked else "✅ Выбрать 10",
+                "☐ Снять на странице" if all_checked else f"✅ Выбрать {len(current)}",
                 f"rf:fill_page_all:{folder_id}:{page}",
             ),
             _button("❌ Сбросить", f"rf:fill_reset:{folder_id}:{page}"),
