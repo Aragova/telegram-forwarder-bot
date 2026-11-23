@@ -109,7 +109,7 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             rules, folder_id=-1, folder_name="", page=page,
         )
         await ctx.answer_callback_safe_once(callback)
-        if rich_rule_list_enabled():
+        if rich_rule_list_enabled(admin=False):
             assigned = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
             variant = rich_catalog_payload(text, keyboard, rules, assigned=assigned)
             if variant:
