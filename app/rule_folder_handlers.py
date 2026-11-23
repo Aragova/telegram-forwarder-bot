@@ -84,6 +84,43 @@ async def _root(ctx: Any, callback: CallbackQuery, tenant_id: int, admin: bool) 
     ))
 
 
+async def _workspace_rules(ctx: Any, tenant_id: int, admin: bool, user_id: int):
+    """Accessible rules for folder organization, including the owner's legacy rules."""
+    if not admin:
+        return await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+    ids = await ctx.run_db(
+        ctx.db.list_folder_manageable_rule_ids, tenant_id, int(user_id),
+    )
+    all_rules = await ctx.run_db(ctx.db.get_all_rules)
+    return [rule for rule in all_rules if int(rule.id) in ids]
+
+
+async def _can_manage_folder_rule(
+    ctx: Any, tenant_id: int, admin: bool, user_id: int, rule_id: int,
+) -> bool:
+    if admin:
+        ids = await ctx.run_db(
+            ctx.db.list_folder_manageable_rule_ids, tenant_id, int(user_id),
+        )
+        return int(rule_id) in ids
+    return int(await ctx.run_db(ctx.db.get_rule_tenant_id, rule_id)) == tenant_id
+
+
+async def _assign_for_actor(
+    ctx: Any, tenant_id: int, admin: bool, user_id: int,
+    ids: list[int], folder_id: int | None,
+) -> int:
+    """Only the hard-coded system administrator may organize legacy owner-created rules."""
+    if admin:
+        return await ctx.run_db(
+            ctx.db.assign_rules_to_folder, tenant_id, ids, folder_id,
+            owner_admin_id=int(user_id),
+        )
+    return await ctx.run_db(
+        ctx.db.assign_rules_to_folder, tenant_id, ids, folder_id,
+    )
+
+
 async def _catalog(ctx: Any, callback: CallbackQuery, *, tenant_id: int, admin: bool,
                    folder_id: int, page: int, search: str | None = None, batch: bool = False):
     # Admin's legacy All rules continues to include every rule; folders are tenant-specific.
