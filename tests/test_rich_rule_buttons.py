@@ -161,10 +161,10 @@ def test_rich_payload_exact_bot_api_parameters():
 
 
 def test_bot_api_rich_success_and_old_server_fallback():
-    class StubClient:
+    class StubResponse:
         def __init__(self, response):
-            self.response = response
-            self.last_request = None
+            self.payload = response
+            self.status = 200 if response.get("ok") else 400
 
         async def __aenter__(self):
             return self
@@ -172,9 +172,17 @@ def test_bot_api_rich_success_and_old_server_fallback():
         async def __aexit__(self, *_):
             return None
 
-        async def post(self, url, json):
+        async def json(self):
+            return self.payload
+
+    class StubSession:
+        def __init__(self, response):
+            self.response = response
+            self.last_request = None
+
+        def post(self, url, json):
             self.last_request = (url, json)
-            return SimpleNamespace(status_code=400, json=lambda: self.response)
+            return StubResponse(self.response)
 
     bot = SimpleNamespace(
         token="example_token",
@@ -186,35 +194,42 @@ def test_bot_api_rich_success_and_old_server_fallback():
     rules = [Rule(4, "Light Dante")]
     text, kb = rule_catalog_view(rules, folder_id=-1, folder_name="", page=0)
     html, footer = rich_catalog_payload(text, kb, rules)
+    invalidated = []
 
-    ok_client = StubClient({"ok": True, "result": {"message_id": 42}})
+    ok_client = StubSession({"ok": True, "result": {"message_id": 42}})
+    async def ok_factory():
+        return ok_client
+
     ok = asyncio.run(try_edit_rich_catalog(
         bot=bot, message=message, html=html, footer=footer,
-        client_factory=lambda **kw: ok_client,
+        session_factory=ok_factory,
+        invalidate_cache=lambda chat, msg: invalidated.append((chat, msg)),
     ))
     assert ok
+    assert invalidated == [(999, 42)]
     assert ok_client.last_request[1]["rich_message"]["html"] == html
 
-    broken_client = StubClient({
+    broken_client = StubSession({
         "ok": False, "error_code": 400,
         "description": "Bad Request: rich_message is not supported",
     })
+    async def broken_factory():
+        return broken_client
+
     fallback = asyncio.run(try_edit_rich_catalog(
         bot=bot, message=message, html=html, footer=footer,
-        client_factory=lambda **kw: broken_client,
+        session_factory=broken_factory,
+        invalidate_cache=lambda chat, msg: invalidated.append((chat, msg)),
     ))
     assert not fallback
+    # We invalidate before attempting Rich so classic fallback can edit
+    # the same message immediately even after a cached previous screen.
+    assert invalidated == [(999, 42), (999, 42)]
 
 
 def test_editor_does_not_log_token_on_transport_error():
-    class StubClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_):
-            return None
-
-        async def post(self, url, json):
+    class StubSession:
+        def post(self, url, json):
             raise RuntimeError(f"Failed to POST {url}: secret-token")
 
     class Logger:
@@ -235,12 +250,28 @@ def test_editor_does_not_log_token_on_transport_error():
     )
     message = SimpleNamespace(chat=SimpleNamespace(id=1), message_id=2)
     from aiogram.types import InlineKeyboardMarkup
+
+    async def session_factory():
+        return StubSession()
+
     ok = asyncio.run(try_edit_rich_catalog(
         bot=bot, message=message, html="<p>Hi</p>",
         footer=InlineKeyboardMarkup(inline_keyboard=[]),
-        client_factory=lambda **kw: StubClient(),
+        session_factory=session_factory,
         logger=logger,
     ))
     assert not ok
     assert logger.messages
     assert "secret-token" not in str(logger.messages)
+
+
+def test_ui_edit_cache_is_invalidated_before_raw_rich_and_classic_fallback():
+    from app.ui_error_policy import UIErrorPolicy
+
+    # Avoid network/flood-lock side effects; test the cache API directly.
+    policy = object.__new__(UIErrorPolicy)
+    policy._last_edit_signature = {(99, 77): ("Меню правил", "markup")}
+    policy._last_edit_at = {(99, 77): 99999.0}
+    policy.invalidate_edit_cache(chat_id=99, message_id=77)
+    assert (99, 77) not in policy._last_edit_signature
+    assert (99, 77) not in policy._last_edit_at
