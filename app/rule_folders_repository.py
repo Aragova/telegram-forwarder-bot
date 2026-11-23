@@ -21,9 +21,9 @@ class RuleFoldersRepositoryMixin:
                            COUNT(r.id)::int AS rules_count,
                            COUNT(r.id) FILTER (WHERE r.is_active)::int AS active_count
                     FROM rule_folders f
-                    LEFT JOIN rule_folder_assignments a ON a.folder_id = f.id
+                    LEFT JOIN rule_folder_assignments a
+                      ON a.folder_id = f.id AND a.tenant_id = f.tenant_id
                     LEFT JOIN routing r ON r.id = a.rule_id
-                      AND COALESCE(r.tenant_id, 1) = f.tenant_id
                     WHERE f.tenant_id = %s
                     GROUP BY f.id, f.tenant_id, f.name
                     ORDER BY lower(f.name), f.id
@@ -102,17 +102,35 @@ class RuleFoldersRepositoryMixin:
                     JOIN rule_folders f ON f.id = a.folder_id AND f.tenant_id = a.tenant_id
                     JOIN routing r ON r.id = a.rule_id
                     WHERE a.tenant_id = %s
-                      AND COALESCE(r.tenant_id, 1) = %s
                     """,
-                    (int(tenant_id), int(tenant_id)),
+                    (int(tenant_id),),
                 )
                 return {
                     int(row["rule_id"]): {"id": int(row["folder_id"]), "name": str(row["name"])}
                     for row in cur.fetchall()
                 }
 
+    def list_folder_manageable_rule_ids(
+        self, tenant_id: int, owner_admin_id: int,
+    ) -> set[int]:
+        """Owner's workspace includes legacy rules created by them in tenant 1.
+
+        No change to rule.tenant_id or to the SaaS user's ordinary tenant ACL.
+        """
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id FROM routing
+                    WHERE COALESCE(tenant_id, 1) = %s OR created_by = %s
+                    """,
+                    (int(tenant_id), int(owner_admin_id)),
+                )
+                return {int(row["id"]) for row in cur.fetchall()}
+
     def assign_rules_to_folder(
         self, tenant_id: int, rule_ids: list[int], folder_id: int | None,
+        *, owner_admin_id: int | None = None,
     ) -> int:
         """All-or-nothing tenant-safe bulk move, including the 'unfiled' case."""
         ids = list(dict.fromkeys(int(x) for x in rule_ids))
@@ -127,15 +145,32 @@ class RuleFoldersRepositoryMixin:
                     )
                     if not cur.fetchone():
                         raise ValueError("Папка не найдена")
+                where = (
+                    "id = ANY(%s) AND COALESCE(tenant_id, 1) = %s"
+                    if owner_admin_id is None
+                    else "id = ANY(%s) AND (COALESCE(tenant_id, 1) = %s OR created_by = %s)"
+                )
+                params = (
+                    (ids, int(tenant_id))
+                    if owner_admin_id is None
+                    else (ids, int(tenant_id), int(owner_admin_id))
+                )
                 cur.execute(
-                    """
-                    SELECT COUNT(*)::int AS cnt FROM routing
-                    WHERE id = ANY(%s) AND COALESCE(tenant_id, 1) = %s
-                    """,
-                    (ids, int(tenant_id)),
+                    f"SELECT COUNT(*)::int AS cnt FROM routing WHERE {where}",
+                    params,
                 )
                 if int(cur.fetchone()["cnt"]) != len(ids):
                     raise ValueError("Одно или несколько правил не принадлежат аккаунту")
+                # An existing assignment of another owner must never be stolen.
+                cur.execute(
+                    """
+                    SELECT COUNT(*)::int AS cnt FROM rule_folder_assignments
+                    WHERE rule_id = ANY(%s) AND tenant_id <> %s
+                    """,
+                    (ids, int(tenant_id)),
+                )
+                if int(cur.fetchone()["cnt"]) != 0:
+                    raise ValueError("Одно из правил находится в папке другого аккаунта")
                 if folder_id is None:
                     cur.execute(
                         "DELETE FROM rule_folder_assignments WHERE tenant_id = %s AND rule_id = ANY(%s)",
@@ -146,12 +181,15 @@ class RuleFoldersRepositoryMixin:
                         """
                         INSERT INTO rule_folder_assignments (rule_id, tenant_id, folder_id)
                         SELECT id, %s, %s FROM routing
-                        WHERE id = ANY(%s) AND COALESCE(tenant_id, 1) = %s
+                        WHERE {where}
                         ON CONFLICT (rule_id)
                         DO UPDATE SET folder_id = EXCLUDED.folder_id,
                                       tenant_id = EXCLUDED.tenant_id
-                        """,
-                        (int(tenant_id), int(folder_id), ids, int(tenant_id)),
+                        WHERE rule_folder_assignments.tenant_id = EXCLUDED.tenant_id
+                        """.format(where=where),
+                        (int(tenant_id), int(folder_id), *params),
                     )
+                    if cur.rowcount != len(ids):
+                        raise ValueError("Некоторые правила уже находятся в папке другого аккаунта")
             conn.commit()
         return len(ids)
