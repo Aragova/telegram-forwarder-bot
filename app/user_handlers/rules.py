@@ -6,6 +6,9 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .context import UserHandlersContext
 from app import user_ui
 from app.rule_folders_ui import root_view, additional_functions_view, rule_catalog_view
+from app.rich_rule_buttons import (
+    rich_catalog_payload, rich_rule_list_enabled, try_edit_rich_catalog,
+)
 from app.rule_folder_handlers import clear_new_rule_folder, clear_folder_input
 
 
@@ -106,6 +109,16 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             rules, folder_id=-1, folder_name="", page=page,
         )
         await ctx.answer_callback_safe_once(callback)
+        if rich_rule_list_enabled():
+            assigned = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+            variant = rich_catalog_payload(text, keyboard, rules, assigned=assigned)
+            if variant:
+                rich_html, footer = variant
+                if await try_edit_rich_catalog(
+                    bot=ctx.bot, message=callback.message, html=rich_html,
+                    footer=footer, logger=ctx.logger,
+                ):
+                    return
         await ctx.edit_message_text_safe(
             message=callback.message, text=text, reply_markup=keyboard, parse_mode="HTML",
         )
