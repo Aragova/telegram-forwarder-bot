@@ -3315,33 +3315,26 @@ def build_rule_card_text(row) -> str:
                 logger.exception("Не удалось собрать сводку рекламной кампании, rule_id=%s", rule_id)
                 repost_campaign_line = "\n💰 Рекламная кампания"
 
-    # Rich presentation reuses the existing queue snapshot and never alters
-    # delivery counters, schedule calculations or fallback behaviour.
+    # Compact presentation reuses the original logical snapshot unchanged.
+    # Long channel names remain complete, with natural Telegram line wrapping.
     details = [
         f"📋 <b>ПРАВИЛО #{rule_id}</b>",
-        "",
-        "🔗 <b>МАРШРУТ ПУБЛИКАЦИИ</b>",
         f"📤 <b>Источник:</b> {safe_html(source_title)}",
         f"📥 <b>Получатель:</b> {safe_html(target_title)}",
         "",
-        "━━━━━━━━━━━━━━",
-        "📡 <b>СОСТОЯНИЕ</b>",
         safe_html(status_line),
         safe_html(wait_line),
         "",
-        "━━━━━━━━━━━━━━",
-        "📊 <b>СТАТИСТИКА ПУБЛИКАЦИЙ</b>",
-        f"📦 <b>В очереди:</b> {logical_pending}",
-        f"⏳ <b>В обработке:</b> {processing}",
-        f"✅ <b>Отправлено:</b> {completed}",
-        f"⚠️ <b>Ошибки:</b> {faulty}",
-        f"📍 <b>Позиция:</b> {safe_html(position_text)}",
+        "📊 <b>ПУБЛИКАЦИИ</b>",
+        f"📦 Очередь: <b>{logical_pending}</b> · ⏳ Обработка: <b>{processing}</b>",
+        f"✅ Отправлено: <b>{completed}</b> · ⚠️ Ошибки: <b>{faulty}</b>",
+        f"📍 Позиция: <b>{safe_html(position_text)}</b>"
+        + (f" · {caption_mode_line}" if caption_mode_line else ""),
     ]
-    if caption_mode_line:
-        details.extend(["", "━━━━━━━━━━━━━━", "🎛 <b>ОФОРМЛЕНИЕ</b>", caption_mode_line])
     if repost_campaign_line:
-        details.extend(["", "━━━━━━━━━━━━━━", repost_campaign_line.strip()])
+        details.append(repost_campaign_line.strip().replace("\n", " · "))
     return "\n".join(details)
+
 
 def build_start_position_text(
     item: dict[str, Any],
@@ -3495,49 +3488,53 @@ def build_rule_card_keyboard(
     schedule_mode: str = "interval",
     mode: str = "repost",
 ) -> InlineKeyboardMarkup:
-    """Compact rich controls. Keep all original callbacks and permissions."""
+    """Two-column control grid; same callbacks and role filtering as before."""
     rows: list[list[InlineKeyboardButton]] = []
     if schedule_mode == "fixed":
-        rows.append([rule_ui_button(
-            "🟢 Плавающий график", f"set_interval_mode:{rule_id}", style="primary",
-        )])
         rows.append([
+            rule_ui_button("🕒 Плавающий", f"set_interval_mode:{rule_id}", style="primary"),
             rule_ui_button("⏰ Фикс. время", f"change_fixed_times:{rule_id}", style="primary"),
-            rule_ui_button("🕒 Время", f"change_next_run:{rule_id}", style="primary"),
         ])
     else:
-        rows.append([rule_ui_button(
-            "📌 Фиксированный график", f"change_fixed_times:{rule_id}", style="primary",
-        )])
         rows.append([
+            rule_ui_button("📌 Фикс. график", f"change_fixed_times:{rule_id}", style="primary"),
             rule_ui_button("⏱ Интервал", f"change_interval:{rule_id}", style="primary"),
-            rule_ui_button("🕒 Время", f"change_next_run:{rule_id}", style="primary"),
         ])
+    rows.append([
+        rule_ui_button("🕒 Время", f"change_next_run:{rule_id}", style="primary"),
+        rule_ui_button("⚙️ Доп. функции", f"rule_extra_menu:{rule_id}", style="primary"),
+    ])
     if mode == "video":
         rows.append([
             rule_ui_button("🎬 Заставки", f"video_intro_menu:{rule_id}", style="primary"),
             rule_ui_button("✍️ Подпись", f"video_caption_menu:{rule_id}", style="primary"),
         ])
-    rows.append([rule_ui_button(
-        "⚙️ Дополнительные функции", f"rule_extra_menu:{rule_id}", style="primary",
-    )])
-    if mode == "repost" and settings.repost_campaign_admin_test_enabled:
+    campaign_enabled = mode == "repost" and settings.repost_campaign_admin_test_enabled
+    if campaign_enabled:
+        rows.append([
+            rule_ui_button("💰 Реклама", f"rule_repost_campaign_menu:{rule_id}", style="primary"),
+            rule_ui_button("🔄 Обновить", f"rule_refresh:{rule_id}", style="primary"),
+        ])
         rows.append([rule_ui_button(
-            "💰 Рекламная кампания", f"rule_repost_campaign_menu:{rule_id}", style="primary",
-        )])
-    rows.append([
-        rule_ui_button("🔄 Обновить", f"rule_refresh:{rule_id}", style="primary"),
-        rule_ui_button(
             "⏸ Выключить" if is_active else "▶️ Включить",
             f"disable_rule:{rule_id}" if is_active else f"enable_rule:{rule_id}",
-            style="primary" if is_active else "success",
-        ),
-    ])
+            style="danger" if is_active else "success",
+        )])
+    else:
+        rows.append([
+            rule_ui_button("🔄 Обновить", f"rule_refresh:{rule_id}", style="primary"),
+            rule_ui_button(
+                "⏸ Выключить" if is_active else "▶️ Включить",
+                f"disable_rule:{rule_id}" if is_active else f"enable_rule:{rule_id}",
+                style="danger" if is_active else "success",
+            ),
+        ])
     rows.append([
         rule_ui_button("⬅️ К правилам", f"rf:back:{rule_id}", style="primary"),
         rule_ui_button("🏠 Главное меню", "rule_to_main_menu", style="primary"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 def build_rule_extra_keyboard(rule_id: int) -> InlineKeyboardMarkup:
