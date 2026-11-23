@@ -20,7 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
-      REPORT_DIR: ${{ runner.temp }}/quality
       PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
 
     steps:
@@ -33,6 +32,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Initialize report directory
+        shell: bash
+        run: |
+          echo "REPORT_DIR=$RUNNER_TEMP/quality" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/quality"
 
       - name: Install analyzers and Graphviz
         run: |
@@ -74,6 +79,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p docs "$REPORT_DIR"
+          rm -f docs/architecture_flow.png
           set +e
           timeout 180s code2flow --language py --hide-legend \
             bot.py \
@@ -233,4 +239,7 @@ jobs:
 
       - name: Require generated diagram
         if: always()
-        run: test -s docs/architecture_flow.png
+        shell: bash
+        run: |
+          test "${{ steps.graph.outputs.created }}" = "true"
+          test -s docs/architecture_flow.png
