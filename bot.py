@@ -5665,6 +5665,8 @@ def build_faulty_pages(limit: int = 200) -> list[dict[str, Any]]:
         status_label, error_type = classify_faulty_row(row)
         error_text = escape((row["error_text"] or "Причина не указана").strip())
         created_at_text = faulty_delivery_time_from_created_at(row["fault_created_at"] or row["created_at"])
+        if created_at_text == "дата неизвестна":
+            created_at_text = faulty_delivery_time_from_created_at(row["created_at"])
 
         problem_state = db.get_problem_state(f"rule_faulty_{row['rule_id']}")
         in_work_text = ""
@@ -5709,7 +5711,13 @@ def classify_faulty_row(row) -> tuple[str, str]:
 
     text = (row["error_text"] or "").lower()
 
-    if "entity too large" in text or "request entity too large" in text:
+    if (
+        "accepted_target_id_unresolved" in text
+        or "copy_single_uncertain_no_fallback" in text
+        or "target message id not confirmed" in text
+    ):
+        error_type = "🧭 Отправка требует сверки с Telegram"
+    elif "entity too large" in text or "request entity too large" in text:
         error_type = "📦 Слишком большой файл"
     elif "timeout" in text:
         error_type = "⏱ Таймаут"
@@ -5724,16 +5732,19 @@ def classify_faulty_row(row) -> tuple[str, str]:
 
     return status_label, error_type
 
-def faulty_delivery_time_from_created_at(created_at: str | None) -> str:
+def faulty_delivery_time_from_created_at(created_at: str | datetime | None) -> str:
     if not created_at:
-        return "время неизвестно"
+        return "дата неизвестна"
 
     try:
-        dt = datetime.fromisoformat(created_at)
-        dt_local = dt.astimezone(USER_TZ)
-        return dt_local.strftime("%d.%m.%Y %H:%M")
-    except Exception:
-        return "ошибка времени"
+        dt = created_at if isinstance(created_at, datetime) else datetime.fromisoformat(
+            str(created_at).strip().replace("Z", "+00:00")
+        )
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(USER_TZ).strftime("%d.%m.%Y %H:%M")
+    except (ValueError, TypeError, OverflowError):
+        return "дата неизвестна"
 
 def _build_intro_handlers_context() -> IntroHandlersContext:
     return IntroHandlersContext(

@@ -364,6 +364,9 @@ class SenderTelethonHelpers:
         media_kind = _detect_message_media_kind(message)
         supports_streaming = media_kind == "video"
 
+        # A transport exception after send_file starts does not establish
+        # that Telegram rejected the request. Do not send again.
+        original_send_started = False
         try:
             logger.info(
                 "TELETHON_FILE_SEND | START_ORIGINAL_MEDIA | target=%s | thread=%s | media_kind=%s | caption_len=%s | entities_in=%s | entities_out=%s | supports_streaming=%s",
@@ -394,10 +397,8 @@ class SenderTelethonHelpers:
             resolver = TelethonAuthoritativeMessageResolver(self.owner.telethon)
             before_max_message_id = await resolver.get_before_max_message_id(entity, target_id)
             send_started_at = datetime.now(timezone.utc)
-            try:
-                sent = await self.owner.telethon.send_file(**send_kwargs)
-            except Exception:
-                raise
+            original_send_started = True
+            sent = await self.owner.telethon.send_file(**send_kwargs)
             send_finished_at = datetime.now(timezone.utc)
             returned_candidate_id = int(sent.id) if sent else None
             if not sent:
@@ -438,6 +439,9 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
+            if original_send_started:
+                logger.warning("TELETHON_FILE_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
+                return telethon_transport_failed(f"original_media_send_uncertain: {exc}")
 
         if not file_path:
             logger.warning(
@@ -569,6 +573,7 @@ class SenderTelethonHelpers:
     ) -> dict:
         downloaded_paths: list[Path] = []
 
+        original_send_started = False
         try:
             if not messages:
                 return telethon_transport_failed("Пустой список сообщений для Telethon album send").to_reupload_album_result(sent_count=0)
@@ -623,6 +628,7 @@ class SenderTelethonHelpers:
             resolver = TelethonAuthoritativeMessageResolver(self.owner.telethon)
             before_max_message_id = await resolver.get_before_max_message_id(entity, target_id)
             send_started_at = datetime.now(timezone.utc)
+            original_send_started = True
             sent = await self.owner.telethon.send_file(**send_kwargs)
             send_finished_at = datetime.now(timezone.utc)
             if not sent:
@@ -685,6 +691,11 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
+            if original_send_started:
+                logger.warning("TELETHON_ALBUM_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
+                return telethon_transport_failed(
+                    f"original_album_send_uncertain: {exc}"
+                ).to_reupload_album_result(sent_count=0)
 
         try:
             files: list[str] = []

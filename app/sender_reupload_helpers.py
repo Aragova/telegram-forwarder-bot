@@ -48,6 +48,20 @@ class SenderReuploadHelpers:
                     if outcome.transport_accepted and outcome.authoritative_resolved and outcome.authoritative_message_id:
                         sent_ids.append(int(outcome.authoritative_message_id))
                         continue
+                    if outcome.transport_attempted and not outcome.transport_accepted:
+                        return {
+                            "ok": False,
+                            "transport_attempted": True,
+                            "transport_accepted": False,
+                            "authoritative_resolved": False,
+                            "sent_message_id": sent_ids[0] if sent_ids else None,
+                            "sent_message_ids": sent_ids[:],
+                            "sent_count": len(sent_ids),
+                            "error_text": outcome.error_text or "uncertain_one_by_one_transport",
+                            "manual_review_required": True,
+                            "non_retryable": True,
+                            "action": "no_second_send",
+                        }
                     if outcome.transport_accepted and not outcome.authoritative_resolved:
                         return {
                             "ok": False,
@@ -67,6 +81,8 @@ class SenderReuploadHelpers:
                         }
                     return {
                         "ok": False,
+                        "transport_accepted": bool(sent_ids),
+                        "authoritative_resolved": False,
                         "sent_message_id": sent_ids[0] if sent_ids else None,
                         "sent_message_ids": sent_ids[:],
                         "sent_count": len(sent_ids),
@@ -95,6 +111,8 @@ class SenderReuploadHelpers:
         except Exception as exc:
             return {
                 "ok": False,
+                "transport_accepted": bool(sent_ids),
+                "authoritative_resolved": False,
                 "sent_message_id": sent_ids[0] if sent_ids else None,
                 "sent_message_ids": sent_ids[:],
                 "sent_count": len(sent_ids),
@@ -153,8 +171,8 @@ class SenderReuploadHelpers:
                 telethon_result["sent_message_ids"] = send_result.sent_message_ids
                 telethon_result["sent_message_id"] = send_result.sent_message_id
                 return telethon_result
-            if telethon_result.get("transport_accepted"):
-                logger.warning("REUPLOAD_ALBUM | TELETHON_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
+            if telethon_result.get("transport_attempted") or telethon_result.get("transport_accepted"):
+                logger.warning("REUPLOAD_ALBUM | TELETHON_UNCERTAIN | no_botapi_fallback=True")
                 return telethon_result
 
             caption_index = 0 if caption_override is not None else None
@@ -336,11 +354,8 @@ class SenderReuploadHelpers:
             )
             if isinstance(telethon_outcome, int) and telethon_outcome > 0:
                 return TelethonSendOutcome(True, True, True, int(telethon_outcome), [int(telethon_outcome)], resolution_method="legacy_telethon_helper")
-            if getattr(telethon_outcome, "transport_accepted", False):
-                if telethon_outcome.authoritative_resolved:
-                    logger.info("REUPLOAD_MESSAGE | TELETHON_TEXT_USED | sent_message_id=%s", telethon_outcome.authoritative_message_id)
-                else:
-                    logger.warning("REUPLOAD_MESSAGE | TELETHON_TEXT_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
+            if getattr(telethon_outcome, "transport_attempted", False) or getattr(telethon_outcome, "transport_accepted", False):
+                logger.warning("REUPLOAD_MESSAGE | TELETHON_TEXT_UNCERTAIN | no_botapi_fallback=True")
                 return telethon_outcome
 
             html_text = raw_text if caption_override is not None else _sender_primitives._prepare_html_text(raw_text)
@@ -393,11 +408,8 @@ class SenderReuploadHelpers:
             )
             if isinstance(telethon_outcome, int) and telethon_outcome > 0:
                 return TelethonSendOutcome(True, True, True, int(telethon_outcome), [int(telethon_outcome)], resolution_method="legacy_telethon_helper")
-            if getattr(telethon_outcome, "transport_accepted", False):
-                if telethon_outcome.authoritative_resolved:
-                    logger.info("REUPLOAD_MESSAGE | TELETHON_FILE_USED | sent_message_id=%s", telethon_outcome.authoritative_message_id)
-                else:
-                    logger.warning("REUPLOAD_MESSAGE | TELETHON_FILE_ACCEPTED_UNRESOLVED | no_botapi_fallback=True")
+            if getattr(telethon_outcome, "transport_attempted", False) or getattr(telethon_outcome, "transport_accepted", False):
+                logger.warning("REUPLOAD_MESSAGE | TELETHON_FILE_UNCERTAIN | no_botapi_fallback=True")
                 return telethon_outcome
 
             html_text = raw_text if caption_override is not None else _sender_primitives._prepare_html_text(raw_text)
