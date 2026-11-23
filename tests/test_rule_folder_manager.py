@@ -404,7 +404,8 @@ def test_batch_unfile_scope_rejects_other_tenant_and_other_folder():
         assert await folder_handlers._selected_folder_rule_ids(ctx, 2, 9, {214, 216}) == [214, 216]
 
     asyncio.run(verify())
-    assert [x[0] for x in calls].count("get_rules_for_tenant") == 2
+    assert len(calls) == 4
+    assert all(arguments == (2,) for _, arguments in calls)
 
 
 def test_rich_rule_card_preserves_snapshot_counters_and_routes():
