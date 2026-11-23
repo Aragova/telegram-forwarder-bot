@@ -116,7 +116,10 @@ def rule_catalog_view(
     ]
     if search_term is not None:
         lines.append(f"🔎 <b>Запрос:</b> {escape(search_term)}")
-    lines += ["", "🔻 Названия показаны полностью. Откройте правило кнопкой с его номером.", ""]
+    if selected is None:
+        lines += ["", "🔻 Названия показаны полностью. Откройте правило кнопкой с его номером.", ""]
+    else:
+        lines += ["", "☑️ Отмечайте номера правил. Выбор сохраняется при смене страницы.", ""]
     rows = []
     number_buttons = []
     for rule in current:
@@ -157,20 +160,100 @@ def rule_catalog_view(
     if nav:
         rows.append(nav)
     if selected is not None:
-        rows.append([_button(f"📁 Переместить выбранные ({len(selected)})",
-                             f"rf:bulk_to:{folder_id}", style="success")])
+        if folder_id > 0:
+            rows.append([_button(f"📂 Убрать из папки ({len(selected)})",
+                                 f"rf:unfile:{folder_id}:{page}")])
+            rows.append([_button(f"📁 Переместить в другую папку ({len(selected)})",
+                                 f"rf:bulk_to:{folder_id}", style="success")])
+        else:
+            rows.append([_button(f"📁 Переместить выбранные ({len(selected)})",
+                                 f"rf:bulk_to:{folder_id}", style="success")])
         rows.append([_button("❌ Сбросить выбор", f"rf:batch_reset:{folder_id}:{page}")])
         rows.append([_button("⬅️ К списку", f"rf:list:{folder_id}:{page}")])
     else:
         if search_term is None:
-            rows.append([_button("☑️ Выбрать несколько", f"rf:batch:{folder_id}:{page}")])
             if folder_id > 0:
-                rows.append([_button("➕ Добавить правило", f"rf:add_in:{folder_id}", style="success")])
+                rows.append([_button("📥 Добавить существующие правила",
+                                     f"rf:fill:{folder_id}:0", style="success")])
+                if rules:
+                    rows.append([_button("☑️ Выбрать несколько", f"rf:batch:{folder_id}:{page}")])
+                rows.append([_button("➕ Создать новое правило", f"rf:add_in:{folder_id}")])
                 rows.append([_button("⚙️ Управление папкой", f"rf:folder_settings:{folder_id}:{page}")])
+            else:
+                if rules:
+                    rows.append([_button("☑️ Выбрать несколько", f"rf:batch:{folder_id}:{page}")])
         rows.append([_button("🔎 Поиск", "rf:search")])
         rows.append([_button("⬅️ Назад", "rf:search" if search_term is not None
                              else f"rf:folders:{folders_page}" if folder_id != -1
                              else "rf:root")])
+    return "\n".join(lines).rstrip(), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+
+def folder_fill_candidates(rules: list, assignments: dict[int, dict], folder_id: int) -> list:
+    """All accessible rules except those already assigned to the destination folder."""
+    return [
+        rule for rule in rules
+        if int(assignments.get(int(rule.id), {}).get("id") or 0) != int(folder_id)
+    ]
+
+
+def folder_fill_view(
+    candidates: list, *, folder_id: int, folder_name: str, page: int,
+    selected: set[int], assignments: dict[int, dict],
+):
+    """Pick rules from the tenant's whole catalog, not from the empty destination."""
+    current, page, pages = _paginate(candidates, page, CATALOG_PAGE_SIZE)
+    lines = [
+        "📥 <b>ДОБАВЛЕНИЕ СУЩЕСТВУЮЩИХ ПРАВИЛ</b>",
+        "",
+        f"📂 <b>Папка:</b> {escape(folder_name)}",
+        f"📊 <b>Доступно для добавления:</b> {len(candidates)}",
+        f"✅ <b>Выбрано:</b> {len(selected)}",
+        "",
+        "🔻 Выберите правила из общего списка. Можно отмечать на разных страницах.",
+        "Если правило уже в другой папке, оно будет перенесено сюда.",
+        "",
+    ]
+    rows = []
+    pair = []
+    for rule in current:
+        rid = int(rule.id)
+        source = str(rule.source_title or rule.source_id)
+        target = str(rule.target_title or rule.target_id)
+        owner_folder = assignments.get(rid, {}).get("name") or "Без папки"
+        state = "🟢" if bool(rule.is_active) else "⏸"
+        lines.extend([
+            f"{state} <b>Правило #{rid}</b>",
+            f"📤 <b>Источник:</b> {escape(source)}",
+            f"📥 <b>Получатель:</b> {escape(target)}",
+            f"📂 <b>Сейчас:</b> {escape(str(owner_folder))}",
+            "",
+        ])
+        pair.append(_button(f"{'✅' if rid in selected else '☐'} #{rid}",
+                            f"rf:fill_pick:{folder_id}:{page}:{rid}"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    if not current:
+        lines.append("📭 Все доступные правила уже находятся в этой папке.")
+    if current:
+        page_ids = {int(r.id) for r in current}
+        all_checked = page_ids.issubset(selected)
+        rows.append([_button(
+            "☑️ Снять выбор на странице" if all_checked else "✅ Выбрать всю страницу",
+            f"rf:fill_page_all:{folder_id}:{page}",
+        )])
+    nav = _page_buttons(f"rf:fill:{folder_id}", page, pages)
+    if nav:
+        rows.append(nav)
+    if selected:
+        rows.append([_button(f"✅ Добавить выбранные ({len(selected)})",
+                             f"rf:fill_apply:{folder_id}", style="success")])
+        rows.append([_button("❌ Сбросить выбор", f"rf:fill_reset:{folder_id}:{page}")])
+    rows.append([_button("⬅️ Назад в папку", f"rf:list:{folder_id}:0")])
     return "\n".join(lines).rstrip(), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -298,6 +381,8 @@ def additional_functions_view(
     ], [
         _button("📁 Переместить в папку", f"rf:move:{rule_id}"),
     ]]
+    if folder_name:
+        rows.append([_button("📂 Убрать из папки", f"rf:unfile_one:{rule_id}")])
     if not admin:
         rows.append([_button("⚙️ Реакции", f"user_rule_reactions:{rule_id}")])
     rows += [[
