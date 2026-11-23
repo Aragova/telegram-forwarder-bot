@@ -379,7 +379,15 @@ class RepostAlbumDelivery:
 
                     if idempotency_key and hasattr(owner.db, "mark_delivery_attempt_verified"):
                         await run_db(owner.db.mark_delivery_attempt_verified, idempotency_key, sent_message_ids=accepted_target_message_ids)
-                    await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
+                    if hasattr(owner, "_mark_album_deliveries_sent_sync"):
+                        await run_db(
+                            owner._mark_album_deliveries_sent_sync, delivery_ids,
+                            sent_message_ids=accepted_target_message_ids,
+                            target_id=str(target_id),
+                            delivery_method="copy_album_verified",
+                        )
+                    else:
+                        await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                     return True
                 if accepted_copy_sent_ids:
                     error_text = (
@@ -586,7 +594,15 @@ class RepostAlbumDelivery:
                                 sent_message_ids=retry_ids, telegram_method="copy_album_retry",
                             )
                             await run_db(owner.db.mark_delivery_attempt_verified, idempotency_key, sent_message_ids=retry_ids)
-                    await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
+                    if hasattr(owner, "_mark_album_deliveries_sent_sync"):
+                        await run_db(
+                            owner._mark_album_deliveries_sent_sync, delivery_ids,
+                            sent_message_ids=normalize_valid_sent_message_ids(verified.get("sent_message_ids") or copy_retry_result.get("sent_message_ids") or []),
+                            target_id=str(target_id),
+                            delivery_method="copy_album_retry_verified",
+                        )
+                    else:
+                        await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                     return True
         else:
             copy_retry_result = {
@@ -847,7 +863,15 @@ class RepostAlbumDelivery:
                         delivery_method="reupload_album_verified",
                     )
                 else:
-                    await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
+                    if hasattr(owner, "_mark_album_deliveries_sent_sync"):
+                        await run_db(
+                            owner._mark_album_deliveries_sent_sync, delivery_ids,
+                            sent_message_ids=sent_message_ids,
+                            target_id=str(target_id),
+                            delivery_method="reupload_album_verified",
+                        )
+                    else:
+                        await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                 return True
 
             if is_self_loop and reupload_candidate_sent_ids:
@@ -1158,7 +1182,15 @@ class RepostAlbumDelivery:
                         },
                     )
 
-                    await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
+                    if hasattr(owner, "_mark_album_deliveries_sent_sync"):
+                        await run_db(
+                            owner._mark_album_deliveries_sent_sync, delivery_ids,
+                            sent_message_ids=sent_message_ids,
+                            target_id=str(target_id),
+                            delivery_method="reupload_album_retry_verified",
+                        )
+                    else:
+                        await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                     return True
         else:
             reupload_retry_result = {

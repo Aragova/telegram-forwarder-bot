@@ -3486,10 +3486,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                   AND r.source_id::text = r.target_id::text
                   AND r.source_id::text = %s
                   AND COALESCE(r.source_thread_id, -1) = COALESCE(%s, -1)
-                  AND (
-                    r.target_thread_id IS NULL
-                    OR COALESCE(r.source_thread_id, -1) = COALESCE(r.target_thread_id, -1)
-                  )
+                  AND r.source_thread_id IS NOT DISTINCT FROM r.target_thread_id
                   AND (
                     (
                       d.status = 'sent'

@@ -169,6 +169,7 @@ def test_self_loop_echo_guard_uses_verified_receipts_and_all_album_ids():
     assert "a.sent_message_ids_json" in source
     assert "a.target_id::text = r.target_id::text" in source
     assert "r.source_id::text = r.target_id::text" in source
+    assert "r.source_thread_id IS NOT DISTINCT FROM r.target_thread_id" in source
 
 
 def test_policy_skip_does_not_use_error_text_field():
@@ -249,3 +250,27 @@ def test_video_download_transient_probe_error_does_not_mark_file_corrupt(tmp_pat
     assert result["transient_validation_failure"] is True
     assert not result.get("invalid_source_file")
     assert path.exists()
+
+
+def test_album_sent_paths_persist_target_message_ids():
+    source = Path("app/repost_album_delivery.py").read_text(encoding="utf-8")
+    assert "copy_album_uncertain_no_fallback" in source
+    assert "REUPLOAD_ALBUM_MT_PROTO_UNCERTAIN" in source
+    for method in (
+        "copy_album_verified",
+        "copy_album_retry_verified",
+        "reupload_album_verified",
+        "reupload_album_retry_verified",
+        "one_by_one_fallback",
+    ):
+        assert f'delivery_method="{method}"' in source
+    assert source.count('if hasattr(owner, "_mark_album_deliveries_sent_sync")') >= 5
+
+
+def test_botapi_copy_transport_uncertain_requires_manual_confirmation():
+    source = Path("app/repost_single_delivery.py").read_text(encoding="utf-8")
+    album = Path("app/repost_album_delivery.py").read_text(encoding="utf-8")
+    helper = Path("app/sender_botapi_copy_helpers.py").read_text(encoding="utf-8")
+    assert 'copy_result.get("definitely_rejected")' in source
+    assert "copy_album_uncertain_no_fallback" in album
+    assert "TelegramBadRequest" in helper

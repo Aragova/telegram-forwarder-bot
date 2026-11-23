@@ -5,7 +5,7 @@
 ## 1. Почему возникали дубли
 В `SenderTelethonHelpers.send_file_via_telethon` и `send_album_via_telethon` исключение во время первого вызова `telethon.send_file` ранее приводило к повторной отправке файла по другому методу. Сетевой timeout/ConnectionReset после вызова **не доказывает**, что Telegram не принял запрос. Аналогично `SenderReuploadHelpers` допускал Bot API fallback после MTProto `transport_attempted=True, transport_accepted=False`, а отправка альбома по одному элементу могла продолжить/повторить частичную публикацию.
 
-Исправление: после начала внешнего `send_file` исключение означает `transport_attempted=True` и **блокирует все последующие transport send** для того же delivery; запись `faulty` и manual reconciliation вместо replay. При достоверном отсутствии попытки внешнего send оставляем резервный путь. Наличие записи `faulty` НЕ означает, что сообщение отсутствует в Telegram.
+Исправление: после начала внешнего `send_file` **сетевая ошибка или неизвестный результат** означает `transport_attempted=True` и блокирует все последующие transport send для того же delivery; запись `faulty` и manual reconciliation вместо replay. Только явно отвергнутые Telegram запросы (`BadRequest`, HTTP 400) могут переключаться на резервный путь без риска дубля. Наличие записи `faulty` НЕ означает, что сообщение отсутствует в Telegram.
 
 ## 2. Self-loop
 `_is_self_target_echo_post_for_rule_conn` уже защищал от части эха, но проверял только `deliveries.sent_message_id`. Теперь он также учитывает сохранённый массив ID альбома и `verified` ID в `delivery_attempts`, при точном совпадении правила и получателя. **Новые исходные посты от пользователя и фиксированные запланированные повторы не запрещаются.** Исторические посты без receipts нуждаются в ручной сверке, а не массовом пропуске.
@@ -32,3 +32,6 @@ PR #522 уже запретил отправлять отдельный текс
 - PostgreSQL `FOR UPDATE SKIP LOCKED`: https://www.postgresql.org/docs/current/sql-select.html
 - Telegram MTProto `random_id`: https://core.telegram.org/method/messages.sendMessage
 - Telegram Bot API `sendMessage`/`copyMessage`: https://core.telegram.org/bots/api
+
+### Сохранение Telegram ID (дополнение)
+Подтверждённые отправки альбомов через Copy, повторную попытку Copy, Reupload и one-by-one сохраняют `sent_message_ids_json` и ID каждого элемента через `_mark_album_deliveries_sent_sync`. Это помогает отделить эхосообщения self-loop от новых постов пользователя и повышает качество последующей сверки.
