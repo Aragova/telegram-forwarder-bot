@@ -67,15 +67,15 @@ def logger():
     return logging.getLogger("tests.channel_title_sync")
 
 
-def test_channel_ids_are_deduplicated_and_named_forum_topics_are_skipped():
+def test_channel_ids_are_deduplicated_including_forum_groups():
     channels = [
         {"channel_id": "-1001", "thread_id": None},
         {"channel_id": "-1001", "thread_id": None},  # source and target
-        {"channel_id": "-1002", "thread_id": 59887},  # topic label, not channel title
+        {"channel_id": "-1002", "thread_id": 59887},  # group saved as a forum topic
         {"channel_id": "-1003", "thread_id": None},
         {"channel_id": "  ", "thread_id": None},
     ]
-    assert unique_channel_ids(channels) == ["-1001", "-1003"]
+    assert unique_channel_ids(channels) == ["-1001", "-1002", "-1003"]
 
 
 def test_rename_both_source_and_recipient_using_current_telegram_names():
@@ -96,6 +96,22 @@ def test_rename_both_source_and_recipient_using_current_telegram_names():
     assert len(bot.calls) == 2
     assert telethon.calls == []
     assert sorted(db.updated) == [("-100214", "Тайная"), ("-100215", "VIP NEW")]
+
+
+def test_forum_only_group_rename_refreshes_source_and_target_rows_by_chat_id():
+    db = FakeDb([
+        {"channel_id": "-100200", "thread_id": 12422, "channel_type": "source"},
+        {"channel_id": "-100200", "thread_id": 12789, "channel_type": "target"},
+    ])
+    bot = FakeBot(names={"-100200": "Тайная 2"})
+    result = asyncio.run(refresh_channel_titles_once(
+        db=db, bot=bot, telethon_client=None, run_db=run_db, logger=logger(),
+    ))
+    assert result.channels == 1
+    assert result.checked == 1
+    assert result.updated == 1
+    assert db.updated == [("-100200", "Тайная 2")]
+    assert bot.calls == ["-100200"]
 
 
 def test_private_source_falls_back_to_existing_authorized_telethon():
@@ -224,14 +240,15 @@ class FakeConn:
         self.commits += 1
 
 
-def test_database_only_updates_changed_root_channel_titles():
+def test_database_only_updates_changed_chat_titles_including_forum_rows():
     conn = FakeConn()
     repository = object.__new__(PostgresRepository)
     repository.connect = lambda: conn
     count = repository.refresh_channel_title("-10055", " Новое название ")
     assert count == 2
     assert "UPDATE channels" in conn.cursor_value.query
-    assert "thread_id IS NULL" in conn.cursor_value.query
+    assert "thread_id IS NULL" not in conn.cursor_value.query
+    assert "WHERE channel_id = %s" in conn.cursor_value.query
     assert "title IS DISTINCT FROM" in conn.cursor_value.query
     assert "routing" not in conn.cursor_value.query
     assert "deliveries" not in conn.cursor_value.query

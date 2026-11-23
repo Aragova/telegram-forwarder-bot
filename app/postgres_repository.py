@@ -2478,7 +2478,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 return cur.fetchone() is not None
 
     def refresh_channel_title(self, channel_id: str, title: str) -> int:
-        """Update only changed root-channel names, never forum-topic labels.
+        """Update changed chat names in all saved rows, including forum groups.
 
         Updating `channels.title` is sufficient: all rule views join this
         table and immediately pick up the new text on their next rendering.
@@ -2494,7 +2494,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     UPDATE channels
                     SET title = %s
                     WHERE channel_id = %s
-                      AND thread_id IS NULL
                       AND title IS DISTINCT FROM %s
                     """,
                     (cleaned, str(channel_id), cleaned),
