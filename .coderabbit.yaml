@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: ru-RU
+reviews:
+  profile: assertive
+  auto_review:
+    enabled: true
+    drafts: false
+  path_instructions:
+    - path: "**/*.py"
+      instructions: |
+        Проводите предметный Python 3.12 / aiogram 3 аудит на русском.
+        - Проверяйте выбор структур данных, асимптотическую сложность по времени
+          и памяти (Big O), повторные обходы, N+1 запросы к БД и лишние сетевые вызовы.
+        - Если можно упростить алгоритм или использовать более быструю структуру,
+          укажите функцию, Big O до и после, и конкретный минимальный рефакторинг.
+        - Ищите блокирующие синхронные операции внутри async def (time.sleep,
+          requests, subprocess.run, файловый/SQL/HTTP ввод-вывод), гонки,
+          пропущенные await и неограниченную параллельность.
+        - Проверяйте обработку краёв: Flood/RetryAfter и другие ошибки Telegram API,
+          удалённые сообщения, недоступные чаты, истёкшие callback_query,
+          некорректный ввод пользователя, идемпотентность повторной доставки.
+        - Проверяйте FSM и пользовательские словари состояний, callback_data,
+          права доступа, возврат Назад, отмену, клавиатуры и удаление старых кнопок.
+        - Каждое замечание должно иметь воспроизводимый сценарий и конкретный
+          безопасный фикс. Не предлагайте косметические переписывания.
+    - path: "app/**"
+      instructions: |
+        Соблюдайте AGENTS.md. Не создавайте альтернативных алгоритмов очереди:
+        _build_rule_logical_items_from_rows, get_rule_queue_logical_items,
+        get_rule_position_info, get_rule_card_snapshot, rollback_last_delivery,
+        set_rule_start_from_position. Проверяйте tenant-изоляцию, транзакции
+        PostgreSQL и сохранение поведения bot/scheduler/worker, repost/video.
+    - path: ".github/workflows/**"
+      instructions: |
+        Проверяйте permissions GITHUB_TOKEN, безопасность PR из форков,
+        отсутствие выполнения недоверенного кода с привилегированным токеном,
+        защиту от циклов автокоммитов и обработку ошибок в CI.

@@ -1,0 +1,245 @@
+name: Architecture and Quality Audit
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Write permissions are available only for same-repository PRs.
+# Fork PRs receive a read-only token automatically.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: architecture-quality-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Initialize report directory
+        shell: bash
+        run: |
+          echo "REPORT_DIR=$RUNNER_TEMP/quality" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/quality"
+
+      - name: Install analyzers and Graphviz
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y graphviz
+          python -m pip install --upgrade pip
+          python -m pip install ruff mypy bandit radon "code2flow==2.5.1"
+
+      # Existing findings are reported before enabling hard quality gates.
+      - name: Ruff, strict mypy and Bandit
+        shell: bash
+        run: |
+          mkdir -p "$REPORT_DIR"
+          set +e
+          ruff check --select E4,E7,E9,F,B,ASYNC app bot.py support_bot.py parse_history.py scripts > "$REPORT_DIR/ruff.txt" 2>&1
+          echo "$?" > "$REPORT_DIR/ruff.exit"
+          timeout 240s mypy --strict --ignore-missing-imports --follow-imports=silent \
+            --show-error-codes app bot.py support_bot.py parse_history.py scripts > "$REPORT_DIR/mypy.txt" 2>&1
+          echo "$?" > "$REPORT_DIR/mypy.exit"
+          bandit -r app bot.py support_bot.py parse_history.py scripts -f json \
+            -o "$REPORT_DIR/bandit.json" -q > "$REPORT_DIR/bandit.log" 2>&1
+          echo "$?" > "$REPORT_DIR/bandit.exit"
+          set -e
+
+      - name: Radon cyclomatic complexity
+        shell: bash
+        run: |
+          mkdir -p "$REPORT_DIR"
+          set +e
+          radon cc . -a -nb > "$REPORT_DIR/radon.txt" 2>&1
+          echo "$?" > "$REPORT_DIR/radon.exit"
+          radon cc . -s -j > "$REPORT_DIR/radon.json" 2> "$REPORT_DIR/radon-json.log"
+          echo "$?" > "$REPORT_DIR/radon-json.exit"
+          set -e
+
+      # These paths exist on main. Curated scopes avoid an unreadable full graph.
+      - name: Generate Python call graph
+        id: graph
+        shell: bash
+        run: |
+          mkdir -p docs "$REPORT_DIR"
+          rm -f docs/architecture_flow.png
+          set +e
+          timeout 180s code2flow --language py --hide-legend \
+            bot.py \
+            app/keyboards.py \
+            app/admin_handlers \
+            app/user_handlers \
+            app/user_menu_handlers.py \
+            app/user_ui.py \
+            app/rule_folder_handlers.py \
+            app/rule_folders_ui.py \
+            app/rich_rule_buttons.py \
+            app/scheduler_runtime.py \
+            app/scheduler_service.py \
+            app/worker_runtime.py \
+            app/sender.py \
+            app/transport.py \
+            app/repost_campaign_handlers.py \
+            app/repost_campaign_service.py \
+            app/video_processor.py \
+            -o docs/architecture_flow.png > "$REPORT_DIR/code2flow.log" 2>&1
+          status=$?
+          set -e
+          echo "$status" > "$REPORT_DIR/code2flow.exit"
+          if [ "$status" -eq 0 ] && [ -s docs/architecture_flow.png ]; then
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            echo "::error::code2flow failed (exit $status); see audit artifact"
+          fi
+
+      # GITHUB_TOKEN commits do not retrigger pull_request workflows.
+      - name: Update image in PR branch
+        if: steps.graph.outputs.created == 'true' && github.event.pull_request.head.repo.full_name == github.repository
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f docs/architecture_flow.png
+          if ! git diff --cached --quiet; then
+            git commit -m "docs: refresh architecture call graph [skip ci]"
+            git push origin "HEAD:refs/heads/$PR_HEAD_REF"
+          fi
+
+      - name: Build audit summary
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$REPORT_DIR"
+          python - <<'PY'
+          import collections
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["REPORT_DIR"])
+
+          def exit_code(tool):
+              try:
+                  return (root / (tool + ".exit")).read_text().strip()
+              except OSError:
+                  return "N/A"
+
+          def data(filename):
+              try:
+                  return json.loads((root / filename).read_text())
+              except (OSError, ValueError):
+                  return {}
+
+          b = data("bandit.json")
+          findings = b.get("results", []) if isinstance(b, dict) else []
+          severities = collections.Counter(x.get("issue_severity", "?") for x in findings)
+          secrets = sum(x.get("test_id") in {"B105", "B106", "B107"} for x in findings)
+
+          r = data("radon.json")
+          functions = []
+          if isinstance(r, dict):
+              for name, blocks in r.items():
+                  if not isinstance(blocks, list):
+                      continue
+                  def visit(node):
+                      if not isinstance(node, dict):
+                          return
+                      if "complexity" in node:
+                          functions.append((node["complexity"], node.get("rank", "?"),
+                                            name, node.get("name", "?"), node.get("lineno", "?")))
+                      for sub in node.get("methods", []) + node.get("closures", []):
+                          visit(sub)
+                  for block in blocks:
+                      visit(block)
+          ranks = collections.Counter(row[1] for row in functions)
+          lines = [
+              "<!-- vimi-quality-report -->",
+              "## 🧪 Автоматический аудит PR",
+              "",
+              "| Инструмент | Код завершения |",
+              "|---|---:|",
+          ]
+          for tool, title in [("ruff", "Ruff"), ("mypy", "mypy --strict"),
+                              ("bandit", "Bandit"), ("radon", "Radon"),
+                              ("code2flow", "code2flow")]:
+              lines.append("| " + title + " | " + exit_code(tool) + " |")
+          lines.extend([
+              "",
+              "🔐 Bandit: " + str(len(findings)) + " находок; HIGH "
+              + str(severities["HIGH"]) + ", MEDIUM " + str(severities["MEDIUM"])
+              + ", LOW " + str(severities["LOW"])
+              + "; B105–B107 (подозрения на секреты): " + str(secrets) + ".",
+              "",
+              "🧩 Radon: " + ", ".join(g + ": " + str(ranks[g]) for g in "ABCDEF")
+              + "; функций/методов: " + str(len(functions)) + ".",
+              "",
+              "Самые сложные функции:",
+          ])
+          for score, grade, filename, name, lineno in sorted(functions, reverse=True)[:5]:
+              lines.append("- " + filename + ":" + str(lineno) + " " + name
+                           + " (CC=" + str(score) + ", класс " + grade + ")")
+          lines.extend([
+              "",
+              "Проверки пока информационные, чтобы существующий технический долг "
+              "не блокировал все PR. Ненулевые коды не скрываются, полные результаты "
+              "есть в artifact architecture-quality-reports. Radon измеряет "
+              "цикломатическую сложность, не Big O. Code2flow отображает "
+              "приближённый статический граф вызовов.",
+          ])
+          (root / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf8")
+          PY
+          cat "$REPORT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post or update one PR comment
+        if: always() && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync(process.env.REPORT_DIR + '/summary.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(c => c.user?.type === 'Bot' &&
+              c.body?.includes('<!-- vimi-quality-report -->'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Upload audit logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: architecture-quality-reports
+          path: ${{ runner.temp }}/quality/
+          retention-days: 14
+
+      - name: Require generated diagram
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.graph.outputs.created }}" = "true"
+          test -s docs/architecture_flow.png
