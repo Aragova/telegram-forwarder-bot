@@ -31,7 +31,7 @@ def test_aiogram_get_me_uses_bot_api_10_5_bot_full_info():
     # permission checks rely on the bot ID, which must remain available.
     assert GetMe.__returning__ is BotFullInfo
     payload = {
-        "id": 8709166092,
+        "id": 123456789,
         "is_bot": True,
         "first_name": "ViMi",
         "username": "vimi_test_bot",
