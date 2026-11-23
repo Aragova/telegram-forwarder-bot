@@ -454,3 +454,52 @@ def test_rich_rule_card_has_styled_controls_without_losing_callbacks():
     tenant_kb = bot._filter_user_rule_card_keyboard(kb, 214)
     assert "user_rule_extra:214" in callbacks(tenant_kb)
     assert "rf:back:214" in callbacks(tenant_kb)
+
+
+
+def test_empty_destination_handler_renders_candidates_from_entire_tenant():
+    import asyncio
+    from types import SimpleNamespace
+
+    rendered = []
+    rules = [FakeRule(214), FakeRule(215), FakeRule(216)]
+    mapping = {215: {"id": 11, "name": "ПУБЛИЧНЫЕ"}}
+
+    async def run_db(fn, *args):
+        return fn(*args)
+
+    async def answer(_callback):
+        return None
+
+    async def edit_message_text_safe(**kwargs):
+        rendered.append(kwargs)
+
+    db = SimpleNamespace(
+        get_rule_folder=lambda tenant, fid: {"id": 9, "name": "ПРИВАТЫ"} if tenant == 1 and fid == 9 else None,
+        get_rules_for_tenant=lambda tenant: rules,
+        get_rule_folder_map=lambda tenant: mapping,
+    )
+    ctx = SimpleNamespace(
+        db=db, run_db=run_db,
+        answer_callback_safe_once=answer,
+        edit_message_text_safe=edit_message_text_safe,
+    )
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=990018),
+        message=SimpleNamespace(),
+    )
+    folder_handlers._fill_selected.pop(990018, None)
+    try:
+        asyncio.run(folder_handlers._fill_catalog(
+            ctx, callback, tenant_id=1, folder_id=9, page=0,
+        ))
+        assert rendered
+        text = rendered[0]["text"]
+        assert "ПРИВАТЫ" in text
+        assert "Правило #214" in text
+        assert "Правило #215" in text
+        assert "Правило #216" in text
+        assert "ПУБЛИЧНЫЕ" in text
+        assert "rf:fill_pick:9:0:214" in callbacks(rendered[0]["reply_markup"])
+    finally:
+        folder_handlers._fill_selected.pop(990018, None)
