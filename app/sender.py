@@ -1355,7 +1355,13 @@ class SenderService:
                     "idempotency_key": idempotency_key}
         await run_db(self.db.create_delivery_attempt, delivery_id=int(delivery_id), rule_id=int(rule_id), tenant_id=1, job_id=None, idempotency_key=idempotency_key, operation_kind="single", status="created", target_id=str(target_id), source_message_ids=[int(message_id)])
         logger.info("DELIVERY_ATTEMPT_CREATED | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
-        acquired = await run_db(self.db.mark_delivery_attempt_sending, idempotency_key, job_id=None, telegram_method="copy_single")
+        # Transport is chosen later (copy, Telethon or fallback). Marking it
+        # as copy_single here falsely reports a copy even when caption policy
+        # skips Bot API copying entirely.
+        acquired = await run_db(
+            self.db.mark_delivery_attempt_sending, idempotency_key,
+            job_id=None, telegram_method="repost_single_transport_pending",
+        )
         if not acquired:
             logger.warning("REPOST_SINGLE_SEND_ATTEMPT_NOT_ACQUIRED | rule_id=%s | delivery_id=%s | key=%s | action=no_send", rule_id, delivery_id, idempotency_key)
             return _terminal_non_retryable_result("copy_single_uncertain_no_fallback: concurrent attempt owns the write")
