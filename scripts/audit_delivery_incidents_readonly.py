@@ -199,6 +199,19 @@ QUERIES = {
         HAVING COUNT(*) > 1
         ORDER BY saved_post_rows DESC LIMIT 300
     """,
+    "recent_text_fallback_events": """
+        SELECT a.id audit_id, a.created_at, a.event_type, a.rule_id, a.delivery_id,
+               a.status, a.error_text, r.mode, r.schedule_mode,
+               a.extra_json::jsonb->>'pipeline_stage' pipeline_stage,
+               a.extra_json::jsonb->>'pipeline_result' pipeline_result,
+               a.extra_json::jsonb->>'sent_message_id' target_message_id,
+               COUNT(*) OVER () matching_total
+        FROM audit_log a JOIN routing r ON r.id=a.rule_id
+        WHERE a.created_at >= %s
+          AND a.event_type='delivery_pipeline_step'
+          AND a.extra_json::jsonb->>'pipeline_stage'='text_fallback'
+        ORDER BY a.id DESC LIMIT %s
+    """,
     "fixed_sent_receipts_recent": """
         SELECT d.id delivery_id, d.rule_id, d.post_id, d.status,
                d.created_at, d.sent_at, d.attempt_count, d.delivery_method,
