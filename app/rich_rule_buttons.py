@@ -20,11 +20,18 @@ _TWO_COLUMN_MAX_CHARS = 27
 _LOGGER = logging.getLogger(__name__)
 
 
-def rich_rule_list_enabled() -> bool:
-    """Rollback switch: VIMI_RICH_RULE_LIST=0 restores the old catalog on restart."""
-    return os.getenv("VIMI_RICH_RULE_LIST", "1").strip().casefold() not in {
-        "0", "false", "off", "no",
-    }
+def rich_rule_list_enabled(*, admin: bool = False) -> bool:
+    """Deployment switch: admin (default), all (1), or classic (0).
+
+    Keep the rollout limited to the owner until the test bots confirm that
+    Telegram clients and the locally hosted Bot API support Rich messages.
+    """
+    mode = os.getenv("VIMI_RICH_RULE_LIST", "admin").strip().casefold()
+    if mode in {"1", "true", "on", "yes", "all"}:
+        return True
+    if mode in {"admin", "owner", "test"}:
+        return bool(admin)
+    return False
 
 
 def _rule_id_for_callback(callback_data: str | None) -> int | None:
