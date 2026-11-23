@@ -127,7 +127,9 @@ async def _catalog(ctx: Any, callback: CallbackQuery, *, tenant_id: int, admin: 
     if folder_id == -1 and admin and not batch:
         rules = await ctx.run_db(ctx.db.get_all_rules)
     else:
-        rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+        rules = await _workspace_rules(
+            ctx, tenant_id, admin, callback.from_user.id,
+        )
     folder_name = "Без папки"
     if folder_id >= 0:
         mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
@@ -167,7 +169,9 @@ async def _fill_catalog(
     if not folder:
         await _error(ctx, callback, "Папка не найдена")
         return
-    rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+    rules = await _workspace_rules(
+        ctx, tenant_id, bool(ctx.is_admin_user(callback.from_user.id)), callback.from_user.id,
+    )
     assignments = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
     candidates = folder_fill_candidates(rules, assignments, folder_id)
     choice = _fill_selected.get(callback.from_user.id)
@@ -183,11 +187,14 @@ async def _fill_catalog(
 
 async def _selected_folder_rule_ids(
     ctx: Any, tenant_id: int, folder_id: int, selected_ids: set[int],
+    owner_admin_id: int | None = None,
 ) -> list[int]:
     """Require every selected ID to be in this folder and owned by this tenant."""
     if not selected_ids:
         raise ValueError("Сначала выберите правила")
-    rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+    rules = await _workspace_rules(
+        ctx, tenant_id, owner_admin_id is not None, int(owner_admin_id or 0),
+    )
     mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
     allowed = {
         int(r.id) for r in rules
@@ -201,7 +208,10 @@ async def _selected_folder_rule_ids(
 async def _extra(ctx: Any, callback: CallbackQuery, tenant_id: int, rule_id: int):
     if not await ctx.ensure_rule_callback_access(callback, rule_id):
         return
-    if int(await ctx.run_db(ctx.db.get_rule_tenant_id, rule_id)) != tenant_id:
+    if not await _can_manage_folder_rule(
+        ctx, tenant_id, bool(ctx.is_admin_user(callback.from_user.id)),
+        callback.from_user.id, rule_id,
+    ):
         await _error(ctx, callback, "Папки доступны для правил вашего аккаунта")
         return
     rule = await ctx.run_db(ctx.db.get_rule, rule_id)
@@ -225,7 +235,10 @@ async def _move(ctx: Any, callback: CallbackQuery, *, tenant_id: int, origin: st
         rule_id = int(origin[1:])
         if not await ctx.ensure_rule_callback_access(callback, rule_id):
             return
-        if int(await ctx.run_db(ctx.db.get_rule_tenant_id, rule_id)) != tenant_id:
+        if not await _can_manage_folder_rule(
+            ctx, tenant_id, bool(ctx.is_admin_user(callback.from_user.id)),
+            callback.from_user.id, rule_id,
+        ):
             await _error(ctx, callback, "Нельзя переместить правило другого аккаунта")
             return
         mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
@@ -264,6 +277,7 @@ async def _apply_move(ctx: Any, callback: CallbackQuery, *, tenant_id: int,
         try:
             rule_ids = await _selected_folder_rule_ids(
                 ctx, tenant_id, int(origin[1:]), choice[1],
+                callback.from_user.id if ctx.is_admin_user(callback.from_user.id) else None,
             ) if int(origin[1:]) > 0 else sorted(choice[1])
         except ValueError as exc:
             await _error(ctx, callback, str(exc))
@@ -272,8 +286,10 @@ async def _apply_move(ctx: Any, callback: CallbackQuery, *, tenant_id: int,
         await _error(ctx, callback, "Некорректная операция")
         return
     try:
-        await ctx.run_db(ctx.db.assign_rules_to_folder, tenant_id, rule_ids,
-                         folder_id if folder_id else None)
+        await _assign_for_actor(
+            ctx, tenant_id, bool(ctx.is_admin_user(callback.from_user.id)),
+            callback.from_user.id, rule_ids, folder_id if folder_id else None,
+        )
     except ValueError as exc:
         await _error(ctx, callback, str(exc))
         return
