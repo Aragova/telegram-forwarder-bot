@@ -98,7 +98,9 @@ def main():
                           jsonb_typeof(payload_json->'delivery_ids') = 'array'
                           AND EXISTS (
                             SELECT 1 FROM jsonb_array_elements_text(
-                              COALESCE(payload_json->'delivery_ids', '[]'::jsonb)
+                              CASE WHEN jsonb_typeof(payload_json->'delivery_ids') = 'array'
+                                   THEN payload_json->'delivery_ids'
+                                   ELSE '[]'::jsonb END
                             ) item(value)
                             WHERE item.value = %s
                           )
