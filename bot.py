@@ -5553,7 +5553,7 @@ def build_faulty_inline_keyboard(page: int, total_pages: int, delivery_id: int |
             InlineKeyboardButton(text="✅ Взята в работу", callback_data=f"faulty_ack:{delivery_id}:{page}"),
         ])
         rows.append([
-            InlineKeyboardButton(text="🧹 Очистить лог", callback_data=f"faulty_clear:{delivery_id}:{page}"),
+            InlineKeyboardButton(text="🗂 Скрыть из списка", callback_data=f"faulty_clear:{delivery_id}:{page}"),
         ])
 
     if nav_row:
