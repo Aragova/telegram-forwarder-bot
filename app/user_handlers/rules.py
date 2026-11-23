@@ -117,6 +117,7 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
                 if await try_edit_rich_catalog(
                     bot=ctx.bot, message=callback.message, html=rich_html,
                     footer=footer, logger=ctx.logger,
+                    invalidate_cache=ctx.invalidate_rich_edit_cache,
                 ):
                     return
         await ctx.edit_message_text_safe(
