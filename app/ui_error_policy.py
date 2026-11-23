@@ -238,6 +238,15 @@ class UIErrorPolicy:
     def _build_message_signature(self, *, text: str, reply_markup) -> tuple[str, str]:
         return (text, repr(reply_markup))
 
+    def invalidate_edit_cache(self, *, chat_id: int | str, message_id: int) -> None:
+        """Clear stale edit state after an externally executed Rich edit.
+
+        Without this, the next navigation to a previously seen screen can be
+        dropped as same_message_signature, even though the message changed.
+        """
+        key = (chat_id, int(message_id))
+        self._last_edit_signature.pop(key, None)
+        self._last_edit_at.pop(key, None)
 
     def _without_none(self, values: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in values.items() if value is not None}
