@@ -1,7 +1,8 @@
 """Keep saved channel names current without touching rule delivery state.
 
 Runs once immediately after the UI runtime starts, then once every six hours.
-Only Telegram chat titles are synchronized; forum-topic labels are preserved.
+All saved chat/group titles are synchronized, including rows with forum topics.
+The topics' own names are not modified.
 """
 
 from __future__ import annotations
@@ -26,11 +27,9 @@ class TitleSyncResult:
 
 
 def unique_channel_ids(rows: list[Any]) -> list[str]:
-    """Deduplicate by immutable chat ID; don't overwrite named forum topics."""
+    """Deduplicate by chat ID, including groups saved only as forum topics."""
     ids: set[str] = set()
     for row in rows:
-        if row["thread_id"] is not None:
-            continue
         channel_id = str(row["channel_id"] or "").strip()
         if channel_id:
             ids.add(channel_id)
@@ -99,7 +98,7 @@ async def refresh_channel_titles_once(
     """Refresh distinct saved channels only; failures never affect publication.
 
     The database update uses IS DISTINCT FROM and commits only changed titles.
-    Existing rule IDs, titles of forum topics, queues and delivery markers stay intact.
+    Existing rule IDs, forum topic IDs, queues and delivery markers stay intact.
     """
     rows = await run_db(db.get_channels)
     channel_ids = unique_channel_ids(rows)
