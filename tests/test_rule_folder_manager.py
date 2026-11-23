@@ -10,6 +10,8 @@ from app import rule_folder_handlers as folder_handlers
 from app.rule_folders_ui import (
     additional_functions_view,
     folder_delete_confirmation_view,
+    folder_fill_candidates,
+    folder_fill_view,
     folder_settings_view,
     folder_index_view,
     move_picker_view,
@@ -134,10 +136,14 @@ class _Cursor:
     def execute(self, query, params=None):
         self._last = str(query)
         self.queries.append((str(query), params))
+        if "INSERT INTO rule_folder_assignments" in self._last:
+            self.rowcount = self.owned
 
     def fetchone(self):
         if "SELECT id FROM rule_folders" in self._last:
             return {"id": 10} if self.folder_exists else None
+        if "SELECT COUNT(*)" in self._last and "rule_folder_assignments" in self._last:
+            return {"cnt": 0}
         return {"cnt": self.owned}
 
     def __enter__(self):
@@ -288,3 +294,256 @@ def test_destructive_rule_actions_require_explicit_two_stage_confirmation():
     assert 'style="danger"' in delete_rule
     assert "db.delete_rule_with_audit" in delete_rule
     assert 'f"rf:back:{rule_id}"' in delete_rule
+
+
+
+def test_empty_folder_offers_import_existing_not_empty_multi_select():
+    text, kb = rule_catalog_view(
+        [], folder_id=9, folder_name="ПРИВАТЫ", page=0,
+    )
+    assert "ПРИВАТЫ" in text
+    assert "rf:fill:9:0" in callbacks(kb)
+    assert "rf:batch:9:0" not in callbacks(kb)
+    assert "rf:add_in:9" in callbacks(kb)
+
+
+def test_filled_folder_has_explicit_add_existing_and_batch_controls():
+    text, kb = rule_catalog_view(
+        [FakeRule(214), FakeRule(215)],
+        folder_id=9, folder_name="ПРИВАТЫ", page=0,
+    )
+    assert "rf:fill:9:0" in callbacks(kb)
+    assert "rf:batch:9:0" in callbacks(kb)
+    _, selected_kb = rule_catalog_view(
+        [FakeRule(214), FakeRule(215)],
+        folder_id=9, folder_name="ПРИВАТЫ", page=0,
+        selected={214, 215},
+    )
+    assert "rf:unfile:9:0" in callbacks(selected_kb)
+    assert "rf:bulk_to:9" in callbacks(selected_kb)
+    assert "rf:fill:9:0" not in callbacks(selected_kb)
+
+
+def test_import_catalog_uses_rules_from_outside_destination_and_paginates():
+    rules = [FakeRule(200 + i) for i in range(17)]
+    mapping = {
+        200: {"id": 9, "name": "ПРИВАТЫ"},
+        201: {"id": 12, "name": "Публичные"},
+    }
+    candidates = folder_fill_candidates(rules, mapping, 9)
+    assert len(candidates) == 16
+    assert all(r.id != 200 for r in candidates)
+    assert any(r.id == 201 for r in candidates)
+    text, kb = folder_fill_view(
+        candidates, folder_id=9, folder_name="ПРИВАТЫ",
+        page=0, selected={201, 206}, assignments=mapping,
+    )
+    assert "ДОБАВЛЕНИЕ СУЩЕСТВУЮЩИХ" in text
+    assert "Публичные" in text
+    assert "✅ <b>Выбрано:</b> 2" in text
+    assert "rf:fill_pick:9:0:201" in callbacks(kb)
+    assert "rf:fill:9:1" in callbacks(kb)
+    assert "rf:fill_page_all:9:0" in callbacks(kb)
+    assert "rf:fill_apply:9" in callbacks(kb)
+    assert "rf:list:9:0" in callbacks(kb)
+    _, later_kb = folder_fill_view(
+        candidates, folder_id=9, folder_name="ПРИВАТЫ",
+        page=2, selected={201, 206}, assignments=mapping,
+    )
+    assert "rf:fill_pick:9:2:211" in callbacks(later_kb)
+
+
+def test_import_catalog_escapes_html_and_has_short_rule_buttons():
+    rules = [FakeRule(3, source_title="<A>", target_title="VIP & <Test>")]
+    text, kb = folder_fill_view(
+        rules, folder_id=4, folder_name="VIP <24>",
+        page=0, selected=set(), assignments={},
+    )
+    assert "VIP &lt;24&gt;" in text
+    assert "&lt;A&gt;" in text
+    assert "VIP &amp; &lt;Test&gt;" in text
+    assert all(len(b.text) <= 33 for row in kb.inline_keyboard for b in row
+               if (b.callback_data or "").startswith("rf:fill_pick"))
+
+
+def test_additional_functions_has_single_unfile_only_for_foldered_rules():
+    _, kb = additional_functions_view(
+        rule_id=214, target_title="VIP", mode="repost",
+        folder_name="ПРИВАТЫ", admin=True,
+    )
+    assert "rf:unfile_one:214" in callbacks(kb)
+    _, without = additional_functions_view(
+        rule_id=214, target_title="VIP", mode="repost",
+        folder_name=None, admin=True,
+    )
+    assert "rf:unfile_one:214" not in callbacks(without)
+
+
+def test_batch_unfile_scope_rejects_other_tenant_and_other_folder():
+    import asyncio
+    from types import SimpleNamespace
+
+    rules = [FakeRule(214), FakeRule(215), FakeRule(216)]
+    mapping = {
+        214: {"id": 9}, 215: {"id": 10},
+        216: {"id": 9},
+    }
+    calls = []
+
+    async def run_db(fn, *args):
+        calls.append((fn.__name__, args))
+        return fn(*args)
+
+    ctx = SimpleNamespace(
+        db=SimpleNamespace(
+            get_rules_for_tenant=lambda tenant: rules,
+            get_rule_folder_map=lambda tenant: mapping,
+        ),
+        run_db=run_db,
+    )
+
+    async def verify():
+        with pytest.raises(ValueError, match="Список изменился"):
+            await folder_handlers._selected_folder_rule_ids(ctx, 2, 9, {214, 215})
+        assert await folder_handlers._selected_folder_rule_ids(ctx, 2, 9, {214, 216}) == [214, 216]
+
+    asyncio.run(verify())
+    assert len(calls) == 4
+    assert all(arguments == (2,) for _, arguments in calls)
+
+
+def test_rich_rule_card_preserves_snapshot_counters_and_routes():
+    import bot
+    row = {
+        "id": 214,
+        "source_id": "-1001", "source_title": "Новости <VIP>",
+        "source_thread_id": None,
+        "target_id": "-1002", "target_title": "ПРИВАТЫ & Stars",
+        "target_thread_id": None,
+        "is_active": True,
+        "processing": 2, "faulty": 1, "pending": 5,
+        "next_run_at": None,
+        "logical_pending": 5,
+        "logical_completed": 39,
+        "logical_total": 44,
+        "logical_current_position": 40,
+        "mode": "video",
+        "video_clip_duration_seconds": 118,
+    }
+    text = bot.build_rule_card_text(row)
+    for heading in ("<b>ПРАВИЛО #214</b>", "<b>МАРШРУТ ПУБЛИКАЦИИ</b>",
+                    "<b>СОСТОЯНИЕ</b>", "<b>СТАТИСТИКА ПУБЛИКАЦИЙ</b>",
+                    "<b>ОФОРМЛЕНИЕ</b>"):
+        assert heading in text
+    assert "Новости &lt;VIP&gt;" in text
+    assert "ПРИВАТЫ &amp; Stars" in text
+    assert "<b>В очереди:</b> 5" in text
+    assert "<b>В обработке:</b> 2" in text
+    assert "<b>Отправлено:</b> 39" in text
+    assert "<b>Ошибки:</b> 1" in text
+    assert "<b>Позиция:</b> 40 / 44" in text
+
+
+def test_rich_rule_card_has_styled_controls_without_losing_callbacks():
+    import bot
+    kb = bot.build_rule_card_keyboard(
+        rule_id=214, is_active=False, schedule_mode="interval", mode="video",
+    )
+    values = callbacks(kb)
+    for callback in ("change_fixed_times:214", "change_interval:214",
+                     "change_next_run:214", "video_intro_menu:214",
+                     "video_caption_menu:214", "rule_extra_menu:214",
+                     "rule_refresh:214", "enable_rule:214", "rf:back:214"):
+        assert callback in values
+    assert any(len(row) == 2 for row in kb.inline_keyboard)
+    tenant_kb = bot._filter_user_rule_card_keyboard(kb, 214)
+    assert "user_rule_extra:214" in callbacks(tenant_kb)
+    assert "rf:back:214" in callbacks(tenant_kb)
+
+
+
+def test_empty_destination_handler_renders_candidates_from_entire_tenant():
+    import asyncio
+    from types import SimpleNamespace
+
+    rendered = []
+    rules = [FakeRule(214), FakeRule(215), FakeRule(216)]
+    mapping = {215: {"id": 11, "name": "ПУБЛИЧНЫЕ"}}
+
+    async def run_db(fn, *args):
+        return fn(*args)
+
+    async def answer(_callback):
+        return None
+
+    async def edit_message_text_safe(**kwargs):
+        rendered.append(kwargs)
+
+    db = SimpleNamespace(
+        get_rule_folder=lambda tenant, fid: {"id": 9, "name": "ПРИВАТЫ"} if tenant == 1 and fid == 9 else None,
+        get_rules_for_tenant=lambda tenant: rules,
+        get_rule_folder_map=lambda tenant: mapping,
+    )
+    ctx = SimpleNamespace(
+        db=db, run_db=run_db,
+        is_admin_user=lambda uid: False,
+        answer_callback_safe_once=answer,
+        edit_message_text_safe=edit_message_text_safe,
+    )
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=990018),
+        message=SimpleNamespace(),
+    )
+    folder_handlers._fill_selected.pop(990018, None)
+    try:
+        asyncio.run(folder_handlers._fill_catalog(
+            ctx, callback, tenant_id=1, folder_id=9, page=0,
+        ))
+        assert rendered
+        text = rendered[0]["text"]
+        assert "ПРИВАТЫ" in text
+        assert "Правило #214" in text
+        assert "Правило #215" in text
+        assert "Правило #216" in text
+        assert "ПУБЛИЧНЫЕ" in text
+        assert "rf:fill_pick:9:0:214" in callbacks(rendered[0]["reply_markup"])
+    finally:
+        folder_handlers._fill_selected.pop(990018, None)
+
+
+
+def test_owner_workspace_includes_owned_legacy_tenant_rules_but_not_other_users():
+    import asyncio
+    from types import SimpleNamespace
+
+    async def run_db(fn, *args):
+        return fn(*args)
+
+    db = SimpleNamespace(
+        get_all_rules=lambda: [FakeRule(214), FakeRule(215), FakeRule(216)],
+        list_folder_manageable_rule_ids=lambda tenant_id, owner_id: {214, 216},
+        get_rules_for_tenant=lambda tenant_id: [FakeRule(214)],
+    )
+    ctx = SimpleNamespace(run_db=run_db, db=db)
+    admin_rules = asyncio.run(folder_handlers._workspace_rules(ctx, 2, True, 888))
+    assert [r.id for r in admin_rules] == [214, 216]
+    ordinary_rules = asyncio.run(folder_handlers._workspace_rules(ctx, 2, False, 777))
+    assert [r.id for r in ordinary_rules] == [214]
+
+
+def test_folder_move_respects_legacy_owner_permission_and_blocks_wrong_owner():
+    repo = _FakeFolderRepo(owned=2)
+    assert repo.assign_rules_to_folder(
+        tenant_id=2, rule_ids=[214, 216], folder_id=10, owner_admin_id=888,
+    ) == 2
+    queries = repo.connection.cursor_obj.queries
+    count_sqls = [sql for sql, _ in queries if "SELECT COUNT(*)::int AS cnt FROM routing" in sql]
+    assert any("created_by = %s" in sql for sql in count_sqls)
+    assert all("UPDATE routing" not in sql.lower() for sql, _ in queries)
+
+    other = _FakeFolderRepo(owned=1)
+    with pytest.raises(ValueError, match="не принадлежат аккаунту"):
+        other.assign_rules_to_folder(
+            tenant_id=2, rule_ids=[214, 216], folder_id=10, owner_admin_id=777,
+        )
+    assert other.connection.commits == 0
