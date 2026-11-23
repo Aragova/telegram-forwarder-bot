@@ -188,7 +188,10 @@ class SenderTelethonHelpers:
             path.unlink(missing_ok=True)
             return None, "none"
         except asyncio.CancelledError:
-            tmp.unlink(missing_ok=True)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("VIDEO_THUMB_CANCEL_CLEANUP_FAILED | path=%s", tmp)
             raise
         except Exception as exc:
             logger.warning("VIDEO_REUPLOAD_THUMB | source=telegram | path=%s | valid=False | error=%s", tmp, exc)
@@ -224,7 +227,10 @@ class SenderTelethonHelpers:
             return None, "none", seek_seconds
         except asyncio.CancelledError:
             # The subprocess is already reaped by communicate_safely().
-            tmp.unlink(missing_ok=True)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("VIDEO_THUMB_CANCEL_CLEANUP_FAILED | path=%s", tmp)
             raise
         except Exception as exc:
             tmp.unlink(missing_ok=True)
