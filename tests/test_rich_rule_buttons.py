@@ -62,13 +62,14 @@ def test_real_rich_buttons_replace_number_buttons_and_preserve_callbacks():
     assert built is not None
     html, footer = built
     assert html.count('<tg-button type="callback_data"') == 10
-    assert html.count("<tg-button-row") == 5
-    assert "🟢📁 #1 Цель 1" in html
-    assert "🟢 #2 Цель 2" in html
-    assert "📁 #2 Цель 2" not in html
+    assert html.count("<tg-button-row") == 10
+    assert all(row.count("<tg-button ") == 1 for row in html.split("</tg-button-row>") if "<tg-button-row" in row)
+    assert "🟢📁 #1 Источник → Цель 1" in html
+    assert "🟢 #2 Источник → Цель 2" in html
+    assert "📁 #2 Источник → Цель 2" not in html
     assert "rf:open:1:-1:0" in html
     assert "rf:open:10:-1:0" in html
-    assert "→" not in html
+    assert "Источник → Цель 1" in html
     assert not any(cb.startswith("rf:open:") for cb in _callbacks(footer))
     assert "rf:list:-1:1" not in _callbacks(footer)
     assert "rf:search" in _callbacks(footer)
@@ -81,15 +82,29 @@ def test_real_rich_buttons_replace_number_buttons_and_preserve_callbacks():
 def test_long_labels_get_full_width_and_html_is_escaped():
     rules = [
         Rule(4, "Light Dante"),
-        Rule(14, "Чрезвычайно длинное название приватного получателя <VIP> & Friends"),
+        Rule(14, "Чрезвычайно длинное название приватного получателя <VIP> & Friends",
+             source_title="Большой <резерв> & источник"),
         Rule(19, "SHALUN REZERV"),
     ]
     text, kb = rule_catalog_view(rules, folder_id=-1, folder_name="", page=0)
     html, _ = rich_catalog_payload(text, kb, rules)
     assert html.count("<tg-button-row") == 3
-    assert "Чрезвычайно длинное название приватного получателя &lt;VIP&gt; &amp; Friends" in html
+    assert "Большой &lt;резерв&gt; &amp; источник → Чрезвычайно длинное название приватного получателя &lt;VIP&gt; &amp; Friends" in html
     assert "<VIP>" not in html
     assert "rf:open:14:-1:0" in html
+
+
+def test_each_short_route_occupies_its_own_rich_row():
+    rows = _button_rows([
+        ("🟢 #4 A → B", "rf:open:4:-1:0"),
+        ("🟢 #14 C → D", "rf:open:14:-1:0"),
+        ("⏸📁 #19 SHALUN → VIP", "rf:open:19:-1:0"),
+    ])
+    assert len(rows) == 3
+    assert all(row.count("<tg-button ") == 1 for row in rows)
+    assert "rf:open:4:-1:0" in rows[0]
+    assert "rf:open:14:-1:0" in rows[1]
+    assert "rf:open:19:-1:0" in rows[2]
 
 
 def test_page_and_search_callbacks_are_reused_verbatim():
@@ -115,8 +130,8 @@ def test_bulk_picker_and_folder_import_remain_clickable():
         assigned={1: {"id": 9}, 2: {"id": 9}},
         selected={1, 2, 5},
     )
-    assert "✅ 🟢📁 #1 Channel 1" in html
-    assert "☐ 🟢 #3 Channel 3" in html
+    assert "✅ 🟢📁 #1 Источник → Channel 1" in html
+    assert "☐ 🟢 #3 Источник → Channel 3" in html
     assert "rf:pick:9:0:1" in html
     assert "rf:unfile:9:0" in _callbacks(footer)
     assert "rf:bulk_to:9" in _callbacks(footer)
@@ -130,8 +145,8 @@ def test_bulk_picker_and_folder_import_remain_clickable():
         selected={4, 5}, assigned={5: {"id": 12, "name": "Другая"}},
     )
     assert "rf:fill_pick:9:0:4" in html2
-    assert "✅ 🟢 #4 Channel 4" in html2
-    assert "✅ 🟢📁 #5 Channel 5" in html2
+    assert "✅ 🟢 #4 Источник → Channel 4" in html2
+    assert "✅ 🟢📁 #5 Источник → Channel 5" in html2
     assert "rf:fill_apply:9" in _callbacks(footer2)
     assert "rf:fill_page_all:9:0" in _callbacks(footer2)
 

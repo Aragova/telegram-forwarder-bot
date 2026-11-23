@@ -14,8 +14,7 @@ from typing import Any, Callable
 from aiogram.types import InlineKeyboardMarkup
 
 _RULE_CALLBACKS = frozenset({"open", "open_search", "pick", "fill_pick"})
-# Two buttons per row if both labels are short. Otherwise one full-width button.
-_TWO_COLUMN_MAX_CHARS = 27
+# Exactly one route button per row, even for short channel names.
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -47,11 +46,12 @@ def _rule_id_for_callback(callback_data: str | None) -> int | None:
 
 def _label_for_rule(rule: Any, *, selected: bool | None, in_folder: bool) -> str:
     rule_id = int(rule.id)
-    name = str(rule.target_title or rule.target_id or rule.source_title or rule.source_id)
+    source = str(rule.source_title or rule.source_id)
+    target = str(rule.target_title or rule.target_id)
     state = "🟢" if bool(rule.is_active) else "⏸"
     folder_marker = "📁" if in_folder else ""
     checked = ("✅ " if selected else "☐ ") if selected is not None else ""
-    return f"{checked}{state}{folder_marker} #{rule_id} {name}"
+    return f"{checked}{state}{folder_marker} #{rule_id} {source} → {target}"
 
 
 def _rich_button(label: str, callback_data: str) -> str:
@@ -65,25 +65,12 @@ def _rich_button(label: str, callback_data: str) -> str:
 
 
 def _button_rows(buttons: list[tuple[str, str]]) -> list[str]:
-    chunks: list[list[str]] = []
-    pending: list[str] = []
-    for label, callback_data in buttons:
-        button = _rich_button(label, callback_data)
-        if len(label) > _TWO_COLUMN_MAX_CHARS:
-            if pending:
-                chunks.append(pending)
-                pending = []
-            chunks.append([button])
-        else:
-            pending.append(button)
-            if len(pending) == 2:
-                chunks.append(pending)
-                pending = []
-    if pending:
-        chunks.append(pending)
+    """Place one source → destination route in each Rich button row."""
     return [
-        '<tg-button-row align="center">' + "".join(chunk) + "</tg-button-row>"
-        for chunk in chunks
+        '<tg-button-row align="center">'
+        + _rich_button(label, callback_data)
+        + "</tg-button-row>"
+        for label, callback_data in buttons
     ]
 
 
