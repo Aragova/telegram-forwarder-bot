@@ -77,7 +77,9 @@ async def _render(
     rich_selected: set[int] | None = None,
 ) -> None:
     await ctx.answer_callback_safe_once(callback)
-    if rich_rules is not None and rich_rule_list_enabled():
+    if (rich_rules is not None and rich_rule_list_enabled(
+        admin=bool(ctx.is_admin_user(callback.from_user.id)),
+    )):
         variant = rich_catalog_payload(
             text, kb, rich_rules,
             assigned=rich_assignments, selected=rich_selected,
@@ -156,7 +158,7 @@ async def _catalog(ctx: Any, callback: CallbackQuery, *, tenant_id: int, admin: 
     folder_name = "Без папки"
     mapping = (
         await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
-        if folder_id >= 0 or rich_rule_list_enabled() else {}
+        if folder_id >= 0 or rich_rule_list_enabled(admin=admin) else {}
     )
     if folder_id >= 0:
         if folder_id > 0:
@@ -840,7 +842,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
         # Remove user input; preserve the existing single-screen navigation.
         await ctx.try_delete_message_safe(message.chat.id, message.message_id)
         edited = False
-        if kind == "search" and rich_rule_list_enabled():
+        if kind == "search" and rich_rule_list_enabled(admin=admin):
             assigned = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
             variant = rich_catalog_payload(
                 text, kb, filtered, assigned=assigned,
