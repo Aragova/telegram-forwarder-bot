@@ -83,13 +83,31 @@ def test_copy_first_self_loop_copies_new_post_without_reupload():
 
 
 def test_self_loop_copy_explicit_failure_allows_one_reupload():
-    owner = _SingleOwner(self_loop=True, use_copy_first=True, verify_ids=[777], copy_result={"raw_result": None, "sent_ids": [], "attempted": True, "error_text": "boom"})
+    owner = _SingleOwner(self_loop=True, use_copy_first=True, verify_ids=[777], copy_result={"raw_result": None, "sent_ids": [], "attempted": True, "definitely_rejected": True, "error_text": "boom"})
     assert _deliver_single(owner) is True
     owner.copy_single.assert_called_once()
     owner.reupload_message.assert_called_once()
     owner.bot.send_message.assert_not_called()
     assert owner.mark_delivery_sent.call_args.kwargs["sent_message_id"] == 777
 
+
+
+def test_self_loop_ambiguous_copy_does_not_trigger_second_send():
+    owner = _SingleOwner(
+        self_loop=True,
+        use_copy_first=True,
+        copy_result={
+            "raw_result": None,
+            "sent_ids": [],
+            "attempted": True,
+            "error_text": "ConnectionResetError after copyMessage",
+        },
+    )
+    assert _deliver_single(owner) is False
+    owner.copy_single.assert_called_once()
+    owner.reupload_message.assert_not_called()
+    owner.bot.send_message.assert_not_called()
+    owner.mark_faulty.assert_called_once()
 
 
 def test_non_self_loop_attempted_copy_with_error_does_not_reupload():

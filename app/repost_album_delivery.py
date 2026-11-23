@@ -229,6 +229,17 @@ class RepostAlbumDelivery:
                 },
             )
 
+            if copy_result.get("attempted") and not copy_result["ok"] and not copy_result.get("definitely_rejected"):
+                # An exception/empty Bot API response is not a verified rejection.
+                error_text = "copy_album_uncertain_no_fallback: copyMessages result unknown"
+                logger.warning(
+                    "COPY_ALBUM_UNCERTAIN_NO_FALLBACK | rule_id=%s | delivery_ids=%s | action=no_second_send",
+                    rule.id, delivery_ids,
+                )
+                for disputed_id in delivery_ids:
+                    await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
+                return False
+
             if copy_result["ok"]:
                 accepted_copy_sent_ids = normalize_valid_sent_message_ids(copy_result.get("sent_message_ids") or [])
                 await owner._log_delivery_pipeline_step(
@@ -454,6 +465,15 @@ class RepostAlbumDelivery:
                     "sent_count": copy_retry_result.get("sent_count"),
                 },
             )
+            if copy_retry_result.get("attempted") and not copy_retry_result["ok"] and not copy_retry_result.get("definitely_rejected"):
+                error_text = "copy_album_uncertain_no_fallback: retry result unknown"
+                logger.warning(
+                    "COPY_ALBUM_RETRY_UNCERTAIN_NO_FALLBACK | rule_id=%s | delivery_ids=%s | action=no_second_send",
+                    rule.id, delivery_ids,
+                )
+                for disputed_id in delivery_ids:
+                    await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
+                return False
             if copy_retry_result["ok"]:
                 await owner._log_delivery_pipeline_step(
                     rule_id=rule.id,

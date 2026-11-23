@@ -5,6 +5,7 @@ import importlib
 from pathlib import Path
 from types import SimpleNamespace
 
+from telethon.errors import BadRequestError
 from app.sender import SenderService
 from app.sender_telethon_helpers import SenderTelethonHelpers
 
@@ -196,7 +197,7 @@ def test_send_file_via_telethon_fallback_smoke(tmp_path):
         async def send_file(self, **kwargs):
             self.calls.append(kwargs)
             if len(self.calls) == 1:
-                raise Exception("original failed")
+                raise BadRequestError(None, "FILE_REFERENCE_EXPIRED")
             return SimpleNamespace(id=789, message=kwargs.get("caption") or "")
 
     telethon = FallbackTelethon()

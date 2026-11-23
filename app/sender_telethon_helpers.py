@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from telethon.tl import types as tl_types
+from telethon.errors import BadRequestError
 
 from .background_tasks import start_background_task
 from .config import settings
@@ -439,7 +440,7 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
-            if original_send_started:
+            if original_send_started and not isinstance(exc, BadRequestError):
                 logger.warning("TELETHON_FILE_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
                 return telethon_transport_failed(f"original_media_send_uncertain: {exc}")
 
@@ -691,7 +692,7 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
-            if original_send_started:
+            if original_send_started and not isinstance(exc, BadRequestError):
                 logger.warning("TELETHON_ALBUM_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
                 return telethon_transport_failed(
                     f"original_album_send_uncertain: {exc}"

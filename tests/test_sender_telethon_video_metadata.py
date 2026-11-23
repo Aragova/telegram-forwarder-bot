@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import asyncio
 from telethon.tl import types as tl_types
+from telethon.errors import BadRequestError
 
 from app.sender_telethon_helpers import SenderTelethonHelpers
 
@@ -19,7 +20,7 @@ class _Telethon:
         if len(self.calls) == 1 and not isinstance(kwargs.get("file"), str):
             if self._original_ok:
                 return SimpleNamespace(id=10, message=kwargs.get("caption") or "")
-            raise RuntimeError("original failed")
+            raise BadRequestError(None, "FILE_REFERENCE_EXPIRED")
         return SimpleNamespace(id=777, message=kwargs.get("caption") or "")
 
     async def get_messages(self, entity, ids=None, limit=None):

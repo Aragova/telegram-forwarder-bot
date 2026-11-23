@@ -37,6 +37,7 @@ POST_SEND_REACTION_TIMEOUT_SEC = 35.0
 
 TERMINAL_NON_RETRYABLE_DELIVERY_REASONS = (
     "telethon_send_attempted_result_unknown_non_retryable",
+    "copy_album_uncertain_no_fallback",
     "copy_single_uncertain_no_fallback",
     "telethon_send_accepted_target_id_unresolved_non_retryable",
     "telethon_one_by_one_send_accepted_target_id_unresolved_non_retryable",

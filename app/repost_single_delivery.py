@@ -325,7 +325,9 @@ class RepostSingleDelivery:
                 )
                 return False
             if copy_result.get("attempted"):
-                if is_self_loop and send_result.error_text:
+                if is_self_loop and copy_result.get("definitely_rejected"):
+                    # Only a definite HTTP 400 rejection permits a second
+                    # transport method. A timeout may hide an accepted copy.
                     logger.info("SELF_LOOP_COPY_TO_REUPLOAD_ALLOWED | rule_id=%s | delivery_id=%s | error=%s", rule.id, delivery_id, send_result.error_text)
                 else:
                     error_text = "copy_single_uncertain_no_fallback: copy_message was attempted but target confirmation failed; manual review required"
