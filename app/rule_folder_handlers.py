@@ -14,6 +14,11 @@ from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 
 from app.rule_folders_repository import normalize_folder_name
+from app.rich_rule_buttons import (
+    rich_catalog_payload,
+    rich_rule_list_enabled,
+    try_edit_rich_catalog,
+)
 from app.rule_folders_ui import (
     _button,
     additional_functions_view,
@@ -65,8 +70,26 @@ async def _actor(ctx: Any, user_id: int) -> tuple[int, bool]:
     return int(tenant_id), bool(ctx.is_admin_user(user_id))
 
 
-async def _render(ctx: Any, callback: CallbackQuery, text: str, kb: InlineKeyboardMarkup) -> None:
+async def _render(
+    ctx: Any, callback: CallbackQuery, text: str, kb: InlineKeyboardMarkup,
+    *, rich_rules: list | None = None,
+    rich_assignments: dict[int, dict] | None = None,
+    rich_selected: set[int] | None = None,
+) -> None:
     await ctx.answer_callback_safe_once(callback)
+    if rich_rules is not None and rich_rule_list_enabled():
+        variant = rich_catalog_payload(
+            text, kb, rich_rules,
+            assigned=rich_assignments, selected=rich_selected,
+        )
+        if variant:
+            html, footer = variant
+            success = await try_edit_rich_catalog(
+                bot=ctx.get_bot(), message=callback.message, html=html,
+                footer=footer, logger=ctx.logger,
+            )
+            if success:
+                return
     await ctx.edit_message_text_safe(
         message=callback.message, text=text, reply_markup=kb, parse_mode="HTML",
     )
@@ -131,8 +154,11 @@ async def _catalog(ctx: Any, callback: CallbackQuery, *, tenant_id: int, admin: 
             ctx, tenant_id, admin, callback.from_user.id,
         )
     folder_name = "Без папки"
+    mapping = (
+        await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+        if folder_id >= 0 or rich_rule_list_enabled() else {}
+    )
     if folder_id >= 0:
-        mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
         if folder_id > 0:
             folder = await ctx.run_db(ctx.db.get_rule_folder, tenant_id, folder_id)
             if not folder:
@@ -158,7 +184,7 @@ async def _catalog(ctx: Any, callback: CallbackQuery, *, tenant_id: int, admin: 
         rules, folder_id=folder_id, folder_name=folder_name, page=page,
         search_term=search, selected=chosen,
         folders_page=_folder_index_page.get(callback.from_user.id, 0),
-    ))
+    ), rich_rules=rules, rich_assignments=mapping, rich_selected=chosen)
 
 
 async def _fill_catalog(
@@ -182,7 +208,8 @@ async def _fill_catalog(
     await _render(ctx, callback, *folder_fill_view(
         candidates, folder_id=folder_id, folder_name=str(folder["name"]),
         page=page, selected=choice[1], assignments=assignments,
-    ))
+    ), rich_rules=candidates, rich_assignments=assignments,
+       rich_selected=choice[1])
 
 
 async def _selected_folder_rule_ids(
@@ -810,12 +837,25 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     _folder_index_page[user_id] = 0
                     text, kb = folder_index_view(folders, 0)
             _inputs.pop(user_id, None)
-        # Remove the message with user input; preserve a single navigable UI screen.
+        # Remove user input; preserve the existing single-screen navigation.
         await ctx.try_delete_message_safe(message.chat.id, message.message_id)
-        edited = await ctx.edit_message_text_safe(
-            message=state["origin_message"], text=text,
-            parse_mode="HTML", reply_markup=kb,
-        )
+        edited = False
+        if kind == "search" and rich_rule_list_enabled():
+            assigned = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+            variant = rich_catalog_payload(
+                text, kb, filtered, assigned=assigned,
+            )
+            if variant:
+                html, footer = variant
+                edited = await try_edit_rich_catalog(
+                    bot=ctx.get_bot(), message=state["origin_message"],
+                    html=html, footer=footer, logger=ctx.logger,
+                )
+        if not edited:
+            edited = await ctx.edit_message_text_safe(
+                message=state["origin_message"], text=text,
+                parse_mode="HTML", reply_markup=kb,
+            )
         if not edited:
             ctx.logger.warning("RULE_FOLDER_UI_EDIT_FAILED | user_id=%s", user_id)
             await ctx.send_message_safe(
