@@ -15,6 +15,7 @@ from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramRetryAfter
 from app.bot_api_session import create_bot_api_session
+from app.channel_title_sync import channel_title_sync_loop
 from aiogram.filters import Command
 from aiogram.types import (
     BotCommand,
@@ -169,6 +170,7 @@ rule_ui_tasks: dict[str, asyncio.Task] = {}
 user_handlers_ctx: UserHandlersContext | None = None
 admin_handlers_ctx: AdminHandlersContext | None = None
 repost_campaign_runtime_tasks: RepostCampaignRuntimeTasks | None = None
+channel_title_sync_task: asyncio.Task | None = None
 
 preview_queue_cache: dict[int, dict[str, Any]] = {}
 preview_busy_users: set[int] = set()
@@ -8651,6 +8653,26 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
 
 
 
+def _start_channel_title_sync_runtime() -> None:
+    """Refresh names immediately after deploying UI, then every 6 hours."""
+    global channel_title_sync_task
+    if channel_title_sync_task is not None and not channel_title_sync_task.done():
+        return
+    if bot is None:
+        return
+    channel_title_sync_task = asyncio.create_task(
+        channel_title_sync_loop(
+            db=db,
+            bot=bot,
+            telethon_client=telethon_client,
+            run_db=run_db,
+            logger=logger,
+        ),
+        name="channel-title-sync",
+    )
+    logger.info("CHANNEL_TITLE_SYNC | запущена фоновая сверка названий")
+
+
 def _start_repost_campaign_runtime_tasks(*, role: str) -> None:
     global repost_campaign_runtime_tasks
     if repost_campaign_runtime_tasks is None:
@@ -8673,7 +8695,7 @@ async def _shutdown_runtime(
     close_telegram_clients: bool,
     close_bot_session: bool,
 ) -> None:
-    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, repost_campaign_runtime_tasks
+    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, repost_campaign_runtime_tasks, channel_title_sync_task
 
     if stop_workers_runtime:
         await stop_job_workers_runtime()
@@ -8683,6 +8705,11 @@ async def _shutdown_runtime(
         for task in dashboard_tasks.values():
             task.cancel()
         dashboard_tasks.clear()
+
+    if channel_title_sync_task is not None:
+        channel_title_sync_task.cancel()
+        await asyncio.gather(channel_title_sync_task, return_exceptions=True)
+        channel_title_sync_task = None
 
     if repost_campaign_runtime_tasks is not None:
         await repost_campaign_runtime_tasks.stop()
@@ -8756,6 +8783,7 @@ async def _start_bot_role() -> None:
     asyncio.create_task(heartbeat_loop("bot", db))
     asyncio.create_task(watchdog_loop(db))
     _start_repost_campaign_runtime_tasks(role="bot")
+    _start_channel_title_sync_runtime()
     logger.info("STARTUP | Роль UI (bot) запущена")
     await dp.start_polling(
         bot,
@@ -8804,6 +8832,7 @@ async def _start_all_role() -> None:
     asyncio.create_task(heartbeat_loop("worker", db))
     asyncio.create_task(watchdog_loop(db))
     _start_repost_campaign_runtime_tasks(role="all")
+    _start_channel_title_sync_runtime()
     if scheduler_runtime_task is None or scheduler_runtime_task.done():
         scheduler_runtime_task = asyncio.create_task(
             run_scheduler_loop(
