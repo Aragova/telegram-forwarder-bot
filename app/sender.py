@@ -1286,7 +1286,31 @@ class SenderService:
             logger.info("DELIVERY_ATTEMPT_VERIFIED_CACHE_HIT | operation=single | key=%s | delivery_id=%s | sent_message_ids=%s", idempotency_key, delivery_id, cached_ids)
             await run_db(self._mark_delivery_sent_sync, int(delivery_id), sent_message_id=int(cached_ids[0]), sent_message_ids=cached_ids, target_id=str(target_id), delivery_method="idempotency_verified_cache")
             return True
-        if attempt_status in {"sending", "accepted", "failed_after_send"}:
+        if attempt_status == "failed_after_send":
+            # This is a terminal, ambiguous Telegram send. The same logical
+            # attempt cannot safely be retried: neither Bot API nor the original
+            # MTProto call guarantees that another send would be idempotent.
+            # Do not spend all job retries rereading an immutable failed ledger.
+            error = (
+                "copy_single_uncertain_no_fallback: "
+                "cached attempt awaiting authoritative target confirmation"
+            )
+            if hasattr(self.db, "mark_delivery_faulty_if_attempt_unverified"):
+                await run_db(
+                    self.db.mark_delivery_faulty_if_attempt_unverified,
+                    int(delivery_id), idempotency_key, error,
+                )
+            logger.warning(
+                "REPOST_SINGLE_CACHE_TERMINAL_MANUAL_REVIEW | rule_id=%s | "
+                "delivery_id=%s | attempt_status=%s | action=no_second_send_no_job_retry",
+                rule_id, delivery_id, attempt_status,
+            )
+            return {
+                "ok": False, "retryable": False, "accepted": False,
+                "manual_review_required": True, "non_retryable": True,
+                "idempotency_key": idempotency_key, "error_text": error,
+            }
+        if attempt_status in {"sending", "accepted"}:
             # An accepted ID is not necessarily visible in this target. Never
             # issue another send after an ambiguous response or worker restart.
             verified_ids = []

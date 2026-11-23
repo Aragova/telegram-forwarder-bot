@@ -199,3 +199,61 @@ def test_accepted_single_reconciliation_marks_sent_only_after_cas_promotion():
     )) is True
     assert repo.sent[0] == 14
     assert repo.sent[1]["sent_message_id"] == 370
+
+
+def test_failed_after_send_cached_attempt_is_terminal_not_retried():
+    """A failed_after_send state must not consume more job retries or send again."""
+
+    class FinalizedRepo(FakeRepo):
+        def __init__(self):
+            self.fenced = []
+
+        def get_delivery_attempt_by_idempotency_key(self, _key):
+            return {"status": "failed_after_send", "sent_message_ids_json": None}
+
+        def mark_delivery_faulty_if_attempt_unverified(self, delivery_id, key, error):
+            self.fenced.append((delivery_id, key, error))
+            return True
+
+    repo = FinalizedRepo()
+    service = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=repo)
+
+    async def must_never_send(*_args, **_kwargs):
+        raise AssertionError("A terminal ambiguous attempt must never resend Telegram data")
+
+    service._deliver_single = must_never_send
+    result = asyncio.run(service.execute_repost_single_from_job(
+        rule_id=267, delivery_id=1416844, message_id=65,
+        source_channel="-100source", target_id="-100target",
+    ))
+    assert result["ok"] is False
+    assert result["retryable"] is False
+    assert result["manual_review_required"] is True
+    assert result["non_retryable"] is True
+    assert len(repo.fenced) == 1
+    assert repo.fenced[0][0] == 1416844
+
+
+def test_inflight_cached_attempt_is_not_finalized_by_competing_worker():
+    """An ongoing send may still complete. Never prematurely mark it faulty."""
+
+    class InflightRepo(FakeRepo):
+        def get_delivery_attempt_by_idempotency_key(self, _key):
+            return {"status": "sending", "sent_message_ids_json": None}
+
+        def mark_delivery_faulty_if_attempt_unverified(self, *_args):
+            raise AssertionError("A live sending attempt is not terminal")
+
+    repo = InflightRepo()
+    service = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=repo)
+
+    async def must_never_send(*_args, **_kwargs):
+        raise AssertionError("Competing worker must not re-send")
+
+    service._deliver_single = must_never_send
+    result = asyncio.run(service.execute_repost_single_from_job(
+        rule_id=267, delivery_id=1416844, message_id=65,
+        source_channel="-100source", target_id="-100target",
+    ))
+    assert result["retryable"] is True
+    assert result["manual_review_required"] is True
