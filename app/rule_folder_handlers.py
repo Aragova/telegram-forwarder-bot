@@ -468,14 +468,14 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 rid = int(data[2])
                 if not await ctx.ensure_rule_callback_access(callback, rid):
                     return
-                if int(await ctx.run_db(ctx.db.get_rule_tenant_id, rid)) != tenant_id:
+                if not await _can_manage_folder_rule(ctx, tenant_id, admin, user_id, rid):
                     await _error(ctx, callback, "Нет доступа к правилу")
                     return
                 assignments = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
                 if rid not in assignments:
                     await _error(ctx, callback, "Это правило уже находится вне папок")
                     return
-                await ctx.run_db(ctx.db.assign_rules_to_folder, tenant_id, [rid], None)
+                await _assign_for_actor(ctx, tenant_id, admin, user_id, [rid], None)
                 _origins[(user_id, rid)] = (0, 0, False)
                 await _extra(ctx, callback, tenant_id, rid)
             elif action == "move_page":
@@ -502,7 +502,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not choice or choice[0] != fid:
                     await _error(ctx, callback, "Список выбора устарел")
                     return
-                rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+                rules = await _workspace_rules(ctx, tenant_id, admin, user_id)
                 mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
                 eligible = {int(r.id) for r in folder_fill_candidates(rules, mapping, fid)}
                 if rid not in eligible:
@@ -519,7 +519,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not choice or choice[0] != fid:
                     await _error(ctx, callback, "Список выбора устарел")
                     return
-                rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+                rules = await _workspace_rules(ctx, tenant_id, admin, user_id)
                 mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
                 candidates = folder_fill_candidates(rules, mapping, fid)
                 current = candidates[max(0, page) * CATALOG_PAGE_SIZE:(max(0, page) + 1) * CATALOG_PAGE_SIZE]
@@ -545,14 +545,14 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not await ctx.run_db(ctx.db.get_rule_folder, tenant_id, fid):
                     await _error(ctx, callback, "Папка не найдена")
                     return
-                rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+                rules = await _workspace_rules(ctx, tenant_id, admin, user_id)
                 mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
                 eligible = {int(r.id) for r in folder_fill_candidates(rules, mapping, fid)}
                 if not choice[1].issubset(eligible):
                     await _error(ctx, callback, "Часть правил изменила папку. Повторите выбор")
                     return
                 ids = sorted(choice[1])
-                await ctx.run_db(ctx.db.assign_rules_to_folder, tenant_id, ids, fid)
+                await _assign_for_actor(ctx, tenant_id, admin, user_id, ids, fid)
                 _fill_selected.pop(user_id, None)
                 await _catalog(ctx, callback, tenant_id=tenant_id, admin=admin, folder_id=fid, page=0)
             elif action == "unfile":
@@ -565,11 +565,14 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     await _error(ctx, callback, "Список выбора устарел")
                     return
                 try:
-                    ids = await _selected_folder_rule_ids(ctx, tenant_id, fid, choice[1])
+                    ids = await _selected_folder_rule_ids(
+                        ctx, tenant_id, fid, choice[1],
+                        user_id if admin else None,
+                    )
                 except ValueError as exc:
                     await _error(ctx, callback, str(exc))
                     return
-                await ctx.run_db(ctx.db.assign_rules_to_folder, tenant_id, ids, None)
+                await _assign_for_actor(ctx, tenant_id, admin, user_id, ids, None)
                 _selected.pop(user_id, None)
                 await _catalog(ctx, callback, tenant_id=tenant_id, admin=admin, folder_id=fid, page=page)
             elif action == "batch":
@@ -582,7 +585,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     await _error(ctx, callback, "Выбор устарел")
                     return
                 # Selection is constrained to the current tenant and folder.
-                own_rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+                own_rules = await _workspace_rules(ctx, tenant_id, admin, user_id)
                 mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
                 match = any(int(r.id) == rid for r in own_rules)
                 if fid >= 0:
@@ -733,7 +736,9 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                             ids = sorted(selection[1])
                     if ids:
                         try:
-                            await ctx.run_db(ctx.db.assign_rules_to_folder, tenant_id, ids, fid)
+                            await _assign_for_actor(
+                                ctx, tenant_id, admin, user_id, ids, fid,
+                            )
                             moved = True
                         except ValueError as exc:
                             await ctx.send_message_safe(
@@ -763,7 +768,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                         text, kb = folder_index_view(folders, 0)
                 elif moved and origin.startswith("b"):
                     _selected.pop(user_id, None)
-                    own_rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+                    own_rules = await _workspace_rules(ctx, tenant_id, admin, user_id)
                     text, kb = rule_catalog_view(
                         [r for r in own_rules if int(r.id) in set(ids)],
                         folder_id=fid, folder_name=name, page=0,
