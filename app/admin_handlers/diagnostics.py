@@ -255,7 +255,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         if not ok:
             await ctx.answer_callback_safe(callback, "Нечего очищать", show_alert=True)
             return
-        await ctx.answer_callback_safe_once(callback, "🧹 Лог очищен")
+        await ctx.answer_callback_safe_once(callback, "✅ Убрана из списка; история сохранена")
         pages = await ctx.run_db(ctx.build_faulty_pages, 200)
         total_pages = len(pages)
         page = ctx.clamp_page(page, total_pages)

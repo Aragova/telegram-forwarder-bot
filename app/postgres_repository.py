@@ -6388,6 +6388,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                      AND t.channel_type = 'target'
                     WHERE d.status = 'faulty'
                       AND (d.error_text IS NULL OR d.error_text NOT LIKE 'Self-loop:%%')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM audit_log cleared
+                          WHERE cleared.delivery_id = d.id
+                            AND cleared.event_type = 'faulty_log_cleared'
+                      )
                     ORDER BY d.id DESC
                     LIMIT %s
                     """,
@@ -7284,9 +7289,14 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 cur.execute(
                     """
                     SELECT id, rule_id, post_id, status, error_text
-                    FROM deliveries
-                    WHERE id = %s
-                      AND status = 'faulty'
+                    FROM deliveries d
+                    WHERE d.id = %s
+                      AND d.status = 'faulty'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM audit_log cleared
+                          WHERE cleared.delivery_id = d.id
+                            AND cleared.event_type = 'faulty_log_cleared'
+                      )
                     LIMIT 1
                     """,
                     (delivery_id,),
@@ -7327,17 +7337,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     ),
                 )
 
-                cur.execute(
-                    """
-                    DELETE FROM deliveries
-                    WHERE id = %s
-                      AND status = 'faulty'
-                    """,
-                    (delivery_id,),
-                )
-                deleted = cur.rowcount > 0
+                # This is an acknowledgement, not a delivery state change.
+                # Keep the send/attempt ledger for safe incident reconciliation.
             conn.commit()
-            return deleted
+            return True
 
     def get_faulty_delivery_by_id(self, delivery_id: int):
         with self.connect() as conn:

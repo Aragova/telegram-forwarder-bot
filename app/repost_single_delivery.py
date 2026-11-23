@@ -766,10 +766,12 @@ class RepostSingleDelivery:
         # 6) TEXT FALLBACK
         # =========================================================
         # Never silently degrade a failed media repost to a text-only "sent".
-        # With custom caption ON a media failure must be visible and retriable.
+        # Never publish an orphan caption as a separate text post when the
+        # original payload contains real media. A failed media send may have
+        # been accepted by Telegram, even if verification timed out.
+        # Link previews are text-only and remain eligible for text fallback.
         media_downgrade_blocked = bool(
-            custom_caption is not None
-            and getattr(message, "media", None)
+            getattr(message, "media", None)
             and not _is_link_preview_only(message)
         )
         html_text = (
@@ -853,8 +855,14 @@ class RepostSingleDelivery:
                     },
                 )
 
-                await run_db(owner._mark_delivery_sent_sync, delivery_id)
-                return {"ok": True, "sent_message_ids": []}
+                await run_db(
+                    owner._mark_delivery_sent_sync, delivery_id,
+                    sent_message_id=int(sent.message_id),
+                    sent_message_ids=[int(sent.message_id)],
+                    target_id=str(target_id),
+                    delivery_method="text_fallback",
+                )
+                return {"ok": True, "sent_message_ids": [int(sent.message_id)]}
 
             except Exception as exc:
                 await owner._log_delivery_pipeline_step(
