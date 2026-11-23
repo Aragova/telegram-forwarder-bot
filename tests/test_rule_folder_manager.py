@@ -260,14 +260,14 @@ def test_folder_input_uses_safe_message_edits_and_private_chat_guard():
 
 
 def test_folder_settings_and_catalog_back_remember_both_pages():
-    rules = [FakeRule(200 + i) for i in range(16)]
+    rules = [FakeRule(200 + i) for i in range(28)]
     text, kb = rule_catalog_view(
         rules, folder_id=7, folder_name="Публичные", page=2, folders_page=3,
     )
     assert "Публичные" in text
     assert "rf:folder_settings:7:2" in callbacks(kb)
     assert "rf:folders:3" in callbacks(kb)
-    folder = {"id": 7, "name": "Публичные", "rules_count": 16}
+    folder = {"id": 7, "name": "Публичные", "rules_count": 28}
     _, settings_kb = folder_settings_view(folder, page=2)
     assert "rf:list:7:2" in callbacks(settings_kb)
     assert "rf:rename:7:2" in callbacks(settings_kb)
