@@ -1762,6 +1762,7 @@ class VideoProcessor:
         thumbnail_path = os.path.join(self.temp_dir, f"thumb_{base_name}.jpg")
 
         files_to_delete = [input_path, clipped_main_path, final_output, normalized_main_path, thumbnail_path]
+        sent_msg = None
 
         try:
             bot = context.bot if hasattr(context, 'bot') else self.bot
@@ -2327,6 +2328,10 @@ class VideoProcessor:
                         del self.video_info_cache[fp]
                 except:
                     pass
+            if sent_msg is not None and sent_msg is not False:
+                # Cleanup/diagnostics failed after the send returned; retain
+                # its evidence instead of reporting a retryable pipeline failure.
+                return sent_msg
             if isinstance(e, (TelegramEntityTooLarge, TelegramRetryAfter, FloodWaitError,
                               TransportRateLimited, VideoPreSendError)):
                 # Preserve definite send rejection/preflight classification.
