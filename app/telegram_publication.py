@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger("forwarder.publication")
+_STARTUP_DRAIN_TIMEOUT_SEC = 30
 
 
 def publication_pairs(scheduled: Any, published: Any) -> list[tuple[int, int]]:
@@ -186,17 +187,31 @@ def prepare_publication_inbox(client: Any, repository: Any):
         if me is None:
             raise RuntimeError("Publication inbox requires an authenticated sender")
         candidate = PublicationInbox(repository,int(me.id))
-        while buffer:
+        from .background_tasks import start_background_task
+
+        async def drain_startup() -> PublicationInbox:
+            nonlocal inbox
+            while buffer:
+                peer, old, new = buffer[0]
+                try:
+                    await persist_startup(candidate, peer, old, new)
+                except Exception:
+                    logger.exception("TELEGRAM_PUBLICATION_STARTUP_PERSIST_FAILED")
+                    await asyncio.sleep(1)
+                    continue
+                buffer.popleft()
             if buffer_overflow:
                 raise RuntimeError("Publication startup buffer overflowed")
-            peer,old,new = buffer[0]
-            await persist_startup(candidate, peer, old, new)
-            buffer.popleft()
-        if buffer_overflow:
-            raise RuntimeError("Publication startup buffer overflowed")
-        inbox = candidate
-        client.publication_inbox = candidate
-        return candidate
+            inbox = candidate
+            client.publication_inbox = candidate
+            return candidate
+
+        # Keep the drain alive if startup must return to the Bot API runtime.
+        # The MTProto sender stays disabled until a safe runtime restart.
+        task = start_background_task(
+            drain_startup(), name="telegram-publication-startup-drain",
+        )
+        return await asyncio.wait_for(asyncio.shield(task), timeout=_STARTUP_DRAIN_TIMEOUT_SEC)
 
     return bind
 

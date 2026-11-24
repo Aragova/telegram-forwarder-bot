@@ -27,7 +27,7 @@ from .subscription_service import SubscriptionService
 from .transport_policy import TransportRateLimited
 from .usage_service import UsageService
 from .worker_load_service import build_worker_load_snapshot
-from .worker_resource_policy import POLICY, WorkerResourcePolicy
+from .worker_resource_policy import POLICY, WorkerResourcePolicy, _env_int
 
 logger = logging.getLogger("forwarder")
 
@@ -759,7 +759,8 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             # The only action on this receipt is read-only reconciliation.
             # Release the light slot and preserve the ordinary retry budget.
             await _finish_owned_job(
-                repo, "defer", job_id, worker_id, "", 30,
+                repo, "defer", job_id, worker_id, "",
+                _env_int("PUBLICATION_RECONCILE_INTERVAL_SEC", 30),
                 finalization_started=finalization_started,
             )
             logger.info("JOB_PUBLICATION_PENDING | job_id=%s | action=defer_read_only", job_id)

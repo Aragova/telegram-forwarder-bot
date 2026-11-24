@@ -1374,6 +1374,7 @@ class RepostCampaignRuntimeService:
             msg
             for msg in active_messages
             if str(msg.get("send_status") or "").strip().lower() == "sent"
+            or msg.get("accepted_unverified")
         ]
         delete_pending = sum(
             1

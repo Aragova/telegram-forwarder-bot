@@ -282,3 +282,25 @@ def test_run_post_send_step_safe_exception_is_non_fatal(caplog):
 
     assert result == {"ok": False, "error": "boom"}
     assert "POST_SEND_STEP_FAILED_NON_FATAL" in caplog.text
+
+
+def test_confirm_single_uses_read_client_when_writer_is_disabled():
+    from datetime import datetime, timezone
+
+    async def scenario():
+        for found in (True, False):
+            calls = []
+
+            async def get_messages(entity, *, ids):
+                calls.append((entity, ids))
+                return SimpleNamespace(date=datetime.now(timezone.utc)) if found else None
+
+            owner = SimpleNamespace(telethon=None, telethon_read=SimpleNamespace(get_messages=get_messages))
+            result = await _helper(owner).confirm_target_delivery_message_ids(
+                rule_id=1, delivery_id=2, source_channel="-1001", target_id="-1002",
+                source_message_ids=[9], candidate_sent_message_ids=[101], method="copy_message",
+            )
+            assert result == ([101] if found else [])
+            assert calls == [(-1002, 101)]
+
+    asyncio.run(scenario())

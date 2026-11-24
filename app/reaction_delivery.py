@@ -35,7 +35,8 @@ class ReactionDelivery:
             logger.warning("REACTION_SKIPPED_INVALID_TARGET_MESSAGE | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, source_message_ids)
             return None
         entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
-        msg = await owner.telethon.get_messages(entity, ids=int(sent_message_id))
+        reader = getattr(owner, "telethon_read", owner.telethon)
+        msg = await reader.get_messages(entity, ids=int(sent_message_id))
         if not msg:
             self._last_reaction_validation_reason = "target_not_found"
             logger.warning("REACTION_SKIPPED_TARGET_MESSAGE_NOT_FOUND | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_id=%s", rule_id, delivery_id, target_id, sent_message_id)

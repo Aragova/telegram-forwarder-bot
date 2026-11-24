@@ -4491,6 +4491,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         "Есть неподтверждённый альбом Bot API; требуется ручная проверка"
                     )
 
+                cur.execute(
+                    "SELECT EXISTS(SELECT 1 FROM telegram_publication_receipts WHERE rule_id=%s AND published_ids IS NULL) AS unresolved",
+                    (int(rule_id),),
+                )
+                if cur.fetchone()["unresolved"]:
+                    raise RuntimeError("Есть неподтверждённая публикация MTProto; требуется ручная проверка")
+
                 # Archive confirmed receipts before changing the corresponding
                 # attempt keys. Scheduled ID claims follow through ON UPDATE CASCADE.
                 # Unresolved receipts retain their original key to prevent a resend.
@@ -6017,7 +6024,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if kind == "album":
                     # Historical album ledger uses delivery IDs rather than source IDs.
                     # Verify both cardinality and actual source membership below.
-                    if (len(delivery_ids) < 2 or int(attempt["delivery_id"]) not in [0, *delivery_ids]
+                    if (int(attempt["delivery_id"]) not in [0, *delivery_ids]
                             or sorted(recorded) not in [sorted(delivery_ids), sorted(source_message_ids)]):
                         return False
                 elif (kind not in {"single", "video_send"} or len(delivery_ids) != 1
@@ -6173,6 +6180,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     )
                     if not cur.fetchone():
                         return False
+                # Lock the complete delivery vector before the final deadline check.
+                cur.execute(
+                    "SELECT id FROM deliveries WHERE rule_id=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
+                    (receipt["rule_id"], receipt["delivery_ids"]),
+                )
+                if [row["id"] for row in cur.fetchall()] != sorted(receipt["delivery_ids"]):
+                    return False
                 # NOW() is fixed at transaction start; locks above may have
                 # delayed this transaction beyond the publication deadline.
                 cur.execute("SELECT clock_timestamp() >= %s AS expired",(receipt["deadline_at"],))
@@ -11411,7 +11425,19 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def list_campaign_run_messages(self, run_id: int) -> list[dict[str, Any]]:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT * FROM campaign_run_messages WHERE run_id=%s ORDER BY id ASC", (int(run_id),))
+                cur.execute(
+                    """SELECT m.*, EXISTS (
+                        SELECT 1 FROM audit_log a
+                        WHERE a.rule_id = m.rule_id
+                          AND a.event_type = 'campaign_publication_unverified'
+                          AND a.status = 'accepted'
+                          AND CASE WHEN a.event_type = 'campaign_publication_unverified'
+                              THEN a.extra_json::jsonb->>'campaign_run_message_id'
+                              END = m.id::text
+                    ) AS accepted_unverified
+                    FROM campaign_run_messages m WHERE m.run_id=%s ORDER BY m.id ASC""",
+                    (int(run_id),),
+                )
                 return [dict(row) for row in (cur.fetchall() or [])]
 
     def resolve_campaign_run_delete_failures(
@@ -11426,30 +11452,30 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    UPDATE campaign_run_messages
+                    f"""
+                    UPDATE campaign_run_messages m
                     SET delete_status = 'deleted',
                         deleted_at = NOW(),
                         delete_error_text = '[manual_resolved_orphaned_target] ' || COALESCE(delete_error_text, ''),
                         updated_at = NOW()
                     WHERE run_id = %s
                       AND rule_id = %s
-                      AND send_status = 'sent'
+                      AND {_CAMPAIGN_OCCUPIED_SQL}
                       AND delete_status = 'failed'
                     """,
                     (int(run_id), int(rule_id)),
                 )
                 resolved = int(cur.rowcount or 0)
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         COUNT(*) FILTER (WHERE delete_status = 'pending') AS remaining_pending,
                         COUNT(*) FILTER (WHERE delete_status = 'processing') AS remaining_processing,
                         COUNT(*) FILTER (WHERE delete_status = 'failed') AS remaining_failed
-                    FROM campaign_run_messages
+                    FROM campaign_run_messages m
                     WHERE run_id = %s
                       AND rule_id = %s
-                      AND send_status = 'sent'
+                      AND {_CAMPAIGN_OCCUPIED_SQL}
                     """,
                     (int(run_id), int(rule_id)),
                 )

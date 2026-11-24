@@ -275,6 +275,14 @@ def test_real_pg_campaign_accepted_unknown_blocks_clean_channel(repo):
     assert unknown not in [row["id"] for row in repo.claim_due_campaign_run_messages_for_delete()]
     assert repo.get_campaign_run_message(unknown)["accepted_unverified"] is True
     assert repo.get_campaign_run_message(rejected)["accepted_unverified"] is False
+    rows = repo.list_campaign_run_messages(run)
+    assert next(row for row in rows if row["id"] == unknown)["accepted_unverified"] is True
+    resolved = repo.resolve_campaign_run_delete_failures(run_id=run, rule_id=rule_id, actor_id=1)
+    assert resolved["resolved"] == 1 and resolved["remaining_failed"] == 0
+    assert repo.get_active_campaign_placements_summary_for_rule(rule_id)["placements_total"] == 0
+    assert repo.get_campaign_run_message(unknown)["accepted_unverified"] is True
+    assert repo.get_campaign_run_message(unknown)["delete_status"] == "deleted"
+    assert repo.get_campaign_run_message(rejected)["delete_status"] == "failed"
 
 
 
@@ -306,3 +314,65 @@ def test_self_loop_suppression_keeps_unrelated_album_members(repo):
     assert repo.get_delivery(deliveries[1])["status"] == "faulty"
     assert repo.get_delivery(deliveries[2])["status"] == "processing"
     assert repo.suppress_self_target_echo_deliveries(rule_id, deliveries[1:]) == [deliveries[1]]
+
+
+def test_rescan_refuses_expired_mtproto_receipt(repo):
+    seeded = seed(repo, 113, count=2)
+    key, rule_id, deliveries, _, _, _ = seeded
+    assert register(repo, seeded, [20, 21])
+    owner = "test-rescan-113"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE telegram_publication_receipts SET deadline_at=NOW()-INTERVAL '1 second' WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE routing SET is_active=FALSE,rescan_owner_token=%s WHERE id=%s", (owner, rule_id))
+    assert repo.expire_publication_receipt(key, "expired")
+    with pytest.raises(RuntimeError, match="неподтверждённая публикация MTProto"):
+        repo.reset_rule_history_for_replay(rule_id, owner_token=owner)
+    assert repo.get_publication_receipt(key) is not None
+    assert all(repo.get_delivery(d) is not None for d in deliveries)
+
+
+def test_album_receipt_accepts_single_remaining_member(repo):
+    seeded = seed(repo, 114, count=2)
+    key, rule_id, deliveries, source_ids, source, target = seeded
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE deliveries SET status='faulty' WHERE id=%s", (deliveries[0],))
+            cur.execute("UPDATE delivery_attempts SET delivery_id=%s,source_message_ids_json=%s::jsonb WHERE idempotency_key=%s",
+                        (deliveries[1], json.dumps([source_ids[1]]), key))
+    assert register(repo, (key, rule_id, deliveries[1:], source_ids[1:], source, target), [30])
+    repo.record_telegram_publication_mappings(123, int(target), [(30, 130)])
+    assert repo.finalize_publication_receipt(key, [130])
+    assert repo.get_delivery(deliveries[0])["status"] == "faulty"
+    assert repo.get_delivery(deliveries[1])["status"] == "sent"
+
+
+def test_publication_deadline_is_checked_after_delivery_row_lock(repo):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    seeded = seed(repo, 115)
+    key, _, deliveries, _, _, target = seeded
+    assert register(repo, seeded, [40])
+    repo.record_telegram_publication_mappings(123, int(target), [(40, 140)])
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE telegram_publication_receipts SET deadline_at=clock_timestamp()+INTERVAL '3 seconds' WHERE idempotency_key=%s", (key,))
+        conn.commit()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM deliveries WHERE id=%s FOR UPDATE", (deliveries[0],))
+                future = pool.submit(repo.finalize_publication_receipt, key, [140])
+                until = time.monotonic() + 2
+                while time.monotonic() < until:
+                    cur.execute("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='transactionid' AND NOT granted) AS waiting")
+                    if cur.fetchone()["waiting"]:
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise AssertionError("Finalizer did not wait for delivery row")
+                cur.execute("SELECT pg_sleep(3.2)")
+            conn.commit()
+        assert future.result(timeout=5) is False
+    assert repo.get_delivery(deliveries[0])["status"] == "processing"

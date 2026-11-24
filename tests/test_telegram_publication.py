@@ -162,3 +162,46 @@ def test_live_inbox_retries_failed_write_without_repeated_telegram_event():
         assert repo.recorded == [(7, utils.get_peer_id(peer), [(4, 100)])]
 
     asyncio.run(scenario())
+
+
+def test_startup_timeout_preserves_unwritten_events(monkeypatch):
+    from app import telegram_publication
+    from telethon import types
+
+    class Client:
+        def add_event_handler(self, callback, event):
+            self.handler = callback
+
+        async def get_me(self):
+            return SimpleNamespace(id=7)
+
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        saved = []
+
+        async def record(self, peer, old, new):
+            started.set()
+            await release.wait()
+            saved.append((old, new))
+            return True
+
+        monkeypatch.setattr(telegram_publication, "_STARTUP_DRAIN_TIMEOUT_SEC", 0.05)
+        monkeypatch.setattr(telegram_publication.PublicationInbox, "record", record)
+        client = Client()
+        bind = telegram_publication.prepare_publication_inbox(client, object())
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[4], sent_messages=[100],
+        ))
+        with pytest.raises(asyncio.TimeoutError):
+            await bind()
+        assert started.is_set() and not hasattr(client, "publication_inbox")
+        release.set()
+        for _ in range(100):
+            if hasattr(client, "publication_inbox"):
+                break
+            await asyncio.sleep(0.01)
+        assert saved == [([4], [100])]
+        assert client.publication_inbox.sender_account_id == 7
+
+    asyncio.run(scenario())
