@@ -12,6 +12,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 
 from telethon import functions, utils
+from telethon.errors import BadRequestError, ForbiddenError, FloodWaitError, RandomIdDuplicateError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, TelegramRetryAfter
 
 from .runtime_utils import run_db
 
@@ -43,6 +45,33 @@ def publication_intent(kind: str, key: str):
 
 def current_intent() -> SendIntent | None:
     return _current_intent.get()
+
+
+def definite_rejection(exc: BaseException) -> bool:
+    return not isinstance(exc, RandomIdDuplicateError) and isinstance(
+        exc, (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge,
+              TelegramRetryAfter, BadRequestError, ForbiddenError, FloodWaitError,
+              PublicationWriteUnavailable),
+    )
+
+
+def possible_write() -> bool:
+    intent = current_intent()
+    return intent is not None and intent.possible_write
+
+
+async def observe_write(call, *, atomic=True):
+    intent = current_intent()
+    if intent is None:
+        return await call()
+    previous = intent.possible_write
+    intent.possible_write = True
+    try:
+        return await call()
+    except Exception as exc:
+        if atomic and definite_rejection(exc):
+            intent.possible_write = previous
+        raise
 
 
 def _request_members(request):
@@ -92,6 +121,13 @@ def publication_client_class(base, repository):
     class PublicationClient(base):
         async def __call__(self, request, ordered=False, flood_sleep_threshold=None):
             await bind_rpc_identity(self, repository, request)
-            return await super().__call__(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold)
+            calls = request if isinstance(request, (list, tuple)) else [request]
+            invoke = super().__call__
+            if any(_request_members(item) for item in calls):
+                return await observe_write(
+                    lambda: invoke(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold),
+                    atomic=len(calls) == 1,
+                )
+            return await invoke(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold)
 
     return PublicationClient
