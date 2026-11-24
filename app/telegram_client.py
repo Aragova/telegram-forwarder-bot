@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import asyncio
 import logging
 from telethon import TelegramClient
 from .config import settings
@@ -55,6 +56,9 @@ async def create_telethon_client(*, publication_repository=None) -> TelegramClie
     if bind is not None:
         try:
             await bind()
+        except asyncio.CancelledError:
+            await client.disconnect()
+            raise
         except Exception:
             # Keep Bot API and UI available. Runtime must not issue MTProto
             # writes without a bound inbox.
