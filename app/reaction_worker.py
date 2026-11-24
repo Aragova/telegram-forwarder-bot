@@ -67,7 +67,7 @@ class ReactionWorker:
             await asyncio.gather(heartbeat_task, return_exceptions=True)
         return True
 
-    async def _process_leased(self, job, owner_token) -> bool:
+    async def _process_leased(self, job, owner_token) -> None:
         job_id = int(job.get("id") or 0)
         tenant_id = int(job.get("tenant_id") or 0)
         rule_id = int(job.get("rule_id") or 0)
@@ -84,10 +84,10 @@ class ReactionWorker:
             if not accounts:
                 result = {"reason": "no_active_accounts_for_job", "attempted": 0, "confirmed": 0, "failed": 0, "skipped": 1}
                 if not await run_db(self.db.mark_reaction_job_skipped, job_id=job_id, worker_id=owner_token, result=result):
-                    return True
+                    return
                 await run_db(self.db.log_reaction_event, tenant_id=tenant_id, rule_id=rule_id, reaction_job_id=job_id, event_type="reaction_job_skipped", status="skipped", extra=result)
                 logger.info("REACTION_JOB_SKIPPED | job_id=%s | tenant_id=%s | rule_id=%s | reason=no_active_accounts_for_job", job_id, tenant_id, rule_id)
-                return True
+                return
 
             executor = TenantReactionExecutor(api_id=settings.api_id, api_hash=settings.api_hash, base_dir=settings.base_dir)
             result = await executor.add_reactions(tenant_id=tenant_id, accounts=accounts, target_id=job.get("target_id"), message_id=int(job.get("message_id") or 0), rule_id=rule_id)
@@ -97,12 +97,12 @@ class ReactionWorker:
 
             if confirmed > 0:
                 if not await run_db(self.db.mark_reaction_job_done, job_id=job_id, worker_id=owner_token, result=result):
-                    return True
+                    return
                 await run_db(self.db.log_reaction_event, tenant_id=tenant_id, rule_id=rule_id, reaction_job_id=job_id, event_type="reaction_job_done", status="done", extra=result)
                 logger.info("REACTION_JOB_DONE | job_id=%s | tenant_id=%s | rule_id=%s", job_id, tenant_id, rule_id)
             elif attempted == 0:
                 if not await run_db(self.db.mark_reaction_job_skipped, job_id=job_id, worker_id=owner_token, result=result):
-                    return True
+                    return
                 await run_db(self.db.log_reaction_event, tenant_id=tenant_id, rule_id=rule_id, reaction_job_id=job_id, event_type="reaction_job_skipped", status="skipped", extra=result)
                 logger.info("REACTION_JOB_SKIPPED | job_id=%s | tenant_id=%s | rule_id=%s", job_id, tenant_id, rule_id)
             else:
@@ -110,7 +110,7 @@ class ReactionWorker:
                 max_attempts = int(job.get("max_attempts") or 0)
                 retry_after = 30 if attempts < max_attempts else None
                 if not await run_db(self.db.mark_reaction_job_failed, job_id=job_id, worker_id=owner_token, error_text="tenant_reaction_not_confirmed", result=result, retry_after_seconds=retry_after):
-                    return True
+                    return
                 await run_db(self.db.log_reaction_event, tenant_id=tenant_id, rule_id=rule_id, reaction_job_id=job_id, event_type="reaction_job_failed", status="pending" if retry_after else "failed", error_text="tenant_reaction_not_confirmed", extra=result)
                 if retry_after:
                     logger.info("REACTION_JOB_RETRY_SCHEDULED | job_id=%s | tenant_id=%s | rule_id=%s", job_id, tenant_id, rule_id)
@@ -120,4 +120,3 @@ class ReactionWorker:
             logger.exception("REACTION_JOB_PROCESS_FAILED | job_id=%s | tenant_id=%s | rule_id=%s", job_id, tenant_id, rule_id)
             await run_db(self.db.mark_reaction_job_failed, job_id=job_id, worker_id=owner_token, error_text=str(exc), result={"error_type": exc.__class__.__name__}, retry_after_seconds=30)
 
-        return True
