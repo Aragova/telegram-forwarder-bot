@@ -71,6 +71,7 @@ class VideoProcessor:
         # Ограничение параллельности для слабого VPS - 1 задача
         self.semaphore = asyncio.Semaphore(1)
         self.cleanup_tasks = []
+        self._cleanup_stop = asyncio.Event()
         self.video_info_cache = {}
 
         # Лимиты кэша
@@ -1601,7 +1602,10 @@ class VideoProcessor:
 
     async def delayed_cleanup(self, file_paths, delay=300):
         async def cleanup():
-            await asyncio.sleep(delay)
+            try:
+                await asyncio.wait_for(self._cleanup_stop.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
             logger.info(f"🧹 Отложенная очистка...")
             deleted = 0
             for fp in file_paths:
@@ -2343,6 +2347,7 @@ class VideoProcessor:
 
     async def shutdown(self):
         logger.info("🛑 Завершение работы VideoProcessor...")
+        self._cleanup_stop.set()
         self._cleanup_watchdog()
         if self.cleanup_tasks:
             logger.info(f"⏳ Ожидание {len(self.cleanup_tasks)} задач...")

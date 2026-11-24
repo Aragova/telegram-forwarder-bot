@@ -7,6 +7,7 @@ from telethon.errors import FloodWaitError
 
 from .runtime_utils import run_db
 from .send_intent import current_publication_intent
+from .delivery_idempotency import normalize_valid_sent_message_ids
 from .sender_primitives import _detect_message_media_kind
 from .telethon_authoritative_resolver import TelethonSendOutcome
 from .video_processor import VideoPreSendError
@@ -217,7 +218,7 @@ class VideoSingleDelivery:
                     candidate_ids = list(sent_msg.authoritative_message_ids)
                 await run_db(
                     owner.db.mark_delivery_attempt_accepted, intent.key,
-                    sent_message_ids=candidate_ids, telegram_method="video_delivery",
+                    sent_message_ids=normalize_valid_sent_message_ids(candidate_ids), telegram_method="video_delivery",
                 )
             if isinstance(sent_msg, TelethonSendOutcome) and not sent_msg.authoritative_resolved:
                 error = "video_send_accepted_target_id_unresolved_non_retryable"
@@ -305,7 +306,7 @@ class VideoSingleDelivery:
                     candidate_sent_message_ids=sent_message_ids,
                     valid_sent_message_ids=valid_sent_message_ids,
                 )
-                return {"ok": True, "sent_message_ids": valid_sent_message_ids}
+                return {"ok": True, "sent_message_ids": valid_sent_message_ids} if intent is not None else True
 
             await run_db(
                 owner._finalize_video_failure_sync,

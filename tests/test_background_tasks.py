@@ -39,3 +39,24 @@ def test_background_task_failure_and_cancellation(caplog) -> None:
         await asyncio.sleep(0)
         assert task not in _RUNNING_TASKS
     asyncio.run(scenario())
+
+
+def test_shutdown_cancels_tasks_spawned_during_cancellation():
+    from app.background_tasks import stop_background_tasks
+
+    async def scenario():
+        spawned = []
+
+        async def original():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                spawned.append(start_background_task(asyncio.Event().wait(), name="late-task"))
+
+        task = start_background_task(original(), name="original")
+        await asyncio.sleep(0)
+        await stop_background_tasks()
+        assert task.cancelled()
+        assert len(spawned) == 1 and spawned[0].cancelled()
+
+    asyncio.run(scenario())

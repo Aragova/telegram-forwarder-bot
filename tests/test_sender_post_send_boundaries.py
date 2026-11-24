@@ -494,8 +494,13 @@ def test_text_fallback_passes_reaction_context():
     source_channel = "@src"
     target_id = "-1001"
     reaction_kwargs = {}
+    accepted = []
 
     class RuntimeRepo:
+        def mark_delivery_attempt_accepted(self, key, **kwargs):
+            accepted.append((key, kwargs))
+            return True
+
         def log_delivery_event(self, **_kwargs):
             return None
 
@@ -556,6 +561,7 @@ def test_text_fallback_passes_reaction_context():
     )
 
     assert ok
+    assert accepted == [("key-r2-1-fallback", {"sent_message_ids": [777], "telegram_method": "text_fallback"})]
     assert reaction_kwargs["rule"] is rule
     assert reaction_kwargs["target_id"] == target_id
     assert reaction_kwargs["sent_message_id"] == 777
