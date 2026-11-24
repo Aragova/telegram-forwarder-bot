@@ -24,13 +24,18 @@ class ReactionClientInfo:
 
 
 async def create_telethon_client(*, publication_repository=None) -> TelegramClient:
-    client = TelegramClient(
+    client_class = TelegramClient
+    if callable(getattr(publication_repository, "get_or_create_mtproto_random_ids", None)):
+        from .send_intent import publication_client_class
+        client_class = publication_client_class(TelegramClient, publication_repository)
+    client = client_class(
         settings.session_name,
         settings.api_id,
         settings.api_hash,
         connection_retries=8,
         retry_delay=2,
         request_retries=8,
+        flood_sleep_threshold=0,
         auto_reconnect=True,
     )
     bind = None
