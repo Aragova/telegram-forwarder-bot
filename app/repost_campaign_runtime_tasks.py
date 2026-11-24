@@ -11,6 +11,7 @@ from app.repost_campaign_schedule_service import RepostCampaignScheduleService, 
 from app.repost_campaign_scheduled_post_service import RepostCampaignScheduledPostService, run_repost_campaign_scheduled_post_loop
 from app.repost_campaign_target_check_service import RepostCampaignTargetCheckService
 from app.saved_post_renderer import SavedPostRenderer
+from app.worker_shutdown import drain_job_workers
 
 
 class RepostCampaignRuntimeTasks:
@@ -47,6 +48,7 @@ class RepostCampaignRuntimeTasks:
         self.launch_job_interval_seconds = int(launch_job_interval_seconds)
         self.launch_job_batch_limit = int(launch_job_batch_limit)
         self._tasks: list[asyncio.Task] = []
+        self._stop_event = asyncio.Event()
 
     def is_running(self) -> bool:
         return any(not task.done() for task in self._tasks)
@@ -60,6 +62,7 @@ class RepostCampaignRuntimeTasks:
             self.logger.info("REPOST_CAMPAIGN_RUNTIME_TASKS_ALREADY_RUNNING | tasks=%s", len(self._tasks))
             return
 
+        self._stop_event.clear()
         started_tasks_before = len(self._tasks)
         try:
             campaign_runtime = self._build_campaign_runtime()
@@ -70,6 +73,7 @@ class RepostCampaignRuntimeTasks:
             self._create_task(
                 "repost_campaign_delete_loop",
                 run_repost_campaign_delete_loop(
+                    stop_event=self._stop_event,
                     runtime=campaign_runtime,
                     interval_seconds=self.delete_interval_seconds,
                     batch_limit=self.delete_batch_limit,
@@ -78,6 +82,7 @@ class RepostCampaignRuntimeTasks:
             self._create_task(
                 "repost_campaign_scheduled_launch_loop",
                 run_repost_campaign_scheduled_launch_loop(
+                    stop_event=self._stop_event,
                     runtime=schedule_runtime,
                     interval_seconds=self.scheduled_launch_interval_seconds,
                     worker_id=f"campaign-schedule:{self.role}",
@@ -86,6 +91,7 @@ class RepostCampaignRuntimeTasks:
             self._create_task(
                 "repost_campaign_scheduled_post_loop",
                 run_repost_campaign_scheduled_post_loop(
+                    stop_event=self._stop_event,
                     runtime=scheduled_post_runtime,
                     interval_seconds=self.scheduled_post_interval_seconds,
                     worker_id=f"vip-scheduled-post:{self.role}",
@@ -94,6 +100,7 @@ class RepostCampaignRuntimeTasks:
             self._create_task(
                 "repost_campaign_launch_job_loop",
                 run_repost_campaign_launch_job_loop(
+                    stop_event=self._stop_event,
                     service=launch_job_runtime,
                     interval_seconds=self.launch_job_interval_seconds,
                     worker_id=f"repost-campaign-launch:{self.role}",
@@ -115,15 +122,13 @@ class RepostCampaignRuntimeTasks:
             self.delete_batch_limit,
         )
 
-    async def stop(self) -> None:
+    async def stop(self, timeout_sec: float = 0.01) -> None:
         if not self._tasks:
             self.logger.info("REPOST_CAMPAIGN_RUNTIME_TASKS_STOPPED | tasks=0")
             return
         tasks = list(self._tasks)
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await drain_job_workers(tasks=tasks, stop_event=self._stop_event,
+                                timeout_sec=timeout_sec, logger=self.logger)
         self._tasks.clear()
         self.logger.info("REPOST_CAMPAIGN_RUNTIME_TASKS_STOPPED | tasks=%s", len(tasks))
 
