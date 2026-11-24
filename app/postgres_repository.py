@@ -4589,6 +4589,30 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if cur.fetchone()["unresolved"]:
                     raise RuntimeError("Есть неподтверждённая публикация MTProto; требуется ручная проверка")
 
+                # Never release an ambiguous attempt merely because its job
+                # exhausted retries. The explicit receipt quarantine above is
+                # the only exception for an unresolved accepted attempt.
+                cur.execute(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM delivery_attempts a
+                        WHERE a.rule_id=%s
+                          AND a.status IN ('sending','accepted','failed_after_send')
+                          AND a.idempotency_key NOT LIKE '%%:rescan:%%'
+                          AND a.idempotency_key NOT LIKE 'archived:%%'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM telegram_publication_receipts r
+                              WHERE r.idempotency_key=a.idempotency_key AND r.rule_id=a.rule_id
+                                AND r.expired_at IS NOT NULL AND r.manual_review IS NOT NULL
+                                AND r.published_ids IS NULL AND a.status='accepted'
+                          )
+                    ) AS unresolved
+                    """,
+                    (int(rule_id),),
+                )
+                if cur.fetchone()["unresolved"]:
+                    raise RuntimeError("Есть отправка с неизвестным результатом; требуется ручная проверка")
+
                 # Archive confirmed receipts before changing the corresponding
                 # attempt keys. Scheduled ID claims follow through ON UPDATE CASCADE.
                 # Unresolved receipts retain their original key to prevent a resend.
@@ -5748,7 +5772,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT mode, schedule_mode, interval
+                    SELECT mode, schedule_mode, interval, target_id, target_thread_id
                     FROM routing
                     WHERE id = %s
                     FOR UPDATE
@@ -5761,6 +5785,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     conn.commit()
                     return None
 
+                # Different rules sharing a destination must serialize their
+                # availability check and enqueue, not just lock their own row.
+                destination_lock = f"delivery-target:{rule_row['target_id']}:{rule_row['target_thread_id']}"
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (destination_lock,))
                 rule_mode = (rule_row["mode"] or "repost").strip().lower()
                 schedule_mode = (rule_row["schedule_mode"] or "interval").strip().lower()
                 interval = int(rule_row["interval"] or 0)
