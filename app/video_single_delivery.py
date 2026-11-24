@@ -4,6 +4,8 @@ import logging
 
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from telethon.errors import FloodWaitError
+from .transport_policy import TransportRateLimited
+from .send_intent import PublicationWriteUnavailable
 
 from .runtime_utils import run_db
 from .sender_primitives import _detect_message_media_kind
@@ -308,6 +310,8 @@ class VideoSingleDelivery:
                 "ok": False, "retryable": True, "accepted": False,
                 "rejected_before_send": True, "error_text": str(exc),
             }
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except (TelegramRetryAfter, FloodWaitError) as exc:
             # A definite Bot API flood-control rejection happens before the
             # video is posted; never finalize as accepted or faulty, and let
