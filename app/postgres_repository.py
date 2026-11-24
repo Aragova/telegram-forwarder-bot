@@ -4571,6 +4571,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         SELECT 1 FROM telegram_publication_receipts r
                         WHERE r.rule_id=%s AND r.published_ids IS NULL
                           AND (r.expired_at IS NULL OR r.manual_review IS NULL OR NOT EXISTS (
+                              SELECT 1 FROM routing rr WHERE rr.id=r.rule_id
+                                AND COALESCE(rr.tenant_id,1)=r.tenant_id
+                                AND rr.source_id::text=r.source_channel
+                                AND rr.source_thread_id IS NOT DISTINCT FROM r.source_thread_id
+                                AND rr.target_id::text=r.target_peer_id::text
+                                AND rr.target_thread_id IS NOT DISTINCT FROM r.target_thread_id
+                          ) OR NOT EXISTS (
                               SELECT 1 FROM delivery_attempts a
                               WHERE a.idempotency_key=r.idempotency_key AND a.rule_id=r.rule_id
                                 AND a.status='accepted'
@@ -5691,6 +5698,18 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                           AND p.source_channel = %s
                           AND p.source_thread_id IS NULL
                           AND p.media_group_id = %s
+                          AND NOT EXISTS (
+                              SELECT 1 FROM telegram_publication_receipts pr
+                              JOIN routing rr ON rr.id=pr.rule_id
+                              WHERE pr.rule_id=d.rule_id AND pr.manual_review IS NOT NULL
+                                AND pr.published_ids IS NULL
+                                AND pr.tenant_id=COALESCE(rr.tenant_id,1)
+                                AND pr.target_peer_id::text=rr.target_id::text
+                                AND pr.target_thread_id IS NOT DISTINCT FROM rr.target_thread_id
+                                AND p.source_channel=pr.source_channel
+                                AND p.source_thread_id IS NOT DISTINCT FROM pr.source_thread_id
+                                AND p.message_id=ANY(pr.source_message_ids)
+                          )
                         ORDER BY p.message_id
                         """,
                         (rule_id, str(source_channel), media_group_id),
@@ -5706,6 +5725,18 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                           AND p.source_channel = %s
                           AND p.source_thread_id = %s
                           AND p.media_group_id = %s
+                          AND NOT EXISTS (
+                              SELECT 1 FROM telegram_publication_receipts pr
+                              JOIN routing rr ON rr.id=pr.rule_id
+                              WHERE pr.rule_id=d.rule_id AND pr.manual_review IS NOT NULL
+                                AND pr.published_ids IS NULL
+                                AND pr.tenant_id=COALESCE(rr.tenant_id,1)
+                                AND pr.target_peer_id::text=rr.target_id::text
+                                AND pr.target_thread_id IS NOT DISTINCT FROM rr.target_thread_id
+                                AND p.source_channel=pr.source_channel
+                                AND p.source_thread_id IS NOT DISTINCT FROM pr.source_thread_id
+                                AND p.message_id=ANY(pr.source_message_ids)
+                          )
                         ORDER BY p.message_id
                         """,
                         (rule_id, str(source_channel), source_thread_id, media_group_id),
@@ -6440,6 +6471,14 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SET manual_review=jsonb_build_object('operator',%s::text,'note',%s::text,'reviewed_at',NOW())
                     WHERE r.idempotency_key=%s AND r.rule_id=%s AND r.send_started_at=%s
                       AND r.expired_at IS NOT NULL AND r.published_ids IS NULL AND r.manual_review IS NULL
+                      AND EXISTS (
+                          SELECT 1 FROM routing rr WHERE rr.id=r.rule_id
+                            AND COALESCE(rr.tenant_id,1)=r.tenant_id
+                            AND rr.source_id::text=r.source_channel
+                            AND rr.source_thread_id IS NOT DISTINCT FROM r.source_thread_id
+                            AND rr.target_id::text=r.target_peer_id::text
+                            AND rr.target_thread_id IS NOT DISTINCT FROM r.target_thread_id
+                      )
                       AND NOT EXISTS (
                           SELECT 1 FROM jobs j WHERE j.payload_json->>'rule_id'=r.rule_id::text
                             AND j.status IN ('pending','leased','processing','retry')
