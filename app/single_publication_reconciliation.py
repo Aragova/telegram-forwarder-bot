@@ -89,7 +89,8 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
     published_ids = receipt["published_ids"]
     if published_ids is None:
         try:
-            reader = getattr(owner, "telethon_read", None) or owner.telethon
+            # Verify outgoing evidence using the publishing account.
+            reader = owner.telethon
             inbox = getattr(reader, "publication_inbox", None)
             if inbox is None:
                 # Reading exact durable mappings does not require enabling sends.
@@ -185,8 +186,9 @@ async def _resolve_receipt_ids(reader, inbox, entity, receipt, source_guard, wri
 
 async def _wait_or_expire(owner,receipt,key,reason):
     if receipt and (receipt.get("expired") or receipt.get("expired_at")):
-        await run_db(owner.db.expire_publication_receipt,key,reason,expected_started_at=receipt["send_started_at"])
-        return _manual(reason)
+        if await run_db(owner.db.expire_publication_receipt,key,reason,expected_started_at=receipt["send_started_at"]):
+            return _manual(reason)
+        return _pending()
     return _pending()
 
 

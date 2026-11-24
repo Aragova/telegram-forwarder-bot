@@ -49,7 +49,8 @@ def verified_published_message(
         return False
     if getattr(message, "chat_id", None) != peer_id:
         return False
-    if (getattr(message, "from_scheduled", None) is True) != require_scheduled:
+    # Only mapped members require explicit scheduled provenance.
+    if require_scheduled and getattr(message, "from_scheduled", None) is not True:
         return False
     if getattr(message, "video_processing_pending", False):
         return False

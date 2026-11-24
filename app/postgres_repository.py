@@ -3654,7 +3654,43 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             )
             row = cur.fetchone()
 
-        return row is not None
+            if row is not None:
+                return True
+            # Exact mapping may arrive before finalization; archived receipts
+            # remain evidence of this rule's own publications.
+            cur.execute(
+                """
+                SELECT 1 FROM telegram_publication_receipts pr
+                JOIN routing rr ON rr.id=pr.rule_id
+                WHERE pr.rule_id=%s AND pr.source_channel=pr.target_peer_id::text
+                  AND rr.source_id::text=pr.source_channel AND rr.target_id::text=pr.source_channel
+                  AND COALESCE(rr.tenant_id,1)=pr.tenant_id
+                  AND rr.source_thread_id IS NOT DISTINCT FROM pr.source_thread_id
+                  AND rr.target_thread_id IS NOT DISTINCT FROM pr.target_thread_id
+                  AND pr.source_channel=%s AND pr.target_thread_id IS NOT DISTINCT FROM %s
+                  AND pr.source_thread_id IS NOT DISTINCT FROM pr.target_thread_id
+                  AND (%s=ANY(pr.published_ids)
+                    OR EXISTS (
+                        SELECT 1 FROM unnest(pr.scheduled_ids,pr.pending_mask) AS member(mid,pending)
+                        WHERE member.pending IS FALSE AND member.mid=%s
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM telegram_publication_claims c
+                        JOIN telegram_publication_mappings m
+                          ON m.sender_account_id=c.sender_account_id
+                         AND m.target_peer_id=c.target_peer_id AND m.scheduled_id=c.scheduled_id
+                        WHERE c.idempotency_key=pr.idempotency_key AND m.published_id=%s
+                          AND NOT EXISTS (
+                            SELECT 1 FROM telegram_publication_mappings x
+                            WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
+                              AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
+                                OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
+                          )
+                    ))
+                LIMIT 1
+                """, (rule_id,str(source_channel),source_thread_id,message_id,message_id,message_id),
+            )
+            return cur.fetchone() is not None
 
     def _log_self_target_echo_delivery_skipped(
         self,
@@ -4520,6 +4556,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def clear_rule_deliveries(self, rule_id: int) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT id FROM routing WHERE id=%s FOR UPDATE", (rule_id,))
+                cur.execute("""SELECT 1 FROM telegram_publication_receipts
+                    WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""", (rule_id,))
+                if cur.fetchone():
+                    raise RuntimeError("Есть незавершённая публикация или реакция")
                 cur.execute("DELETE FROM deliveries WHERE rule_id = %s", (rule_id,))
                 count = int(cur.rowcount or 0)
             conn.commit()
@@ -5587,7 +5628,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT mode, schedule_mode, interval
+                    SELECT mode, schedule_mode, interval, target_id, target_thread_id
                     FROM routing
                     WHERE id = %s
                     FOR UPDATE
@@ -5600,6 +5641,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     conn.commit()
                     return None
 
+                destination_lock = f"delivery-target:{rule_row['target_id']}:{rule_row['target_thread_id']}"
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (destination_lock,))
                 rule_mode = (rule_row["mode"] or "repost").strip().lower()
                 schedule_mode = (rule_row["schedule_mode"] or "interval").strip().lower()
                 interval = int(rule_row["interval"] or 0)
@@ -5655,6 +5698,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             FROM deliveries d_target
                             JOIN routing r_target ON r_target.id = d_target.rule_id
                             WHERE d_target.status = 'processing'
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM telegram_publication_receipts pr
+                                  JOIN delivery_attempts pa ON pa.idempotency_key=pr.idempotency_key
+                                  WHERE pr.delivery_ids @> ARRAY[d_target.id]::bigint[]
+                                    AND pr.published_ids IS NULL AND pr.expired_at IS NULL
+                                    AND pa.status='accepted'
+                              )
                               AND r_target.target_id = r.target_id
                               AND (
                                     (r_target.target_thread_id IS NULL AND r.target_thread_id IS NULL)

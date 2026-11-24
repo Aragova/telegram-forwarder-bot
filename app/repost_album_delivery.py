@@ -683,6 +683,8 @@ class RepostAlbumDelivery:
                 **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
         if reupload_result.get("resolution_method") == "video_processing_pending" and reupload_result.get("transport_accepted"):
+            if [int(m.id) for m in source_messages] != message_ids:
+                return False
             from .single_publication_reconciliation import register_pending_publication
             if await register_pending_publication(
                 owner, key=idempotency_key, delivery_ids=delivery_ids, rule_id=rule.id,
@@ -1065,6 +1067,8 @@ class RepostAlbumDelivery:
                 **({"caption_override": custom_caption} if custom_caption is not None else {}),
             )
             if reupload_retry_result.get("resolution_method") == "video_processing_pending" and reupload_retry_result.get("transport_accepted"):
+                if [int(m.id) for m in source_messages] != message_ids:
+                    return False
                 from .single_publication_reconciliation import register_pending_publication
                 if await register_pending_publication(
                     owner, key=idempotency_key, delivery_ids=delivery_ids, rule_id=rule.id,

@@ -264,3 +264,17 @@ def repo():
         yield repository
     finally:
         repository.client.close_all_connections()
+
+def test_stage2_queued_echo_is_recognized_before_finalization(repo):
+    key, rule_id, delivery_ids, source_ids, source, target = seed(repo, 109)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET target_id=%s WHERE id=%s", (source, rule_id))
+            cur.execute("UPDATE delivery_attempts SET target_id=%s WHERE idempotency_key=%s", (source, key))
+    assert register(repo, (key, rule_id, delivery_ids, source_ids, source, source), [77])
+    repo.record_telegram_publication_mappings(123, int(source), [(77, 900)])
+    with repo.connect() as conn:
+        assert repo._is_self_target_echo_post_for_rule_conn(conn, rule_id=rule_id,
+            source_channel=source, source_thread_id=None, message_id=900)
+        assert not repo._is_self_target_echo_post_for_rule_conn(conn, rule_id=rule_id,
+            source_channel=source, source_thread_id=None, message_id=901)

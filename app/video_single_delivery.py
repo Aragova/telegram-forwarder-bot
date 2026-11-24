@@ -209,7 +209,7 @@ class VideoSingleDelivery:
 
             publication_returned = sent_msg is not None and sent_msg is not False
             if isinstance(sent_msg, TelethonSendOutcome):
-                candidate_ids = sent_msg.returned_candidate_ids or []
+                candidate_ids = [] if sent_msg.resolution_method == "video_processing_pending" else (sent_msg.returned_candidate_ids or [])
             intent = current_publication_intent()
             if publication_returned and intent is not None and hasattr(owner.db, "mark_delivery_attempt_accepted"):
                 if not isinstance(sent_msg, TelethonSendOutcome):
@@ -241,7 +241,7 @@ class VideoSingleDelivery:
                     target_thread_id=target_thread_id, source_message_id=message_id,
                     error_text=error,
                 )
-                return {"ok": False, "accepted_unresolved": True, "retryable": False, "error_text": error, "candidate_sent_message_ids": sent_msg.returned_candidate_ids or []}
+                return {"ok": False, "accepted_unresolved": True, "retryable": False, "error_text": error, "candidate_sent_message_ids": [] if sent_msg.resolution_method == "video_processing_pending" else (sent_msg.returned_candidate_ids or [])}
 
             if sent_msg:
                 sent_message_ids = (
