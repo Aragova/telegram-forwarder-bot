@@ -480,21 +480,28 @@ async def send_saved_post_album_via_telethon_source(
         raise ValueError("Не удалось получить исходные сообщения альбома")
     medias = [m.media for m in messages if getattr(m, "media", None)]
     sent = await _publish_rpc(telethon_client.send_file, chat_id, "telethon_source", entity=target_entity, file=medias, caption=content.get("caption") or "", formatting_entities=saved_post_entities_to_telethon(content.get("caption_entities")))
-    sent_messages = sent if isinstance(sent, list) else [sent]
-    raw_ids = [int(m.id) for m in sent_messages if getattr(m, "id", None)]
-    pending_ids = await resolve_saved_post_pending(
-        telethon_client=telethon_client, chat_id=chat_id, sent_messages=sent_messages,
-        expected_count=media_items_count, started_at=started_at, method="telethon_source",
-    )
-    if pending_ids is not None:
-        return {"ok": True, "message_id": pending_ids[0], "message_ids": pending_ids, "chat_id": str(chat_id), "kind": "album", "method": "telethon_source"}
-    verified = await verify_raw_album_ids(telethon_client=telethon_client, target_id=chat_id, raw_message_ids=raw_ids, expected_count=media_items_count, expected_caption=content.get("caption"), started_at=started_at)
-    if verified.ok:
-        return {"ok": True, "message_id": verified.message_id, "message_ids": verified.message_ids, "chat_id": str(chat_id), "kind": "album", "method": verified.method}
-    recovered = await recover_album_ids_by_scan(telethon_client=telethon_client, target_id=chat_id, expected_count=media_items_count, expected_caption=content.get("caption"), started_at=started_at)
-    if recovered.ok:
-        return {"ok": True, "message_id": recovered.message_id, "message_ids": recovered.message_ids, "chat_id": str(chat_id), "kind": "album", "method": recovered.method}
-    raise SavedPostSentUnverifiedError(target_id=chat_id, message_ids=raw_ids, verified_ids=verified.message_ids, method="telethon_source_unverified", reason=recovered.error_text or verified.error_text or "Не удалось подтвердить ID отправленного альбома в целевом канале.")
+    raw_ids = []
+    try:
+        sent_messages = sent if isinstance(sent, list) else [sent]
+        raw_ids = [int(m.id) for m in sent_messages if getattr(m, "id", None)]
+        pending_ids = await resolve_saved_post_pending(
+            telethon_client=telethon_client, chat_id=chat_id, sent_messages=sent_messages,
+            expected_count=media_items_count, started_at=started_at, method="telethon_source",
+        )
+        if pending_ids is not None:
+            return {"ok": True, "message_id": pending_ids[0], "message_ids": pending_ids, "chat_id": str(chat_id), "kind": "album", "method": "telethon_source"}
+        verified = await verify_raw_album_ids(telethon_client=telethon_client, target_id=chat_id, raw_message_ids=raw_ids, expected_count=media_items_count, expected_caption=content.get("caption"), started_at=started_at)
+        if verified.ok:
+            return {"ok": True, "message_id": verified.message_id, "message_ids": verified.message_ids, "chat_id": str(chat_id), "kind": "album", "method": verified.method}
+        recovered = await recover_album_ids_by_scan(telethon_client=telethon_client, target_id=chat_id, expected_count=media_items_count, expected_caption=content.get("caption"), started_at=started_at)
+        if recovered.ok:
+            return {"ok": True, "message_id": recovered.message_id, "message_ids": recovered.message_ids, "chat_id": str(chat_id), "kind": "album", "method": recovered.method}
+        raise SavedPostSentUnverifiedError(target_id=chat_id, message_ids=raw_ids, verified_ids=verified.message_ids, method="telethon_source_unverified", reason=recovered.error_text or verified.error_text or "Не удалось подтвердить ID отправленного альбома в целевом канале.")
+    except SavedPostSentUnverifiedError:
+        raise
+    except Exception as exc:
+        raise SavedPostSentUnverifiedError(target_id=chat_id, message_ids=raw_ids,
+            method="telethon_source_unverified", reason="Post-send verification failed") from exc
 
 
 async def send_saved_post_content_via_telethon(
@@ -513,6 +520,8 @@ async def send_saved_post_content_via_telethon(
         target_entity,
         kind,
     )
+    response_received = False
+    raw_ids = []
     local_path: Path | None = None
     local_paths: list[Path] = []
     started_at = datetime.now(timezone.utc)
@@ -520,6 +529,7 @@ async def send_saved_post_content_via_telethon(
         if kind == "text":
             entities = saved_post_entities_to_telethon(content.get("entities"))
             sent = await _publish_rpc(telethon_client.send_message, chat_id, "telethon_builder", entity=target_entity, message=content.get("text") or "", formatting_entities=entities)
+            response_received = True
         elif kind == "album":
             media_items = content.get("media_items") or []
             if not media_items:
@@ -546,6 +556,7 @@ async def send_saved_post_content_via_telethon(
             for item in media_items:
                 local_paths.append(await download_saved_post_media_item_for_telethon(bot=bot, item=item, temp_dir=temp_dir))
             sent = await _publish_rpc(telethon_client.send_file, chat_id, "telethon_builder", entity=target_entity, file=[str(x) for x in local_paths], caption=content.get("caption") or "", formatting_entities=caption_entities)
+            response_received = True
             sent_messages = sent if isinstance(sent, list) else [sent]
             raw_ids = [int(m.id) for m in sent_messages if getattr(m, "id", None)]
             pending_ids = await resolve_saved_post_pending(
@@ -575,6 +586,7 @@ async def send_saved_post_content_via_telethon(
                 caption=content.get("caption") or "",
                 formatting_entities=caption_entities,
             )
+            response_received = True
         pending_ids = await resolve_saved_post_pending(
             telethon_client=telethon_client, chat_id=chat_id, sent_messages=[sent],
             expected_count=1, started_at=started_at, method="telethon_builder",
@@ -584,7 +596,12 @@ async def send_saved_post_content_via_telethon(
             raise SavedPostSentUnverifiedError(target_id=chat_id, message_ids=[], method="telethon_builder_unverified", reason="Invalid publication ID; do not resend")
         logger.info("SAVED_POST_TELETHON_BUILDER_SEND_DONE | target_id=%s | message_id=%s | method=telethon_builder", chat_id, ids[0])
         return {"ok": True, "message_id": ids[0], "message_ids": ids, "chat_id": str(chat_id), "kind": kind, "method": "telethon_builder"}
+    except SavedPostSentUnverifiedError:
+        raise
     except Exception as exc:
+        if response_received:
+            raise SavedPostSentUnverifiedError(target_id=chat_id, message_ids=raw_ids,
+                method="telethon_builder_unverified", reason="Post-send verification failed") from exc
         logger.warning("SAVED_POST_TELETHON_BUILDER_SEND_FAILED | target_id=%s | error=%s", chat_id, exc)
         raise
     finally:
