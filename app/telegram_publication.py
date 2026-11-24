@@ -154,6 +154,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
             old,new = map(list,zip(*pairs))
             if len(buffer) == buffer.maxlen:
                 buffer_overflow = True
+                client.publication_write_blocked = True
                 logger.error("TELEGRAM_PUBLICATION_MAPPING_BUFFER_FULL | bound=%s", inbox is not None)
                 return
             buffer.append((peer,old,new))
