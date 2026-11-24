@@ -11,15 +11,19 @@ LOGGER = logging.getLogger("forwarder.background_tasks")
 # A task needs a strong reference until it finishes.
 _RUNNING_TASKS: set[asyncio.Task[Any]] = set()
 _STOPPING_LOOPS = WeakSet()
+_DRAIN_ONLY_TASKS: set[asyncio.Task[Any]] = set()
 
 
-def start_background_task(awaitable: Awaitable[Any], *, name: str) -> asyncio.Task[Any]:
+def start_background_task(awaitable: Awaitable[Any], *, name: str, drain_only: bool = False) -> asyncio.Task[Any]:
     """Track a fire-and-forget task and log unexpected failures."""
     task = asyncio.create_task(awaitable, name=name)
     _RUNNING_TASKS.add(task)
+    if drain_only:
+        _DRAIN_ONLY_TASKS.add(task)
 
     def _finished(done: asyncio.Task[Any]) -> None:
         _RUNNING_TASKS.discard(done)
+        _DRAIN_ONLY_TASKS.discard(done)
         if done.cancelled():
             return
         try:
@@ -28,7 +32,7 @@ def start_background_task(awaitable: Awaitable[Any], *, name: str) -> asyncio.Ta
             LOGGER.exception("Фоновая задача %s завершилась с ошибкой", name)
 
     task.add_done_callback(_finished)
-    if task.get_loop() in _STOPPING_LOOPS:
+    if task.get_loop() in _STOPPING_LOOPS and not drain_only:
         task.cancel()
     return task
 
@@ -44,5 +48,6 @@ async def stop_background_tasks() -> None:
         if not tasks:
             return
         for task in tasks:
-            task.cancel()
+            if task not in _DRAIN_ONLY_TASKS:
+                task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

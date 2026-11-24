@@ -9158,4 +9158,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("👋 Бот остановлен")
     finally:
-        db.client.close_all_connections()
+        db.close_all_connections()

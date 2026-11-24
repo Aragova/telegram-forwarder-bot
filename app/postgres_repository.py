@@ -133,6 +133,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     # LOW LEVEL
     # =========================================================
 
+    def close_all_connections(self) -> None:
+        self.client.close_all_connections()
+
     def ensure_configured(self) -> None:
         self.client.ensure_driver()
         if not self.client.is_configured():

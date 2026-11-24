@@ -33,6 +33,15 @@ def _create_thumb_temp_path(prefix: str) -> Path:
         return Path(handle.name)
 
 
+def _remove_orphan_thumb(done: asyncio.Task[Path], prefix: str) -> None:
+    if done.cancelled():
+        return
+    try:
+        done.result().unlink(missing_ok=True)
+    except Exception:
+        logger.exception("THUMB_TEMP_CLEANUP_FAILED | prefix=%s", prefix)
+
+
 async def _create_thumb_temp_path_async(prefix: str) -> Path:
     """Offload creation and remove the late-created file after cancellation.
 
@@ -42,18 +51,12 @@ async def _create_thumb_temp_path_async(prefix: str) -> Path:
     creation = start_background_task(
         asyncio.to_thread(_create_thumb_temp_path, prefix),
         name=f"create-thumbnail-{prefix}",
+        drain_only=True,
     )
     try:
         return await asyncio.shield(creation)
     except asyncio.CancelledError:
-        def _remove_orphan(done: asyncio.Task[Path]) -> None:
-            if done.cancelled():
-                return
-            try:
-                done.result().unlink(missing_ok=True)
-            except Exception:
-                logger.exception("THUMB_TEMP_CLEANUP_FAILED | prefix=%s", prefix)
-        creation.add_done_callback(_remove_orphan)
+        creation.add_done_callback(lambda done: _remove_orphan_thumb(done, prefix))
         raise
 
 

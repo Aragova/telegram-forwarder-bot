@@ -60,3 +60,14 @@ def test_shutdown_cancels_tasks_spawned_during_cancellation():
         assert len(spawned) == 1 and spawned[0].cancelled()
 
     asyncio.run(scenario())
+
+
+def test_shutdown_drains_thread_work_instead_of_discarding_result():
+    from app.background_tasks import stop_background_tasks
+
+    async def scenario():
+        task = start_background_task(asyncio.to_thread(lambda: 42), name="thread", drain_only=True)
+        await stop_background_tasks()
+        assert task.result() == 42
+
+    asyncio.run(scenario())
