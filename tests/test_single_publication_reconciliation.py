@@ -76,3 +76,12 @@ def test_pending_single_defers_without_second_send_then_finishes_and_reacts_to_f
         assert third["ok"] and reactions == [5181] and repo.finalized == 1
 
     asyncio.run(check())
+
+
+def test_publication_key_matches_sender_jobs():
+    from app.single_publication_reconciliation import publication_key_for_job
+    payload = dict(rule_id=149,delivery_id=12,delivery_ids=[12,13],target_id="-100123",media_group_id="abc")
+    assert publication_key_for_job("repost_single",payload) == "delivery:12:target:-100123:single"
+    assert publication_key_for_job("repost_album",payload) == "rule:149:target:-100123:media_group:abc:album"
+    assert publication_key_for_job("video_send",payload) == publication_key_for_job("video_delivery",payload)
+    assert publication_key_for_job("video_download",payload) is None

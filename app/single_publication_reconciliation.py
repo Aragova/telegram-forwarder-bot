@@ -9,9 +9,25 @@ import logging
 from typing import Any
 
 from .runtime_utils import run_db
+from .delivery_idempotency import build_delivery_idempotency_key
 from .telethon_authoritative_resolver import TelethonAuthoritativeMessageResolver
 
 logger = logging.getLogger("forwarder.publication")
+
+
+def publication_key_for_job(job_type: str, payload: dict[str, Any]) -> str | None:
+    """Derive the same key as SenderService, not a new queue identity."""
+    kind = {"repost_single":"single","repost_album":"album",
+            "video_delivery":"video_send","video_send":"video_send"}.get(job_type)
+    if kind is None:
+        return None
+    delivery_id = payload.get("delivery_id")
+    ids = payload.get("delivery_ids") or ([delivery_id] if delivery_id is not None else [])
+    return build_delivery_idempotency_key(
+        operation_kind=kind, delivery_id=delivery_id, rule_id=payload.get("rule_id"),
+        target_id=payload.get("target_id"), media_group_id=payload.get("media_group_id"),
+        source_message_ids=ids,
+    )
 
 
 def _pending() -> dict[str, Any]:

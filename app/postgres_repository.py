@@ -567,7 +567,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             sender_account_id BIGINT NOT NULL,
             target_peer_id BIGINT NOT NULL,
             scheduled_id BIGINT NOT NULL CHECK(scheduled_id > 0),
-            idempotency_key TEXT NOT NULL REFERENCES telegram_publication_receipts(idempotency_key),
+            idempotency_key TEXT NOT NULL REFERENCES telegram_publication_receipts(idempotency_key) ON UPDATE CASCADE,
             PRIMARY KEY (sender_account_id, target_peer_id, scheduled_id)
         );
 
@@ -2775,6 +2775,21 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         [(delivery_id,) for delivery_id in delivery_ids],
                     )
 
+                    # Explicit rollback starts a new logical send lifecycle. Keep
+                    # old Telegram evidence and claims for audit, but release its
+                    # active idempotency key. Never archive an unresolved receipt.
+                    cur.execute(
+                        """
+                        UPDATE telegram_publication_receipts
+                        SET idempotency_key='archived:' || %s || ':' || idempotency_key,
+                            reaction_state=CASE WHEN reaction_state IN ('pending','dispatching')
+                                THEN 'uncertain' ELSE reaction_state END
+                        WHERE rule_id=%s AND delivery_ids && %s::bigint[]
+                          AND published_ids IS NOT NULL
+                          AND idempotency_key NOT LIKE 'archived:%%'
+                        """,
+                        (uuid.uuid4().hex,rule_id,delivery_ids),
+                    )
                     cur.execute(
                         """
                         DELETE FROM delivery_attempts
@@ -3561,6 +3576,68 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             row = cur.fetchone()
 
         return row is not None
+
+    def suppress_self_target_echo_deliveries(self, rule_id: int, delivery_ids: list[int]) -> bool:
+        """Recheck queued source posts against exact published IDs before another send."""
+        if not delivery_ids:
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT d.id,p.source_channel,p.source_thread_id,p.message_id
+                    FROM deliveries d JOIN posts p ON p.id=d.post_id
+                    JOIN routing r ON r.id=d.rule_id
+                    WHERE d.id=ANY(%s) AND d.rule_id=%s
+                      AND d.status IN ('pending','processing')
+                      AND r.source_id::text=r.target_id::text
+                      AND r.source_thread_id IS NOT DISTINCT FROM r.target_thread_id
+                    """,(delivery_ids,rule_id),
+                )
+                rows=cur.fetchall()
+                echo=False
+                for row in rows:
+                    if self._is_self_target_echo_post_for_rule_conn(
+                        conn,rule_id=rule_id,source_channel=row["source_channel"],
+                        source_thread_id=row["source_thread_id"],message_id=row["message_id"],
+                    ):
+                        echo=True
+                        break
+                    # Telegram mapping may arrive before the original receipt finalizes.
+                    cur.execute(
+                        """
+                        SELECT 1 FROM telegram_publication_receipts r
+                        JOIN telegram_publication_mappings m
+                          ON m.sender_account_id=r.sender_account_id
+                         AND m.target_peer_id=r.target_peer_id
+                         AND m.scheduled_id=ANY(r.scheduled_ids)
+                        WHERE r.rule_id=%s AND r.source_channel=r.target_peer_id::text
+                          AND r.target_peer_id::text=%s
+                          AND r.target_thread_id IS NOT DISTINCT FROM %s
+                          AND r.source_thread_id IS NOT DISTINCT FROM r.target_thread_id
+                          AND m.published_id=%s
+                          AND NOT EXISTS (
+                            SELECT 1 FROM telegram_publication_mappings x
+                            WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
+                              AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
+                                OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
+                          )
+                        LIMIT 1
+                        """,(rule_id,row["source_channel"],row["source_thread_id"],row["message_id"]),
+                    )
+                    if cur.fetchone():
+                        echo=True
+                        break
+                if not echo:
+                    return False
+                cur.execute(
+                    """
+                    UPDATE deliveries SET status='faulty',error_text='Self-loop: confirmed publication echo'
+                    WHERE id=ANY(%s) AND rule_id=%s AND status IN ('pending','processing')
+                    """,(delivery_ids,rule_id),
+                )
+            conn.commit()
+        return True
 
     def _log_self_target_echo_delivery_skipped(
         self,
