@@ -72,9 +72,16 @@ class PublicationDifferenceRecovery:
             pts_limit=1000, pts_total_limit=10000,
         ))
         if isinstance(difference, types.updates.DifferenceTooLong):
-            # Old evidence may be unrecoverable. Rebaseline for future sends;
-            # existing unresolved receipts still require exact pairs.
-            logger.warning("PUBLICATION_DIFFERENCE_TOO_LONG | account=%s", self.sender_account_id)
+            # The caller's total limit can itself cause TooLong. Retry from
+            # the same checkpoint without that limit before abandoning it.
+            difference = await self._rpc(functions.updates.GetDifferenceRequest(
+                pts=cursor["pts"], qts=cursor["qts"], date=cursor["state_date"],
+                pts_limit=1000,
+            ))
+        if isinstance(difference, types.updates.DifferenceTooLong):
+            # The server still cannot provide the range. Rebaseline for future
+            # sends, without treating old receipts as confirmed.
+            logger.warning("PUBLICATION_DIFFERENCE_RANGE_UNAVAILABLE | account=%s", self.sender_account_id)
             state = await self._rpc(functions.updates.GetStateRequest())
             await self._advance(cursor, state.pts, state.qts, state.date)
             return False
