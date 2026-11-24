@@ -6185,7 +6185,19 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                      scheduled_ids, mask, attempt["created_at"]),
                 )
                 if not cur.fetchone():
-                    return False
+                    # A repeated identical registration may follow a lost commit response.
+                    cur.execute(
+                        """SELECT 1 FROM telegram_publication_receipts
+                           WHERE idempotency_key=%s AND rule_id=%s AND tenant_id=%s
+                             AND sender_account_id=%s AND target_peer_id=%s
+                             AND target_thread_id IS NOT DISTINCT FROM %s
+                             AND source_channel=%s AND source_thread_id IS NOT DISTINCT FROM %s
+                             AND delivery_ids=%s AND source_message_ids=%s
+                             AND scheduled_ids=%s AND pending_mask=%s AND expired_at IS NULL""",
+                        (key,rule_id,rule['tenant_id'] or 1,account_id,peer_id,thread_id,
+                         source_channel,rule['source_thread_id'],delivery_ids,source_message_ids,scheduled_ids,mask),
+                    )
+                    return cur.fetchone() is not None
                 cur.executemany(
                     """
                     INSERT INTO telegram_publication_claims
@@ -6473,6 +6485,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SET status = 'accepted', sent_message_ids_json = %s::jsonb, telegram_method = COALESCE(%s, telegram_method), updated_at = NOW(), error_text = NULL
                     WHERE idempotency_key = %s
                       AND status IN ('sending', 'accepted')
+                      AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication'
                     """,
                     (_json_dumps([int(x) for x in (sent_message_ids or [])]), telegram_method, str(idempotency_key)),
                 )
@@ -6492,6 +6505,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     UPDATE delivery_attempts
                     SET status = 'verified', sent_message_ids_json = %s::jsonb, error_text = NULL, updated_at = NOW()
                     WHERE idempotency_key = %s
+                      AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication'
                       AND (
                           status = 'accepted'
                           OR (status = 'verified' AND sent_message_ids_json = %s::jsonb)
@@ -6757,7 +6771,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s FOR UPDATE",
+                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication' FOR UPDATE",
                     (str(idempotency_key),),
                 )
                 attempt = cur.fetchone()
@@ -6799,7 +6813,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if not current_job or current_job.get("status") != "processing" or current_job.get("locked_by") != str(worker_id):
                     return 0
                 cur.execute(
-                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s FOR UPDATE",
+                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication' FOR UPDATE",
                     (str(idempotency_key),),
                 )
                 attempt = cur.fetchone()

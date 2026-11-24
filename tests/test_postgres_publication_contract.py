@@ -207,6 +207,11 @@ def test_stage2_real_pg_mixed_album_is_atomic_and_rollback_preserves_evidence(re
     seeded=seed(repo,101,count=2)
     key,rule_id,deliveries,source_ids,source,target=seeded
     assert register(repo,seeded,[500,500],[False,True])
+    assert register(repo,seeded,[500,500],[False,True])
+    assert not register(repo,seeded,[500,502],[False,True])
+    assert not repo.mark_delivery_attempt_accepted(key,sent_message_ids=[500,999],telegram_method="mtproto")
+    assert not repo.mark_delivery_attempt_verified(key,sent_message_ids=[500,999])
+    assert not repo.mark_delivery_faulty_if_attempt_unverified(deliveries[0],key,"stale worker")
     assert repo.get_delivery_attempt_by_idempotency_key(key)["status"]=="accepted"
     assert repo.get_delivery_attempt_by_idempotency_key(key)["sent_message_ids_json"]==[]
     assert not repo.finalize_publication_receipt(key,[500,501])

@@ -1088,9 +1088,7 @@ class SenderService:
     ) -> dict:
         from .reaction_delivery import ReactionDelivery
         kwargs = {
-            "rule": rule,
-            "target_id": target_id,
-            "sent_message_id": sent_message_id,
+            "rule": rule, "target_id": target_id, "sent_message_id": sent_message_id,
             "source_channel": source_channel,
             "source_message_ids": source_message_ids,
             "delivery_id": delivery_id,
