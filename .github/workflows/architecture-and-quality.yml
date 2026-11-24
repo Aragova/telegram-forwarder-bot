@@ -297,7 +297,7 @@ jobs:
       pull-requests: read
       contents: read
     steps:
-      - name: Read latest completed SonarCloud check annotations
+      - name: Read latest completed SonarCloud and CodeQL annotations
         uses: actions/github-script@v7
         with:
           script: |
@@ -307,25 +307,25 @@ jobs:
             });
             const head = context.payload.pull_request.head.sha;
             const refs = [...new Set([head, ...commits.reverse().map(c => c.sha)])].slice(0, 12);
-            for (const ref of refs) {
-              const checks = await github.paginate(github.rest.checks.listForRef, {
-                owner, repo, ref, check_name: 'SonarCloud Code Analysis', per_page: 100
-              });
-              const check = checks.find(c => c.status === 'completed');
-              if (!check) continue;
-              core.info('SONAR_CHECK ' + JSON.stringify({
-                ref, head, conclusion: check.conclusion, id: check.id
-              }));
-              const annotations = await github.paginate(github.rest.checks.listAnnotations, {
-                owner, repo, check_run_id: check.id, per_page: 100
-              });
-              for (const a of annotations) {
-                core.info('SONAR_ANNOTATION ' + JSON.stringify({
-                  path: a.path, line: a.start_line, level: a.annotation_level,
-                  title: a.title, message: a.message
+            for (const checkName of ['SonarCloud Code Analysis', 'CodeQL']) {
+              for (const ref of refs) {
+                const checks = await github.paginate(github.rest.checks.listForRef, {
+                  owner, repo, ref, check_name: checkName, per_page: 100
+                });
+                const check = checks.find(c => c.status === 'completed');
+                if (!check) continue;
+                core.info('ANALYZER_CHECK ' + JSON.stringify({
+                  name: checkName, ref, head, conclusion: check.conclusion, id: check.id
                 }));
+                const annotations = await github.paginate(github.rest.checks.listAnnotations, {
+                  owner, repo, check_run_id: check.id, per_page: 100
+                });
+                for (const a of annotations) {
+                  core.info('ANALYZER_ANNOTATION ' + JSON.stringify({
+                    name: checkName, path: a.path, line: a.start_line, level: a.annotation_level,
+                    title: a.title, message: a.message
+                  }));
+                }
+                break;
               }
-              return;
             }
-            core.info('No completed SonarCloud check in recent PR commits.');
-
