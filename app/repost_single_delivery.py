@@ -498,6 +498,9 @@ class RepostSingleDelivery:
             return False
 
         if getattr(reupload_outcome, "transport_accepted", False) and not getattr(reupload_outcome, "authoritative_resolved", False):
+            if idempotency_key and getattr(reupload_outcome, "resolution_method", None) == "botapi_pending_unresolved":
+                await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                             sent_message_ids=[], telegram_method="botapi_pending_unresolved")
             if getattr(reupload_outcome, "resolution_method", None) == "video_processing_pending":
                 from .single_publication_reconciliation import register_pending_single
                 if await register_pending_single(
@@ -846,6 +849,7 @@ class RepostSingleDelivery:
         text_fallback_sent_message_id = None
 
         if html_text:
+            response_received = False
             try:
                 sent = await owner.bot.send_message(
                     chat_id=target_id,
@@ -855,6 +859,20 @@ class RepostSingleDelivery:
                     **({"entities": bot_entities} if custom_caption is not None else {}),
                     disable_web_page_preview=True,
                 )
+
+                response_received = True
+                from .telegram_publication import botapi_publication_ids
+                ids = botapi_publication_ids(sent, 1)
+                if not ids:
+                    if idempotency_key:
+                        await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                                     sent_message_ids=[], telegram_method="botapi_pending_unresolved")
+                    await run_db(owner._mark_delivery_faulty_sync, delivery_id,
+                                 "copy_single_uncertain_no_fallback: text fallback response unresolved")
+                    return False
+                if idempotency_key:
+                    await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                                 sent_message_ids=ids, telegram_method="text_fallback")
 
                 await owner._add_reaction_for_rule_if_possible(
                     rule=rule,
@@ -909,6 +927,17 @@ class RepostSingleDelivery:
                 return {"ok": True, "sent_message_ids": [int(sent.message_id)]}
 
             except Exception as exc:
+                from .send_intent import definite_rejection
+                from .transport_policy import TransportRateLimited
+                if not response_received and isinstance(exc, TransportRateLimited):
+                    raise
+                if response_received or not definite_rejection(exc):
+                    error = "copy_single_uncertain_no_fallback: text fallback outcome unknown"
+                    if idempotency_key:
+                        await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key,
+                                     status="failed_after_send", error_text=error)
+                    await run_db(owner._mark_delivery_faulty_sync, delivery_id, error)
+                    return False
                 await owner._log_delivery_pipeline_step(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
