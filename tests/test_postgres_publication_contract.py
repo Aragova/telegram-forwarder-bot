@@ -112,3 +112,30 @@ def test_rescan_preserves_uncertain_attempt(status):
         assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == status
     finally:
         repo.client.close_all_connections()
+
+
+@pytest.mark.skipif(os.getenv("VIMI_TEST_POSTGRES") != "1", reason="requires disposable PostgreSQL")
+def test_publication_inbox_preserves_conflicts_and_cursor_cas():
+    from datetime import datetime, timezone
+
+    assert os.getenv("APP_PG_DB") == "vimi_publication_ci"
+    repo = PostgresRepository()
+    try:
+        repo.init()
+        repo.record_telegram_publication_mappings(123, -100456, [(9, 100), (10, 101)])
+        repo.record_telegram_publication_mappings(123, -100456, [(9, 100)])
+        assert repo.get_telegram_publication_mappings(123, -100456, [10, 9]) == [101, 100]
+        assert repo.get_telegram_publication_mapping(124, -100456, 9) is None
+        assert repo.get_telegram_publication_mapping(123, -100457, 9) is None
+        repo.record_telegram_publication_mappings(123, -100456, [(9, 102)])
+        assert repo.get_telegram_publication_mapping(123, -100456, 9) is None
+        assert repo.get_telegram_publication_mappings(123, -100456, [9, 10]) == []
+        repo.record_telegram_publication_mappings(123, -100456, [(11, 101)])
+        assert repo.get_telegram_publication_mapping(123, -100456, 10) is None
+        now = datetime.now(timezone.utc)
+        repo.initialize_publication_recovery_cursor(123, 1, 0, now)
+        assert repo.advance_publication_recovery_cursor(123, 0, 2, 0, now)
+        assert not repo.advance_publication_recovery_cursor(123, 0, 3, 0, now)
+        assert repo.get_publication_recovery_cursor(123)["pts"] == 2
+    finally:
+        repo.client.close_all_connections()

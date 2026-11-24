@@ -1,0 +1,283 @@
+"""Exact scheduled-to-published ID evidence from Telegram MTProto.
+
+This module never sends, resends, deletes, edits or guesses messages.
+The inbox stores protocol evidence independently of the delivery attempt;
+an update is allowed to arrive before the send RPC returns.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime, timezone
+from typing import Any
+
+logger = logging.getLogger("forwarder.publication")
+_STARTUP_DRAIN_TIMEOUT_SEC = 30
+
+
+def publication_pairs(scheduled: Any, published: Any) -> list[tuple[int, int]]:
+    """Validate the entire vector pair; ordinary scheduled deletion has no mapping."""
+    if not isinstance(scheduled, (tuple, list)) or not isinstance(published, (tuple, list)):
+        return []
+    if not scheduled or len(scheduled) != len(published):
+        return []
+    if any(type(mid) is not int or mid <= 0 for mid in (*scheduled, *published)):
+        return []
+    if len(set(scheduled)) != len(scheduled) or len(set(published)) != len(published):
+        return []
+    return list(zip(scheduled, published))
+
+
+def publication_candidate_mask(ids: list[int], pending_mask: list[bool] | None) -> list[bool]:
+    """A numeric ID can legitimately occur once in each Telegram namespace."""
+    mask = [True] * len(ids) if pending_mask is None else pending_mask
+    if (not ids or len(ids) != len(mask) or not any(mask)
+            or any(type(mid) is not int or mid <= 0 for mid in ids)
+            or any(type(flag) is not bool for flag in mask)
+            or len(set(zip(mask,ids))) != len(ids)):
+        return []
+    return list(mask)
+
+
+def verified_published_message(
+    message: Any, *, peer_id: int, published_id: int, thread_id: int | None,
+    source_ids: set[int] | None, before_id: int | None, started_at: datetime,
+    broadcast: bool, require_scheduled: bool = True,
+) -> bool:
+    """Verify a protocol-mapped message in the intended peer, not by caption."""
+    if message is None or getattr(message, "id", None) != published_id:
+        return False
+    if getattr(message, "chat_id", None) != peer_id:
+        return False
+    if (getattr(message, "from_scheduled", None) is True) != require_scheduled:
+        return False
+    if getattr(message, "video_processing_pending", False):
+        return False
+    if broadcast and getattr(message, "post", None) is not True:
+        return False
+    if not broadcast and getattr(message, "out", None) is not True:
+        return False
+    if before_id is not None and published_id <= before_id:
+        return False
+    if source_ids and published_id in source_ids:
+        return False
+    date = getattr(message, "date", None)
+    if not isinstance(date, datetime) or date.tzinfo is None:
+        return False
+    if started_at.tzinfo is None or date.astimezone(timezone.utc) < started_at.astimezone(timezone.utc).replace(microsecond=0):
+        return False
+    if thread_id is not None:
+        reply = getattr(message, "reply_to", None)
+        top = getattr(reply, "reply_to_top_id", None) or getattr(reply, "top_msg_id", None)
+        if top is None:
+            top = getattr(reply, "reply_to_msg_id", None)
+        if top != thread_id:
+            return False
+    return True
+
+
+class PublicationInbox:
+    def __init__(self, repository: Any, sender_account_id: int):
+        if type(sender_account_id) is not int or sender_account_id <= 0:
+            raise ValueError("Invalid sender account")
+        self.repository = repository
+        self.sender_account_id = sender_account_id
+
+    async def record(self, peer_id: int, scheduled: Any, published: Any) -> bool:
+        pairs = publication_pairs(scheduled, published)
+        if type(peer_id) is not int or peer_id == 0 or not pairs:
+            return False
+        await asyncio.to_thread(
+            self.repository.record_telegram_publication_mappings,
+            self.sender_account_id, peer_id, pairs,
+        )
+        return True
+
+    async def lookup(self, peer_id: int, scheduled_id: int) -> int | None:
+        return await asyncio.to_thread(
+            self.repository.get_telegram_publication_mapping,
+            self.sender_account_id, peer_id, scheduled_id,
+        )
+
+    async def lookup_many(self, peer_id: int, scheduled_ids: list[int]) -> list[int]:
+        return await asyncio.to_thread(
+            self.repository.get_telegram_publication_mappings,
+            self.sender_account_id, peer_id, scheduled_ids,
+        )
+
+
+def prepare_publication_inbox(client: Any, repository: Any):
+    """Install before connect; only bind events after authenticating the account."""
+    from collections import deque
+    from telethon import events, types, utils
+    from telethon.errors import FloodWaitError, ServerError
+
+    client.publication_inbox_ready = asyncio.get_running_loop().create_future()
+
+    buffer = deque(maxlen=1024)
+    inbox: PublicationInbox | None = None
+    candidate: PublicationInbox | None = None
+    buffer_overflow = False
+    live_lock = asyncio.Lock()
+    retry_task: asyncio.Task | None = None
+
+    async def flush_live() -> None:
+        async with live_lock:
+            while buffer and candidate is not None:
+                peer, old, new = buffer[0]
+                await candidate.record(peer, old, new)
+                buffer.popleft()
+
+    def schedule_retry(delay: float) -> None:
+        nonlocal retry_task
+        from .background_tasks import start_background_task
+        retry_task = start_background_task(
+            retry_live(delay), name="telegram-publication-persist-retry",
+        )
+
+    async def retry_live(delay: float) -> None:
+        await asyncio.sleep(delay)
+        try:
+            await flush_live()
+        except Exception:
+            logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_RETRY_FAILED")
+            schedule_retry(min(delay * 2, 30))
+
+    async def handle(update: Any) -> None:
+        nonlocal buffer_overflow
+        if not isinstance(update, types.UpdateDeleteScheduledMessages):
+            return
+        try:
+            peer = utils.get_peer_id(update.peer)
+            pairs = publication_pairs(update.messages,getattr(update,"sent_messages",None))
+            if not pairs:
+                return
+            old,new = map(list,zip(*pairs))
+            if len(buffer) == buffer.maxlen:
+                buffer_overflow = True
+                client.publication_write_blocked = True
+                logger.error("TELEGRAM_PUBLICATION_MAPPING_BUFFER_FULL | bound=%s", inbox is not None)
+                return
+            buffer.append((peer,old,new))
+            if inbox is None or live_lock.locked() or (retry_task is not None and not retry_task.done()):
+                return
+            try:
+                await flush_live()
+            except Exception:
+                logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_FAILED")
+                schedule_retry(0.25)
+        except Exception:
+            logger.exception("TELEGRAM_PUBLICATION_MAPPING_HANDLE_FAILED")
+
+    client.flush_publication_inbox = flush_live
+    client.add_event_handler(handle,events.Raw(types=types.UpdateDeleteScheduledMessages))
+
+    async def bind() -> PublicationInbox:
+        nonlocal inbox, candidate
+        from .background_tasks import start_background_task
+
+        recovery = None
+        drained = asyncio.Event()
+
+        def fail_startup(error: Exception) -> None:
+            if not client.publication_inbox_ready.done():
+                client.publication_inbox_ready.set_exception(error)
+                # Mark observed even if the runtime has not attached a callback.
+                client.publication_inbox_ready.exception()
+            drained.set()
+
+        async def retry_startup(delay: float, *, flood_wait: float = 0) -> None:
+            # Honor Telegram's delay separately from database retry backoff.
+            await asyncio.sleep(max(delay, flood_wait))
+            await drain_startup(min(delay * 2, 1))
+
+        async def drain_startup(delay: float = 0.25) -> None:
+            nonlocal inbox, candidate, recovery
+            if candidate is None:
+                try:
+                    me = await asyncio.wait_for(client.get_me(), timeout=30)
+                    if me is None:
+                        raise RuntimeError("Publication inbox requires an authenticated sender")
+                    candidate = PublicationInbox(repository, int(me.id))
+                    if callable(getattr(repository, "get_publication_recovery_cursor", None)):
+                        from .publication_difference_recovery import PublicationDifferenceRecovery
+
+                        recovery = PublicationDifferenceRecovery(client, candidate)
+                except FloodWaitError as exc:
+                    start_background_task(
+                        retry_startup(delay, flood_wait=exc.seconds),
+                        name="telegram-publication-identity-retry",
+                    )
+                    return
+                except (TimeoutError, OSError, ServerError):
+                    logger.exception("TELEGRAM_PUBLICATION_IDENTITY_RETRY")
+                    start_background_task(
+                        retry_startup(delay), name="telegram-publication-identity-retry",
+                    )
+                    return
+                except Exception as exc:
+                    fail_startup(exc)
+                    return
+            try:
+                await flush_live()
+                if recovery is not None and not hasattr(client, "publication_recovery"):
+                    # Checkpoint setup is part of startup, including retry
+                    # after a DB outage. Events arriving during it stay buffered.
+                    await recovery.initialize()
+                    client.publication_recovery = recovery
+            except FloodWaitError as exc:
+                logger.warning("TELEGRAM_PUBLICATION_STARTUP_FLOOD_WAIT | seconds=%s", exc.seconds)
+                start_background_task(
+                    retry_startup(delay, flood_wait=exc.seconds),
+                    name="telegram-publication-startup-retry",
+                )
+                return
+            except Exception:
+                logger.exception("TELEGRAM_PUBLICATION_STARTUP_PERSIST_FAILED")
+                start_background_task(
+                    retry_startup(delay), name="telegram-publication-startup-retry",
+                )
+                return
+            if buffer:
+                # A live event arrived during checkpoint initialization.
+                await drain_startup()
+                return
+            # Continue recording evidence for prior sends even if startup lost
+            # events. Do not expose the write-readiness gate in that case.
+            inbox = candidate
+            if buffer_overflow:
+                fail_startup(RuntimeError("Publication startup buffer overflowed"))
+                return
+            client.publication_inbox = candidate
+            if not client.publication_inbox_ready.done():
+                client.publication_inbox_ready.set_result(candidate)
+            drained.set()
+
+        # Wait for the completion signal, not the retry task itself. A startup
+        # timeout must not cancel pending writes or enable MTProto sending.
+        start_background_task(
+            drain_startup(), name="telegram-publication-startup-drain",
+        )
+        await asyncio.wait_for(drained.wait(), timeout=_STARTUP_DRAIN_TIMEOUT_SEC)
+        return client.publication_inbox_ready.result()
+
+    return bind
+
+
+async def install_publication_inbox(client: Any, repository: Any) -> PublicationInbox:
+    """Compatibility for isolated clients; runtime installs before connect."""
+    bind = prepare_publication_inbox(client,repository)
+    return await bind()
+
+
+def botapi_publication_ids(messages: Any, expected_count: int) -> list[int]:
+    """A successful Bot API response may be scheduled (ID=0) or partial.
+
+    Return only a complete, positive, unique ID vector. An empty vector here
+    never means that the request was rejected or can safely be sent again.
+    """
+    items = messages if isinstance(messages, (list, tuple)) else [messages]
+    ids = [getattr(item,"message_id",None) for item in items]
+    if len(ids) != expected_count or not publication_pairs(ids,ids):
+        return []
+    return ids

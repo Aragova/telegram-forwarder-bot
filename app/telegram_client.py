@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 from telethon import TelegramClient
@@ -32,7 +33,7 @@ class ReactionClientInfo:
     fixed_reactions: list[str]
 
 
-async def create_telethon_client() -> TelegramClient:
+async def create_telethon_client(*, publication_repository=None) -> TelegramClient:
     from .send_intent import publication_client_class
 
     client = publication_client_class(TelegramClient)(
@@ -44,8 +45,26 @@ async def create_telethon_client() -> TelegramClient:
         request_retries=8,
         auto_reconnect=True,
     )
+    bind = None
+    if publication_repository is not None:
+        client.publication_inbox_required = True
+        from .telegram_publication import prepare_publication_inbox
+        try:
+            bind = prepare_publication_inbox(client, publication_repository)
+        except Exception:
+            client.publication_write_blocked = True
+            logger.exception("TELEGRAM_PUBLICATION_INBOX_SETUP_FAILED")
     try:
         await client.connect()
+        if bind is not None:
+            try:
+                await bind()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Read-only access and Bot API remain available; scoped MTProto
+                # writes require a ready inbox at the RPC boundary.
+                logger.exception("TELEGRAM_PUBLICATION_INBOX_UNAVAILABLE")
     except BaseException:
         await _close_failed_client(client)
         raise

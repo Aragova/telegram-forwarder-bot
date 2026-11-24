@@ -541,6 +541,28 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             PRIMARY KEY(attempt_id, ordinal)
         );
 
+        -- MTProto scheduled IDs and published IDs are distinct namespaces.
+        CREATE TABLE IF NOT EXISTS telegram_publication_mappings (
+            sender_account_id BIGINT NOT NULL CHECK(sender_account_id > 0),
+            target_peer_id BIGINT NOT NULL CHECK(target_peer_id <> 0),
+            scheduled_id BIGINT NOT NULL CHECK(scheduled_id > 0),
+            published_id BIGINT NOT NULL CHECK(published_id > 0),
+            first_observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (sender_account_id, target_peer_id, scheduled_id, published_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_telegram_publication_mappings_published
+            ON telegram_publication_mappings(sender_account_id, target_peer_id, published_id);
+
+        -- Independent read-only difference cursor; never advance it before
+        -- the exact publication mappings returned by Telegram are durable.
+        CREATE TABLE IF NOT EXISTS telegram_publication_recovery_cursor (
+            sender_account_id BIGINT PRIMARY KEY CHECK(sender_account_id > 0),
+            pts BIGINT NOT NULL CHECK(pts >= 0),
+            qts BIGINT NOT NULL CHECK(qts >= 0),
+            state_date TIMESTAMPTZ NOT NULL,
+            version BIGINT NOT NULL DEFAULT 0
+        );
+
         CREATE TABLE IF NOT EXISTS jobs(
             id BIGSERIAL PRIMARY KEY,
             job_type TEXT NOT NULL,
@@ -5809,6 +5831,125 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if stored["fingerprint"] != fingerprint or len(stored["random_ids"]) != count:
                     raise ValueError("MTProto publication identity mismatch")
                 return list(stored["random_ids"])
+
+    def get_publication_recovery_cursor(self, account_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pts,qts,state_date,version FROM telegram_publication_recovery_cursor WHERE sender_account_id=%s",
+                    (account_id,),
+                )
+                return cur.fetchone()
+
+    def initialize_publication_recovery_cursor(
+        self, account_id: int, pts: int, qts: int, state_date: datetime,
+    ) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO telegram_publication_recovery_cursor(sender_account_id,pts,qts,state_date)
+                    VALUES (%s,%s,%s,%s) ON CONFLICT(sender_account_id) DO NOTHING
+                    """,
+                    (account_id, pts, qts, state_date),
+                )
+            conn.commit()
+
+    def advance_publication_recovery_cursor(
+        self, account_id: int, version: int, pts: int, qts: int, state_date: datetime,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE telegram_publication_recovery_cursor
+                    SET pts=%s,qts=%s,state_date=%s,version=version+1
+                    WHERE sender_account_id=%s AND version=%s
+                      AND pts<=%s AND qts<=%s AND state_date<=%s
+                    """,
+                    (pts,qts,state_date,account_id,version,pts,qts,state_date),
+                )
+                changed = cur.rowcount == 1
+            conn.commit()
+        return changed
+
+    def record_telegram_publication_mappings(
+        self, sender_account_id: int, target_peer_id: int,
+        pairs: list[tuple[int, int]],
+    ) -> None:
+        """Persist exact Telegram mappings, including updates before receipts."""
+        from app.telegram_publication import publication_pairs
+
+        validated = publication_pairs([p[0] for p in pairs], [p[1] for p in pairs])
+        if not validated or validated != pairs:
+            raise ValueError("Invalid scheduled-publication mapping")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                # Serialize exact evidence against the same peer's finalizer.
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                            (f"publication:{sender_account_id}:{target_peer_id}",))
+                # All items in an update are committed together.
+                cur.executemany(
+                    """
+                    INSERT INTO telegram_publication_mappings
+                        (sender_account_id, target_peer_id, scheduled_id, published_id)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (sender_account_id, target_peer_id, scheduled_id, published_id)
+                    DO NOTHING
+                    """,
+                    [(sender_account_id, target_peer_id, old, new) for old, new in sorted(validated)],
+                )
+            conn.commit()
+
+    def get_telegram_publication_mapping(
+        self, sender_account_id: int, target_peer_id: int, scheduled_id: int,
+    ) -> int | None:
+        """Fail closed on contradictory evidence in either ID namespace."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT m.published_id
+                    FROM telegram_publication_mappings m
+                    WHERE m.sender_account_id = %s AND m.target_peer_id = %s
+                      AND m.scheduled_id = %s
+                      AND NOT EXISTS (
+                        SELECT 1 FROM telegram_publication_mappings other
+                        WHERE other.sender_account_id = m.sender_account_id
+                          AND other.target_peer_id = m.target_peer_id
+                          AND (
+                            (other.scheduled_id = m.scheduled_id AND other.published_id <> m.published_id)
+                            OR (other.published_id = m.published_id AND other.scheduled_id <> m.scheduled_id)
+                          )
+                      )
+                    """,
+                    (sender_account_id, target_peer_id, scheduled_id),
+                )
+                row = cur.fetchone()
+                return int(row["published_id"]) if row else None
+
+    def get_telegram_publication_mappings(
+        self, sender_account_id: int, target_peer_id: int, scheduled_ids: list[int],
+    ) -> list[int]:
+        """Read all conflict-free mappings from one database snapshot."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT m.scheduled_id,m.published_id
+                    FROM telegram_publication_mappings m
+                    WHERE m.sender_account_id=%s AND m.target_peer_id=%s
+                      AND m.scheduled_id=ANY(%s)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM telegram_publication_mappings x
+                          WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
+                            AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
+                              OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
+                      )
+                    """,(sender_account_id,target_peer_id,scheduled_ids),
+                )
+                rows = {r["scheduled_id"]:r["published_id"] for r in cur.fetchall()}
+                return [rows[mid] for mid in scheduled_ids] if all(mid in rows for mid in scheduled_ids) else []
 
     def get_delivery_attempt_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
         with self.connect() as conn:

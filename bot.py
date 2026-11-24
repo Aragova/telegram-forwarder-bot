@@ -8635,7 +8635,7 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
     except Exception as exc:
         logger.warning("Не удалось установить команды бота: %s", exc)
 
-    telethon_client = await create_telethon_client()
+    telethon_client = await create_telethon_client(publication_repository=db)
     reaction_clients = await create_reaction_clients()
     if admin_handlers_ctx is not None:
         admin_handlers_ctx.bot = bot
