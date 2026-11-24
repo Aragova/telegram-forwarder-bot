@@ -1,0 +1,3 @@
+# CI only. Linux x86_64; versions and artifact SHA-256 verified against PyPI.
+psycopg-binary==3.2.9 --hash=sha256:f34e88940833d46108f949fdc1fcfb74d6b5ae076550cd67ab59ef47555dba95
+psycopg[binary]==3.2.9 --hash=sha256:01a8dadccdaac2123c916208c96e06631641c0566b22005493f09663c7a8d3b6
