@@ -162,6 +162,15 @@ class RepostSingleDelivery:
                 error_text=copy_result.get("error_text"),
                 attempted=bool(copy_result.get("attempted", True)),
             )
+            if copy_result.get("accepted_unresolved"):
+                # A zero ID is an accepted request, not proof of rejection.
+                # Keep an empty published-ID vector in the attempt ledger.
+                if idempotency_key:
+                    await run_db(owner.db.mark_delivery_attempt_accepted,idempotency_key,
+                                 sent_message_ids=[],telegram_method="botapi_pending_unresolved")
+                error = "copy_single_uncertain_no_fallback: Bot API accepted without published ID"
+                await run_db(owner._mark_delivery_faulty_sync,delivery_id,error)
+                return False
             copy_sent_ids = send_result.sent_message_ids
             valid_sent_ids = send_result.sent_message_ids
             log_fn = logger.info if send_result.ok else logger.warning

@@ -237,3 +237,14 @@ def test_copy_album_via_bot_debug_skip(monkeypatch):
         "error_text": "Bot API copy_album принудительно отключён",
     }
     assert fake_bot.calls == []
+
+
+def test_copy_album_zero_or_partial_is_never_a_definite_rejection():
+    from app.sender_botapi_copy_helpers import SenderBotApiCopyHelpers
+    for ids in ([0,0],[101,0],[101],[101,101]):
+        bot = FakeCopyMessagesBot(result=[SimpleNamespace(message_id=i) for i in ids])
+        result = asyncio.run(SenderBotApiCopyHelpers(SimpleNamespace(bot=bot)).copy_album_via_bot("src","dst",[1,2],None))
+        assert result["accepted_unresolved"]
+        assert not result["ok"] and not result["definitely_rejected"]
+        assert result["sent_message_ids"] == []
+        assert len(bot.calls)==1

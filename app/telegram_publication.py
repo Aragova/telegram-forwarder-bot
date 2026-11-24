@@ -120,3 +120,16 @@ async def install_publication_inbox(client: Any, repository: Any) -> Publication
     # This is not a guarantee that app-level database writes succeeded.
     await client.catch_up()
     return inbox
+
+
+def botapi_publication_ids(messages: Any, expected_count: int) -> list[int]:
+    """A successful Bot API response may be scheduled (ID=0) or partial.
+
+    Return only a complete, positive, unique ID vector. An empty vector here
+    never means that the request was rejected or can safely be sent again.
+    """
+    items = messages if isinstance(messages, (list, tuple)) else [messages]
+    ids = [getattr(item,"message_id",None) for item in items]
+    if len(ids) != expected_count or not publication_pairs(ids,ids):
+        return []
+    return ids

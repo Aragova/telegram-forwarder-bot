@@ -5,6 +5,8 @@ import logging
 from aiogram.methods import CopyMessages
 from aiogram.exceptions import TelegramBadRequest
 
+from .telegram_publication import botapi_publication_ids
+
 from .sender_primitives import (
     DEBUG_FORCE_SKIP_COPY_ALBUM,
     DEBUG_FORCE_SKIP_COPY_SINGLE,
@@ -47,8 +49,9 @@ class SenderBotApiCopyHelpers:
                     "TELEGRAM_BOTAPI_VIDEO_PROCESSING_PENDING | target_id=%s | source_message_id=%s | action=no_second_send",
                     target_id, message_id,
                 )
-            sent_ids = self.owner._extract_sent_message_ids(sent)
+            sent_ids = botapi_publication_ids(sent,1)
             return {
+                "accepted_unresolved": not bool(sent_ids),
                 "attempted": True,
                 "sent_ids": sent_ids,
                 "fallback_allowed": False,
@@ -101,15 +104,25 @@ class SenderBotApiCopyHelpers:
             )
 
             if sent_messages and len(sent_messages) > 0:
-                if any(m.message_id == 0 for m in sent_messages):
+                confirmed_ids = botapi_publication_ids(sent_messages,len(message_ids))
+                if not confirmed_ids:
                     logger.info(
                         "TELEGRAM_BOTAPI_ALBUM_PROCESSING_PENDING | target_id=%s | source_message_ids=%s | action=no_second_send",
                         target_id, message_ids,
                     )
+                if not confirmed_ids:
+                    return {
+                        "ok": False, "attempted": True, "definitely_rejected": False,
+                        "accepted_unresolved": True, "sent_message_id": None,
+                        "sent_message_ids": [], "sent_count": len(sent_messages),
+                        "raw_message_ids": [m.message_id for m in sent_messages],
+                        "error_text": "botapi_accepted_partial_or_zero_ids_no_resend",
+                    }
                 return {
                     "ok": True,
-                    "sent_message_id": sent_messages[0].message_id,
-                    "sent_message_ids": [int(m.message_id) for m in sent_messages],
+                    "attempted": True,
+                    "sent_message_id": confirmed_ids[0],
+                    "sent_message_ids": confirmed_ids,
                     "sent_count": len(sent_messages),
                     "error_text": None,
                 }

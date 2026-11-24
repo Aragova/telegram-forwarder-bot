@@ -230,6 +230,9 @@ class RepostAlbumDelivery:
             )
 
             if copy_result.get("attempted") and not copy_result["ok"] and not copy_result.get("definitely_rejected"):
+                if idempotency_key and copy_result.get("accepted_unresolved"):
+                    await run_db(owner.db.mark_delivery_attempt_accepted,idempotency_key,
+                                 sent_message_ids=[],telegram_method="botapi_pending_unresolved")
                 # An exception/empty Bot API response is not a verified rejection.
                 error_text = "copy_album_uncertain_no_fallback: copyMessages result unknown"
                 logger.warning(
@@ -474,6 +477,9 @@ class RepostAlbumDelivery:
                 },
             )
             if copy_retry_result.get("attempted") and not copy_retry_result["ok"] and not copy_retry_result.get("definitely_rejected"):
+                if idempotency_key and copy_retry_result.get("accepted_unresolved"):
+                    await run_db(owner.db.mark_delivery_attempt_accepted,idempotency_key,
+                                 sent_message_ids=[],telegram_method="botapi_pending_unresolved")
                 error_text = "copy_album_uncertain_no_fallback: retry result unknown"
                 logger.warning(
                     "COPY_ALBUM_RETRY_UNCERTAIN_NO_FALLBACK | rule_id=%s | delivery_ids=%s | action=no_second_send",
