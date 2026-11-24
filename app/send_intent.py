@@ -16,6 +16,7 @@ from telethon.errors import BadRequestError, ForbiddenError, FloodWaitError, Ran
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, TelegramRetryAfter
 
 from .runtime_utils import run_db
+from .publication_transport_guard import PublicationContentError, run_with_shared_cooldown
 
 
 class PublicationWriteUnavailable(RuntimeError):
@@ -51,7 +52,7 @@ def definite_rejection(exc: BaseException) -> bool:
     return not isinstance(exc, RandomIdDuplicateError) and isinstance(
         exc, (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge,
               TelegramRetryAfter, BadRequestError, ForbiddenError, FloodWaitError,
-              PublicationWriteUnavailable),
+              PublicationWriteUnavailable, PublicationContentError),
     )
 
 
@@ -120,13 +121,18 @@ def publication_client_class(base, repository):
     """Use the public Telethon call hook; keep its uploads/entities machinery."""
     class PublicationClient(base):
         async def __call__(self, request, ordered=False, flood_sleep_threshold=None):
-            await bind_rpc_identity(self, repository, request)
             calls = request if isinstance(request, (list, tuple)) else [request]
             invoke = super().__call__
             if any(_request_members(item) for item in calls):
-                return await observe_write(
-                    lambda: invoke(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold),
-                    atomic=len(calls) == 1,
+                await bind_rpc_identity(self, repository, request)
+                async def publish():
+                    return await observe_write(
+                        lambda: invoke(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold),
+                        atomic=len(calls) == 1,
+                    )
+                return await run_with_shared_cooldown(
+                    repository, f"mtproto:{self.publication_inbox.sender_account_id}",
+                    "telethon", "publish", publish,
                 )
             return await invoke(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold)
 
