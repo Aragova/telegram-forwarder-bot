@@ -14,6 +14,7 @@ from .delivery_idempotency import (
 from .runtime_utils import run_db
 from .telethon_authoritative_resolver import TelethonSendOutcome
 from .video_processor import VideoPreSendError
+from .transport_policy import TransportRateLimited
 
 logger = logging.getLogger("forwarder")
 
@@ -183,11 +184,14 @@ class VideoSendDelivery:
                 "retryable": True, "accepted": False,
                 "error_text": error_text,
             }
-        except (TelegramRetryAfter, FloodWaitError) as exc:
+        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited) as exc:
             # Telegram explicitly rejected this request before publishing it.
             # Release the ledger for a delayed worker retry; do not confuse
             # this with an ambiguous timeout after Telegram might have posted.
-            delay = max(1, int(exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after))
+            if isinstance(exc, TransportRateLimited):
+                delay = max(1, exc.retry_after_seconds)
+            else:
+                delay = max(1, int(exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after))
             error_text = f"{type(exc).__name__}: retry_after={delay}"
             logger.warning(
                 "VIDEO_SEND_RATE_LIMITED | delivery_id=%s | rule_id=%s | retry_after=%s | action=retry_after_rejection",
