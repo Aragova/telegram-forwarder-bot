@@ -5946,6 +5946,18 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             JOIN posts p ON p.id = d.post_id
                             WHERE d.rule_id = %s
                               AND d.status = 'pending'
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM telegram_publication_receipts pr
+                                  JOIN routing rr ON rr.id=pr.rule_id
+                                  WHERE pr.rule_id=d.rule_id AND pr.manual_review IS NOT NULL
+                                    AND pr.published_ids IS NULL
+                                    AND pr.tenant_id=COALESCE(rr.tenant_id,1)
+                                    AND pr.target_peer_id::text=rr.target_id::text
+                                    AND pr.target_thread_id IS NOT DISTINCT FROM rr.target_thread_id
+                                    AND p.source_channel=pr.source_channel
+                                    AND p.source_thread_id IS NOT DISTINCT FROM pr.source_thread_id
+                                    AND p.message_id=ANY(pr.source_message_ids)
+                              )
                               AND p.source_channel = %s
                               AND p.source_thread_id IS NULL
                               AND p.media_group_id = %s
@@ -5962,6 +5974,18 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             JOIN posts p ON p.id = d.post_id
                             WHERE d.rule_id = %s
                               AND d.status = 'pending'
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM telegram_publication_receipts pr
+                                  JOIN routing rr ON rr.id=pr.rule_id
+                                  WHERE pr.rule_id=d.rule_id AND pr.manual_review IS NOT NULL
+                                    AND pr.published_ids IS NULL
+                                    AND pr.tenant_id=COALESCE(rr.tenant_id,1)
+                                    AND pr.target_peer_id::text=rr.target_id::text
+                                    AND pr.target_thread_id IS NOT DISTINCT FROM rr.target_thread_id
+                                    AND p.source_channel=pr.source_channel
+                                    AND p.source_thread_id IS NOT DISTINCT FROM pr.source_thread_id
+                                    AND p.message_id=ANY(pr.source_message_ids)
+                              )
                               AND p.source_channel = %s
                               AND p.source_thread_id = %s
                               AND p.media_group_id = %s
