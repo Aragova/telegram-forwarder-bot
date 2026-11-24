@@ -53,29 +53,36 @@ async def create_telethon_client() -> TelegramClient:
 async def create_reaction_clients() -> list[ReactionClientInfo]:
     reaction_clients: list[ReactionClientInfo] = []
 
-    for session_name in settings.reaction_sessions:
-        client = TelegramClient(
-            session_name,
-            settings.api_id,
-            settings.api_hash,
-            connection_retries=8,
-            retry_delay=2,
-            request_retries=8,
-            auto_reconnect=True,
-        )
-        await client.connect()
-
-        me = await client.get_me()
-        is_premium = bool(getattr(me, "premium", False))
-        fixed_reactions = PREMIUM_REACTION_SETS.get(session_name, [])
-
-        reaction_clients.append(
-            ReactionClientInfo(
-                session_name=session_name,
-                client=client,
-                is_premium=is_premium,
-                fixed_reactions=fixed_reactions,
+    opened_clients: list[TelegramClient] = []
+    try:
+        for session_name in settings.reaction_sessions:
+            client = TelegramClient(
+                session_name,
+                settings.api_id,
+                settings.api_hash,
+                connection_retries=8,
+                retry_delay=2,
+                request_retries=8,
+                auto_reconnect=True,
             )
-        )
+            opened_clients.append(client)
+            await client.connect()
+
+            me = await client.get_me()
+            is_premium = bool(getattr(me, "premium", False))
+            fixed_reactions = PREMIUM_REACTION_SETS.get(session_name, [])
+
+            reaction_clients.append(
+                ReactionClientInfo(
+                    session_name=session_name,
+                    client=client,
+                    is_premium=is_premium,
+                    fixed_reactions=fixed_reactions,
+                )
+            )
+    except BaseException:
+        for opened in reversed(opened_clients):
+            await _close_failed_client(opened)
+        raise
 
     return reaction_clients
