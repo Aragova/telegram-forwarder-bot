@@ -220,6 +220,9 @@ class RepostAlbumDelivery:
                 target_thread_id=target_thread_id,
             )
             attempts_debug.append({"stage": "copy_album", **copy_result})
+            if idempotency_key and copy_result.get("accepted_unresolved"):
+                await run_db(owner.db.record_unverified_botapi_album, idempotency_key,
+                             copy_result.get("raw_message_ids") or [])
             if idempotency_key and copy_result.get("ok") and copy_result.get("sent_message_ids"):
                 sent_ids = [int(x) for x in (copy_result.get("sent_message_ids") or []) if str(x).isdigit()]
                 valid_sent_ids = normalize_valid_sent_message_ids(sent_ids)
@@ -249,9 +252,6 @@ class RepostAlbumDelivery:
             )
 
             if copy_result.get("attempted") and not copy_result["ok"] and not copy_result.get("definitely_rejected"):
-                if idempotency_key and copy_result.get("accepted_unresolved"):
-                    await run_db(owner.db.record_unverified_botapi_album,idempotency_key,
-                                 copy_result.get("raw_message_ids") or [])
                 # An exception/empty Bot API response is not a verified rejection.
                 error_text = "copy_album_uncertain_no_fallback: copyMessages result unknown"
                 logger.warning(
@@ -480,6 +480,9 @@ class RepostAlbumDelivery:
                 target_thread_id=target_thread_id,
             )
             attempts_debug.append({"stage": "copy_album_retry", **copy_retry_result})
+            if idempotency_key and copy_retry_result.get("accepted_unresolved"):
+                await run_db(owner.db.record_unverified_botapi_album, idempotency_key,
+                             copy_retry_result.get("raw_message_ids") or [])
 
             await log_pipeline_step(
                 rule_id=rule.id,
@@ -498,9 +501,6 @@ class RepostAlbumDelivery:
                 },
             )
             if copy_retry_result.get("attempted") and not copy_retry_result["ok"] and not copy_retry_result.get("definitely_rejected"):
-                if idempotency_key and copy_retry_result.get("accepted_unresolved"):
-                    await run_db(owner.db.record_unverified_botapi_album,idempotency_key,
-                                 copy_retry_result.get("raw_message_ids") or [])
                 error_text = "copy_album_uncertain_no_fallback: retry result unknown"
                 logger.warning(
                     "COPY_ALBUM_RETRY_UNCERTAIN_NO_FALLBACK | rule_id=%s | delivery_ids=%s | action=no_second_send",
@@ -682,6 +682,9 @@ class RepostAlbumDelivery:
         async def stop_if_accepted_unresolved(result):
             if not result.get("transport_accepted") or result.get("authoritative_resolved"):
                 return False
+            if result.get("accepted_unresolved") and idempotency_key:
+                await run_db(owner.db.record_unverified_botapi_album, idempotency_key,
+                             result.get("raw_message_ids") or [])
             if result.get("resolution_method") == "video_processing_pending":
                 from .single_publication_reconciliation import register_pending_publication
                 if await register_pending_publication(
@@ -1234,6 +1237,9 @@ class RepostAlbumDelivery:
             **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
         attempts_debug.append({"stage": "send_album_one_by_one", **one_by_one_result})
+        if idempotency_key and (one_by_one_result.get("transport_attempted") or one_by_one_result.get("transport_accepted")) and not one_by_one_result.get("ok"):
+            await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key,
+                         status="failed_after_send", error_text="one_by_one_outcome_unknown_no_resend")
 
         await log_pipeline_step(
             rule_id=rule.id,
