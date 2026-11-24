@@ -605,3 +605,57 @@ def test_reviewed_expired_receipt_allows_rescan_but_never_replays_members(repo):
     )
     assert not repo.mark_delivery_attempt_sending(key + ":different-vector")
     assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "accepted"
+
+def test_durable_random_ids_survive_retry_and_new_repo(repo):
+    key, _, _, _, _, _ = seed(repo, 120, count=2)
+    ids = repo.get_or_create_mtproto_random_ids("delivery", key, 0, "fingerprint", 2)
+    other = PostgresRepository()
+    try:
+        assert other.get_or_create_mtproto_random_ids("delivery", key, 0, "fingerprint", 2) == ids
+        assert len(set(ids)) == 2 and all(0 < i < 2**63 for i in ids)
+        with pytest.raises(RuntimeError, match="intent changed"):
+            other.get_or_create_mtproto_random_ids("delivery", key, 0, "different", 2)
+    finally:
+        other.client.close_all_connections()
+
+
+@pytest.mark.parametrize("status,suffix", [("sending",121),("accepted",122),("failed_after_send",123)])
+def test_rescan_never_archives_unclassified_ambiguous_attempt(repo,status,suffix):
+    key, rule_id, deliveries, _, _, _ = seed(repo,suffix)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE delivery_attempts SET status=%s WHERE idempotency_key=%s",(status,key))
+            cur.execute("UPDATE deliveries SET status='faulty' WHERE id=ANY(%s)",(deliveries,))
+            cur.execute("UPDATE routing SET is_active=FALSE,rescan_owner_token='audit' WHERE id=%s",(rule_id,))
+    with pytest.raises(RuntimeError,match="неизвестным результатом"):
+        repo.reset_rule_history_for_replay(rule_id,owner_token="audit")
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == status
+
+
+def test_transport_cooldown_is_shared_and_never_shortened(repo):
+    scope = "test:cooldown:124"
+    repo.extend_transport_cooldown(scope, 30)
+    repo.extend_transport_cooldown(scope, 1)
+    other = PostgresRepository()
+    try:
+        assert other.get_transport_cooldown(scope) >= 25
+    finally:
+        other.client.close_all_connections()
+
+
+def test_reaction_stale_owner_cannot_finalize(repo):
+    _, rule_id, _, _, _, target = seed(repo, 125)
+    job_id = repo.enqueue_reaction_job(tenant_id=1,rule_id=rule_id,target_id=target,message_id=991,max_attempts=2)
+    job = repo.lease_due_reaction_job(worker_id="old",lock_timeout_seconds=1)
+    # Other tests can have pending reactions. Isolate the target job explicitly.
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE reaction_jobs SET status='processing',locked_by='new',locked_at=NOW(),attempt_count=2 WHERE id=%s",(job_id,))
+    assert not repo.mark_reaction_job_done(job_id=job_id,worker_id="old",result={})
+    assert repo.heartbeat_reaction_job(job_id=job_id,worker_id="new")
+    assert repo.mark_reaction_job_failed(job_id=job_id,worker_id="new",error_text="failed",retry_after_seconds=1)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status,locked_by FROM reaction_jobs WHERE id=%s",(job_id,))
+            row=cur.fetchone()
+    assert row["status"]=="failed" and row["locked_by"] is None
