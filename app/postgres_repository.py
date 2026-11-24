@@ -876,12 +876,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS account_ids_json TEXT NULL;
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS result_json TEXT NULL;
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ NULL;
-        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NULL;
-        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS publish_status TEXT NULL;
-        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS delete_permission_status TEXT NULL;
-        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS publish_error_text TEXT NULL;
-        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS delete_error_text TEXT NULL;
-        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS check_source TEXT NULL;
 
 
         CREATE TABLE IF NOT EXISTS rule_repost_campaign_targets (
@@ -904,6 +898,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             updated_at TIMESTAMPTZ NULL,
             created_by BIGINT NULL
         );
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS publish_status TEXT NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS delete_permission_status TEXT NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS publish_error_text TEXT NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS delete_error_text TEXT NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS check_source TEXT NULL;
+
         CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_repost_campaign_targets_unique
         ON rule_repost_campaign_targets(rule_id, target_id, COALESCE(target_thread_id, -1));
         CREATE INDEX IF NOT EXISTS idx_rule_repost_campaign_targets_rule

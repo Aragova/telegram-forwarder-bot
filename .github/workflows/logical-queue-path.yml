@@ -11,6 +11,9 @@ on:
       - '.github/workflows/logical-queue-path.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   tests:
     runs-on: ubuntu-latest

@@ -84,7 +84,10 @@ def test_real_pg_mixed_album_is_atomic_and_rollback_preserves_evidence(repo):
     repo.record_telegram_publication_mappings(123,int(target),[(500,501)])
     assert repo.get_telegram_publication_mappings(123,int(target),[500])==[501]
     assert repo.finalize_publication_receipt(key,[500,501])
-    assert [repo.get_delivery(d)["sent_message_id"] for d in deliveries]==[500,501]
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT sent_message_id FROM deliveries WHERE id=ANY(%s) ORDER BY id",(deliveries,))
+            assert [row["sent_message_id"] for row in cur.fetchall()]==[500,501]
     assert repo.get_delivery_attempt_by_idempotency_key(key)["sent_message_ids_json"]==[500,501]
     assert repo.claim_publication_reaction(key)
     assert not repo.claim_publication_reaction(key)
