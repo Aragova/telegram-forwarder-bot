@@ -548,6 +548,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             delivery_ids BIGINT[] NOT NULL,
             source_message_ids BIGINT[] NOT NULL,
             scheduled_ids BIGINT[] NOT NULL,
+            pending_mask BOOLEAN[] NOT NULL,
             send_started_at TIMESTAMPTZ NOT NULL,
             deadline_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '24 hours'),
             published_ids BIGINT[] NULL,
@@ -559,6 +560,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             CHECK(cardinality(delivery_ids) BETWEEN 1 AND 10),
             CHECK(cardinality(delivery_ids) = cardinality(source_message_ids)),
             CHECK(cardinality(delivery_ids) = cardinality(scheduled_ids)),
+            CHECK(cardinality(delivery_ids) = cardinality(pending_mask)),
             CHECK(published_ids IS NULL OR cardinality(published_ids) = cardinality(delivery_ids))
         );
         CREATE INDEX IF NOT EXISTS idx_telegram_publication_receipt_deliveries
@@ -3610,7 +3612,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         JOIN telegram_publication_mappings m
                           ON m.sender_account_id=r.sender_account_id
                          AND m.target_peer_id=r.target_peer_id
-                         AND m.scheduled_id=ANY(r.scheduled_ids)
+                         AND m.scheduled_id IN (SELECT c.scheduled_id FROM telegram_publication_claims c WHERE c.idempotency_key=r.idempotency_key)
                         WHERE r.rule_id=%s AND r.source_channel=r.target_peer_id::text
                           AND r.target_peer_id::text=%s
                           AND r.target_thread_id IS NOT DISTINCT FROM %s
@@ -5910,14 +5912,18 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         self, *, key: str, delivery_ids: list[int], rule_id: int,
         account_id: int, peer_id: int, thread_id: int | None,
         source_channel: str, source_message_ids: list[int], scheduled_ids: list[int],
+        pending_mask: list[bool] | None = None,
     ) -> bool:
         """Register an ordered MTProto receipt and reserve each scheduled ID once."""
-        from app.telegram_publication import publication_pairs
+        from app.telegram_publication import publication_candidate_mask, publication_pairs
+
+        mask = publication_candidate_mask(scheduled_ids,pending_mask)
 
         if (account_id <= 0 or peer_id == 0 or not 1 <= len(delivery_ids) <= 10
                 or not publication_pairs(delivery_ids, source_message_ids)
-                or not publication_pairs(delivery_ids, scheduled_ids)):
+                or len(delivery_ids) != len(scheduled_ids) or not mask):
             return False
+        pending_ids = [mid for mid,flag in zip(scheduled_ids,mask) if flag]
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -5974,13 +5980,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     INSERT INTO telegram_publication_receipts
                     (idempotency_key,rule_id,tenant_id,sender_account_id,target_peer_id,
                      target_thread_id,source_channel,source_thread_id,delivery_ids,source_message_ids,
-                     scheduled_ids,send_started_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     scheduled_ids,pending_mask,send_started_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT DO NOTHING RETURNING idempotency_key
                     """,
                     (key, rule_id, rule["tenant_id"] or 1, account_id, peer_id, thread_id,
                      source_channel, rule["source_thread_id"], delivery_ids, source_message_ids,
-                     scheduled_ids, attempt["created_at"]),
+                     scheduled_ids, mask, attempt["created_at"]),
                 )
                 if not cur.fetchone():
                     return False
@@ -5990,9 +5996,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (sender_account_id,target_peer_id,scheduled_id,idempotency_key)
                     VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING
                     """,
-                    [(account_id,peer_id,mid,key) for mid in sorted(scheduled_ids)],
+                    [(account_id,peer_id,mid,key) for mid in sorted(pending_ids)],
                 )
-                if cur.rowcount != len(scheduled_ids):
+                if cur.rowcount != len(pending_ids):
                     conn.rollback()
                     return False
                 cur.execute(
@@ -6039,7 +6045,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         from app.telegram_publication import publication_pairs
 
         receipt = self.get_publication_receipt(key)
-        if not receipt or not publication_pairs(receipt["scheduled_ids"],published_ids):
+        if not receipt or not publication_pairs(published_ids,published_ids) or len(receipt["scheduled_ids"]) != len(published_ids):
             return False
         if str(receipt["target_peer_id"]) == receipt["source_channel"] and set(published_ids) & set(receipt["source_message_ids"]):
             return False
@@ -6074,7 +6080,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 # every mapping. A conflicting event already recorded blocks promotion.
                 cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                             (f'publication:{receipt["sender_account_id"]}:{receipt["target_peer_id"]}',))
-                for scheduled_id,published_id in zip(receipt["scheduled_ids"],published_ids):
+                for scheduled_id,published_id,flag in zip(receipt["scheduled_ids"],published_ids,receipt["pending_mask"]):
+                    if not flag:
+                        if scheduled_id != published_id:
+                            return False
+                        continue
                     cur.execute(
                         """
                         SELECT m.published_id FROM telegram_publication_mappings m

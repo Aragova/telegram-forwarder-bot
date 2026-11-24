@@ -27,17 +27,28 @@ def publication_pairs(scheduled: Any, published: Any) -> list[tuple[int, int]]:
     return list(zip(scheduled, published))
 
 
+def publication_candidate_mask(ids: list[int], pending_mask: list[bool] | None) -> list[bool]:
+    """A numeric ID can legitimately occur once in each Telegram namespace."""
+    mask = [True] * len(ids) if pending_mask is None else pending_mask
+    if (not ids or len(ids) != len(mask) or not any(mask)
+            or any(type(mid) is not int or mid <= 0 for mid in ids)
+            or any(type(flag) is not bool for flag in mask)
+            or len(set(zip(mask,ids))) != len(ids)):
+        return []
+    return list(mask)
+
+
 def verified_published_message(
     message: Any, *, peer_id: int, published_id: int, thread_id: int | None,
     source_ids: set[int] | None, before_id: int | None, started_at: datetime,
-    broadcast: bool,
+    broadcast: bool, require_scheduled: bool = True,
 ) -> bool:
     """Verify a protocol-mapped message in the intended peer, not by caption."""
     if message is None or getattr(message, "id", None) != published_id:
         return False
     if getattr(message, "chat_id", None) != peer_id:
         return False
-    if getattr(message, "from_scheduled", None) is not True:
+    if (getattr(message, "from_scheduled", None) is True) != require_scheduled:
         return False
     if getattr(message, "video_processing_pending", False):
         return False

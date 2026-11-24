@@ -494,3 +494,34 @@ def test_pending_single_uses_exact_publication_mapping_not_scheduled_id():
     assert result.authoritative_message_ids == [5181]
     assert result.returned_candidate_id == 2292
     assert result.resolution_method == "scheduled_publication_mapping"
+
+
+def test_mixed_album_resolves_only_pending_members_and_preserves_order():
+    now = datetime.now(timezone.utc)
+    first = _msg(100)
+    second = _msg(100)
+    second.video_processing_pending = True
+    published = [_msg(100),_msg(101)]
+    for i,msg in enumerate(published):
+        msg.chat_id = -100
+        msg.post = True
+        msg.grouped_id = 12345
+        msg.date = now
+        msg.from_scheduled = i == 1
+    class Inbox:
+        async def lookup_many(self, peer_id, scheduled_ids):
+            assert (peer_id,scheduled_ids) == (-100,[100])
+            return [101]
+    class Client:
+        publication_inbox = Inbox()
+        async def get_messages(self, entity, ids):
+            assert ids == [100,101]
+            return list(reversed(published))
+    result = asyncio.run(TelethonAuthoritativeMessageResolver(Client()).resolve_authoritative_album_messages(
+        target_entity=-100,target_id=-100,sent_messages=[first,second],
+        expected_messages=[_msg(1),_msg(2)],expected_text="caption",
+        before_max_message_id=99,send_started_at=now,send_finished_at=now,
+        target_is_broadcast_channel=True,
+    ))
+    assert result.ok
+    assert result.authoritative_message_ids == [100,101]

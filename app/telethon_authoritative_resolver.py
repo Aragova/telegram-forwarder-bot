@@ -18,6 +18,7 @@ class TelethonResolutionResult:
     returned_candidate_ids: list[int] | None = None
     resolution_method: str | None = None
     error_text: str | None = None
+    pending_mask: list[bool] | None = None
 
 
 def _message_id(message: Any) -> int | None:
@@ -111,6 +112,7 @@ class TelethonSendOutcome:
     returned_candidate_ids: list[int] | None = None
     resolution_method: str | None = None
     error_text: str | None = None
+    pending_mask: list[bool] | None = None
 
     @property
     def ok(self) -> bool:
@@ -129,6 +131,7 @@ class TelethonSendOutcome:
             "returned_candidate_id": self.returned_candidate_id,
             "returned_candidate_ids": list(self.returned_candidate_ids or []),
             "resolution_method": self.resolution_method,
+            **({"pending_mask": self.pending_mask} if self.pending_mask is not None else {}),
         }
 
 
@@ -243,20 +246,26 @@ class TelethonAuthoritativeMessageResolver:
         self, *, target_entity: Any, target_id: Any, scheduled_ids: list[int],
         source_message_ids: set[int] | None, target_thread_id: int | None,
         before_max_message_id: int | None, send_started_at: datetime,
-        target_is_broadcast_channel: bool,
+        target_is_broadcast_channel: bool, pending_mask: list[bool] | None = None,
     ) -> list[int]:
         """Resolve the complete vector in its original order, never partial groups."""
-        from .telegram_publication import publication_pairs, verified_published_message
+        from .telegram_publication import publication_candidate_mask, publication_pairs, verified_published_message
 
         inbox = getattr(self.telethon,"publication_inbox",None)
-        if inbox is None or not publication_pairs(scheduled_ids,scheduled_ids):
+        mask = publication_candidate_mask(scheduled_ids,pending_mask)
+        if inbox is None or not mask:
             return []
+        pending_ids = [mid for mid,flag in zip(scheduled_ids,mask) if flag]
         try:
             from telethon import utils
 
             peer_id = int(target_id) if str(target_id).lstrip("-").isdigit() else utils.get_peer_id(target_entity)
-            ids = await inbox.lookup_many(peer_id, scheduled_ids)
-            if not publication_pairs(scheduled_ids,ids):
+            mapped = await inbox.lookup_many(peer_id, pending_ids)
+            if not publication_pairs(pending_ids,mapped):
+                return []
+            mapped_iter = iter(mapped)
+            ids = [next(mapped_iter) if flag else mid for mid,flag in zip(scheduled_ids,mask)]
+            if not publication_pairs(ids,ids):
                 return []
             if len(ids)==1:
                 messages = [await self.telethon.get_messages(target_entity,ids=ids[0])]
@@ -275,9 +284,10 @@ class TelethonAuthoritativeMessageResolver:
                 by_id[mid],peer_id=peer_id,published_id=mid,thread_id=target_thread_id,
                 source_ids=source_message_ids,before_id=before_max_message_id,
                 started_at=send_started_at,broadcast=target_is_broadcast_channel,
-            ) for mid in ids):
+                require_scheduled=flag,
+            ) for mid,flag in zip(ids,mask)):
                 return []
-            if await inbox.lookup_many(peer_id, scheduled_ids) != ids:
+            if await inbox.lookup_many(peer_id, pending_ids) != mapped:
                 return []
             return ids
         except Exception as exc:
@@ -414,17 +424,15 @@ class TelethonAuthoritativeMessageResolver:
         if len(sent_messages) != len(expected_messages):
             return TelethonResolutionResult(False, None, returned_candidate_ids=[i for i in (_message_id(m) for m in sent_messages) if i], resolution_method="album_unresolved", error_text="album_sent_count_mismatch")
 
-        pending_ids = [
-            _message_id(m) for m in sent_messages
-            if getattr(m, "video_processing_pending", None) is True
-        ]
-        if pending_ids:
-            raw_ids = [mid for mid in (_message_id(m) for m in sent_messages) if mid]
+        pending_mask = [getattr(m,"video_processing_pending",None) is True for m in sent_messages]
+        pending_ids = [_message_id(m) for m,flag in zip(sent_messages,pending_mask) if flag]
+        if any(pending_mask):
+            raw_ids = [_message_id(m) for m in sent_messages]
             final_ids = await self.resolve_scheduled_publications(
                 target_entity=target_entity,target_id=target_id,scheduled_ids=raw_ids,
                 source_message_ids=source_message_ids,target_thread_id=target_thread_id,
                 before_max_message_id=before_max_message_id,send_started_at=send_started_at,
-                target_is_broadcast_channel=target_is_broadcast_channel,
+                target_is_broadcast_channel=target_is_broadcast_channel,pending_mask=pending_mask,
             ) if len(raw_ids)==len(expected_messages) else []
             if final_ids:
                 return TelethonResolutionResult(
@@ -437,6 +445,7 @@ class TelethonAuthoritativeMessageResolver:
             )
             return TelethonResolutionResult(
                 False, None, returned_candidate_ids=raw_ids,
+                pending_mask=pending_mask,
                 resolution_method="video_processing_pending",
                 error_text="telegram_video_processing_pending",
             )

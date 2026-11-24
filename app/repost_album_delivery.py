@@ -18,6 +18,10 @@ def _reaction_applied_or_enqueued(result) -> bool:
     return bool(payload)
 
 
+class AlbumPreflightError(RuntimeError):
+    """Known failure before any Telegram send request."""
+
+
 class RepostAlbumDelivery:
     def __init__(self, owner):
         self.owner = owner
@@ -35,13 +39,16 @@ class RepostAlbumDelivery:
         delivery_ids = [int(r["delivery_id"]) for r in album_rows]
         message_ids = [int(r["message_id"]) for r in album_rows]
 
-        strategy = await run_db(
-            owner._resolve_repost_caption_delivery_strategy_sync,
-            rule=rule,
-            source_channel=source_channel,
-            message_ids=message_ids,
-            is_album=True,
-        )
+        try:
+            strategy = await run_db(
+                owner._resolve_repost_caption_delivery_strategy_sync,
+                rule=rule,
+                source_channel=source_channel,
+                message_ids=message_ids,
+                is_album=True,
+            )
+        except Exception as exc:
+            raise AlbumPreflightError(str(exc)) from exc
 
         caption_mode = strategy["configured_mode"]
         requires_builder = strategy["requires_builder"]
@@ -999,6 +1006,7 @@ class RepostAlbumDelivery:
                     target_id=target_id,target_thread_id=target_thread_id,
                     source_channel=source_channel,source_message_ids=message_ids,
                     scheduled_ids=result.get("returned_candidate_ids") or [],
+                    pending_mask=result.get("pending_mask"),
                 ):
                     return True
             error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"

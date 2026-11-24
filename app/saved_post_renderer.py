@@ -394,11 +394,12 @@ async def resolve_saved_post_pending(*, telethon_client, chat_id, sent_messages,
         return None
     raw_ids = [getattr(msg, "id", None) for msg in sent_messages]
     ids = []
-    if len(raw_ids) == expected_count and publication_pairs(raw_ids, raw_ids):
+    if len(raw_ids) == expected_count:
         try:
             entity = await telethon_client.get_entity(normalize_telethon_target(chat_id))
             ids = await TelethonAuthoritativeMessageResolver(telethon_client).resolve_scheduled_publications(
                 target_entity=entity, target_id=chat_id, scheduled_ids=raw_ids,
+                pending_mask=[getattr(m, "video_processing_pending", None) is True for m in sent_messages],
                 source_message_ids=None, target_thread_id=None, before_max_message_id=None,
                 send_started_at=started_at, target_is_broadcast_channel=bool(getattr(entity, "broadcast", False)),
             )

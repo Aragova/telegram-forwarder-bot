@@ -85,3 +85,10 @@ def test_telethon_schema_supports_publication_mapping_and_plain_deletion():
     deleted = types.UpdateDeleteScheduledMessages(peer=peer,messages=[1])
     assert publication_pairs(published.messages,published.sent_messages) == [(1,100)]
     assert publication_pairs(deleted.messages,deleted.sent_messages) == []
+
+
+def test_mixed_namespace_candidates_allow_same_number_only_in_different_namespaces():
+    from app.telegram_publication import publication_candidate_mask
+    assert publication_candidate_mask([10,10],[False,True]) == [False,True]
+    assert publication_candidate_mask([10,10],[True,True]) == []
+    assert publication_candidate_mask([10],[False]) == []

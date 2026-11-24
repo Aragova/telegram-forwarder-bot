@@ -41,7 +41,7 @@ def _manual(reason: str) -> dict[str, Any]:
 
 async def register_pending_publication(owner, *, key, delivery_ids, rule_id, target_id,
                                        target_thread_id, source_channel, source_message_ids,
-                                       scheduled_ids) -> bool:
+                                       scheduled_ids, pending_mask=None) -> bool:
     inbox = getattr(owner.telethon,"publication_inbox",None)
     register = getattr(owner.db,"register_publication_receipt",None)
     if not key or inbox is None or not callable(register):
@@ -52,7 +52,7 @@ async def register_pending_publication(owner, *, key, delivery_ids, rule_id, tar
             account_id=inbox.sender_account_id,peer_id=int(target_id),
             thread_id=target_thread_id,source_channel=str(source_channel),
             source_message_ids=[int(i) for i in source_message_ids],
-            scheduled_ids=[int(i) for i in scheduled_ids],
+            scheduled_ids=[int(i) for i in scheduled_ids],pending_mask=pending_mask,
         ))
     except Exception:
         logger.exception("PUBLICATION_RECEIPT_PERSIST_FAILED | delivery_ids=%s",delivery_ids)
@@ -95,6 +95,7 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
             resolver = TelethonAuthoritativeMessageResolver(owner.telethon)
             published_ids = await resolver.resolve_scheduled_publications(
                 target_entity=entity,target_id=target_id,scheduled_ids=receipt["scheduled_ids"],
+                pending_mask=receipt.get("pending_mask"),
                 source_message_ids=source_guard,target_thread_id=receipt["target_thread_id"],
                 before_max_message_id=None,send_started_at=receipt["send_started_at"],
                 target_is_broadcast_channel=bool(getattr(entity,"broadcast",False)
