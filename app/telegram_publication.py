@@ -113,9 +113,28 @@ def prepare_publication_inbox(client: Any, repository: Any):
     buffer = deque(maxlen=1024)
     inbox: PublicationInbox | None = None
     buffer_overflow = False
+    live_lock = asyncio.Lock()
+    retry_task: asyncio.Task | None = None
+
+    async def flush_live() -> None:
+        async with live_lock:
+            while buffer and inbox is not None:
+                peer, old, new = buffer[0]
+                await inbox.record(peer, old, new)
+                buffer.popleft()
+
+    async def retry_live() -> None:
+        delay = 0.25
+        while buffer:
+            await asyncio.sleep(delay)
+            try:
+                await flush_live()
+            except Exception:
+                logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_RETRY_FAILED")
+                delay = min(delay * 2, 30)
 
     async def handle(update: Any) -> None:
-        nonlocal buffer_overflow
+        nonlocal buffer_overflow, retry_task
         if not isinstance(update, types.UpdateDeleteScheduledMessages):
             return
         try:
@@ -124,16 +143,20 @@ def prepare_publication_inbox(client: Any, repository: Any):
             if not pairs:
                 return
             old,new = map(list,zip(*pairs))
-            if inbox is None:
-                if len(buffer) == buffer.maxlen:
-                    buffer_overflow = True
-                    logger.error("TELEGRAM_PUBLICATION_STARTUP_BUFFER_FULL")
-                    return
-                buffer.append((peer,old,new))
+            if len(buffer) == buffer.maxlen:
+                buffer_overflow = True
+                logger.error("TELEGRAM_PUBLICATION_MAPPING_BUFFER_FULL | bound=%s", inbox is not None)
                 return
-            await inbox.record(peer,old,new)
+            buffer.append((peer,old,new))
+            if inbox is None or live_lock.locked() or (retry_task is not None and not retry_task.done()):
+                return
+            try:
+                await flush_live()
+            except Exception:
+                logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_FAILED")
+                retry_task = asyncio.create_task(retry_live())
         except Exception:
-            logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_FAILED")
+            logger.exception("TELEGRAM_PUBLICATION_MAPPING_HANDLE_FAILED")
 
     client.add_event_handler(handle,events.Raw(types=types.UpdateDeleteScheduledMessages))
 

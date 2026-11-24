@@ -120,3 +120,45 @@ def test_inbox_buffers_early_event_until_account_is_authenticated():
         await client.handler(types.UpdateDeleteScheduledMessages(peer=peer,messages=[5]))
         assert len(repo.recorded)==1
     asyncio.run(scenario())
+
+
+
+def test_live_inbox_retries_failed_write_without_repeated_telegram_event():
+    from telethon import types, utils
+    from app.telegram_publication import prepare_publication_inbox
+
+    class Repository:
+        def __init__(self):
+            self.attempts = 0
+            self.recorded = []
+
+        def record_telegram_publication_mappings(self, account, peer, pairs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("temporary database outage")
+            self.recorded.append((account, peer, pairs))
+
+    class Client:
+        def add_event_handler(self, callback, event):
+            self.handler = callback
+
+        async def get_me(self):
+            return SimpleNamespace(id=7)
+
+    async def scenario():
+        repo = Repository()
+        client = Client()
+        await prepare_publication_inbox(client, repo)()
+        peer = types.PeerChannel(99)
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=peer, messages=[4], sent_messages=[100],
+        ))
+        assert not repo.recorded
+        for _ in range(100):
+            if repo.recorded:
+                break
+            await asyncio.sleep(0.02)
+        assert repo.attempts == 2
+        assert repo.recorded == [(7, utils.get_peer_id(peer), [(4, 100)])]
+
+    asyncio.run(scenario())

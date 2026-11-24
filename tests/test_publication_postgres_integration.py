@@ -288,7 +288,7 @@ def test_rescan_refuses_unverified_botapi_album(repo):
                 "UPDATE routing SET is_active=FALSE,rescan_owner_token=%s WHERE id=%s",
                 (owner, rule_id),
             )
-            cur.execute("UPDATE deliveries SET status='failed' WHERE id=ANY(%s)", (deliveries,))
+            cur.execute("UPDATE deliveries SET status='faulty' WHERE id=ANY(%s)", (deliveries,))
     with pytest.raises(RuntimeError, match="неподтверждённый альбом Bot API"):
         repo.reset_rule_history_for_replay(rule_id, owner_token=owner)
     assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "accepted"
