@@ -8,6 +8,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from telethon.errors import FloodWaitError
 from .transport_policy import TransportRateLimited
 from .send_intent import PublicationWriteUnavailable
+from .publication_transport_guard import PublicationContentError
 from .telegram_publication import botapi_publication_ids
 from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo
 
@@ -326,7 +327,7 @@ class SenderReuploadHelpers:
 
         except (TelegramRetryAfter, FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
             raise
-        except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge) as exc:
+        except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, PublicationContentError) as exc:
             return {"ok": False, "sent_message_id": None, "sent_count": 0,
                     "definitely_rejected": True, "error_text": str(exc)}
         except Exception as exc:
@@ -475,7 +476,7 @@ class SenderReuploadHelpers:
 
         except (TelegramRetryAfter, FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
             raise
-        except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge) as exc:
+        except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, PublicationContentError) as exc:
             return telethon_not_attempted(str(exc))
         except Exception as exc:
             return telethon_transport_failed(str(exc))
