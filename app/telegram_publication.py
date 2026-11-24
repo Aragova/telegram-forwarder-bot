@@ -112,6 +112,8 @@ def prepare_publication_inbox(client: Any, repository: Any):
     from telethon import events, types, utils
     from telethon.errors import FloodWaitError
 
+    client.publication_inbox_ready = asyncio.get_running_loop().create_future()
+
     buffer = deque(maxlen=1024)
     inbox: PublicationInbox | None = None
     buffer_overflow = False
@@ -220,6 +222,8 @@ def prepare_publication_inbox(client: Any, repository: Any):
             if not buffer_overflow:
                 inbox = candidate
                 client.publication_inbox = candidate
+                if not client.publication_inbox_ready.done():
+                    client.publication_inbox_ready.set_result(candidate)
             drained.set()
 
         # Wait for the completion signal, not the retry task itself. A startup
