@@ -22,6 +22,8 @@ class PostgresClient:
         self.password = os.getenv("APP_PG_PASSWORD", "").strip()
 
         self._local = threading.local()
+        self._connection_lock = threading.Lock()
+        self._connections = {}
 
     def is_configured(self) -> bool:
         return all([
@@ -69,6 +71,8 @@ class PostgresClient:
                 except Exception:
                     pass
                 self._local.conn = None
+                with self._connection_lock:
+                    self._connections.pop(id(conn), None)
 
         conn = psycopg.connect(
             self.get_dsn(),
@@ -77,9 +81,14 @@ class PostgresClient:
             connect_timeout=5,
         )
 
-        with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = 15000")
-
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET statement_timeout = 15000")
+        except BaseException:
+            conn.close()
+            raise
+        with self._connection_lock:
+            self._connections[id(conn)] = conn
         self._local.conn = conn
         return conn
 
@@ -113,6 +122,20 @@ class PostgresClient:
             pass
         finally:
             self._local.conn = None
+            with self._connection_lock:
+                self._connections.pop(id(conn), None)
+
+    def close_all_connections(self) -> None:
+        """Only after all runtime DB executor work has drained."""
+        with self._connection_lock:
+            connections = list(self._connections.values())
+            self._connections.clear()
+        for conn in connections:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._local.conn = None
 
     def ping(self) -> bool:
         self.ensure_driver()
