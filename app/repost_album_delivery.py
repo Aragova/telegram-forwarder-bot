@@ -223,9 +223,14 @@ class RepostAlbumDelivery:
                 target_thread_id=target_thread_id,
             )
             attempts_debug.append({"stage": "copy_album", **copy_result})
-            if idempotency_key and copy_result.get("accepted_unresolved"):
-                await run_db(owner.db.record_unverified_botapi_album, idempotency_key,
-                             copy_result.get("raw_message_ids") or [])
+            if copy_result.get("accepted_unresolved"):
+                if idempotency_key:
+                    await run_db(owner.db.record_unverified_botapi_album, idempotency_key,
+                                 copy_result.get("raw_message_ids") or [])
+                for disputed_id in delivery_ids:
+                    await run_db(owner._mark_delivery_faulty_sync, disputed_id,
+                                 "copy_album_uncertain_no_fallback: Bot API accepted without published ID")
+                return False
             if idempotency_key and copy_result.get("ok") and copy_result.get("sent_message_ids"):
                 sent_ids = [int(x) for x in (copy_result.get("sent_message_ids") or []) if str(x).isdigit()]
                 valid_sent_ids = normalize_valid_sent_message_ids(sent_ids)
