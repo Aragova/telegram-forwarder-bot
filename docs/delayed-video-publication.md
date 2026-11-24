@@ -42,3 +42,12 @@ MTProto: UpdateNewScheduledMessage / video_processing_pending — отдельн
 - После реализации: unit, integration PostgreSQL, CI/CodeQL/Sonar, тестовая публикация обычного несекретного видео в контролируемом канале и staged rollout.
 
 **Текущий черновик не реализует пункты 1–6 полностью; изменение схемы/очереди требует отдельного согласованного архитектурного решения.** 
+
+## Этап 2: точный MTProto inbox (черновик)
+- Telegram Desktop scheduled_messages.cpp использует peer и соответствующие индексы двух массивов. TDLib updateMessageSendSucceeded заменяет временный ID, а не угадывает запись по истории. Telethon v1 messageparse.py явно предупреждает о коллизиях двух пространств ID; uploads.py создаёт random_id самостоятельно. Telegram docs https://core.telegram.org/api/updates отдельно описывают восстановление UpdateMessageID после потери RPC и дедупликацию.
+- Добавлен PostgreSQL inbox с ключом (sender_account_id, target_peer_id, scheduled_id), проверкой полных массивов и блокировкой противоречивых соответствий. Raw listener устанавливается на реальный отправляющий аккаунт до запуска воркеров; повтор события не меняет доказательство. Не записываем текст, медиа или ключи сессии.
+- Разрешатель одиночной отправки может использовать точный mapping, уже доставленный к моменту проверки, и проверяет peer, topic, watermark, from_scheduled, время и self-loop. Не подбирает публикацию по совпавшей подписи.
+- **Не завершено:** автоматическая отложенная финализация поздних событий, durable receipt ↔ delivery_id, outbox последующих действий, альбомы/кампании/Bot API zero, сохранение random_id до низкоуровневого RPC, восстановление при сбое записи inbox. Telethon catch_up не делает запись PostgreSQL и сохранение pts одной транзакцией. Нельзя мержить или считать ночные сбои устранёнными.
+- Применение схемы требует проверки на тестовой PostgreSQL, проверки индекса/роста inbox и политики хранения. Новый код слушателя пока не запускался на production.
+
+Источники: https://core.telegram.org/api/scheduled-messages ; https://core.telegram.org/api/updates ; https://core.telegram.org/tdlib/getting-started ; https://github.com/telegramdesktop/tdesktop/blob/dev/Telegram/SourceFiles/data/components/scheduled_messages.cpp ; https://github.com/LonamiWebs/Telethon/blob/v1/telethon/client/messageparse.py ; https://github.com/LonamiWebs/Telethon/blob/v1/telethon/client/uploads.py ; https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html .

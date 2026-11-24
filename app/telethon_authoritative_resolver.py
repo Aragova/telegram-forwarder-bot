@@ -222,9 +222,53 @@ class TelethonAuthoritativeMessageResolver:
     def _is_safe_history_candidate(self, message: Any, *, expected_fp: dict[str, Any], before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None, target_thread_id: int | None, target_is_broadcast_channel: bool = False) -> bool:
         return self._history_candidate_rejection_reason(message, expected_fp=expected_fp, before_max_message_id=before_max_message_id, send_started_at=send_started_at, send_finished_at=send_finished_at, source_message_ids=source_message_ids, target_thread_id=target_thread_id, target_is_broadcast_channel=target_is_broadcast_channel) is None
 
+    async def resolve_scheduled_publication(
+        self, *, target_entity: Any, target_id: Any, scheduled_id: int | None,
+        source_message_ids: set[int] | None, target_thread_id: int | None,
+        before_max_message_id: int | None, send_started_at: datetime,
+        target_is_broadcast_channel: bool,
+    ) -> int | None:
+        """Use only explicit Telegram mapping; never scan by similar caption."""
+        from .telegram_publication import verified_published_message
+
+        inbox = getattr(self.telethon, "publication_inbox", None)
+        if inbox is None or not scheduled_id:
+            return None
+        try:
+            peer_id = int(target_id)
+            final_id = await inbox.lookup(peer_id, scheduled_id)
+            if not final_id:
+                return None
+            message = await self.telethon.get_messages(target_entity, ids=final_id)
+            if verified_published_message(
+                message, peer_id=peer_id, published_id=final_id,
+                thread_id=target_thread_id, source_ids=source_message_ids,
+                before_id=before_max_message_id, started_at=send_started_at,
+                broadcast=target_is_broadcast_channel,
+            ):
+                return final_id
+        except Exception as exc:
+            logger.warning(
+                "TELEGRAM_PUBLICATION_MAPPING_LOOKUP_FAILED | target_id=%s | scheduled_id=%s | error_type=%s",
+                target_id, scheduled_id, type(exc).__name__,
+            )
+        return None
+
     async def resolve_authoritative_single_message(self, *, target_entity: Any, target_id: Any, sent: Any, expected_message: Any = None, expected_text: str = "", before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None, target_thread_id: int | None = None, target_is_broadcast_channel: bool = False, require_strong_media_match: bool = False, history_poll_delays: tuple[float, ...] | None = None) -> TelethonResolutionResult:
         returned_candidate_id = _message_id(sent)
         if getattr(sent, "video_processing_pending", None) is True:
+            final_id = await self.resolve_scheduled_publication(
+                target_entity=target_entity, target_id=target_id,
+                scheduled_id=returned_candidate_id, source_message_ids=source_message_ids,
+                target_thread_id=target_thread_id, before_max_message_id=before_max_message_id,
+                send_started_at=send_started_at, target_is_broadcast_channel=target_is_broadcast_channel,
+            )
+            if final_id is not None:
+                return TelethonResolutionResult(
+                    True, final_id, authoritative_message_ids=[final_id],
+                    returned_candidate_id=returned_candidate_id,
+                    resolution_method="scheduled_publication_mapping",
+                )
             # Telegram allocates scheduled and published IDs in separate namespaces.
             # Never look up a scheduled ID in the published history as a candidate.
             logger.info(

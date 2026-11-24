@@ -524,6 +524,19 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             UNIQUE(idempotency_key)
         );
 
+        -- MTProto scheduled IDs and published IDs are distinct namespaces.
+        CREATE TABLE IF NOT EXISTS telegram_publication_mappings (
+            sender_account_id BIGINT NOT NULL CHECK(sender_account_id > 0),
+            target_peer_id BIGINT NOT NULL CHECK(target_peer_id <> 0),
+            scheduled_id BIGINT NOT NULL CHECK(scheduled_id > 0),
+            published_id BIGINT NOT NULL CHECK(published_id > 0),
+            conflicted BOOLEAN NOT NULL DEFAULT FALSE,
+            first_observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (sender_account_id, target_peer_id, scheduled_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_telegram_publication_mappings_published
+            ON telegram_publication_mappings(sender_account_id, target_peer_id, published_id);
+
         CREATE TABLE IF NOT EXISTS jobs(
             id BIGSERIAL PRIMARY KEY,
             job_type TEXT NOT NULL,
@@ -5703,6 +5716,58 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (utc_now_iso(), sent_message_id, _json_dumps(sent_message_ids or []), target_id, delivery_method, delivery_id),
                 )
             conn.commit()
+
+    def record_telegram_publication_mappings(
+        self, sender_account_id: int, target_peer_id: int,
+        pairs: list[tuple[int, int]],
+    ) -> None:
+        """Persist exact Telegram mappings, including updates before receipts."""
+        from app.telegram_publication import publication_pairs
+
+        validated = publication_pairs([p[0] for p in pairs], [p[1] for p in pairs])
+        if not validated or validated != pairs:
+            raise ValueError("Invalid scheduled-publication mapping")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                # All items in an update are committed together.
+                cur.executemany(
+                    """
+                    INSERT INTO telegram_publication_mappings
+                        (sender_account_id, target_peer_id, scheduled_id, published_id)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (sender_account_id, target_peer_id, scheduled_id)
+                    DO UPDATE SET conflicted =
+                        telegram_publication_mappings.conflicted
+                        OR telegram_publication_mappings.published_id <> EXCLUDED.published_id
+                    """,
+                    [(sender_account_id, target_peer_id, old, new) for old, new in sorted(validated)],
+                )
+            conn.commit()
+
+    def get_telegram_publication_mapping(
+        self, sender_account_id: int, target_peer_id: int, scheduled_id: int,
+    ) -> int | None:
+        """Fail closed on contradictory evidence in either ID namespace."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT m.published_id
+                    FROM telegram_publication_mappings m
+                    WHERE m.sender_account_id = %s AND m.target_peer_id = %s
+                      AND m.scheduled_id = %s AND NOT m.conflicted
+                      AND NOT EXISTS (
+                        SELECT 1 FROM telegram_publication_mappings other
+                        WHERE other.sender_account_id = m.sender_account_id
+                          AND other.target_peer_id = m.target_peer_id
+                          AND other.published_id = m.published_id
+                          AND other.scheduled_id <> m.scheduled_id
+                      )
+                    """,
+                    (sender_account_id, target_peer_id, scheduled_id),
+                )
+                row = cur.fetchone()
+                return int(row["published_id"]) if row else None
 
     def get_delivery_attempt_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
         with self.connect() as conn:

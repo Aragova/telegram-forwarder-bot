@@ -8636,6 +8636,12 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
         logger.warning("Не удалось установить команды бота: %s", exc)
 
     telethon_client = await create_telethon_client()
+    if (
+        telethon_client is not None
+        and callable(getattr(db, "record_telegram_publication_mappings", None))
+    ):
+        from app.telegram_publication import install_publication_inbox
+        await install_publication_inbox(telethon_client, db)
     reaction_clients = await create_reaction_clients()
     if admin_handlers_ctx is not None:
         admin_handlers_ctx.bot = bot
