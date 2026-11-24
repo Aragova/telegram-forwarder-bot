@@ -25,6 +25,7 @@ from .job_service import (
 from .limit_service import LimitService
 from .subscription_service import SubscriptionService
 from .transport_policy import TransportRateLimited
+from .send_intent import publication_intent
 from .usage_service import UsageService
 from .worker_load_service import build_worker_load_snapshot
 from .worker_resource_policy import POLICY, WorkerResourcePolicy, _env_int
@@ -499,8 +500,10 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     job_type = str(job["job_type"])
     payload = _safe_payload(job)
     payload.pop("job_id", None)
-    payload.pop("tenant_id", None)
-    tenant_id = int(payload.get("tenant_id") or getattr(repo, "get_rule_tenant_id", lambda _x: 1)(int(payload.get("rule_id") or 0)) or 1)
+    payload_tenant_id = payload.pop("tenant_id", None)
+    tenant_id = int(payload_tenant_id or await asyncio.to_thread(
+        getattr(repo, "get_rule_tenant_id", lambda _x: 1), int(payload.get("rule_id") or 0)
+    ) or 1)
     subscription_service = SubscriptionService(repo)
     usage_service = UsageService(repo)
     limit_service = LimitService(repo, subscription_service, usage_service)
@@ -511,14 +514,14 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     reconcile_only = (isinstance(receipt, dict)
                       and receipt.get("rule_id") == int(payload.get("rule_id") or 0)
                       and receipt.get("tenant_id") == tenant_id)
-    can_enqueue, enqueue_reason = (True, None) if reconcile_only else limit_service.can_enqueue_job(tenant_id)
+    can_enqueue, enqueue_reason = (True, None) if reconcile_only else await asyncio.to_thread(limit_service.can_enqueue_job, tenant_id)
     if not can_enqueue:
         logger.warning("Worker блокирует выполнение job #%s tenant_id=%s: %s", job_id, tenant_id, enqueue_reason)
         if hasattr(repo, "create_billing_event"):
-            sub = subscription_service.get_active_subscription(int(tenant_id)) or {}
-            usage_today = usage_service.get_today_usage(int(tenant_id)) or {}
+            sub = await asyncio.to_thread(subscription_service.get_active_subscription, int(tenant_id)) or {}
+            usage_today = await asyncio.to_thread(usage_service.get_today_usage, int(tenant_id)) or {}
             event_type = "subscription_blocked_action" if str(enqueue_reason or "").strip().lower() == "подписка неактивна" else "limit_job_blocked"
-            repo.create_billing_event(
+            await asyncio.to_thread(repo.create_billing_event,
                 int(tenant_id),
                 event_type,
                 event_source="worker_runtime",
@@ -537,13 +540,13 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         return True
 
     if str(job_type).startswith("video_") and not reconcile_only:
-        can_video, video_reason = limit_service.can_process_video(tenant_id)
+        can_video, video_reason = await asyncio.to_thread(limit_service.can_process_video, tenant_id)
         if not can_video:
             logger.warning("Видео не обработано: лимит тарифа tenant_id=%s reason=%s", tenant_id, video_reason or "unknown")
             if hasattr(repo, "create_billing_event"):
-                sub = subscription_service.get_active_subscription(int(tenant_id)) or {}
-                usage_today = usage_service.get_today_usage(int(tenant_id)) or {}
-                repo.create_billing_event(
+                sub = await asyncio.to_thread(subscription_service.get_active_subscription, int(tenant_id)) or {}
+                usage_today = await asyncio.to_thread(usage_service.get_today_usage, int(tenant_id)) or {}
+                await asyncio.to_thread(repo.create_billing_event,
                     int(tenant_id),
                     "limit_video_blocked",
                     event_source="worker_runtime",
@@ -636,12 +639,14 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             result = delivery_result.to_dict()
             ok = delivery_result.ok
         elif job_type == "repost_single":
-            raw_result = await sender_service.execute_repost_single_from_job(**payload)
+            with publication_intent("delivery", publication_key_for_job("repost_single", payload)):
+                raw_result = await sender_service.execute_repost_single_from_job(**payload)
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
             ok = delivery_result.ok
         elif job_type == "repost_album":
-            raw_result = await sender_service.execute_repost_album_from_job(**payload)
+            with publication_intent("delivery", publication_key_for_job("repost_album", payload)):
+                raw_result = await sender_service.execute_repost_album_from_job(**payload)
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
             ok = delivery_result.ok
@@ -712,7 +717,8 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             ok = False
         elif job_type == "video_send":
             _log_video_stage_event("VIDEO SEND START | запуск стадии отправки", int(payload.get("delivery_id") or 0))
-            raw_result = await sender_service.execute_video_send_from_job(**payload)
+            with publication_intent("delivery", publication_key_for_job("video_send", payload)):
+                raw_result = await sender_service.execute_video_send_from_job(**payload)
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
             if delivery_result.fallback_to_legacy:
@@ -725,7 +731,8 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             if ok:
                 _log_video_stage_event("VIDEO SEND DONE | стадия отправки завершена", int(payload.get("delivery_id") or 0))
         elif job_type == "video_delivery":
-            raw_result = await sender_service.execute_video_delivery_from_job(**payload)
+            with publication_intent("delivery", publication_key_for_job("video_delivery", payload)):
+                raw_result = await sender_service.execute_video_delivery_from_job(**payload)
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
             ok = delivery_result.ok
