@@ -76,12 +76,25 @@ def test_reaction_lease_owner_and_retry_budget():
         assert not repo.mark_reaction_job_failed(job_id=job_id, worker_id="old", error_text="stale")
         assert not repo.mark_reaction_job_skipped(job_id=job_id, worker_id="old", result={})
         assert repo.heartbeat_reaction_job(job_id=job_id, worker_id="new")
+        # Verify heartbeat is committed to a distinct connection, not just visible locally.
+        reader = PostgresRepository()
+        try:
+            with reader.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT locked_at > NOW()-interval '5 seconds' AS fresh FROM reaction_jobs WHERE id=%s", (job_id,))
+                    assert cur.fetchone()["fresh"]
+        finally:
+            reader.client.close_all_connections()
         assert repo.mark_reaction_job_failed(job_id=job_id, worker_id="new",
                                             error_text="exhausted", retry_after_seconds=1)
-        with repo.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT status, locked_by FROM reaction_jobs WHERE id=%s", (job_id,))
-                assert cur.fetchone() == {"status": "failed", "locked_by": None}
+        reader = PostgresRepository()
+        try:
+            with reader.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT status, locked_by FROM reaction_jobs WHERE id=%s", (job_id,))
+                    assert cur.fetchone() == {"status": "failed", "locked_by": None}
+        finally:
+            reader.client.close_all_connections()
         assert repo.lease_due_reaction_job(worker_id="third", lock_timeout_seconds=1) is None
     finally:
         repo.client.close_all_connections()

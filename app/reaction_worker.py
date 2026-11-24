@@ -67,7 +67,9 @@ class ReactionWorker:
             logger.warning("REACTION_LEASE_LOST | job_id=%s", job_id)
         finally:
             heartbeat_task.cancel()
-            await asyncio.gather(heartbeat_task, return_exceptions=True)
+            if not processing.done():
+                processing.cancel()
+            await asyncio.gather(processing, heartbeat_task, return_exceptions=True)
         return True
 
     async def _process_leased(self, job, owner_token) -> None:
