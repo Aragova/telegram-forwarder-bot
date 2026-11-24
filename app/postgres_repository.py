@@ -540,6 +540,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             UNIQUE(idempotency_key)
         );
 
+        CREATE TABLE IF NOT EXISTS telegram_transport_cooldowns (
+            scope_key TEXT PRIMARY KEY,
+            blocked_until TIMESTAMPTZ NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS mtproto_send_intents (
             scope_kind TEXT NOT NULL CHECK(scope_kind IN ('delivery','campaign')),
             scope_id BIGINT NOT NULL,
@@ -6086,6 +6090,29 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (utc_now_iso(), sent_message_id, _json_dumps(sent_message_ids or []), target_id, delivery_method, delivery_id),
                 )
             conn.commit()
+
+    def get_transport_cooldown(self, scope_key: str) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT GREATEST(0,CEIL(EXTRACT(EPOCH FROM blocked_until-clock_timestamp())))::integer AS seconds FROM telegram_transport_cooldowns WHERE scope_key=%s",
+                    (scope_key,),
+                )
+                row = cur.fetchone()
+                return int(row["seconds"]) if row else 0
+
+    def extend_transport_cooldown(self, scope_key: str, delay: int) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO telegram_transport_cooldowns(scope_key,blocked_until)
+                    VALUES (%s,clock_timestamp()+make_interval(secs=>%s))
+                    ON CONFLICT (scope_key) DO UPDATE
+                    SET blocked_until=GREATEST(telegram_transport_cooldowns.blocked_until,EXCLUDED.blocked_until)
+                    """,
+                    (scope_key,max(1,int(delay))),
+                )
 
     def get_or_create_mtproto_random_ids(self, kind: str, key: str, ordinal: int,
                                          fingerprint: str, count: int) -> list[int]:
