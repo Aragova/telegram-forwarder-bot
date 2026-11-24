@@ -494,10 +494,15 @@ def test_text_fallback_passes_reaction_context():
     source_channel = "@src"
     target_id = "-1001"
     reaction_kwargs = {}
+    accepted = []
 
     class RuntimeRepo:
         def log_delivery_event(self, **_kwargs):
             return None
+
+        def mark_delivery_attempt_accepted(self, key, *, sent_message_ids, telegram_method=None):
+            accepted.append((key, sent_message_ids, telegram_method))
+            return True
 
     class RuntimeBot:
         async def send_message(self, **_kwargs):
@@ -540,6 +545,7 @@ def test_text_fallback_passes_reaction_context():
             return []
 
         async def _add_reaction_for_rule_if_possible(self, **kwargs):
+            assert accepted == [("key-r2-1-fallback", [777], "text_fallback")]
             reaction_kwargs.update(kwargs)
             return True
 
