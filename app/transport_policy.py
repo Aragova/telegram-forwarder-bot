@@ -6,6 +6,8 @@ import random
 import re
 import time
 from dataclasses import dataclass
+from aiogram.exceptions import TelegramRetryAfter
+from telethon.errors import FloodWaitError
 
 from app.transport_operation import TransportOperationKind, classify_transport_operation
 
@@ -270,7 +272,9 @@ class TransportPolicy:
 
         flood_seconds = self._extract_wait_seconds(exc, text)
         if flood_seconds is not None:
-            if flood_seconds > self.long_retry_after_threshold_sec:
+            if (flood_seconds > self.long_retry_after_threshold_sec
+                    or (operation_kind == TransportOperationKind.NON_IDEMPOTENT_WRITE
+                        and isinstance(exc, (TelegramRetryAfter, FloodWaitError)))):
                 logger.warning(
                     "TRANSPORT | RATE_LIMITED | %s",
                     _format_transport_log_context(
