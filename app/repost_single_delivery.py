@@ -873,6 +873,9 @@ class RepostSingleDelivery:
                 if idempotency_key:
                     await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
                                  sent_message_ids=ids, telegram_method="text_fallback")
+                    if hasattr(owner.db, "mark_delivery_attempt_verified"):
+                        await run_db(owner.db.mark_delivery_attempt_verified, idempotency_key,
+                                     sent_message_ids=ids)
 
                 await owner._add_reaction_for_rule_if_possible(
                     rule=rule,
