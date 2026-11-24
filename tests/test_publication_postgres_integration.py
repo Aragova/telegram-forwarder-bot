@@ -692,3 +692,32 @@ def test_reaction_stale_owner_cannot_finalize(repo):
             cur.execute("SELECT status,locked_by FROM reaction_jobs WHERE id=%s",(job_id,))
             row=cur.fetchone()
     assert row["status"]=="failed" and row["locked_by"] is None
+
+def test_interrupted_campaign_send_requires_explicit_fenced_review(repo):
+    _, rule_id, _, _, _, target = seed(repo, 126)
+    saved = repo.create_saved_post(rule_id=rule_id, title="test", content={},
+        source_chat_id=None, source_message_id=None, source_media_group_id=None, created_by=None)
+    run = repo.create_campaign_run(rule_id=rule_id, saved_post_id=saved, run_type="manual",
+        status="sending", show_seconds=10, started_by=None, targets_total=1)
+    abandoned = repo.create_campaign_run_message(run_id=run, rule_id=rule_id,
+        saved_post_id=saved, target_kind="main", target_id=target)
+    assert repo.mark_campaign_run_message_sending(abandoned)
+    next_run = repo.create_campaign_run(rule_id=rule_id, saved_post_id=saved, run_type="manual",
+        status="created", show_seconds=10, started_by=None, targets_total=1)
+    future = repo.create_campaign_run_message(run_id=next_run, rule_id=rule_id,
+        saved_post_id=saved, target_kind="main", target_id=target)
+    assert not repo.mark_campaign_run_message_sending(future)
+    review = dict(operator="test-operator", note="Verified no live or scheduled publication")
+    fresh = repo.get_campaign_run_message(abandoned)["updated_at"]
+    assert not repo.acknowledge_interrupted_campaign_send(abandoned, expected_updated_at=fresh, **review)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE campaign_run_messages SET updated_at=NOW()-INTERVAL '20 minutes' WHERE id=%s", (abandoned,))
+            cur.execute("UPDATE routing SET is_active=FALSE WHERE id=%s", (rule_id,))
+    observed = repo.get_campaign_run_message(abandoned)["updated_at"]
+    assert not repo.acknowledge_interrupted_campaign_send(abandoned, expected_updated_at=fresh, **review)
+    assert repo.acknowledge_interrupted_campaign_send(abandoned, expected_updated_at=observed, **review)
+    assert not repo.acknowledge_interrupted_campaign_send(abandoned, expected_updated_at=observed, **review)
+    assert repo.get_campaign_run_message(abandoned)["send_status"] == "failed"
+    assert not repo.mark_campaign_run_message_sending(abandoned)
+    assert repo.mark_campaign_run_message_sending(future)
