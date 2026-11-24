@@ -251,3 +251,43 @@ def test_startup_retries_failed_writes_after_bind_timeout_without_new_update(mon
         assert client.publication_inbox.sender_account_id == 7
 
     asyncio.run(scenario())
+
+
+def test_startup_flood_wait_honors_server_delay_after_bind_timeout(monkeypatch):
+    from app import telegram_publication
+    from app.publication_difference_recovery import PublicationDifferenceRecovery
+    from telethon.errors import FloodWaitError
+
+    class Client:
+        def add_event_handler(self, callback, event):
+            self.handler = callback
+
+        async def get_me(self):
+            return SimpleNamespace(id=7)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        attempts = []
+
+        async def initialize(self):
+            attempts.append(loop.time())
+            if len(attempts) == 1:
+                raise FloodWaitError(request=None, capture=1)
+
+        monkeypatch.setattr(PublicationDifferenceRecovery, "initialize", initialize)
+        monkeypatch.setattr(telegram_publication, "_STARTUP_DRAIN_TIMEOUT_SEC", 0.05)
+        client = Client()
+        repo = SimpleNamespace(get_publication_recovery_cursor=lambda *_: None)
+        bind = telegram_publication.prepare_publication_inbox(client, repo)
+        with pytest.raises(asyncio.TimeoutError):
+            await bind()
+        assert not hasattr(client, "publication_inbox")
+        assert not client.publication_inbox_ready.done()
+        await asyncio.sleep(0.35)
+        assert len(attempts) == 1
+        await asyncio.wait_for(asyncio.shield(client.publication_inbox_ready), 3)
+        assert len(attempts) == 2
+        assert attempts[1] - attempts[0] >= 1
+        assert client.publication_inbox.sender_account_id == 7
+
+    asyncio.run(scenario())
