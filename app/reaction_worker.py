@@ -22,9 +22,9 @@ class ReactionWorker:
         self.poll_interval_sec = poll_interval_sec
         self.lock_timeout_seconds = lock_timeout_seconds
 
-    async def run_forever(self) -> None:
+    async def run_forever(self, stop_event=None) -> None:
         logger.info("REACTION_WORKER_STARTED | worker_id=%s", self.worker_id)
-        while True:
+        while not (stop_event and stop_event.is_set()):
             try:
                 processed = await self.process_once()
                 if not processed:
