@@ -8,6 +8,8 @@ on:
       - 'support_bot.py'
       - 'tests/**'
       - 'requirements.txt'
+      - '.github/workflows/logical-queue-path.yml'
+      - '.github/requirements/postgres-test.lock'
   workflow_dispatch:
 
 jobs:
@@ -44,6 +46,7 @@ jobs:
           sudo -u postgres createuser -- "$(id -un)"
           sudo -u postgres createdb -O "$(id -un)" vimi_publication_ci
           export APP_PG_HOST=/var/run/postgresql APP_PG_PORT=5432
-          export APP_PG_DB=vimi_publication_ci APP_PG_USER="$(id -un)" APP_PG_PASSWORD=
+          export APP_PG_DB=vimi_publication_ci APP_PG_USER="$(id -un)"
+          unset APP_PG_PASSWORD # local Unix socket peer authentication
           export VIMI_TEST_POSTGRES=1
           pytest -q tests/test_postgres_publication_contract.py
