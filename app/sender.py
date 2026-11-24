@@ -16,6 +16,8 @@ from .delivery_content_helpers import (
     video_caption_requires_premium,
 )
 from .runtime_utils import run_db
+from .send_intent import possible_write
+from .transport_policy import TransportRateLimited
 from .sender_primitives import (
     MAX_INVALID_MP4_RETRY,
     MAX_NORMAL_REACTION_ATTEMPTS,
@@ -1409,7 +1411,7 @@ class SenderService:
                         terminal_error,
                     )
                     return _terminal_non_retryable_result(terminal_error)
-                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send" if possible_write() else "failed_before_send", error_text="executor returned unsuccessful result")
                 logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
                 logger.warning(
                     "JOB EXECUTOR | repost_single | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат",
@@ -1418,7 +1420,7 @@ class SenderService:
                 )
             return bool(ok)
         except Exception as exc:
-            await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=str(exc))
+            await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send" if possible_write() else "failed_before_send", error_text=str(exc))
             logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
             logger.warning(
                 "JOB EXECUTOR | repost_single | failed | rule_id=%s | delivery_id=%s | error=%s",
@@ -1610,7 +1612,7 @@ class SenderService:
                         terminal_error,
                     )
                     return _terminal_non_retryable_result(terminal_error)
-                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send" if possible_write() else "failed_before_send", error_text="executor returned unsuccessful result")
                 logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
                 logger.warning(
                     "JOB EXECUTOR | repost_album | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат",
@@ -1621,7 +1623,7 @@ class SenderService:
         except Exception as exc:
             # An exception inside the transport or finalizer is not proof that Telegram rejected the send.
             from .repost_album_delivery import AlbumPreflightError
-            failure_status = "failed_after_send" if transport_entered and not isinstance(exc, AlbumPreflightError) else "failed_before_send"
+            failure_status = "failed_after_send" if possible_write() or (transport_entered and not isinstance(exc, (AlbumPreflightError, TransportRateLimited))) else "failed_before_send"
             await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status=failure_status, error_text=str(exc))
             logger.info("DELIVERY_ATTEMPT_FAILED | operation=album | key=%s | delivery_id=%s | status=%s", idempotency_key, delivery_id, failure_status)
             logger.warning(
@@ -1790,7 +1792,7 @@ class SenderService:
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
             if not ok and has_attempt_ledger:
-                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send" if possible_write() else "failed_before_send", error_text="executor returned unsuccessful result")
                 logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s", delivery_id, rule_id, target_id, idempotency_key)
             if ok:
                 logger.info("JOB EXECUTOR | video_delivery | success | rule_id=%s | delivery_id=%s", rule_id, delivery_id)
@@ -1799,7 +1801,7 @@ class SenderService:
             return bool(ok)
         except Exception as exc:
             if has_attempt_ledger:
-                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=str(exc))
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send" if possible_write() else "failed_before_send", error_text=str(exc))
                 logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s", delivery_id, rule_id, target_id, idempotency_key)
             logger.warning(
                 "JOB EXECUTOR | video_delivery | failed | rule_id=%s | delivery_id=%s | error=%s",
