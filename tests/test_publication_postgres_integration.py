@@ -485,8 +485,10 @@ def test_publication_recovery_cursor_and_exact_replay_after_restart(repo):
         client.publication_recovery = PublicationDifferenceRecovery(client, client.publication_inbox)
         await client.publication_recovery.initialize()
 
+        reactions = []
+
         async def react(**kwargs):
-            assert kwargs["sent_message_id"] == 142
+            reactions.append(kwargs["sent_message_id"])
             return {"reason": "disabled"}
 
         owner = SimpleNamespace(db=repo, telethon=client, _add_reaction_for_rule_if_possible=react)
@@ -498,7 +500,12 @@ def test_publication_recovery_cursor_and_exact_replay_after_restart(repo):
         assert cursor["pts"] == 102 and cursor["version"] == 1
         assert not repo.advance_publication_recovery_cursor(account, 0, 103, 0, baseline)
         assert not repo.finalize_publication_receipt(key, [142])
-        assert repo.get_delivery(deliveries[0])["sent_message_id"] == 142
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT status,sent_message_id FROM deliveries WHERE id=%s", (deliveries[0],))
+                assert cur.fetchone() == {"status": "sent", "sent_message_id": 142}
         assert (await reconcile_pending_publication(owner, key))["ok"]
+        assert repo.get_publication_receipt(key)["reaction_state"] == "done"
+        assert reactions == [142]
 
     asyncio.run(scenario())
