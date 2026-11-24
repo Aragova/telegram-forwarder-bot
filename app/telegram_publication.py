@@ -110,6 +110,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
     """Install before connect; only bind events after authenticating the account."""
     from collections import deque
     from telethon import events, types, utils
+    from telethon.errors import FloodWaitError
 
     buffer = deque(maxlen=1024)
     inbox: PublicationInbox | None = None
@@ -181,9 +182,9 @@ def prepare_publication_inbox(client: Any, repository: Any):
 
         drained = asyncio.Event()
 
-        async def retry_startup(delay: float) -> None:
-            # A failed database write needs timed backoff, not readiness polling.
-            await asyncio.sleep(delay)
+        async def retry_startup(delay: float, *, flood_wait: float = 0) -> None:
+            # Honor Telegram's delay separately from database retry backoff.
+            await asyncio.sleep(max(delay, flood_wait))
             await drain_startup(min(delay * 2, 1))
 
         async def drain_startup(delay: float = 0.25) -> None:
@@ -199,6 +200,13 @@ def prepare_publication_inbox(client: Any, repository: Any):
                     # after a DB outage. Events arriving during it stay buffered.
                     await recovery.initialize()
                     client.publication_recovery = recovery
+            except FloodWaitError as exc:
+                logger.warning("TELEGRAM_PUBLICATION_STARTUP_FLOOD_WAIT | seconds=%s", exc.seconds)
+                start_background_task(
+                    retry_startup(delay, flood_wait=exc.seconds),
+                    name="telegram-publication-startup-retry",
+                )
+                return
             except Exception:
                 logger.exception("TELEGRAM_PUBLICATION_STARTUP_PERSIST_FAILED")
                 start_background_task(
