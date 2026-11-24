@@ -193,3 +193,26 @@ def test_reaction_startup_closes_all_opened_clients_on_failure(monkeypatch, fail
     with pytest.raises(RuntimeError, match="startup failed"):
         asyncio.run(telegram_client.create_reaction_clients())
     assert closed == ["second", "first"]
+
+
+@pytest.mark.parametrize("seconds", [21, 120])
+def test_telethon_slow_mode_is_explicit_rejection(seconds):
+    from telethon.errors import SlowModeWaitError
+
+    async def scenario():
+        calls = 0
+
+        async def operation():
+            nonlocal calls
+            calls += 1
+            raise SlowModeWaitError(request=None, capture=seconds)
+
+        with pytest.raises(TransportRateLimited) as result:
+            await build_sender_telethon_policy().execute(
+                backend="telethon", key="sender.send_file",
+                op_name="send_file", func=operation,
+            )
+        assert result.value.retry_after_seconds == seconds
+        assert calls == 1
+
+    asyncio.run(scenario())
