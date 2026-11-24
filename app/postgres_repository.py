@@ -11507,9 +11507,29 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def mark_campaign_run_message_sending(self, message_id: int, *, render_mode: str | None = None) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE campaign_run_messages SET send_status='sending', render_mode=%s, updated_at=NOW() WHERE id=%s", (render_mode, int(message_id)))
+                cur.execute("SELECT rule_id,saved_post_id,target_id,target_thread_id FROM campaign_run_messages WHERE id=%s AND send_status='pending' FOR UPDATE", (int(message_id),))
+                row = cur.fetchone()
+                if not row:
+                    return False
+                lock_key = f"campaign:{row['rule_id']}:{row['saved_post_id']}:{row['target_id']}:{row['target_thread_id']}"
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (lock_key,))
+                cur.execute(
+                    f"""
+                    SELECT EXISTS(
+                        SELECT 1 FROM campaign_run_messages m
+                        WHERE m.id<>%s AND m.rule_id=%s AND m.saved_post_id=%s
+                          AND m.target_id=%s AND m.target_thread_id IS NOT DISTINCT FROM %s
+                          AND (m.send_status='sending' OR (m.send_status='failed' AND {_CAMPAIGN_OCCUPIED_SQL}))
+                    ) AS occupied
+                    """,
+                    (int(message_id),row["rule_id"],row["saved_post_id"],row["target_id"],row["target_thread_id"]),
+                )
+                if cur.fetchone()["occupied"]:
+                    return False
+                cur.execute("UPDATE campaign_run_messages SET send_status='sending', render_mode=%s, updated_at=NOW() WHERE id=%s AND send_status='pending'", (render_mode, int(message_id)))
+                claimed = cur.rowcount == 1
             conn.commit()
-            return True
+            return claimed
 
     def mark_campaign_run_message_sent(self, message_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None = None, render_mode: str | None = None) -> bool:
         with self.connect() as conn:
