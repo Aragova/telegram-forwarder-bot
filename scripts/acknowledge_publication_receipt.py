@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -24,6 +25,7 @@ def main() -> int:
     if args.apply and (not args.accept_no_resend or not args.note.strip()):
         parser.error("--apply requires --accept-no-resend and --note")
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from app.postgres_repository import PostgresRepository
 
     repo = PostgresRepository()
