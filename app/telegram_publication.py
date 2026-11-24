@@ -112,8 +112,10 @@ def prepare_publication_inbox(client: Any, repository: Any):
 
     buffer = deque(maxlen=1024)
     inbox: PublicationInbox | None = None
+    buffer_overflow = False
 
     async def handle(update: Any) -> None:
+        nonlocal buffer_overflow
         if not isinstance(update, types.UpdateDeleteScheduledMessages):
             return
         try:
@@ -123,8 +125,10 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 return
             old,new = map(list,zip(*pairs))
             if inbox is None:
-                if len(buffer)==buffer.maxlen:
+                if len(buffer) == buffer.maxlen:
+                    buffer_overflow = True
                     logger.error("TELEGRAM_PUBLICATION_STARTUP_BUFFER_FULL")
+                    return
                 buffer.append((peer,old,new))
                 return
             await inbox.record(peer,old,new)
@@ -138,12 +142,26 @@ def prepare_publication_inbox(client: Any, repository: Any):
         me = await asyncio.wait_for(client.get_me(),timeout=30)
         if me is None:
             raise RuntimeError("Publication inbox requires an authenticated sender")
-        inbox = PublicationInbox(repository,int(me.id))
+        candidate = PublicationInbox(repository,int(me.id))
         while buffer:
-            peer,old,new = buffer.popleft()
-            await inbox.record(peer,old,new)
-        client.publication_inbox = inbox
-        return inbox
+            if buffer_overflow:
+                raise RuntimeError("Publication startup buffer overflowed")
+            peer,old,new = buffer[0]
+            for attempt in range(3):
+                try:
+                    await candidate.record(peer,old,new)
+                    break
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    logger.warning("TELEGRAM_PUBLICATION_STARTUP_PERSIST_RETRY | attempt=%s", attempt + 1)
+                    await asyncio.sleep(0.25 * (2 ** attempt))
+            buffer.popleft()
+        if buffer_overflow:
+            raise RuntimeError("Publication startup buffer overflowed")
+        inbox = candidate
+        client.publication_inbox = candidate
+        return candidate
 
     return bind
 

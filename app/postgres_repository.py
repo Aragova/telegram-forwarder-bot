@@ -6097,7 +6097,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
                 if not cur.fetchone():
                     return False
-                cur.execute("SELECT *,deadline_at<=NOW() AS expired FROM telegram_publication_receipts WHERE idempotency_key=%s FOR UPDATE",(key,))
+                cur.execute("SELECT *,deadline_at<=clock_timestamp() AS expired FROM telegram_publication_receipts WHERE idempotency_key=%s FOR UPDATE",(key,))
                 pending = cur.fetchone()
                 if not pending or pending["published_ids"] is not None or pending["expired_at"] is not None or pending["expired"]:
                     return False
@@ -6139,6 +6139,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     )
                     if not cur.fetchone():
                         return False
+                # NOW() is fixed at transaction start; locks above may have
+                # delayed this transaction beyond the publication deadline.
+                cur.execute("SELECT clock_timestamp() >= %s AS expired",(receipt["deadline_at"],))
+                if cur.fetchone()["expired"]:
+                    return False
                 ids = _json_dumps(published_ids)
                 now = utc_now_iso()
                 for delivery_id,source_id,published_id in sorted(zip(receipt["delivery_ids"],receipt["source_message_ids"],published_ids)):

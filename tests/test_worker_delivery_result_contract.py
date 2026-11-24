@@ -337,3 +337,37 @@ def test_repost_orphan_zero_result_with_already_faulty_delivery_does_not_defer_f
     ))
     assert repo.failed and repo.failed[0][0] == 117
     assert repo.deferred == []
+
+
+
+def test_publication_reconciliation_db_failure_defers_at_last_attempt(monkeypatch):
+    import app.worker_runtime as runtime
+
+    class ReceiptRepo(FakeRepo):
+        def __init__(self):
+            super().__init__()
+            self.deferred = []
+
+        def get_publication_receipt(self, key):
+            return {"rule_id": 1, "tenant_id": 1}
+
+        def defer_job(self, job_id, error, delay):
+            self.deferred.append((job_id, delay))
+            return True
+
+    async def broken_reconcile(sender, key):
+        raise RuntimeError("temporary database failure")
+
+    class NoSend:
+        async def execute_video_send_from_job(self, **kwargs):
+            raise AssertionError("Accepted publication must never be resent")
+
+    monkeypatch.setattr(runtime, "reconcile_pending_publication", broken_reconcile)
+    repo = ReceiptRepo()
+    assert _run(repo, NoSend(), {
+        "id": 901, "job_type": "video_send",
+        "payload_json": {"rule_id": 1, "delivery_id": 103, "target_id": "-100dst"},
+        "attempts": 2, "max_attempts": 3,
+    })
+    assert repo.deferred == [(901, 30)]
+    assert not repo.failed and not repo.retried and not repo.completed

@@ -613,7 +613,14 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         if reconcile_only:
             # This path can never initiate a send, even if rollback removed
             # the receipt between the initial lookup and acquiring the job.
-            raw_result = await reconcile_pending_publication(sender_service, publication_key)
+            try:
+                raw_result = await reconcile_pending_publication(sender_service, publication_key)
+            except Exception:
+                # Telegram has already accepted this publication. A transient
+                # reconciliation failure must not consume the send retry budget.
+                logger.exception("JOB_PUBLICATION_RECONCILE_FAILED | job_id=%s | action=defer_read_only", job_id)
+                raw_result = {"ok": False, "accepted": True, "retryable": False,
+                              "publication_pending": True}
             delivery_result = normalize_delivery_result(raw_result or {
                 "ok": False, "retryable": False, "accepted": True,
                 "error_text": "publication_receipt_changed_no_resend",

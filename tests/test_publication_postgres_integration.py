@@ -215,3 +215,36 @@ def test_rescan_archives_confirmed_receipt_and_releases_logical_key(repo):
     start_attempt(repo,key,rule_id,new_deliveries,source_ids,target)
     assert register(repo,(key,rule_id,new_deliveries,source_ids,source,target),[12,13])
     assert repo.get_publication_receipt(key)["published_ids"] is None
+
+
+
+def test_publication_deadline_is_checked_after_advisory_lock(repo):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    seeded = seed(repo,109)
+    key, _, deliveries, _, _, target = seeded
+    assert register(repo,seeded,[15])
+    repo.record_telegram_publication_mappings(123,int(target),[(15,115)])
+    lock_key = f"publication:123:{target}"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE telegram_publication_receipts SET deadline_at=clock_timestamp()+INTERVAL '3 seconds' WHERE idempotency_key=%s",(key,))
+        conn.commit()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",(lock_key,))
+                future = pool.submit(repo.finalize_publication_receipt,key,[115])
+                until = time.monotonic()+2
+                while time.monotonic() < until:
+                    cur.execute("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted) AS waiting")
+                    if cur.fetchone()["waiting"]:
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise AssertionError("Finalizer never waited on publication lock")
+                cur.execute("SELECT pg_sleep(3.2)")
+            conn.commit()
+        assert future.result(timeout=5) is False
+    assert repo.get_delivery(deliveries[0])["status"] == "processing"

@@ -133,3 +133,52 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
         assert runtime.runtime_context.bot is raw_bot
         assert runtime.runtime_context.telethon_client is raw_telethon_client
     asyncio.run(scenario())
+
+
+
+def test_actual_sender_factory_captures_connect_events_and_retries_startup_write(monkeypatch):
+    from types import SimpleNamespace
+
+    from telethon import types, utils
+    from app import telegram_client
+
+    peer = types.PeerChannel(99)
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            self.handlers = []
+
+        def add_event_handler(self, callback, event):
+            self.handlers.append(callback)
+
+        async def connect(self):
+            assert len(self.handlers) == 1
+            await self.handlers[0](types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[1], sent_messages=[101],
+            ))
+            await self.handlers[0](types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[2], sent_messages=[102],
+            ))
+
+        async def get_me(self):
+            return SimpleNamespace(id=7)
+
+    class Repo:
+        def __init__(self):
+            self.calls = []
+            self.saved = []
+
+        def record_telegram_publication_mappings(self, account, peer_id, pairs):
+            self.calls.append(pairs)
+            if len(self.calls) == 2:
+                raise RuntimeError("temporary PostgreSQL failure")
+            self.saved.append((account, peer_id, pairs))
+
+    monkeypatch.setattr(telegram_client, "TelegramClient", Client)
+    repo = Repo()
+    client = asyncio.run(telegram_client.create_telethon_client(publication_repository=repo))
+    assert client.publication_inbox.sender_account_id == 7
+    assert len(client.handlers) == 1
+    assert repo.calls == [[(1,101)], [(2,102)], [(2,102)]]
+    assert repo.saved == [(7,utils.get_peer_id(peer),[(1,101)]),
+                          (7,utils.get_peer_id(peer),[(2,102)])]
