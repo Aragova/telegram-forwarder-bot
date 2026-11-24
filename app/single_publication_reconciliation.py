@@ -154,7 +154,7 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
 
 async def _wait_or_expire(owner,receipt,key,reason):
     if receipt and (receipt.get("expired") or receipt.get("expired_at")):
-        await run_db(owner.db.expire_publication_receipt,key,reason)
+        await run_db(owner.db.expire_publication_receipt,key,reason,expected_started_at=receipt["send_started_at"])
         return _manual(reason)
     return _pending()
 

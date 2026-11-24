@@ -1,5 +1,6 @@
 """Integration tests against an isolated PostgreSQL service, never production."""
 import os
+import json
 
 import pytest
 
@@ -140,4 +141,5 @@ def test_real_pg_partial_botapi_album_evidence_is_not_published_ids(repo):
     with repo.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT extra_json FROM audit_log WHERE event_type='botapi_publication_unverified' AND delivery_id=%s",(attempt["delivery_id"],))
-            assert cur.fetchone()["extra_json"]["raw_message_ids"]==[901,0]
+            raw=cur.fetchone()["extra_json"]
+            assert (json.loads(raw) if isinstance(raw,str) else raw)["raw_message_ids"]==[901,0]

@@ -242,7 +242,7 @@ def test_mark_campaign_run_message_failed_sanitizes_null_delete_status():
 
     @contextmanager
     def _connect():
-        conn = _FakeConn(1, row=None)
+        conn = _FakeConn(1, row={"rule_id":1,"target_id":"-100123"})
         captured["conn"] = conn
         yield conn
 

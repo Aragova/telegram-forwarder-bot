@@ -92,3 +92,31 @@ def test_mixed_namespace_candidates_allow_same_number_only_in_different_namespac
     assert publication_candidate_mask([10,10],[False,True]) == [False,True]
     assert publication_candidate_mask([10,10],[True,True]) == []
     assert publication_candidate_mask([10],[False]) == []
+
+
+def test_inbox_buffers_early_event_until_account_is_authenticated():
+    from telethon import types,utils
+    from app.telegram_publication import prepare_publication_inbox
+    class Repository:
+        def __init__(self):
+            self.recorded=[]
+        def record_telegram_publication_mappings(self,account,peer,pairs):
+            self.recorded.append((account,peer,pairs))
+    class Client:
+        def add_event_handler(self,callback,event):
+            self.handler=callback
+        async def get_me(self):
+            return SimpleNamespace(id=7)
+    async def scenario():
+        repo=Repository()
+        client=Client()
+        bind=prepare_publication_inbox(client,repo)
+        peer=types.PeerChannel(99)
+        await client.handler(types.UpdateDeleteScheduledMessages(peer=peer,messages=[4],sent_messages=[100]))
+        assert not repo.recorded
+        assert not hasattr(client,"publication_inbox")
+        await bind()
+        assert repo.recorded==[(7,utils.get_peer_id(peer),[(4,100)])]
+        await client.handler(types.UpdateDeleteScheduledMessages(peer=peer,messages=[5]))
+        assert len(repo.recorded)==1
+    asyncio.run(scenario())

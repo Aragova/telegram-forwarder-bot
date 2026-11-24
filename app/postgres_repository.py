@@ -2658,6 +2658,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
             with self.connect() as conn:
                 with conn.cursor() as cur:
+                    # Serialize rollback with receipt registration/finalization.
+                    cur.execute("SELECT id FROM routing WHERE id=%s FOR UPDATE",(rule_id,))
+                    if not cur.fetchone():
+                        return None
                     cur.execute(
                         """
                         SELECT
@@ -6147,10 +6151,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
         return True
 
-    def expire_publication_receipt(self, key: str, reason: str) -> bool:
+    def expire_publication_receipt(self, key: str, reason: str, *, expected_started_at: datetime | None = None) -> bool:
         """Retain the accepted attempt and atomically end an unresolved receipt."""
         receipt = self.get_publication_receipt(key)
-        if not receipt:
+        if not receipt or (expected_started_at is not None and receipt['send_started_at'] != expected_started_at):
             return False
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -6161,9 +6165,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     """
                     UPDATE telegram_publication_receipts SET expired_at=NOW()
                     WHERE idempotency_key=%s AND published_ids IS NULL AND expired_at IS NULL
-                      AND deadline_at<=NOW() RETURNING delivery_ids
+                      AND send_started_at=%s AND deadline_at<=NOW() RETURNING delivery_ids
                     """,
-                    (key,),
+                    (key,receipt['send_started_at']),
                 )
                 row = cur.fetchone()
                 if not row:
