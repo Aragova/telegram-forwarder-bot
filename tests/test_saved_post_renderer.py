@@ -450,3 +450,37 @@ def test_verify_raw_album_ids_old_album_time_fails():
 
     result = asyncio.run(verify_raw_album_ids(telethon_client=_Old(), target_id="-1002451047809", raw_message_ids=[900, 901], expected_count=2, expected_caption="cap", started_at=datetime.now(timezone.utc)))
     assert result.ok is False
+
+
+@pytest.mark.parametrize("returned_ids", [[0, 0], [123, 0], [123], [123, 123]])
+def test_saved_post_botapi_album_never_accepts_incomplete_ids(returned_ids):
+    class Bot:
+        async def send_media_group(self, **kwargs):
+            return [_FakeMediaMsg(i) for i in returned_ids]
+        async def send_message(self, **kwargs):
+            raise AssertionError("No further send for unconfirmed publication")
+    result = asyncio.run(SavedPostRenderer(bot=Bot()).send(
+        chat_id=-100123, reply_markup=object(),
+        content={"kind": "album", "media_items": [{"kind": "photo", "file_id": "a"}, {"kind": "video", "file_id": "b"}]},
+    ))
+    assert not result.ok
+    assert result.message_ids is None
+    assert result.method == "bot_api_unverified"
+
+
+def test_saved_post_pending_album_never_uses_history_guess():
+    class Client(FakeTelethonSource):
+        async def send_file(self, **kwargs):
+            self.send_file_calls.append(kwargs)
+            return [SimpleNamespace(id=i, video_processing_pending=True) for i in (90, 91)]
+        async def get_entity(self, entity):
+            return SimpleNamespace(broadcast=True)
+        async def iter_messages(self, *args, **kwargs):
+            raise AssertionError("No history guess for scheduled IDs")
+    client = Client()
+    with pytest.raises(SavedPostSentUnverifiedError, match="telegram_video_processing_pending"):
+        asyncio.run(send_saved_post_album_via_telethon_source(
+            telethon_client=client, chat_id=-100123,
+            content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
+        ))
+    assert len(client.send_file_calls) == 1
