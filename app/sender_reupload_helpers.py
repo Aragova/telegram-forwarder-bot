@@ -7,6 +7,7 @@ from pathlib import Path
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, TelegramRetryAfter
 from telethon.errors import FloodWaitError
 from .transport_policy import TransportRateLimited
+from .send_intent import PublicationWriteUnavailable
 from .telegram_publication import botapi_publication_ids
 from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo
 
@@ -323,7 +324,7 @@ class SenderReuploadHelpers:
                 "error_text": "botapi_accepted_partial_or_zero_ids_no_resend",
             }
 
-        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited):
+        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
             raise
         except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge) as exc:
             return {"ok": False, "sent_message_id": None, "sent_count": 0,
@@ -472,7 +473,7 @@ class SenderReuploadHelpers:
             logger.info("REUPLOAD_MESSAGE | BOTAPI_MEDIA_FALLBACK | OK | sent_message_id=%s", ids[0])
             return TelethonSendOutcome(True, True, True, ids[0], ids, resolution_method="botapi_media_fallback")
 
-        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited):
+        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
             raise
         except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge) as exc:
             return telethon_not_attempted(str(exc))
