@@ -109,6 +109,21 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
                 target_is_broadcast_channel=bool(getattr(entity,"broadcast",False)
                                                  and not getattr(entity,"megagroup",False)),
             )
+            if not published_ids:
+                recovery = getattr(reader, "publication_recovery", None)
+                if recovery is not None and recovery.sender_account_id == receipt["sender_account_id"]:
+                    mask = receipt.get("pending_mask") or [True] * len(receipt["scheduled_ids"])
+                    pending_ids = [mid for mid, flag in zip(receipt["scheduled_ids"], mask) if flag]
+                    if not await inbox.lookup_many(int(target_id), pending_ids):
+                        await recovery.recover()
+                        published_ids = await resolver.resolve_scheduled_publications(
+                            target_entity=entity, target_id=target_id, scheduled_ids=receipt["scheduled_ids"],
+                            pending_mask=receipt.get("pending_mask"), publication_inbox=inbox,
+                            source_message_ids=source_guard, target_thread_id=receipt["target_thread_id"],
+                            before_max_message_id=None, send_started_at=receipt["send_started_at"],
+                            target_is_broadcast_channel=bool(getattr(entity,"broadcast",False)
+                                                             and not getattr(entity,"megagroup",False)),
+                        )
         except Exception as exc:
             logger.warning("PUBLICATION_READ_FAILED | delivery_ids=%s | error_type=%s",
                            receipt["delivery_ids"],type(exc).__name__)

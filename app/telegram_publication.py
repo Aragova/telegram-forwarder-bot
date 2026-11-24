@@ -172,6 +172,13 @@ def prepare_publication_inbox(client: Any, repository: Any):
         if me is None:
             raise RuntimeError("Publication inbox requires an authenticated sender")
         candidate = PublicationInbox(repository,int(me.id))
+        if callable(getattr(repository, "get_publication_recovery_cursor", None)):
+            from .publication_difference_recovery import PublicationDifferenceRecovery
+
+            recovery = PublicationDifferenceRecovery(client, candidate)
+            # Establish the checkpoint before exposing a write-capable sender.
+            await recovery.initialize()
+            client.publication_recovery = recovery
         from .background_tasks import start_background_task
 
         drained = asyncio.Event()

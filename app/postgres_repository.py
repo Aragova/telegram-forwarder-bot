@@ -552,6 +552,16 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         CREATE INDEX IF NOT EXISTS idx_telegram_publication_mappings_published
             ON telegram_publication_mappings(sender_account_id, target_peer_id, published_id);
 
+        -- Independent read-only difference cursor; never advance it before
+        -- the exact publication mappings returned by Telegram are durable.
+        CREATE TABLE IF NOT EXISTS telegram_publication_recovery_cursor (
+            sender_account_id BIGINT PRIMARY KEY CHECK(sender_account_id > 0),
+            pts BIGINT NOT NULL CHECK(pts >= 0),
+            qts BIGINT NOT NULL CHECK(qts >= 0),
+            state_date TIMESTAMPTZ NOT NULL,
+            version BIGINT NOT NULL DEFAULT 0
+        );
+
         CREATE TABLE IF NOT EXISTS telegram_publication_receipts (
             idempotency_key TEXT PRIMARY KEY,
             rule_id BIGINT NOT NULL,
@@ -5929,6 +5939,47 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (utc_now_iso(), sent_message_id, _json_dumps(sent_message_ids or []), target_id, delivery_method, delivery_id),
                 )
             conn.commit()
+
+    def get_publication_recovery_cursor(self, account_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pts,qts,state_date,version FROM telegram_publication_recovery_cursor WHERE sender_account_id=%s",
+                    (account_id,),
+                )
+                return cur.fetchone()
+
+    def initialize_publication_recovery_cursor(
+        self, account_id: int, pts: int, qts: int, state_date: datetime,
+    ) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO telegram_publication_recovery_cursor(sender_account_id,pts,qts,state_date)
+                    VALUES (%s,%s,%s,%s) ON CONFLICT(sender_account_id) DO NOTHING
+                    """,
+                    (account_id, pts, qts, state_date),
+                )
+            conn.commit()
+
+    def advance_publication_recovery_cursor(
+        self, account_id: int, version: int, pts: int, qts: int, state_date: datetime,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE telegram_publication_recovery_cursor
+                    SET pts=%s,qts=%s,state_date=%s,version=version+1
+                    WHERE sender_account_id=%s AND version=%s
+                      AND pts<=%s AND qts<=%s AND state_date<=%s
+                    """,
+                    (pts,qts,state_date,account_id,version,pts,qts,state_date),
+                )
+                changed = cur.rowcount == 1
+            conn.commit()
+        return changed
 
     def record_telegram_publication_mappings(
         self, sender_account_id: int, target_peer_id: int,

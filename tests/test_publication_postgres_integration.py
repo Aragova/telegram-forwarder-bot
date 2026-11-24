@@ -404,3 +404,68 @@ def test_publication_reaction_enqueue_and_receipt_complete_atomically(repo):
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM reaction_jobs WHERE rule_id=%s AND message_id=%s", (rule_id, 141))
             assert [row["id"] for row in cur.fetchall()] == [job_id]
+
+
+def test_publication_recovery_cursor_and_exact_replay_after_restart(repo):
+    import asyncio
+    from telethon import functions, types
+    from app.publication_difference_recovery import PublicationDifferenceRecovery
+    from app.telegram_publication import PublicationInbox
+
+    from telethon import utils
+
+    seeded = seed(repo, 117)
+    key, rule_id, deliveries, source_ids, source, _ = seeded
+    peer = types.PeerChannel(900117)
+    target = str(utils.get_peer_id(peer))
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET target_id=%s WHERE id=%s", (target, rule_id))
+            cur.execute("UPDATE delivery_attempts SET target_id=%s WHERE idempotency_key=%s", (target, key))
+    seeded = (key, rule_id, deliveries, source_ids, source, target)
+    account = 123
+    baseline = datetime.now(timezone.utc).replace(microsecond=0)
+    state = types.updates.State(pts=101, qts=0, date=baseline, seq=1, unread_count=0)
+
+    class Client:
+        def __init__(self, response):
+            self.response = response
+
+        async def __call__(self, request, *, flood_sleep_threshold):
+            assert flood_sleep_threshold == 0
+            if isinstance(request, functions.updates.GetStateRequest):
+                return state
+            assert isinstance(request, functions.updates.GetDifferenceRequest)
+            assert request.pts == 101 and request.qts == 0
+            return self.response
+
+    async def scenario():
+        initial = PublicationDifferenceRecovery(Client(None), PublicationInbox(repo, account))
+        await initial.initialize()
+        assert register(repo, seeded, [42])
+        assert not repo.finalize_publication_receipt(key, [142])
+        # The original process never receives the live publication event.
+        published = types.UpdateDeleteScheduledMessages(
+            peer=peer, messages=[42], sent_messages=[142],
+        )
+        deletion = types.UpdateDeleteScheduledMessages(
+            peer=published.peer, messages=[43],
+        )
+        result = types.updates.Difference(
+            new_messages=[], new_encrypted_messages=[], other_updates=[deletion, published],
+            chats=[], users=[], state=types.updates.State(
+                pts=102, qts=0, date=baseline, seq=2, unread_count=0,
+            ),
+        )
+        restarted = PublicationDifferenceRecovery(Client(result), PublicationInbox(repo, account))
+        await restarted.initialize()
+        await restarted.recover()
+        assert repo.get_telegram_publication_mappings(account, int(target), [42]) == [142]
+        assert repo.get_telegram_publication_mappings(account, int(target), [43]) == []
+        cursor = repo.get_publication_recovery_cursor(account)
+        assert cursor["pts"] == 102 and cursor["version"] == 1
+        assert not repo.advance_publication_recovery_cursor(account, 0, 103, 0, baseline)
+        assert repo.finalize_publication_receipt(key, [142])
+        assert repo.get_delivery(deliveries[0])["sent_message_id"] == 142
+
+    asyncio.run(scenario())
