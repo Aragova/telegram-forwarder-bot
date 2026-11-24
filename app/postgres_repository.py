@@ -3600,32 +3600,36 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
         return row is not None
 
-    def suppress_self_target_echo_deliveries(self, rule_id: int, delivery_ids: list[int]) -> bool:
+    def suppress_self_target_echo_deliveries(self, rule_id: int, delivery_ids: list[int]) -> list[int]:
         """Recheck queued source posts against exact published IDs before another send."""
         if not delivery_ids:
-            return False
+            return []
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT d.id,p.source_channel,p.source_thread_id,p.message_id
+                    SELECT d.id,d.status,p.source_channel,p.source_thread_id,p.message_id
                     FROM deliveries d JOIN posts p ON p.id=d.post_id
                     JOIN routing r ON r.id=d.rule_id
                     WHERE d.id=ANY(%s) AND d.rule_id=%s
-                      AND d.status IN ('pending','processing')
+                      AND (d.status IN ('pending','processing')
+                           OR (d.status='faulty' AND d.error_text='Self-loop: confirmed publication echo'))
                       AND r.source_id::text=r.target_id::text
                       AND r.source_thread_id IS NOT DISTINCT FROM r.target_thread_id
                     """,(delivery_ids,rule_id),
                 )
                 rows=cur.fetchall()
-                echo=False
+                echo_ids=[]
                 for row in rows:
+                    if row["status"] == "faulty":
+                        echo_ids.append(int(row["id"]))
+                        continue
                     if self._is_self_target_echo_post_for_rule_conn(
                         conn,rule_id=rule_id,source_channel=row["source_channel"],
                         source_thread_id=row["source_thread_id"],message_id=row["message_id"],
                     ):
-                        echo=True
-                        break
+                        echo_ids.append(int(row["id"]))
+                        continue
                     # Telegram mapping may arrive before the original receipt finalizes.
                     cur.execute(
                         """
@@ -3649,18 +3653,17 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         """,(rule_id,row["source_channel"],row["source_thread_id"],row["message_id"]),
                     )
                     if cur.fetchone():
-                        echo=True
-                        break
-                if not echo:
-                    return False
+                        echo_ids.append(int(row["id"]))
+                if not echo_ids:
+                    return []
                 cur.execute(
                     """
                     UPDATE deliveries SET status='faulty',error_text='Self-loop: confirmed publication echo'
                     WHERE id=ANY(%s) AND rule_id=%s AND status IN ('pending','processing')
-                    """,(delivery_ids,rule_id),
+                    """,(echo_ids,rule_id),
                 )
             conn.commit()
-        return True
+        return echo_ids
 
     def _log_self_target_echo_delivery_skipped(
         self,

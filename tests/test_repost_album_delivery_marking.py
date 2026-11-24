@@ -202,3 +202,34 @@ def test_album_pipeline_audit_failure_preserves_send_boundary(
     assert owner._copy_album_via_bot.await_count == copy_calls
     owner._reupload_album.assert_not_awaited()
     owner._send_album_one_by_one.assert_not_awaited()
+
+
+def test_album_source_fetch_failure_before_send_is_retryable_preflight():
+    from unittest.mock import AsyncMock, Mock
+
+    from app.repost_album_delivery import AlbumPreflightError, RepostAlbumDelivery
+
+    owner = SimpleNamespace(
+        _resolve_repost_caption_delivery_strategy_sync=Mock(return_value={
+            "configured_mode": "builder_first",
+            "requires_builder": True,
+            "use_copy_first": False,
+        }),
+        _is_self_loop_rule=Mock(return_value=False),
+        _content_from_message_or_post=Mock(return_value={}),
+        _log_caption_entity_inventory=Mock(),
+        _caption_entity_counts=Mock(return_value={}),
+        _fetch_album_messages=AsyncMock(side_effect=RuntimeError("source unavailable")),
+        _get_album_primary_text=Mock(),
+        _log_delivery_pipeline_step=AsyncMock(),
+        _copy_album_via_bot=AsyncMock(),
+        _reupload_album=AsyncMock(),
+        _send_album_one_by_one=AsyncMock(),
+    )
+    with pytest.raises(AlbumPreflightError, match="source unavailable"):
+        asyncio.run(RepostAlbumDelivery(owner).deliver(
+            SimpleNamespace(id=111), FakeAlbumRepo().rows, "src", "dst", None,
+        ))
+    owner._copy_album_via_bot.assert_not_awaited()
+    owner._reupload_album.assert_not_awaited()
+    owner._send_album_one_by_one.assert_not_awaited()

@@ -642,18 +642,23 @@ class RepostAlbumDelivery:
         # =========================================================
         # 4) FETCH SOURCE ALBUM
         # =========================================================
-        if source_messages is None:
-            source_messages = await owner._fetch_album_messages(source_channel, message_ids)
+        try:
+            if source_messages is None:
+                source_messages = await owner._fetch_album_messages(source_channel, message_ids)
 
-        if source_messages is not None and first_source_caption is None:
-            first_source_caption = owner._get_album_primary_text(
-                source_messages,
-                post_rows=[
-                    post_rows_by_message_id.get(int(getattr(m, "id")))
-                    for m in source_messages
-                ],
-                is_self_loop=is_self_loop,
-            )
+            if source_messages is not None and first_source_caption is None:
+                first_source_caption = owner._get_album_primary_text(
+                    source_messages,
+                    post_rows=[
+                        post_rows_by_message_id.get(int(getattr(m, "id")))
+                        for m in source_messages
+                    ],
+                    is_self_loop=is_self_loop,
+                )
+        except Exception as exc:
+            if not transport_entered:
+                raise AlbumPreflightError(str(exc)) from exc
+            raise
 
         if len(source_messages) != len(message_ids):
             final_error_text = "Не удалось получить весь альбом через MTProto"

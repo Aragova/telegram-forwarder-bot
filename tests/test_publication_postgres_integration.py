@@ -293,3 +293,16 @@ def test_rescan_refuses_unverified_botapi_album(repo):
         repo.reset_rule_history_for_replay(rule_id, owner_token=owner)
     assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "accepted"
     assert all(repo.get_delivery(delivery_id) is not None for delivery_id in deliveries)
+
+
+def test_self_loop_suppression_keeps_unrelated_album_members(repo):
+    _, rule_id, deliveries, source_ids, source, _ = seed(repo, 112, count=3)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET target_id=source_id WHERE id=%s", (rule_id,))
+            cur.execute("UPDATE deliveries SET status='sent', sent_message_id=%s WHERE id=%s",
+                        (source_ids[1], deliveries[0]))
+    assert repo.suppress_self_target_echo_deliveries(rule_id, deliveries[1:]) == [deliveries[1]]
+    assert repo.get_delivery(deliveries[1])["status"] == "faulty"
+    assert repo.get_delivery(deliveries[2])["status"] == "processing"
+    assert repo.suppress_self_target_echo_deliveries(rule_id, deliveries[1:]) == [deliveries[1]]

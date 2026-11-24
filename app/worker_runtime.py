@@ -593,11 +593,19 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     try:
         if not reconcile_only and job_type in {"repost_single", "repost_album", "video_delivery", "video_send"}:
             suppress_echo = getattr(repo, "suppress_self_target_echo_deliveries", None)
-            if callable(suppress_echo) and await asyncio.to_thread(
-                suppress_echo, int(payload.get("rule_id") or 0), _extract_delivery_ids_from_payload(payload),
-            ) is True:
-                await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
-                return True
+            if callable(suppress_echo):
+                delivery_ids = _extract_delivery_ids_from_payload(payload)
+                echo_ids = await asyncio.to_thread(
+                    suppress_echo, int(payload.get("rule_id") or 0), delivery_ids,
+                )
+                if echo_ids:
+                    remaining_ids = [item for item in delivery_ids if item not in echo_ids]
+                    if not remaining_ids:
+                        await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
+                        return True
+                    if job_type == "repost_album":
+                        payload["delivery_ids"] = remaining_ids
+                        payload["delivery_id"] = remaining_ids[0]
         if not reconcile_only and job_type in {"repost_single", "repost_album", "repost_campaign_send_copy", "repost_campaign_delete_copy", "video_delivery", "video_send"}:
             guarded = await asyncio.to_thread(
                 _complete_job_if_delivery_already_sent,
