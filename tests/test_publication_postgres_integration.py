@@ -646,8 +646,7 @@ def test_transport_cooldown_is_shared_and_never_shortened(repo):
 def test_reaction_stale_owner_cannot_finalize(repo):
     _, rule_id, _, _, _, target = seed(repo, 125)
     job_id = repo.enqueue_reaction_job(tenant_id=1,rule_id=rule_id,target_id=target,message_id=991,max_attempts=2)
-    job = repo.lease_due_reaction_job(worker_id="old",lock_timeout_seconds=1)
-    # Other tests can have pending reactions. Isolate the target job explicitly.
+    # Simulate takeover of this exact job, without leasing unrelated jobs.
     with repo.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE reaction_jobs SET status='processing',locked_by='new',locked_at=NOW(),attempt_count=2 WHERE id=%s",(job_id,))
