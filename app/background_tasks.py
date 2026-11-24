@@ -42,9 +42,10 @@ def start_background_task(awaitable: Awaitable[Any], *, name: str, drain_only: b
     return task
 
 
-async def stop_background_tasks() -> None:
-    """Drain this loop's tracked tasks, including tasks spawned during cancellation."""
+async def stop_background_tasks(*, drain_timeout: float = 15.0) -> None:
+    """Drain cancelled resource users; bound waiting for independent file cleanup."""
     loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, drain_timeout)
     with _TASK_LOCK:
         _STOPPING_LOOPS.add(loop)
     current = asyncio.current_task()
@@ -55,6 +56,15 @@ async def stop_background_tasks() -> None:
             to_cancel = [task for task in tasks if task not in _DRAIN_ONLY_TASKS]
         if not tasks:
             return
-        for task in to_cancel:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if to_cancel:
+            for task in to_cancel:
+                task.cancel()
+            # Resource users must exit before their clients are disconnected.
+            await asyncio.gather(*to_cancel, return_exceptions=True)
+            continue
+        _, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time()))
+        if pending:
+            LOGGER.warning("BACKGROUND_FILE_DRAIN_TIMEOUT | pending=%s", len(pending))
+            # These tasks must not use Telegram or database resources. Their
+            # thread-owned cleanup continues even if the event loop exits.
+            return

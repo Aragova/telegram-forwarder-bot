@@ -5,6 +5,7 @@ import asyncio
 import json
 import struct
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,30 +34,52 @@ def _create_thumb_temp_path(prefix: str) -> Path:
         return Path(handle.name)
 
 
-def _remove_orphan_thumb(done: asyncio.Task[Path], prefix: str) -> None:
-    if done.cancelled() or done.exception() is not None:
-        return
+def _unlink_orphan_thumb(path: Path, prefix: str) -> None:
     try:
-        done.result().unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
     except Exception:
         logger.exception("THUMB_TEMP_CLEANUP_FAILED | prefix=%s", prefix)
 
 
-async def _create_thumb_temp_path_async(prefix: str) -> Path:
-    """Offload creation and remove the late-created file after cancellation.
+class _ThumbTempCreation:
+    """Hand off a temporary path or unlink it in the creating thread."""
 
-    shield prevents a cancelled caller from losing the thread result.
-    start_background_task retains the pending task until it completes.
-    """
+    def __init__(self, prefix: str):
+        self.prefix = prefix
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._path: Path | None = None
+
+    def create(self) -> Path:
+        path = _create_thumb_temp_path(self.prefix)
+        with self._lock:
+            if not self._abandoned:
+                self._path = path
+                return path
+        _unlink_orphan_thumb(path, self.prefix)
+        return path
+
+    def abandon(self) -> None:
+        with self._lock:
+            self._abandoned = True
+            path = self._path
+            self._path = None
+        if path is not None:
+            _unlink_orphan_thumb(path, self.prefix)
+
+
+async def _create_thumb_temp_path_async(prefix: str) -> Path:
+    """Keep cleanup ownership even if shutdown cancels the asyncio task."""
+    state = _ThumbTempCreation(prefix)
     creation = start_background_task(
-        asyncio.to_thread(_create_thumb_temp_path, prefix),
+        asyncio.to_thread(state.create),
         name=f"create-thumbnail-{prefix}",
         drain_only=True,
     )
     try:
         return await asyncio.shield(creation)
     except asyncio.CancelledError:
-        creation.add_done_callback(lambda done: _remove_orphan_thumb(done, prefix))
+        state.abandon()
         raise
 
 

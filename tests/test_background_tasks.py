@@ -71,3 +71,19 @@ def test_shutdown_drains_thread_work_instead_of_discarding_result():
         assert task.result() == 42
 
     asyncio.run(scenario())
+
+
+def test_shutdown_bounds_independent_file_drain():
+    from app.background_tasks import stop_background_tasks
+
+    async def scenario():
+        release = asyncio.Event()
+        task = start_background_task(release.wait(), name="file-cleanup", drain_only=True)
+        try:
+            await asyncio.wait_for(stop_background_tasks(drain_timeout=0), timeout=1)
+            assert task in _RUNNING_TASKS and not task.done()
+        finally:
+            release.set()
+            await task
+
+    asyncio.run(scenario())
