@@ -264,3 +264,18 @@ def test_verify_album_reads_when_mtproto_write_is_disabled():
     ))
     assert result["ok"] and result["sent_message_ids"] == [10, 11]
     assert owner.telethon is None
+
+def test_mtproto_writer_unavailable_is_pre_send_deferral():
+    import pytest
+    from app.send_intent import PublicationWriteUnavailable
+
+    helper = SenderTelethonHelpers(SimpleNamespace(telethon=None))
+    with pytest.raises(PublicationWriteUnavailable):
+        asyncio.run(helper.send_text_via_telethon(target_id="-100", target_thread_id=None,
+                                                  text="text", entities=[]))
+    with pytest.raises(PublicationWriteUnavailable):
+        asyncio.run(helper.send_file_via_telethon(target_id="-100", target_thread_id=None,
+                                                  message=SimpleNamespace()))
+    with pytest.raises(PublicationWriteUnavailable):
+        asyncio.run(helper.send_album_via_telethon(target_id="-100", target_thread_id=None,
+                                                   messages=[SimpleNamespace()]))
