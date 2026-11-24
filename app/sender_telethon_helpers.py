@@ -43,7 +43,7 @@ async def _create_thumb_temp_path_async(prefix: str) -> Path:
         name=f"create-thumbnail-{prefix}",
     )
     def _remove_orphan(done: asyncio.Task[Path]) -> None:
-        if done.cancelled():
+        if done.cancelled() or done.exception() is not None:
             return
         try:
             done.result().unlink(missing_ok=True)
@@ -285,6 +285,8 @@ class SenderTelethonHelpers:
         source_message_ids: set[int] | None = None,
         literal_caption: bool = False,
     ) -> TelethonSendOutcome:
+        if self.owner.telethon is None:
+            raise PublicationWriteUnavailable("MTProto publication writer is not ready")
         entity, target_is_broadcast_channel = await self._resolve_target_entity_and_broadcast_flag(target_id)
         formatting_entities = self.owner._clone_telethon_entities(entities, text)
 
@@ -358,6 +360,8 @@ class SenderTelethonHelpers:
         is_self_loop: bool = False,
         caption_override: dict | None = None,
     ) -> TelethonSendOutcome:
+        if self.owner.telethon is None:
+            raise PublicationWriteUnavailable("MTProto publication writer is not ready")
         content = (
             caption_override
             if caption_override is not None
@@ -584,6 +588,8 @@ class SenderTelethonHelpers:
         is_self_loop: bool = False,
         caption_override: dict | None = None,
     ) -> dict:
+        if self.owner.telethon is None:
+            raise PublicationWriteUnavailable("MTProto publication writer is not ready")
         downloaded_paths: list[Path] = []
 
         original_send_started = False
