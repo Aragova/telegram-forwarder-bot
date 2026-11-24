@@ -422,8 +422,10 @@ def test_pending_video_id_never_matches_unrelated_published_message():
     sent = _msg(2292)
     sent.video_processing_pending = True
 
+    calls = []
     class NoHistoryLookup:
         async def get_messages(self, *args, **kwargs):
+            calls.append((args, kwargs))
             raise AssertionError("Scheduled ID is not a published ID")
 
     now = datetime.now(timezone.utc)
@@ -435,14 +437,17 @@ def test_pending_video_id_never_matches_unrelated_published_message():
     assert result.authoritative_message_id is None
     assert result.returned_candidate_id == 2292
     assert result.resolution_method == "video_processing_pending"
+    assert not calls
 
 
 def test_pending_album_is_not_partially_resolved():
     first, second = _msg(10), _msg(11)
     second.video_processing_pending = True
 
+    calls = []
     class NoHistoryLookup:
         async def get_messages(self, *args, **kwargs):
+            calls.append((args, kwargs))
             raise AssertionError("Do not resolve a partly scheduled album")
 
     now = datetime.now(timezone.utc)
@@ -455,6 +460,7 @@ def test_pending_album_is_not_partially_resolved():
     assert result.authoritative_message_id is None
     assert result.returned_candidate_ids == [10, 11]
     assert result.resolution_method == "video_processing_pending"
+    assert not calls
 
 
 def test_pending_single_uses_exact_publication_mapping_not_scheduled_id():
@@ -464,11 +470,13 @@ def test_pending_single_uses_exact_publication_mapping_not_scheduled_id():
     published.chat_id = -100
     published.from_scheduled = True
     published.post = True
+    now = datetime.now(timezone.utc)
+    published.date = now
 
     class Inbox:
-        async def lookup(self, peer_id, scheduled_id):
-            assert (peer_id, scheduled_id) == (-100, 2292)
-            return 5181
+        async def lookup_many(self, peer_id, scheduled_ids):
+            assert (peer_id, scheduled_ids) == (-100, [2292])
+            return [5181]
 
     class Client:
         publication_inbox = Inbox()
@@ -477,7 +485,6 @@ def test_pending_single_uses_exact_publication_mapping_not_scheduled_id():
             assert ids == 5181
             return published
 
-    now = datetime.now(timezone.utc)
     result = asyncio.run(TelethonAuthoritativeMessageResolver(Client()).resolve_authoritative_single_message(
         target_entity=-100, target_id=-100, sent=sent, expected_text="caption",
         before_max_message_id=5180, send_started_at=now, send_finished_at=now,

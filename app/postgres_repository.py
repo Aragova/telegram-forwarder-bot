@@ -5806,6 +5806,29 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 row = cur.fetchone()
                 return int(row["published_id"]) if row else None
 
+    def get_telegram_publication_mappings(
+        self, sender_account_id: int, target_peer_id: int, scheduled_ids: list[int],
+    ) -> list[int]:
+        """Read all conflict-free mappings from one database snapshot."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT m.scheduled_id,m.published_id
+                    FROM telegram_publication_mappings m
+                    WHERE m.sender_account_id=%s AND m.target_peer_id=%s
+                      AND m.scheduled_id=ANY(%s)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM telegram_publication_mappings x
+                          WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
+                            AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
+                              OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
+                      )
+                    """,(sender_account_id,target_peer_id,scheduled_ids),
+                )
+                rows = {r["scheduled_id"]:r["published_id"] for r in cur.fetchall()}
+                return [rows[mid] for mid in scheduled_ids] if all(mid in rows for mid in scheduled_ids) else []
+
     def register_publication_receipt(
         self, *, key: str, delivery_ids: list[int], rule_id: int,
         account_id: int, peer_id: int, thread_id: int | None,
@@ -5966,9 +5989,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
                 if not cur.fetchone():
                     return False
-                cur.execute("SELECT published_ids,expired_at FROM telegram_publication_receipts WHERE idempotency_key=%s FOR UPDATE",(key,))
+                cur.execute("SELECT published_ids,expired_at,deadline_at<=NOW() AS expired FROM telegram_publication_receipts WHERE idempotency_key=%s FOR UPDATE",(key,))
                 pending = cur.fetchone()
-                if not pending or pending["published_ids"] is not None or pending["expired_at"] is not None:
+                if not pending or pending["published_ids"] is not None or pending["expired_at"] is not None or pending["expired"]:
                     return False
                 # Serialize with inbox writes for the same peer before checking
                 # every mapping. A conflicting event already recorded blocks promotion.

@@ -62,6 +62,8 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
         return None
     if receipt.get("expired_at"):
         return _manual("publication_receipt_expired_no_resend")
+    if receipt["published_ids"] is None and receipt.get("expired"):
+        return await _wait_or_expire(owner,receipt,key,"publication_receipt_expired_no_resend")
 
     inbox = getattr(owner.telethon,"publication_inbox",None)
     if receipt["published_ids"] is None and (inbox is None or inbox.sender_account_id != receipt["sender_account_id"]):

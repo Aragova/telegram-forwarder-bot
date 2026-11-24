@@ -87,6 +87,12 @@ class PublicationInbox:
             self.sender_account_id, peer_id, scheduled_id,
         )
 
+    async def lookup_many(self, peer_id: int, scheduled_ids: list[int]) -> list[int]:
+        return await asyncio.to_thread(
+            self.repository.get_telegram_publication_mappings,
+            self.sender_account_id, peer_id, scheduled_ids,
+        )
+
 
 async def install_publication_inbox(client: Any, repository: Any) -> PublicationInbox:
     """Attach to the actual sender account before workers can send messages."""
@@ -102,7 +108,7 @@ async def install_publication_inbox(client: Any, repository: Any) -> Publication
             return
         try:
             peer_id = utils.get_peer_id(update.peer)
-            recorded = await inbox.record(peer_id, update.messages, update.sent_messages)
+            recorded = await inbox.record(peer_id, update.messages, getattr(update, "sent_messages", None))
             if recorded:
                 logger.info(
                     "TELEGRAM_PUBLICATION_MAPPING_RECORDED | peer=%s | count=%s",

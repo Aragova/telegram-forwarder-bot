@@ -74,3 +74,14 @@ def test_exact_published_id_passes_but_self_loop_source_and_watermark_do_not():
     assert verified_published_message(msg, **kwargs)
     assert not verified_published_message(msg, **(kwargs | {"source_ids": {100}}))
     assert not verified_published_message(msg, **(kwargs | {"before_id": 100}))
+
+
+def test_telethon_schema_supports_publication_mapping_and_plain_deletion():
+    import inspect
+    from telethon import types
+    assert "video_processing_pending" in inspect.signature(types.Message).parameters
+    peer = types.PeerChannel(123)
+    published = types.UpdateDeleteScheduledMessages(peer=peer,messages=[1],sent_messages=[100])
+    deleted = types.UpdateDeleteScheduledMessages(peer=peer,messages=[1])
+    assert publication_pairs(published.messages,published.sent_messages) == [(1,100)]
+    assert publication_pairs(deleted.messages,deleted.sent_messages) == []

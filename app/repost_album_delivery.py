@@ -989,20 +989,22 @@ class RepostAlbumDelivery:
                 await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
             return False
 
-        if reupload_result.get("transport_accepted") and not reupload_result.get("authoritative_resolved"):
-            if reupload_result.get("resolution_method") == "video_processing_pending":
+        async def stop_if_accepted_unresolved(result):
+            if not result.get("transport_accepted") or result.get("authoritative_resolved"):
+                return False
+            if result.get("resolution_method") == "video_processing_pending":
                 from .single_publication_reconciliation import register_pending_publication
                 if await register_pending_publication(
                     owner,key=idempotency_key,delivery_ids=delivery_ids,rule_id=rule.id,
                     target_id=target_id,target_thread_id=target_thread_id,
                     source_channel=source_channel,source_message_ids=message_ids,
-                    scheduled_ids=reupload_result.get("returned_candidate_ids") or [],
+                    scheduled_ids=result.get("returned_candidate_ids") or [],
                 ):
-                    return False
+                    return True
             error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
             logger.warning(
                 "REUPLOAD_ALBUM_ACCEPTED_TARGET_ID_UNRESOLVED | rule_id=%s | delivery_ids=%s | target_id=%s | returned_candidate_ids=%s | action=no_retry_no_second_send",
-                rule.id, delivery_ids, target_id, reupload_result.get("returned_candidate_ids"),
+                rule.id, delivery_ids, target_id, result.get("returned_candidate_ids"),
             )
             await owner._log_delivery_pipeline_step(
                 rule_id=rule.id,
@@ -1017,8 +1019,8 @@ class RepostAlbumDelivery:
                 extra={
                     "transport_accepted": True,
                     "authoritative_resolved": False,
-                    "returned_candidate_ids": reupload_result.get("returned_candidate_ids"),
-                    "resolution_method": reupload_result.get("resolution_method"),
+                    "returned_candidate_ids": result.get("returned_candidate_ids"),
+                    "resolution_method": result.get("resolution_method"),
                     "manual_review_required": True,
                     "non_retryable": True,
                     "action": "no_retry_no_second_send",
@@ -1026,6 +1028,9 @@ class RepostAlbumDelivery:
             )
             for delivery_id in delivery_ids:
                 await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+            return True
+
+        if await stop_if_accepted_unresolved(reupload_result):
             return False
 
         if is_self_loop:
@@ -1065,6 +1070,12 @@ class RepostAlbumDelivery:
                 **({"caption_override": custom_caption} if custom_caption is not None else {}),
             )
             attempts_debug.append({"stage": "reupload_album_retry", **reupload_retry_result})
+            if await stop_if_accepted_unresolved(reupload_retry_result):
+                return False
+            if reupload_retry_result.get("transport_attempted") and not reupload_retry_result.get("transport_accepted"):
+                for disputed_id in delivery_ids:
+                    await run_db(owner._mark_delivery_faulty_sync, disputed_id, "telethon_send_attempted_result_unknown_non_retryable")
+                return False
 
             await owner._log_delivery_pipeline_step(
                 rule_id=rule.id,

@@ -252,8 +252,10 @@ class TelethonAuthoritativeMessageResolver:
         if inbox is None or not publication_pairs(scheduled_ids,scheduled_ids):
             return []
         try:
-            peer_id = int(target_id)
-            ids = [await inbox.lookup(peer_id,mid) for mid in scheduled_ids]
+            from telethon import utils
+
+            peer_id = int(target_id) if str(target_id).lstrip("-").isdigit() else utils.get_peer_id(target_entity)
+            ids = await inbox.lookup_many(peer_id, scheduled_ids)
             if not publication_pairs(scheduled_ids,ids):
                 return []
             if len(ids)==1:
@@ -274,6 +276,8 @@ class TelethonAuthoritativeMessageResolver:
                 source_ids=source_message_ids,before_id=before_max_message_id,
                 started_at=send_started_at,broadcast=target_is_broadcast_channel,
             ) for mid in ids):
+                return []
+            if await inbox.lookup_many(peer_id, scheduled_ids) != ids:
                 return []
             return ids
         except Exception as exc:

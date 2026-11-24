@@ -37,9 +37,9 @@ def test_pending_single_defers_without_second_send_then_finishes_and_reacts_to_f
         sender_account_id = 1
         mapped = None
 
-        async def lookup(self, peer_id, scheduled_id):
-            assert (peer_id, scheduled_id) == (-100, 2292)
-            return self.mapped
+        async def lookup_many(self, peer_id, scheduled_ids):
+            assert (peer_id, scheduled_ids) == (-100, [2292])
+            return [self.mapped] if self.mapped else []
 
     class Client:
         publication_inbox = Inbox()
