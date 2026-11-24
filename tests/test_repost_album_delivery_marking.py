@@ -17,6 +17,7 @@ class FakeAlbumRepo:
         self.fail_mark = False
         self.faulty = []
         self.promoted = []
+        self.failed_attempts = []
         self.verification_result = {"ok": False, "sent_message_ids": []}
 
     def get_delivery_attempt_by_idempotency_key(self, _key):
@@ -31,7 +32,8 @@ class FakeAlbumRepo:
     def mark_delivery_faulty(self, delivery_id, error_text):
         self.faulty.append((delivery_id, error_text))
 
-    def mark_delivery_attempt_failed(self, *_args, **_kwargs):
+    def mark_delivery_attempt_failed(self, *_args, **kwargs):
+        self.failed_attempts.append(kwargs)
         return None
 
     def mark_delivery_attempt_verified(self, key, *, sent_message_ids):
@@ -61,6 +63,7 @@ async def _execute(repo, *, delivery_ids=None):
     service.db = repo
 
     async def fake_deliver_album(*_args, **_kwargs):
+        repo.attempt = {"status": "verified", "sent_message_ids_json": [501, 502]}
         return True
 
     service._deliver_album = fake_deliver_album
@@ -109,6 +112,7 @@ def test_repost_album_no_false_success_if_mark_sent_fails():
 
     with pytest.raises(RuntimeError, match="mark failed"):
         asyncio.run(_execute(repo, delivery_ids=[1, 2]))
+    assert repo.failed_attempts[-1]["status"] == "failed_after_send"
 
 
 def test_repost_album_accepted_cache_does_not_fake_success_or_resend():

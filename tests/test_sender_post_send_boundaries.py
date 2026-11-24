@@ -777,7 +777,7 @@ def test_copy_album_copy_first_does_not_override_caption_when_builder_not_requir
     class Bot:
         async def __call__(self, method):
             calls.append(method)
-            return [type("M", (), {"message_id": 501})()]
+            return [type("M", (), {"message_id": mid})() for mid in (501, 502)]
 
     s = SenderService(bot=Bot(), telethon_client=None, reaction_clients=[], db=Repo())
 

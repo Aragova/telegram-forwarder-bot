@@ -1531,6 +1531,7 @@ class SenderService:
             logger.warning("REPOST_ALBUM_SEND_ATTEMPT_NOT_ACQUIRED | rule_id=%s | delivery_id=%s | action=no_send", rule_id, delivery_id)
             return _terminal_non_retryable_result("telethon_send_accepted_target_id_unresolved_non_retryable: concurrent album attempt")
         logger.info("DELIVERY_ATTEMPT_SENDING | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
+        transport_entered = False
         try:
             rule = await run_db(self.db.get_rule, int(rule_id))
             if not rule:
@@ -1549,6 +1550,7 @@ class SenderService:
                 raise RuntimeError(f"Не найден processing-альбом media_group_id={media_group_id}")
             album_delivery_ids = [int(r["delivery_id"]) for r in album_rows] or album_delivery_ids
 
+            transport_entered = True
             ok = await self._deliver_album(
                 rule,
                 album_rows,
@@ -1615,8 +1617,10 @@ class SenderService:
                 )
             return bool(ok)
         except Exception as exc:
-            await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=str(exc))
-            logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
+            # An exception inside the transport or finalizer is not proof that Telegram rejected the send.
+            failure_status = "failed_after_send" if transport_entered else "failed_before_send"
+            await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status=failure_status, error_text=str(exc))
+            logger.info("DELIVERY_ATTEMPT_FAILED | operation=album | key=%s | delivery_id=%s | status=%s", idempotency_key, delivery_id, failure_status)
             logger.warning(
                 "JOB EXECUTOR | repost_album | failed | rule_id=%s | delivery_id=%s | error=%s",
                 rule_id,
