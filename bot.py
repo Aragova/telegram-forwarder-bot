@@ -8635,13 +8635,10 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
     except Exception as exc:
         logger.warning("Не удалось установить команды бота: %s", exc)
 
-    telethon_client = await create_telethon_client()
-    if (
-        telethon_client is not None
-        and callable(getattr(db, "record_telegram_publication_mappings", None))
-    ):
-        from app.telegram_publication import install_publication_inbox
-        await install_publication_inbox(telethon_client, db)
+    publication_required = callable(getattr(db,"record_telegram_publication_mappings",None))
+    telethon_client = await create_telethon_client(publication_repository=db if publication_required else None)
+    if publication_required and getattr(telethon_client,"publication_inbox",None) is None:
+        logger.error("TELEGRAM_PUBLICATION_INBOX_UNAVAILABLE | action=disable_mtproto_sender")
     reaction_clients = await create_reaction_clients()
     if admin_handlers_ctx is not None:
         admin_handlers_ctx.bot = bot
@@ -8653,7 +8650,7 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
         policy=build_sender_bot_policy(),
     )
     sender_telethon_client = wrap_telethon_client(
-        telethon_client,
+        telethon_client if not publication_required or getattr(telethon_client,"publication_inbox",None) is not None else None,
         label="sender.telethon",
         policy=build_sender_telethon_policy(),
     )

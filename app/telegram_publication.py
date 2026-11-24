@@ -105,38 +105,53 @@ class PublicationInbox:
         )
 
 
-async def install_publication_inbox(client: Any, repository: Any) -> PublicationInbox:
-    """Attach to the actual sender account before workers can send messages."""
+def prepare_publication_inbox(client: Any, repository: Any):
+    """Install before connect; only bind events after authenticating the account."""
+    from collections import deque
     from telethon import events, types, utils
 
-    me = await client.get_me()
-    if me is None:
-        raise RuntimeError("Publication inbox requires an authenticated sender")
-    inbox = PublicationInbox(repository, int(me.id))
+    buffer = deque(maxlen=1024)
+    inbox: PublicationInbox | None = None
 
     async def handle(update: Any) -> None:
         if not isinstance(update, types.UpdateDeleteScheduledMessages):
             return
         try:
-            peer_id = utils.get_peer_id(update.peer)
-            recorded = await inbox.record(peer_id, update.messages, getattr(update, "sent_messages", None))
-            if recorded:
-                logger.info(
-                    "TELEGRAM_PUBLICATION_MAPPING_RECORDED | peer=%s | count=%s",
-                    peer_id, len(update.messages),
-                )
+            peer = utils.get_peer_id(update.peer)
+            pairs = publication_pairs(update.messages,getattr(update,"sent_messages",None))
+            if not pairs:
+                return
+            old,new = map(list,zip(*pairs))
+            if inbox is None:
+                if len(buffer)==buffer.maxlen:
+                    logger.error("TELEGRAM_PUBLICATION_STARTUP_BUFFER_FULL")
+                buffer.append((peer,old,new))
+                return
+            await inbox.record(peer,old,new)
         except Exception:
-            # Never acknowledge this as persisted in our database. The
-            # recovery stage must reconcile gaps; Telethon state and this DB
-            # are not one atomic transaction.
             logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_FAILED")
 
-    client.add_event_handler(handle, events.Raw(types=types.UpdateDeleteScheduledMessages))
-    client.publication_inbox = inbox
-    # Telethon owns the MTProto update-state/gap-filling mechanism.
-    # This is not a guarantee that app-level database writes succeeded.
-    await client.catch_up()
-    return inbox
+    client.add_event_handler(handle,events.Raw(types=types.UpdateDeleteScheduledMessages))
+
+    async def bind() -> PublicationInbox:
+        nonlocal inbox
+        me = await asyncio.wait_for(client.get_me(),timeout=30)
+        if me is None:
+            raise RuntimeError("Publication inbox requires an authenticated sender")
+        inbox = PublicationInbox(repository,int(me.id))
+        while buffer:
+            peer,old,new = buffer.popleft()
+            await inbox.record(peer,old,new)
+        client.publication_inbox = inbox
+        return inbox
+
+    return bind
+
+
+async def install_publication_inbox(client: Any, repository: Any) -> PublicationInbox:
+    """Compatibility for isolated clients; runtime installs before connect."""
+    bind = prepare_publication_inbox(client,repository)
+    return await bind()
 
 
 def botapi_publication_ids(messages: Any, expected_count: int) -> list[int]:

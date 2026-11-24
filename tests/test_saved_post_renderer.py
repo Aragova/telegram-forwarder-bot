@@ -490,3 +490,14 @@ def test_unverified_publication_warning_is_localized():
     from app.saved_post_renderer import normalize_saved_post_render_error, SavedPostSentUnverifiedError
     exc=SavedPostSentUnverifiedError(target_id=-100123,message_ids=[5],method="bot_api_unverified",reason="Bot API accepted without publication ID; do not resend")
     assert "Не отправляйте публикацию повторно" in normalize_saved_post_render_error(exc,kind="video",premium_required=False)
+
+
+def test_saved_post_partial_botapi_evidence_is_preserved():
+    class Bot:
+        async def send_media_group(self, **kwargs):
+            return [_FakeMediaMsg(123),_FakeMediaMsg(0)]
+    result=asyncio.run(SavedPostRenderer(bot=Bot()).send(
+        chat_id=-100123,content={"kind":"album","media_items":[{"kind":"photo","file_id":"a"},{"kind":"video","file_id":"b"}]},
+    ))
+    assert result.accepted and result.manual_review_required
+    assert result.raw_message_ids==[123] and result.message_ids is None

@@ -5609,6 +5609,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             FROM deliveries d_target
                             JOIN routing r_target ON r_target.id = d_target.rule_id
                             WHERE d_target.status = 'processing'
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM telegram_publication_receipts pr
+                                  JOIN delivery_attempts pa ON pa.idempotency_key=pr.idempotency_key
+                                  WHERE pr.delivery_ids @> ARRAY[d_target.id]::bigint[]
+                                    AND pr.published_ids IS NULL AND pr.expired_at IS NULL
+                                    AND pa.status='accepted'
+                              )
                               AND r_target.target_id = r.target_id
                               AND (
                                     (r_target.target_thread_id IS NULL AND r.target_thread_id IS NULL)
@@ -6271,6 +6278,31 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 updated = int(cur.rowcount or 0) > 0
             conn.commit()
             return updated
+
+    def record_unverified_botapi_album(self, key: str, raw_ids: list[int]) -> bool:
+        """Retain partial response evidence atomically with the accepted state."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts SET status='accepted',telegram_method='botapi_pending_unresolved',
+                        sent_message_ids_json='[]'::jsonb,updated_at=NOW()
+                    WHERE idempotency_key=%s AND status IN ('sending','accepted')
+                    RETURNING rule_id,delivery_id,tenant_id,target_id
+                    """,(key,),
+                )
+                row=cur.fetchone()
+                if not row:
+                    return False
+                cur.execute(
+                    """
+                    INSERT INTO audit_log(created_at,event_type,rule_id,delivery_id,tenant_id,target_id,status,extra_json)
+                    VALUES(%s,'botapi_publication_unverified',%s,%s,%s,%s,'accepted',%s::jsonb)
+                    """,(utc_now_iso(),row["rule_id"],row["delivery_id"],row["tenant_id"],row["target_id"],
+                         _json_dumps({"idempotency_key":key,"raw_message_ids":raw_ids})),
+                )
+            conn.commit()
+        return True
 
     def mark_delivery_attempt_verified(self, idempotency_key: str, *, sent_message_ids: list[int]) -> bool:
         """Promote a target-confirmed delivery; never overwrite a verified id with a raw candidate."""
@@ -11041,6 +11073,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         render_mode: str | None = None,
         delete_status: str | None = "failed",
         delete_error_text: str | None = None,
+        accepted_unverified: bool = False,
+        raw_message_ids: list[int] | None = None,
     ) -> bool:
         safe_delete_status = str(delete_status or "failed")
         if safe_delete_status not in {"none", "pending", "processing", "deleted", "failed"}:
@@ -11048,6 +11082,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         safe_delete_error_text = delete_error_text
         if delete_status is None and not safe_delete_error_text:
             safe_delete_error_text = "ID публикации не подтверждён. Автоматическое удаление невозможно, требуется ручная проверка."
+        if accepted_unverified:
+            safe_delete_status = "failed"
+            safe_delete_error_text = "Telegram принял публикацию, но ID не подтверждены. Не отправляйте повторно; требуется ручная проверка."
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -11060,11 +11097,21 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         delete_error_text=%s,
                         updated_at=NOW()
                     WHERE id=%s
+                    RETURNING rule_id, target_id
                     """,
                     (error_text, render_mode, safe_delete_status, safe_delete_error_text, int(message_id)),
                 )
+                row = cur.fetchone()
+                if row and accepted_unverified:
+                    cur.execute(
+                        """
+                        INSERT INTO audit_log(created_at,event_type,rule_id,target_id,status,extra_json)
+                        VALUES(%s,'campaign_publication_unverified',%s,%s,'accepted',%s::jsonb)
+                        """,(utc_now_iso(),row["rule_id"],row["target_id"],
+                             _json_dumps({"campaign_run_message_id":int(message_id),"raw_message_ids":raw_message_ids or []})),
+                    )
             conn.commit()
-            return True
+            return bool(row)
 
     def create_campaign_top_time_pause(
         self,

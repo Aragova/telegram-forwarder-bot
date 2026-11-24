@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import logging
 from telethon import TelegramClient
 from .config import settings
 
@@ -22,7 +23,7 @@ class ReactionClientInfo:
     fixed_reactions: list[str]
 
 
-async def create_telethon_client() -> TelegramClient:
+async def create_telethon_client(*, publication_repository=None) -> TelegramClient:
     client = TelegramClient(
         settings.session_name,
         settings.api_id,
@@ -32,7 +33,18 @@ async def create_telethon_client() -> TelegramClient:
         request_retries=8,
         auto_reconnect=True,
     )
+    bind = None
+    if publication_repository is not None:
+        from .telegram_publication import prepare_publication_inbox
+        bind = prepare_publication_inbox(client,publication_repository)
     await client.connect()
+    if bind is not None:
+        try:
+            await bind()
+        except Exception:
+            # Keep Bot API and UI available. Runtime must not issue MTProto
+            # writes without a bound inbox.
+            logging.getLogger("forwarder").exception("TELEGRAM_PUBLICATION_INBOX_UNAVAILABLE")
     return client
 
 

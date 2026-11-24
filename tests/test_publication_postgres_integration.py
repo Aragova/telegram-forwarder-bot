@@ -129,3 +129,15 @@ def test_real_pg_conflicting_mapping_and_deadline_never_finalize(repo):
     assert repo.expire_publication_receipt(key2,"publication_receipt_expired_no_resend")
     assert repo.get_delivery(deliveries2[0])["status"]=="faulty"
     assert repo.get_delivery_attempt_by_idempotency_key(key2)["status"]=="accepted"
+
+
+def test_real_pg_partial_botapi_album_evidence_is_not_published_ids(repo):
+    seeded=seed(repo,104,count=2)
+    key,_,_,_,_,_=seeded
+    assert repo.record_unverified_botapi_album(key,[901,0])
+    attempt=repo.get_delivery_attempt_by_idempotency_key(key)
+    assert attempt["status"]=="accepted" and attempt["sent_message_ids_json"]==[]
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT extra_json FROM audit_log WHERE event_type='botapi_publication_unverified' AND delivery_id=%s",(attempt["delivery_id"],))
+            assert cur.fetchone()["extra_json"]["raw_message_ids"]==[901,0]

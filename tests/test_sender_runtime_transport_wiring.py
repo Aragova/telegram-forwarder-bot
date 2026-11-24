@@ -76,7 +76,10 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
             telethon_wrap_calls.append({"raw": raw, "label": label, "policy": policy})
             return original_wrap_telethon_client(raw, label=label, policy=policy)
 
-        async def _create_telethon_client():
+        async def _create_telethon_client(*, publication_repository=None):
+            from app.telegram_publication import prepare_publication_inbox
+            bind=prepare_publication_inbox(raw_telethon_client,publication_repository)
+            await bind()
             return raw_telethon_client
 
         async def _create_reaction_clients():
@@ -111,7 +114,7 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
         assert sender_telethon.publication_inbox is raw_telethon_client.publication_inbox
         assert sender_telethon.publication_inbox.sender_account_id == 12345
         assert len(raw_telethon_client.handlers) == 1
-        assert raw_telethon_client.caught_up
+        assert not raw_telethon_client.caught_up
 
         assert sender_service_kwargs["reaction_clients"] == [reaction_client]
         assert runtime.reaction_clients == [reaction_client]

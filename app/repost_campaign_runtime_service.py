@@ -646,6 +646,8 @@ class RepostCampaignRuntimeService:
                 render_mode=render_result.method,
                 delete_status=delete_status,
                 delete_error_text=delete_error_text,
+                accepted_unverified=bool(getattr(render_result,"accepted",False)),
+                raw_message_ids=getattr(render_result,"raw_message_ids",None),
             )
             self.repo.update_campaign_run_status(
                 run_id,
@@ -784,7 +786,7 @@ class RepostCampaignRuntimeService:
                 targets_success += 1
             else:
                 delete_status, delete_error_text = _build_failed_campaign_message_delete_fields(getattr(render_result, "method", None))
-                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=getattr(render_result, "error_text", None) or "unknown error", render_mode=getattr(render_result, "method", None), delete_status=delete_status, delete_error_text=delete_error_text)
+                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=getattr(render_result, "error_text", None) or "unknown error", render_mode=getattr(render_result, "method", None), delete_status=delete_status, delete_error_text=delete_error_text, accepted_unverified=bool(getattr(render_result,"accepted",False)), raw_message_ids=getattr(render_result,"raw_message_ids",None))
                 targets_failed += 1
                 error_text = error_text or getattr(render_result, "error_text", None) or "unknown error"
         if targets_success > 0 and targets_failed == 0:
@@ -1068,7 +1070,7 @@ class RepostCampaignRuntimeService:
             else:
                 err_text = "Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error")
                 delete_status, delete_error_text = _build_failed_campaign_message_delete_fields(getattr(render_result, "method", None))
-                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=err_text, render_mode=getattr(render_result, "method", None), delete_status=delete_status, delete_error_text=delete_error_text)
+                self.repo.mark_campaign_run_message_failed(run_message_id, error_text=err_text, render_mode=getattr(render_result, "method", None), delete_status=delete_status, delete_error_text=delete_error_text, accepted_unverified=bool(getattr(render_result,"accepted",False)), raw_message_ids=getattr(render_result,"raw_message_ids",None))
                 failed_count += 1
                 if first_error_text is None:
                     first_error_text = "Не удалось подтвердить ID отправленного альбома." if is_album_without_ids else (getattr(render_result, "error_text", None) or "unknown error")
