@@ -1082,3 +1082,69 @@ def test_album_delivery_one_by_one_first_accepted_unresolved_terminal_faulty():
     terminal = [event for event in events if event[1] == "one_by_one_accepted_target_id_unresolved"]
     assert terminal and terminal[0][4]["sent_count"] == 1
     assert terminal[0][4]["resolved_authoritative_message_ids_before_unresolved"] == []
+
+
+def test_legacy_video_post_send_failures_keep_no_resend_result(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from app import video_single_delivery
+    from app.transport_policy import TransportRateLimited
+    from app.video_processor import VideoPreSendError
+
+    monkeypatch.setattr(video_single_delivery, "_detect_message_media_kind", lambda _: "video")
+
+    for failure in (
+        VideoPreSendError("verification failed"),
+        TransportRateLimited(retry_after_seconds=21, backend="bot", op_name="get_chat", key="verify"),
+        RuntimeError("verification failed"),
+    ):
+        for finalize_fails in (False, True):
+            calls = []
+            path = tmp_path / "clip.mp4"
+            path.write_bytes(b"clip")
+
+            async def fetch(*_args):
+                return object()
+
+            async def download(*_args, **_kwargs):
+                return path
+
+            async def send(**_kwargs):
+                calls.append("send")
+                return SimpleNamespace(message_id=301)
+
+            async def confirm(**_kwargs):
+                raise failure
+
+            def finalize(**kwargs):
+                calls.append(("finalize", kwargs))
+                if finalize_fails:
+                    raise RuntimeError("database unavailable")
+
+            owner = SimpleNamespace(
+                _get_post_id_by_delivery_sync=lambda _: 7,
+                _log_video_event_sync=lambda **_: None,
+                _fetch_message=fetch,
+                _get_rule_intro_items_sync=lambda _: (None, None),
+                _build_video_caption_delivery_payload=lambda _: {
+                    "caption": "", "caption_entities": [], "caption_entities_json": None,
+                    "caption_delivery_mode": "plain", "requires_premium": False, "selected_mode": "plain",
+                },
+                _build_video_stage_logger=lambda **_: None,
+                _download_video_source=download,
+                video_processor=SimpleNamespace(process_video=send),
+                _extract_sent_message_ids=lambda msg: [msg.message_id],
+                _confirm_target_delivery_message_ids_with_retry=confirm,
+                _finalize_video_failure_sync=finalize,
+            )
+            result = asyncio.run(video_single_delivery.VideoSingleDelivery(owner).deliver(
+                DummyRule(), 8, 12, "@src", "-1001", None,
+            ))
+            assert result["accepted_unresolved"] is True
+            assert result["retryable"] is False
+            assert result["candidate_sent_message_ids"] == [301]
+            assert len(calls) == 2
+            assert calls[0] == "send"
+            assert calls[1][0] == "finalize"
+            assert calls[1][1]["delivery_id"] == 8
+            assert calls[1][1]["error_text"] == "video_send_accepted_target_id_unresolved_non_retryable"
