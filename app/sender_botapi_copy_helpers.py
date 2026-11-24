@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 
 from aiogram.methods import CopyMessages
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from .transport_policy import TransportRateLimited
 
 from .telegram_publication import botapi_publication_ids
 
@@ -58,6 +59,8 @@ class SenderBotApiCopyHelpers:
                 "raw_result_type": type(sent).__name__,
                 "raw_result": sent,
             }
+        except (TelegramRetryAfter, TransportRateLimited):
+            raise
         except Exception as exc:
             logger.warning(
                 "Не удалось скопировать сообщение %s/%s в %s: %s",
@@ -73,6 +76,7 @@ class SenderBotApiCopyHelpers:
                 "raw_result_type": "exception",
                 "error_text": str(exc),
                 "definitely_rejected": isinstance(exc, TelegramBadRequest),
+                "outcome_unknown": not isinstance(exc, TelegramBadRequest),
             }
 
     async def copy_album_via_bot(
@@ -132,10 +136,13 @@ class SenderBotApiCopyHelpers:
                 "sent_message_id": None,
                 "sent_count": 0,
                 "error_text": "CopyMessages вернул пустой результат",
+                "accepted_unresolved": True,
                 "attempted": True,
                 "definitely_rejected": False,
             }
 
+        except (TelegramRetryAfter, TransportRateLimited):
+            raise
         except Exception as exc:
             return {
                 "ok": False,
