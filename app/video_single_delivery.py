@@ -6,6 +6,7 @@ from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from telethon.errors import FloodWaitError
 
 from .runtime_utils import run_db
+from .send_intent import current_publication_intent
 from .sender_primitives import _detect_message_media_kind
 from .telethon_authoritative_resolver import TelethonSendOutcome
 from .video_processor import VideoPreSendError
@@ -208,6 +209,16 @@ class VideoSingleDelivery:
             publication_returned = sent_msg is not None and sent_msg is not False
             if isinstance(sent_msg, TelethonSendOutcome):
                 candidate_ids = sent_msg.returned_candidate_ids or []
+            intent = current_publication_intent()
+            if publication_returned and intent is not None and hasattr(owner.db, "mark_delivery_attempt_accepted"):
+                if not isinstance(sent_msg, TelethonSendOutcome):
+                    candidate_ids = owner._extract_sent_message_ids(sent_msg)
+                elif sent_msg.authoritative_resolved:
+                    candidate_ids = list(sent_msg.authoritative_message_ids)
+                await run_db(
+                    owner.db.mark_delivery_attempt_accepted, intent.key,
+                    sent_message_ids=candidate_ids, telegram_method="video_delivery",
+                )
             if isinstance(sent_msg, TelethonSendOutcome) and not sent_msg.authoritative_resolved:
                 error = "video_send_accepted_target_id_unresolved_non_retryable"
                 logger.warning("VIDEO_LEGACY_ACCEPTED_UNRESOLVED | rule_id=%s | delivery_id=%s | returned_candidate_ids=%s | action=no_resend", rule.id, delivery_id, sent_msg.returned_candidate_ids)

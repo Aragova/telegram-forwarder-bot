@@ -524,6 +524,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             UNIQUE(idempotency_key)
         );
 
+        CREATE TABLE IF NOT EXISTS mtproto_send_intents (
+            attempt_id BIGINT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+            fingerprint TEXT NOT NULL,
+            random_ids BIGINT[] NOT NULL CHECK(cardinality(random_ids) BETWEEN 1 AND 100),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY(attempt_id, ordinal)
+        );
+
         CREATE TABLE IF NOT EXISTS jobs(
             id BIGSERIAL PRIMARY KEY,
             job_type TEXT NOT NULL,
@@ -5703,6 +5712,42 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (utc_now_iso(), sent_message_id, _json_dumps(sent_message_ids or []), target_id, delivery_method, delivery_id),
                 )
             conn.commit()
+
+    def get_or_create_mtproto_random_ids(self, key: str, ordinal: int,
+                                         fingerprint: str, count: int) -> list[int]:
+        """Persist a request identity under the currently claimed ledger row."""
+        import secrets
+
+        if not 1 <= count <= 100 or ordinal < 0:
+            raise ValueError("Invalid MTProto send identity")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM delivery_attempts WHERE idempotency_key=%s AND status='sending' FOR UPDATE",
+                    (key,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise RuntimeError("No claimed MTProto delivery attempt")
+                attempt_id = row["id"]
+                ids = set()
+                while len(ids) < count:
+                    ids.add(secrets.randbits(63) or 1)
+                cur.execute(
+                    """
+                    INSERT INTO mtproto_send_intents(attempt_id,ordinal,fingerprint,random_ids)
+                    VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING
+                    """,
+                    (attempt_id, ordinal, fingerprint, sorted(ids)),
+                )
+                cur.execute(
+                    "SELECT fingerprint,random_ids FROM mtproto_send_intents WHERE attempt_id=%s AND ordinal=%s",
+                    (attempt_id, ordinal),
+                )
+                stored = cur.fetchone()
+                if stored["fingerprint"] != fingerprint or len(stored["random_ids"]) != count:
+                    raise ValueError("MTProto publication identity mismatch")
+                return list(stored["random_ids"])
 
     def get_delivery_attempt_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
         with self.connect() as conn:

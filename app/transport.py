@@ -11,6 +11,9 @@ from app.transport_policy import (
     build_sender_telethon_upload_policy,
 )
 
+from app.send_intent import observe_publication
+from app.transport_operation import TransportOperationKind, classify_transport_operation
+
 logger = logging.getLogger("forwarder.transport")
 
 # Short, read-only RPCs must not occupy worker slots indefinitely.
@@ -37,6 +40,16 @@ class BotTransportProxy:
     def raw(self):
         return self._bot
 
+    async def _invoke(self, name, call, kwargs, *, method=None):
+        if classify_transport_operation("bot", name) != TransportOperationKind.NON_IDEMPOTENT_WRITE:
+            return await call()
+        if method is not None:
+            items = getattr(method, "media", None) or getattr(method, "message_ids", None)
+        else:
+            items = kwargs.get("media") or kwargs.get("message_ids")
+        count = len(items) if isinstance(items, (list, tuple)) else None
+        return await observe_publication(call, bot_result=True, expected_count=count)
+
     async def __call__(self, *args, **kwargs):
         method = args[0] if args else kwargs.get("method")
         op_name = type(method).__name__ if method is not None else "__call__"
@@ -44,7 +57,7 @@ class BotTransportProxy:
             backend="bot",
             key=f"{self._label}.{op_name}",
             op_name=op_name,
-            func=lambda: self._bot(*args, **kwargs),
+            func=lambda: self._invoke(op_name, lambda: self._bot(*args, **kwargs), kwargs, method=method),
         )
 
     def __getattr__(self, name: str):
@@ -58,7 +71,7 @@ class BotTransportProxy:
                 backend="bot",
                 key=f"{self._label}.{name}",
                 op_name=name,
-                func=lambda: attr(*args, **kwargs),
+                func=lambda: self._invoke(name, lambda: attr(*args, **kwargs), kwargs),
             )
 
         return _wrapped

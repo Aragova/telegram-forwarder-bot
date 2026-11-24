@@ -33,7 +33,9 @@ class ReactionClientInfo:
 
 
 async def create_telethon_client() -> TelegramClient:
-    client = TelegramClient(
+    from .send_intent import publication_client_class
+
+    client = publication_client_class(TelegramClient)(
         settings.session_name,
         settings.api_id,
         settings.api_hash,

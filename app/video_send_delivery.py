@@ -12,6 +12,7 @@ from .delivery_idempotency import (
     normalize_valid_sent_message_ids,
 )
 from .runtime_utils import run_db
+from .send_intent import PublicationIntent, publication_scope
 from .telethon_authoritative_resolver import TelethonSendOutcome
 from .video_processor import VideoPreSendError
 from .transport_policy import TransportRateLimited
@@ -160,18 +161,20 @@ class VideoSendDelivery:
                 target_id,
                 idempotency_key,
             )
+        intent = PublicationIntent(owner.db, idempotency_key)
         try:
-            sent_msg = await owner.video_processor.send_with_retry(
-                owner.bot,
-                payload.get("target_id"),
-                payload.get("target_thread_id"),
-                str(processed_video_path),
-                str(thumbnail_path) if thumbnail_path else None,
-                caption_payload["caption"] or "",
-                video_info["duration"],
-                caption_entities_json=caption_payload["caption_entities_json"],
-                caption_send_mode=caption_payload["selected_mode"],
-            )
+            with publication_scope(intent):
+                sent_msg = await owner.video_processor.send_with_retry(
+                    owner.bot,
+                    payload.get("target_id"),
+                    payload.get("target_thread_id"),
+                    str(processed_video_path),
+                    str(thumbnail_path) if thumbnail_path else None,
+                    caption_payload["caption"] or "",
+                    video_info["duration"],
+                    caption_entities_json=caption_payload["caption_entities_json"],
+                    caption_send_mode=caption_payload["selected_mode"],
+                )
         except VideoPreSendError as exc:
             # The Telegram request has not started. This row may safely
             # transition back to failed_before_send for a worker retry.

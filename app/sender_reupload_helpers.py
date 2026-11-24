@@ -7,6 +7,7 @@ from pathlib import Path
 from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo
 
 from .config import settings
+from .send_intent import authorize_next_album_member
 from . import sender_primitives as _sender_primitives
 from .telegram_send_result import telegram_send_result_from_raw
 from .telethon_authoritative_resolver import TelethonSendOutcome, telethon_transport_failed, telethon_not_attempted
@@ -32,6 +33,8 @@ class SenderReuploadHelpers:
                 }
 
             for idx, message in enumerate(messages):
+                if idx:
+                    authorize_next_album_member()
                 post_row = post_rows[idx] if post_rows and idx < len(post_rows) else None
                 outcome = await self.reupload_message(
                     message=message,
