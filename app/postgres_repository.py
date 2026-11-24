@@ -3672,23 +3672,30 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     cur.execute(
                         """
                         SELECT 1 FROM telegram_publication_receipts r
-                        JOIN telegram_publication_mappings m
-                          ON m.sender_account_id=r.sender_account_id
-                         AND m.target_peer_id=r.target_peer_id
-                         AND m.scheduled_id IN (SELECT c.scheduled_id FROM telegram_publication_claims c WHERE c.idempotency_key=r.idempotency_key)
                         WHERE r.rule_id=%s AND r.source_channel=r.target_peer_id::text
                           AND r.target_peer_id::text=%s
                           AND r.target_thread_id IS NOT DISTINCT FROM %s
                           AND r.source_thread_id IS NOT DISTINCT FROM r.target_thread_id
-                          AND m.published_id=%s
-                          AND NOT EXISTS (
-                            SELECT 1 FROM telegram_publication_mappings x
-                            WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
-                              AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
-                                OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
+                          AND (
+                            %s=ANY(r.published_ids)
+                            OR EXISTS (
+                              SELECT 1 FROM telegram_publication_claims c
+                              JOIN telegram_publication_mappings m
+                                ON m.sender_account_id=c.sender_account_id
+                               AND m.target_peer_id=c.target_peer_id
+                               AND m.scheduled_id=c.scheduled_id
+                              WHERE c.idempotency_key=r.idempotency_key
+                                AND m.published_id=%s
+                                AND NOT EXISTS (
+                                  SELECT 1 FROM telegram_publication_mappings x
+                                  WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
+                                    AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
+                                      OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
+                                )
+                            )
                           )
                         LIMIT 1
-                        """,(rule_id,row["source_channel"],row["source_thread_id"],row["message_id"]),
+                        """,(rule_id,row["source_channel"],row["source_thread_id"],row["message_id"],row["message_id"]),
                     )
                     if cur.fetchone():
                         echo_ids.append(int(row["id"]))
