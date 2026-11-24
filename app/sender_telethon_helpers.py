@@ -34,7 +34,7 @@ def _create_thumb_temp_path(prefix: str) -> Path:
 
 
 def _remove_orphan_thumb(done: asyncio.Task[Path], prefix: str) -> None:
-    if done.cancelled():
+    if done.cancelled() or done.exception() is not None:
         return
     try:
         done.result().unlink(missing_ok=True)
