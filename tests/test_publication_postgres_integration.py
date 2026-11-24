@@ -273,3 +273,23 @@ def test_real_pg_campaign_accepted_unknown_blocks_clean_channel(repo):
     assert rows[0]["accepted_unverified"]==1
     assert rows[0]["active_messages_total"]==1
     assert unknown not in [row["id"] for row in repo.claim_due_campaign_run_messages_for_delete()]
+    assert repo.get_campaign_run_message(unknown)["accepted_unverified"] is True
+    assert repo.get_campaign_run_message(rejected)["accepted_unverified"] is False
+
+
+
+def test_rescan_refuses_unverified_botapi_album(repo):
+    key, rule_id, deliveries, _, _, _ = seed(repo, 111, count=2)
+    assert repo.record_unverified_botapi_album(key, [0, 102])
+    owner = "test-rescan-111"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE routing SET is_active=FALSE,rescan_owner_token=%s WHERE id=%s",
+                (owner, rule_id),
+            )
+            cur.execute("UPDATE deliveries SET status='failed' WHERE id=ANY(%s)", (deliveries,))
+    with pytest.raises(RuntimeError, match="неподтверждённый альбом Bot API"):
+        repo.reset_rule_history_for_replay(rule_id, owner_token=owner)
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "accepted"
+    assert all(repo.get_delivery(delivery_id) is not None for delivery_id in deliveries)

@@ -4473,6 +4473,21 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if cur.fetchone()["busy"]:
                     raise RuntimeError("Остались активные задачи; архивирование отменено")
 
+                cur.execute(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM delivery_attempts
+                        WHERE rule_id = %s AND status = 'accepted'
+                          AND telegram_method = 'botapi_pending_unresolved'
+                    ) AS unresolved
+                    """,
+                    (int(rule_id),),
+                )
+                if cur.fetchone()["unresolved"]:
+                    raise RuntimeError(
+                        "Есть неподтверждённый альбом Bot API; требуется ручная проверка"
+                    )
+
                 # Archive confirmed receipts before changing the corresponding
                 # attempt keys. Scheduled ID claims follow through ON UPDATE CASCADE.
                 # Unresolved receipts retain their original key to prevent a resend.
@@ -11366,9 +11381,17 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT *
-                    FROM campaign_run_messages
-                    WHERE id = %s
+                    SELECT m.*, EXISTS (
+                        SELECT 1 FROM audit_log a
+                        WHERE a.rule_id = m.rule_id
+                          AND a.event_type = 'campaign_publication_unverified'
+                          AND a.status = 'accepted'
+                          AND CASE WHEN a.event_type = 'campaign_publication_unverified'
+                              THEN a.extra_json::jsonb->>'campaign_run_message_id'
+                              END = m.id::text
+                    ) AS accepted_unverified
+                    FROM campaign_run_messages m
+                    WHERE m.id = %s
                     LIMIT 1
                     """,
                     (int(message_id),),
