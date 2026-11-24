@@ -46,6 +46,8 @@ class VideoSingleDelivery:
             },
         )
 
+        publication_returned = False
+        candidate_ids = []
         try:
             message = await owner._fetch_message(source_channel, message_id)
             if not message:
@@ -185,6 +187,9 @@ class VideoSingleDelivery:
                 except Exception:
                     pass
 
+            publication_returned = sent_msg is not None and sent_msg is not False
+            if isinstance(sent_msg, TelethonSendOutcome):
+                candidate_ids = sent_msg.returned_candidate_ids or []
             if isinstance(sent_msg, TelethonSendOutcome) and not sent_msg.authoritative_resolved:
                 error = "video_send_accepted_target_id_unresolved_non_retryable"
                 logger.warning("VIDEO_LEGACY_ACCEPTED_UNRESOLVED | rule_id=%s | delivery_id=%s | returned_candidate_ids=%s | action=no_resend", rule.id, delivery_id, sent_msg.returned_candidate_ids)
@@ -203,6 +208,7 @@ class VideoSingleDelivery:
                     if isinstance(sent_msg, TelethonSendOutcome)
                     else owner._extract_sent_message_ids(sent_msg)
                 )
+                candidate_ids = sent_message_ids
                 valid_sent_message_ids = await owner._confirm_target_delivery_message_ids_with_retry(
                     rule_id=rule.id,
                     delivery_id=delivery_id,
@@ -290,6 +296,10 @@ class VideoSingleDelivery:
             return False
 
         except VideoPreSendError as exc:
+            if publication_returned:
+                logger.warning("VIDEO_LEGACY_POST_SEND_ERROR | delivery_id=%s | action=no_resend | error=%s", delivery_id, exc)
+                return {"ok": False, "accepted_unresolved": True, "retryable": False,
+                        "error_text": str(exc), "candidate_sent_message_ids": candidate_ids}
             logger.warning(
                 "VIDEO_LEGACY_PREFLIGHT_FAILED | rule_id=%s | delivery_id=%s | action=safe_retry | reason=%s",
                 rule.id, delivery_id, exc,
@@ -299,6 +309,10 @@ class VideoSingleDelivery:
                 "rejected_before_send": True, "error_text": str(exc),
             }
         except (TelegramRetryAfter, FloodWaitError, TransportRateLimited) as exc:
+            if publication_returned:
+                logger.warning("VIDEO_LEGACY_POST_SEND_ERROR | delivery_id=%s | action=no_resend | error=%s", delivery_id, exc)
+                return {"ok": False, "accepted_unresolved": True, "retryable": False,
+                        "error_text": str(exc), "candidate_sent_message_ids": candidate_ids}
             # A definite Bot API flood-control rejection happens before the
             # video is posted; never finalize as accepted or faulty, and let
             # the worker retry only after the required delay.
@@ -319,6 +333,10 @@ class VideoSingleDelivery:
                 "error_text": f"{type(exc).__name__}: retry_after={delay}",
             }
         except Exception as exc:
+            if publication_returned:
+                logger.warning("VIDEO_LEGACY_POST_SEND_ERROR | delivery_id=%s | action=no_resend | error=%s", delivery_id, exc)
+                return {"ok": False, "accepted_unresolved": True, "retryable": False,
+                        "error_text": str(exc), "candidate_sent_message_ids": candidate_ids}
             logger.exception("Ошибка video delivery rule=%s delivery=%s", rule.id, delivery_id)
 
             await run_db(
