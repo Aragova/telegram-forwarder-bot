@@ -18,7 +18,20 @@ class _RawBot:
 
 
 class _RawTelethonClient:
-    pass
+    def __init__(self):
+        self.handlers = []
+        self.caught_up = False
+
+    async def get_me(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(id=12345)
+
+    def add_event_handler(self, callback, event):
+        self.handlers.append((callback, event))
+
+    async def catch_up(self):
+        assert self.handlers
+        self.caught_up = True
 
 
 class _Policy:
@@ -95,6 +108,10 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
         assert sender_bot.raw is raw_bot
         assert getattr(sender_telethon, "_is_transport_proxy", False) is True
         assert sender_telethon.raw is raw_telethon_client
+        assert sender_telethon.publication_inbox is raw_telethon_client.publication_inbox
+        assert sender_telethon.publication_inbox.sender_account_id == 12345
+        assert len(raw_telethon_client.handlers) == 1
+        assert raw_telethon_client.caught_up
 
         assert sender_service_kwargs["reaction_clients"] == [reaction_client]
         assert runtime.reaction_clients == [reaction_client]
