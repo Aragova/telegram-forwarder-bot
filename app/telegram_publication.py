@@ -139,21 +139,6 @@ def prepare_publication_inbox(client: Any, repository: Any):
             logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_RETRY_FAILED")
             schedule_retry(min(delay * 2, 30))
 
-    async def persist_startup(candidate: PublicationInbox, peer: int, old: list[int], new: list[int]) -> None:
-        try:
-            await candidate.record(peer, old, new)
-            return
-        except Exception:
-            logger.warning("TELEGRAM_PUBLICATION_STARTUP_PERSIST_RETRY | attempt=1")
-        await asyncio.sleep(0.25)
-        try:
-            await candidate.record(peer, old, new)
-            return
-        except Exception:
-            logger.warning("TELEGRAM_PUBLICATION_STARTUP_PERSIST_RETRY | attempt=2")
-        await asyncio.sleep(0.5)
-        await candidate.record(peer, old, new)
-
     async def handle(update: Any) -> None:
         nonlocal buffer_overflow
         if not isinstance(update, types.UpdateDeleteScheduledMessages):
@@ -189,29 +174,41 @@ def prepare_publication_inbox(client: Any, repository: Any):
         candidate = PublicationInbox(repository,int(me.id))
         from .background_tasks import start_background_task
 
-        async def drain_startup() -> PublicationInbox:
+        drained = asyncio.Event()
+
+        async def retry_startup(delay: float) -> None:
+            # A failed database write needs timed backoff, not readiness polling.
+            await asyncio.sleep(delay)
+            await drain_startup(min(delay * 2, 1))
+
+        async def drain_startup(delay: float = 0.25) -> None:
             nonlocal inbox
             while buffer:
                 peer, old, new = buffer[0]
                 try:
-                    await persist_startup(candidate, peer, old, new)
+                    await candidate.record(peer, old, new)
                 except Exception:
                     logger.exception("TELEGRAM_PUBLICATION_STARTUP_PERSIST_FAILED")
-                    await asyncio.sleep(1)
-                    continue
+                    start_background_task(
+                        retry_startup(delay), name="telegram-publication-startup-retry",
+                    )
+                    return
                 buffer.popleft()
-            if buffer_overflow:
-                raise RuntimeError("Publication startup buffer overflowed")
-            inbox = candidate
-            client.publication_inbox = candidate
-            return candidate
+                delay = 0.25
+            if not buffer_overflow:
+                inbox = candidate
+                client.publication_inbox = candidate
+            drained.set()
 
-        # Keep the drain alive if startup must return to the Bot API runtime.
-        # The MTProto sender stays disabled until a safe runtime restart.
-        task = start_background_task(
+        # Wait for the completion signal, not the retry task itself. A startup
+        # timeout must not cancel pending writes or enable MTProto sending.
+        start_background_task(
             drain_startup(), name="telegram-publication-startup-drain",
         )
-        return await asyncio.wait_for(asyncio.shield(task), timeout=_STARTUP_DRAIN_TIMEOUT_SEC)
+        await asyncio.wait_for(drained.wait(), timeout=_STARTUP_DRAIN_TIMEOUT_SEC)
+        if buffer_overflow:
+            raise RuntimeError("Publication startup buffer overflowed")
+        return candidate
 
     return bind
 

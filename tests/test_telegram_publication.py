@@ -205,3 +205,49 @@ def test_startup_timeout_preserves_unwritten_events(monkeypatch):
         assert client.publication_inbox.sender_account_id == 7
 
     asyncio.run(scenario())
+
+
+def test_startup_retries_failed_writes_after_bind_timeout_without_new_update(monkeypatch):
+    from app import telegram_publication
+    from telethon import types
+
+    class Client:
+        def add_event_handler(self, callback, event):
+            self.handler = callback
+
+        async def get_me(self):
+            return SimpleNamespace(id=7)
+
+    async def scenario():
+        attempts = []
+        saved = []
+        complete = asyncio.Event()
+
+        async def record(self, peer, old, new):
+            attempts.append(old[0])
+            if len(attempts) <= 3:
+                raise RuntimeError("temporary database outage")
+            saved.append((old[0], new[0]))
+            if len(saved) == 2:
+                complete.set()
+            return True
+
+        monkeypatch.setattr(telegram_publication, "_STARTUP_DRAIN_TIMEOUT_SEC", 0.05)
+        monkeypatch.setattr(telegram_publication.PublicationInbox, "record", record)
+        client = Client()
+        bind = telegram_publication.prepare_publication_inbox(client, object())
+        peer = types.PeerChannel(99)
+        for old, new in [(4, 100), (5, 101)]:
+            await client.handler(types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[old], sent_messages=[new],
+            ))
+        with pytest.raises(asyncio.TimeoutError):
+            await bind()
+        assert not hasattr(client, "publication_inbox")
+        assert saved == []
+        await asyncio.wait_for(complete.wait(), timeout=5)
+        assert attempts == [4, 4, 4, 4, 5]
+        assert saved == [(4, 100), (5, 101)]
+        assert client.publication_inbox.sender_account_id == 7
+
+    asyncio.run(scenario())
