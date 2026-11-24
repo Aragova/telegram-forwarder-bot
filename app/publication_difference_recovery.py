@@ -59,11 +59,12 @@ class PublicationDifferenceRecovery:
         for update in updates:
             if not isinstance(update, types.UpdateDeleteScheduledMessages):
                 continue
-            pairs = publication_pairs(update.messages, update.sent_messages)
+            sent = getattr(update, "sent_messages", None)
+            pairs = publication_pairs(update.messages, sent)
             if not pairs:
                 continue
             peer = utils.get_peer_id(update.peer)
-            if not await self.inbox.record(peer, update.messages, update.sent_messages):
+            if not await self.inbox.record(peer, update.messages, sent):
                 raise RuntimeError("Publication difference evidence rejected")
 
     async def _read_page(self, cursor: dict) -> bool:

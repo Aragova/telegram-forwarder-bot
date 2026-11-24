@@ -1084,6 +1084,7 @@ class SenderService:
         delivery_id: int | None = None,
         max_age_seconds: int = 300,
         allow_unverified_self_loop_target: bool = False,
+        publication_intent=None,
     ) -> dict:
         from .reaction_delivery import ReactionDelivery
         kwargs = {
@@ -1095,6 +1096,8 @@ class SenderService:
             "delivery_id": delivery_id,
             "max_age_seconds": max_age_seconds,
         }
+        if publication_intent is not None:
+            kwargs["publication_intent"] = publication_intent
         if allow_unverified_self_loop_target:
             kwargs["allow_unverified_self_loop_target"] = True
         try:
@@ -1280,6 +1283,10 @@ class SenderService:
             normalized_schedule_mode,
         )
         idempotency_key = build_delivery_idempotency_key(operation_kind="single", delivery_id=int(delivery_id), target_id=str(target_id))
+        from .single_publication_reconciliation import reconcile_pending_publication
+        pending_result = await reconcile_pending_publication(self, idempotency_key)
+        if pending_result is not None:
+            return pending_result
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
@@ -1382,6 +1389,10 @@ class SenderService:
                     target_thread_id,
                     idempotency_key=idempotency_key,
                 )
+            if not ok:
+                pending_result = await reconcile_pending_publication(self, idempotency_key)
+                if pending_result is not None:
+                    return pending_result
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
             if ok:
@@ -1467,6 +1478,10 @@ class SenderService:
             album_delivery_ids = [int(delivery_id)]
         album_source_ids = list(album_delivery_ids)
         idempotency_key = build_delivery_idempotency_key(operation_kind="album", rule_id=int(rule_id), target_id=str(target_id), media_group_id=media_group_id, source_message_ids=album_source_ids)
+        from .single_publication_reconciliation import reconcile_pending_publication
+        pending_result = await reconcile_pending_publication(self, idempotency_key)
+        if pending_result is not None:
+            return pending_result
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
@@ -1559,6 +1574,10 @@ class SenderService:
                     target_thread_id,
                     idempotency_key=idempotency_key,
                 )
+            if not ok:
+                pending_result = await reconcile_pending_publication(self, idempotency_key)
+                if pending_result is not None:
+                    return pending_result
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
             if ok:
@@ -1656,6 +1675,10 @@ class SenderService:
         normalized_schedule_mode = str(schedule_mode or "interval")
         normalized_mode = str(mode or "video")
         idempotency_key = build_delivery_idempotency_key(operation_kind="video_send", delivery_id=int(delivery_id), target_id=str(target_id))
+        from .single_publication_reconciliation import reconcile_pending_publication
+        pending_result = await reconcile_pending_publication(self, idempotency_key)
+        if pending_result is not None:
+            return pending_result
         logger.info(
             "JOB EXECUTOR | video_delivery | start | rule_id=%s | delivery_id=%s | message_id=%s | mode=%s | schedule_mode=%s",
             rule_id,
@@ -1732,6 +1755,10 @@ class SenderService:
             # The transport scope records entry into a publication RPC.
             with publication_scope(intent):
                 outcome = await self._deliver_single_video(rule, int(delivery_id), int(message_id), str(source_channel), str(target_id), target_thread_id)
+            if isinstance(outcome, dict) and outcome.get("publication_pending"):
+                pending_result = await reconcile_pending_publication(self, idempotency_key)
+                return pending_result or {"ok": False, "accepted": True, "retryable": False,
+                                          "manual_review_required": True, "error_text": "publication_receipt_missing_no_resend"}
             if isinstance(outcome, dict) and outcome.get("accepted_unresolved"):
                 publication_possible = True
                 # The media may already be published. Never turn this into a

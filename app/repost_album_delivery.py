@@ -682,6 +682,16 @@ class RepostAlbumDelivery:
             is_self_loop=is_self_loop,
                 **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
+        if reupload_result.get("resolution_method") == "video_processing_pending" and reupload_result.get("transport_accepted"):
+            from .single_publication_reconciliation import register_pending_publication
+            if await register_pending_publication(
+                owner, key=idempotency_key, delivery_ids=delivery_ids, rule_id=rule.id,
+                target_id=target_id, target_thread_id=target_thread_id,
+                source_channel=source_channel, source_message_ids=message_ids,
+                scheduled_ids=reupload_result.get("returned_candidate_ids") or [],
+                pending_mask=reupload_result.get("pending_mask"),
+            ):
+                return False
         attempts_debug.append({"stage": "reupload_album", **reupload_result})
         reupload_candidate_sent_ids = normalize_valid_sent_message_ids(reupload_result.get("sent_message_ids") or [])
         if idempotency_key and reupload_candidate_sent_ids:
@@ -1054,6 +1064,16 @@ class RepostAlbumDelivery:
                 is_self_loop=is_self_loop,
                 **({"caption_override": custom_caption} if custom_caption is not None else {}),
             )
+            if reupload_retry_result.get("resolution_method") == "video_processing_pending" and reupload_retry_result.get("transport_accepted"):
+                from .single_publication_reconciliation import register_pending_publication
+                if await register_pending_publication(
+                    owner, key=idempotency_key, delivery_ids=delivery_ids, rule_id=rule.id,
+                    target_id=target_id, target_thread_id=target_thread_id,
+                    source_channel=source_channel, source_message_ids=message_ids,
+                    scheduled_ids=reupload_retry_result.get("returned_candidate_ids") or [],
+                    pending_mask=reupload_retry_result.get("pending_mask"),
+                ):
+                    return False
             attempts_debug.append({"stage": "reupload_album_retry", **reupload_retry_result})
             if idempotency_key:
                 accepted_ids = normalize_valid_sent_message_ids(reupload_retry_result.get("sent_message_ids") or [])
