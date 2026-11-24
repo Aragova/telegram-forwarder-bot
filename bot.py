@@ -8648,6 +8648,7 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
         bot,
         label="sender.bot",
         policy=build_sender_bot_policy(),
+        repository=db,
     )
     sender_telethon_client = wrap_telethon_client(
         telethon_client,
@@ -8712,7 +8713,7 @@ def _start_repost_campaign_runtime_tasks(*, role: str) -> None:
     if repost_campaign_runtime_tasks is None:
         repost_campaign_runtime_tasks = RepostCampaignRuntimeTasks(
             repo=db,
-            bot=bot,
+            bot=sender_service.bot if sender_service is not None else bot,
             telethon_client=telethon_client,
             settings=settings,
             logger_=logger,
