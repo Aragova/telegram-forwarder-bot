@@ -229,30 +229,57 @@ class TelethonAuthoritativeMessageResolver:
         target_is_broadcast_channel: bool,
     ) -> int | None:
         """Use only explicit Telegram mapping; never scan by similar caption."""
-        from .telegram_publication import verified_published_message
-
-        inbox = getattr(self.telethon, "publication_inbox", None)
-        if inbox is None or not scheduled_id:
+        if not scheduled_id:
             return None
+        ids = await self.resolve_scheduled_publications(
+            target_entity=target_entity,target_id=target_id,scheduled_ids=[scheduled_id],
+            source_message_ids=source_message_ids,target_thread_id=target_thread_id,
+            before_max_message_id=before_max_message_id,send_started_at=send_started_at,
+            target_is_broadcast_channel=target_is_broadcast_channel,
+        )
+        return ids[0] if ids else None
+
+    async def resolve_scheduled_publications(
+        self, *, target_entity: Any, target_id: Any, scheduled_ids: list[int],
+        source_message_ids: set[int] | None, target_thread_id: int | None,
+        before_max_message_id: int | None, send_started_at: datetime,
+        target_is_broadcast_channel: bool,
+    ) -> list[int]:
+        """Resolve the complete vector in its original order, never partial groups."""
+        from .telegram_publication import publication_pairs, verified_published_message
+
+        inbox = getattr(self.telethon,"publication_inbox",None)
+        if inbox is None or not publication_pairs(scheduled_ids,scheduled_ids):
+            return []
         try:
             peer_id = int(target_id)
-            final_id = await inbox.lookup(peer_id, scheduled_id)
-            if not final_id:
-                return None
-            message = await self.telethon.get_messages(target_entity, ids=final_id)
-            if verified_published_message(
-                message, peer_id=peer_id, published_id=final_id,
-                thread_id=target_thread_id, source_ids=source_message_ids,
-                before_id=before_max_message_id, started_at=send_started_at,
-                broadcast=target_is_broadcast_channel,
-            ):
-                return final_id
+            ids = [await inbox.lookup(peer_id,mid) for mid in scheduled_ids]
+            if not publication_pairs(scheduled_ids,ids):
+                return []
+            if len(ids)==1:
+                messages = [await self.telethon.get_messages(target_entity,ids=ids[0])]
+            else:
+                messages = await self.telethon.get_messages(target_entity,ids=ids)
+            if not isinstance(messages,(list,tuple)) or len(messages)!=len(ids):
+                return []
+            by_id = {getattr(m,"id",None):m for m in messages if m is not None}
+            if set(by_id)!=set(ids):
+                return []
+            if len(ids)>1:
+                groups = {getattr(m,"grouped_id",None) for m in messages}
+                if len(groups)!=1 or not next(iter(groups)):
+                    return []
+            if not all(verified_published_message(
+                by_id[mid],peer_id=peer_id,published_id=mid,thread_id=target_thread_id,
+                source_ids=source_message_ids,before_id=before_max_message_id,
+                started_at=send_started_at,broadcast=target_is_broadcast_channel,
+            ) for mid in ids):
+                return []
+            return ids
         except Exception as exc:
-            logger.warning(
-                "TELEGRAM_PUBLICATION_MAPPING_LOOKUP_FAILED | target_id=%s | scheduled_id=%s | error_type=%s",
-                target_id, scheduled_id, type(exc).__name__,
-            )
-        return None
+            logger.warning("TELEGRAM_PUBLICATION_VECTOR_LOOKUP_FAILED | target_id=%s | error_type=%s",
+                           target_id,type(exc).__name__)
+            return []
 
     async def resolve_authoritative_single_message(self, *, target_entity: Any, target_id: Any, sent: Any, expected_message: Any = None, expected_text: str = "", before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None, target_thread_id: int | None = None, target_is_broadcast_channel: bool = False, require_strong_media_match: bool = False, history_poll_delays: tuple[float, ...] | None = None) -> TelethonResolutionResult:
         returned_candidate_id = _message_id(sent)
@@ -389,6 +416,17 @@ class TelethonAuthoritativeMessageResolver:
         ]
         if pending_ids:
             raw_ids = [mid for mid in (_message_id(m) for m in sent_messages) if mid]
+            final_ids = await self.resolve_scheduled_publications(
+                target_entity=target_entity,target_id=target_id,scheduled_ids=raw_ids,
+                source_message_ids=source_message_ids,target_thread_id=target_thread_id,
+                before_max_message_id=before_max_message_id,send_started_at=send_started_at,
+                target_is_broadcast_channel=target_is_broadcast_channel,
+            ) if len(raw_ids)==len(expected_messages) else []
+            if final_ids:
+                return TelethonResolutionResult(
+                    True,final_ids[0],authoritative_message_ids=final_ids,
+                    returned_candidate_ids=raw_ids,resolution_method="scheduled_publication_mapping",
+                )
             logger.info(
                 "TELEGRAM_ALBUM_PROCESSING_PENDING | target_id=%s | scheduled_ids=%s | returned_ids=%s | action=await_publication_mapping",
                 target_id, pending_ids, raw_ids,

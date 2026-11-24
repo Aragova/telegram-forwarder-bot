@@ -984,6 +984,15 @@ class RepostAlbumDelivery:
             return False
 
         if reupload_result.get("transport_accepted") and not reupload_result.get("authoritative_resolved"):
+            if reupload_result.get("resolution_method") == "video_processing_pending":
+                from .single_publication_reconciliation import register_pending_publication
+                if await register_pending_publication(
+                    owner,key=idempotency_key,delivery_ids=delivery_ids,rule_id=rule.id,
+                    target_id=target_id,target_thread_id=target_thread_id,
+                    source_channel=source_channel,source_message_ids=message_ids,
+                    scheduled_ids=reupload_result.get("returned_candidate_ids") or [],
+                ):
+                    return False
             error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
             logger.warning(
                 "REUPLOAD_ALBUM_ACCEPTED_TARGET_ID_UNRESOLVED | rule_id=%s | delivery_ids=%s | target_id=%s | returned_candidate_ids=%s | action=no_retry_no_second_send",

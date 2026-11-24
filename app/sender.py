@@ -1463,6 +1463,10 @@ class SenderService:
             album_delivery_ids = [int(delivery_id)]
         album_source_ids = list(album_delivery_ids)
         idempotency_key = build_delivery_idempotency_key(operation_kind="album", rule_id=int(rule_id), target_id=str(target_id), media_group_id=media_group_id, source_message_ids=album_source_ids)
+        from .single_publication_reconciliation import reconcile_pending_publication
+        pending_result = await reconcile_pending_publication(self,idempotency_key)
+        if pending_result is not None:
+            return pending_result
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
@@ -1553,6 +1557,10 @@ class SenderService:
                 target_thread_id,
                 idempotency_key=idempotency_key,
             )
+            if not ok:
+                pending_result = await reconcile_pending_publication(self,idempotency_key)
+                if pending_result is not None:
+                    return pending_result
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
             if ok:

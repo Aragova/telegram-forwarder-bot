@@ -8,26 +8,26 @@ from app.single_publication_reconciliation import reconcile_pending_single
 def test_pending_single_defers_without_second_send_then_finishes_and_reacts_to_final_id():
     class Repo:
         def __init__(self):
-            self.row = dict(delivery_id=12, rule_id=149, sender_account_id=1,
+            self.row = dict(delivery_ids=[12], rule_id=149, tenant_id=1, sender_account_id=1,
                             target_peer_id=-100, target_thread_id=None, source_channel="-200",
-                            source_message_id=7, scheduled_id=2292, published_id=None,
+                            source_message_ids=[7], scheduled_ids=[2292], published_ids=None, expired_at=None,
                             send_started_at=datetime.now(timezone.utc), expired=False,
                             reaction_state="pending", dispatch_stale=False)
             self.finalized = 0
 
-        def get_single_publication_receipt(self, key):
+        def get_publication_receipt(self, key):
             return dict(self.row)
 
-        def finalize_single_publication_receipt(self, key, published_id):
+        def finalize_publication_receipt(self, key, published_ids):
             self.finalized += 1
-            self.row["published_id"] = published_id
+            self.row["published_ids"] = published_ids
             return True
 
-        def claim_single_publication_reaction(self, key):
+        def claim_publication_reaction(self, key):
             self.row["reaction_state"] = "dispatching"
             return True
 
-        def finish_single_publication_reaction(self, key, state, result):
+        def finish_publication_reaction(self, key, state, result):
             self.row["reaction_state"] = state
 
         def get_rule(self, rule_id):
