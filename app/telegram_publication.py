@@ -172,13 +172,11 @@ def prepare_publication_inbox(client: Any, repository: Any):
         if me is None:
             raise RuntimeError("Publication inbox requires an authenticated sender")
         candidate = PublicationInbox(repository,int(me.id))
+        recovery = None
         if callable(getattr(repository, "get_publication_recovery_cursor", None)):
             from .publication_difference_recovery import PublicationDifferenceRecovery
 
             recovery = PublicationDifferenceRecovery(client, candidate)
-            # Establish the checkpoint before exposing a write-capable sender.
-            await recovery.initialize()
-            client.publication_recovery = recovery
         from .background_tasks import start_background_task
 
         drained = asyncio.Event()
@@ -190,18 +188,27 @@ def prepare_publication_inbox(client: Any, repository: Any):
 
         async def drain_startup(delay: float = 0.25) -> None:
             nonlocal inbox
-            while buffer:
-                peer, old, new = buffer[0]
-                try:
+            try:
+                while buffer:
+                    peer, old, new = buffer[0]
                     await candidate.record(peer, old, new)
-                except Exception:
-                    logger.exception("TELEGRAM_PUBLICATION_STARTUP_PERSIST_FAILED")
-                    start_background_task(
-                        retry_startup(delay), name="telegram-publication-startup-retry",
-                    )
-                    return
-                buffer.popleft()
-                delay = 0.25
+                    buffer.popleft()
+                    delay = 0.25
+                if recovery is not None and not hasattr(client, "publication_recovery"):
+                    # Checkpoint setup is part of startup, including retry
+                    # after a DB outage. Events arriving during it stay buffered.
+                    await recovery.initialize()
+                    client.publication_recovery = recovery
+            except Exception:
+                logger.exception("TELEGRAM_PUBLICATION_STARTUP_PERSIST_FAILED")
+                start_background_task(
+                    retry_startup(delay), name="telegram-publication-startup-retry",
+                )
+                return
+            if buffer:
+                # A live event arrived during checkpoint initialization.
+                await drain_startup()
+                return
             if not buffer_overflow:
                 inbox = candidate
                 client.publication_inbox = candidate

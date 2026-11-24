@@ -100,30 +100,7 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
             if inbox.sender_account_id != receipt["sender_account_id"]:
                 return await _wait_or_expire(owner, receipt, key, "publication_sender_unavailable")
             entity = await reader.get_entity(target_id)
-            resolver = TelethonAuthoritativeMessageResolver(reader)
-            published_ids = await resolver.resolve_scheduled_publications(
-                target_entity=entity,target_id=target_id,scheduled_ids=receipt["scheduled_ids"],
-                pending_mask=receipt.get("pending_mask"), publication_inbox=inbox,
-                source_message_ids=source_guard,target_thread_id=receipt["target_thread_id"],
-                before_max_message_id=None,send_started_at=receipt["send_started_at"],
-                target_is_broadcast_channel=bool(getattr(entity,"broadcast",False)
-                                                 and not getattr(entity,"megagroup",False)),
-            )
-            if not published_ids:
-                recovery = getattr(reader, "publication_recovery", None)
-                if recovery is not None and recovery.sender_account_id == receipt["sender_account_id"]:
-                    mask = receipt.get("pending_mask") or [True] * len(receipt["scheduled_ids"])
-                    pending_ids = [mid for mid, flag in zip(receipt["scheduled_ids"], mask) if flag]
-                    if not await inbox.lookup_many(int(target_id), pending_ids):
-                        await recovery.recover()
-                        published_ids = await resolver.resolve_scheduled_publications(
-                            target_entity=entity, target_id=target_id, scheduled_ids=receipt["scheduled_ids"],
-                            pending_mask=receipt.get("pending_mask"), publication_inbox=inbox,
-                            source_message_ids=source_guard, target_thread_id=receipt["target_thread_id"],
-                            before_max_message_id=None, send_started_at=receipt["send_started_at"],
-                            target_is_broadcast_channel=bool(getattr(entity,"broadcast",False)
-                                                             and not getattr(entity,"megagroup",False)),
-                        )
+            published_ids = await _resolve_receipt_ids(reader, inbox, entity, receipt, source_guard)
         except Exception as exc:
             logger.warning("PUBLICATION_READ_FAILED | delivery_ids=%s | error_type=%s",
                            receipt["delivery_ids"],type(exc).__name__)
@@ -178,6 +155,31 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
         completed = bool(result.get("applied") or result.get("enqueued") or result.get("reason") in {"disabled","no_accounts","rule_target_changed"})
         await run_db(owner.db.finish_publication_reaction,key,"done" if completed else "uncertain",result,expected_started_at=receipt["send_started_at"])
     return {"ok":True,"accepted":True,"sent_message_ids":published_ids}
+
+
+async def _resolve_receipt_ids(reader, inbox, entity, receipt, source_guard):
+    target_id = receipt["target_peer_id"]
+    resolver = TelethonAuthoritativeMessageResolver(reader)
+    kwargs = dict(
+        target_entity=entity, target_id=target_id, scheduled_ids=receipt["scheduled_ids"],
+        pending_mask=receipt.get("pending_mask"), publication_inbox=inbox,
+        source_message_ids=source_guard, target_thread_id=receipt["target_thread_id"],
+        before_max_message_id=None, send_started_at=receipt["send_started_at"],
+        target_is_broadcast_channel=bool(getattr(entity, "broadcast", False)
+                                         and not getattr(entity, "megagroup", False)),
+    )
+    published_ids = await resolver.resolve_scheduled_publications(**kwargs)
+    if published_ids:
+        return published_ids
+    recovery = getattr(reader, "publication_recovery", None)
+    if recovery is None or recovery.sender_account_id != receipt["sender_account_id"]:
+        return []
+    mask = receipt.get("pending_mask") or [True] * len(receipt["scheduled_ids"])
+    pending_ids = [mid for mid, flag in zip(receipt["scheduled_ids"], mask) if flag]
+    if not await inbox.lookup_many(int(target_id), pending_ids):
+        await recovery.recover()
+        return await resolver.resolve_scheduled_publications(**kwargs)
+    return []
 
 
 async def _wait_or_expire(owner,receipt,key,reason):

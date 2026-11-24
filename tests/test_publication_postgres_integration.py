@@ -411,7 +411,8 @@ def test_publication_recovery_cursor_and_exact_replay_after_restart(repo):
     from telethon import functions, types
     from app.publication_difference_recovery import PublicationDifferenceRecovery
     from app.telegram_publication import PublicationInbox
-
+    from app.single_publication_reconciliation import reconcile_pending_publication
+    from types import SimpleNamespace
     from telethon import utils
 
     seeded = seed(repo, 117)
@@ -439,6 +440,15 @@ def test_publication_recovery_cursor_and_exact_replay_after_restart(repo):
             assert request.pts == 101 and request.qts == 0
             return self.response
 
+        async def get_entity(self, peer_id):
+            assert peer_id == int(target)
+            return SimpleNamespace(broadcast=True, megagroup=False)
+
+        async def get_messages(self, entity, ids):
+            assert ids == 142
+            return SimpleNamespace(id=ids, chat_id=int(target), from_scheduled=True,
+                                   post=True, date=datetime.now(timezone.utc))
+
     async def scenario():
         initial = PublicationDifferenceRecovery(Client(None), PublicationInbox(repo, account))
         await initial.initialize()
@@ -457,15 +467,38 @@ def test_publication_recovery_cursor_and_exact_replay_after_restart(repo):
                 pts=102, qts=0, date=baseline, seq=2, unread_count=0,
             ),
         )
-        restarted = PublicationDifferenceRecovery(Client(result), PublicationInbox(repo, account))
-        await restarted.initialize()
-        await restarted.recover()
+        # Fail the first database write after receiving the replay page.
+        class FailingRepository:
+            def __getattr__(self, name):
+                return getattr(repo, name)
+
+            def record_telegram_publication_mappings(self, *_args):
+                raise RuntimeError("simulated database outage")
+
+        failed = PublicationDifferenceRecovery(Client(result), PublicationInbox(FailingRepository(), account))
+        await failed.recover()
+        assert repo.get_publication_recovery_cursor(account)["version"] == 0
+        assert repo.get_telegram_publication_mappings(account, int(target), [42]) == []
+
+        client = Client(result)
+        client.publication_inbox = PublicationInbox(repo, account)
+        client.publication_recovery = PublicationDifferenceRecovery(client, client.publication_inbox)
+        await client.publication_recovery.initialize()
+
+        async def react(**kwargs):
+            assert kwargs["sent_message_id"] == 142
+            return {"reason": "disabled"}
+
+        owner = SimpleNamespace(db=repo, telethon=client, _add_reaction_for_rule_if_possible=react)
+        outcome = await reconcile_pending_publication(owner, key)
+        assert outcome["ok"] and outcome["sent_message_ids"] == [142]
         assert repo.get_telegram_publication_mappings(account, int(target), [42]) == [142]
         assert repo.get_telegram_publication_mappings(account, int(target), [43]) == []
         cursor = repo.get_publication_recovery_cursor(account)
         assert cursor["pts"] == 102 and cursor["version"] == 1
         assert not repo.advance_publication_recovery_cursor(account, 0, 103, 0, baseline)
-        assert repo.finalize_publication_receipt(key, [142])
+        assert not repo.finalize_publication_receipt(key, [142])
         assert repo.get_delivery(deliveries[0])["sent_message_id"] == 142
+        assert (await reconcile_pending_publication(owner, key))["ok"]
 
     asyncio.run(scenario())
