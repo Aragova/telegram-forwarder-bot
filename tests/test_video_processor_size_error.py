@@ -8,6 +8,8 @@ from telethon.errors import FloodWaitError
 from aiogram.methods import SendVideo
 
 from app.video_processor import VideoProcessor
+from app.transport import wrap_bot
+from app.transport_policy import TransportRateLimited, build_sender_bot_policy
 
 
 def test_send_with_retry_does_not_repeat_413(tmp_path):
@@ -43,7 +45,8 @@ def test_send_with_retry_does_not_repeat_413(tmp_path):
     assert bot.calls == 1
 
 
-def test_send_with_retry_propagates_rejected_429_without_second_post(tmp_path):
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_send_with_retry_propagates_rejected_429_without_second_post(tmp_path, wrapped):
     class ThrottledBot:
         calls = 0
 
@@ -59,13 +62,15 @@ def test_send_with_retry_propagates_rejected_429_without_second_post(tmp_path):
     clip.write_bytes(b"video")
     bot = ThrottledBot()
 
-    with pytest.raises(TelegramRetryAfter) as err:
+    transport = wrap_bot(bot, label="sender.bot", policy=build_sender_bot_policy()) if wrapped else bot
+    expected_error = TransportRateLimited if wrapped else TelegramRetryAfter
+    with pytest.raises(expected_error) as err:
         asyncio.run(processor.send_with_retry(
-            bot, destination_channel=-100123, target_thread_id=None,
+            transport, destination_channel=-100123, target_thread_id=None,
             video_path=str(clip), thumbnail_path=None,
             caption="", duration=10, max_retries=3,
         ))
-    assert err.value.retry_after == 21
+    assert (err.value.retry_after_seconds if wrapped else err.value.retry_after) == 21
     assert bot.calls == 1
 
 
@@ -124,3 +129,48 @@ def test_telethon_missing_ffprobe_metadata_is_pre_send_retryable(tmp_path):
             video_path=str(clip), thumbnail_path=None,
             caption="", duration=10, caption_send_mode="premium", max_retries=3,
         ))
+
+def test_telethon_rate_limit_after_send_is_unknown_acceptance_not_rejection(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.telethon_authoritative_resolver import TelethonAuthoritativeMessageResolver
+
+    processor = VideoProcessor.__new__(VideoProcessor)
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"video")
+
+    class Client:
+        calls = 0
+
+        async def send_file(self, **_kwargs):
+            self.calls += 1
+            return SimpleNamespace(id=123)
+
+        async def get_entity(self, _):
+            return SimpleNamespace(broadcast=True, megagroup=False)
+
+        async def get_messages(self, _entity, ids=None, limit=None):
+            return []
+
+    client = Client()
+    processor.telethon = client
+
+    async def fake_video_info(*_args, **_kwargs):
+        return {"width": 720, "height": 1280, "duration": 30}
+
+    async def rate_limited(*_args, **_kwargs):
+        raise TransportRateLimited(
+            retry_after_seconds=21, backend="telethon",
+            op_name="get_messages", key="sender.telethon.get_messages",
+        )
+
+    processor.get_video_info = fake_video_info
+    monkeypatch.setattr(TelethonAuthoritativeMessageResolver, "resolve_authoritative_single_message", rate_limited)
+    result = asyncio.run(processor.send_with_retry(
+        None, destination_channel=-100123, target_thread_id=None,
+        video_path=str(clip), thumbnail_path=None,
+        caption="", duration=10, caption_send_mode="premium",
+    ))
+    assert result.transport_accepted
+    assert not result.authoritative_resolved
+    assert result.returned_candidate_ids == [123]
+    assert client.calls == 1

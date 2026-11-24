@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from aiogram.exceptions import TelegramRetryAfter
+from aiogram.methods import SendMessage
 
 from app.transport_policy import (
     TransportPolicy,
@@ -296,18 +298,17 @@ def test_sender_telethon_policy_still_retries_download_transient_errors(monkeypa
 
 def test_sender_bot_policy_long_retry_after_on_write_raises_rate_limited_once():
     async def scenario():
-        class RetryAfterError(Exception):
-            def __init__(self, retry_after):
-                self.retry_after = retry_after
-                super().__init__(f"retry after {retry_after}")
-
         policy = build_sender_bot_policy()
         calls = 0
 
         async def operation():
             nonlocal calls
             calls += 1
-            raise RetryAfterError(policy.long_retry_after_threshold_sec + 1)
+            raise TelegramRetryAfter(
+                method=SendMessage(chat_id=1, text="test"),
+                message="rate limited",
+                retry_after=policy.long_retry_after_threshold_sec + 1,
+            )
 
         with pytest.raises(TransportRateLimited) as raised:
             await policy.execute(backend="bot", key="sender.long-flood", op_name="send_message", func=operation)

@@ -237,3 +237,59 @@ def test_copy_album_via_bot_debug_skip(monkeypatch):
         "error_text": "Bot API copy_album принудительно отключён",
     }
     assert fake_bot.calls == []
+
+def test_copy_rate_limit_propagates_without_fallback(monkeypatch):
+    import pytest
+    from aiogram.exceptions import TelegramRetryAfter
+    from aiogram.methods import CopyMessage, CopyMessages
+    from app import sender_botapi_copy_helpers as module
+    from app.transport import wrap_bot
+    from app.transport_policy import TransportRateLimited, build_sender_bot_policy
+
+    monkeypatch.setattr(module, "DEBUG_FORCE_SKIP_COPY_SINGLE", False)
+    monkeypatch.setattr(module, "DEBUG_FORCE_SKIP_COPY_ALBUM", False)
+
+    async def scenario():
+        for album in (False, True):
+            method = (
+                CopyMessages(chat_id=1, from_chat_id=2, message_ids=[3, 4])
+                if album else CopyMessage(chat_id=1, from_chat_id=2, message_id=3)
+            )
+            error = TelegramRetryAfter(method=method, message="rate limited", retry_after=21)
+            for wrapped in (False, True):
+                raw = FakeCopyMessagesBot(exc=error) if album else FakeCopyMessageBot(exc=error)
+                bot = wrap_bot(raw, label="sender.bot", policy=build_sender_bot_policy()) if wrapped else raw
+                helpers = module.SenderBotApiCopyHelpers(SimpleNamespace(
+                    bot=bot, _extract_sent_message_ids=lambda result: [result.message_id],
+                ))
+                with pytest.raises(TransportRateLimited) as caught:
+                    if album:
+                        await helpers.copy_album_via_bot(2, 1, [3, 4], None)
+                    else:
+                        await helpers.copy_single_via_bot(2, 1, 3, None)
+                assert caught.value.retry_after_seconds == 21
+                assert len(raw.calls if album else raw.copy_message_calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_copy_single_error_after_rpc_return_is_not_safe_rate_limit(monkeypatch):
+    from app import sender_botapi_copy_helpers as module
+    from app.transport_policy import TransportRateLimited
+
+    monkeypatch.setattr(module, "DEBUG_FORCE_SKIP_COPY_SINGLE", False)
+    raw = FakeCopyMessageBot()
+
+    def extract(_result):
+        raise TransportRateLimited(
+            retry_after_seconds=21, backend="bot", op_name="get_chat", key="sender.bot.get_chat",
+        )
+
+    helpers = module.SenderBotApiCopyHelpers(SimpleNamespace(
+        bot=raw, _extract_sent_message_ids=extract,
+    ))
+    result = asyncio.run(helpers.copy_single_via_bot(2, 1, 3, None))
+    assert result["attempted"] is True
+    assert result["fallback_allowed"] is False
+    assert result["definitely_rejected"] is False
+    assert len(raw.copy_message_calls) == 1

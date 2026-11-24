@@ -39,3 +39,51 @@ def test_background_task_failure_and_cancellation(caplog) -> None:
         await asyncio.sleep(0)
         assert task not in _RUNNING_TASKS
     asyncio.run(scenario())
+
+
+def test_shutdown_cancels_tasks_spawned_during_cancellation():
+    from app.background_tasks import stop_background_tasks
+
+    async def scenario():
+        spawned = []
+
+        async def original():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                spawned.append(start_background_task(asyncio.Event().wait(), name="late-task"))
+
+        task = start_background_task(original(), name="original")
+        await asyncio.sleep(0)
+        await stop_background_tasks()
+        assert task.cancelled()
+        assert len(spawned) == 1 and spawned[0].cancelled()
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_drains_thread_work_instead_of_discarding_result():
+    from app.background_tasks import stop_background_tasks
+
+    async def scenario():
+        task = start_background_task(asyncio.to_thread(lambda: 42), name="thread", drain_only=True)
+        await stop_background_tasks()
+        assert task.result() == 42
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_bounds_independent_file_drain():
+    from app.background_tasks import stop_background_tasks
+
+    async def scenario():
+        release = asyncio.Event()
+        task = start_background_task(release.wait(), name="file-cleanup", drain_only=True)
+        try:
+            await asyncio.wait_for(stop_background_tasks(drain_timeout=0), timeout=1)
+            assert task in _RUNNING_TASKS and not task.done()
+        finally:
+            release.set()
+            await task
+
+    asyncio.run(scenario())

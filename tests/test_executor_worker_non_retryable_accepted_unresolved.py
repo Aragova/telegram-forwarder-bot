@@ -209,3 +209,49 @@ def test_worker_retries_retryable_presend_failure():
     assert sender.calls == 1
     assert repo.fail_calls == []
     assert len(repo.retry_calls) == 1
+
+
+def test_single_executor_keeps_ambiguous_rpc_terminal_when_audit_fails():
+    from app.send_intent import observe_publication
+
+    repo = _ExecutorRepo({1: {"delivery_id": 1, "status": "processing"}})
+    sender = _ExecutorSender(repo)
+
+    async def send():
+        raise TimeoutError("Telegram response lost")
+
+    async def deliver(*_args, **_kwargs):
+        try:
+            await observe_publication(send)
+        except TimeoutError:
+            raise RuntimeError("audit database unavailable") from None
+
+    sender._deliver_single = deliver
+    result = asyncio.run(sender.execute_repost_single_from_job(
+        rule_id=1, delivery_id=1, message_id=10, source_channel="src", target_id="dst",
+    ))
+    assert result["retryable"] is False
+    assert repo.failed_attempts[-1][1] == "failed_after_send"
+
+
+def test_album_executor_keeps_partial_rpc_terminal_when_audit_fails():
+    from app.send_intent import observe_publication
+
+    repo = _ExecutorRepo({1: {"delivery_id": 1, "status": "processing"},
+                          2: {"delivery_id": 2, "status": "processing"}})
+    sender = _ExecutorSender(repo)
+
+    async def send():
+        return [SimpleNamespace(message_id=20)]
+
+    async def deliver(*_args, **_kwargs):
+        await observe_publication(send, bot_result=True, expected_count=2)
+        raise RuntimeError("audit database unavailable")
+
+    sender._deliver_album = deliver
+    result = asyncio.run(sender.execute_repost_album_from_job(
+        rule_id=1, delivery_id=1, message_id=1, source_channel="src", source_thread_id=None,
+        media_group_id="g", target_id="dst", target_thread_id=None, delivery_ids=[1, 2],
+    ))
+    assert result["retryable"] is False
+    assert repo.failed_attempts[-1][1] == "failed_after_send"

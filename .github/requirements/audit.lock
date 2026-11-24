@@ -1,0 +1,21 @@
+# Architecture audit tools: Linux x86_64 / CPython 3.12.
+# Exact versions and wheel digests from the successful CI resolution and PyPI.
+# Update all transitive dependencies together; do not remove --require-hashes.
+ast-serialize==0.13.1 --hash=sha256:9f99786e0d62082a5b121b3437f3167562133711df22128de1e9886f57f0b226
+bandit==1.9.4 --hash=sha256:f89ffa663767f5a0585ea075f01020207e966a9c0f2b9ef56a57c7963a3f6f8e
+colorama==0.4.6 --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+librt==0.17.0 --hash=sha256:afa8a6a1916f155e6f35c48d6cb547849af79e07060e36b6aaec1d1c63dc3c7e
+mando==0.7.1 --hash=sha256:26ef1d70928b6057ee3ca12583d73c63e05c49de8972d620c278a7b206581a8a
+markdown-it-py==4.3.0 --hash=sha256:7aa1511a46c39138de78d9eba92ce47e63124d8003fc98b3a351909e04239efa
+mdurl==0.1.2 --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8
+mypy-extensions==1.2.0 --hash=sha256:993e7a20aa5671eb41a7132cf555af30062da99729601601b9a8382b11cae768
+mypy==2.4.1 --hash=sha256:a20ff6cd2af7a670c64f089bfa5fbcebe8ff3bf896c5e6ac7c9862c7960e4494
+pathspec==1.1.1 --hash=sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189
+Pygments==2.21.0 --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+PyYAML==6.0.4 --hash=sha256:93bfb2459195406a518e2f487a9bbf01df240175f31e06f5a252ac6734c7bbf0
+radon==6.0.1 --hash=sha256:632cc032364a6f8bb1010a2f6a12d0f14bc7e5ede76585ef29dc0cecf4cd8859
+rich==15.0.0 --hash=sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb
+ruff==0.17.6 --hash=sha256:aa3b08254a732acba246891089a152c47c5733dc36b8ecb76ce8602f8326e5e4
+six==1.17.0 --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+stevedore==5.10.0 --hash=sha256:47c48dc09e75933106c1bba0a7690eef3b5acecdb807df6d47cc40b2532fa927
+typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8

@@ -3,6 +3,9 @@ from __future__ import annotations
 import logging
 
 from .runtime_utils import run_db
+from .delivery_idempotency import normalize_valid_sent_message_ids
+from .send_intent import PublicationWriteUnavailable
+from .transport_policy import TransportRateLimited
 from .repost_caption import get_repost_caption_override, caption_override_content
 from .sender_primitives import (
     DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK, _prepare_html_text,
@@ -838,6 +841,11 @@ class RepostSingleDelivery:
                     disable_web_page_preview=True,
                 )
 
+                if idempotency_key:
+                    sent_ids = normalize_valid_sent_message_ids([sent.message_id])
+                    await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                                 sent_message_ids=sent_ids, telegram_method="text_fallback")
+
                 await owner._add_reaction_for_rule_if_possible(
                     rule=rule,
                     target_id=target_id,
@@ -890,6 +898,8 @@ class RepostSingleDelivery:
                 )
                 return {"ok": True, "sent_message_ids": [int(sent.message_id)]}
 
+            except (TransportRateLimited, PublicationWriteUnavailable):
+                raise
             except Exception as exc:
                 await owner._log_delivery_pipeline_step(
                     rule_id=rule.id,

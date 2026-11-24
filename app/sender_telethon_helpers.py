@@ -5,12 +5,16 @@ import asyncio
 import json
 import struct
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from telethon.tl import types as tl_types
-from telethon.errors import BadRequestError
+from telethon.errors import BadRequestError, RandomIdDuplicateError
+
+from .send_intent import PublicationWriteUnavailable
+from .transport_policy import TransportRateLimited
 
 from .background_tasks import start_background_task
 from .config import settings
@@ -30,27 +34,52 @@ def _create_thumb_temp_path(prefix: str) -> Path:
         return Path(handle.name)
 
 
-async def _create_thumb_temp_path_async(prefix: str) -> Path:
-    """Offload creation and remove the late-created file after cancellation.
+def _unlink_orphan_thumb(path: Path, prefix: str) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        logger.exception("THUMB_TEMP_CLEANUP_FAILED | prefix=%s", prefix)
 
-    shield prevents a cancelled caller from losing the thread result.
-    start_background_task retains the pending task until it completes.
-    """
+
+class _ThumbTempCreation:
+    """Hand off a temporary path or unlink it in the creating thread."""
+
+    def __init__(self, prefix: str):
+        self.prefix = prefix
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._path: Path | None = None
+
+    def create(self) -> Path:
+        path = _create_thumb_temp_path(self.prefix)
+        with self._lock:
+            if not self._abandoned:
+                self._path = path
+                return path
+        _unlink_orphan_thumb(path, self.prefix)
+        return path
+
+    def abandon(self) -> None:
+        with self._lock:
+            self._abandoned = True
+            path = self._path
+            self._path = None
+        if path is not None:
+            _unlink_orphan_thumb(path, self.prefix)
+
+
+async def _create_thumb_temp_path_async(prefix: str) -> Path:
+    """Keep cleanup ownership even if shutdown cancels the asyncio task."""
+    state = _ThumbTempCreation(prefix)
     creation = start_background_task(
-        asyncio.to_thread(_create_thumb_temp_path, prefix),
+        asyncio.to_thread(state.create),
         name=f"create-thumbnail-{prefix}",
+        drain_only=True,
     )
     try:
         return await asyncio.shield(creation)
     except asyncio.CancelledError:
-        def _remove_orphan(done: asyncio.Task[Path]) -> None:
-            if done.cancelled():
-                return
-            try:
-                done.result().unlink(missing_ok=True)
-            except Exception:
-                logger.exception("THUMB_TEMP_CLEANUP_FAILED | prefix=%s", prefix)
-        creation.add_done_callback(_remove_orphan)
+        state.abandon()
         raise
 
 
@@ -311,6 +340,8 @@ class SenderTelethonHelpers:
         send_started_at = datetime.now(timezone.utc)
         try:
             sent = await self.owner.telethon.send_message(**send_kwargs)
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.warning("TELETHON_TEXT_SEND | FAILED | target=%s | thread=%s | error=%s", target_id, target_thread_id, exc)
             return telethon_transport_failed(str(exc))
@@ -433,6 +464,8 @@ class SenderTelethonHelpers:
             )
             return TelethonSendOutcome(True, True, bool(resolved.ok), sent_id, [sent_id] if sent_id else [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method=resolved.resolution_method, error_text=resolved.error_text)
 
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.warning(
                 "TELETHON_FILE_SEND | FAILED_ORIGINAL_MEDIA | target=%s | thread=%s | error=%s",
@@ -440,7 +473,7 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
-            if original_send_started and not isinstance(exc, BadRequestError):
+            if original_send_started and (not isinstance(exc, BadRequestError) or isinstance(exc, RandomIdDuplicateError)):
                 logger.warning("TELETHON_FILE_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
                 return telethon_transport_failed(f"original_media_send_uncertain: {exc}")
 
@@ -545,6 +578,8 @@ class SenderTelethonHelpers:
             )
             return TelethonSendOutcome(True, True, bool(resolved.ok), sent_id, [sent_id] if sent_id else [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method=resolved.resolution_method, error_text=resolved.error_text)
 
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.warning(
                 "TELETHON_FILE_SEND | FAILED_FILE_PATH | target=%s | thread=%s | file=%s | error=%s",
@@ -688,6 +723,8 @@ class SenderTelethonHelpers:
                 target_thread_id,
             )
 
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.warning(
                 "TELETHON_ALBUM_SEND | FAILED_ORIGINAL_MEDIA | target=%s | thread=%s | error=%s",
@@ -695,7 +732,7 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
-            if original_send_started and not isinstance(exc, BadRequestError):
+            if original_send_started and (not isinstance(exc, BadRequestError) or isinstance(exc, RandomIdDuplicateError)):
                 logger.warning("TELETHON_ALBUM_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
                 return telethon_transport_failed(
                     f"original_album_send_uncertain: {exc}"
@@ -810,6 +847,8 @@ class SenderTelethonHelpers:
                 "resolution_method": resolved.resolution_method,
             }
 
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.exception(
                 "TELETHON_ALBUM_SEND | FAILED_FILE_PATH | target=%s | thread=%s | error=%s",

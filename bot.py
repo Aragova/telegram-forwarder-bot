@@ -15,7 +15,7 @@ from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramRetryAfter
 from app.bot_api_session import create_bot_api_session
-from app.background_tasks import start_background_task
+from app.background_tasks import start_background_task, stop_background_tasks
 from app.channel_title_sync import channel_title_sync_loop
 from aiogram.filters import Command
 from aiogram.types import (
@@ -8717,8 +8717,10 @@ async def _shutdown_runtime(
         await stop_all_workers()
 
     if close_dashboard_tasks:
-        for task in dashboard_tasks.values():
+        tasks = list(dashboard_tasks.values())
+        for task in tasks:
             task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         dashboard_tasks.clear()
 
     if channel_title_sync_task is not None:
@@ -8743,6 +8745,10 @@ async def _shutdown_runtime(
         reaction_worker_task.cancel()
         await asyncio.gather(reaction_worker_task, return_exceptions=True)
     reaction_worker_task = None
+
+    await stop_background_tasks()
+    if sender_service is not None:
+        await sender_service.video_processor.shutdown()
 
     if close_telegram_clients and telethon_client:
         try:
@@ -9151,3 +9157,5 @@ if __name__ == "__main__":
         asyncio.run(main(role=role))
     except KeyboardInterrupt:
         logger.info("👋 Бот остановлен")
+    finally:
+        db.close_all_connections()

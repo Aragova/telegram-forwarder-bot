@@ -1,5 +1,7 @@
 import asyncio
 import logging
+
+import pytest
 from pathlib import Path
 
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
@@ -7,6 +9,7 @@ from telethon.errors import FloodWaitError
 from aiogram.methods import SendVideo
 
 from app.sender import SenderService
+from app.transport_policy import TransportRateLimited
 
 
 class _Rule:
@@ -145,12 +148,17 @@ def test_pre_send_telethon_lookup_error_is_retryable_and_never_accepted(tmp_path
     assert not any(c[0] in ("accepted", "verified", "mark_delivery_sent") for c in repo.calls)
 
 
-def test_bot_api_retry_after_is_rejected_and_scheduled_safely(tmp_path: Path):
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_bot_api_retry_after_is_rejected_and_scheduled_safely(tmp_path: Path, wrapped):
     """Codex P2: Telegram refused the send, so mark failed_before_send."""
     repo = FakeRepo()
     service = _build_service(repo)
 
     async def _rate_limited(*_args, **_kwargs):
+        if wrapped:
+            raise TransportRateLimited(
+                retry_after_seconds=37, backend="bot", op_name="send_video", key="sender.bot.send_video",
+            )
         raise TelegramRetryAfter(
             method=SendVideo(chat_id=123, video="clip_id"),
             message="Too Many Requests", retry_after=37,

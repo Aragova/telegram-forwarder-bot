@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 
@@ -11,7 +12,43 @@ from app.transport_policy import (
     build_sender_telethon_upload_policy,
 )
 
+from app.send_intent import observe_publication, run_with_cooldown
+from app.transport_operation import TransportOperationKind, classify_transport_operation, normalize_transport_operation_name
+
 logger = logging.getLogger("forwarder.transport")
+
+
+def _validate_publication_content(name, kwargs, method):
+    """Reject only provably invalid raw content; Telegram parses markup itself."""
+    def value(field):
+        return getattr(method, field, None) if method is not None else kwargs.get(field)
+
+    op = normalize_transport_operation_name(name)
+    if op == "send_media_group":
+        media = value("media")
+        if isinstance(media, (list, tuple)) and not 2 <= len(media) <= 10:
+            raise ValueError("Telegram media group requires 2 to 10 items")
+        for item in media or []:
+            if getattr(item, "parse_mode", None) is None:
+                caption = getattr(item, "caption", None)
+                if isinstance(caption, str) and len(caption) > 1024:
+                    raise ValueError("Telegram media caption exceeds 1024 characters")
+    elif op == "copy_messages":
+        ids = value("message_ids")
+        if isinstance(ids, (list, tuple)) and not 1 <= len(ids) <= 100:
+            raise ValueError("CopyMessages requires 1 to 100 message IDs")
+    elif op in {"send_message", "send_photo", "send_video", "send_document",
+                "send_animation", "send_audio", "send_voice"}:
+        # Missing parse_mode can inherit the bot's default, so only validate
+        # when it was explicitly set to None (or the method object says None).
+        explicit_plain = value("parse_mode") is None and (
+            method is not None or "parse_mode" in kwargs
+        )
+        field, limit = ("text", 4096) if op == "send_message" else ("caption", 1024)
+        content = value(field)
+        if explicit_plain and isinstance(content, str) and len(content) > limit:
+            raise ValueError(f"Telegram {field} exceeds {limit} characters")
+
 
 # Short, read-only RPCs must not occupy worker slots indefinitely.
 _TELETHON_READ_TIMEOUT_SEC = 15.0
@@ -37,12 +74,32 @@ class BotTransportProxy:
     def raw(self):
         return self._bot
 
+    async def _invoke(self, name, call, kwargs, *, method=None):
+        if classify_transport_operation("bot", name) != TransportOperationKind.NON_IDEMPOTENT_WRITE:
+            return await call()
+        _validate_publication_content(name, kwargs, method)
+        if method is not None:
+            items = getattr(method, "media", None) or getattr(method, "message_ids", None)
+        else:
+            items = kwargs.get("media") or kwargs.get("message_ids")
+        count = len(items) if isinstance(items, (list, tuple)) else None
+        async def publish():
+            return await observe_publication(call, bot_result=True, expected_count=count)
+
+        bot_id = getattr(self._bot, "id", None)
+        return await run_with_cooldown(
+            publish, account_scope=f"bot:{bot_id}" if bot_id else None,
+            backend="bot", op_name=name,
+        )
+
     async def __call__(self, *args, **kwargs):
+        method = args[0] if args else kwargs.get("method")
+        op_name = type(method).__name__ if method is not None else "__call__"
         return await self._policy.execute(
             backend="bot",
-            key=f"{self._label}.__call__",
-            op_name="__call__",
-            func=lambda: self._bot(*args, **kwargs),
+            key=f"{self._label}.{op_name}",
+            op_name=op_name,
+            func=lambda: self._invoke(op_name, lambda: self._bot(*args, **kwargs), kwargs, method=method),
         )
 
     def __getattr__(self, name: str):
@@ -52,11 +109,21 @@ class BotTransportProxy:
             return attr
 
         async def _wrapped(*args, **kwargs):
+            fields = kwargs
+            if args and classify_transport_operation("bot", name) == TransportOperationKind.NON_IDEMPOTENT_WRITE:
+                # aiogram supports positional arguments. Preserve the original
+                # call while exposing its named payload to the publication fence.
+                try:
+                    bound = inspect.signature(attr).bind(*args, **kwargs)
+                except ValueError:
+                    bound = None
+                if bound is not None:
+                    fields = {**kwargs, **bound.arguments}
             return await self._policy.execute(
                 backend="bot",
                 key=f"{self._label}.{name}",
                 op_name=name,
-                func=lambda: attr(*args, **kwargs),
+                func=lambda: self._invoke(name, lambda: attr(*args, **kwargs), fields),
             )
 
         return _wrapped

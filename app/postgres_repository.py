@@ -133,6 +133,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     # LOW LEVEL
     # =========================================================
 
+    def close_all_connections(self) -> None:
+        self.client.close_all_connections()
+
     def ensure_configured(self) -> None:
         self.client.ensure_driver()
         if not self.client.is_configured():
@@ -524,6 +527,20 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             UNIQUE(idempotency_key)
         );
 
+        CREATE TABLE IF NOT EXISTS telegram_transport_cooldowns (
+            scope_key TEXT PRIMARY KEY,
+            blocked_until TIMESTAMPTZ NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS mtproto_send_intents (
+            attempt_id BIGINT NOT NULL REFERENCES delivery_attempts(id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+            fingerprint TEXT NOT NULL,
+            random_ids BIGINT[] NOT NULL CHECK(cardinality(random_ids) BETWEEN 1 AND 100),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY(attempt_id, ordinal)
+        );
+
         CREATE TABLE IF NOT EXISTS jobs(
             id BIGSERIAL PRIMARY KEY,
             job_type TEXT NOT NULL,
@@ -827,14 +844,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS account_ids_json TEXT NULL;
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS result_json TEXT NULL;
         ALTER TABLE reaction_jobs ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ NULL;
-        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NULL;
-        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS publish_status TEXT NULL;
-        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS delete_permission_status TEXT NULL;
-        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS publish_error_text TEXT NULL;
-        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS delete_error_text TEXT NULL;
-        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS check_source TEXT NULL;
-
-
         CREATE TABLE IF NOT EXISTS rule_repost_campaign_targets (
             id BIGSERIAL PRIMARY KEY,
             rule_id BIGINT NOT NULL,
@@ -855,6 +864,12 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             updated_at TIMESTAMPTZ NULL,
             created_by BIGINT NULL
         );
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS publish_status TEXT NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS delete_permission_status TEXT NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS publish_error_text TEXT NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS delete_error_text TEXT NULL;
+        ALTER TABLE rule_repost_campaign_targets ADD COLUMN IF NOT EXISTS check_source TEXT NULL;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_repost_campaign_targets_unique
         ON rule_repost_campaign_targets(rule_id, target_id, COALESCE(target_thread_id, -1));
         CREATE INDEX IF NOT EXISTS idx_rule_repost_campaign_targets_rule
@@ -5704,6 +5719,64 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
             conn.commit()
 
+    def get_transport_cooldown(self, scope_key: str) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT GREATEST(0, CEIL(EXTRACT(EPOCH FROM blocked_until-clock_timestamp())))::integer AS seconds
+                       FROM telegram_transport_cooldowns WHERE scope_key=%s""",
+                    (scope_key,),
+                )
+                row = cur.fetchone()
+                return int(row["seconds"]) if row else 0
+
+    def extend_transport_cooldown(self, scope_key: str, delay: int) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO telegram_transport_cooldowns(scope_key,blocked_until)
+                       VALUES (%s,clock_timestamp()+make_interval(secs=>%s))
+                       ON CONFLICT (scope_key) DO UPDATE SET blocked_until =
+                       GREATEST(telegram_transport_cooldowns.blocked_until,EXCLUDED.blocked_until)""",
+                    (scope_key, max(1, int(delay))),
+                )
+
+    def get_or_create_mtproto_random_ids(self, key: str, ordinal: int,
+                                         fingerprint: str, count: int) -> list[int]:
+        """Persist a request identity under the currently claimed ledger row."""
+        import secrets
+
+        if not 1 <= count <= 100 or ordinal < 0:
+            raise ValueError("Invalid MTProto send identity")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM delivery_attempts WHERE idempotency_key=%s AND status='sending' FOR UPDATE",
+                    (key,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise RuntimeError("No claimed MTProto delivery attempt")
+                attempt_id = row["id"]
+                ids = set()
+                while len(ids) < count:
+                    ids.add(secrets.randbits(63) or 1)
+                cur.execute(
+                    """
+                    INSERT INTO mtproto_send_intents(attempt_id,ordinal,fingerprint,random_ids)
+                    VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING
+                    """,
+                    (attempt_id, ordinal, fingerprint, sorted(ids)),
+                )
+                cur.execute(
+                    "SELECT fingerprint,random_ids FROM mtproto_send_intents WHERE attempt_id=%s AND ordinal=%s",
+                    (attempt_id, ordinal),
+                )
+                stored = cur.fetchone()
+                if stored["fingerprint"] != fingerprint or len(stored["random_ids"]) != count:
+                    raise ValueError("MTProto publication identity mismatch")
+                return list(stored["random_ids"])
+
     def get_delivery_attempt_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -5975,8 +6048,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SET status = %s, error_text = %s, updated_at = NOW()
                     WHERE idempotency_key = %s
                       AND status NOT IN ('accepted', 'verified')
+                      AND (status <> 'failed_after_send' OR %s = 'failed_after_send')
                     """,
-                    (normalized, (error_text or "")[:1000], str(idempotency_key)),
+                    (normalized, (error_text or "")[:1000], str(idempotency_key), normalized),
                 )
                 updated = int(cur.rowcount or 0) > 0
             conn.commit()
