@@ -524,6 +524,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             UNIQUE(idempotency_key)
         );
 
+        CREATE TABLE IF NOT EXISTS telegram_transport_cooldowns (
+            scope_key TEXT PRIMARY KEY,
+            blocked_until TIMESTAMPTZ NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS mtproto_send_intents (
             attempt_id BIGINT NOT NULL,
             ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
@@ -5713,6 +5718,28 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
             conn.commit()
 
+    def get_transport_cooldown(self, scope_key: str) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT GREATEST(0, CEIL(EXTRACT(EPOCH FROM blocked_until-clock_timestamp())))::integer AS seconds
+                       FROM telegram_transport_cooldowns WHERE scope_key=%s""",
+                    (scope_key,),
+                )
+                row = cur.fetchone()
+                return int(row["seconds"]) if row else 0
+
+    def extend_transport_cooldown(self, scope_key: str, delay: int) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO telegram_transport_cooldowns(scope_key,blocked_until)
+                       VALUES (%s,clock_timestamp()+make_interval(secs=>%s))
+                       ON CONFLICT (scope_key) DO UPDATE SET blocked_until =
+                       GREATEST(telegram_transport_cooldowns.blocked_until,EXCLUDED.blocked_until)""",
+                    (scope_key, max(1, int(delay))),
+                )
+
     def get_or_create_mtproto_random_ids(self, key: str, ordinal: int,
                                          fingerprint: str, count: int) -> list[int]:
         """Persist a request identity under the currently claimed ledger row."""
@@ -6020,8 +6047,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SET status = %s, error_text = %s, updated_at = NOW()
                     WHERE idempotency_key = %s
                       AND status NOT IN ('accepted', 'verified')
+                      AND (status <> 'failed_after_send' OR %s = 'failed_after_send')
                     """,
-                    (normalized, (error_text or "")[:1000], str(idempotency_key)),
+                    (normalized, (error_text or "")[:1000], str(idempotency_key), normalized),
                 )
                 updated = int(cur.rowcount or 0) > 0
             conn.commit()

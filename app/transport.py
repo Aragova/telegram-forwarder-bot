@@ -11,7 +11,7 @@ from app.transport_policy import (
     build_sender_telethon_upload_policy,
 )
 
-from app.send_intent import observe_publication
+from app.send_intent import observe_publication, run_with_cooldown
 from app.transport_operation import TransportOperationKind, classify_transport_operation
 
 logger = logging.getLogger("forwarder.transport")
@@ -48,7 +48,14 @@ class BotTransportProxy:
         else:
             items = kwargs.get("media") or kwargs.get("message_ids")
         count = len(items) if isinstance(items, (list, tuple)) else None
-        return await observe_publication(call, bot_result=True, expected_count=count)
+        async def publish():
+            return await observe_publication(call, bot_result=True, expected_count=count)
+
+        bot_id = getattr(self._bot, "id", None)
+        return await run_with_cooldown(
+            publish, account_scope=f"bot:{bot_id}" if bot_id else None,
+            backend="bot", op_name=name,
+        )
 
     async def __call__(self, *args, **kwargs):
         method = args[0] if args else kwargs.get("method")

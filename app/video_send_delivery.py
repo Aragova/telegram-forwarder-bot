@@ -175,57 +175,63 @@ class VideoSendDelivery:
                     caption_entities_json=caption_payload["caption_entities_json"],
                     caption_send_mode=caption_payload["selected_mode"],
                 )
-        except VideoPreSendError as exc:
-            # The Telegram request has not started. This row may safely
-            # transition back to failed_before_send for a worker retry.
-            error_text = str(exc)
-            logger.warning("VIDEO_SEND_PREFLIGHT_FAILED | delivery_id=%s | action=safe_retry | reason=%s", delivery_id, error_text)
-            if has_attempt_ledger:
-                await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=error_text)
-            return {
-                "ok": False, "fallback_to_legacy": False,
-                "retryable": True, "accepted": False,
-                "error_text": error_text,
-            }
-        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited) as exc:
-            # Telegram explicitly rejected this request before publishing it.
-            # Release the ledger for a delayed worker retry; do not confuse
-            # this with an ambiguous timeout after Telegram might have posted.
-            if isinstance(exc, TransportRateLimited):
-                delay = max(1, exc.retry_after_seconds)
+        except (VideoPreSendError, TelegramRetryAfter, FloodWaitError, TransportRateLimited, TelegramEntityTooLarge) as exc:
+            if intent.possible_write:
+                error = "video_send_accepted_target_id_unresolved_non_retryable"
+                if has_attempt_ledger:
+                    await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send", error_text=error)
+                return {"ok": False, "accepted": True, "retryable": False, "fallback_to_legacy": False, "error_text": error, "manual_review_required": True}
+            if isinstance(exc, VideoPreSendError):
+                # The Telegram request has not started. This row may safely
+                # transition back to failed_before_send for a worker retry.
+                error_text = str(exc)
+                logger.warning("VIDEO_SEND_PREFLIGHT_FAILED | delivery_id=%s | action=safe_retry | reason=%s", delivery_id, error_text)
+                if has_attempt_ledger:
+                    await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=error_text)
+                return {
+                    "ok": False, "fallback_to_legacy": False,
+                    "retryable": True, "accepted": False,
+                    "error_text": error_text,
+                }
+            elif isinstance(exc, (TelegramRetryAfter, FloodWaitError, TransportRateLimited)):
+                # Telegram explicitly rejected this request before publishing it.
+                # Release the ledger for a delayed worker retry; do not confuse
+                # this with an ambiguous timeout after Telegram might have posted.
+                if isinstance(exc, TransportRateLimited):
+                    delay = max(1, exc.retry_after_seconds)
+                else:
+                    delay = max(1, int(exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after))
+                error_text = f"{type(exc).__name__}: retry_after={delay}"
+                logger.warning(
+                    "VIDEO_SEND_RATE_LIMITED | delivery_id=%s | rule_id=%s | retry_after=%s | action=retry_after_rejection",
+                    delivery_id, rule_id, delay,
+                )
+                if has_attempt_ledger:
+                    await run_db(
+                        owner.db.mark_delivery_attempt_failed, idempotency_key,
+                        status="failed_before_send", error_text=error_text,
+                    )
+                return {
+                    "ok": False, "fallback_to_legacy": False, "retryable": True,
+                    "accepted": False, "retry_after_seconds": delay,
+                    "error_text": error_text,
+                }
             else:
-                delay = max(1, int(exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after))
-            error_text = f"{type(exc).__name__}: retry_after={delay}"
-            logger.warning(
-                "VIDEO_SEND_RATE_LIMITED | delivery_id=%s | rule_id=%s | retry_after=%s | action=retry_after_rejection",
-                delivery_id, rule_id, delay,
-            )
-            if has_attempt_ledger:
-                await run_db(
-                    owner.db.mark_delivery_attempt_failed, idempotency_key,
-                    status="failed_before_send", error_text=error_text,
+                error_text = f"TelegramEntityTooLarge: {exc}"
+                logger.error(
+                    "VIDEO_SEND_SIZE_REJECTED | delivery_id=%s | rule_id=%s | file_size_bytes=%s | retryable=False",
+                    delivery_id,
+                    rule_id,
+                    Path(processed_video_path).stat().st_size,
                 )
-            return {
-                "ok": False, "fallback_to_legacy": False, "retryable": True,
-                "accepted": False, "retry_after_seconds": delay,
-                "error_text": error_text,
-            }
-        except TelegramEntityTooLarge as exc:
-            error_text = f"TelegramEntityTooLarge: {exc}"
-            logger.error(
-                "VIDEO_SEND_SIZE_REJECTED | delivery_id=%s | rule_id=%s | file_size_bytes=%s | retryable=False",
-                delivery_id,
-                rule_id,
-                Path(processed_video_path).stat().st_size,
-            )
-            if has_attempt_ledger:
-                await run_db(
-                    owner.db.mark_delivery_attempt_failed,
-                    idempotency_key,
-                    status="failed_before_send",
-                    error_text=error_text,
-                )
-            return {"ok": False, "fallback_to_legacy": False, "retryable": False, "error_text": error_text}
+                if has_attempt_ledger:
+                    await run_db(
+                        owner.db.mark_delivery_attempt_failed,
+                        idempotency_key,
+                        status="failed_before_send",
+                        error_text=error_text,
+                    )
+                return {"ok": False, "fallback_to_legacy": False, "retryable": False, "error_text": error_text}
         if isinstance(sent_msg, TelethonSendOutcome):
             # Unknown result / wrong peer: do not guess the target message id,
             # call reaction handlers, or permit another Telegram send.

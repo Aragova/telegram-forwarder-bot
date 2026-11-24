@@ -7,7 +7,8 @@ from pathlib import Path
 from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo
 
 from .config import settings
-from .send_intent import authorize_next_album_member
+from .send_intent import PublicationWriteUnavailable, authorize_next_album_member
+from .transport_policy import TransportRateLimited
 from . import sender_primitives as _sender_primitives
 from .telegram_send_result import telegram_send_result_from_raw
 from .telethon_authoritative_resolver import TelethonSendOutcome, telethon_transport_failed, telethon_not_attempted
@@ -112,6 +113,8 @@ class SenderReuploadHelpers:
             }
 
         except Exception as exc:
+            if isinstance(exc, (TransportRateLimited, PublicationWriteUnavailable)) and not sent_ids:
+                raise
             return {
                 "ok": False,
                 "transport_accepted": bool(sent_ids),
@@ -315,6 +318,8 @@ class SenderReuploadHelpers:
                 "error_text": telethon_result.get("error_text") or "send_media_group вернул пустой результат",
             }
 
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.exception("reupload_album: ошибка reupload альбома: %s", exc)
             return {

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -11,10 +12,13 @@ from typing import Any
 from aiogram.exceptions import (
     TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, TelegramRetryAfter,
 )
-from telethon import functions
+from telethon import functions, utils
 from telethon.errors import BadRequestError, ForbiddenError, FloodWaitError, SlowModeWaitError, RandomIdDuplicateError
 
 from .runtime_utils import run_db
+from .transport_policy import TransportRateLimited
+
+logger = logging.getLogger("forwarder.transport")
 
 
 class PublicationWriteUnavailable(RuntimeError):
@@ -72,6 +76,35 @@ def _definite_rejection(exc: Exception) -> bool:
 def _check_fence(intent: PublicationIntent) -> None:
     if intent.blocked:
         raise PublicationAlreadyAttempted("Previous publication must be reconciled; no alternate send")
+
+
+async def run_with_cooldown(call, *, account_scope, backend, op_name, peer_scope=None):
+    intent = _intent.get()
+    if intent is None or not account_scope:
+        return await call()
+    repo = intent.repository
+    get_wait = getattr(repo, "get_transport_cooldown", None)
+    extend = getattr(repo, "extend_transport_cooldown", None)
+    if not callable(get_wait) or not callable(extend):
+        return await call()
+    try:
+        scopes = [account_scope] + ([peer_scope] if peer_scope else [])
+        remaining = max([await run_db(get_wait, scope) for scope in scopes])
+    except Exception as exc:
+        intent.blocked = True
+        raise PublicationWriteUnavailable("Could not read shared Telegram cooldown") from exc
+    if remaining > 0:
+        raise TransportRateLimited(retry_after_seconds=remaining, backend=backend, op_name=op_name, key=account_scope)
+    try:
+        return await call()
+    except (TelegramRetryAfter, FloodWaitError, SlowModeWaitError) as exc:
+        seconds = exc.retry_after if isinstance(exc, TelegramRetryAfter) else exc.seconds
+        scope = peer_scope if isinstance(exc, SlowModeWaitError) and peer_scope else account_scope
+        try:
+            await run_db(extend, scope, max(1, int(seconds)) + 1)
+        except Exception:
+            logger.exception("TRANSPORT_SHARED_COOLDOWN_PERSIST_FAILED | backend=%s", backend)
+        raise
 
 
 async def observe_publication(call, *, bot_result=False, expected_count=None):
@@ -192,9 +225,23 @@ def publication_client_class(base):
                     intent.blocked = True
                     raise PublicationWriteUnavailable("Batched publication RPC is not supported")
                 item, members = publications[0]
-                await _bind_identity(self, intent, item, members)
-                return await observe_publication(
-                    lambda: invoke(request, ordered=ordered, flood_sleep_threshold=0),
+                auth_key_id = getattr(getattr(self.session, "auth_key", None), "key_id", None)
+                account_scope = f"mtproto:{auth_key_id}"
+                peer = getattr(item, "peer", None) or getattr(item, "to_peer", None)
+                try:
+                    peer_scope = f"{account_scope}:{utils.get_peer_id(peer)}"
+                except (TypeError, ValueError):
+                    peer_scope = None
+
+                async def publish():
+                    await _bind_identity(self, intent, item, members)
+                    return await observe_publication(
+                        lambda: invoke(request, ordered=ordered, flood_sleep_threshold=0),
+                    )
+
+                return await run_with_cooldown(
+                    publish, account_scope=account_scope, peer_scope=peer_scope,
+                    backend="telethon", op_name="publish",
                 )
             finally:
                 _single_rpc.reset(token)

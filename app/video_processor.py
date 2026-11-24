@@ -13,6 +13,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from .bot_api_session import create_bot_api_session
 from .transport_policy import TransportRateLimited
+from .send_intent import PublicationWriteUnavailable
 from .subprocess_safety import (
     communicate_safely,
     await_critical_cleanup,
@@ -1510,6 +1511,8 @@ class VideoProcessor:
 
                 return sent_msg
 
+            except PublicationWriteUnavailable as exc:
+                raise VideoPreSendError(str(exc)) from exc
             except VideoPreSendError as exc:
                 self._stage_failed(stage_logger, "send", error_text=str(exc), extra={"retryable": True, "accepted": False})
                 logger.warning("VIDEO_SEND_PREFLIGHT_FAILED | action=safe_retry | error=%s", exc)

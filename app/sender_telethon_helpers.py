@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from telethon.tl import types as tl_types
-from telethon.errors import BadRequestError
+from telethon.errors import BadRequestError, RandomIdDuplicateError
+
+from .send_intent import PublicationWriteUnavailable
+from .transport_policy import TransportRateLimited
 
 from .background_tasks import start_background_task
 from .config import settings
@@ -311,6 +314,8 @@ class SenderTelethonHelpers:
         send_started_at = datetime.now(timezone.utc)
         try:
             sent = await self.owner.telethon.send_message(**send_kwargs)
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.warning("TELETHON_TEXT_SEND | FAILED | target=%s | thread=%s | error=%s", target_id, target_thread_id, exc)
             return telethon_transport_failed(str(exc))
@@ -433,6 +438,8 @@ class SenderTelethonHelpers:
             )
             return TelethonSendOutcome(True, True, bool(resolved.ok), sent_id, [sent_id] if sent_id else [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method=resolved.resolution_method, error_text=resolved.error_text)
 
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.warning(
                 "TELETHON_FILE_SEND | FAILED_ORIGINAL_MEDIA | target=%s | thread=%s | error=%s",
@@ -440,7 +447,7 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
-            if original_send_started and not isinstance(exc, BadRequestError):
+            if original_send_started and (not isinstance(exc, BadRequestError) or isinstance(exc, RandomIdDuplicateError)):
                 logger.warning("TELETHON_FILE_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
                 return telethon_transport_failed(f"original_media_send_uncertain: {exc}")
 
@@ -545,6 +552,8 @@ class SenderTelethonHelpers:
             )
             return TelethonSendOutcome(True, True, bool(resolved.ok), sent_id, [sent_id] if sent_id else [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method=resolved.resolution_method, error_text=resolved.error_text)
 
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.warning(
                 "TELETHON_FILE_SEND | FAILED_FILE_PATH | target=%s | thread=%s | file=%s | error=%s",
@@ -688,6 +697,8 @@ class SenderTelethonHelpers:
                 target_thread_id,
             )
 
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.warning(
                 "TELETHON_ALBUM_SEND | FAILED_ORIGINAL_MEDIA | target=%s | thread=%s | error=%s",
@@ -695,7 +706,7 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
-            if original_send_started and not isinstance(exc, BadRequestError):
+            if original_send_started and (not isinstance(exc, BadRequestError) or isinstance(exc, RandomIdDuplicateError)):
                 logger.warning("TELETHON_ALBUM_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
                 return telethon_transport_failed(
                     f"original_album_send_uncertain: {exc}"
@@ -810,6 +821,8 @@ class SenderTelethonHelpers:
                 "resolution_method": resolved.resolution_method,
             }
 
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.exception(
                 "TELETHON_ALBUM_SEND | FAILED_FILE_PATH | target=%s | thread=%s | error=%s",
