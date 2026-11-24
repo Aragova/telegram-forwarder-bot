@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 
@@ -108,11 +109,21 @@ class BotTransportProxy:
             return attr
 
         async def _wrapped(*args, **kwargs):
+            fields = kwargs
+            if args and classify_transport_operation("bot", name) == TransportOperationKind.NON_IDEMPOTENT_WRITE:
+                # aiogram supports positional arguments. Preserve the original
+                # call while exposing its named payload to the publication fence.
+                try:
+                    bound = inspect.signature(attr).bind(*args, **kwargs)
+                except ValueError:
+                    bound = None
+                if bound is not None:
+                    fields = {**kwargs, **bound.arguments}
             return await self._policy.execute(
                 backend="bot",
                 key=f"{self._label}.{name}",
                 op_name=name,
-                func=lambda: self._invoke(name, lambda: attr(*args, **kwargs), kwargs),
+                func=lambda: self._invoke(name, lambda: attr(*args, **kwargs), fields),
             )
 
         return _wrapped

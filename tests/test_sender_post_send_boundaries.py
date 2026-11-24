@@ -962,7 +962,12 @@ def _run_album_delivery_one_by_one_accepted_unresolved(*, first_resolved: bool):
     events = []
 
     class RuntimeRepo:
-        pass
+        def __init__(self):
+            self.accepted = []
+
+        def mark_delivery_attempt_accepted(self, key, **kwargs):
+            self.accepted.append((key, kwargs))
+            return True
 
     class RuntimeOwner(SenderService):
         def __init__(self):
@@ -1054,6 +1059,7 @@ def _run_album_delivery_one_by_one_accepted_unresolved(*, first_resolved: bool):
             "@src",
             "-1001",
             None,
+            idempotency_key="album-test",
         )
     )
     return ok, owner, events
@@ -1075,6 +1081,7 @@ def test_album_delivery_one_by_one_second_accepted_unresolved_terminal_faulty():
     assert terminal and terminal[0][2] == "terminal_manual_review"
     assert terminal[0][4]["returned_candidate_ids"] == [1158]
     assert terminal[0][4]["resolved_authoritative_message_ids_before_unresolved"] == [201]
+    assert owner.db.accepted == [("album-test", {"sent_message_ids": [201], "telegram_method": "one_by_one_fallback"})]
     assert not [event for event in events if event[0] == "final_failure" and event[1] == "album_pipeline_final_failure"]
 
 
@@ -1088,6 +1095,7 @@ def test_album_delivery_one_by_one_first_accepted_unresolved_terminal_faulty():
     terminal = [event for event in events if event[1] == "one_by_one_accepted_target_id_unresolved"]
     assert terminal and terminal[0][4]["sent_count"] == 1
     assert terminal[0][4]["resolved_authoritative_message_ids_before_unresolved"] == []
+    assert owner.db.accepted == []
 
 
 def test_legacy_video_post_send_failures_keep_no_resend_result(tmp_path, monkeypatch):

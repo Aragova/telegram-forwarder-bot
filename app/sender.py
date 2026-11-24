@@ -1729,11 +1729,11 @@ class SenderService:
             rule = await run_db(self.db.get_rule, int(rule_id))
             if not rule:
                 raise RuntimeError(f"Правило #{rule_id} не найдено для video_delivery")
-            # An exception from the legacy pipeline is not proof of rejection.
-            publication_possible = True
+            # The transport scope records entry into a publication RPC.
             with publication_scope(intent):
                 outcome = await self._deliver_single_video(rule, int(delivery_id), int(message_id), str(source_channel), str(target_id), target_thread_id)
             if isinstance(outcome, dict) and outcome.get("accepted_unresolved"):
+                publication_possible = True
                 # The media may already be published. Never turn this into a
                 # retryable download/send job or a second upload.
                 if has_attempt_ledger:
@@ -1802,7 +1802,7 @@ class SenderService:
             return bool(ok)
         except Exception as exc:
             if has_attempt_ledger and acquired:
-                failure_status = "failed_after_send" if publication_possible else "failed_before_send"
+                failure_status = "failed_after_send" if publication_possible or intent.possible_write else "failed_before_send"
                 await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status=failure_status, error_text=str(exc))
                 logger.info("DELIVERY_ATTEMPT_FAILED | operation=video_send | delivery_id=%s | key=%s | status=%s", delivery_id, idempotency_key, failure_status)
             logger.warning(

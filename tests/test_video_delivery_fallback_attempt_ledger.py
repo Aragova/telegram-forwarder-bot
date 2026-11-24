@@ -224,3 +224,41 @@ def test_legacy_video_exception_after_success_does_not_release_attempt():
             rule_id=1, delivery_id=46, message_id=14, source_channel="src", target_id="dst",
         ))
     assert [c[2]["status"] for c in repo.calls if c[0] == "failed"] == ["failed_after_send"]
+
+
+def test_legacy_video_failure_before_publication_rpc_is_retryable():
+    import pytest
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def fail_before(*_args, **_kwargs):
+        raise RuntimeError("preflight database unavailable")
+
+    service._deliver_single_video = fail_before
+    with pytest.raises(RuntimeError, match="preflight database unavailable"):
+        asyncio.run(service.execute_video_delivery_from_job(
+            rule_id=1, delivery_id=47, message_id=15, source_channel="src", target_id="dst",
+        ))
+    assert [c[2]["status"] for c in repo.calls if c[0] == "failed"] == ["failed_before_send"]
+
+
+def test_legacy_video_exception_after_ambiguous_rpc_never_releases_attempt():
+    import pytest
+    from app.send_intent import observe_publication
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def lost_reply():
+        raise TimeoutError("Telegram reply lost")
+
+    async def deliver(*_args, **_kwargs):
+        return await observe_publication(lost_reply)
+
+    service._deliver_single_video = deliver
+    with pytest.raises(TimeoutError, match="Telegram reply lost"):
+        asyncio.run(service.execute_video_delivery_from_job(
+            rule_id=1, delivery_id=49, message_id=16, source_channel="src", target_id="dst",
+        ))
+    assert [c[2]["status"] for c in repo.calls if c[0] == "failed"] == ["failed_after_send"]

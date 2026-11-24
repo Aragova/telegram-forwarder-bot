@@ -1237,7 +1237,11 @@ class RepostAlbumDelivery:
         )
         attempts_debug.append({"stage": "send_album_one_by_one", **one_by_one_result})
         if idempotency_key:
-            accepted_ids = normalize_valid_sent_message_ids(one_by_one_result.get("sent_message_ids") or [])
+            accepted_ids = normalize_valid_sent_message_ids(
+                one_by_one_result.get("sent_message_ids")
+                or one_by_one_result.get("resolved_authoritative_message_ids_before_unresolved")
+                or []
+            )
             if accepted_ids:
                 await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
                              sent_message_ids=accepted_ids, telegram_method="one_by_one_fallback")

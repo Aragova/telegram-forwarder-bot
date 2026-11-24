@@ -224,3 +224,21 @@ def test_self_peer_resolves_to_concrete_authorized_account(account_id):
                 await client(_request())
                 assert client.calls == [(100, 0, 0)]
     asyncio.run(scenario())
+
+
+def test_positional_album_payload_is_checked_for_partial_response():
+    class PositionalBot(RawBot):
+        async def send_media_group(self, chat_id, media):
+            return await super().send_media_group(chat_id=chat_id, media=media)
+
+    async def scenario():
+        raw = PositionalBot()
+        intent = PublicationIntent(MemoryRepository(), "positional")
+        with publication_scope(intent):
+            await _bot(raw).send_media_group(1, [object(), object()])
+            assert intent.uncertain
+            with pytest.raises(PublicationAlreadyAttempted):
+                authorize_next_album_member()
+        assert raw.calls == 1
+
+    asyncio.run(scenario())
