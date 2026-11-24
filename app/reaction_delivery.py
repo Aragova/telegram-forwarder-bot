@@ -4,6 +4,7 @@ import logging
 import random
 import asyncio
 import time
+from datetime import datetime
 from typing import Any
 
 from telethon import functions, types
@@ -273,7 +274,8 @@ class ReactionDelivery:
 
         entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
         try:
-            fetched = await owner.telethon.get_messages(entity, ids=ids)
+            reader = getattr(owner, "telethon_read", owner.telethon)
+            fetched = await reader.get_messages(entity, ids=ids)
             fetched_list = fetched if isinstance(fetched, list) else [fetched]
             fetched_by_id = {int(m.id): m for m in fetched_list if m}
         except Exception:
@@ -373,6 +375,7 @@ class ReactionDelivery:
         delivery_id: int | None = None,
         max_age_seconds: int = 300,
         allow_unverified_self_loop_target: bool = False,
+        publication_intent: tuple[str, datetime] | None = None,
     ) -> dict[str, Any]:
         owner = self.owner
         rule_id = int(getattr(rule, "id", 0) or 0)
@@ -494,7 +497,10 @@ class ReactionDelivery:
                     message_id=int(sent_message_id),
                     account_ids=account_ids,
                     max_attempts=3,
+                    **({"publication_intent": publication_intent} if publication_intent is not None else {}),
                 )
+                if publication_intent is not None and job_id is None:
+                    return {"applied": False, "enqueued": False, "reason": "enqueue_failed"}
                 logger.info(
                     "REACTION_JOB_ENQUEUED | tenant_id=%s | rule_id=%s | job_id=%s | target_id=%s | message_id=%s | accounts=%s",
                     plan.tenant_id,

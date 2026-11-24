@@ -247,11 +247,12 @@ class TelethonAuthoritativeMessageResolver:
         source_message_ids: set[int] | None, target_thread_id: int | None,
         before_max_message_id: int | None, send_started_at: datetime,
         target_is_broadcast_channel: bool, pending_mask: list[bool] | None = None,
+        publication_inbox: Any = None,
     ) -> list[int]:
         """Resolve the complete vector in its original order, never partial groups."""
         from .telegram_publication import publication_candidate_mask, publication_pairs, verified_published_message
 
-        inbox = getattr(self.telethon,"publication_inbox",None)
+        inbox = publication_inbox if publication_inbox is not None else getattr(self.telethon,"publication_inbox",None)
         mask = publication_candidate_mask(scheduled_ids,pending_mask)
         if inbox is None or not mask:
             return []

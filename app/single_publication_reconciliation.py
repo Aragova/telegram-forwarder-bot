@@ -5,12 +5,14 @@ This module never issues a Telegram send or re-upload.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from .runtime_utils import run_db
 from .delivery_idempotency import build_delivery_idempotency_key
 from .telethon_authoritative_resolver import TelethonAuthoritativeMessageResolver
+from .telegram_publication import PublicationInbox
 
 logger = logging.getLogger("forwarder.publication")
 
@@ -81,21 +83,27 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
     if receipt["published_ids"] is None and receipt.get("expired"):
         return await _wait_or_expire(owner,receipt,key,"publication_receipt_expired_no_resend")
 
-    inbox = getattr(owner.telethon,"publication_inbox",None)
-    if receipt["published_ids"] is None and (inbox is None or inbox.sender_account_id != receipt["sender_account_id"]):
-        return await _wait_or_expire(owner,receipt,key,"publication_sender_unavailable")
-
     target_id = receipt["target_peer_id"]
     source_ids = receipt["source_message_ids"]
     source_guard = set(source_ids) if receipt["source_channel"] == str(target_id) else None
     published_ids = receipt["published_ids"]
     if published_ids is None:
         try:
-            entity = await owner.telethon.get_entity(target_id)
-            resolver = TelethonAuthoritativeMessageResolver(owner.telethon)
+            reader = getattr(owner, "telethon_read", owner.telethon)
+            inbox = getattr(reader, "publication_inbox", None)
+            if inbox is None:
+                # Reading exact durable mappings does not require enabling sends.
+                me = await asyncio.wait_for(reader.get_me(), timeout=30)
+                if getattr(me, "id", None) != receipt["sender_account_id"]:
+                    return await _wait_or_expire(owner, receipt, key, "publication_sender_unavailable")
+                inbox = PublicationInbox(owner.db, me.id)
+            if inbox.sender_account_id != receipt["sender_account_id"]:
+                return await _wait_or_expire(owner, receipt, key, "publication_sender_unavailable")
+            entity = await reader.get_entity(target_id)
+            resolver = TelethonAuthoritativeMessageResolver(reader)
             published_ids = await resolver.resolve_scheduled_publications(
                 target_entity=entity,target_id=target_id,scheduled_ids=receipt["scheduled_ids"],
-                pending_mask=receipt.get("pending_mask"),
+                pending_mask=receipt.get("pending_mask"), publication_inbox=inbox,
                 source_message_ids=source_guard,target_thread_id=receipt["target_thread_id"],
                 before_max_message_id=None,send_started_at=receipt["send_started_at"],
                 target_is_broadcast_channel=bool(getattr(entity,"broadcast",False)
@@ -141,14 +149,19 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
                         rule=rule,target_id=str(target_id),sent_message_id=reaction_id,
                         source_channel=receipt["source_channel"],source_message_ids=source_ids,
                         delivery_id=receipt["delivery_ids"][0],max_age_seconds=86400,
+                        publication_intent=(key, receipt["send_started_at"]),
                     )
             result = result if isinstance(result,dict) else {"applied":bool(result)}
-            completed = bool(result.get("applied") or result.get("enqueued") or result.get("reason") in {"disabled","no_accounts","rule_target_changed"})
-            await run_db(owner.db.finish_publication_reaction,key,"done" if completed else "uncertain",result,expected_started_at=receipt["send_started_at"])
         except Exception as exc:
-            await run_db(owner.db.finish_publication_reaction,key,"uncertain",
-                         {"reason":type(exc).__name__},expected_started_at=receipt["send_started_at"])
+            result = {"reason": type(exc).__name__}
             logger.warning("PUBLICATION_REACTION_UNCERTAIN | delivery_ids=%s",receipt["delivery_ids"])
+        if result.get("reason") == "enqueue_failed":
+            # The tenant queue insert and receipt completion share a transaction.
+            # A committed insert cannot be rearmed even if its response was lost.
+            await run_db(owner.db.finish_publication_reaction,key,"pending",result,expected_started_at=receipt["send_started_at"])
+            return _pending()
+        completed = bool(result.get("applied") or result.get("enqueued") or result.get("reason") in {"disabled","no_accounts","rule_target_changed"})
+        await run_db(owner.db.finish_publication_reaction,key,"done" if completed else "uncertain",result,expected_started_at=receipt["send_started_at"])
     return {"ok":True,"accepted":True,"sent_message_ids":published_ids}
 
 

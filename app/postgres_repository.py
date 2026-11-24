@@ -2262,9 +2262,23 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 row = cur.fetchone()
         return dict(row) if row else None
 
-    def enqueue_reaction_job(self, *, tenant_id: int, rule_id: int, target_id: str, message_id: int, account_ids: list[int] | None = None, not_before: str | None = None, max_attempts: int = 3, reaction_payload: dict[str, Any] | None = None, delivery_id: int | None = None, account_id: int | None = None, run_at: str | None = None) -> int | None:
+    def enqueue_reaction_job(self, *, tenant_id: int, rule_id: int, target_id: str, message_id: int, account_ids: list[int] | None = None, not_before: str | None = None, max_attempts: int = 3, reaction_payload: dict[str, Any] | None = None, delivery_id: int | None = None, account_id: int | None = None, run_at: str | None = None, publication_intent: tuple[str, datetime] | None = None) -> int | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                if publication_intent is not None:
+                    key, started_at = publication_intent
+                    cur.execute(
+                        """
+                        SELECT 1 FROM telegram_publication_receipts
+                        WHERE idempotency_key=%s AND send_started_at=%s
+                          AND reaction_state='dispatching' AND tenant_id=%s AND rule_id=%s
+                          AND target_peer_id::text=%s AND %s=ANY(published_ids)
+                        FOR UPDATE
+                        """,
+                        (key, started_at, tenant_id, rule_id, str(target_id), message_id),
+                    )
+                    if not cur.fetchone():
+                        return None
                 cur.execute(
                     """
                     INSERT INTO reaction_jobs(
@@ -2277,6 +2291,20 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (tenant_id, rule_id, delivery_id, target_id, message_id, account_id, _json_dumps(reaction_payload) or "{}", max_attempts, run_at, _json_dumps(account_ids), not_before),
                 )
                 row = cur.fetchone()
+                if publication_intent is not None:
+                    if not row or row.get("id") is None:
+                        raise RuntimeError("Reaction queue insert returned no ID")
+                    cur.execute(
+                        """
+                        UPDATE telegram_publication_receipts
+                        SET reaction_state='done', reaction_result=%s::jsonb, reaction_updated_at=NOW()
+                        WHERE idempotency_key=%s AND send_started_at=%s AND reaction_state='dispatching'
+                        """,
+                        (_json_dumps({"enqueued": True, "job_id": int(row["id"]), "reason": "job_enqueued"}),
+                         key, started_at),
+                    )
+                    if cur.rowcount != 1:
+                        raise RuntimeError("Publication reaction intent changed")
             conn.commit()
         return int(row["id"]) if row and row.get("id") is not None else None
 
@@ -6279,7 +6307,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         return claimed
 
     def finish_publication_reaction(self, key: str, state: str, result: dict[str, Any], *, expected_started_at: datetime) -> None:
-        if state not in {"done","uncertain"}:
+        if state not in {"done","uncertain"} and not (state == "pending" and result.get("reason") == "enqueue_failed"):
             raise ValueError("Invalid reaction outcome")
         with self.connect() as conn:
             with conn.cursor() as cur:

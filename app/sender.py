@@ -1085,6 +1085,7 @@ class SenderService:
         delivery_id: int | None = None,
         max_age_seconds: int = 300,
         allow_unverified_self_loop_target: bool = False,
+        publication_intent: tuple[str, datetime] | None = None,
     ) -> dict:
         from .reaction_delivery import ReactionDelivery
         kwargs = {
@@ -1098,6 +1099,8 @@ class SenderService:
         }
         if allow_unverified_self_loop_target:
             kwargs["allow_unverified_self_loop_target"] = True
+        if publication_intent is not None:
+            kwargs["publication_intent"] = publication_intent
         try:
             return await asyncio.wait_for(
                 ReactionDelivery(self)._add_reaction_for_rule_if_possible(**kwargs),

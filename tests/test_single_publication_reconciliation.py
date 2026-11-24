@@ -85,3 +85,75 @@ def test_publication_key_matches_sender_jobs():
     assert publication_key_for_job("repost_album",payload) == "rule:149:target:-100123:media_group:abc:album"
     assert publication_key_for_job("video_send",payload) == publication_key_for_job("video_delivery",payload)
     assert publication_key_for_job("video_download",payload) is None
+
+
+def test_read_only_reconciliation_and_safe_reaction_retry():
+    class Repo:
+        def __init__(self):
+            self.row = dict(delivery_ids=[12], rule_id=149, tenant_id=1, sender_account_id=1,
+                            target_peer_id=-100, target_thread_id=None, source_channel="-200",
+                            source_message_ids=[7], scheduled_ids=[2292], published_ids=None,
+                            expired_at=None, send_started_at=datetime.now(timezone.utc),
+                            expired=False, reaction_state="pending", dispatch_stale=False)
+            self.lookups = 0
+
+        def get_publication_receipt(self, key):
+            return dict(self.row)
+
+        def get_telegram_publication_mappings(self, account, peer, ids):
+            assert (account, peer, ids) == (1, -100, [2292])
+            self.lookups += 1
+            return [5181]
+
+        def finalize_publication_receipt(self, key, published_ids, *, expected_started_at):
+            self.row["published_ids"] = published_ids
+
+        def claim_publication_reaction(self, key, published_ids, *, expected_started_at):
+            assert self.row["reaction_state"] == "pending"
+            self.row["reaction_state"] = "dispatching"
+            return True
+
+        def finish_publication_reaction(self, key, state, result, *, expected_started_at):
+            self.row["reaction_state"] = state
+
+        def get_rule(self, rule_id):
+            return SimpleNamespace(id=rule_id, target_id="-100", target_thread_id=None)
+
+    class Reader:
+        account_id = 2
+
+        async def get_me(self):
+            return SimpleNamespace(id=self.account_id)
+
+        async def get_entity(self, peer):
+            return SimpleNamespace(broadcast=True, megagroup=False)
+
+        async def get_messages(self, entity, ids):
+            return SimpleNamespace(id=ids, chat_id=-100, from_scheduled=True,
+                                   post=True, date=datetime.now(timezone.utc))
+
+    async def check():
+        repo, reader = Repo(), Reader()
+        reactions = []
+
+        async def react(**kwargs):
+            assert kwargs["publication_intent"] == ("key", repo.row["send_started_at"])
+            reactions.append(kwargs["sent_message_id"])
+            if len(reactions) == 1:
+                return {"reason": "enqueue_failed"}
+            return {"enqueued": True}
+
+        owner = SimpleNamespace(db=repo, telethon=None, telethon_read=reader,
+                                _add_reaction_for_rule_if_possible=react)
+        assert (await reconcile_pending_single(owner, "key"))["publication_pending"]
+        assert repo.lookups == 0 and not reactions
+        reader.account_id = 1
+        assert (await reconcile_pending_single(owner, "key"))["publication_pending"]
+        assert repo.row["published_ids"] == [5181]
+        assert repo.row["reaction_state"] == "pending"
+        assert (await reconcile_pending_single(owner, "key"))["ok"]
+        assert (await reconcile_pending_single(owner, "key"))["ok"]
+        assert reactions == [5181, 5181]
+        assert not hasattr(reader, "publication_inbox") and owner.telethon is None
+
+    asyncio.run(check())

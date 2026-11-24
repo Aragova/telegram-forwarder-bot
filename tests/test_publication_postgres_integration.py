@@ -376,3 +376,31 @@ def test_publication_deadline_is_checked_after_delivery_row_lock(repo):
             conn.commit()
         assert future.result(timeout=5) is False
     assert repo.get_delivery(deliveries[0])["status"] == "processing"
+
+
+def test_publication_reaction_enqueue_and_receipt_complete_atomically(repo):
+    seeded = seed(repo, 116)
+    key, rule_id, _, _, _, target = seeded
+    assert register(repo, seeded, [41])
+    repo.record_telegram_publication_mappings(123, int(target), [(41, 141)])
+    assert repo.finalize_publication_receipt(key, [141])
+    started = repo.get_publication_receipt(key)["send_started_at"]
+    assert repo.claim_publication_reaction(key, [141], expected_started_at=started)
+    repo.finish_publication_reaction(key, "pending", {"reason": "enqueue_failed"}, expected_started_at=started)
+    assert repo.claim_publication_reaction(key, [141], expected_started_at=started)
+    kwargs = dict(tenant_id=1, rule_id=rule_id, target_id=target, message_id=141,
+                  account_ids=[1], publication_intent=(key, started))
+    assert repo.enqueue_reaction_job(**(kwargs | {"message_id": 142})) is None
+    job_id = repo.enqueue_reaction_job(**kwargs)
+    assert job_id is not None
+    receipt = repo.get_publication_receipt(key)
+    assert receipt["reaction_state"] == "done"
+    # Simulate a lost response after the database commit.
+    repo.finish_publication_reaction(key, "pending", {"reason": "enqueue_failed"}, expected_started_at=started)
+    assert not repo.claim_publication_reaction(key, [141], expected_started_at=started)
+    assert repo.enqueue_reaction_job(**kwargs) is None
+    assert repo.get_publication_receipt(key)["reaction_state"] == "done"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM reaction_jobs WHERE rule_id=%s AND message_id=%s", (rule_id, 141))
+            assert [row["id"] for row in cur.fetchall()] == [job_id]
