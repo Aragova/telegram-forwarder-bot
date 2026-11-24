@@ -168,6 +168,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
         except Exception:
             logger.exception("TELEGRAM_PUBLICATION_MAPPING_HANDLE_FAILED")
 
+    client.flush_publication_inbox = flush_live
     client.add_event_handler(handle,events.Raw(types=types.UpdateDeleteScheduledMessages))
 
     async def bind() -> PublicationInbox:
