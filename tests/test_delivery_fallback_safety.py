@@ -155,3 +155,24 @@ def test_faulty_list_excludes_archived_entries_without_removing_history():
     assert "NOT EXISTS" in sql
     assert "cleared.delivery_id = d.id" in sql
     assert "cleared.event_type = 'faulty_log_cleared'" in sql
+
+
+def test_live_faulty_count_uses_same_filter_as_faulty_list():
+    cur = _Cursor()
+    cur.fetchone = lambda: {"cnt": 3}
+    repo, _ = _repo(cur)
+    assert repo.count_uncleared_faulty_deliveries() == 3
+    repo.get_faulty_deliveries(limit=20)
+    count_sql, list_sql = (statement[0] for statement in cur.statements)
+    for clause in (
+        "d.status = 'faulty'",
+        "d.error_text NOT LIKE 'Self-loop:",
+        "JOIN posts p ON p.id = d.post_id",
+        "JOIN routing r ON r.id = d.rule_id",
+        "NOT EXISTS",
+        "cleared.delivery_id = d.id",
+        "cleared.event_type = 'faulty_log_cleared'",
+    ):
+        assert clause in count_sql
+        assert clause in list_sql
+    assert "LIMIT" not in count_sql

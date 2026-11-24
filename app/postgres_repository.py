@@ -6345,6 +6345,27 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             "active_rules": active_rules,
         }
 
+    def count_uncleared_faulty_deliveries(self) -> int:
+        """Count entries still visible in the admin faulty-delivery list."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
+                    WHERE d.status = 'faulty'
+                      AND (d.error_text IS NULL OR d.error_text NOT LIKE 'Self-loop:%')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM audit_log cleared
+                          WHERE cleared.delivery_id = d.id
+                            AND cleared.event_type = 'faulty_log_cleared'
+                      )
+                    """
+                )
+                return int(cur.fetchone()["cnt"])
+
     def get_faulty_deliveries(self, limit: int = 20):
         with self.connect() as conn:
             with conn.cursor() as cur:
