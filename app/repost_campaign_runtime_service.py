@@ -11,6 +11,7 @@ from app.repost_campaign_service import build_campaign_delete_after_iso, format_
 from app.repost_campaign_top_time import normalize_repost_campaign_top_time_settings
 from app.repost_campaign_view_model import format_campaign_error_text, format_campaign_datetime_text
 from app.saved_post_renderer import normalize_telethon_target
+from app.send_intent import publication_intent
 from app.saved_posts_service import get_saved_post_short_description
 
 
@@ -637,7 +638,8 @@ class RepostCampaignRuntimeService:
         self.repo.mark_campaign_run_message_sending(run_message_id, render_mode=None)
 
         content = saved_post.get("content_json") or saved_post.get("content") or {}
-        render_result = await self.renderer.send(chat_id=target_id, content=content)
+        with publication_intent("campaign", str(run_message_id)):
+            render_result = await self.renderer.send(chat_id=target_id, content=content)
         if not render_result.ok:
             delete_status, delete_error_text = _build_failed_campaign_message_delete_fields(render_result.method)
             self.repo.mark_campaign_run_message_failed(
@@ -779,7 +781,8 @@ class RepostCampaignRuntimeService:
                 error_text = error_text or "Не удалось создать запись публикации рекламной кампании"
                 continue
             self.repo.mark_campaign_run_message_sending(run_message_id, render_mode=None)
-            render_result = await self.renderer.send(chat_id=target["target_id"], content=content)
+            with publication_intent("campaign", str(run_message_id)):
+                render_result = await self.renderer.send(chat_id=target["target_id"], content=content)
             last_render_mode = getattr(render_result, "method", None) or last_render_mode
             if render_result.ok:
                 self.repo.mark_campaign_run_message_sent(run_message_id, sent_message_id=render_result.message_id, sent_message_ids=getattr(render_result, "message_ids", None), render_mode=render_result.method)
@@ -1038,7 +1041,8 @@ class RepostCampaignRuntimeService:
                 "REPOST_CAMPAIGN_LAUNCH_TARGET_SENDING | run_id=%s | target_kind=%s | target_id=%s",
                 run_id, target["target_kind"], target["target_id"]
             )
-            render_result = await self.renderer.send(chat_id=target["target_id"], content=content)
+            with publication_intent("campaign", str(run_message_id)):
+                render_result = await self.renderer.send(chat_id=target["target_id"], content=content)
             any_premium_required = any_premium_required or bool(getattr(render_result, "premium_required", False))
             album_ids = list(getattr(render_result, "message_ids", None) or [])
             is_album_without_ids = bool(render_result.ok and render_result.kind == "album" and not album_ids)
