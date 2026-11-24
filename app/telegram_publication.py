@@ -116,15 +116,16 @@ def prepare_publication_inbox(client: Any, repository: Any):
 
     buffer = deque(maxlen=1024)
     inbox: PublicationInbox | None = None
+    candidate: PublicationInbox | None = None
     buffer_overflow = False
     live_lock = asyncio.Lock()
     retry_task: asyncio.Task | None = None
 
     async def flush_live() -> None:
         async with live_lock:
-            while buffer and inbox is not None:
+            while buffer and candidate is not None:
                 peer, old, new = buffer[0]
-                await inbox.record(peer, old, new)
+                await candidate.record(peer, old, new)
                 buffer.popleft()
 
     def schedule_retry(delay: float) -> None:
@@ -172,10 +173,9 @@ def prepare_publication_inbox(client: Any, repository: Any):
     client.add_event_handler(handle,events.Raw(types=types.UpdateDeleteScheduledMessages))
 
     async def bind() -> PublicationInbox:
-        nonlocal inbox
+        nonlocal inbox, candidate
         from .background_tasks import start_background_task
 
-        candidate: PublicationInbox | None = None
         recovery = None
         drained = asyncio.Event()
 
@@ -219,11 +219,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
                     fail_startup(exc)
                     return
             try:
-                while buffer:
-                    peer, old, new = buffer[0]
-                    await candidate.record(peer, old, new)
-                    buffer.popleft()
-                    delay = 0.25
+                await flush_live()
                 if recovery is not None and not hasattr(client, "publication_recovery"):
                     # Checkpoint setup is part of startup, including retry
                     # after a DB outage. Events arriving during it stay buffered.
