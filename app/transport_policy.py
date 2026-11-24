@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 
 from aiogram.exceptions import TelegramRetryAfter
-from telethon.errors import FloodWaitError
+from telethon.errors import FloodWaitError, SlowModeWaitError
 
 from app.transport_operation import TransportOperationKind, classify_transport_operation
 
@@ -274,7 +274,7 @@ class TransportPolicy:
         flood_seconds = self._extract_wait_seconds(exc, text)
         # Only a protocol-level rejection proves that a publication RPC
         # was not accepted. Text and arbitrary timing attributes do not.
-        explicit_flood = isinstance(exc, (TelegramRetryAfter, FloodWaitError))
+        explicit_flood = isinstance(exc, (TelegramRetryAfter, FloodWaitError, SlowModeWaitError))
         unsafe_write = (
             operation_kind == TransportOperationKind.NON_IDEMPOTENT_WRITE
             and not self.retry_non_idempotent_writes
