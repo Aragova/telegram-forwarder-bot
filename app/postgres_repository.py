@@ -11576,6 +11576,84 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
             return claimed
 
+    def acknowledge_interrupted_campaign_send(
+        self, message_id: int, *, expected_updated_at: datetime, operator: str, note: str,
+    ) -> bool:
+        """Release only an explicitly inspected abandoned placement; never replay it.
+
+        Requires stopped campaign workers and confirmation that no live or
+        scheduled publication remains. Age alone does not establish rejection.
+        """
+        operator, note = operator.strip(), note.strip()
+        if not operator or len(operator) > 128 or not note or len(note) > 1000:
+            raise ValueError("Operator and review note are required")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT rule_id FROM campaign_run_messages WHERE id=%s",
+                    (int(message_id),),
+                )
+                identity = cur.fetchone()
+                if not identity:
+                    return False
+                cur.execute("SELECT is_active FROM routing WHERE id=%s FOR UPDATE", (identity["rule_id"],))
+                rule = cur.fetchone()
+                if not rule or rule["is_active"]:
+                    return False
+                cur.execute(
+                    """
+                    SELECT * FROM campaign_run_messages
+                    WHERE id=%s AND rule_id=%s AND send_status='sending'
+                      AND updated_at=%s AND updated_at < NOW()-INTERVAL '15 minutes'
+                      AND sent_message_id IS NULL
+                      AND COALESCE(sent_message_ids_json,'[]'::jsonb) IN ('[]'::jsonb,'null'::jsonb)
+                    FOR UPDATE
+                    """,
+                    (int(message_id), identity["rule_id"], expected_updated_at),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return False
+                lock_key = f"campaign:{row['rule_id']}:{row['saved_post_id']}:{row['target_id']}:{row['target_thread_id']}"
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (lock_key,))
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages m
+                    SET send_status='failed', delete_status='none',
+                        send_error_text='Interrupted publication manually reviewed; do not replay',
+                        delete_error_text=NULL, updated_at=NOW()
+                    WHERE m.id=%s AND m.send_status='sending' AND m.updated_at=%s
+                      AND NOT EXISTS (
+                        SELECT 1 FROM repost_campaign_launch_jobs j
+                        WHERE j.rule_id=m.rule_id AND j.status IN ('pending','processing')
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM campaign_scheduled_posts p
+                        WHERE p.rule_id=m.rule_id AND p.status='processing'
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM campaign_scheduled_launches p
+                        WHERE p.rule_id=m.rule_id AND p.status='processing'
+                      )
+                    RETURNING id
+                    """,
+                    (int(message_id), expected_updated_at),
+                )
+                if cur.fetchone() is None:
+                    return False
+                cur.execute(
+                    """
+                    INSERT INTO audit_log(created_at,event_type,rule_id,target_id,status,extra_json)
+                    VALUES(%s,'campaign_interrupted_send_reviewed',%s,%s,'resolved',%s::jsonb)
+                    """,
+                    (utc_now_iso(), row["rule_id"], row["target_id"], _json_dumps({
+                        "campaign_run_message_id": int(message_id), "operator": operator,
+                        "note": note, "outcome": "no_live_or_scheduled_publication",
+                    })),
+                )
+            conn.commit()
+        return True
+
     def mark_campaign_run_message_sent(self, message_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None = None, render_mode: str | None = None) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
