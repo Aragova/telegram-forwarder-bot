@@ -456,3 +456,29 @@ def test_send_album_one_by_one_stops_on_second_accepted_unresolved(monkeypatch):
     assert result["sent_count"] == 2
     assert result["manual_review_required"] is True
     assert calls == ["m1", "m2"]
+
+def test_botapi_album_timeout_and_partial_response_are_never_retryable(tmp_path):
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+
+    class Bot(FakeBot):
+        async def send_media_group(self, **kwargs):
+            self.send_media_group_calls.append(kwargs)
+            if len(self.send_media_group_calls) == 1:
+                raise TimeoutError("response lost")
+            return [SimpleNamespace(message_id=20), SimpleNamespace(message_id=0)]
+
+    bot = Bot()
+    for expected_accepted in (False, True):
+        paths = [tmp_path / "one.jpg", tmp_path / "two.mp4"]
+        for path in paths:
+            path.write_bytes(b"media")
+        owner = _owner_for_message(
+            bot=bot, telethon=FakeTelethon(paths),
+            album_result={"ok": False, "sent_count": 0, "error_text": "preflight"},
+        )
+        result = asyncio.run(SenderReuploadHelpers(owner).reupload_album(
+            [SimpleNamespace(), SimpleNamespace()], "dst", 777))
+        assert not result["ok"] and result["transport_attempted"]
+        assert result["transport_accepted"] is expected_accepted
+        assert not result.get("sent_message_ids")
+        assert all(not path.exists() for path in paths)
