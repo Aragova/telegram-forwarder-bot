@@ -8662,6 +8662,20 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
         telethon_read_client=sender_telethon_client,
         reaction_clients=reaction_clients,
     )
+    if not mtproto_write_ready:
+        readiness = getattr(telethon_client, "publication_inbox_ready", None)
+        if readiness is not None:
+            service = sender_service
+            writer = sender_telethon_client
+
+            def restore_mtproto_writer(ready):
+                if ready.cancelled() or ready.exception() is not None:
+                    return
+                service.telethon = writer
+                service.video_processor.telethon = writer
+                logger.info("TELEGRAM_PUBLICATION_INBOX_READY | action=restore_mtproto_sender")
+
+            readiness.add_done_callback(restore_mtproto_writer)
     runtime_context = RuntimeContext(
         repo=db,
         sender_service=sender_service,
