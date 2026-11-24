@@ -2234,11 +2234,26 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(
                     """
+                    WITH exhausted AS (
+                        SELECT id FROM reaction_jobs
+                        WHERE attempt_count>=max_attempts AND (status='pending' OR
+                            (status='processing' AND locked_at<NOW()-make_interval(secs=>%s)))
+                        ORDER BY id LIMIT 100 FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE reaction_jobs j SET status='failed', locked_by=NULL, locked_at=NULL,
+                        error_text='reaction retry budget exhausted', processed_at=NOW(), updated_at=NOW()
+                    FROM exhausted WHERE j.id=exhausted.id
+                    """,
+                    (int(lock_timeout_seconds),),
+                )
+                cur.execute(
+                    """
                     WITH candidate AS (
                         SELECT id
                         FROM reaction_jobs
                         WHERE (
                             status = 'pending'
+                            AND attempt_count < max_attempts
                             AND (not_before IS NULL OR not_before <= NOW())
                         )
                         OR (
@@ -2266,38 +2281,37 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
         return dict(row) if row else None
 
-    def mark_reaction_job_done(self, *, job_id: int, result: dict) -> None:
+    def heartbeat_reaction_job(self, *, job_id: int, worker_id: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE reaction_jobs SET locked_at=NOW(),updated_at=NOW() WHERE id=%s AND locked_by=%s AND status='processing'", (job_id, worker_id))
+                return cur.rowcount == 1
+
+    def mark_reaction_job_done(self, *, job_id: int, worker_id: str, result: dict) -> bool:
+        return self._finish_reaction_job(job_id, worker_id, "done", result, None, None)
+
+    def mark_reaction_job_failed(self, *, job_id: int, worker_id: str, error_text: str, result: dict | None = None, retry_after_seconds: int | None = None) -> bool:
+        return self._finish_reaction_job(job_id, worker_id, "failed", result, error_text, retry_after_seconds)
+
+    def mark_reaction_job_skipped(self, *, job_id: int, worker_id: str, result: dict) -> bool:
+        return self._finish_reaction_job(job_id, worker_id, "skipped", result, None, None)
+
+    def _finish_reaction_job(self, job_id, worker_id, status, result, error, retry_after) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE reaction_jobs SET status='done', processed_at=NOW(), result_json=%s, error_text=NULL, updated_at=NOW() WHERE id=%s",
-                    (_json_dumps(result) or "{}", job_id),
+                    """
+                    UPDATE reaction_jobs SET
+                      status=CASE WHEN %s::integer IS NOT NULL AND attempt_count<max_attempts THEN 'pending' ELSE %s END,
+                      not_before=CASE WHEN %s::integer IS NOT NULL AND attempt_count<max_attempts
+                          THEN NOW()+make_interval(secs=>%s::integer) ELSE NULL END,
+                      processed_at=CASE WHEN %s::integer IS NOT NULL AND attempt_count<max_attempts THEN NULL ELSE NOW() END,
+                      result_json=%s,error_text=%s,locked_by=NULL,locked_at=NULL,updated_at=NOW()
+                    WHERE id=%s AND locked_by=%s AND status='processing'
+                    """,
+                    (retry_after,status,retry_after,retry_after,retry_after,_json_dumps(result),error,job_id,worker_id),
                 )
-            conn.commit()
-
-    def mark_reaction_job_failed(self, *, job_id: int, error_text: str, result: dict | None = None, retry_after_seconds: int | None = None) -> None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                if retry_after_seconds is None:
-                    cur.execute(
-                        "UPDATE reaction_jobs SET status='failed', processed_at=NOW(), result_json=%s, error_text=%s, updated_at=NOW() WHERE id=%s",
-                        (_json_dumps(result), error_text, job_id),
-                    )
-                else:
-                    cur.execute(
-                        "UPDATE reaction_jobs SET status='pending', not_before=NOW() + make_interval(secs => %s), result_json=%s, error_text=%s, updated_at=NOW() WHERE id=%s",
-                        (int(retry_after_seconds), _json_dumps(result), error_text, job_id),
-                    )
-            conn.commit()
-
-    def mark_reaction_job_skipped(self, *, job_id: int, result: dict) -> None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE reaction_jobs SET status='skipped', processed_at=NOW(), result_json=%s, updated_at=NOW() WHERE id=%s",
-                    (_json_dumps(result) or "{}", job_id),
-                )
-            conn.commit()
+                return cur.rowcount == 1
 
     def log_reaction_event(self, *, event_type: str, reaction_job_id: int | None = None, tenant_id: int | None = None, rule_id: int | None = None, delivery_id: int | None = None, account_id: int | None = None, status: str | None = None, error_text: str | None = None, extra: dict[str, Any] | list[Any] | None = None) -> int | None:
         with self.connect() as conn:
@@ -4340,6 +4354,25 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
                 if cur.fetchone()["busy"]:
                     raise RuntimeError("Остались активные задачи; архивирование отменено")
+
+                # Never archive an attempt whose publication outcome is unknown.
+                # Explicit replay may proceed only after authoritative reconciliation.
+                cur.execute(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM delivery_attempts
+                        WHERE rule_id=%s
+                          AND status IN ('sending','accepted','failed_after_send')
+                          AND idempotency_key NOT LIKE '%%:rescan:%%'
+                          AND idempotency_key NOT LIKE 'archived:%%'
+                    ) AS unresolved
+                    """,
+                    (int(rule_id),),
+                )
+                if cur.fetchone()["unresolved"]:
+                    raise RuntimeError(
+                        "Есть отправка с неизвестным результатом; требуется ручная проверка"
+                    )
 
                 # Unique suffix incorporates immutable attempt primary key.
                 # Previously archived rows are excluded, including on repeat reset.
