@@ -544,3 +544,55 @@ def test_self_loop_suppression_checks_archived_mixed_receipt(repo):
                 echo_ids.append(cur.fetchone()["id"])
     assert repo.suppress_self_target_echo_deliveries(rule_id, echo_ids) == echo_ids[:2]
     assert [repo.get_delivery(d)["status"] for d in echo_ids] == ["faulty", "faulty", "pending"]
+
+
+def test_reviewed_expired_receipt_allows_rescan_but_never_replays_members(repo):
+    seeded = seed(repo, 119, count=2)
+    key, rule_id, deliveries, source_ids, source, target = seeded
+    assert register(repo, seeded, [70, 71])
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE WHERE id=%s", (rule_id,))
+    review = dict(operator="test-operator", note="Inspected target; quarantine uncertain delivery")
+    assert not repo.acknowledge_expired_publication_receipt(key, **review)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE telegram_publication_receipts SET deadline_at=NOW()-INTERVAL '1 second' WHERE idempotency_key=%s", (key,))
+    assert repo.expire_publication_receipt(key, "expired")
+    assert repo.acknowledge_expired_publication_receipt(key, **review)
+    assert not repo.acknowledge_expired_publication_receipt(key, **review)
+    receipt = repo.get_publication_receipt(key)
+    assert receipt["manual_review"]["operator"] == "test-operator"
+    assert receipt["published_ids"] is None and receipt["expired_at"] is not None
+
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO posts(message_id,source_channel,content_json,created_at) "
+                        "VALUES (%s,%s,'{}',%s) RETURNING id",
+                        (3001, source, "2026-01-01T00:00:00+00:00"))
+            other_post = cur.fetchone()["id"]
+            cur.execute("INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id) "
+                        "VALUES (%s,%s,'pending',%s,1) RETURNING id",
+                        (rule_id, other_post, "2026-01-01T00:00:00+00:00"))
+            other = cur.fetchone()["id"]
+            cur.execute("UPDATE routing SET rescan_owner_token='manual-review-119' WHERE id=%s", (rule_id,))
+    assert repo.reset_rule_history_for_replay(rule_id, owner_token="manual-review-119") == (0, 1)
+    assert repo.get_delivery(other) is None
+    assert repo.get_publication_receipt(key)["published_ids"] is None
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "accepted"
+    assert [repo.get_delivery(d)["status"] for d in deliveries] == ["faulty", "faulty"]
+    assert repo.backfill_rule(rule_id) == 1
+    # Even if another cleanup removes a delivery, its durable source identity
+    # remains quarantined. The next backfill cannot recreate it.
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM deliveries WHERE id=%s", (deliveries[0],))
+    assert repo.backfill_rule(rule_id) == 0
+    # A changed album key must not allow a previously accepted member to send.
+    assert repo.create_delivery_attempt(
+        delivery_id=deliveries[1], rule_id=rule_id, tenant_id=1, job_id=None,
+        idempotency_key=key + ":different-vector", operation_kind="album",
+        status="created", target_id=target, source_message_ids=[deliveries[1]],
+    )
+    assert not repo.mark_delivery_attempt_sending(key + ":different-vector")
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "accepted"
