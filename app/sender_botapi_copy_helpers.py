@@ -5,6 +5,7 @@ import logging
 from aiogram.methods import CopyMessages
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from .transport_policy import TransportRateLimited
+from .publication_transport_guard import PublicationContentError
 
 from .telegram_publication import botapi_publication_ids
 
@@ -75,8 +76,8 @@ class SenderBotApiCopyHelpers:
                 "fallback_allowed": False,
                 "raw_result_type": "exception",
                 "error_text": str(exc),
-                "definitely_rejected": isinstance(exc, TelegramBadRequest),
-                "outcome_unknown": not isinstance(exc, TelegramBadRequest),
+                "definitely_rejected": isinstance(exc, (TelegramBadRequest, PublicationContentError)),
+                "outcome_unknown": not isinstance(exc, (TelegramBadRequest, PublicationContentError)),
             }
 
     async def copy_album_via_bot(
@@ -150,5 +151,5 @@ class SenderBotApiCopyHelpers:
                 "sent_count": 0,
                 "error_text": str(exc),
                 "attempted": True,
-                "definitely_rejected": isinstance(exc, TelegramBadRequest),
+                "definitely_rejected": isinstance(exc, (TelegramBadRequest, PublicationContentError)),
             }
