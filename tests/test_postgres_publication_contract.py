@@ -100,7 +100,8 @@ def test_rescan_preserves_uncertain_attempt(status):
                 cur.execute(
                     "INSERT INTO routing(source_id,target_id,created_date,is_active,rescan_owner_token) "
                     "VALUES(%s,%s,'2026-01-01',FALSE,%s) RETURNING id",
-                    ("-100123", "-100456", owner),
+                    ("-100123", {"sending": "-100456", "accepted": "-100457",
+                                 "failed_after_send": "-100458"}[status], owner),
                 )
                 rule_id = cur.fetchone()["id"]
         key = str(uuid4())
