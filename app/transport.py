@@ -83,6 +83,7 @@ class BotTransportProxy:
                                                kwargs=kwargs),
             )
 
+        _wrapped.__name__ = name
         return _wrapped
 
 
