@@ -6651,7 +6651,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
         return claimed
 
-    def finish_publication_reaction(self, key: str, state: str, result: dict[str, Any], *, expected_started_at: datetime) -> None:
+    def finish_publication_reaction(self, key: str, state: str, result: dict[str, Any], *, expected_started_at: datetime, expected_reaction_updated_at: datetime | None = None) -> None:
         if state not in {"done","uncertain"} and not (state == "pending" and result.get("reason") == "enqueue_failed"):
             raise ValueError("Invalid reaction outcome")
         with self.connect() as conn:
@@ -6661,8 +6661,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     UPDATE telegram_publication_receipts
                     SET reaction_state=%s,reaction_result=%s::jsonb,reaction_updated_at=NOW()
                     WHERE idempotency_key=%s AND send_started_at=%s AND reaction_state='dispatching'
+                      AND (%s::timestamptz IS NULL OR reaction_updated_at=%s::timestamptz)
                     """,
-                    (state,_json_dumps(result),key,expected_started_at),
+                    (state,_json_dumps(result),key,expected_started_at,expected_reaction_updated_at,expected_reaction_updated_at),
                 )
             conn.commit()
 
