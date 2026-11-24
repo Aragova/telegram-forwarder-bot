@@ -14,6 +14,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from telethon.errors import BadRequestError, ForbiddenError, FloodWaitError, RandomIdDuplicateError
 from app.transport_policy import TransportRateLimited
 from app.send_intent import PublicationWriteUnavailable
+from app.publication_transport_guard import PublicationContentError, validate_bot_publication
 from aiogram.types import InputMediaDocument, InputMediaPhoto, InputMediaVideo
 
 from app.saved_post_entities import deserialize_message_entities, saved_post_entities_to_telethon
@@ -73,13 +74,15 @@ class SavedPostSentUnverifiedError(Exception):
 
 async def _publish_rpc(send, target_id, method, **kwargs):
     """Distinguish definite Telegram rejection from an ambiguous write."""
+    if method == "bot_api":
+        validate_bot_publication(getattr(send, "__name__", ""), kwargs)
     try:
         return await send(**kwargs)
     except RandomIdDuplicateError as exc:
         raise SavedPostSentUnverifiedError(target_id=target_id, message_ids=[],
             method=method + "_unverified", reason="Telegram random_id already used; do not resend") from exc
     except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge,
-            TelegramRetryAfter, BadRequestError, ForbiddenError, FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
+            TelegramRetryAfter, BadRequestError, ForbiddenError, FloodWaitError, TransportRateLimited, PublicationWriteUnavailable, PublicationContentError):
         raise
     except Exception as exc:
         raise SavedPostSentUnverifiedError(target_id=target_id, message_ids=[],
