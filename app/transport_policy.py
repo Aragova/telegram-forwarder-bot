@@ -416,7 +416,7 @@ class TransportPolicy:
         return delay
 
     def _extract_wait_seconds(self, exc: Exception, text: str) -> int | None:
-        for attr_name in ("seconds", "retry_after", "timeout"):
+        for attr_name in ("seconds", "retry_after"):
             value = getattr(exc, attr_name, None)
             if isinstance(value, (int, float)) and value > 0:
                 return int(value)
