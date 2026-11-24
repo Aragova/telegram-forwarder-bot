@@ -183,3 +183,35 @@ def test_publication_finalize_preserves_scheduler_reserved_slot(repo):
         with conn.cursor() as cur:
             cur.execute("SELECT next_run_at,last_sent_at FROM routing WHERE id=%s",(rule_id,))
             assert cur.fetchone()==before
+
+
+
+def test_rescan_archives_confirmed_receipt_and_releases_logical_key(repo):
+    seeded=seed(repo,108,count=2)
+    key,rule_id,deliveries,source_ids,source,target=seeded
+    assert register(repo,seeded,[10,11])
+    repo.record_telegram_publication_mappings(123,int(target),[(10,100),(11,101)])
+    assert repo.finalize_publication_receipt(key,[100,101])
+    attempt_id=repo.get_delivery_attempt_by_idempotency_key(key)["id"]
+    owner="test-rescan-108"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE,rescan_owner_token=%s WHERE id=%s",(owner,rule_id))
+    assert repo.reset_rule_history_for_replay(rule_id,owner_token=owner)==(1,2)
+    assert repo.get_publication_receipt(key) is None
+    archived_key=f"{key}:rescan:{attempt_id}"
+    assert repo.get_publication_receipt(archived_key)["published_ids"]==[100,101]
+    assert repo.get_delivery_attempt_by_idempotency_key(archived_key)["status"]=="verified"
+    assert repo.get_telegram_publication_mappings(123,int(target),[10,11])==[100,101]
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM posts WHERE source_channel=%s ORDER BY message_id",(source,))
+            post_ids=[row["id"] for row in cur.fetchall()]
+            new_deliveries=[]
+            for post_id in post_ids:
+                cur.execute("INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id) VALUES (%s,%s,'processing',%s,1) RETURNING id",
+                            (rule_id,post_id,"2026-01-01T00:00:00+00:00"))
+                new_deliveries.append(cur.fetchone()["id"])
+    start_attempt(repo,key,rule_id,new_deliveries,source_ids,target)
+    assert register(repo,(key,rule_id,new_deliveries,source_ids,source,target),[12,13])
+    assert repo.get_publication_receipt(key)["published_ids"] is None

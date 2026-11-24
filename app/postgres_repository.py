@@ -4457,6 +4457,25 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if cur.fetchone()["busy"]:
                     raise RuntimeError("Остались активные задачи; архивирование отменено")
 
+                # Archive confirmed receipts before changing the corresponding
+                # attempt keys. Scheduled ID claims follow through ON UPDATE CASCADE.
+                # Unresolved receipts retain their original key to prevent a resend.
+                cur.execute(
+                    """
+                    UPDATE telegram_publication_receipts r
+                    SET idempotency_key=r.idempotency_key || ':rescan:' || a.id::text,
+                        reaction_state=CASE WHEN r.reaction_state IN ('pending','dispatching')
+                            THEN 'uncertain' ELSE r.reaction_state END
+                    FROM delivery_attempts a
+                    WHERE r.rule_id=%s AND a.rule_id=r.rule_id
+                      AND a.idempotency_key=r.idempotency_key
+                      AND r.published_ids IS NOT NULL
+                      AND r.idempotency_key NOT LIKE '%%:rescan:%%'
+                      AND r.idempotency_key NOT LIKE 'archived:%%'
+                    """,
+                    (int(rule_id),),
+                )
+
                 # Unique suffix incorporates immutable attempt primary key.
                 # Previously archived rows are excluded, including on repeat reset.
                 cur.execute(
