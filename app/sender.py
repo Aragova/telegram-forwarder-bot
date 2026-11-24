@@ -1095,11 +1095,9 @@ class SenderService:
             "source_message_ids": source_message_ids,
             "delivery_id": delivery_id,
             "max_age_seconds": max_age_seconds,
+            **({"publication_intent": publication_intent} if publication_intent is not None else {}),
+            **({"allow_unverified_self_loop_target": True} if allow_unverified_self_loop_target else {}),
         }
-        if publication_intent is not None:
-            kwargs["publication_intent"] = publication_intent
-        if allow_unverified_self_loop_target:
-            kwargs["allow_unverified_self_loop_target"] = True
         try:
             return await asyncio.wait_for(
                 ReactionDelivery(self)._add_reaction_for_rule_if_possible(**kwargs),

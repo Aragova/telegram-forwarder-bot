@@ -278,3 +278,18 @@ def test_stage2_queued_echo_is_recognized_before_finalization(repo):
             source_channel=source, source_thread_id=None, message_id=900)
         assert not repo._is_self_target_echo_post_for_rule_conn(conn, rule_id=rule_id,
             source_channel=source, source_thread_id=None, message_id=901)
+
+def test_stage2_reaction_enqueue_is_atomic_and_one_shot(repo):
+    seeded = seed(repo, 110)
+    key, rule_id, delivery_ids, source_ids, source, target = seeded
+    assert register(repo, seeded, [78])
+    repo.record_telegram_publication_mappings(123, int(target), [(78, 901)])
+    assert repo.finalize_publication_receipt(key, [901])
+    started = repo.get_publication_receipt(key)["send_started_at"]
+    assert repo.claim_publication_reaction(key, [901], expected_started_at=started)
+    args = dict(tenant_id=1, rule_id=rule_id, target_id=target, message_id=901,
+                publication_intent=(key, started))
+    assert repo.enqueue_reaction_job(**(args | {"message_id": 78})) is None
+    assert repo.enqueue_reaction_job(**args)
+    assert repo.enqueue_reaction_job(**args) is None
+    assert repo.get_publication_receipt(key)["reaction_state"] == "done"

@@ -90,7 +90,7 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
     if published_ids is None:
         try:
             # Verify outgoing evidence using the publishing account.
-            reader = owner.telethon
+            reader = owner.telethon or getattr(owner, "telethon_read", None)
             inbox = getattr(reader, "publication_inbox", None)
             if inbox is None:
                 # Reading exact durable mappings does not require enabling sends.
