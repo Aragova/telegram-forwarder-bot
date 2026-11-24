@@ -51,7 +51,7 @@ async def reconcile_pending_single(owner, key: str) -> dict[str, Any] | None:
         return None
 
     inbox = getattr(owner.telethon, "publication_inbox", None)
-    if inbox is None or inbox.sender_account_id != receipt["sender_account_id"]:
+    if receipt["published_id"] is None and (inbox is None or inbox.sender_account_id != receipt["sender_account_id"]):
         if not receipt["expired"]:
             return _pending()
         return await _expire(owner, receipt, key, "publication_sender_unavailable")

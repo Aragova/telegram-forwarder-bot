@@ -183,7 +183,7 @@ def _complete_job_if_delivery_already_sent(
     if not _delivery_ids_already_sent(repo, delivery_ids):
         return False
     pending_reaction = getattr(repo, "has_unfinished_single_publication_reaction", None)
-    if (payload.get("job_type") == "repost_single" and callable(pending_reaction)
+    if (payload.get("job_type") in {"repost_single", "video_send", "video_delivery"} and callable(pending_reaction)
             and any(pending_reaction(delivery_id) is True for delivery_id in delivery_ids)):
         return False
     logger.info("IDEMPOTENCY_GUARD_ALREADY_SENT | job_id=%s | stage=%s | delivery_ids=%s", int(job_id), stage, delivery_ids)

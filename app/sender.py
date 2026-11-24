@@ -1641,6 +1641,10 @@ class SenderService:
         normalized_schedule_mode = str(schedule_mode or "interval")
         normalized_mode = str(mode or "video")
         idempotency_key = build_delivery_idempotency_key(operation_kind="video_send", delivery_id=int(delivery_id), target_id=str(target_id))
+        from .single_publication_reconciliation import reconcile_pending_single
+        pending_result = await reconcile_pending_single(self, idempotency_key)
+        if pending_result is not None:
+            return pending_result
         logger.info(
             "JOB EXECUTOR | video_delivery | start | rule_id=%s | delivery_id=%s | message_id=%s | mode=%s | schedule_mode=%s",
             rule_id,
@@ -1712,6 +1716,12 @@ class SenderService:
             if not rule:
                 raise RuntimeError(f"Правило #{rule_id} не найдено для video_delivery")
             outcome = await self._deliver_single_video(rule, int(delivery_id), int(message_id), str(source_channel), str(target_id), target_thread_id)
+            if isinstance(outcome, dict) and outcome.get("publication_pending"):
+                pending_result = await reconcile_pending_single(self, idempotency_key)
+                if pending_result is not None:
+                    return pending_result
+                return {"ok": False, "retryable": False, "accepted": True,
+                        "manual_review_required": True, "error_text": "publication_receipt_missing_no_resend"}
             if isinstance(outcome, dict) and outcome.get("accepted_unresolved"):
                 # The media may already be published. Never turn this into a
                 # retryable download/send job or a second upload.

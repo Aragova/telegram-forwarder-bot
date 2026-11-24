@@ -5810,7 +5810,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     """
                     SELECT created_at FROM delivery_attempts
                     WHERE idempotency_key=%s AND delivery_id=%s AND rule_id=%s
-                      AND operation_kind='single' AND status IN ('sending','accepted')
+                      AND operation_kind IN ('single','video_send') AND status IN ('sending','accepted')
                       AND target_id=%s AND source_message_ids_json=%s::jsonb
                     FOR UPDATE
                     """,
