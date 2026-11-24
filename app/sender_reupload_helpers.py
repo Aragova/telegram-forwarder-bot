@@ -426,7 +426,16 @@ class SenderReuploadHelpers:
             logger.warning("REUPLOAD_MESSAGE | TEXT_ONLY | ALL_METHODS_FAILED")
             return telethon_outcome if isinstance(telethon_outcome, TelethonSendOutcome) else telethon_not_attempted("text_only_all_methods_failed")
 
-        file_path = await self.owner.telethon.download_media(message, file=str(settings.media_cache_path))
+        reader = getattr(self.owner, "telethon_read", None) or self.owner.telethon
+        if reader is None:
+            raise PublicationWriteUnavailable("MTProto source reader is not ready")
+        try:
+            file_path = await reader.download_media(message, file=str(settings.media_cache_path))
+        except FloodWaitError as exc:
+            raise TransportRateLimited(
+                retry_after_seconds=max(1, int(exc.seconds)), backend="telethon",
+                op_name="download_media", key=str(target_id),
+            ) from exc
         if not file_path:
             logger.warning("REUPLOAD_MESSAGE | DOWNLOAD_FAILED")
             return telethon_not_attempted("download_failed_before_send")
