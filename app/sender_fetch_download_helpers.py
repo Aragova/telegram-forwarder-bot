@@ -22,10 +22,13 @@ class SenderFetchDownloadHelpers:
     def __init__(self, owner):
         self.owner = owner
 
+    def _read_client(self):
+        return getattr(self.owner, "telethon_read", None) or self.owner.telethon
+
     async def fetch_message(self, source_channel, message_id):
         try:
             entity = int(source_channel) if str(source_channel).lstrip("-").isdigit() else source_channel
-            return await self.owner.telethon.get_messages(entity, ids=message_id)
+            return await self._read_client().get_messages(entity, ids=message_id)
         except TransportRateLimited:
             raise
         except FloodWaitError as exc:
@@ -138,7 +141,7 @@ class SenderFetchDownloadHelpers:
         try:
             logger.info("📥 Начинаю скачивание исходного видео...")
 
-            file_path = await self.owner.telethon.download_media(
+            file_path = await self._read_client().download_media(
                 message,
                 file=str(download_target_path),
                 progress_callback=progress_callback,
