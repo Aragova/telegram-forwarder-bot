@@ -5806,6 +5806,34 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 else:
                     payload["job_type"] = JOB_TYPE_REPOST_SINGLE
 
+                # The source update can be queued before its publication receipt
+                # is mapped. Recheck under the rule/delivery locks before enqueueing.
+                if (str(due_row["source_channel"]) == str(due_row["target_id"])
+                        and due_row["source_thread_id"] == due_row["target_thread_id"]):
+                    cur.execute(
+                        """SELECT d.id, p.message_id FROM deliveries d
+                           JOIN posts p ON p.id=d.post_id WHERE d.id=ANY(%s)""",
+                        (delivery_ids_to_take,),
+                    )
+                    echo_ids = []
+                    for item in cur.fetchall():
+                        if self._is_self_target_echo_post_for_rule_conn(
+                            conn, rule_id=int(rule_id), source_channel=str(due_row["source_channel"]),
+                            source_thread_id=due_row["source_thread_id"], message_id=int(item["message_id"]),
+                        ):
+                            echo_ids.append(int(item["id"]))
+                            self._log_self_target_echo_delivery_skipped(
+                                rule_id=int(rule_id), source_channel=str(due_row["source_channel"]),
+                                source_thread_id=due_row["source_thread_id"], message_id=int(item["message_id"]),
+                            )
+                    if echo_ids:
+                        cur.execute(
+                            """UPDATE deliveries SET status='faulty', error_text='self_target_echo'
+                               WHERE id=ANY(%s) AND status='pending'""", (echo_ids,),
+                        )
+                        conn.commit()
+                        return None
+
                 cur.execute(
                     """
                     SELECT id
@@ -6192,8 +6220,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                              AND sender_account_id=%s AND target_peer_id=%s
                              AND target_thread_id IS NOT DISTINCT FROM %s
                              AND source_channel=%s AND source_thread_id IS NOT DISTINCT FROM %s
-                             AND delivery_ids=%s AND source_message_ids=%s
-                             AND scheduled_ids=%s AND pending_mask=%s AND expired_at IS NULL""",
+                             AND delivery_ids=%s::bigint[] AND source_message_ids=%s::bigint[]
+                             AND scheduled_ids=%s::bigint[] AND pending_mask=%s::boolean[] AND expired_at IS NULL""",
                         (key,rule_id,rule['tenant_id'] or 1,account_id,peer_id,thread_id,
                          source_channel,rule['source_thread_id'],delivery_ids,source_message_ids,scheduled_ids,mask),
                     )

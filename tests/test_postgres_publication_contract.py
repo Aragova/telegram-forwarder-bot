@@ -231,6 +231,12 @@ def test_stage2_real_pg_mixed_album_is_atomic_and_rollback_preserves_evidence(re
     assert repo.claim_publication_reaction(key,[500,501],expected_started_at=started)
     assert not repo.claim_publication_reaction(key,[500,501],expected_started_at=started)
     repo.finish_publication_reaction(key,"done",{"applied":True},expected_started_at=started)
+    assert repo.rollback_last_delivery(rule_id)
+    assert repo.get_publication_receipt(key) is None
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT published_ids FROM telegram_publication_receipts WHERE rule_id=%s", (rule_id,))
+            assert cur.fetchone()["published_ids"] == [500,501]
 
 
 
@@ -283,6 +289,18 @@ def test_stage2_queued_echo_is_recognized_before_finalization(repo):
             source_channel=source, source_thread_id=None, message_id=900)
         assert not repo._is_self_target_echo_post_for_rule_conn(conn, rule_id=rule_id,
             source_channel=source, source_thread_id=None, message_id=901)
+    assert repo.finalize_publication_receipt(key, [900])
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=TRUE,next_run_at=NULL WHERE id=%s", (rule_id,))
+            cur.execute("""INSERT INTO posts(message_id,source_channel,content_json,created_at)
+                VALUES(900,%s,'{}','2026-01-01T00:00:00+00:00') RETURNING id""",(source,))
+            post_id=cur.fetchone()["id"]
+            cur.execute("""INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
+                VALUES(%s,%s,'pending','2026-01-01T00:00:00+00:00',1) RETURNING id""",(rule_id,post_id))
+            echo_id=cur.fetchone()["id"]
+    assert repo.take_due_delivery_and_create_job(rule_id,"2026-12-01T00:00:00+00:00") is None
+    assert repo.get_delivery(echo_id)["status"] == "faulty"
 
 def test_stage2_reaction_enqueue_is_atomic_and_one_shot(repo):
     seeded = seed(repo, 110)
