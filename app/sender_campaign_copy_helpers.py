@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .runtime_utils import run_db
+from .transport_policy import TransportRateLimited
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 
@@ -31,7 +32,7 @@ class SenderCampaignCopyHelpers:
             return _unverified_copy()
         try:
             sent = await self.owner.bot.copy_message(chat_id=str(copy_row.get("target_id")), from_chat_id=str(delivery.get("source_channel")), message_id=int(delivery.get("message_id")))
-        except (TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter) as exc:
+        except (TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter, TransportRateLimited) as exc:
             await run_db(self.owner.db.mark_delivery_campaign_copy_send_failed,int(copy_id),str(exc))
             raise
         except Exception:
