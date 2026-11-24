@@ -9,6 +9,7 @@ from .runtime_utils import run_db
 from .sender_primitives import _detect_message_media_kind
 from .telethon_authoritative_resolver import TelethonSendOutcome
 from .video_processor import VideoPreSendError
+from .transport_policy import TransportRateLimited
 
 logger = logging.getLogger("forwarder")
 
@@ -297,11 +298,14 @@ class VideoSingleDelivery:
                 "ok": False, "retryable": True, "accepted": False,
                 "rejected_before_send": True, "error_text": str(exc),
             }
-        except (TelegramRetryAfter, FloodWaitError) as exc:
+        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited) as exc:
             # A definite Bot API flood-control rejection happens before the
             # video is posted; never finalize as accepted or faulty, and let
             # the worker retry only after the required delay.
-            delay = max(1, int(exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after))
+            if isinstance(exc, TransportRateLimited):
+                delay = max(1, exc.retry_after_seconds)
+            else:
+                delay = max(1, int(exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after))
             logger.warning(
                 "VIDEO_LEGACY_RATE_LIMITED | rule_id=%s | delivery_id=%s | retry_after=%s",
                 rule.id, delivery_id, delay,
