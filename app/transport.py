@@ -38,10 +38,12 @@ class BotTransportProxy:
         return self._bot
 
     async def __call__(self, *args, **kwargs):
+        method = args[0] if args else kwargs.get("method")
+        op_name = type(method).__name__ if method is not None else "__call__"
         return await self._policy.execute(
             backend="bot",
-            key=f"{self._label}.__call__",
-            op_name="__call__",
+            key=f"{self._label}.{op_name}",
+            op_name=op_name,
             func=lambda: self._bot(*args, **kwargs),
         )
 

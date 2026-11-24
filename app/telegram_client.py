@@ -1,6 +1,16 @@
+import logging
 from dataclasses import dataclass
 from telethon import TelegramClient
 from .config import settings
+
+logger = logging.getLogger("forwarder")
+
+
+async def _close_failed_client(client: TelegramClient) -> None:
+    try:
+        await client.disconnect()
+    except Exception:
+        logger.exception("TELETHON_STARTUP_CLOSE_FAILED")
 
 
 # ЖЁСТКО ЗАКРЕПЛЁННЫЕ НАБОРЫ ДЛЯ PREMIUM-СЕССИЙ
@@ -32,7 +42,11 @@ async def create_telethon_client() -> TelegramClient:
         request_retries=8,
         auto_reconnect=True,
     )
-    await client.connect()
+    try:
+        await client.connect()
+    except BaseException:
+        await _close_failed_client(client)
+        raise
     return client
 
 

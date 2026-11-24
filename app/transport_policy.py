@@ -7,6 +7,9 @@ import re
 import time
 from dataclasses import dataclass
 
+from aiogram.exceptions import TelegramRetryAfter
+from telethon.errors import FloodWaitError
+
 from app.transport_operation import TransportOperationKind, classify_transport_operation
 
 
@@ -270,7 +273,14 @@ class TransportPolicy:
 
         flood_seconds = self._extract_wait_seconds(exc, text)
         if flood_seconds is not None:
-            if flood_seconds > self.long_retry_after_threshold_sec:
+            if (
+                flood_seconds > self.long_retry_after_threshold_sec
+                or (
+                    operation_kind == TransportOperationKind.NON_IDEMPOTENT_WRITE
+                    and not self.retry_non_idempotent_writes
+                    and isinstance(exc, (TelegramRetryAfter, FloodWaitError))
+                )
+            ):
                 logger.warning(
                     "TRANSPORT | RATE_LIMITED | %s",
                     _format_transport_log_context(
@@ -416,7 +426,7 @@ class TransportPolicy:
         return delay
 
     def _extract_wait_seconds(self, exc: Exception, text: str) -> int | None:
-        for attr_name in ("seconds", "retry_after", "timeout"):
+        for attr_name in ("seconds", "retry_after"):
             value = getattr(exc, attr_name, None)
             if isinstance(value, (int, float)) and value > 0:
                 return int(value)
