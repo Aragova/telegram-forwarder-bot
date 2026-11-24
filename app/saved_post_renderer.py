@@ -125,6 +125,18 @@ class SavedPostRenderer:
                         error_text="Telethon client недоступен для premium-отправки",
                         premium_required=True,
                     )
+                if (
+                    getattr(self.telethon_client, "publication_inbox_required", False) is True
+                    and getattr(self.telethon_client, "publication_inbox", None) is None
+                ):
+                    return SavedPostRenderResult(
+                        ok=False,
+                        method="telethon_builder",
+                        kind=kind,
+                        chat_id=str(chat_id),
+                        error_text="Premium-отправка временно недоступна: обработчик подтверждений Telegram не подключён.",
+                        premium_required=True,
+                    )
                 raw = await send_saved_post_content_via_telethon(
                     bot=self.bot,
                     telethon_client=self.telethon_client,

@@ -35,8 +35,12 @@ async def create_telethon_client(*, publication_repository=None) -> TelegramClie
     )
     bind = None
     if publication_repository is not None:
+        client.publication_inbox_required = True
         from .telegram_publication import prepare_publication_inbox
-        bind = prepare_publication_inbox(client,publication_repository)
+        try:
+            bind = prepare_publication_inbox(client, publication_repository)
+        except Exception:
+            logging.getLogger("forwarder").exception("TELEGRAM_PUBLICATION_INBOX_SETUP_FAILED")
     await client.connect()
     if bind is not None:
         try:

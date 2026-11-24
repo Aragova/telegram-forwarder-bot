@@ -501,3 +501,17 @@ def test_saved_post_partial_botapi_evidence_is_preserved():
     ))
     assert result.accepted and result.manual_review_required
     assert result.raw_message_ids==[123] and result.message_ids is None
+
+
+
+def test_saved_post_premium_cannot_send_without_required_inbox(monkeypatch):
+    async def unexpected_send(**kwargs):
+        raise AssertionError("MTProto write without publication inbox")
+
+    monkeypatch.setattr(spr,"send_saved_post_content_via_telethon",unexpected_send)
+    renderer=SavedPostRenderer(bot=_FakeBot(),telethon_client=SimpleNamespace(publication_inbox_required=True))
+    result=asyncio.run(renderer.send(chat_id=123,content={
+        "kind":"text","text":"x","entities":[{"type":"custom_emoji","offset":0,"length":1,"custom_emoji_id":"123"}],
+    }))
+    assert not result.ok and not result.accepted
+    assert "обработчик подтверждений" in result.error_text

@@ -1,6 +1,7 @@
 """Integration tests against an isolated PostgreSQL service, never production."""
 import os
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -143,3 +144,42 @@ def test_real_pg_partial_botapi_album_evidence_is_not_published_ids(repo):
             cur.execute("SELECT extra_json FROM audit_log WHERE event_type='botapi_publication_unverified' AND delivery_id=%s",(attempt["delivery_id"],))
             raw=cur.fetchone()["extra_json"]
             assert (json.loads(raw) if isinstance(raw,str) else raw)["raw_message_ids"]==[901,0]
+
+
+
+def test_pending_receipt_does_not_block_other_rules_to_same_target(repo):
+    waiting=seed(repo,105)
+    assert register(repo,waiting,[88])
+    other=seed(repo,106)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET target_id=%s WHERE id=%s",(waiting[5],other[1]))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE id=ANY(%s)",(other[2],))
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s",(other[0],))
+    result=repo.take_due_delivery_and_create_job(other[1],datetime.now(timezone.utc).isoformat())
+    assert result is not None
+    assert result["status"]=="created"
+    assert repo.get_delivery(waiting[2][0])["status"]=="processing"
+
+
+def test_publication_finalize_preserves_scheduler_reserved_slot(repo):
+    seeded=seed(repo,107)
+    key,rule_id,_,_,_,target=seeded
+    reserved="2099-01-01T00:00:00+00:00"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET next_run_at=%s WHERE id=%s",(reserved,rule_id))
+    assert register(repo,seeded,[123])
+    repo.record_telegram_publication_mappings(123,int(target),[(123,456)])
+    assert repo.finalize_publication_receipt(key,[456])
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT next_run_at,last_sent_at FROM routing WHERE id=%s",(rule_id,))
+            before=cur.fetchone()
+    assert before["next_run_at"]==reserved
+    assert before["last_sent_at"] is not None
+    assert not repo.finalize_publication_receipt(key,[456])
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT next_run_at,last_sent_at FROM routing WHERE id=%s",(rule_id,))
+            assert cur.fetchone()==before
