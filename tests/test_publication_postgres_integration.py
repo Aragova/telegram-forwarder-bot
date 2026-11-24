@@ -19,10 +19,28 @@ def repo():
     assert os.environ.get("APP_PG_HOST") == "127.0.0.1"
     assert os.environ.get("APP_PG_DB") == "publication_test"
     assert os.environ.get("APP_PG_USER") == "publication_test"
-    repository = PostgresRepository()
-    repository.init()
-    yield repository
-    repository.client.close_thread_connection()
+    from uuid import uuid4
+    from psycopg import sql
+
+    schema = "publication_" + uuid4().hex
+    admin = PostgresRepository()
+    with admin.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv("PGOPTIONS", "-c search_path=" + schema)
+            repository = PostgresRepository()
+            try:
+                repository.init()
+                yield repository
+            finally:
+                repository.client.close_all_connections()
+    finally:
+        with admin.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+        admin.client.close_all_connections()
 
 
 def seed(repository, suffix, count=1):
@@ -218,9 +236,17 @@ def test_rescan_archives_confirmed_receipt_and_releases_logical_key(repo):
 
 
 
+def finalize_with_pid(repository, key, published_ids, pid_ready):
+    with repository.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_backend_pid() AS pid")
+            pid_ready.set_result(cur.fetchone()["pid"])
+    return repository.finalize_publication_receipt(key, published_ids)
+
+
 def test_publication_deadline_is_checked_after_advisory_lock(repo):
     import time
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import Future, ThreadPoolExecutor
 
     seeded = seed(repo,109)
     key, _, deliveries, _, _, target = seeded
@@ -235,10 +261,14 @@ def test_publication_deadline_is_checked_after_advisory_lock(repo):
         with repo.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",(lock_key,))
-                future = pool.submit(repo.finalize_publication_receipt,key,[115])
+                cur.execute("SELECT pg_backend_pid() AS pid")
+                blocker_pid = cur.fetchone()["pid"]
+                pid_ready = Future()
+                future = pool.submit(finalize_with_pid, repo, key, [115], pid_ready)
+                finalizer_pid = pid_ready.result(timeout=2)
                 until = time.monotonic()+2
                 while time.monotonic() < until:
-                    cur.execute("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted) AS waiting")
+                    cur.execute("SELECT %s=ANY(pg_blocking_pids(%s)) AS waiting", (blocker_pid, finalizer_pid))
                     if cur.fetchone()["waiting"]:
                         break
                     time.sleep(0.05)
@@ -349,7 +379,7 @@ def test_album_receipt_accepts_single_remaining_member(repo):
 
 def test_publication_deadline_is_checked_after_delivery_row_lock(repo):
     import time
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import Future, ThreadPoolExecutor
 
     seeded = seed(repo, 115)
     key, _, deliveries, _, _, target = seeded
@@ -363,10 +393,14 @@ def test_publication_deadline_is_checked_after_delivery_row_lock(repo):
         with repo.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT id FROM deliveries WHERE id=%s FOR UPDATE", (deliveries[0],))
-                future = pool.submit(repo.finalize_publication_receipt, key, [140])
+                cur.execute("SELECT pg_backend_pid() AS pid")
+                blocker_pid = cur.fetchone()["pid"]
+                pid_ready = Future()
+                future = pool.submit(finalize_with_pid, repo, key, [140], pid_ready)
+                finalizer_pid = pid_ready.result(timeout=2)
                 until = time.monotonic() + 2
                 while time.monotonic() < until:
-                    cur.execute("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='transactionid' AND NOT granted) AS waiting")
+                    cur.execute("SELECT %s=ANY(pg_blocking_pids(%s)) AS waiting", (blocker_pid, finalizer_pid))
                     if cur.fetchone()["waiting"]:
                         break
                     time.sleep(0.05)
