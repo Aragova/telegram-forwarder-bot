@@ -721,3 +721,48 @@ def test_interrupted_campaign_send_requires_explicit_fenced_review(repo):
     assert repo.get_campaign_run_message(abandoned)["send_status"] == "failed"
     assert not repo.mark_campaign_run_message_sending(abandoned)
     assert repo.mark_campaign_run_message_sending(future)
+
+def test_quarantined_album_members_never_enter_scheduler_claim(repo):
+    seeded = seed(repo, 127, count=2)
+    key, rule_id, deliveries, _, source, _ = seeded
+    assert register(repo, seeded, [71, 72])
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE WHERE id=%s", (rule_id,))
+            cur.execute("UPDATE telegram_publication_receipts SET deadline_at=NOW()-INTERVAL '1 second' WHERE idempotency_key=%s", (key,))
+    assert repo.expire_publication_receipt(key, "expired")
+    assert repo.acknowledge_expired_publication_receipt(key, operator="test", note="Keep members quarantined")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE deliveries SET status='pending' WHERE id=ANY(%s)", (deliveries,))
+            cur.execute("INSERT INTO posts(message_id,source_channel,content_json,media_group_id,created_at) VALUES (%s,%s,'{}',%s,%s) RETURNING id",
+                        (3001, source, "group-127", "2026-01-01T00:00:00+00:00"))
+            post_id = cur.fetchone()["id"]
+            cur.execute("INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id) VALUES (%s,%s,'pending',%s,1) RETURNING id",
+                        (rule_id, post_id, "2026-01-01T00:00:00+00:00"))
+            new_delivery = cur.fetchone()["id"]
+            cur.execute("UPDATE routing SET is_active=TRUE,next_run_at=NULL WHERE id=%s", (rule_id,))
+    result = repo.take_due_delivery_and_create_job(rule_id, datetime.now(timezone.utc).isoformat())
+    assert result and result["status"] == "created"
+    assert repo.get_delivery(new_delivery)["status"] == "processing"
+    assert [repo.get_delivery(d)["status"] for d in deliveries] == ["pending", "pending"]
+
+
+def test_stale_publication_reaction_finish_cannot_overwrite_new_claim(repo):
+    seeded = seed(repo, 128)
+    key, _, _, _, _, target = seeded
+    assert register(repo, seeded, [42])
+    repo.record_telegram_publication_mappings(123, int(target), [(42, 142)])
+    assert repo.finalize_publication_receipt(key, [142])
+    started = repo.get_publication_receipt(key)["send_started_at"]
+    assert repo.claim_publication_reaction(key, [142], expected_started_at=started)
+    old_version = repo.get_publication_receipt(key)["reaction_updated_at"]
+    repo.finish_publication_reaction(key, "pending", {"reason": "enqueue_failed"},
+                                     expected_started_at=started, expected_reaction_updated_at=old_version)
+    assert repo.claim_publication_reaction(key, [142], expected_started_at=started)
+    new_version = repo.get_publication_receipt(key)["reaction_updated_at"]
+    assert new_version != old_version
+    repo.finish_publication_reaction(key, "uncertain", {"reason": "interrupted_reaction_dispatch"},
+                                     expected_started_at=started, expected_reaction_updated_at=old_version)
+    assert repo.get_publication_receipt(key)["reaction_state"] == "dispatching"
+    assert repo.get_publication_receipt(key)["reaction_updated_at"] == new_version
