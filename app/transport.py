@@ -12,9 +12,42 @@ from app.transport_policy import (
 )
 
 from app.send_intent import observe_publication, run_with_cooldown
-from app.transport_operation import TransportOperationKind, classify_transport_operation
+from app.transport_operation import TransportOperationKind, classify_transport_operation, normalize_transport_operation_name
 
 logger = logging.getLogger("forwarder.transport")
+
+
+def _validate_publication_content(name, kwargs, method):
+    """Reject only provably invalid raw content; Telegram parses markup itself."""
+    def value(field):
+        return getattr(method, field, None) if method is not None else kwargs.get(field)
+
+    op = normalize_transport_operation_name(name)
+    if op == "send_media_group":
+        media = value("media")
+        if isinstance(media, (list, tuple)) and not 2 <= len(media) <= 10:
+            raise ValueError("Telegram media group requires 2 to 10 items")
+        for item in media or []:
+            if getattr(item, "parse_mode", None) is None:
+                caption = getattr(item, "caption", None)
+                if isinstance(caption, str) and len(caption) > 1024:
+                    raise ValueError("Telegram media caption exceeds 1024 characters")
+    elif op == "copy_messages":
+        ids = value("message_ids")
+        if isinstance(ids, (list, tuple)) and not 1 <= len(ids) <= 100:
+            raise ValueError("CopyMessages requires 1 to 100 message IDs")
+    elif op in {"send_message", "send_photo", "send_video", "send_document",
+                "send_animation", "send_audio", "send_voice"}:
+        # Missing parse_mode can inherit the bot's default, so only validate
+        # when it was explicitly set to None (or the method object says None).
+        explicit_plain = value("parse_mode") is None and (
+            method is not None or "parse_mode" in kwargs
+        )
+        field, limit = ("text", 4096) if op == "send_message" else ("caption", 1024)
+        content = value(field)
+        if explicit_plain and isinstance(content, str) and len(content) > limit:
+            raise ValueError(f"Telegram {field} exceeds {limit} characters")
+
 
 # Short, read-only RPCs must not occupy worker slots indefinitely.
 _TELETHON_READ_TIMEOUT_SEC = 15.0
@@ -43,6 +76,7 @@ class BotTransportProxy:
     async def _invoke(self, name, call, kwargs, *, method=None):
         if classify_transport_operation("bot", name) != TransportOperationKind.NON_IDEMPOTENT_WRITE:
             return await call()
+        _validate_publication_content(name, kwargs, method)
         if method is not None:
             items = getattr(method, "media", None) or getattr(method, "message_ids", None)
         else:

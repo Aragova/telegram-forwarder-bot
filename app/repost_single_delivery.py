@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from .runtime_utils import run_db
+from .delivery_idempotency import normalize_valid_sent_message_ids
 from .send_intent import PublicationWriteUnavailable
 from .transport_policy import TransportRateLimited
 from .repost_caption import get_repost_caption_override, caption_override_content

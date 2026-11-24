@@ -163,13 +163,10 @@ def _stable_descriptor(value):
     return value
 
 
-async def _bind_identity(client, intent: PublicationIntent, request, members) -> None:
+async def _bind_identity(account_id: int, intent: PublicationIntent, request, members) -> None:
     _check_fence(intent)
     try:
-        auth_key_id = getattr(getattr(client.session, "auth_key", None), "key_id", None)
-        if not auth_key_id:
-            raise ValueError("MTProto session identity is unavailable")
-        descriptor = {"account": auth_key_id, "request": _stable_descriptor(request.to_dict())}
+        descriptor = {"account": account_id, "request": _stable_descriptor(request.to_dict())}
         fingerprint = hashlib.sha256(
             json.dumps(descriptor, sort_keys=True, default=str).encode()
         ).hexdigest()
@@ -225,8 +222,19 @@ def publication_client_class(base):
                     intent.blocked = True
                     raise PublicationWriteUnavailable("Batched publication RPC is not supported")
                 item, members = publications[0]
-                auth_key_id = getattr(getattr(self.session, "auth_key", None), "key_id", None)
-                account_scope = f"mtproto:{auth_key_id}"
+                # get_me(input_peer=True) uses Telethon's cached self peer.
+                # No auth key, token or password participates in the identity.
+                try:
+                    me = await self.get_me(input_peer=True)
+                    account_id = getattr(me, "user_id", None)
+                    if type(account_id) is not int or account_id <= 0:
+                        raise ValueError("MTProto sender account is not authorized")
+                except (FloodWaitError, SlowModeWaitError):
+                    raise
+                except Exception as exc:
+                    intent.blocked = True
+                    raise PublicationWriteUnavailable("Could not resolve MTProto sender account") from exc
+                account_scope = f"mtproto:{account_id}"
                 peer = getattr(item, "peer", None) or getattr(item, "to_peer", None)
                 try:
                     peer_scope = f"{account_scope}:{utils.get_peer_id(peer)}"
@@ -234,7 +242,7 @@ def publication_client_class(base):
                     peer_scope = None
 
                 async def publish():
-                    await _bind_identity(self, intent, item, members)
+                    await _bind_identity(account_id, intent, item, members)
                     return await observe_publication(
                         lambda: invoke(request, ordered=ordered, flood_sleep_threshold=0),
                     )
