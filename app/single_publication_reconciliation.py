@@ -71,7 +71,20 @@ async def register_pending_single(owner, *, key, delivery_id, rule_id, target_id
     )
 
 
-async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
+async def reconcile_pending_publication(owner, key: str) -> dict[str, Any] | None:
+    """Fail closed on database errors, including the first lookup after a send.
+
+    Returning None authorizes the caller to continue normal delivery, so it
+    must only mean a successful lookup found no receipt (or no receipt API).
+    """
+    try:
+        return await _reconcile_pending_publication(owner, key)
+    except Exception:
+        logger.exception("PUBLICATION_RECONCILE_DEFERRED | key=%s", key)
+        return _pending()
+
+
+async def _reconcile_pending_publication(owner, key: str) -> dict[str, Any] | None:
     get_receipt = getattr(owner.db,"get_publication_receipt",None)
     if not callable(get_receipt):
         return None

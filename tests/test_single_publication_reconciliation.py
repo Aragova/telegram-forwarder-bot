@@ -14,11 +14,14 @@ def test_pending_single_defers_without_second_send_then_finishes_and_reacts_to_f
                             send_started_at=datetime.now(timezone.utc), expired=False,
                             reaction_state="pending", dispatch_stale=False)
             self.finalized = 0
+            self.fail_finalize = False
 
         def get_publication_receipt(self, key):
             return dict(self.row)
 
         def finalize_publication_receipt(self, key, published_ids, *, expected_started_at):
+            if self.fail_finalize:
+                raise OSError("database unavailable after receipt committed")
             self.finalized += 1
             self.row["published_ids"] = published_ids
             return True
@@ -69,6 +72,11 @@ def test_pending_single_defers_without_second_send_then_finishes_and_reacts_to_f
         assert first["publication_pending"]
         assert not reactions and repo.finalized == 0
         client.publication_inbox.mapped = 5181
+        repo.fail_finalize = True
+        failed = await reconcile_pending_single(owner, "key")
+        assert failed["publication_pending"] and not failed["retryable"]
+        assert not reactions and repo.finalized == 0
+        repo.fail_finalize = False
         second = await reconcile_pending_single(owner, "key")
         assert second["ok"] and second["sent_message_ids"] == [5181]
         assert reactions == [5181] and repo.finalized == 1
@@ -157,3 +165,13 @@ def test_read_only_reconciliation_and_safe_reaction_retry():
         assert not hasattr(reader, "publication_inbox") and owner.telethon is None
 
     asyncio.run(check())
+
+def test_failed_receipt_lookup_never_authorizes_another_send():
+    class Repo:
+        def get_publication_receipt(self, key):
+            raise OSError("database unavailable")
+
+    result = asyncio.run(reconcile_pending_single(SimpleNamespace(db=Repo()), "key"))
+    assert result["publication_pending"] is True
+    assert not result["ok"]
+    assert not result["retryable"]
