@@ -326,7 +326,7 @@ def test_premium_album_with_full_source_ids_never_downloads(monkeypatch):
         called["download"] += 1
         raise AssertionError("download should not be called")
     monkeypatch.setattr(spr, "download_saved_post_media_item_for_telethon", _download)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(SavedPostSentUnverifiedError, match="outcome unknown"):
         asyncio.run(send_saved_post_content_via_telethon(
             bot=_FakeBot(),
             telethon_client=_TelethonBroken(),
@@ -515,3 +515,14 @@ def test_saved_post_premium_cannot_send_without_required_inbox(monkeypatch):
     }))
     assert not result.ok and not result.accepted
     assert "обработчик подтверждений" in result.error_text
+
+
+def test_campaign_network_timeout_is_unverified_not_rejected():
+    class Bot:
+        async def send_message(self, **kwargs):
+            raise TimeoutError("reply lost")
+    result = asyncio.run(SavedPostRenderer(bot=Bot()).send(
+        chat_id=-100123, content={"kind": "text", "text": "publication"}))
+    assert not result.ok
+    assert result.accepted and result.manual_review_required
+    assert result.method == "bot_api_unverified"
