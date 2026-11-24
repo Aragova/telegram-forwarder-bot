@@ -5,11 +5,9 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
 
-# Write permissions are available only for same-repository PRs.
-# Fork PRs receive a read-only token automatically.
+# Default read-only token; only the comment job receives write permission.
 permissions:
   contents: read
-  pull-requests: write
 
 concurrency:
   group: architecture-quality-pr-${{ github.event.pull_request.number }}
@@ -239,27 +237,6 @@ jobs:
           PY
           cat "$REPORT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Post or update one PR comment
-        if: always() && github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const body = fs.readFileSync(process.env.REPORT_DIR + '/summary.md', 'utf8');
-            const { owner, repo } = context.repo;
-            const issue_number = context.issue.number;
-            const comments = await github.paginate(github.rest.issues.listComments,
-              { owner, repo, issue_number, per_page: 100 });
-            const existing = comments.find(c => c.user?.type === 'Bot' &&
-              c.body?.includes('<!-- vimi-quality-report -->'));
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner, repo, comment_id: existing.id, body
-              });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number, body });
-            }
-
       - name: Upload audit logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -274,6 +251,41 @@ jobs:
         run: |
           test "${{ steps.graph.outputs.created }}" = "true"
           test -s docs/architecture_flow.png
+
+  post-comment:
+    needs: audit
+    if: always() && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download audit report
+        uses: actions/download-artifact@v4
+        with:
+          name: architecture-quality-reports
+          path: quality-report
+
+      - name: Post or update one PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('quality-report/summary.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(c => c.user?.type === 'Bot' &&
+              c.body?.includes('<!-- vimi-quality-report -->'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
 
   sonar-diagnostics:
     # Read only; no checkout, repository scripts, or write token.
