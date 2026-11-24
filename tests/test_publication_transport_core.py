@@ -159,3 +159,37 @@ def test_explicit_flood_wait_at_attempt_limit_keeps_retry_after():
         assert result.value.retry_after_seconds == 2
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["connect", "get_me"])
+def test_reaction_startup_closes_all_opened_clients_on_failure(monkeypatch, failure):
+    from types import SimpleNamespace
+    from app import telegram_client
+
+    closed = []
+
+    class FakeClient:
+        def __init__(self, session, *args, **kwargs):
+            self.session = session
+
+        async def connect(self):
+            if self.session == "second" and failure == "connect":
+                raise RuntimeError("startup failed")
+
+        async def get_me(self):
+            if self.session == "second" and failure == "get_me":
+                raise RuntimeError("startup failed")
+            return SimpleNamespace(premium=False)
+
+        async def disconnect(self):
+            closed.append(self.session)
+            if self.session == "second":
+                raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(telegram_client, "TelegramClient", FakeClient)
+    monkeypatch.setattr(telegram_client, "settings", SimpleNamespace(
+        reaction_sessions=["first", "second"], api_id=1, api_hash="test",
+    ))
+    with pytest.raises(RuntimeError, match="startup failed"):
+        asyncio.run(telegram_client.create_reaction_clients())
+    assert closed == ["second", "first"]
