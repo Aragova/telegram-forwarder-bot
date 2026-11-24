@@ -13,6 +13,7 @@ from typing import Any
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, TelegramRetryAfter
 from telethon.errors import BadRequestError, ForbiddenError, FloodWaitError, RandomIdDuplicateError
 from app.transport_policy import TransportRateLimited
+from app.send_intent import PublicationWriteUnavailable
 from aiogram.types import InputMediaDocument, InputMediaPhoto, InputMediaVideo
 
 from app.saved_post_entities import deserialize_message_entities, saved_post_entities_to_telethon
@@ -78,7 +79,7 @@ async def _publish_rpc(send, target_id, method, **kwargs):
         raise SavedPostSentUnverifiedError(target_id=target_id, message_ids=[],
             method=method + "_unverified", reason="Telegram random_id already used; do not resend") from exc
     except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge,
-            TelegramRetryAfter, BadRequestError, ForbiddenError, FloodWaitError, TransportRateLimited):
+            TelegramRetryAfter, BadRequestError, ForbiddenError, FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
         raise
     except Exception as exc:
         raise SavedPostSentUnverifiedError(target_id=target_id, message_ids=[],
@@ -145,7 +146,8 @@ class SavedPostRenderer:
                     )
                 if (
                     getattr(self.telethon_client, "publication_inbox_required", False) is True
-                    and getattr(self.telethon_client, "publication_inbox", None) is None
+                    and (getattr(self.telethon_client, "publication_inbox", None) is None
+                         or getattr(self.telethon_client, "publication_write_blocked", False) is True)
                 ):
                     return SavedPostRenderResult(
                         ok=False,
@@ -474,7 +476,7 @@ async def send_saved_post_album_via_telethon_source(
     if not messages:
         raise ValueError("Не удалось получить исходные сообщения альбома")
     medias = [m.media for m in messages if getattr(m, "media", None)]
-    sent = await _publish_rpc(telethon_client.send_file, chat_id, "telethon_builder", entity=target_entity, file=medias, caption=content.get("caption") or "", formatting_entities=saved_post_entities_to_telethon(content.get("caption_entities")))
+    sent = await _publish_rpc(telethon_client.send_file, chat_id, "telethon_source", entity=target_entity, file=medias, caption=content.get("caption") or "", formatting_entities=saved_post_entities_to_telethon(content.get("caption_entities")))
     sent_messages = sent if isinstance(sent, list) else [sent]
     raw_ids = [int(m.id) for m in sent_messages if getattr(m, "id", None)]
     pending_ids = await resolve_saved_post_pending(
