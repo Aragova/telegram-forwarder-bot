@@ -233,3 +233,48 @@ def test_album_source_fetch_failure_before_send_is_retryable_preflight():
     owner._copy_album_via_bot.assert_not_awaited()
     owner._reupload_album.assert_not_awaited()
     owner._send_album_one_by_one.assert_not_awaited()
+
+
+def test_pending_album_receipt_precedes_fallible_post_send_audit(monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+
+    from app import single_publication_reconciliation
+    from app.repost_album_delivery import RepostAlbumDelivery
+
+    async def log_step(**kwargs):
+        if kwargs["pipeline_stage"] == "reupload_album" and kwargs["pipeline_result"] != "started":
+            raise RuntimeError("audit unavailable")
+
+    register = AsyncMock(return_value=True)
+    monkeypatch.setattr(single_publication_reconciliation, "register_pending_publication", register)
+    owner = SimpleNamespace(
+        _resolve_repost_caption_delivery_strategy_sync=Mock(return_value={
+            "configured_mode": "builder_first", "requires_builder": True, "use_copy_first": False,
+        }),
+        _is_self_loop_rule=Mock(return_value=False),
+        _content_from_message_or_post=Mock(return_value={}),
+        _log_caption_entity_inventory=Mock(),
+        _caption_entity_counts=Mock(return_value={}),
+        _fetch_album_messages=AsyncMock(return_value=[SimpleNamespace(id=101), SimpleNamespace(id=102)]),
+        _get_album_primary_text=Mock(return_value="caption"),
+        _log_delivery_pipeline_step=log_step,
+        _copy_album_via_bot=AsyncMock(),
+        _reupload_album=AsyncMock(return_value={
+            "ok": False, "transport_accepted": True, "authoritative_resolved": False,
+            "resolution_method": "video_processing_pending", "returned_candidate_ids": [11, 12],
+            "pending_mask": [True, True],
+        }),
+        _send_album_one_by_one=AsyncMock(),
+    )
+    result = asyncio.run(RepostAlbumDelivery(owner).deliver(
+        SimpleNamespace(id=111), FakeAlbumRepo().rows, "src", "dst", None, idempotency_key="album-key",
+    ))
+    assert result is False
+    register.assert_awaited_once_with(
+        owner, key="album-key", delivery_ids=[1, 2], rule_id=111, target_id="dst",
+        target_thread_id=None, source_channel="src", source_message_ids=[101, 102],
+        scheduled_ids=[11, 12], pending_mask=[True, True],
+    )
+    owner._reupload_album.assert_awaited_once()
+    owner._copy_album_via_bot.assert_not_awaited()
+    owner._send_album_one_by_one.assert_not_awaited()
