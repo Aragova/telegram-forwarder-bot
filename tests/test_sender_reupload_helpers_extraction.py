@@ -482,3 +482,58 @@ def test_botapi_album_timeout_and_partial_response_are_never_retryable(tmp_path)
         assert result["transport_accepted"] is expected_accepted
         assert not result.get("sent_message_ids")
         assert all(not path.exists() for path in paths)
+
+def test_one_by_one_rate_limit_defers_first_item_but_never_replays_partial_album(monkeypatch):
+    import pytest
+    from telethon.errors import FloodWaitError
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    from app.transport_policy import TransportRateLimited
+
+    calls = []
+
+    async def limited(self, message, **kwargs):
+        calls.append(message)
+        if message == "sent":
+            return 201
+        raise FloodWaitError(request=None, capture=7)
+
+    monkeypatch.setattr(SenderReuploadHelpers, "reupload_message", limited)
+    helper = SenderReuploadHelpers(SimpleNamespace())
+    with pytest.raises(TransportRateLimited) as error:
+        asyncio.run(helper.send_album_one_by_one(["limited", "never"], "dst", 777))
+    assert error.value.retry_after_seconds == 7
+    assert calls == ["limited"]
+
+    calls.clear()
+    result = asyncio.run(helper.send_album_one_by_one(["sent", "limited", "never"], "dst", 777))
+    assert not result["ok"]
+    assert result["transport_accepted"] and result["manual_review_required"]
+    assert result["non_retryable"]
+    assert result["sent_message_ids"] == [201]
+    assert calls == ["sent", "limited"]
+
+
+def test_one_by_one_cooldown_does_not_override_prior_uncertain_write(monkeypatch):
+    from app.send_intent import publication_intent, observe_write
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    from app.transport_policy import TransportRateLimited
+
+    async def limited(self, message, **kwargs):
+        raise TransportRateLimited(retry_after_seconds=5, backend="bot", op_name="send_message", key="bot:1")
+
+    monkeypatch.setattr(SenderReuploadHelpers, "reupload_message", limited)
+
+    async def scenario():
+        async def unknown():
+            raise TimeoutError("lost response")
+        with publication_intent("delivery", "k"):
+            try:
+                await observe_write(unknown)
+            except TimeoutError:
+                pass
+            result = await SenderReuploadHelpers(SimpleNamespace()).send_album_one_by_one(["m1"], "dst", 777)
+            assert result["transport_attempted"]
+            assert not result["transport_accepted"]
+            assert result["non_retryable"]
+
+    asyncio.run(scenario())
