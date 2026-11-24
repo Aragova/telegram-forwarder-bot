@@ -7,7 +7,7 @@ from pathlib import Path
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, TelegramRetryAfter
 from telethon.errors import FloodWaitError
 from .transport_policy import TransportRateLimited
-from .send_intent import PublicationWriteUnavailable
+from .send_intent import PublicationWriteUnavailable, possible_write
 from .publication_transport_guard import PublicationContentError
 from .telegram_publication import botapi_publication_ids
 from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo
@@ -112,6 +112,30 @@ class SenderReuploadHelpers:
                 "sent_message_ids": sent_ids[:],
                 "sent_count": len(sent_ids),
                 "error_text": None,
+            }
+
+        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited, PublicationWriteUnavailable) as exc:
+            if not sent_ids and not accepted_transport_count and not possible_write():
+                if isinstance(exc, (TelegramRetryAfter, FloodWaitError)):
+                    delay = exc.retry_after if isinstance(exc, TelegramRetryAfter) else exc.seconds
+                    raise TransportRateLimited(
+                        retry_after_seconds=max(1, int(delay)), backend="telegram",
+                        op_name="send_album_one_by_one", key=str(target_id),
+                    ) from exc
+                raise
+            # A later rejection cannot undo an earlier accepted or uncertain send.
+            return {
+                "ok": False,
+                "transport_attempted": True,
+                "transport_accepted": bool(sent_ids or accepted_transport_count),
+                "authoritative_resolved": False,
+                "sent_message_id": sent_ids[0] if sent_ids else None,
+                "sent_message_ids": sent_ids[:],
+                "sent_count": len(sent_ids),
+                "error_text": str(exc),
+                "manual_review_required": True,
+                "non_retryable": True,
+                "action": "no_second_send",
             }
 
         except Exception as exc:
