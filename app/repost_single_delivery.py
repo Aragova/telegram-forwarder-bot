@@ -850,6 +850,7 @@ class RepostSingleDelivery:
 
         if html_text:
             response_received = False
+            confirmed_ids = []
             try:
                 sent = await owner.bot.send_message(
                     chat_id=target_id,
@@ -870,6 +871,7 @@ class RepostSingleDelivery:
                     await run_db(owner._mark_delivery_faulty_sync, delivery_id,
                                  "copy_single_uncertain_no_fallback: text fallback response unresolved")
                     return False
+                confirmed_ids = ids
                 if idempotency_key:
                     await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
                                  sent_message_ids=ids, telegram_method="text_fallback")
@@ -877,14 +879,17 @@ class RepostSingleDelivery:
                         await run_db(owner.db.mark_delivery_attempt_verified, idempotency_key,
                                      sent_message_ids=ids)
 
-                await owner._add_reaction_for_rule_if_possible(
-                    rule=rule,
-                    target_id=target_id,
-                    sent_message_id=sent.message_id,
-                    source_channel=str(source_channel or ""),
-                    source_message_ids=source_message_ids,
-                    delivery_id=delivery_id,
-                )
+                try:
+                    await owner._add_reaction_for_rule_if_possible(
+                        rule=rule,
+                        target_id=target_id,
+                        sent_message_id=sent.message_id,
+                        source_channel=str(source_channel or ""),
+                        source_message_ids=source_message_ids,
+                        delivery_id=delivery_id,
+                    )
+                except Exception:
+                    logger.exception("TEXT_FALLBACK_REACTION_FAILED_NON_FATAL | delivery_id=%s", delivery_id)
 
                 text_fallback_ok = True
                 text_fallback_sent_message_id = sent.message_id
@@ -930,6 +935,10 @@ class RepostSingleDelivery:
                 return {"ok": True, "sent_message_ids": [int(sent.message_id)]}
 
             except Exception as exc:
+                if confirmed_ids:
+                    # Let the existing accepted/verified ledger recover finalization.
+                    # Never turn a known Telegram publication into a faulty delivery.
+                    raise
                 from .send_intent import definite_rejection
                 from .transport_policy import TransportRateLimited
                 if not response_received and isinstance(exc, TransportRateLimited):
