@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import time
+import signal
 from html import escape
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramRetryAfter
 from app.bot_api_session import create_bot_api_session
-from app.background_tasks import start_background_task
+from app.background_tasks import start_background_task, shutdown_background_tasks
 from app.channel_title_sync import channel_title_sync_loop
 from aiogram.filters import Command
 from aiogram.types import (
@@ -161,6 +162,7 @@ posting_active = False
 job_worker_tasks: list[asyncio.Task] = []
 job_workers_stop_event: asyncio.Event | None = None
 reaction_worker_task: asyncio.Task | None = None
+reaction_worker_stop_event: asyncio.Event | None = None
 scheduler_runtime_task: asyncio.Task | None = None
 job_watchdog_task: asyncio.Task | None = None
 workers_runtime_enabled = True
@@ -8730,25 +8732,20 @@ async def _shutdown_runtime(
     close_telegram_clients: bool,
     close_bot_session: bool,
 ) -> None:
-    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, repost_campaign_runtime_tasks, channel_title_sync_task
-
-    if stop_workers_runtime:
-        await stop_job_workers_runtime()
-        await stop_all_workers()
+    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, reaction_worker_stop_event, repost_campaign_runtime_tasks, channel_title_sync_task
 
     if close_dashboard_tasks:
-        for task in dashboard_tasks.values():
+        tasks = list(dashboard_tasks.values())
+        for task in tasks:
             task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         dashboard_tasks.clear()
 
     if channel_title_sync_task is not None:
         channel_title_sync_task.cancel()
         await asyncio.gather(channel_title_sync_task, return_exceptions=True)
         channel_title_sync_task = None
-
-    if repost_campaign_runtime_tasks is not None:
-        await repost_campaign_runtime_tasks.stop()
-        repost_campaign_runtime_tasks = None
 
     if scheduler_runtime_task and not scheduler_runtime_task.done():
         scheduler_runtime_task.cancel()
@@ -8759,15 +8756,35 @@ async def _shutdown_runtime(
         job_watchdog_task.cancel()
         await asyncio.gather(job_watchdog_task, return_exceptions=True)
     job_watchdog_task = None
+    # Stop producers, then drain all publication-capable consumers in parallel
+    # under the same systemd shutdown budget.
+    drains = []
+    if stop_workers_runtime:
+        drains.append(stop_job_workers_runtime())
+    if repost_campaign_runtime_tasks is not None:
+        drains.append(repost_campaign_runtime_tasks.stop(
+            timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec))
     if reaction_worker_task and not reaction_worker_task.done():
-        reaction_worker_task.cancel()
-        await asyncio.gather(reaction_worker_task, return_exceptions=True)
+        drains.append(drain_job_workers(tasks=[reaction_worker_task],
+            stop_event=reaction_worker_stop_event,
+            timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec, logger=logger))
+    if drains:
+        results = await asyncio.gather(*drains, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.error("RUNTIME_DRAIN_FAILED | error=%s", result)
+    repost_campaign_runtime_tasks = None
     reaction_worker_task = None
+    reaction_worker_stop_event = None
+    await shutdown_background_tasks()
 
     if close_telegram_clients and telethon_client:
         try:
             raw_telethon = getattr(telethon_client, "raw", telethon_client)
             await raw_telethon.disconnect()
+            flush = getattr(raw_telethon, "flush_publication_inbox", None)
+            if callable(flush):
+                await asyncio.wait_for(flush(), timeout=15)
         except Exception as exc:
             logger.warning("Ошибка при закрытии Telethon: %s", exc)
         telethon_client = None
@@ -8824,6 +8841,7 @@ async def _start_bot_role() -> None:
         bot,
         polling_timeout=30,
         handle_as_tasks=True,
+        close_bot_session=False,
     )
 
 
@@ -8857,7 +8875,7 @@ async def _start_worker_role() -> None:
 
 
 async def _start_all_role() -> None:
-    global workers_runtime_enabled, posting_active, scheduler_runtime_task, job_watchdog_task, reaction_worker_task
+    global workers_runtime_enabled, posting_active, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, reaction_worker_stop_event
     workers_runtime_enabled = True
     posting_active = False
     await _init_db_runtime()
@@ -8880,7 +8898,8 @@ async def _start_all_role() -> None:
         job_watchdog_task = asyncio.create_task(run_watchdog_loop(db, interval_seconds=10.0))
     if reaction_worker_task is None or reaction_worker_task.done():
         reaction_worker = ReactionWorker(db=db, worker_id="reaction-worker-1", poll_interval_sec=2.0, lock_timeout_seconds=300)
-        reaction_worker_task = asyncio.create_task(reaction_worker.run_forever())
+        reaction_worker_stop_event = asyncio.Event()
+        reaction_worker_task = asyncio.create_task(reaction_worker.run_forever(reaction_worker_stop_event))
         logger.info("Reaction worker запущен: reaction-worker-1")
     await start_job_workers_runtime()
     logger.info("STARTUP | Legacy режим all запущен")
@@ -9061,6 +9080,24 @@ async def main(role: str = "all"):
         logger.error("PREFLIGHT | Критическая ошибка: %s", exc)
         raise SystemExit(2) from exc
 
+    loop = asyncio.get_running_loop()
+    sigterm_received = False
+    signal_installed = False
+    runtime_task = asyncio.current_task()
+
+    def request_shutdown():
+        nonlocal sigterm_received
+        if not sigterm_received:
+            sigterm_received = True
+            runtime_task.cancel()
+
+    if normalized_role in {"worker", "scheduler"}:
+        try:
+            loop.add_signal_handler(signal.SIGTERM, request_shutdown)
+            signal_installed = True
+        except (NotImplementedError, RuntimeError):
+            pass
+
     try:
         await run_runtime_role(
             normalized_role,
@@ -9069,7 +9106,12 @@ async def main(role: str = "all"):
             run_worker=_start_worker_role,
             run_all=_start_all_role,
         )
+    except asyncio.CancelledError:
+        if not sigterm_received:
+            raise
     finally:
+        if signal_installed:
+            loop.remove_signal_handler(signal.SIGTERM)
         logger.info("SHUTDOWN | Остановка роли %s", normalized_role)
         await _shutdown_runtime(
             stop_workers_runtime=(normalized_role in {"worker", "all"}),
@@ -9077,6 +9119,12 @@ async def main(role: str = "all"):
             close_telegram_clients=(normalized_role in {"bot", "worker", "all"}),
             close_bot_session=(normalized_role in {"bot", "worker", "all"}),
         )
+        # asyncio.to_thread cancellation does not stop SQL in the thread.
+        # Join the executor before closing all thread-owned connections.
+        await loop.shutdown_default_executor()
+        close_connections = getattr(getattr(db, "client", None), "close_all_connections", None)
+        if callable(close_connections):
+            close_connections()
         logger.info("SHUTDOWN | Роль %s остановлена", normalized_role)
 
 
