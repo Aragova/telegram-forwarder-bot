@@ -291,3 +291,113 @@ def test_startup_flood_wait_honors_server_delay_after_bind_timeout(monkeypatch):
         assert client.publication_inbox.sender_account_id == 7
 
     asyncio.run(scenario())
+
+
+def test_sender_identity_timeout_retries_after_bind_timeout(monkeypatch):
+    from app import telegram_publication
+    from unittest.mock import AsyncMock
+
+    async def scenario():
+        client = SimpleNamespace(add_event_handler=lambda *_: None,
+                                 get_me=AsyncMock(side_effect=[TimeoutError(), SimpleNamespace(id=7)]))
+        monkeypatch.setattr(telegram_publication, "_STARTUP_DRAIN_TIMEOUT_SEC", 0.05)
+        bind = telegram_publication.prepare_publication_inbox(client, object())
+        with pytest.raises(asyncio.TimeoutError):
+            await bind()
+        assert not hasattr(client, "publication_inbox")
+        inbox = await asyncio.wait_for(asyncio.shield(client.publication_inbox_ready), 3)
+        assert inbox.sender_account_id == 7
+        assert client.get_me.await_count == 2
+
+    asyncio.run(scenario())
+
+
+def test_unauthenticated_sender_fails_readiness_without_retry():
+    from app.telegram_publication import prepare_publication_inbox
+    from unittest.mock import AsyncMock
+
+    async def scenario():
+        client = SimpleNamespace(add_event_handler=lambda *_: None,
+                                 get_me=AsyncMock(return_value=None))
+        with pytest.raises(RuntimeError, match="authenticated sender"):
+            await prepare_publication_inbox(client, object())()
+        assert client.publication_inbox_ready.done()
+        assert not hasattr(client, "publication_inbox")
+        assert client.get_me.await_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_startup_overflow_keeps_live_evidence_without_enabling_writer(monkeypatch):
+    from app import telegram_publication
+    from telethon import types
+
+    async def scenario():
+        saved = []
+
+        async def record(self, peer, old, new):
+            saved.append((old[0], new[0]))
+            return True
+
+        monkeypatch.setattr(telegram_publication.PublicationInbox, "record", record)
+        client = SimpleNamespace(get_me=lambda: asyncio.sleep(0, result=SimpleNamespace(id=7)))
+        client.add_event_handler = lambda callback, event: setattr(client, "handler", callback)
+        bind = telegram_publication.prepare_publication_inbox(client, object())
+        peer = types.PeerChannel(99)
+        for mid in range(1, 1026):
+            await client.handler(types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[mid], sent_messages=[mid + 2000],
+            ))
+        with pytest.raises(RuntimeError, match="buffer overflowed"):
+            await bind()
+        assert client.publication_inbox_ready.done()
+        assert not hasattr(client, "publication_inbox")
+        assert len(saved) == 1024
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=peer, messages=[1026], sent_messages=[3026],
+        ))
+        assert len(saved) == 1025
+        assert saved[-1] == (1026, 3026)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("server_unavailable", [False, True])
+def test_difference_total_limit_does_not_discard_recoverable_page(server_unavailable):
+    from app.publication_difference_recovery import PublicationDifferenceRecovery
+    from telethon import types, functions
+    from unittest.mock import AsyncMock
+
+    async def scenario():
+        date = datetime.now(timezone.utc)
+        cursor = dict(pts=1, qts=0, state_date=date, version=0)
+        state = types.updates.State(pts=20000, qts=0, date=date, seq=1, unread_count=0)
+        update = types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[4], sent_messages=[100],
+        )
+        page = types.updates.DifferenceSlice(
+            new_messages=[], new_encrypted_messages=[], other_updates=[update],
+            chats=[], users=[], intermediate_state=state,
+        )
+        too_long = types.updates.DifferenceTooLong(pts=20000)
+        responses = [too_long, too_long, state] if server_unavailable else [too_long, page]
+        client = AsyncMock(side_effect=responses)
+        inbox = SimpleNamespace(repository=object(), sender_account_id=7,
+                                record=AsyncMock(return_value=True))
+        recovery = PublicationDifferenceRecovery(client, inbox)
+        recovery._advance = AsyncMock(return_value=True)
+        assert await recovery._read_page(cursor) is (not server_unavailable)
+        requests = [call.args[0] for call in client.await_args_list]
+        assert requests[0].pts_total_limit == 10000
+        assert requests[1].pts_total_limit is None
+        assert requests[1].pts == requests[0].pts == 1
+        assert requests[1].pts_limit == 1000
+        if server_unavailable:
+            assert isinstance(requests[2], functions.updates.GetStateRequest)
+            inbox.record.assert_not_awaited()
+        else:
+            assert len(requests) == 2
+            inbox.record.assert_awaited_once()
+        recovery._advance.assert_awaited_once_with(cursor, 20000, 0, date)
+
+    asyncio.run(scenario())
