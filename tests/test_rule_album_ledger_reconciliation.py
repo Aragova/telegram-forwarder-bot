@@ -589,5 +589,5 @@ def test_explicit_replay_refuses_unverified_botapi_album():
     with pytest.raises(RuntimeError, match="неподтверждённый альбом Bot API"):
         repo.reset_rule_history_for_replay(214, owner_token="valid")
     assert conn.commits == 0
-    assert not any("UPDATE delivery_attempts SET idempotency_key" in q for q in cursor.sql)
-    assert not any("DELETE FROM deliveries" in q for q in cursor.sql)
+    write_verbs = {"INSERT", "UPDATE", "DELETE"}
+    assert not [q for q in cursor.sql if q.split(None, 1)[0].upper() in write_verbs]
