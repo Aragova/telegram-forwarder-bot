@@ -509,3 +509,38 @@ def test_publication_recovery_cursor_and_exact_replay_after_restart(repo):
         assert reactions == [142]
 
     asyncio.run(scenario())
+
+
+def test_self_loop_suppression_checks_archived_mixed_receipt(repo):
+    key, rule_id, deliveries, source_ids, source, _ = seed(repo, 118, count=2)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET target_id=source_id WHERE id=%s", (rule_id,))
+            cur.execute("UPDATE delivery_attempts SET target_id=%s WHERE idempotency_key=%s",
+                        (source, key))
+    assert register(repo, (key, rule_id, deliveries, source_ids, source, source),
+                    [2001, 40], [False, True])
+    repo.record_telegram_publication_mappings(123, int(source), [(40, 2002)])
+    assert repo.finalize_publication_receipt(key, [2001, 2002])
+    # The published echo can be queued before finalization. Reproduce the
+    # persisted queue after explicit rollback has removed original send IDs.
+    assert repo.rollback_last_delivery(rule_id)
+    assert repo.get_publication_receipt(key) is None
+    echo_ids = []
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            for mid in (2001, 2002, 2003):
+                cur.execute(
+                    "INSERT INTO posts(message_id,source_channel,content_json,created_at) "
+                    "VALUES (%s,%s,'{}',%s) RETURNING id",
+                    (mid, source, "2026-01-01T00:00:00+00:00"),
+                )
+                post_id = cur.fetchone()["id"]
+                cur.execute(
+                    "INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id) "
+                    "VALUES (%s,%s,'pending',%s,1) RETURNING id",
+                    (rule_id, post_id, "2026-01-01T00:00:00+00:00"),
+                )
+                echo_ids.append(cur.fetchone()["id"])
+    assert repo.suppress_self_target_echo_deliveries(rule_id, echo_ids) == echo_ids[:2]
+    assert [repo.get_delivery(d)["status"] for d in echo_ids] == ["faulty", "faulty", "pending"]
