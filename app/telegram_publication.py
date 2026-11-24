@@ -110,7 +110,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
     """Install before connect; only bind events after authenticating the account."""
     from collections import deque
     from telethon import events, types, utils
-    from telethon.errors import FloodWaitError
+    from telethon.errors import FloodWaitError, ServerError
 
     client.publication_inbox_ready = asyncio.get_running_loop().create_future()
 
@@ -171,18 +171,18 @@ def prepare_publication_inbox(client: Any, repository: Any):
 
     async def bind() -> PublicationInbox:
         nonlocal inbox
-        me = await asyncio.wait_for(client.get_me(),timeout=30)
-        if me is None:
-            raise RuntimeError("Publication inbox requires an authenticated sender")
-        candidate = PublicationInbox(repository,int(me.id))
-        recovery = None
-        if callable(getattr(repository, "get_publication_recovery_cursor", None)):
-            from .publication_difference_recovery import PublicationDifferenceRecovery
-
-            recovery = PublicationDifferenceRecovery(client, candidate)
         from .background_tasks import start_background_task
 
+        candidate: PublicationInbox | None = None
+        recovery = None
         drained = asyncio.Event()
+
+        def fail_startup(error: Exception) -> None:
+            if not client.publication_inbox_ready.done():
+                client.publication_inbox_ready.set_exception(error)
+                # Mark observed even if the runtime has not attached a callback.
+                client.publication_inbox_ready.exception()
+            drained.set()
 
         async def retry_startup(delay: float, *, flood_wait: float = 0) -> None:
             # Honor Telegram's delay separately from database retry backoff.
@@ -190,7 +190,32 @@ def prepare_publication_inbox(client: Any, repository: Any):
             await drain_startup(min(delay * 2, 1))
 
         async def drain_startup(delay: float = 0.25) -> None:
-            nonlocal inbox
+            nonlocal inbox, candidate, recovery
+            if candidate is None:
+                try:
+                    me = await asyncio.wait_for(client.get_me(), timeout=30)
+                    if me is None:
+                        raise RuntimeError("Publication inbox requires an authenticated sender")
+                    candidate = PublicationInbox(repository, int(me.id))
+                    if callable(getattr(repository, "get_publication_recovery_cursor", None)):
+                        from .publication_difference_recovery import PublicationDifferenceRecovery
+
+                        recovery = PublicationDifferenceRecovery(client, candidate)
+                except FloodWaitError as exc:
+                    start_background_task(
+                        retry_startup(delay, flood_wait=exc.seconds),
+                        name="telegram-publication-identity-retry",
+                    )
+                    return
+                except (TimeoutError, OSError, ServerError):
+                    logger.exception("TELEGRAM_PUBLICATION_IDENTITY_RETRY")
+                    start_background_task(
+                        retry_startup(delay), name="telegram-publication-identity-retry",
+                    )
+                    return
+                except Exception as exc:
+                    fail_startup(exc)
+                    return
             try:
                 while buffer:
                     peer, old, new = buffer[0]
@@ -219,11 +244,15 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 # A live event arrived during checkpoint initialization.
                 await drain_startup()
                 return
-            if not buffer_overflow:
-                inbox = candidate
-                client.publication_inbox = candidate
-                if not client.publication_inbox_ready.done():
-                    client.publication_inbox_ready.set_result(candidate)
+            # Continue recording evidence for prior sends even if startup lost
+            # events. Do not expose the write-readiness gate in that case.
+            inbox = candidate
+            if buffer_overflow:
+                fail_startup(RuntimeError("Publication startup buffer overflowed"))
+                return
+            client.publication_inbox = candidate
+            if not client.publication_inbox_ready.done():
+                client.publication_inbox_ready.set_result(candidate)
             drained.set()
 
         # Wait for the completion signal, not the retry task itself. A startup
@@ -232,9 +261,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
             drain_startup(), name="telegram-publication-startup-drain",
         )
         await asyncio.wait_for(drained.wait(), timeout=_STARTUP_DRAIN_TIMEOUT_SEC)
-        if buffer_overflow:
-            raise RuntimeError("Publication startup buffer overflowed")
-        return candidate
+        return client.publication_inbox_ready.result()
 
     return bind
 
