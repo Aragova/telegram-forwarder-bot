@@ -657,7 +657,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 job_attempt=int(job.get("attempts") or 0) + 1,
             )
             if result.get("fallback_to_legacy"):
-                enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
+                await asyncio.to_thread(enqueue_video_delivery_fallback, repo, int(payload.get("delivery_id") or 0))
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
@@ -668,7 +668,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 next_payload["processed_video_path"] = None
                 next_payload["thumbnail_path"] = None
                 next_payload["cleanup_paths"] = [result.get("source_video_path")] if result.get("source_video_path") else []
-                enqueue_video_process(repo, next_payload)
+                await asyncio.to_thread(enqueue_video_process, repo, next_payload)
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO DOWNLOAD DONE | стадия скачивания завершена", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
@@ -681,7 +681,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 job_attempt=int(job.get("attempts") or 0) + 1,
             )
             if result.get("fallback_to_legacy"):
-                enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
+                await asyncio.to_thread(enqueue_video_delivery_fallback, repo, int(payload.get("delivery_id") or 0))
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
@@ -692,14 +692,14 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 next_payload["processed_video_path"] = result.get("processed_video_path")
                 next_payload["thumbnail_path"] = result.get("thumbnail_path")
                 next_payload["cleanup_paths"] = result.get("cleanup_paths") or payload.get("cleanup_paths") or []
-                enqueue_video_send(repo, next_payload)
+                await asyncio.to_thread(enqueue_video_send, repo, next_payload)
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO PROCESS DONE | стадия обработки завершена", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
             if result.get("restart_download"):
                 delivery_id = int(payload.get("delivery_id") or 0)
-                enqueue_video_download(
+                await asyncio.to_thread(enqueue_video_download,
                     repo,
                     delivery_id,
                     extra_payload={
@@ -722,7 +722,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
             if delivery_result.fallback_to_legacy:
-                enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
+                await asyncio.to_thread(enqueue_video_delivery_fallback, repo, int(payload.get("delivery_id") or 0))
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
