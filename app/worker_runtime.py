@@ -182,6 +182,10 @@ def _complete_job_if_delivery_already_sent(
         return False
     if not _delivery_ids_already_sent(repo, delivery_ids):
         return False
+    pending_reaction = getattr(repo, "has_unfinished_single_publication_reaction", None)
+    if (payload.get("job_type") == "repost_single" and callable(pending_reaction)
+            and any(pending_reaction(delivery_id) is True for delivery_id in delivery_ids)):
+        return False
     logger.info("IDEMPOTENCY_GUARD_ALREADY_SENT | job_id=%s | stage=%s | delivery_ids=%s", int(job_id), stage, delivery_ids)
     # Finalization may commit before the DB thread returns. Signal heartbeat
     # before the CAS so own completion never looks like an external takeover.
@@ -711,6 +715,16 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                     bool(result.get("fallback_to_legacy")),
                     result.get("sent_message_ids") or [],
                 )
+
+        if isinstance(result, dict) and result.get("publication_pending") is True:
+            # The only action on this receipt is read-only reconciliation.
+            # Release the light slot and preserve the ordinary retry budget.
+            await _finish_owned_job(
+                repo, "defer", job_id, worker_id, "", 30,
+                finalization_started=finalization_started,
+            )
+            logger.info("JOB_PUBLICATION_PENDING | job_id=%s | action=defer_read_only", job_id)
+            return True
 
         if ok:
             completed = await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)

@@ -489,6 +489,15 @@ class RepostSingleDelivery:
             return False
 
         if getattr(reupload_outcome, "transport_accepted", False) and not getattr(reupload_outcome, "authoritative_resolved", False):
+            if getattr(reupload_outcome, "resolution_method", None) == "video_processing_pending":
+                from .single_publication_reconciliation import register_pending_single
+                if await register_pending_single(
+                    owner, key=idempotency_key, delivery_id=delivery_id, rule_id=rule.id,
+                    target_id=target_id, target_thread_id=target_thread_id,
+                    source_channel=source_channel, source_message_id=message_id,
+                    scheduled_id=getattr(reupload_outcome, "returned_candidate_id", None),
+                ):
+                    return False  # executor sees durable receipt and defers without another send
             error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
             logger.warning(
                 "REUPLOAD_SINGLE_ACCEPTED_TARGET_ID_UNRESOLVED | rule_id=%s | delivery_id=%s | target_id=%s | returned_candidate_id=%s | action=no_second_send_no_reaction_manual_review",
