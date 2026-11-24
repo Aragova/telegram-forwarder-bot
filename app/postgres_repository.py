@@ -540,6 +540,16 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             UNIQUE(idempotency_key)
         );
 
+        CREATE TABLE IF NOT EXISTS mtproto_send_intents (
+            scope_kind TEXT NOT NULL CHECK(scope_kind IN ('delivery','campaign')),
+            scope_id BIGINT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+            fingerprint TEXT NOT NULL,
+            random_ids BIGINT[] NOT NULL CHECK(cardinality(random_ids) BETWEEN 1 AND 10),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY(scope_kind, scope_id, ordinal)
+        );
+
         -- MTProto scheduled IDs and published IDs are distinct namespaces.
         CREATE TABLE IF NOT EXISTS telegram_publication_mappings (
             sender_account_id BIGINT NOT NULL CHECK(sender_account_id > 0),
@@ -6073,6 +6083,47 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
             conn.commit()
 
+    def get_or_create_mtproto_random_ids(self, kind: str, key: str, ordinal: int,
+                                         fingerprint: str, count: int) -> list[int]:
+        """Bind IDs to immutable ledger row IDs, not a reusable replay key."""
+        import secrets
+
+        if kind not in {"delivery", "campaign"} or not 1 <= count <= 10 or ordinal < 0:
+            raise ValueError("Invalid MTProto send identity")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if kind == "delivery":
+                    cur.execute("SELECT id FROM delivery_attempts WHERE idempotency_key=%s AND status='sending' FOR UPDATE", (key,))
+                else:
+                    cur.execute("SELECT id FROM campaign_run_messages WHERE id=%s AND send_status='sending' FOR UPDATE", (int(key),))
+                row = cur.fetchone()
+                if not row:
+                    raise RuntimeError("No active MTProto send intent")
+                scope_id = row["id"]
+                ids = set()
+                while len(ids) < count:
+                    ids.add(secrets.randbits(63) or 1)
+                cur.execute(
+                    """
+                    INSERT INTO mtproto_send_intents(scope_kind,scope_id,ordinal,fingerprint,random_ids)
+                    VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING
+                    """,
+                    (kind, scope_id, ordinal, fingerprint, sorted(ids)),
+                )
+                cur.execute(
+                    """
+                    SELECT fingerprint,random_ids FROM mtproto_send_intents
+                    WHERE scope_kind=%s AND scope_id=%s AND ordinal=%s
+                    """,
+                    (kind, scope_id, ordinal),
+                )
+                saved = cur.fetchone()
+                if saved["fingerprint"] != fingerprint or len(saved["random_ids"]) != count:
+                    raise RuntimeError("MTProto send intent changed; refusing reuse")
+                result = list(saved["random_ids"])
+            conn.commit()
+        return result
+
     def get_publication_recovery_cursor(self, account_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -11432,7 +11483,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def mark_campaign_run_message_sent(self, message_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None = None, render_mode: str | None = None) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE campaign_run_messages SET send_status='sent', sent_message_id=%s, sent_message_ids_json=%s::jsonb, render_mode=%s, sent_at=NOW(), updated_at=NOW() WHERE id=%s", (sent_message_id, _json_dumps(sent_message_ids), render_mode, int(message_id)))
+                cur.execute("UPDATE campaign_run_messages SET send_status='sent', sent_message_id=%s, sent_message_ids_json=%s::jsonb, render_mode=%s, sent_at=NOW(), delete_after_at=CASE WHEN delete_after_at IS NOT NULL THEN NOW()+make_interval(secs=>show_seconds::double precision) ELSE NULL END, updated_at=NOW() WHERE id=%s", (sent_message_id, _json_dumps(sent_message_ids), render_mode, int(message_id)))
             conn.commit()
             return True
 
@@ -11455,7 +11506,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             safe_delete_error_text = "ID публикации не подтверждён. Автоматическое удаление невозможно, требуется ручная проверка."
         if accepted_unverified:
             safe_delete_status = "failed"
-            safe_delete_error_text = "Telegram принял публикацию, но ID не подтверждены. Не отправляйте повторно; требуется ручная проверка."
+            safe_delete_error_text = "Telegram мог принять публикацию, но ID не подтверждены. Не отправляйте повторно; требуется ручная проверка."
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
