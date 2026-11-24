@@ -83,6 +83,11 @@ def test_telethon_schema_supports_publication_mapping_and_plain_deletion():
     peer = types.PeerChannel(123)
     published = types.UpdateDeleteScheduledMessages(peer=peer,messages=[1],sent_messages=[100])
     deleted = types.UpdateDeleteScheduledMessages(peer=peer,messages=[1])
+    from telethon.extensions import BinaryReader
+    with BinaryReader(bytes(published)) as reader:
+        decoded = reader.tgread_object()
+    assert decoded.sent_messages == [100]
+    assert publication_pairs(decoded.messages, decoded.sent_messages) == [(1,100)]
     assert publication_pairs(published.messages,published.sent_messages) == [(1,100)]
     assert publication_pairs(deleted.messages,deleted.sent_messages) == []
 

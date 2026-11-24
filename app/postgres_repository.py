@@ -591,6 +591,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             CHECK(published_ids IS NULL OR cardinality(published_ids) = cardinality(delivery_ids))
         );
         ALTER TABLE telegram_publication_receipts ADD COLUMN IF NOT EXISTS manual_review JSONB NULL;
+        CREATE INDEX IF NOT EXISTS idx_telegram_publication_receipts_rule
+            ON telegram_publication_receipts(rule_id);
         CREATE INDEX IF NOT EXISTS idx_telegram_publication_manual_review_rule
             ON telegram_publication_receipts(rule_id) WHERE manual_review IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_telegram_publication_receipt_deliveries
@@ -2279,15 +2281,19 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             with conn.cursor() as cur:
                 if publication_intent is not None:
                     key, started_at = publication_intent
+                    try:
+                        peer_id = int(target_id)
+                    except (TypeError, ValueError):
+                        return None
                     cur.execute(
                         """
                         SELECT 1 FROM telegram_publication_receipts
                         WHERE idempotency_key=%s AND send_started_at=%s
                           AND reaction_state='dispatching' AND tenant_id=%s AND rule_id=%s
-                          AND target_peer_id::text=%s AND %s=ANY(published_ids)
+                          AND target_peer_id=%s AND %s=ANY(published_ids)
                         FOR UPDATE
                         """,
-                        (key, started_at, tenant_id, rule_id, str(target_id), message_id),
+                        (key, started_at, tenant_id, rule_id, peer_id, message_id),
                     )
                     if not cur.fetchone():
                         return None
@@ -6020,7 +6026,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     "SELECT pts,qts,state_date,version FROM telegram_publication_recovery_cursor WHERE sender_account_id=%s",
                     (account_id,),
                 )
-                return cur.fetchone()
+                row = cur.fetchone()
+                return dict(row) if row is not None else None
 
     def initialize_publication_recovery_cursor(
         self, account_id: int, pts: int, qts: int, state_date: datetime,
@@ -6259,7 +6266,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     """,
                     (key,),
                 )
-                return cur.fetchone()
+                row = cur.fetchone()
+                return dict(row) if row is not None else None
 
     def has_unfinished_publication_reaction(self, delivery_id: int) -> bool:
         with self.connect() as conn:

@@ -150,7 +150,9 @@ def test_publication_inbox_preserves_conflicts_and_cursor_cas():
         repo.initialize_publication_recovery_cursor(123, 1, 0, now)
         assert repo.advance_publication_recovery_cursor(123, 0, 2, 0, now)
         assert not repo.advance_publication_recovery_cursor(123, 0, 3, 0, now)
-        assert repo.get_publication_recovery_cursor(123)["pts"] == 2
+        cursor = repo.get_publication_recovery_cursor(123)
+        assert isinstance(cursor, dict)
+        assert cursor["pts"] == 2
     finally:
         repo.client.close_all_connections()
 
@@ -207,6 +209,7 @@ def test_stage2_real_pg_mixed_album_is_atomic_and_rollback_preserves_evidence(re
     seeded=seed(repo,101,count=2)
     key,rule_id,deliveries,source_ids,source,target=seeded
     assert register(repo,seeded,[500,500],[False,True])
+    assert isinstance(repo.get_publication_receipt(key), dict)
     assert register(repo,seeded,[500,500],[False,True])
     assert not register(repo,seeded,[500,502],[False,True])
     assert not repo.mark_delivery_attempt_accepted(key,sent_message_ids=[500,999],telegram_method="mtproto")
@@ -313,6 +316,7 @@ def test_stage2_reaction_enqueue_is_atomic_and_one_shot(repo):
     args = dict(tenant_id=1, rule_id=rule_id, target_id=target, message_id=901,
                 publication_intent=(key, started))
     assert repo.enqueue_reaction_job(**(args | {"message_id": 78})) is None
+    assert repo.enqueue_reaction_job(**(args | {"target_id": "not-a-peer"})) is None
     assert repo.enqueue_reaction_job(**args)
     assert repo.enqueue_reaction_job(**args) is None
     assert repo.get_publication_receipt(key)["reaction_state"] == "done"
