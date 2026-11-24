@@ -91,6 +91,22 @@ def _safe_json_loads(raw: Any, default: Any) -> Any:
 
 _JOB_TENANT_SQL = "COALESCE(NULLIF(j.payload_json->>'tenant_id', '')::BIGINT, 1)"
 
+# A Telegram-accepted send with unknown final IDs is not a clean placement.
+# Retain the existing failed status and use its durable acceptance evidence.
+_CAMPAIGN_OCCUPIED_SQL = """(
+    m.send_status = 'sent' OR (
+        m.send_status = 'failed' AND m.delete_status = 'failed' AND EXISTS (
+            SELECT 1 FROM audit_log a
+            WHERE a.rule_id = m.rule_id
+              AND a.event_type = 'campaign_publication_unverified'
+              AND a.status = 'accepted'
+              AND CASE WHEN a.event_type = 'campaign_publication_unverified'
+                  THEN a.extra_json::jsonb->>'campaign_run_message_id'
+                  END = m.id::text
+        )
+    )
+)"""
+
 CAMPAIGN_INVITE_LINK_DEFAULT_APPEND_TEMPLATE = "👉 Подписаться: {invite_link}"
 CAMPAIGN_INVITE_LINK_ALLOWED_LINK_MODES = {"join_request", "direct_join"}
 CAMPAIGN_INVITE_LINK_ALLOWED_INJECTION_MODES = {"placeholder", "append_footer", "disabled"}
@@ -11429,7 +11445,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     ) -> list[dict[str, Any]]:
         where_parts = [
             "r.rule_id = %s",
-            "m.send_status = 'sent'",
+            _CAMPAIGN_OCCUPIED_SQL,
             "m.delete_status IN ('pending', 'processing', 'failed')",
         ]
         params: list[Any] = [int(rule_id)]
@@ -11456,6 +11472,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         r.targets_success,
                         r.targets_failed,
                         COUNT(m.id) FILTER (WHERE m.send_status = 'sent') AS sent,
+                        COUNT(m.id) FILTER (WHERE m.send_status = 'failed') AS accepted_unverified,
                         COUNT(m.id) FILTER (WHERE m.delete_status = 'pending') AS delete_pending,
                         COUNT(m.id) FILTER (WHERE m.delete_status = 'processing') AS delete_processing,
                         COUNT(m.id) FILTER (WHERE m.delete_status = 'failed') AS delete_failed,
@@ -11493,7 +11510,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             else:
                 placement_status = "clean"
             row["sent"] = int(row.get("sent") or 0)
-            row["active_messages_total"] = row["sent"]
+            row["accepted_unverified"] = int(row.get("accepted_unverified") or 0)
+            row["active_messages_total"] = row["sent"] + row["accepted_unverified"]
             row["delete_pending"] = delete_pending
             row["delete_processing"] = delete_processing
             row["delete_failed"] = delete_failed
@@ -11509,7 +11527,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     ) -> dict[str, Any]:
         where_parts = [
             "r.rule_id = %s",
-            "m.send_status = 'sent'",
+            _CAMPAIGN_OCCUPIED_SQL,
             "m.delete_status IN ('pending', 'processing', 'failed')",
         ]
         params: list[Any] = [int(rule_id)]

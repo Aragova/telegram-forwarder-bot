@@ -248,3 +248,28 @@ def test_publication_deadline_is_checked_after_advisory_lock(repo):
             conn.commit()
         assert future.result(timeout=5) is False
     assert repo.get_delivery(deliveries[0])["status"] == "processing"
+
+
+def test_real_pg_campaign_accepted_unknown_blocks_clean_channel(repo):
+    _,rule_id,_,_,_,target=seed(repo,110)
+    saved=repo.create_saved_post(rule_id=rule_id,title="test",content={},
+        source_chat_id=None,source_message_id=None,source_media_group_id=None,created_by=None)
+    run=repo.create_campaign_run(rule_id=rule_id,saved_post_id=saved,run_type="manual",
+        status="sending",show_seconds=10,started_by=None,targets_total=2)
+    unknown=repo.create_campaign_run_message(run_id=run,rule_id=rule_id,saved_post_id=saved,
+        target_kind="main",target_id=target)
+    rejected=repo.create_campaign_run_message(run_id=run,rule_id=rule_id,saved_post_id=saved,
+        target_kind="extra",target_id="-10099110")
+    assert repo.mark_campaign_run_message_failed(rejected,error_text="rejected")
+    assert repo.get_active_campaign_placements_summary_for_rule(rule_id)["placements_total"]==0
+    assert repo.mark_campaign_run_message_failed(unknown,error_text="unknown",
+        accepted_unverified=True,raw_message_ids=[0])
+    summary=repo.get_active_campaign_placements_summary_for_rule(rule_id)
+    assert summary["placements_total"]==1
+    assert summary["delete_problem_total"]==1
+    rows=repo.list_active_campaign_placements_for_rule(rule_id)
+    assert len(rows)==1
+    assert rows[0]["sent"]==0
+    assert rows[0]["accepted_unverified"]==1
+    assert rows[0]["active_messages_total"]==1
+    assert unknown not in [row["id"] for row in repo.claim_due_campaign_run_messages_for_delete()]
