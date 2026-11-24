@@ -533,7 +533,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         );
 
         CREATE TABLE IF NOT EXISTS mtproto_send_intents (
-            attempt_id BIGINT NOT NULL,
+            attempt_id BIGINT NOT NULL REFERENCES delivery_attempts(id) ON DELETE CASCADE,
             ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
             fingerprint TEXT NOT NULL,
             random_ids BIGINT[] NOT NULL CHECK(cardinality(random_ids) BETWEEN 1 AND 100),

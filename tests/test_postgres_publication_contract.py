@@ -48,5 +48,11 @@ def test_durable_publication_contract():
         repo.extend_transport_cooldown(scope, 60)
         repo.extend_transport_cooldown(scope, 1)
         assert repo.get_transport_cooldown(scope) > 30
+        # Identity belongs to a ledger row, not a reusable delivery key.
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+                cur.execute("SELECT COUNT(*) AS n FROM mtproto_send_intents")
+                assert cur.fetchone()["n"] == 0
     finally:
         repo.client.close_all_connections()

@@ -4,6 +4,7 @@ import os
 import threading
 from contextlib import contextmanager
 from typing import Iterator
+from weakref import WeakValueDictionary
 
 try:
     import psycopg
@@ -23,7 +24,7 @@ class PostgresClient:
 
         self._local = threading.local()
         self._connections_lock = threading.Lock()
-        self._connections = {}
+        self._connections = WeakValueDictionary()
 
     def is_configured(self) -> bool:
         return all([

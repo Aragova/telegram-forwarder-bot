@@ -191,3 +191,16 @@ def test_bot_cooldown_shared_between_attempts_and_invalid_content_does_not_enter
             await bot.send_message(chat_id=1, text="x" * 4097, parse_mode=None)
         assert raw.calls == 1 and not intent.possible_write
     asyncio.run(scenario())
+
+
+def test_publication_client_can_read_properties_during_base_initialization():
+    class InitializingBase:
+        def __init__(self):
+            assert self._request_retries == 0
+            assert self.flood_sleep_threshold == 0
+            self._request_retries = 3
+            self.flood_sleep_threshold = 60
+
+    client = publication_client_class(InitializingBase)()
+    assert client._request_retries == 3
+    assert client.flood_sleep_threshold == 60

@@ -193,7 +193,7 @@ def publication_client_class(base):
     class PublicationClient(base):
         @property
         def _request_retries(self):
-            return 0 if _single_rpc.get() else self._normal_request_retries
+            return 0 if _single_rpc.get() else getattr(self, "_normal_request_retries", 0)
 
         @_request_retries.setter
         def _request_retries(self, value):
@@ -201,7 +201,7 @@ def publication_client_class(base):
 
         @property
         def flood_sleep_threshold(self):
-            return 0 if _single_rpc.get() else self._flood_sleep_threshold
+            return 0 if _single_rpc.get() else getattr(self, "_flood_sleep_threshold", 0)
 
         @flood_sleep_threshold.setter
         def flood_sleep_threshold(self, value):
