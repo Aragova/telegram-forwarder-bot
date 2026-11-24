@@ -113,3 +113,49 @@ def test_failed_telethon_connect_closes_client_and_preserves_error(monkeypatch):
     with pytest.raises(RuntimeError, match="connect failed"):
         asyncio.run(telegram_client.create_telethon_client())
     assert events == ["connect", "disconnect"]
+
+
+@pytest.mark.parametrize("seconds", [2, 60])
+@pytest.mark.parametrize("op_name", ["send_message", "__call__"])
+def test_unconfirmed_wait_hint_does_not_authorize_publication_retry(seconds, op_name):
+    class AmbiguousTimeout(TimeoutError):
+        pass
+
+    async def scenario():
+        calls = 0
+
+        async def operation():
+            nonlocal calls
+            calls += 1
+            error = AmbiguousTimeout("network timeout")
+            error.seconds = seconds
+            raise error
+
+        with pytest.raises(AmbiguousTimeout):
+            await build_sender_bot_policy().execute(
+                backend="bot", key=f"sender.{op_name}",
+                op_name=op_name, func=operation,
+            )
+        assert calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_explicit_flood_wait_at_attempt_limit_keeps_retry_after():
+    from app.transport_policy import TransportPolicy
+
+    async def scenario():
+        async def operation():
+            raise TelegramRetryAfter(
+                method=SendMessage(chat_id=1, text="test"),
+                message="rate limited", retry_after=2,
+            )
+
+        with pytest.raises(TransportRateLimited) as result:
+            await TransportPolicy(max_attempts=1).execute(
+                backend="bot", key="sender.get_chat",
+                op_name="get_chat", func=operation,
+            )
+        assert result.value.retry_after_seconds == 2
+
+    asyncio.run(scenario())
