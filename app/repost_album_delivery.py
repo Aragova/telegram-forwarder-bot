@@ -5,6 +5,7 @@ import logging
 
 from .delivery_idempotency import normalize_valid_sent_message_ids
 from .runtime_utils import run_db
+from .transport_policy import TransportRateLimited
 from .repost_caption import get_repost_caption_override, caption_override_content
 
 
@@ -127,6 +128,8 @@ class RepostAlbumDelivery:
                         for m in source_messages
                     ],
                 )
+        except TransportRateLimited:
+            raise
         except Exception as exc:
             logger.warning(
                 "Не удалось заранее получить preview альбома %s -> %s: %s",
@@ -655,6 +658,8 @@ class RepostAlbumDelivery:
                     ],
                     is_self_loop=is_self_loop,
                 )
+        except TransportRateLimited:
+            raise
         except Exception as exc:
             if not transport_entered:
                 raise AlbumPreflightError(str(exc)) from exc
@@ -1049,6 +1054,11 @@ class RepostAlbumDelivery:
                     await run_db(owner._mark_delivery_faulty_sync, disputed_id, "telethon_send_attempted_result_unknown_non_retryable")
                 return False
 
+            retry_candidate_ids = normalize_valid_sent_message_ids(reupload_retry_result.get("sent_message_ids") or [])
+            if idempotency_key and reupload_retry_result.get("ok") and len(retry_candidate_ids) == len(message_ids):
+                await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                             sent_message_ids=retry_candidate_ids, telegram_method="reupload_album_retry")
+
             await log_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
@@ -1240,6 +1250,11 @@ class RepostAlbumDelivery:
         if idempotency_key and (one_by_one_result.get("transport_attempted") or one_by_one_result.get("transport_accepted")) and not one_by_one_result.get("ok"):
             await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key,
                          status="failed_after_send", error_text="one_by_one_outcome_unknown_no_resend")
+
+        fallback_candidate_ids = normalize_valid_sent_message_ids(one_by_one_result.get("sent_message_ids") or [])
+        if idempotency_key and one_by_one_result.get("ok") and len(fallback_candidate_ids) == len(message_ids):
+            await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                         sent_message_ids=fallback_candidate_ids, telegram_method="one_by_one")
 
         await log_pipeline_step(
             rule_id=rule.id,
