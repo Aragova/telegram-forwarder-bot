@@ -1089,12 +1089,9 @@ class SenderService:
     ) -> dict:
         from .reaction_delivery import ReactionDelivery
         kwargs = {
-            "rule": rule,
-            "target_id": target_id,
-            "sent_message_id": sent_message_id,
-            "source_channel": source_channel,
-            "source_message_ids": source_message_ids,
-            "delivery_id": delivery_id,
+            "rule": rule, "target_id": target_id,
+            "sent_message_id": sent_message_id, "source_channel": source_channel,
+            "source_message_ids": source_message_ids, "delivery_id": delivery_id,
             "max_age_seconds": max_age_seconds,
         }
         if allow_unverified_self_loop_target:
