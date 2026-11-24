@@ -67,10 +67,12 @@ def _terminal_non_retryable_result(error_text: str) -> dict:
 
 class SenderService:
     def __init__(
-        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db
+        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db,
+        *, telethon_read_client=None,
     ):
         self.bot = bot
         self.telethon = telethon_client
+        self.telethon_read = telethon_read_client if telethon_read_client is not None else telethon_client
         self.reaction_clients = reaction_clients or []
         self.db = db
         self.scheduler_service = SchedulerService(self.db)

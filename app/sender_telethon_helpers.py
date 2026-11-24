@@ -852,7 +852,8 @@ class SenderTelethonHelpers:
                 }
 
             entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
-            fetched = await self.owner.telethon.get_messages(entity, ids=sent_message_ids)
+            reader = getattr(self.owner, "telethon_read", None) or self.owner.telethon
+            fetched = await reader.get_messages(entity, ids=sent_message_ids)
             fetched_list = fetched if isinstance(fetched, list) else [fetched]
             fetched_list = [m for m in fetched_list if m]
             actual_ids = sorted(int(m.id) for m in fetched_list)

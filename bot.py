@@ -8650,14 +8650,16 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
         policy=build_sender_bot_policy(),
     )
     sender_telethon_client = wrap_telethon_client(
-        telethon_client if not publication_required or getattr(telethon_client,"publication_inbox",None) is not None else None,
+        telethon_client,
         label="sender.telethon",
         policy=build_sender_telethon_policy(),
     )
+    mtproto_write_ready = not publication_required or getattr(telethon_client, "publication_inbox", None) is not None
     sender_service = SenderService(
         bot=sender_bot,
         db=db,
-        telethon_client=sender_telethon_client,
+        telethon_client=sender_telethon_client if mtproto_write_ready else None,
+        telethon_read_client=sender_telethon_client,
         reaction_clients=reaction_clients,
     )
     runtime_context = RuntimeContext(

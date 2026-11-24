@@ -47,6 +47,9 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
         import bot as runtime
 
         raw_telethon_client = _RawTelethonClient()
+        from types import SimpleNamespace
+        repository = SimpleNamespace(record_telegram_publication_mappings=lambda *args: None)
+        monkeypatch.setattr(runtime, "db", repository)
         reaction_client = object()
         sender_service_kwargs = {}
         builder_calls: list[str] = []
@@ -78,6 +81,7 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
 
         async def _create_telethon_client(*, publication_repository=None):
             from app.telegram_publication import prepare_publication_inbox
+            assert publication_repository is repository
             bind=prepare_publication_inbox(raw_telethon_client,publication_repository)
             await bind()
             return raw_telethon_client
@@ -111,6 +115,7 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
         assert sender_bot.raw is raw_bot
         assert getattr(sender_telethon, "_is_transport_proxy", False) is True
         assert sender_telethon.raw is raw_telethon_client
+        assert sender_service_kwargs["telethon_read_client"] is sender_telethon
         assert sender_telethon.publication_inbox is raw_telethon_client.publication_inbox
         assert sender_telethon.publication_inbox.sender_account_id == 12345
         assert len(raw_telethon_client.handlers) == 1
