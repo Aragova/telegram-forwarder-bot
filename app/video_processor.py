@@ -2308,6 +2308,8 @@ class VideoProcessor:
                         del self.video_info_cache[fp]
                 except:
                     pass
+            if isinstance(e, (TransportRateLimited, PublicationWriteUnavailable)):
+                raise
             if isinstance(e, TelegramEntityTooLarge):
                 # Keep the terminal 413 classification across the legacy pipeline.
                 raise
