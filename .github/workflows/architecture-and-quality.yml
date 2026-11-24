@@ -279,3 +279,58 @@ jobs:
               return;
             }
             core.info('No completed SonarCloud check in recent PR commits.');
+
+      - name: Collect reviewed analyzer distribution hashes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import io
+          import json
+          import tarfile
+          import urllib.request
+          from pathlib import PurePosixPath
+
+          wheels = [
+              ("ruff", "0.17.6", "ruff-0.17.6-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"),
+              ("mypy", "2.4.1", "mypy-2.4.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"),
+              ("bandit", "1.9.4", "bandit-1.9.4-py3-none-any.whl"),
+              ("radon", "6.0.1", "radon-6.0.1-py2.py3-none-any.whl"),
+              ("typing-extensions", "4.16.0", "typing_extensions-4.16.0-py3-none-any.whl"),
+              ("mypy-extensions", "1.2.0", "mypy_extensions-1.2.0-py3-none-any.whl"),
+              ("pathspec", "1.1.1", "pathspec-1.1.1-py3-none-any.whl"),
+              ("librt", "0.17.0", "librt-0.17.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"),
+              ("ast-serialize", "0.13.1", "ast_serialize-0.13.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"),
+              ("PyYAML", "6.0.4", "pyyaml-6.0.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"),
+              ("stevedore", "5.10.0", "stevedore-5.10.0-py3-none-any.whl"),
+              ("rich", "15.0.0", "rich-15.0.0-py3-none-any.whl"),
+              ("mando", "0.7.1", "mando-0.7.1-py2.py3-none-any.whl"),
+              ("colorama", "0.4.6", "colorama-0.4.6-py2.py3-none-any.whl"),
+              ("six", "1.17.0", "six-1.17.0-py2.py3-none-any.whl"),
+              ("markdown-it-py", "4.3.0", "markdown_it_py-4.3.0-py3-none-any.whl"),
+              ("Pygments", "2.21.0", "pygments-2.21.0-py3-none-any.whl"),
+              ("mdurl", "0.1.2", "mdurl-0.1.2-py3-none-any.whl"),
+          ]
+          for name, version, filename in wheels:
+              with urllib.request.urlopen(f"https://pypi.org/pypi/{name}/{version}/json", timeout=15) as response:
+                  metadata = json.load(response)
+              selected = next(x for x in metadata["urls"] if x["filename"] == filename and not x["yanked"])
+              print(f"LOCK_ENTRY {name}=={version} --hash=sha256:{selected['digests']['sha256']}", flush=True)
+
+          with urllib.request.urlopen("https://pypi.org/pypi/code2flow/2.5.1/json", timeout=15) as response:
+              metadata = json.load(response)
+          selected = next(x for x in metadata["urls"] if x["filename"] == "code2flow-2.5.1.tar.gz")
+          print("CODE2FLOW_SOURCE " + json.dumps({"url": selected["url"], "sha256": selected["digests"]["sha256"]}))
+          expected = "ad98717920da6598dac38a1951f38b84891f4aa4bd2f36c119b0dbac729f4785"
+          if selected["digests"]["sha256"] != expected:
+              raise RuntimeError("Unexpected code2flow release hash")
+          with urllib.request.urlopen(selected["url"], timeout=15) as response:
+              archive = response.read(1000000)
+          if hashlib.sha256(archive).hexdigest() != expected:
+              raise RuntimeError("Unexpected code2flow archive hash")
+          with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+              for entry in tar.getmembers():
+                  path = PurePosixPath(entry.name)
+                  if entry.isfile() and path.name in {"entry_points.txt", "setup.py", "__main__.py"}:
+                      print("CODE2FLOW_ENTRY " + json.dumps({"path": entry.name, "text": tar.extractfile(entry).read().decode()}))
+          PY
