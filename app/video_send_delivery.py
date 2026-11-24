@@ -5,6 +5,8 @@ from pathlib import Path
 
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from telethon.errors import FloodWaitError
+from .transport_policy import TransportRateLimited
+from .send_intent import PublicationWriteUnavailable
 
 from .delivery_idempotency import (
     build_delivery_idempotency_key,
@@ -187,6 +189,11 @@ class VideoSendDelivery:
                 "retryable": True, "accepted": False,
                 "error_text": error_text,
             }
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            if has_attempt_ledger:
+                await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key,
+                             status="failed_before_send", error_text="publication transport temporarily unavailable")
+            raise
         except (TelegramRetryAfter, FloodWaitError) as exc:
             # Telegram explicitly rejected this request before publishing it.
             # Release the ledger for a delayed worker retry; do not confuse
