@@ -11,6 +11,16 @@ from app.transport_policy import (
     build_sender_telethon_upload_policy,
 )
 
+from app.send_intent import observe_write, PublicationWriteUnavailable
+from app.transport_operation import classify_transport_operation, TransportOperationKind
+
+
+async def _invoke_bot_write(op_name, invoke):
+    if classify_transport_operation("bot", op_name) == TransportOperationKind.NON_IDEMPOTENT_WRITE:
+        return await observe_write(invoke)
+    return await invoke()
+
+
 logger = logging.getLogger("forwarder.transport")
 
 # Short, read-only RPCs must not occupy worker slots indefinitely.
@@ -38,11 +48,13 @@ class BotTransportProxy:
         return self._bot
 
     async def __call__(self, *args, **kwargs):
+        method = args[0] if args else kwargs.get("method")
+        op_name = type(method).__name__ if method is not None else "__call__"
         return await self._policy.execute(
             backend="bot",
-            key=f"{self._label}.__call__",
-            op_name="__call__",
-            func=lambda: self._bot(*args, **kwargs),
+            key=f"{self._label}.{op_name}",
+            op_name=op_name,
+            func=lambda: _invoke_bot_write(op_name, lambda: self._bot(*args, **kwargs)),
         )
 
     def __getattr__(self, name: str):
@@ -56,7 +68,7 @@ class BotTransportProxy:
                 backend="bot",
                 key=f"{self._label}.{name}",
                 op_name=name,
-                func=lambda: attr(*args, **kwargs),
+                func=lambda: _invoke_bot_write(name, lambda: attr(*args, **kwargs)),
             )
 
         return _wrapped
@@ -101,6 +113,9 @@ class TelethonTransportProxy:
             return attr
 
         async def _wrapped(*args, **kwargs):
+            if (name in {"send_file", "send_message", "forward_messages"}
+                    and getattr(self._client, "publication_write_blocked", False) is True):
+                raise PublicationWriteUnavailable("MTProto publication evidence unavailable")
             if name in _TELETHON_CONTROL_OPS:
                 selected_policy = self._read_policy
                 lane = "control"
