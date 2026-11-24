@@ -30,6 +30,8 @@ class SavedPostRenderResult:
     message_ids: list[int] | None = None
     raw_message_ids: list[int] | None = None
     recovery_status: str | None = None
+    accepted: bool = False
+    manual_review_required: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -43,6 +45,8 @@ class SavedPostRenderResult:
             "message_ids": self.message_ids,
             "raw_message_ids": self.raw_message_ids,
             "recovery_status": self.recovery_status,
+            "accepted": self.accepted,
+            "manual_review_required": self.manual_review_required,
         }
 
 class SavedPostSentUnverifiedError(Exception):
@@ -174,6 +178,8 @@ class SavedPostRenderer:
                 message_ids=None,
                 raw_message_ids=exc.message_ids,
                 recovery_status="failed",
+                accepted=True,
+                manual_review_required=True,
             )
         except Exception as exc:
             self.logger.warning(
@@ -325,6 +331,8 @@ def get_album_source_chat_id(content: dict[str, Any]) -> int | str | None:
 
 def normalize_saved_post_render_error(exc: Exception, *, kind: str, premium_required: bool) -> str:
     text = str(exc)
+    if isinstance(exc, SavedPostSentUnverifiedError):
+        return "Telegram принял публикацию, но её ID пока не подтверждены. Не отправляйте публикацию повторно."
     if "Для premium-альбома нет source_message_ids" in text:
         return "Этот рекламный альбом сохранён без исходных ID сообщений. Замените рекламный пост альбомом заново."
     if "Для premium-альбома сохранены не все source_message_ids" in text:
@@ -620,7 +628,7 @@ async def send_saved_post_content(
         messages = await bot.send_media_group(chat_id=chat_id, media=media_group)
         ids = botapi_publication_ids(messages, len(media_group))
         if not ids:
-            raise SavedPostSentUnverifiedError(target_id=chat_id, message_ids=[], method="bot_api_unverified", reason="Bot API accepted without complete publication IDs; do not resend")
+            raise SavedPostSentUnverifiedError(target_id=chat_id, message_ids=[m.message_id for m in messages if type(getattr(m,"message_id",None)) is int and m.message_id>0], method="bot_api_unverified", reason="Bot API accepted without complete publication IDs; do not resend")
         if reply_markup is not None:
             await bot.send_message(chat_id=chat_id, text="⬆️ Предпросмотр рекламного альбома", reply_markup=reply_markup)
         return {"ok": True, "message_id": ids[0], "message_ids": ids, "chat_id": str(chat_id), "kind": kind, "method": "bot_api"}

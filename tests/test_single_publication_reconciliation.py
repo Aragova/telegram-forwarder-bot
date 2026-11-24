@@ -18,16 +18,16 @@ def test_pending_single_defers_without_second_send_then_finishes_and_reacts_to_f
         def get_publication_receipt(self, key):
             return dict(self.row)
 
-        def finalize_publication_receipt(self, key, published_ids):
+        def finalize_publication_receipt(self, key, published_ids, *, expected_started_at):
             self.finalized += 1
             self.row["published_ids"] = published_ids
             return True
 
-        def claim_publication_reaction(self, key):
+        def claim_publication_reaction(self, key, published_ids, *, expected_started_at):
             self.row["reaction_state"] = "dispatching"
             return True
 
-        def finish_publication_reaction(self, key, state, result):
+        def finish_publication_reaction(self, key, state, result, *, expected_started_at):
             self.row["reaction_state"] = state
 
         def get_rule(self, rule_id):

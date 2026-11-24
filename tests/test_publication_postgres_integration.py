@@ -89,9 +89,11 @@ def test_real_pg_mixed_album_is_atomic_and_rollback_preserves_evidence(repo):
             cur.execute("SELECT sent_message_id FROM deliveries WHERE id=ANY(%s) ORDER BY id",(deliveries,))
             assert [row["sent_message_id"] for row in cur.fetchall()]==[500,501]
     assert repo.get_delivery_attempt_by_idempotency_key(key)["sent_message_ids_json"]==[500,501]
-    assert repo.claim_publication_reaction(key)
-    assert not repo.claim_publication_reaction(key)
-    repo.finish_publication_reaction(key,"done",{"applied":True})
+    started=repo.get_publication_receipt(key)["send_started_at"]
+    assert not repo.claim_publication_reaction(key,[500,999],expected_started_at=started)
+    assert repo.claim_publication_reaction(key,[500,501],expected_started_at=started)
+    assert not repo.claim_publication_reaction(key,[500,501],expected_started_at=started)
+    repo.finish_publication_reaction(key,"done",{"applied":True},expected_started_at=started)
 
     assert repo.rollback_last_delivery(rule_id)
     assert repo.get_publication_receipt(key) is None
@@ -103,6 +105,7 @@ def test_real_pg_mixed_album_is_atomic_and_rollback_preserves_evidence(repo):
             assert cur.fetchone()["published_ids"]==[500,501]
     start_attempt(repo,key,rule_id,deliveries,source_ids,target)
     assert register(repo,seeded,[600,601],[True,True])
+    assert not repo.finalize_publication_receipt(key,[500,501],expected_started_at=started)
 
 
 def test_real_pg_conflicting_mapping_and_deadline_never_finalize(repo):

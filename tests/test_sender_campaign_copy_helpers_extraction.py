@@ -49,6 +49,13 @@ class FakeDb:
 
     def mark_delivery_campaign_copy_processing(self, copy_id):
         self.calls.append(("mark_delivery_campaign_copy_processing", copy_id))
+        self.copy_row["send_status"]="processing"
+        return True
+
+    def mark_delivery_campaign_copy_unverified(self, copy_id, reason):
+        self.copy_row["send_status"]="unverified"
+        self.calls.append(("unverified",copy_id,reason))
+        return True
 
     def mark_delivery_campaign_copy_sent(self, copy_id, **kwargs):
         self.calls.append(("mark_delivery_campaign_copy_sent", copy_id, kwargs))
@@ -256,3 +263,15 @@ def test_delete_copy_non_retryable_failure():
     assert result["ok"] is False
     assert result["retryable"] is False
     assert "Forbidden" in result["error_text"]
+
+
+def test_accepted_zero_copy_is_never_sent_again():
+    db=FakeDb(copy_row={"send_status":"pending","delivery_id":11,"target_id":"-100target"},
+              delivery={"source_channel":"-100source","message_id":333})
+    bot=FakeBot(copy_message_id=0)
+    helper=_helper(SimpleNamespace(db=db,bot=bot))
+    first=asyncio.run(helper.execute_send_copy_from_job(copy_id=9))
+    second=asyncio.run(helper.execute_send_copy_from_job(copy_id=9))
+    assert first["manual_review_required"] and second["manual_review_required"]
+    assert db.copy_row["send_status"]=="unverified"
+    assert len(bot.copy_message_calls)==1

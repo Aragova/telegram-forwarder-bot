@@ -484,3 +484,9 @@ def test_saved_post_pending_album_never_uses_history_guess():
             content={"kind": "album", "media_items": [{}, {}], "forward_origin": {"chat_id": 1, "message_ids": [11, 12]}},
         ))
     assert len(client.send_file_calls) == 1
+
+
+def test_unverified_publication_warning_is_localized():
+    from app.saved_post_renderer import normalize_saved_post_render_error, SavedPostSentUnverifiedError
+    exc=SavedPostSentUnverifiedError(target_id=-100123,message_ids=[5],method="bot_api_unverified",reason="Bot API accepted without publication ID; do not resend")
+    assert "Не отправляйте публикацию повторно" in normalize_saved_post_render_error(exc,kind="video",premium_required=False)

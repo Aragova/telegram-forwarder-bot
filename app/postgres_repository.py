@@ -6041,14 +6041,12 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
                 return cur.fetchone() is not None
 
-    def finalize_publication_receipt(self, key: str, published_ids: list[int]) -> bool:
+    def finalize_publication_receipt(self, key: str, published_ids: list[int], *, expected_started_at: datetime | None = None) -> bool:
         """Commit all mapped IDs, the attempt, and post-send intent atomically."""
         from app.telegram_publication import publication_pairs
 
         receipt = self.get_publication_receipt(key)
-        if not receipt or not publication_pairs(published_ids,published_ids) or len(receipt["scheduled_ids"]) != len(published_ids):
-            return False
-        if str(receipt["target_peer_id"]) == receipt["source_channel"] and set(published_ids) & set(receipt["source_message_ids"]):
+        if not receipt or not publication_pairs(published_ids,published_ids) or (expected_started_at is not None and receipt["send_started_at"] != expected_started_at):
             return False
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -6057,11 +6055,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (receipt["rule_id"],),
                 )
                 rule = cur.fetchone()
-                if (not rule or str(rule["target_id"]) != str(receipt["target_peer_id"])
-                        or rule["target_thread_id"] != receipt["target_thread_id"]
-                        or str(rule["source_id"]) != receipt["source_channel"]
-                        or rule["source_thread_id"] != receipt["source_thread_id"]
-                        or (rule["tenant_id"] or 1) != receipt["tenant_id"]):
+                if not rule:
                     return False
                 cur.execute(
                     """
@@ -6073,9 +6067,22 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
                 if not cur.fetchone():
                     return False
-                cur.execute("SELECT published_ids,expired_at,deadline_at<=NOW() AS expired FROM telegram_publication_receipts WHERE idempotency_key=%s FOR UPDATE",(key,))
+                cur.execute("SELECT *,deadline_at<=NOW() AS expired FROM telegram_publication_receipts WHERE idempotency_key=%s FOR UPDATE",(key,))
                 pending = cur.fetchone()
                 if not pending or pending["published_ids"] is not None or pending["expired_at"] is not None or pending["expired"]:
+                    return False
+                if pending["send_started_at"] != receipt["send_started_at"] or pending["rule_id"] != receipt["rule_id"]:
+                    return False
+                receipt = pending
+                if len(receipt["scheduled_ids"]) != len(published_ids):
+                    return False
+                if (not rule or str(rule["target_id"]) != str(receipt["target_peer_id"])
+                        or rule["target_thread_id"] != receipt["target_thread_id"]
+                        or str(rule["source_id"]) != receipt["source_channel"]
+                        or rule["source_thread_id"] != receipt["source_thread_id"]
+                        or (rule["tenant_id"] or 1) != receipt["tenant_id"]):
+                    return False
+                if str(receipt["target_peer_id"]) == receipt["source_channel"] and set(published_ids) & set(receipt["source_message_ids"]):
                     return False
                 # Serialize with inbox writes for the same peer before checking
                 # every mapping. A conflicting event already recorded blocks promotion.
@@ -6164,14 +6171,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
         return True
 
-    def claim_publication_reaction(self, key: str) -> bool:
+    def claim_publication_reaction(self, key: str, published_ids: list[int], *, expected_started_at: datetime) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE telegram_publication_receipts r
                     SET reaction_state='dispatching',reaction_updated_at=NOW()
-                    WHERE r.idempotency_key=%s AND r.published_ids IS NOT NULL AND r.reaction_state='pending'
+                    WHERE r.idempotency_key=%s AND r.published_ids=%s::bigint[]
+                      AND r.send_started_at=%s AND r.reaction_state='pending'
                       AND EXISTS (SELECT 1 FROM delivery_attempts a WHERE a.idempotency_key=r.idempotency_key
                                   AND a.status='verified' AND a.sent_message_ids_json=to_jsonb(r.published_ids))
                       AND NOT EXISTS (
@@ -6181,13 +6189,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             AND d.target_id_snapshot=r.target_peer_id::text)
                       )
                     """,
-                    (key,),
+                    (key,published_ids,expected_started_at),
                 )
                 claimed = cur.rowcount == 1
             conn.commit()
         return claimed
 
-    def finish_publication_reaction(self, key: str, state: str, result: dict[str, Any]) -> None:
+    def finish_publication_reaction(self, key: str, state: str, result: dict[str, Any], *, expected_started_at: datetime) -> None:
         if state not in {"done","uncertain"}:
             raise ValueError("Invalid reaction outcome")
         with self.connect() as conn:
@@ -6196,9 +6204,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     """
                     UPDATE telegram_publication_receipts
                     SET reaction_state=%s,reaction_result=%s::jsonb,reaction_updated_at=NOW()
-                    WHERE idempotency_key=%s AND reaction_state='dispatching'
+                    WHERE idempotency_key=%s AND send_started_at=%s AND reaction_state='dispatching'
                     """,
-                    (state,_json_dumps(result),key),
+                    (state,_json_dumps(result),key,expected_started_at),
                 )
             conn.commit()
 
@@ -11821,7 +11829,28 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 return d
 
     def mark_delivery_campaign_copy_processing(self, copy_id: int) -> bool:
-        return self._update_copy_status(copy_id, 'send_status', 'processing')
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE delivery_campaign_copies SET send_status='processing',updated_at=NOW() WHERE id=%s AND send_status IN ('pending','failed')",
+                    (int(copy_id),),
+                )
+                claimed=cur.rowcount == 1
+            conn.commit()
+        return claimed
+
+    def mark_delivery_campaign_copy_unverified(self, copy_id: int, reason: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE delivery_campaign_copies SET send_status='unverified',
+                       send_error_text=%s,delete_status='none',updated_at=NOW()
+                       WHERE id=%s AND send_status='processing'""",
+                    (reason,int(copy_id)),
+                )
+                updated=cur.rowcount == 1
+            conn.commit()
+        return updated
 
     def mark_delivery_campaign_copy_sent(self, copy_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None, delivery_method: str | None, delete_after_at: str | None) -> bool:
         with self.connect() as conn:

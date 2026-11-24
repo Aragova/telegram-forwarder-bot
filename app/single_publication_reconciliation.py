@@ -107,9 +107,10 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
             published_ids = []
         if not published_ids:
             return await _wait_or_expire(owner,receipt,key,"publication_mapping_unavailable")
-        await run_db(owner.db.finalize_publication_receipt,key,published_ids)
+        await run_db(owner.db.finalize_publication_receipt,key,published_ids,expected_started_at=receipt['send_started_at'])
+        started_at = receipt["send_started_at"]
         receipt = await run_db(get_receipt,key)
-        if not receipt or receipt.get("published_ids") != published_ids:
+        if not receipt or receipt.get("send_started_at") != started_at or receipt.get("published_ids") != published_ids:
             return await _wait_or_expire(owner,receipt,key,"publication_finalize_conflict")
 
     state = receipt["reaction_state"]
@@ -117,9 +118,9 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
         if not receipt["dispatch_stale"]:
             return _pending()
         await run_db(owner.db.finish_publication_reaction,key,"uncertain",
-                     {"reason":"interrupted_reaction_dispatch"})
+                     {"reason":"interrupted_reaction_dispatch"},expected_started_at=receipt["send_started_at"])
     elif state == "pending":
-        if not await run_db(owner.db.claim_publication_reaction,key):
+        if not await run_db(owner.db.claim_publication_reaction,key,published_ids,expected_started_at=receipt['send_started_at']):
             return _pending()
         try:
             rule = await run_db(owner.db.get_rule,receipt["rule_id"])
@@ -143,10 +144,10 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
                     )
             result = result if isinstance(result,dict) else {"applied":bool(result)}
             completed = bool(result.get("applied") or result.get("enqueued") or result.get("reason") in {"disabled","no_accounts","rule_target_changed"})
-            await run_db(owner.db.finish_publication_reaction,key,"done" if completed else "uncertain",result)
+            await run_db(owner.db.finish_publication_reaction,key,"done" if completed else "uncertain",result,expected_started_at=receipt["send_started_at"])
         except Exception as exc:
             await run_db(owner.db.finish_publication_reaction,key,"uncertain",
-                         {"reason":type(exc).__name__})
+                         {"reason":type(exc).__name__},expected_started_at=receipt["send_started_at"])
             logger.warning("PUBLICATION_REACTION_UNCERTAIN | delivery_ids=%s",receipt["delivery_ids"])
     return {"ok":True,"accepted":True,"sent_message_ids":published_ids}
 
