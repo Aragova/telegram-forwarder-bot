@@ -4,7 +4,7 @@ import os
 import threading
 from contextlib import contextmanager
 from typing import Iterator
-from weakref import WeakValueDictionary
+from weakref import WeakSet
 
 try:
     import psycopg
@@ -24,7 +24,7 @@ class PostgresClient:
 
         self._local = threading.local()
         self._connections_lock = threading.Lock()
-        self._connections = WeakValueDictionary()
+        self._connections = WeakSet()
 
     def is_configured(self) -> bool:
         return all([
@@ -86,7 +86,7 @@ class PostgresClient:
             raise
 
         with self._connections_lock:
-            self._connections[id(conn)] = conn
+            self._connections.add(conn)
         self._local.conn = conn
         return conn
 
@@ -120,13 +120,13 @@ class PostgresClient:
             pass
         finally:
             with self._connections_lock:
-                self._connections.pop(id(conn), None)
+                self._connections.discard(conn)
             self._local.conn = None
 
     def close_all_connections(self) -> None:
         """Call after the runtime executor has drained all database work."""
         with self._connections_lock:
-            connections = list(self._connections.values())
+            connections = list(self._connections)
             self._connections.clear()
         for conn in connections:
             try:

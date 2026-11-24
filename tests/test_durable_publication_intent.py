@@ -204,3 +204,23 @@ def test_publication_client_can_read_properties_during_base_initialization():
     client = publication_client_class(InitializingBase)()
     assert client._request_retries == 3
     assert client.flood_sleep_threshold == 60
+
+
+@pytest.mark.parametrize("account_id", [42, None])
+def test_self_peer_resolves_to_concrete_authorized_account(account_id):
+    class SelfPeerClient(RawTelethon):
+        async def get_me(self, *, input_peer):
+            return types.InputPeerSelf() if input_peer else SimpleNamespace(id=account_id)
+
+    async def scenario():
+        repo = MemoryRepository()
+        client = publication_client_class(SelfPeerClient)()
+        with publication_scope(PublicationIntent(repo, "self-peer")):
+            if account_id is None:
+                with pytest.raises(PublicationWriteUnavailable):
+                    await client(_request())
+                assert not client.calls and not repo.ids
+            else:
+                await client(_request())
+                assert client.calls == [(100, 0, 0)]
+    asyncio.run(scenario())

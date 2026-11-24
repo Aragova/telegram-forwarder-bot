@@ -12,7 +12,7 @@ from typing import Any
 from aiogram.exceptions import (
     TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, TelegramRetryAfter,
 )
-from telethon import functions, utils
+from telethon import functions, types, utils
 from telethon.errors import BadRequestError, ForbiddenError, FloodWaitError, SlowModeWaitError, RandomIdDuplicateError
 
 from .runtime_utils import run_db
@@ -227,6 +227,9 @@ def publication_client_class(base):
                 try:
                     me = await self.get_me(input_peer=True)
                     account_id = getattr(me, "user_id", None)
+                    if isinstance(me, types.InputPeerSelf):
+                        # Resolve the actual User rather than recursively resolving self.
+                        account_id = getattr(await self.get_me(input_peer=False), "id", None)
                     if type(account_id) is not int or account_id <= 0:
                         raise ValueError("MTProto sender account is not authorized")
                 except (FloodWaitError, SlowModeWaitError):
