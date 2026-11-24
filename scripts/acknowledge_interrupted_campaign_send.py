@@ -10,6 +10,7 @@ import argparse
 import getpass
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -21,12 +22,14 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--workers-stopped", action="store_true")
     parser.add_argument("--no-live-or-scheduled-publication", action="store_true")
+    parser.add_argument("--expected-updated-at", help="Exact timestamp shown during dry-run")
     parser.add_argument("--note", default="")
     args = parser.parse_args()
     if args.apply and not (
         args.workers_stopped and args.no_live_or_scheduled_publication and args.note.strip()
+        and args.expected_updated_at
     ):
-        parser.error("Apply requires stopped workers, verified absence of live/scheduled publication and a review note")
+        parser.error("Apply requires stopped workers, verified absence, exact dry-run timestamp and review note")
     root = Path(__file__).resolve().parents[1]
     load_dotenv(root / ".env")
     sys.path.insert(0, str(root))
@@ -43,8 +46,11 @@ def main() -> int:
         print(json.dumps({field: row[field] for field in fields}, default=str, ensure_ascii=False))
         if not args.apply:
             return 0
+        expected = datetime.fromisoformat(args.expected_updated_at)
+        if expected.tzinfo is None:
+            parser.error("--expected-updated-at must include timezone")
         if not repo.acknowledge_interrupted_campaign_send(
-            args.message_id, expected_updated_at=row["updated_at"], operator=getpass.getuser(), note=args.note,
+            args.message_id, expected_updated_at=expected, operator=getpass.getuser(), note=args.note,
         ):
             print("Refused: unchanged abandoned sending row, paused rule and no active campaign launch are required.")
             return 1
