@@ -294,7 +294,7 @@ class VideoSingleDelivery:
                     candidate_sent_message_ids=sent_message_ids,
                     valid_sent_message_ids=valid_sent_message_ids,
                 )
-                return True
+                return {"ok": True, "sent_message_ids": valid_sent_message_ids}
 
             await run_db(
                 owner._finalize_video_failure_sync,

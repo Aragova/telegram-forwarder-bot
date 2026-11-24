@@ -84,7 +84,7 @@ class SenderBotApiCopyHelpers:
                 "fallback_allowed": False,
                 "raw_result_type": "exception",
                 "error_text": str(exc),
-                "definitely_rejected": isinstance(exc, TelegramBadRequest),
+                "definitely_rejected": not rpc_returned and isinstance(exc, TelegramBadRequest),
             }
 
     async def copy_album_via_bot(
@@ -144,5 +144,5 @@ class SenderBotApiCopyHelpers:
                 "sent_count": 0,
                 "error_text": str(exc),
                 "attempted": True,
-                "definitely_rejected": isinstance(exc, TelegramBadRequest),
+                "definitely_rejected": not rpc_returned and isinstance(exc, TelegramBadRequest),
             }

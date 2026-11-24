@@ -1651,6 +1651,8 @@ class SenderService:
                 "mark_delivery_attempt_failed",
             )
         )
+        acquired = False
+        publication_possible = False
         try:
             attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key) if has_attempt_ledger else None
             cached_sent_ids = extract_sent_message_ids_from_attempt(attempt)
@@ -1703,6 +1705,8 @@ class SenderService:
             rule = await run_db(self.db.get_rule, int(rule_id))
             if not rule:
                 raise RuntimeError(f"Правило #{rule_id} не найдено для video_delivery")
+            # An exception from the legacy pipeline is not proof of rejection.
+            publication_possible = True
             outcome = await self._deliver_single_video(rule, int(delivery_id), int(message_id), str(source_channel), str(target_id), target_thread_id)
             if isinstance(outcome, dict) and outcome.get("accepted_unresolved"):
                 # The media may already be published. Never turn this into a
@@ -1717,6 +1721,7 @@ class SenderService:
                 logger.warning("VIDEO_DELIVERY_ACCEPTED_UNRESOLVED | rule_id=%s | delivery_id=%s | action=manual_review_no_resend", rule_id, delivery_id)
                 return {"ok": False, "retryable": False, "accepted": True, "transport_accepted": True, "authoritative_resolved": False, "error_text": error, "manual_review_required": True}
             if isinstance(outcome, dict) and outcome.get("rejected_before_send"):
+                publication_possible = False
                 # Telegram explicitly rejected the attempt (429), so it is
                 # safe to retry; unlike a timeout, no video was published.
                 if has_attempt_ledger:
@@ -1739,6 +1744,7 @@ class SenderService:
             raw_sent_ids = outcome.get("sent_message_ids") if isinstance(outcome, dict) else None
             valid_sent_ids = normalize_valid_sent_message_ids(raw_sent_ids)
             post_send_accepted = bool(valid_sent_ids)
+            publication_possible = bool(ok or post_send_accepted)
             if valid_sent_ids and has_attempt_ledger:
                 await run_db(self.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=valid_sent_ids, telegram_method="video_delivery")
                 if ok and hasattr(self.db, "mark_delivery_attempt_verified"):
@@ -1765,9 +1771,10 @@ class SenderService:
                 logger.warning("JOB EXECUTOR | video_delivery | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат", rule_id, delivery_id)
             return bool(ok)
         except Exception as exc:
-            if has_attempt_ledger:
-                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=str(exc))
-                logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s", delivery_id, rule_id, target_id, idempotency_key)
+            if has_attempt_ledger and acquired:
+                failure_status = "failed_after_send" if publication_possible else "failed_before_send"
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status=failure_status, error_text=str(exc))
+                logger.info("DELIVERY_ATTEMPT_FAILED | operation=video_send | delivery_id=%s | key=%s | status=%s", delivery_id, idempotency_key, failure_status)
             logger.warning(
                 "JOB EXECUTOR | video_delivery | failed | rule_id=%s | delivery_id=%s | error=%s",
                 rule_id,
