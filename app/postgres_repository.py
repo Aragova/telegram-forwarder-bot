@@ -10986,9 +10986,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 set_parts.append(sql); params.append(_json_dumps(kwargs[k]) if k in {"post_snapshot","readiness_snapshot","preview","metadata"} else kwargs[k])
         if not set_parts: return False
         set_parts.append("updated_at=NOW()"); params.append(int(scheduled_post_id))
+        editing = any(k in kwargs for k in ("saved_post_id", "show_seconds", "scheduled_at", "post_snapshot"))
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"UPDATE campaign_scheduled_posts SET {', '.join(set_parts)} WHERE id=%s", tuple(params)); ok=cur.rowcount>0
+                guard = " AND status IN ('draft','ready')" if editing else ""
+                cur.execute(f"UPDATE campaign_scheduled_posts SET {', '.join(set_parts)} WHERE id=%s{guard}", tuple(params)); ok=cur.rowcount>0
             conn.commit()
         if ok: logger.info("VIP_SCHEDULED_POST_UPDATED id=%s", scheduled_post_id)
         return ok
@@ -11008,10 +11010,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 return [self._normalize_campaign_scheduled_post_row(r) for r in (cur.fetchall() or [])]
 
 
-    def replace_campaign_scheduled_post_targets(self, *, scheduled_post_id: int, rule_id: int, targets: list[dict[str, Any]]) -> int:
+    def replace_campaign_scheduled_post_targets(self, *, scheduled_post_id: int, rule_id: int, targets: list[dict[str, Any]]) -> int | None:
         active = 0
         with self.connect() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT id FROM campaign_scheduled_posts WHERE id=%s AND rule_id=%s AND status IN ('draft','ready') FOR UPDATE", (int(scheduled_post_id), int(rule_id)))
+                if cur.fetchone() is None:
+                    return None
                 cur.execute("DELETE FROM campaign_scheduled_post_targets WHERE scheduled_post_id=%s", (int(scheduled_post_id),))
                 for t in targets:
                     cur.execute("""INSERT INTO campaign_scheduled_post_targets(scheduled_post_id, rule_id, target_kind, target_id, target_thread_id, target_title, is_active, metadata_json)
