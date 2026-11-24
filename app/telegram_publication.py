@@ -123,18 +123,38 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 await inbox.record(peer, old, new)
                 buffer.popleft()
 
-    async def retry_live() -> None:
-        delay = 0.25
-        while buffer:
-            await asyncio.sleep(delay)
-            try:
-                await flush_live()
-            except Exception:
-                logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_RETRY_FAILED")
-                delay = min(delay * 2, 30)
+    def schedule_retry(delay: float) -> None:
+        nonlocal retry_task
+        from .background_tasks import start_background_task
+        retry_task = start_background_task(
+            retry_live(delay), name="telegram-publication-persist-retry",
+        )
+
+    async def retry_live(delay: float) -> None:
+        await asyncio.sleep(delay)
+        try:
+            await flush_live()
+        except Exception:
+            logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_RETRY_FAILED")
+            schedule_retry(min(delay * 2, 30))
+
+    async def persist_startup(candidate: PublicationInbox, peer: int, old: list[int], new: list[int]) -> None:
+        try:
+            await candidate.record(peer, old, new)
+            return
+        except Exception:
+            logger.warning("TELEGRAM_PUBLICATION_STARTUP_PERSIST_RETRY | attempt=1")
+        await asyncio.sleep(0.25)
+        try:
+            await candidate.record(peer, old, new)
+            return
+        except Exception:
+            logger.warning("TELEGRAM_PUBLICATION_STARTUP_PERSIST_RETRY | attempt=2")
+        await asyncio.sleep(0.5)
+        await candidate.record(peer, old, new)
 
     async def handle(update: Any) -> None:
-        nonlocal buffer_overflow, retry_task
+        nonlocal buffer_overflow
         if not isinstance(update, types.UpdateDeleteScheduledMessages):
             return
         try:
@@ -154,7 +174,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 await flush_live()
             except Exception:
                 logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_FAILED")
-                retry_task = asyncio.create_task(retry_live())
+                schedule_retry(0.25)
         except Exception:
             logger.exception("TELEGRAM_PUBLICATION_MAPPING_HANDLE_FAILED")
 
@@ -170,15 +190,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
             if buffer_overflow:
                 raise RuntimeError("Publication startup buffer overflowed")
             peer,old,new = buffer[0]
-            for attempt in range(3):
-                try:
-                    await candidate.record(peer,old,new)
-                    break
-                except Exception:
-                    if attempt == 2:
-                        raise
-                    logger.warning("TELEGRAM_PUBLICATION_STARTUP_PERSIST_RETRY | attempt=%s", attempt + 1)
-                    await asyncio.sleep(0.25 * (2 ** attempt))
+            await persist_startup(candidate, peer, old, new)
             buffer.popleft()
         if buffer_overflow:
             raise RuntimeError("Publication startup buffer overflowed")

@@ -40,16 +40,17 @@ async def _create_thumb_temp_path_async(prefix: str) -> Path:
         asyncio.to_thread(_create_thumb_temp_path, prefix),
         name=f"create-thumbnail-{prefix}",
     )
+    def _remove_orphan(done: asyncio.Task[Path]) -> None:
+        if done.cancelled():
+            return
+        try:
+            done.result().unlink(missing_ok=True)
+        except Exception:
+            logger.exception("THUMB_TEMP_CLEANUP_FAILED | prefix=%s", prefix)
+
     try:
         return await asyncio.shield(creation)
     except asyncio.CancelledError:
-        def _remove_orphan(done: asyncio.Task[Path]) -> None:
-            if done.cancelled():
-                return
-            try:
-                done.result().unlink(missing_ok=True)
-            except Exception:
-                logger.exception("THUMB_TEMP_CLEANUP_FAILED | prefix=%s", prefix)
         creation.add_done_callback(_remove_orphan)
         raise
 

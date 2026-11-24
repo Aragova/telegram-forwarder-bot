@@ -252,7 +252,7 @@ async def _heartbeat_active_job(
     if not hasattr(repo, "heartbeat_job_processing"):
         return
     started = time.monotonic()
-    last_stalled_log = 0.0
+    last_stalled_log: float | None = None
     while True:
         await asyncio.sleep(max(0.01, interval_seconds))
         try:
@@ -270,7 +270,7 @@ async def _heartbeat_active_job(
             running_task.cancel()
             return
         elapsed = time.monotonic() - started
-        if elapsed >= 120 and (last_stalled_log == 0.0 or elapsed - last_stalled_log >= 60):
+        if elapsed >= 120 and (last_stalled_log is None or elapsed - last_stalled_log >= 60):
             logger.warning(
                 "JOB_LONG_RUNNING | job_id=%s | job_type=%s | owner=%s | elapsed_sec=%s | await_chain=%s",
                 job_id, job_type, worker_id, round(elapsed), _await_chain(running_task),
