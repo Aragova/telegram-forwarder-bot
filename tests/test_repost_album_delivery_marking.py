@@ -17,6 +17,7 @@ class FakeAlbumRepo:
         self.fail_mark = False
         self.faulty = []
         self.promoted = []
+        self.failed_attempts = []
         self.verification_result = {"ok": False, "sent_message_ids": []}
 
     def get_delivery_attempt_by_idempotency_key(self, _key):
@@ -31,7 +32,8 @@ class FakeAlbumRepo:
     def mark_delivery_faulty(self, delivery_id, error_text):
         self.faulty.append((delivery_id, error_text))
 
-    def mark_delivery_attempt_failed(self, *_args, **_kwargs):
+    def mark_delivery_attempt_failed(self, *_args, **kwargs):
+        self.failed_attempts.append(kwargs)
         return None
 
     def mark_delivery_attempt_verified(self, key, *, sent_message_ids):
@@ -61,6 +63,7 @@ async def _execute(repo, *, delivery_ids=None):
     service.db = repo
 
     async def fake_deliver_album(*_args, **_kwargs):
+        repo.attempt = {"status": "verified", "sent_message_ids_json": [501, 502]}
         return True
 
     service._deliver_album = fake_deliver_album
@@ -109,6 +112,7 @@ def test_repost_album_no_false_success_if_mark_sent_fails():
 
     with pytest.raises(RuntimeError, match="mark failed"):
         asyncio.run(_execute(repo, delivery_ids=[1, 2]))
+    assert repo.failed_attempts[-1]["status"] == "failed_after_send"
 
 
 def test_repost_album_accepted_cache_does_not_fake_success_or_resend():
@@ -147,3 +151,130 @@ def test_repost_album_accepted_cache_does_not_recover_partial_copy():
     assert result["retryable"] is True
     assert repo.marked == []
     assert repo.promoted == []
+
+
+@pytest.mark.parametrize(
+    ("copy_first", "failing_stage", "failing_result", "expected_error", "copy_calls"),
+    [
+        (True, "copy_album", "started", "preflight", 0),
+        (False, "copy_album", "skipped", "preflight", 0),
+        (False, "reupload_album", "started", "preflight", 0),
+        (True, "copy_album", "failed", "ordinary", 1),
+    ],
+)
+def test_album_pipeline_audit_failure_preserves_send_boundary(
+    copy_first, failing_stage, failing_result, expected_error, copy_calls
+):
+    from unittest.mock import AsyncMock, Mock
+
+    from app.repost_album_delivery import AlbumPreflightError, RepostAlbumDelivery
+
+    async def log_step(**kwargs):
+        if (kwargs["pipeline_stage"], kwargs["pipeline_result"]) == (
+            failing_stage, failing_result
+        ):
+            raise RuntimeError("audit unavailable")
+
+    owner = SimpleNamespace(
+        _resolve_repost_caption_delivery_strategy_sync=Mock(return_value={
+            "configured_mode": "copy_first" if copy_first else "builder_first",
+            "requires_builder": not copy_first,
+            "use_copy_first": copy_first,
+        }),
+        _is_self_loop_rule=Mock(return_value=False),
+        _content_from_message_or_post=Mock(return_value={}),
+        _log_caption_entity_inventory=Mock(),
+        _caption_entity_counts=Mock(return_value={}),
+        _fetch_album_messages=AsyncMock(return_value=[
+            SimpleNamespace(id=101), SimpleNamespace(id=102),
+        ]),
+        _get_album_primary_text=Mock(return_value="caption"),
+        _log_delivery_pipeline_step=log_step,
+        _copy_album_via_bot=AsyncMock(return_value={"ok": False}),
+        _reupload_album=AsyncMock(),
+        _send_album_one_by_one=AsyncMock(),
+    )
+    with pytest.raises(RuntimeError, match="audit unavailable") as raised:
+        asyncio.run(RepostAlbumDelivery(owner).deliver(
+            SimpleNamespace(id=111), FakeAlbumRepo().rows, "src", "dst", None,
+        ))
+    assert isinstance(raised.value, AlbumPreflightError) == (expected_error == "preflight")
+    assert owner._copy_album_via_bot.await_count == copy_calls
+    owner._reupload_album.assert_not_awaited()
+    owner._send_album_one_by_one.assert_not_awaited()
+
+
+def test_album_source_fetch_failure_before_send_is_retryable_preflight():
+    from unittest.mock import AsyncMock, Mock
+
+    from app.repost_album_delivery import AlbumPreflightError, RepostAlbumDelivery
+
+    owner = SimpleNamespace(
+        _resolve_repost_caption_delivery_strategy_sync=Mock(return_value={
+            "configured_mode": "builder_first",
+            "requires_builder": True,
+            "use_copy_first": False,
+        }),
+        _is_self_loop_rule=Mock(return_value=False),
+        _content_from_message_or_post=Mock(return_value={}),
+        _log_caption_entity_inventory=Mock(),
+        _caption_entity_counts=Mock(return_value={}),
+        _fetch_album_messages=AsyncMock(side_effect=RuntimeError("source unavailable")),
+        _get_album_primary_text=Mock(),
+        _log_delivery_pipeline_step=AsyncMock(),
+        _copy_album_via_bot=AsyncMock(),
+        _reupload_album=AsyncMock(),
+        _send_album_one_by_one=AsyncMock(),
+    )
+    with pytest.raises(AlbumPreflightError, match="source unavailable"):
+        asyncio.run(RepostAlbumDelivery(owner).deliver(
+            SimpleNamespace(id=111), FakeAlbumRepo().rows, "src", "dst", None,
+        ))
+    owner._copy_album_via_bot.assert_not_awaited()
+    owner._reupload_album.assert_not_awaited()
+    owner._send_album_one_by_one.assert_not_awaited()
+
+
+def test_pending_album_receipt_precedes_fallible_post_send_audit(monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+
+    from app import single_publication_reconciliation
+    from app.repost_album_delivery import RepostAlbumDelivery
+
+    async def log_step(**kwargs):
+        if kwargs["pipeline_stage"] == "reupload_album" and kwargs["pipeline_result"] != "started":
+            raise RuntimeError("audit unavailable")
+
+    register = AsyncMock(return_value=True)
+    monkeypatch.setattr(single_publication_reconciliation, "register_pending_publication", register)
+    owner = SimpleNamespace(
+        _resolve_repost_caption_delivery_strategy_sync=Mock(return_value={
+            "configured_mode": "builder_first", "requires_builder": True, "use_copy_first": False,
+        }),
+        _is_self_loop_rule=Mock(return_value=False),
+        _content_from_message_or_post=Mock(return_value={}),
+        _log_caption_entity_inventory=Mock(),
+        _caption_entity_counts=Mock(return_value={}),
+        _fetch_album_messages=AsyncMock(return_value=[SimpleNamespace(id=101), SimpleNamespace(id=102)]),
+        _get_album_primary_text=Mock(return_value="caption"),
+        _log_delivery_pipeline_step=log_step,
+        _copy_album_via_bot=AsyncMock(),
+        _reupload_album=AsyncMock(return_value={
+            "ok": False, "transport_accepted": True, "authoritative_resolved": False,
+            "resolution_method": "video_processing_pending", "returned_candidate_ids": [11, 12],
+            "pending_mask": [True, True],
+        }),
+        _send_album_one_by_one=AsyncMock(),
+    )
+    result = asyncio.run(RepostAlbumDelivery(owner).deliver(
+        SimpleNamespace(id=111), FakeAlbumRepo().rows, "src", "dst", None, idempotency_key="album-key",
+    ))
+    assert result is False
+    register.assert_awaited_once_with(
+        owner, key="album-key", delivery_ids=[1, 2], rule_id=111, target_id="dst",
+        target_thread_id=None, source_channel="src", source_message_ids=[101, 102],
+        scheduled_ids=[11, 12], pending_mask=[True, True],
+    )
+    owner._reupload_album.assert_awaited_once()
+    owner._copy_album_via_bot.assert_not_awaited()
+    owner._send_album_one_by_one.assert_not_awaited()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.runtime_utils import run_db
+
 import asyncio
 import logging
 from dataclasses import dataclass
@@ -85,10 +87,10 @@ class RepostCampaignLaunchJobService:
 
     async def process_due_jobs(self, *, worker_id: str, limit: int = 5) -> int:
         await self.recover_stale_jobs(worker_id=worker_id)
-        jobs = self.repo.get_due_repost_campaign_launch_jobs(limit=max(1, int(limit)))
+        jobs = await run_db(self.repo.get_due_repost_campaign_launch_jobs, limit=max(1, int(limit)))
         processed = 0
         for job in jobs:
-            leased = self.repo.lease_repost_campaign_launch_job(
+            leased = await run_db(self.repo.lease_repost_campaign_launch_job, 
                 int(job["id"]),
                 worker_id=worker_id,
                 lock_ttl_seconds=self.lock_ttl_seconds,
@@ -113,7 +115,7 @@ class RepostCampaignLaunchJobService:
         if not isinstance(payload, dict):
             payload = {}
         force_ignore_clean_channel = bool(payload.get("force_ignore_clean_channel"))
-        self.repo.mark_repost_campaign_launch_job_processing(job_id, worker_id=worker_id)
+        await run_db(self.repo.mark_repost_campaign_launch_job_processing, job_id, worker_id=worker_id)
         self.logger.info("REPOST_CAMPAIGN_LAUNCH_JOB_STARTED | job_id=%s | rule_id=%s", job_id, rule_id)
         before_run_id = self._latest_campaign_run_id(rule_id)
         try:
@@ -150,7 +152,7 @@ class RepostCampaignLaunchJobService:
             )
             result_ok = bool(result_json.get("ok"))
             if result_ok and campaign_run_id:
-                updated = self.repo.mark_repost_campaign_launch_job_sent(job_id, campaign_run_id=campaign_run_id, result_json=result_json)
+                updated = await run_db(self.repo.mark_repost_campaign_launch_job_sent, job_id, campaign_run_id=campaign_run_id, result_json=result_json)
                 await self._update_progress_message(rule_id=rule_id, job=updated or {**job, "status": "sent", "result_json": result_json, "campaign_run_id": campaign_run_id})
                 self.logger.info(
                     "REPOST_CAMPAIGN_LAUNCH_JOB_SENT | job_id=%s | rule_id=%s | campaign_run_id=%s | ok=%s",
@@ -164,7 +166,7 @@ class RepostCampaignLaunchJobService:
             error_text = result_json.get("error_text") or "Запуск рекламной кампании завершился неуспешно"
             if campaign_run_id:
                 review_error_text = result_json.get("error_text") or "Запуск создал campaign_run, но завершился неуспешно"
-                updated = self.repo.mark_repost_campaign_launch_job_needs_review(
+                updated = await run_db(self.repo.mark_repost_campaign_launch_job_needs_review, 
                     job_id,
                     last_error=review_error_text,
                     campaign_run_id=campaign_run_id,
@@ -179,7 +181,7 @@ class RepostCampaignLaunchJobService:
                 )
                 return updated
 
-            updated = self.repo.mark_repost_campaign_launch_job_failed(job_id, last_error=error_text, result_json=result_json)
+            updated = await run_db(self.repo.mark_repost_campaign_launch_job_failed, job_id, last_error=error_text, result_json=result_json)
             await self._update_progress_message(rule_id=rule_id, job=updated or {**job, "status": "failed", "last_error": error_text, "result_json": result_json})
             self.logger.warning(
                 "REPOST_CAMPAIGN_LAUNCH_JOB_FAILED | job_id=%s | rule_id=%s | reason=launch_result_not_ok_without_campaign_run | error=%s",
@@ -189,11 +191,11 @@ class RepostCampaignLaunchJobService:
             )
             return updated
         except Exception as exc:
-            latest_job = self.repo.get_repost_campaign_launch_job(job_id) or job
+            latest_job = await run_db(self.repo.get_repost_campaign_launch_job, job_id) or job
             detected_run_id = (latest_job or {}).get("campaign_run_id") or self._detect_new_campaign_run_id(rule_id, before_run_id)
             error_text = str(exc) or "Неизвестная ошибка запуска кампании"
             if detected_run_id:
-                updated = self.repo.mark_repost_campaign_launch_job_needs_review(
+                updated = await run_db(self.repo.mark_repost_campaign_launch_job_needs_review, 
                     job_id,
                     last_error=error_text,
                     campaign_run_id=detected_run_id,
@@ -208,7 +210,7 @@ class RepostCampaignLaunchJobService:
                 )
                 return updated
 
-            updated = self.repo.mark_repost_campaign_launch_job_failed(job_id, last_error=error_text, retryable=True)
+            updated = await run_db(self.repo.mark_repost_campaign_launch_job_failed, job_id, last_error=error_text, retryable=True)
             self.logger.warning(
                 "REPOST_CAMPAIGN_LAUNCH_JOB_FAILED | job_id=%s | rule_id=%s | error=%s",
                 job_id,
@@ -218,7 +220,7 @@ class RepostCampaignLaunchJobService:
             return updated
 
     async def recover_stale_jobs(self, *, worker_id: str) -> dict[str, int]:
-        summary = self.repo.recover_stale_repost_campaign_launch_jobs(worker_id=worker_id)
+        summary = await run_db(self.repo.recover_stale_repost_campaign_launch_jobs, worker_id=worker_id)
         if int((summary or {}).get("needs_review") or 0) > 0:
             self.logger.warning(
                 "REPOST_CAMPAIGN_LAUNCH_JOB_NEEDS_REVIEW | reason=stale_processing_with_campaign_run | count=%s",
@@ -283,6 +285,7 @@ async def run_repost_campaign_launch_job_loop(
     interval_seconds: int = 15,
     worker_id: str = "repost-campaign-launch:bot",
     batch_limit: int = 5,
+    stop_event=None,
 ) -> None:
     service.logger.info(
         "REPOST_CAMPAIGN_LAUNCH_JOB_LOOP_STARTED | worker_id=%s | interval_seconds=%s | batch_limit=%s",
@@ -291,7 +294,7 @@ async def run_repost_campaign_launch_job_loop(
         batch_limit,
     )
     await service.recover_stale_jobs(worker_id=worker_id)
-    while True:
+    while not (stop_event and stop_event.is_set()):
         try:
             await service.process_due_jobs(worker_id=worker_id, limit=batch_limit)
         except asyncio.CancelledError:

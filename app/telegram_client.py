@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import asyncio
+import logging
 from telethon import TelegramClient
 from .config import settings
 
@@ -22,46 +24,85 @@ class ReactionClientInfo:
     fixed_reactions: list[str]
 
 
-async def create_telethon_client() -> TelegramClient:
-    client = TelegramClient(
+async def create_telethon_client(*, publication_repository=None) -> TelegramClient:
+    client_class = TelegramClient
+    if callable(getattr(publication_repository, "get_or_create_mtproto_random_ids", None)):
+        from .send_intent import publication_client_class
+        client_class = publication_client_class(TelegramClient, publication_repository)
+    client = client_class(
         settings.session_name,
         settings.api_id,
         settings.api_hash,
         connection_retries=8,
         retry_delay=2,
         request_retries=8,
+        flood_sleep_threshold=0,
         auto_reconnect=True,
     )
-    await client.connect()
+    bind = None
+    if publication_repository is not None:
+        client.publication_inbox_required = True
+        from .telegram_publication import prepare_publication_inbox
+        try:
+            bind = prepare_publication_inbox(client, publication_repository)
+        except Exception:
+            logging.getLogger("forwarder").exception("TELEGRAM_PUBLICATION_INBOX_SETUP_FAILED")
+    try:
+        await client.connect()
+    except BaseException:
+        if callable(getattr(client, "disconnect", None)):
+            await client.disconnect()
+        raise
+    if bind is not None:
+        try:
+            await bind()
+        except asyncio.CancelledError:
+            await client.disconnect()
+            raise
+        except Exception:
+            # Keep Bot API and UI available. Runtime must not issue MTProto
+            # writes without a bound inbox.
+            logging.getLogger("forwarder").exception("TELEGRAM_PUBLICATION_INBOX_UNAVAILABLE")
     return client
 
 
 async def create_reaction_clients() -> list[ReactionClientInfo]:
     reaction_clients: list[ReactionClientInfo] = []
 
-    for session_name in settings.reaction_sessions:
-        client = TelegramClient(
-            session_name,
-            settings.api_id,
-            settings.api_hash,
-            connection_retries=8,
-            retry_delay=2,
-            request_retries=8,
-            auto_reconnect=True,
-        )
-        await client.connect()
-
-        me = await client.get_me()
-        is_premium = bool(getattr(me, "premium", False))
-        fixed_reactions = PREMIUM_REACTION_SETS.get(session_name, [])
-
-        reaction_clients.append(
-            ReactionClientInfo(
-                session_name=session_name,
-                client=client,
-                is_premium=is_premium,
-                fixed_reactions=fixed_reactions,
+    connecting = []
+    try:
+        for session_name in settings.reaction_sessions:
+            client = TelegramClient(
+                session_name,
+                settings.api_id,
+                settings.api_hash,
+                connection_retries=8,
+                retry_delay=2,
+                request_retries=8,
+                auto_reconnect=True,
             )
-        )
+            connecting.append(client)
+            await client.connect()
+    
+            me = await client.get_me()
+            is_premium = bool(getattr(me, "premium", False))
+            fixed_reactions = PREMIUM_REACTION_SETS.get(session_name, [])
+    
+            reaction_clients.append(
+                ReactionClientInfo(
+                    session_name=session_name,
+                    client=client,
+                    is_premium=is_premium,
+                    fixed_reactions=fixed_reactions,
+                )
+            )
+    
+    except BaseException:
+        for opened in reversed(connecting):
+            try:
+                await opened.disconnect()
+            except Exception:
+                logging.getLogger("forwarder").exception("REACTION_CLIENT_STARTUP_CLOSE_FAILED")
+        raise
 
     return reaction_clients

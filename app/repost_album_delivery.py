@@ -5,6 +5,7 @@ import logging
 
 from .delivery_idempotency import normalize_valid_sent_message_ids
 from .runtime_utils import run_db
+from .transport_policy import TransportRateLimited
 from .repost_caption import get_repost_caption_override, caption_override_content
 
 
@@ -16,6 +17,10 @@ def _reaction_applied_or_enqueued(result) -> bool:
     if isinstance(payload, dict):
         return bool(payload.get("applied") or payload.get("enqueued"))
     return bool(payload)
+
+
+class AlbumPreflightError(RuntimeError):
+    """Known failure before any Telegram send request."""
 
 
 class RepostAlbumDelivery:
@@ -32,16 +37,29 @@ class RepostAlbumDelivery:
         idempotency_key: str | None = None,
     ):
         owner = self.owner
+        transport_entered = False
+
+        async def log_pipeline_step(**kwargs):
+            try:
+                await owner._log_delivery_pipeline_step(**kwargs)
+            except Exception as exc:
+                if not transport_entered:
+                    raise AlbumPreflightError(str(exc)) from exc
+                raise
+
         delivery_ids = [int(r["delivery_id"]) for r in album_rows]
         message_ids = [int(r["message_id"]) for r in album_rows]
 
-        strategy = await run_db(
-            owner._resolve_repost_caption_delivery_strategy_sync,
-            rule=rule,
-            source_channel=source_channel,
-            message_ids=message_ids,
-            is_album=True,
-        )
+        try:
+            strategy = await run_db(
+                owner._resolve_repost_caption_delivery_strategy_sync,
+                rule=rule,
+                source_channel=source_channel,
+                message_ids=message_ids,
+                is_album=True,
+            )
+        except Exception as exc:
+            raise AlbumPreflightError(str(exc)) from exc
 
         caption_mode = strategy["configured_mode"]
         requires_builder = strategy["requires_builder"]
@@ -110,6 +128,8 @@ class RepostAlbumDelivery:
                         for m in source_messages
                     ],
                 )
+        except TransportRateLimited:
+            raise
         except Exception as exc:
             logger.warning(
                 "Не удалось заранее получить preview альбома %s -> %s: %s",
@@ -178,7 +198,7 @@ class RepostAlbumDelivery:
         # Выполняем только если режим разрешает copy-first
         # =========================================================
         if use_copy_first:
-            await owner._log_delivery_pipeline_step(
+            await log_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
@@ -194,6 +214,8 @@ class RepostAlbumDelivery:
                 },
             )
 
+            transport_entered = True
+
             copy_result = await owner._copy_album_via_bot(
                 source_channel=source_channel,
                 target_id=target_id,
@@ -201,6 +223,14 @@ class RepostAlbumDelivery:
                 target_thread_id=target_thread_id,
             )
             attempts_debug.append({"stage": "copy_album", **copy_result})
+            if copy_result.get("accepted_unresolved"):
+                if idempotency_key:
+                    await run_db(owner.db.record_unverified_botapi_album, idempotency_key,
+                                 copy_result.get("raw_message_ids") or [])
+                for disputed_id in delivery_ids:
+                    await run_db(owner._mark_delivery_faulty_sync, disputed_id,
+                                 "copy_album_uncertain_no_fallback: Bot API accepted without published ID")
+                return False
             if idempotency_key and copy_result.get("ok") and copy_result.get("sent_message_ids"):
                 sent_ids = [int(x) for x in (copy_result.get("sent_message_ids") or []) if str(x).isdigit()]
                 valid_sent_ids = normalize_valid_sent_message_ids(sent_ids)
@@ -210,7 +240,7 @@ class RepostAlbumDelivery:
                 else:
                     logger.warning("DELIVERY_ATTEMPT_ACCEPTED_SKIPPED_INVALID_IDS | operation=%s | key=%s | delivery_id=%s | raw_sent_message_ids=%s", "album", idempotency_key, delivery_id, sent_ids)
 
-            await owner._log_delivery_pipeline_step(
+            await log_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
@@ -242,7 +272,7 @@ class RepostAlbumDelivery:
 
             if copy_result["ok"]:
                 accepted_copy_sent_ids = normalize_valid_sent_message_ids(copy_result.get("sent_message_ids") or [])
-                await owner._log_delivery_pipeline_step(
+                await log_pipeline_step(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
                     event_type="delivery_pipeline_step",
@@ -270,7 +300,7 @@ class RepostAlbumDelivery:
                 verified = verify_step.get("result") or {"ok": False, "error_text": "verify_after_copy_album_failed_non_fatal"}
                 attempts_debug.append({"stage": "verify_after_copy", **verified})
 
-                await owner._log_delivery_pipeline_step(
+                await log_pipeline_step(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
                     event_type="delivery_pipeline_step",
@@ -289,7 +319,7 @@ class RepostAlbumDelivery:
                 if not verified["ok"]:
                     await asyncio.sleep(1.5)
 
-                    await owner._log_delivery_pipeline_step(
+                    await log_pipeline_step(
                         rule_id=rule.id,
                         delivery_ids=delivery_ids,
                         event_type="delivery_pipeline_step",
@@ -309,7 +339,7 @@ class RepostAlbumDelivery:
                     )
                     attempts_debug.append({"stage": "verify_after_copy_retry_only", **verified_retry})
 
-                    await owner._log_delivery_pipeline_step(
+                    await log_pipeline_step(
                         rule_id=rule.id,
                         delivery_ids=delivery_ids,
                         event_type="delivery_pipeline_step",
@@ -413,7 +443,7 @@ class RepostAlbumDelivery:
                 "error_text": "copy_album skipped because custom_emoji requires Telethon" if album_custom_emoji_count > 0 else "copy_album пропущен политикой caption mode",
             }
 
-            await owner._log_delivery_pipeline_step(
+            await log_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
@@ -437,7 +467,7 @@ class RepostAlbumDelivery:
         if use_copy_first and not copy_result["ok"] and not is_self_loop:
             await asyncio.sleep(1.2)
 
-            await owner._log_delivery_pipeline_step(
+            await log_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
@@ -449,6 +479,8 @@ class RepostAlbumDelivery:
                 extra={"attempt_no": 2},
             )
 
+            transport_entered = True
+
             copy_retry_result = await owner._copy_album_via_bot(
                 source_channel=source_channel,
                 target_id=target_id,
@@ -456,8 +488,11 @@ class RepostAlbumDelivery:
                 target_thread_id=target_thread_id,
             )
             attempts_debug.append({"stage": "copy_album_retry", **copy_retry_result})
+            if idempotency_key and copy_retry_result.get("accepted_unresolved"):
+                await run_db(owner.db.record_unverified_botapi_album, idempotency_key,
+                             copy_retry_result.get("raw_message_ids") or [])
 
-            await owner._log_delivery_pipeline_step(
+            await log_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
@@ -483,7 +518,7 @@ class RepostAlbumDelivery:
                     await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
                 return False
             if copy_retry_result["ok"]:
-                await owner._log_delivery_pipeline_step(
+                await log_pipeline_step(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
                     event_type="delivery_pipeline_step",
@@ -503,7 +538,7 @@ class RepostAlbumDelivery:
                 )
                 attempts_debug.append({"stage": "verify_after_copy_retry", **verified})
 
-                await owner._log_delivery_pipeline_step(
+                await log_pipeline_step(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
                     event_type="delivery_pipeline_step",
@@ -522,7 +557,7 @@ class RepostAlbumDelivery:
                 if not verified["ok"]:
                     await asyncio.sleep(1.5)
 
-                    await owner._log_delivery_pipeline_step(
+                    await log_pipeline_step(
                         rule_id=rule.id,
                         delivery_ids=delivery_ids,
                         event_type="delivery_pipeline_step",
@@ -542,7 +577,7 @@ class RepostAlbumDelivery:
                     )
                     attempts_debug.append({"stage": "verify_after_copy_retry_only_second", **verified_retry})
 
-                    await owner._log_delivery_pipeline_step(
+                    await log_pipeline_step(
                         rule_id=rule.id,
                         delivery_ids=delivery_ids,
                         event_type="delivery_pipeline_step",
@@ -615,18 +650,25 @@ class RepostAlbumDelivery:
         # =========================================================
         # 4) FETCH SOURCE ALBUM
         # =========================================================
-        if source_messages is None:
-            source_messages = await owner._fetch_album_messages(source_channel, message_ids)
+        try:
+            if source_messages is None:
+                source_messages = await owner._fetch_album_messages(source_channel, message_ids)
 
-        if source_messages is not None and first_source_caption is None:
-            first_source_caption = owner._get_album_primary_text(
-                source_messages,
-                post_rows=[
-                    post_rows_by_message_id.get(int(getattr(m, "id")))
-                    for m in source_messages
-                ],
-                is_self_loop=is_self_loop,
-            )
+            if source_messages is not None and first_source_caption is None:
+                first_source_caption = owner._get_album_primary_text(
+                    source_messages,
+                    post_rows=[
+                        post_rows_by_message_id.get(int(getattr(m, "id")))
+                        for m in source_messages
+                    ],
+                    is_self_loop=is_self_loop,
+                )
+        except TransportRateLimited:
+            raise
+        except Exception as exc:
+            if not transport_entered:
+                raise AlbumPreflightError(str(exc)) from exc
+            raise
 
         if len(source_messages) != len(message_ids):
             final_error_text = "Не удалось получить весь альбом через MTProto"
@@ -647,10 +689,55 @@ class RepostAlbumDelivery:
             )
             return False
 
+        async def stop_if_accepted_unresolved(result):
+            if not result.get("transport_accepted") or result.get("authoritative_resolved"):
+                return False
+            if result.get("accepted_unresolved") and idempotency_key:
+                await run_db(owner.db.record_unverified_botapi_album, idempotency_key,
+                             result.get("raw_message_ids") or [])
+            if result.get("resolution_method") == "video_processing_pending":
+                from .single_publication_reconciliation import register_pending_publication
+                if await register_pending_publication(
+                    owner,key=idempotency_key,delivery_ids=delivery_ids,rule_id=rule.id,
+                    target_id=target_id,target_thread_id=target_thread_id,
+                    source_channel=source_channel,source_message_ids=message_ids,
+                    scheduled_ids=result.get("returned_candidate_ids") or [],
+                    pending_mask=result.get("pending_mask"),
+                ):
+                    return True
+            error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
+            logger.warning(
+                "REUPLOAD_ALBUM_ACCEPTED_TARGET_ID_UNRESOLVED | rule_id=%s | delivery_ids=%s | target_id=%s | returned_candidate_ids=%s | action=no_retry_no_second_send",
+                rule.id, delivery_ids, target_id, result.get("returned_candidate_ids"),
+            )
+            await log_pipeline_step(
+                rule_id=rule.id,
+                delivery_ids=delivery_ids,
+                event_type="delivery_pipeline_step",
+                pipeline_stage="reupload_album_accepted_target_id_unresolved",
+                pipeline_result="terminal_manual_review",
+                source_channel=source_channel,
+                target_id=target_id,
+                source_message_ids=message_ids,
+                error_text=error_text,
+                extra={
+                    "transport_accepted": True,
+                    "authoritative_resolved": False,
+                    "returned_candidate_ids": result.get("returned_candidate_ids"),
+                    "resolution_method": result.get("resolution_method"),
+                    "manual_review_required": True,
+                    "non_retryable": True,
+                    "action": "no_retry_no_second_send",
+                },
+            )
+            for delivery_id in delivery_ids:
+                await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+            return True
+
         # =========================================================
         # 5) REUPLOAD AS ALBUM
         # =========================================================
-        await owner._log_delivery_pipeline_step(
+        await log_pipeline_step(
             rule_id=rule.id,
             delivery_ids=delivery_ids,
             event_type="delivery_pipeline_step",
@@ -666,6 +753,8 @@ class RepostAlbumDelivery:
             },
         )
 
+        transport_entered = True
+
         reupload_result = await owner._reupload_album(
             messages=source_messages,
             target_id=target_id,
@@ -678,6 +767,10 @@ class RepostAlbumDelivery:
                 **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
         attempts_debug.append({"stage": "reupload_album", **reupload_result})
+        # Persist pending receipts before any fallible post-send audit write.
+        if await stop_if_accepted_unresolved(reupload_result):
+            return False
+
         reupload_candidate_sent_ids = normalize_valid_sent_message_ids(reupload_result.get("sent_message_ids") or [])
         if idempotency_key and reupload_candidate_sent_ids:
             await run_db(
@@ -691,7 +784,7 @@ class RepostAlbumDelivery:
                 idempotency_key, delivery_ids, reupload_candidate_sent_ids,
             )
 
-        await owner._log_delivery_pipeline_step(
+        await log_pipeline_step(
             rule_id=rule.id,
             delivery_ids=delivery_ids,
             event_type="delivery_pipeline_step",
@@ -718,7 +811,7 @@ class RepostAlbumDelivery:
         )
 
         if reupload_result["ok"]:
-            await owner._log_delivery_pipeline_step(
+            await log_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
@@ -739,7 +832,7 @@ class RepostAlbumDelivery:
             )
             attempts_debug.append({"stage": "verify_after_reupload", **verified})
 
-            await owner._log_delivery_pipeline_step(
+            await log_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
@@ -758,7 +851,7 @@ class RepostAlbumDelivery:
             if not verified["ok"]:
                 await asyncio.sleep(1.5)
 
-                await owner._log_delivery_pipeline_step(
+                await log_pipeline_step(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
                     event_type="delivery_pipeline_step",
@@ -779,7 +872,7 @@ class RepostAlbumDelivery:
                 )
                 attempts_debug.append({"stage": "verify_after_reupload_retry_only", **verified_retry})
 
-                await owner._log_delivery_pipeline_step(
+                await log_pipeline_step(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
                     event_type="delivery_pipeline_step",
@@ -875,73 +968,10 @@ class RepostAlbumDelivery:
                 return True
 
             if is_self_loop and reupload_candidate_sent_ids:
-                if any(int(x) in set(message_ids) for x in reupload_candidate_sent_ids):
-                    logger.warning(
-                        "SELF_LOOP_SENT_ID_COLLISION | rule_id=%s | delivery_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s | action=reject_as_new_target",
-                        rule.id, (delivery_ids[0] if delivery_ids else None), message_ids, reupload_candidate_sent_ids,
-                    )
-                    return False
-                logger.warning(
-                    "SELF_LOOP_ALBUM_ACCEPTED_UNVERIFIED | rule_id=%s | delivery_ids=%s | candidate_sent_message_ids=%s | action=mark_sent_no_second_send",
-                    rule.id, delivery_ids, reupload_candidate_sent_ids,
-                )
-                reaction_message_id = int(reupload_candidate_sent_ids[0])
-                logger.info(
-                    "SELF_LOOP_REACTION_TARGET_RESOLVED | rule_id=%s | delivery_id=%s | source_message_ids=%s | accepted_target_message_ids=%s | reaction_target_message_id=%s | method=reupload_album",
-                    rule.id, (delivery_ids[0] if delivery_ids else None), message_ids, reupload_candidate_sent_ids, reaction_message_id,
-                )
-                async def _apply_unverified_album_reaction():
-                    return await owner._add_reaction_for_rule_if_possible(
-                        rule=rule,
-                        target_id=target_id,
-                        sent_message_id=reaction_message_id,
-                        source_channel=str(source_channel or ""),
-                        source_message_ids=message_ids,
-                        delivery_id=(delivery_ids[0] if delivery_ids else None),
-                        allow_unverified_self_loop_target=True,
-                    )
-
-                if hasattr(owner, "_run_post_send_step_safe"):
-                    reaction_result = await owner._run_post_send_step_safe(
-                        step_name="reaction_after_reupload_album_self_loop_unverified",
-                        rule_id=rule.id,
-                        delivery_id=delivery_ids[0] if delivery_ids else None,
-                        idempotency_key=idempotency_key,
-                        accepted_sent_message_ids=reupload_candidate_sent_ids,
-                        coro_factory=_apply_unverified_album_reaction,
-                    )
-                else:
-                    try:
-                        reaction_result = {"ok": True, "result": await _apply_unverified_album_reaction()}
-                    except Exception as exc:
-                        reaction_result = {"ok": False, "error": str(exc)}
-                if _reaction_applied_or_enqueued(reaction_result):
-                    logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, reaction_message_id)
-                else:
-                    reaction_payload = reaction_result.get("result") if isinstance(reaction_result, dict) and isinstance(reaction_result.get("result"), dict) else reaction_result
-                    reaction_reason = reaction_payload.get("reason") if isinstance(reaction_payload, dict) else None
-                    reaction_error = reaction_result.get("error") if isinstance(reaction_result, dict) else None
-                    logger.warning(
-                        "SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | delivery_id=%s | target_id=%s | reaction_target_message_id=%s | reason=%s",
-                        rule.id, (delivery_ids[0] if delivery_ids else None), target_id, reaction_message_id, reaction_reason or reaction_error or "unknown",
-                    )
-                await owner._log_delivery_final_success(
-                    rule_id=rule.id, delivery_ids=delivery_ids, final_method="reupload_album_self_loop_unverified",
-                    source_channel=source_channel, target_id=target_id, source_message_ids=message_ids,
-                    sent_message_id=int(reupload_candidate_sent_ids[0]), sent_message_ids=reupload_candidate_sent_ids,
-                    verify_result=verified,
-                    extra={
-                        "caption_delivery_mode": caption_mode, "requires_builder": requires_builder,
-                        "verification_ok": False, "post_send_warning": "target_message_not_found_after_send",
-                        "candidate_sent_message_ids": reupload_candidate_sent_ids, "second_send_blocked": True,
-                    },
-                )
-                await run_db(
-                    owner._mark_album_deliveries_sent_sync,
-                    delivery_ids=delivery_ids, sent_message_ids=reupload_candidate_sent_ids,
-                    target_id=str(target_id), delivery_method="reupload_album_self_loop_unverified",
-                )
-                return True
+                error = "telethon_send_accepted_target_id_unresolved_non_retryable: self-loop album not verified"
+                for disputed_id in delivery_ids:
+                    await run_db(owner._mark_delivery_faulty_sync, disputed_id, error)
+                return False
 
             if upload_confirmed_by_send_result:
                 # Telethon accepted an album upload, but the channel has not
@@ -969,7 +999,7 @@ class RepostAlbumDelivery:
                 "REUPLOAD_ALBUM_MT_PROTO_UNCERTAIN | rule_id=%s | delivery_ids=%s | action=no_second_send",
                 rule.id, delivery_ids,
             )
-            await owner._log_delivery_pipeline_step(
+            await log_pipeline_step(
                 rule_id=rule.id, delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
                 pipeline_stage="reupload_album_transport_uncertain",
@@ -981,36 +1011,6 @@ class RepostAlbumDelivery:
             )
             for disputed_id in delivery_ids:
                 await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
-            return False
-
-        if reupload_result.get("transport_accepted") and not reupload_result.get("authoritative_resolved"):
-            error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
-            logger.warning(
-                "REUPLOAD_ALBUM_ACCEPTED_TARGET_ID_UNRESOLVED | rule_id=%s | delivery_ids=%s | target_id=%s | returned_candidate_ids=%s | action=no_retry_no_second_send",
-                rule.id, delivery_ids, target_id, reupload_result.get("returned_candidate_ids"),
-            )
-            await owner._log_delivery_pipeline_step(
-                rule_id=rule.id,
-                delivery_ids=delivery_ids,
-                event_type="delivery_pipeline_step",
-                pipeline_stage="reupload_album_accepted_target_id_unresolved",
-                pipeline_result="terminal_manual_review",
-                source_channel=source_channel,
-                target_id=target_id,
-                source_message_ids=message_ids,
-                error_text=error_text,
-                extra={
-                    "transport_accepted": True,
-                    "authoritative_resolved": False,
-                    "returned_candidate_ids": reupload_result.get("returned_candidate_ids"),
-                    "resolution_method": reupload_result.get("resolution_method"),
-                    "manual_review_required": True,
-                    "non_retryable": True,
-                    "action": "no_retry_no_second_send",
-                },
-            )
-            for delivery_id in delivery_ids:
-                await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
             return False
 
         if is_self_loop:
@@ -1026,7 +1026,7 @@ class RepostAlbumDelivery:
         if not reupload_result["ok"]:
             await asyncio.sleep(1.2)
 
-            await owner._log_delivery_pipeline_step(
+            await log_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
@@ -1037,6 +1037,8 @@ class RepostAlbumDelivery:
                 source_message_ids=message_ids,
                 extra={"attempt_no": 2},
             )
+
+            transport_entered = True
 
             reupload_retry_result = await owner._reupload_album(
                 messages=source_messages,
@@ -1050,8 +1052,19 @@ class RepostAlbumDelivery:
                 **({"caption_override": custom_caption} if custom_caption is not None else {}),
             )
             attempts_debug.append({"stage": "reupload_album_retry", **reupload_retry_result})
+            if await stop_if_accepted_unresolved(reupload_retry_result):
+                return False
+            if reupload_retry_result.get("transport_attempted") and not reupload_retry_result.get("transport_accepted"):
+                for disputed_id in delivery_ids:
+                    await run_db(owner._mark_delivery_faulty_sync, disputed_id, "telethon_send_attempted_result_unknown_non_retryable")
+                return False
 
-            await owner._log_delivery_pipeline_step(
+            retry_candidate_ids = normalize_valid_sent_message_ids(reupload_retry_result.get("sent_message_ids") or [])
+            if idempotency_key and reupload_retry_result.get("ok") and len(retry_candidate_ids) == len(message_ids):
+                await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                             sent_message_ids=retry_candidate_ids, telegram_method="reupload_album_retry")
+
+            await log_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
@@ -1069,7 +1082,7 @@ class RepostAlbumDelivery:
             )
 
             if reupload_retry_result["ok"]:
-                await owner._log_delivery_pipeline_step(
+                await log_pipeline_step(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
                     event_type="delivery_pipeline_step",
@@ -1090,7 +1103,7 @@ class RepostAlbumDelivery:
                 )
                 attempts_debug.append({"stage": "verify_after_reupload_retry", **verified})
 
-                await owner._log_delivery_pipeline_step(
+                await log_pipeline_step(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
                     event_type="delivery_pipeline_step",
@@ -1109,7 +1122,7 @@ class RepostAlbumDelivery:
                 if not verified["ok"]:
                     await asyncio.sleep(1.5)
 
-                    await owner._log_delivery_pipeline_step(
+                    await log_pipeline_step(
                         rule_id=rule.id,
                         delivery_ids=delivery_ids,
                         event_type="delivery_pipeline_step",
@@ -1130,7 +1143,7 @@ class RepostAlbumDelivery:
                     )
                     attempts_debug.append({"stage": "verify_after_reupload_retry_only_second", **verified_retry})
 
-                    await owner._log_delivery_pipeline_step(
+                    await log_pipeline_step(
                         rule_id=rule.id,
                         delivery_ids=delivery_ids,
                         event_type="delivery_pipeline_step",
@@ -1151,6 +1164,14 @@ class RepostAlbumDelivery:
 
                 if verified["ok"]:
                     sent_message_ids = verified.get("sent_message_ids") or reupload_retry_result.get("sent_message_ids") or []
+                    from .telegram_publication import publication_pairs
+                    if len(sent_message_ids)!=len(delivery_ids) or not publication_pairs(sent_message_ids,sent_message_ids):
+                        for disputed_id in delivery_ids:
+                            await run_db(owner._mark_delivery_faulty_sync,disputed_id,"telethon_send_accepted_target_id_unresolved_non_retryable")
+                        return False
+                    if idempotency_key and hasattr(owner.db,"mark_delivery_attempt_verified"):
+                        await run_db(owner.db.mark_delivery_attempt_accepted,idempotency_key,sent_message_ids=sent_message_ids,telegram_method="reupload_album_retry")
+                        await run_db(owner.db.mark_delivery_attempt_verified,idempotency_key,sent_message_ids=sent_message_ids)
                     reaction_message_id, reaction_target_reason = await owner._select_reaction_message_id(
                         target_id=target_id,
                         sent_message_ids=sent_message_ids,
@@ -1192,6 +1213,9 @@ class RepostAlbumDelivery:
                     else:
                         await run_db(owner._mark_many_deliveries_sent_sync, delivery_ids)
                     return True
+                for disputed_id in delivery_ids:
+                    await run_db(owner._mark_delivery_faulty_sync,disputed_id,"telethon_send_accepted_target_id_unresolved_non_retryable: retry verification failed")
+                return False
         else:
             reupload_retry_result = {
                 "ok": False,
@@ -1203,7 +1227,7 @@ class RepostAlbumDelivery:
         # =========================================================
         # 7) EMERGENCY FALLBACK: ONE BY ONE
         # =========================================================
-        await owner._log_delivery_pipeline_step(
+        await log_pipeline_step(
             rule_id=rule.id,
             delivery_ids=delivery_ids,
             event_type="delivery_pipeline_step",
@@ -1214,6 +1238,8 @@ class RepostAlbumDelivery:
             source_message_ids=message_ids,
             extra={"attempt_no": 1},
         )
+
+        transport_entered = True
 
         one_by_one_result = await owner._send_album_one_by_one(
             messages=source_messages,
@@ -1226,8 +1252,16 @@ class RepostAlbumDelivery:
             **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
         attempts_debug.append({"stage": "send_album_one_by_one", **one_by_one_result})
+        if idempotency_key and (one_by_one_result.get("transport_attempted") or one_by_one_result.get("transport_accepted")) and not one_by_one_result.get("ok"):
+            await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key,
+                         status="failed_after_send", error_text="one_by_one_outcome_unknown_no_resend")
 
-        await owner._log_delivery_pipeline_step(
+        fallback_candidate_ids = normalize_valid_sent_message_ids(one_by_one_result.get("sent_message_ids") or [])
+        if idempotency_key and one_by_one_result.get("ok") and len(fallback_candidate_ids) == len(message_ids):
+            await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                         sent_message_ids=fallback_candidate_ids, telegram_method="one_by_one")
+
+        await log_pipeline_step(
             rule_id=rule.id,
             delivery_ids=delivery_ids,
             event_type="delivery_pipeline_step",
@@ -1260,7 +1294,7 @@ class RepostAlbumDelivery:
                 "ONE_BY_ONE_ACCEPTED_TARGET_ID_UNRESOLVED | rule_id=%s | delivery_ids=%s | target_id=%s | returned_candidate_ids=%s | action=no_retry_no_second_send | manual_review_required=True",
                 rule.id, delivery_ids, target_id, one_by_one_result.get("returned_candidate_ids"),
             )
-            await owner._log_delivery_pipeline_step(
+            await log_pipeline_step(
                 rule_id=rule.id,
                 delivery_ids=delivery_ids,
                 event_type="delivery_pipeline_step",
@@ -1288,7 +1322,16 @@ class RepostAlbumDelivery:
             return False
 
         if one_by_one_result["ok"]:
-            sent_message_id = one_by_one_result.get("sent_message_id")
+            from .telegram_publication import publication_pairs
+            sent_ids = one_by_one_result.get("sent_message_ids") or []
+            if len(sent_ids)!=len(delivery_ids) or not publication_pairs(sent_ids,sent_ids):
+                for disputed_id in delivery_ids:
+                    await run_db(owner._mark_delivery_faulty_sync,disputed_id,"telethon_send_accepted_target_id_unresolved_non_retryable: incomplete one-by-one")
+                return False
+            if idempotency_key and hasattr(owner.db,"mark_delivery_attempt_verified"):
+                await run_db(owner.db.mark_delivery_attempt_accepted,idempotency_key,sent_message_ids=sent_ids,telegram_method="one_by_one")
+                await run_db(owner.db.mark_delivery_attempt_verified,idempotency_key,sent_message_ids=sent_ids)
+            sent_message_id = sent_ids[0]
             if sent_message_id:
                 await owner._add_reaction_for_rule_if_possible(
                             rule=rule,

@@ -4,6 +4,9 @@ import logging
 import time
 from pathlib import Path
 
+from telethon.errors import FloodWaitError
+from .transport_policy import TransportRateLimited
+
 from .config import settings
 from .runtime_utils import run_db
 from . import sender_primitives as _sender_primitives
@@ -19,10 +22,20 @@ class SenderFetchDownloadHelpers:
     def __init__(self, owner):
         self.owner = owner
 
+    def _read_client(self):
+        return getattr(self.owner, "telethon_read", None) or self.owner.telethon
+
     async def fetch_message(self, source_channel, message_id):
         try:
             entity = int(source_channel) if str(source_channel).lstrip("-").isdigit() else source_channel
-            return await self.owner.telethon.get_messages(entity, ids=message_id)
+            return await self._read_client().get_messages(entity, ids=message_id)
+        except TransportRateLimited:
+            raise
+        except FloodWaitError as exc:
+            raise TransportRateLimited(
+                retry_after_seconds=max(1, int(exc.seconds)), backend="telethon",
+                op_name="get_messages", key=str(source_channel),
+            ) from exc
         except Exception as exc:
             logger.warning("Telethon не смог получить сообщение %s/%s: %s", source_channel, message_id, exc); return None
 
@@ -128,7 +141,7 @@ class SenderFetchDownloadHelpers:
         try:
             logger.info("📥 Начинаю скачивание исходного видео...")
 
-            file_path = await self.owner.telethon.download_media(
+            file_path = await self._read_client().download_media(
                 message,
                 file=str(download_target_path),
                 progress_callback=progress_callback,
@@ -190,6 +203,17 @@ class SenderFetchDownloadHelpers:
 
             return path
 
+        except (FloodWaitError, TransportRateLimited) as exc:
+            try:
+                download_target_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Не удалось удалить незавершённую загрузку: %s", download_target_path)
+            if isinstance(exc, TransportRateLimited):
+                raise
+            raise TransportRateLimited(
+                retry_after_seconds=max(1, int(exc.seconds)), backend="telethon",
+                op_name="download_media", key=str(source_channel or "video_source"),
+            ) from exc
         except Exception as exc:
             logger.warning("Не удалось скачать исходное видео: %s", exc)
 

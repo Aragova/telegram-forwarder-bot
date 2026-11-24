@@ -5,6 +5,8 @@ from pathlib import Path
 
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from telethon.errors import FloodWaitError
+from .transport_policy import TransportRateLimited
+from .send_intent import PublicationWriteUnavailable
 
 from .delivery_idempotency import (
     build_delivery_idempotency_key,
@@ -43,6 +45,10 @@ class VideoSendDelivery:
             delivery_id=int(delivery_id),
             target_id=target_id,
         )
+        from .single_publication_reconciliation import register_pending_single, reconcile_pending_single
+        pending_result = await reconcile_pending_single(owner, idempotency_key)
+        if pending_result is not None:
+            return pending_result
         has_attempt_ledger = all(
             hasattr(owner.db, method_name)
             for method_name in (
@@ -183,6 +189,11 @@ class VideoSendDelivery:
                 "retryable": True, "accepted": False,
                 "error_text": error_text,
             }
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            if has_attempt_ledger:
+                await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key,
+                             status="failed_before_send", error_text="publication transport temporarily unavailable")
+            raise
         except (TelegramRetryAfter, FloodWaitError) as exc:
             # Telegram explicitly rejected this request before publishing it.
             # Release the ledger for a delayed worker retry; do not confuse
@@ -223,6 +234,19 @@ class VideoSendDelivery:
             # Unknown result / wrong peer: do not guess the target message id,
             # call reaction handlers, or permit another Telegram send.
             if not sent_msg.authoritative_resolved:
+                if sent_msg.transport_accepted and sent_msg.resolution_method == "video_processing_pending":
+                    if await register_pending_single(
+                        owner, key=idempotency_key, delivery_id=delivery_id, rule_id=rule_id,
+                        target_id=target_id, target_thread_id=payload.get("target_thread_id"),
+                        source_channel=str(payload.get("source_channel") or ""),
+                        source_message_id=source_message_id,
+                        scheduled_id=sent_msg.returned_candidate_id,
+                    ):
+                        pending_result = await reconcile_pending_single(owner, idempotency_key)
+                        if pending_result is not None:
+                            return pending_result
+                        return {"ok": False, "retryable": False, "accepted": True,
+                                "manual_review_required": True, "error_text": "publication_receipt_missing_no_resend"}
                 candidate_ids = sent_msg.returned_candidate_ids or []
                 if has_attempt_ledger:
                     await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=candidate_ids, telegram_method="video_send_unresolved")

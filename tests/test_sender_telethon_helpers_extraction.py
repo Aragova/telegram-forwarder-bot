@@ -248,3 +248,34 @@ def test_verify_album_delivery_smoke():
     assert result["count"] == 2
     assert result["first_message_id"] == 10
     assert result["sent_message_ids"] == [10, 11]
+
+
+
+def test_verify_album_reads_when_mtproto_write_is_disabled():
+    class Reader:
+        async def get_messages(self, entity, ids):
+            assert entity == -100
+            assert ids == [10, 11]
+            return [SimpleNamespace(id=10, grouped_id=99), SimpleNamespace(id=11, grouped_id=99)]
+
+    owner = SimpleNamespace(telethon=None, telethon_read=Reader())
+    result = asyncio.run(SenderTelethonHelpers(owner).verify_album_delivery(
+        target_id="-100", expected_count=2, sent_message_ids=[10, 11],
+    ))
+    assert result["ok"] and result["sent_message_ids"] == [10, 11]
+    assert owner.telethon is None
+
+def test_mtproto_writer_unavailable_is_pre_send_deferral():
+    import pytest
+    from app.send_intent import PublicationWriteUnavailable
+
+    helper = SenderTelethonHelpers(SimpleNamespace(telethon=None))
+    with pytest.raises(PublicationWriteUnavailable):
+        asyncio.run(helper.send_text_via_telethon(target_id="-100", target_thread_id=None,
+                                                  text="text", entities=[]))
+    with pytest.raises(PublicationWriteUnavailable):
+        asyncio.run(helper.send_file_via_telethon(target_id="-100", target_thread_id=None,
+                                                  message=SimpleNamespace()))
+    with pytest.raises(PublicationWriteUnavailable):
+        asyncio.run(helper.send_album_via_telethon(target_id="-100", target_thread_id=None,
+                                                   messages=[SimpleNamespace()]))

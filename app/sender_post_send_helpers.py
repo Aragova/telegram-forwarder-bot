@@ -195,7 +195,7 @@ class SenderPostSendHelpers:
             normalized_candidates,
         )
 
-        if not hasattr(self.owner.telethon, "get_messages"):
+        if not hasattr(getattr(self.owner, "telethon_read", self.owner.telethon), "get_messages"):
             logger.warning(
                 "DELIVERY_TARGET_CONFIRM_SKIPPED_NO_GET_MESSAGES | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s",
                 rule_id,

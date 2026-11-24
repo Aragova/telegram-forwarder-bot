@@ -1,5 +1,5 @@
 aiogram==3.34.0
-telethon>=1.36,<2
+telethon>=1.38,<2
 python-dotenv>=1.0,<2
 aiofiles>=24.1,<25
 httpx>=0.27,<1

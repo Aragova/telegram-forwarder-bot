@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from telethon.tl import types as tl_types
-from telethon.errors import BadRequestError
+from telethon.errors import BadRequestError, FloodWaitError, RandomIdDuplicateError
+from .transport_policy import TransportRateLimited
+from .send_intent import PublicationWriteUnavailable
 
 from .background_tasks import start_background_task
 from .config import settings
@@ -40,16 +42,17 @@ async def _create_thumb_temp_path_async(prefix: str) -> Path:
         asyncio.to_thread(_create_thumb_temp_path, prefix),
         name=f"create-thumbnail-{prefix}",
     )
+    def _remove_orphan(done: asyncio.Task[Path]) -> None:
+        if done.cancelled() or done.exception() is not None:
+            return
+        try:
+            done.result().unlink(missing_ok=True)
+        except Exception:
+            logger.exception("THUMB_TEMP_CLEANUP_FAILED | prefix=%s", prefix)
+
     try:
         return await asyncio.shield(creation)
     except asyncio.CancelledError:
-        def _remove_orphan(done: asyncio.Task[Path]) -> None:
-            if done.cancelled():
-                return
-            try:
-                done.result().unlink(missing_ok=True)
-            except Exception:
-                logger.exception("THUMB_TEMP_CLEANUP_FAILED | prefix=%s", prefix)
         creation.add_done_callback(_remove_orphan)
         raise
 
@@ -282,6 +285,8 @@ class SenderTelethonHelpers:
         source_message_ids: set[int] | None = None,
         literal_caption: bool = False,
     ) -> TelethonSendOutcome:
+        if self.owner.telethon is None:
+            raise PublicationWriteUnavailable("MTProto publication writer is not ready")
         entity, target_is_broadcast_channel = await self._resolve_target_entity_and_broadcast_flag(target_id)
         formatting_entities = self.owner._clone_telethon_entities(entities, text)
 
@@ -311,6 +316,8 @@ class SenderTelethonHelpers:
         send_started_at = datetime.now(timezone.utc)
         try:
             sent = await self.owner.telethon.send_message(**send_kwargs)
+        except (FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.warning("TELETHON_TEXT_SEND | FAILED | target=%s | thread=%s | error=%s", target_id, target_thread_id, exc)
             return telethon_transport_failed(str(exc))
@@ -353,6 +360,8 @@ class SenderTelethonHelpers:
         is_self_loop: bool = False,
         caption_override: dict | None = None,
     ) -> TelethonSendOutcome:
+        if self.owner.telethon is None:
+            raise PublicationWriteUnavailable("MTProto publication writer is not ready")
         content = (
             caption_override
             if caption_override is not None
@@ -433,6 +442,8 @@ class SenderTelethonHelpers:
             )
             return TelethonSendOutcome(True, True, bool(resolved.ok), sent_id, [sent_id] if sent_id else [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method=resolved.resolution_method, error_text=resolved.error_text)
 
+        except (FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.warning(
                 "TELETHON_FILE_SEND | FAILED_ORIGINAL_MEDIA | target=%s | thread=%s | error=%s",
@@ -440,7 +451,7 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
-            if original_send_started and not isinstance(exc, BadRequestError):
+            if original_send_started and (not isinstance(exc, BadRequestError) or isinstance(exc, RandomIdDuplicateError)):
                 logger.warning("TELETHON_FILE_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
                 return telethon_transport_failed(f"original_media_send_uncertain: {exc}")
 
@@ -545,6 +556,8 @@ class SenderTelethonHelpers:
             )
             return TelethonSendOutcome(True, True, bool(resolved.ok), sent_id, [sent_id] if sent_id else [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method=resolved.resolution_method, error_text=resolved.error_text)
 
+        except (FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.warning(
                 "TELETHON_FILE_SEND | FAILED_FILE_PATH | target=%s | thread=%s | file=%s | error=%s",
@@ -575,6 +588,8 @@ class SenderTelethonHelpers:
         is_self_loop: bool = False,
         caption_override: dict | None = None,
     ) -> dict:
+        if self.owner.telethon is None:
+            raise PublicationWriteUnavailable("MTProto publication writer is not ready")
         downloaded_paths: list[Path] = []
 
         original_send_started = False
@@ -660,7 +675,7 @@ class SenderTelethonHelpers:
                     return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=returned_ids, resolution_method="resolver_exception", error_text=str(exc)).to_reupload_album_result(sent_count=len(sent_messages))
                 if not resolved.ok:
                     logger.warning("TELETHON_ALBUM_SEND | ACCEPTED_UNRESOLVED | target=%s | thread=%s | returned_candidate_ids=%s", target_id, target_thread_id, resolved.returned_candidate_ids)
-                    return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=resolved.returned_candidate_ids or [], resolution_method=resolved.resolution_method, error_text=resolved.error_text or "telethon_album_target_id_unresolved").to_reupload_album_result(sent_count=len(sent_messages))
+                    return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=resolved.returned_candidate_ids or [], resolution_method=resolved.resolution_method, error_text=resolved.error_text or "telethon_album_target_id_unresolved", pending_mask=resolved.pending_mask).to_reupload_album_result(sent_count=len(sent_messages))
                 first_id = int(resolved.authoritative_message_id)
                 logger.info(
                     "TELETHON_ALBUM_SEND | OK_ORIGINAL_MEDIA | target=%s | thread=%s | sent_count=%s | returned_candidate_ids=%s | sent_message_ids=%s | first_message_id=%s | resolution_method=%s",
@@ -688,6 +703,8 @@ class SenderTelethonHelpers:
                 target_thread_id,
             )
 
+        except (FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.warning(
                 "TELETHON_ALBUM_SEND | FAILED_ORIGINAL_MEDIA | target=%s | thread=%s | error=%s",
@@ -695,7 +712,7 @@ class SenderTelethonHelpers:
                 target_thread_id,
                 exc,
             )
-            if original_send_started and not isinstance(exc, BadRequestError):
+            if original_send_started and (not isinstance(exc, BadRequestError) or isinstance(exc, RandomIdDuplicateError)):
                 logger.warning("TELETHON_ALBUM_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
                 return telethon_transport_failed(
                     f"original_album_send_uncertain: {exc}"
@@ -787,7 +804,7 @@ class SenderTelethonHelpers:
                 return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=returned_ids, resolution_method="resolver_exception", error_text=str(exc)).to_reupload_album_result(sent_count=len(sent_messages))
             if not resolved.ok:
                 logger.warning("TELETHON_ALBUM_SEND | ACCEPTED_UNRESOLVED_FILE_PATH | target=%s | thread=%s | returned_candidate_ids=%s", target_id, target_thread_id, resolved.returned_candidate_ids)
-                return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=resolved.returned_candidate_ids or [], resolution_method=resolved.resolution_method, error_text=resolved.error_text or "telethon_album_target_id_unresolved").to_reupload_album_result(sent_count=len(sent_messages))
+                return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=resolved.returned_candidate_ids or [], resolution_method=resolved.resolution_method, error_text=resolved.error_text or "telethon_album_target_id_unresolved", pending_mask=resolved.pending_mask).to_reupload_album_result(sent_count=len(sent_messages))
 
             first_id = int(resolved.authoritative_message_id)
             logger.info(
@@ -810,6 +827,8 @@ class SenderTelethonHelpers:
                 "resolution_method": resolved.resolution_method,
             }
 
+        except (FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except Exception as exc:
             logger.exception(
                 "TELETHON_ALBUM_SEND | FAILED_FILE_PATH | target=%s | thread=%s | error=%s",
@@ -852,7 +871,8 @@ class SenderTelethonHelpers:
                 }
 
             entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
-            fetched = await self.owner.telethon.get_messages(entity, ids=sent_message_ids)
+            reader = getattr(self.owner, "telethon_read", None) or self.owner.telethon
+            fetched = await reader.get_messages(entity, ids=sent_message_ids)
             fetched_list = fetched if isinstance(fetched, list) else [fetched]
             fetched_list = [m for m in fetched_list if m]
             actual_ids = sorted(int(m.id) for m in fetched_list)

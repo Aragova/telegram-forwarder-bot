@@ -68,9 +68,12 @@ class SenderStateSyncHelpers:
             raise RuntimeError("Не удалось определить deliveries альбома для перевода в sent")
 
         valid_sent_message_ids = normalize_valid_sent_message_ids(sent_message_ids)
-        if valid_sent_message_ids and hasattr(self.owner.db, "mark_delivery_sent_with_target_message"):
-            for index, album_delivery_id in enumerate(normalized_delivery_ids):
-                sent_message_id = valid_sent_message_ids[index] if index < len(valid_sent_message_ids) else valid_sent_message_ids[0]
+        if hasattr(self.owner.db, "mark_delivery_sent_with_target_message"):
+            if (len(valid_sent_message_ids) != len(normalized_delivery_ids)
+                    or len(set(valid_sent_message_ids)) != len(valid_sent_message_ids)
+                    or len(set(normalized_delivery_ids)) != len(normalized_delivery_ids)):
+                raise RuntimeError("Не подтверждены все уникальные ID альбома")
+            for album_delivery_id, sent_message_id in zip(normalized_delivery_ids,valid_sent_message_ids):
                 self.owner.db.mark_delivery_sent_with_target_message(
                     album_delivery_id,
                     sent_message_id=int(sent_message_id),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.runtime_utils import run_db
+
 import asyncio
 import logging
 import os
@@ -435,20 +437,20 @@ class RepostCampaignScheduleService:
         return RepostCampaignActionResult(ok=ok, action="cancel_scheduled_launch", rule_id=int(row.get("rule_id") or 0))
 
     async def process_due_scheduled_launches(self, *, worker_id: str, limit: int = 5) -> dict:
-        reset_result = self.repo.reset_stuck_campaign_scheduled_launches(stuck_seconds=CAMPAIGN_SCHEDULE_STUCK_SECONDS)
+        reset_result = await run_db(self.repo.reset_stuck_campaign_scheduled_launches, stuck_seconds=CAMPAIGN_SCHEDULE_STUCK_SECONDS)
         if isinstance(reset_result, dict) and reset_result.get("needs_review"):
             self.logger.warning(
                 "CAMPAIGN_SCHEDULE_NEEDS_REVIEW | reason=stale_processing_with_campaign_run | count=%s",
                 reset_result.get("needs_review"),
             )
-        claimed = self.repo.claim_due_campaign_scheduled_launches(now_iso=campaign_schedule_now_utc().isoformat(), worker_id=worker_id, limit=limit)
+        claimed = await run_db(self.repo.claim_due_campaign_scheduled_launches, now_iso=campaign_schedule_now_utc().isoformat(), worker_id=worker_id, limit=limit)
 
         for row in claimed:
             rule_id = int(row["rule_id"])
             scheduled_launch_id = int(row["id"])
             created_by = row.get("created_by")
             scheduled_at_utc = _coerce_schedule_datetime_utc(row.get("scheduled_at"))
-            policy_state = self.build_scheduled_launch_policy_state(
+            policy_state = await run_db(self.build_scheduled_launch_policy_state, 
                 rule_id=rule_id,
                 scheduled_at_utc=scheduled_at_utc,
             )
@@ -463,7 +465,7 @@ class RepostCampaignScheduleService:
             )
 
             if policy_state.get("ok") is False or action == "policy_error":
-                self.repo.mark_campaign_scheduled_launch_needs_review(
+                await run_db(self.repo.mark_campaign_scheduled_launch_needs_review, 
                     scheduled_launch_id,
                     error_text="Не удалось проверить Чистый канал перед запуском",
                     campaign_run_id=None,
@@ -476,7 +478,7 @@ class RepostCampaignScheduleService:
                 continue
 
             if action == "base_block" or policy_state.get("can_schedule") is not True:
-                self.repo.mark_campaign_scheduled_launch_failed(
+                await run_db(self.repo.mark_campaign_scheduled_launch_failed, 
                     scheduled_launch_id,
                     error_text="Кампания не готова к запуску в момент старта",
                 )
@@ -491,7 +493,7 @@ class RepostCampaignScheduleService:
             if action == "schedule_with_clean_channel_wait":
                 attempt_count = _campaign_schedule_clean_channel_attempt_count(row)
                 if attempt_count >= CAMPAIGN_SCHEDULE_CLEAN_CHANNEL_MAX_ATTEMPTS:
-                    self.repo.mark_campaign_scheduled_launch_needs_review(
+                    await run_db(self.repo.mark_campaign_scheduled_launch_needs_review, 
                         scheduled_launch_id,
                         error_text="Запуск слишком долго ждёт чистый канал",
                         campaign_run_id=None,
@@ -504,7 +506,7 @@ class RepostCampaignScheduleService:
                     continue
 
                 next_retry_at = _campaign_schedule_clean_channel_next_retry_at()
-                self.repo.mark_campaign_scheduled_launch_waiting_clean_channel(
+                await run_db(self.repo.mark_campaign_scheduled_launch_waiting_clean_channel, 
                     scheduled_launch_id,
                     next_retry_at=next_retry_at.isoformat(),
                     reason=_campaign_schedule_clean_channel_wait_reason(policy_state),
@@ -520,7 +522,7 @@ class RepostCampaignScheduleService:
                 continue
 
             if action not in {"allow", "schedule_with_overlap_warning"}:
-                self.repo.mark_campaign_scheduled_launch_needs_review(
+                await run_db(self.repo.mark_campaign_scheduled_launch_needs_review, 
                     scheduled_launch_id,
                     error_text="Неизвестное состояние проверки Чистого канала",
                     campaign_run_id=None,
@@ -556,10 +558,10 @@ class RepostCampaignScheduleService:
                     top_time_snapshot=top_time_snapshot,
                 )
             except Exception as exc:
-                current = self.repo.get_campaign_scheduled_launch(scheduled_launch_id) or {}
+                current = await run_db(self.repo.get_campaign_scheduled_launch, scheduled_launch_id) or {}
                 run_id = int(current.get("campaign_run_id") or captured_run_id or 0)
                 if run_id:
-                    self.repo.mark_campaign_scheduled_launch_needs_review(
+                    await run_db(self.repo.mark_campaign_scheduled_launch_needs_review, 
                         scheduled_launch_id,
                         error_text=str(exc) or "Запуск прерван после создания campaign_run",
                         campaign_run_id=run_id,
@@ -570,7 +572,7 @@ class RepostCampaignScheduleService:
                         run_id,
                     )
                 else:
-                    self.repo.mark_campaign_scheduled_launch_failed(
+                    await run_db(self.repo.mark_campaign_scheduled_launch_failed, 
                         scheduled_launch_id,
                         error_text=str(exc) or "Ошибка запуска",
                     )
@@ -578,10 +580,10 @@ class RepostCampaignScheduleService:
 
             run_id = int(((result.extra or {}) if result else {}).get("campaign_run_id") or captured_run_id or 0)
             if result and result.ok and run_id:
-                self.repo.mark_campaign_scheduled_launch_launched(scheduled_launch_id, campaign_run_id=run_id)
+                await run_db(self.repo.mark_campaign_scheduled_launch_launched, scheduled_launch_id, campaign_run_id=run_id)
             elif result and _is_scheduled_launch_blocked_by_clean_channel_result(result) and not run_id:
                 next_retry_at = _campaign_schedule_clean_channel_next_retry_at()
-                self.repo.mark_campaign_scheduled_launch_waiting_clean_channel(
+                await run_db(self.repo.mark_campaign_scheduled_launch_waiting_clean_channel, 
                     scheduled_launch_id,
                     next_retry_at=next_retry_at.isoformat(),
                     reason=result.error_text or "Чистый канал занят активной рекламой",
@@ -599,7 +601,7 @@ class RepostCampaignScheduleService:
                     result.error_text,
                 )
             elif run_id:
-                self.repo.mark_campaign_scheduled_launch_needs_review(
+                await run_db(self.repo.mark_campaign_scheduled_launch_needs_review, 
                     scheduled_launch_id,
                     error_text=(result.error_text if result else None) or "Запуск прерван после создания campaign_run",
                     campaign_run_id=run_id,
@@ -610,7 +612,7 @@ class RepostCampaignScheduleService:
                     run_id,
                 )
             else:
-                self.repo.mark_campaign_scheduled_launch_failed(scheduled_launch_id, error_text=result.error_text if result else "Ошибка запуска")
+                await run_db(self.repo.mark_campaign_scheduled_launch_failed, scheduled_launch_id, error_text=result.error_text if result else "Ошибка запуска")
 
         return {"claimed": len(claimed)}
 

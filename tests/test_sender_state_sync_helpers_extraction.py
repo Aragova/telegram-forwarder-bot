@@ -209,19 +209,20 @@ def test_mark_album_deliveries_sent_sync_raises_on_empty_ids():
 
 def test_mark_album_deliveries_sent_sync_rich_marking():
     db = FakeDb(); helper = SenderStateSyncHelpers(make_owner(db))
-    helper.mark_album_deliveries_sent_sync([1, 2, 3], sent_message_ids=[101, 102], target_id="-100target", delivery_method="copy_album")
+    helper.mark_album_deliveries_sent_sync([1, 2], sent_message_ids=[101, 102], target_id="-100target", delivery_method="copy_album")
     assert db.sent_with_target == [
         (1, {"sent_message_id": 101, "sent_message_ids": [101, 102], "target_id": "-100target", "delivery_method": "copy_album"}),
         (2, {"sent_message_id": 102, "sent_message_ids": [101, 102], "target_id": "-100target", "delivery_method": "copy_album"}),
-        (3, {"sent_message_id": 101, "sent_message_ids": [101, 102], "target_id": "-100target", "delivery_method": "copy_album"}),
     ]
     assert db.many_sent == []
 
 
-def test_mark_album_deliveries_sent_sync_fallback_to_many_sent_without_valid_ids():
+@pytest.mark.parametrize("ids",[[],[101],[101,101],[101,102,103]])
+def test_mark_album_deliveries_sent_sync_rejects_incomplete_or_ambiguous_ids(ids):
     db = FakeDb(); helper = SenderStateSyncHelpers(make_owner(db))
-    helper.mark_album_deliveries_sent_sync([1, 2], sent_message_ids=[])
-    assert db.many_sent == [[1, 2]]
+    with pytest.raises(RuntimeError,match="Не подтверждены все уникальные ID"):
+        helper.mark_album_deliveries_sent_sync([1,2],sent_message_ids=ids)
+    assert not db.many_sent and not db.sent_with_target
 
 
 def test_mark_album_deliveries_sent_sync_fallback_to_many_sent_without_rich_method():

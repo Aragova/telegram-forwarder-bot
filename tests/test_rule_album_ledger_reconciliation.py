@@ -298,8 +298,9 @@ def test_rescan_batch_refresh_skips_recreating_old_delivery_rows():
 
 
 class RescanCursor:
-    def __init__(self, *, active=True, busy=False, owner=None):
+    def __init__(self, *, active=True, busy=False, owner=None, unresolved=False):
         self.active, self.busy, self.owner = active, busy, owner
+        self.unresolved = unresolved
         self.result, self.rowcount, self.sql = None, 1, []
 
     def execute(self, sql, args=None):
@@ -310,6 +311,8 @@ class RescanCursor:
             self.result = {"is_active": self.active, "rescan_owner_token": self.owner}
         elif "AS busy" in q:
             self.result = {"busy": self.busy}
+        elif "AS unresolved" in q:
+            self.result = {"unresolved": self.unresolved}
         elif "SET is_active = FALSE, rescan_owner_token =" in q:
             self.owner, self.active = args[0], False
         elif "SET is_active = %s, rescan_owner_token = NULL" in q:
@@ -328,8 +331,8 @@ class RescanCursor:
         return self.result
 
 
-def _rescan_repo(*, active=True, busy=False, owner=None):
-    cursor = RescanCursor(active=active, busy=busy, owner=owner)
+def _rescan_repo(*, active=True, busy=False, owner=None, unresolved=False):
+    cursor = RescanCursor(active=active, busy=busy, owner=owner, unresolved=unresolved)
     conn = FakeConnection(cursor)
     repo = object.__new__(PostgresRepository)
 
@@ -578,3 +581,13 @@ def test_scan_high_water_is_captured_inside_owner_finally_scope():
         )
         assert "include_newer_than_message_id=scan_start_max_message_id" in block
     assert "scan_start_max_message_id=scan_start_max_message_id" in source
+
+
+
+def test_explicit_replay_refuses_unverified_botapi_album():
+    repo, cursor, conn = _rescan_repo(active=False, owner="valid", unresolved=True)
+    with pytest.raises(RuntimeError, match="неподтверждённый альбом Bot API"):
+        repo.reset_rule_history_for_replay(214, owner_token="valid")
+    assert conn.commits == 0
+    write_verbs = {"INSERT", "UPDATE", "DELETE"}
+    assert not [q for q in cursor.sql if q.split(None, 1)[0].upper() in write_verbs]

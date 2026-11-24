@@ -134,3 +134,22 @@ def test_processing_delivery_is_sent_normally():
     assert ok is True
     assert sender.calls == 1
     assert repo.completed == [15]
+
+
+def test_repost_album_suppression_preserves_non_echo_deliveries():
+    repo = FakeRepo()
+    repo.suppress_self_target_echo_deliveries = lambda *_args: [1]
+    sender = FakeSender(repo)
+    received = []
+
+    async def send_album(**payload):
+        received.append(payload)
+        return {"ok": True}
+
+    sender.execute_repost_album_from_job = send_album
+    job = {"id": 16, "job_type": "repost_album",
+           "payload_json": {"delivery_id": 1, "delivery_ids": [1, 2, 3], "rule_id": 1}}
+    ok = __import__("asyncio").run(_process_job(repo, sender, 'w', 'light', job, policy=__import__('app.worker_resource_policy', fromlist=['POLICY']).POLICY, state=_InFlightState()))
+    assert ok is True
+    assert received == [{"delivery_id": 2, "delivery_ids": [2, 3], "rule_id": 1}]
+    assert repo.completed == [16]

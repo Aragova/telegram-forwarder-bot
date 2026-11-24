@@ -16,6 +16,8 @@ from .delivery_content_helpers import (
     video_caption_requires_premium,
 )
 from .runtime_utils import run_db
+from .send_intent import possible_write, PublicationWriteUnavailable
+from .transport_policy import TransportRateLimited
 from .sender_primitives import (
     MAX_INVALID_MP4_RETRY,
     MAX_NORMAL_REACTION_ATTEMPTS,
@@ -67,10 +69,12 @@ def _terminal_non_retryable_result(error_text: str) -> dict:
 
 class SenderService:
     def __init__(
-        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db
+        self, bot, telethon_client, reaction_clients: list[ReactionClientInfo], db,
+        *, telethon_read_client=None,
     ):
         self.bot = bot
         self.telethon = telethon_client
+        self.telethon_read = telethon_read_client if telethon_read_client is not None else telethon_client
         self.reaction_clients = reaction_clients or []
         self.db = db
         self.scheduler_service = SchedulerService(self.db)
@@ -1083,19 +1087,19 @@ class SenderService:
         delivery_id: int | None = None,
         max_age_seconds: int = 300,
         allow_unverified_self_loop_target: bool = False,
+        publication_intent: tuple[str, datetime] | None = None,
     ) -> dict:
         from .reaction_delivery import ReactionDelivery
         kwargs = {
-            "rule": rule,
-            "target_id": target_id,
-            "sent_message_id": sent_message_id,
-            "source_channel": source_channel,
-            "source_message_ids": source_message_ids,
-            "delivery_id": delivery_id,
+            "rule": rule, "target_id": target_id,
+            "sent_message_id": sent_message_id, "source_channel": source_channel,
+            "source_message_ids": source_message_ids, "delivery_id": delivery_id,
             "max_age_seconds": max_age_seconds,
         }
         if allow_unverified_self_loop_target:
             kwargs["allow_unverified_self_loop_target"] = True
+        if publication_intent is not None:
+            kwargs["publication_intent"] = publication_intent
         try:
             return await asyncio.wait_for(
                 ReactionDelivery(self)._add_reaction_for_rule_if_possible(**kwargs),
@@ -1279,6 +1283,10 @@ class SenderService:
             normalized_schedule_mode,
         )
         idempotency_key = build_delivery_idempotency_key(operation_kind="single", delivery_id=int(delivery_id), target_id=str(target_id))
+        from .single_publication_reconciliation import reconcile_pending_single
+        pending_result = await reconcile_pending_single(self, idempotency_key)
+        if pending_result is not None:
+            return pending_result
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
@@ -1379,6 +1387,10 @@ class SenderService:
                 target_thread_id,
                 idempotency_key=idempotency_key,
             )
+            if not ok:
+                pending_result = await reconcile_pending_single(self, idempotency_key)
+                if pending_result is not None:
+                    return pending_result
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
             if ok:
@@ -1399,7 +1411,7 @@ class SenderService:
                         terminal_error,
                     )
                     return _terminal_non_retryable_result(terminal_error)
-                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send" if possible_write() else "failed_before_send", error_text="executor returned unsuccessful result")
                 logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
                 logger.warning(
                     "JOB EXECUTOR | repost_single | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат",
@@ -1408,7 +1420,7 @@ class SenderService:
                 )
             return bool(ok)
         except Exception as exc:
-            await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=str(exc))
+            await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send" if possible_write() else "failed_before_send", error_text=str(exc))
             logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=single | key=%s | delivery_id=%s", idempotency_key, delivery_id)
             logger.warning(
                 "JOB EXECUTOR | repost_single | failed | rule_id=%s | delivery_id=%s | error=%s",
@@ -1455,6 +1467,10 @@ class SenderService:
             album_delivery_ids = [int(delivery_id)]
         album_source_ids = list(album_delivery_ids)
         idempotency_key = build_delivery_idempotency_key(operation_kind="album", rule_id=int(rule_id), target_id=str(target_id), media_group_id=media_group_id, source_message_ids=album_source_ids)
+        from .single_publication_reconciliation import reconcile_pending_publication
+        pending_result = await reconcile_pending_publication(self,idempotency_key)
+        if pending_result is not None:
+            return pending_result
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
@@ -1519,6 +1535,7 @@ class SenderService:
             logger.warning("REPOST_ALBUM_SEND_ATTEMPT_NOT_ACQUIRED | rule_id=%s | delivery_id=%s | action=no_send", rule_id, delivery_id)
             return _terminal_non_retryable_result("telethon_send_accepted_target_id_unresolved_non_retryable: concurrent album attempt")
         logger.info("DELIVERY_ATTEMPT_SENDING | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
+        transport_entered = False
         try:
             rule = await run_db(self.db.get_rule, int(rule_id))
             if not rule:
@@ -1537,6 +1554,7 @@ class SenderService:
                 raise RuntimeError(f"Не найден processing-альбом media_group_id={media_group_id}")
             album_delivery_ids = [int(r["delivery_id"]) for r in album_rows] or album_delivery_ids
 
+            transport_entered = True
             ok = await self._deliver_album(
                 rule,
                 album_rows,
@@ -1545,6 +1563,10 @@ class SenderService:
                 target_thread_id,
                 idempotency_key=idempotency_key,
             )
+            if not ok:
+                pending_result = await reconcile_pending_publication(self,idempotency_key)
+                if pending_result is not None:
+                    return pending_result
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
             if ok:
@@ -1590,7 +1612,7 @@ class SenderService:
                         terminal_error,
                     )
                     return _terminal_non_retryable_result(terminal_error)
-                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send" if possible_write() else "failed_before_send", error_text="executor returned unsuccessful result")
                 logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
                 logger.warning(
                     "JOB EXECUTOR | repost_album | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат",
@@ -1599,8 +1621,11 @@ class SenderService:
                 )
             return bool(ok)
         except Exception as exc:
-            await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=str(exc))
-            logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
+            # An exception inside the transport or finalizer is not proof that Telegram rejected the send.
+            from .repost_album_delivery import AlbumPreflightError
+            failure_status = "failed_after_send" if possible_write() or (transport_entered and not isinstance(exc, (AlbumPreflightError, TransportRateLimited, PublicationWriteUnavailable))) else "failed_before_send"
+            await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status=failure_status, error_text=str(exc))
+            logger.info("DELIVERY_ATTEMPT_FAILED | operation=album | key=%s | delivery_id=%s | status=%s", idempotency_key, delivery_id, failure_status)
             logger.warning(
                 "JOB EXECUTOR | repost_album | failed | rule_id=%s | delivery_id=%s | error=%s",
                 rule_id,
@@ -1633,6 +1658,10 @@ class SenderService:
         normalized_schedule_mode = str(schedule_mode or "interval")
         normalized_mode = str(mode or "video")
         idempotency_key = build_delivery_idempotency_key(operation_kind="video_send", delivery_id=int(delivery_id), target_id=str(target_id))
+        from .single_publication_reconciliation import reconcile_pending_single
+        pending_result = await reconcile_pending_single(self, idempotency_key)
+        if pending_result is not None:
+            return pending_result
         logger.info(
             "JOB EXECUTOR | video_delivery | start | rule_id=%s | delivery_id=%s | message_id=%s | mode=%s | schedule_mode=%s",
             rule_id,
@@ -1704,6 +1733,12 @@ class SenderService:
             if not rule:
                 raise RuntimeError(f"Правило #{rule_id} не найдено для video_delivery")
             outcome = await self._deliver_single_video(rule, int(delivery_id), int(message_id), str(source_channel), str(target_id), target_thread_id)
+            if isinstance(outcome, dict) and outcome.get("publication_pending"):
+                pending_result = await reconcile_pending_single(self, idempotency_key)
+                if pending_result is not None:
+                    return pending_result
+                return {"ok": False, "retryable": False, "accepted": True,
+                        "manual_review_required": True, "error_text": "publication_receipt_missing_no_resend"}
             if isinstance(outcome, dict) and outcome.get("accepted_unresolved"):
                 # The media may already be published. Never turn this into a
                 # retryable download/send job or a second upload.
@@ -1757,7 +1792,7 @@ class SenderService:
             if ok or normalized_schedule_mode == "fixed":
                 await run_db(self._touch_rule_after_send_sync, int(rule_id), int(interval))
             if not ok and has_attempt_ledger:
-                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text="executor returned unsuccessful result")
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send" if possible_write() else "failed_before_send", error_text="executor returned unsuccessful result")
                 logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s", delivery_id, rule_id, target_id, idempotency_key)
             if ok:
                 logger.info("JOB EXECUTOR | video_delivery | success | rule_id=%s | delivery_id=%s", rule_id, delivery_id)
@@ -1766,7 +1801,7 @@ class SenderService:
             return bool(ok)
         except Exception as exc:
             if has_attempt_ledger:
-                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=str(exc))
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send" if possible_write() else "failed_before_send", error_text=str(exc))
                 logger.info("DELIVERY_ATTEMPT_FAILED_BEFORE_SEND | operation=video_send | job_type=video_delivery | delivery_id=%s | rule_id=%s | target_id=%s | idempotency_key=%s", delivery_id, rule_id, target_id, idempotency_key)
             logger.warning(
                 "JOB EXECUTOR | video_delivery | failed | rule_id=%s | delivery_id=%s | error=%s",

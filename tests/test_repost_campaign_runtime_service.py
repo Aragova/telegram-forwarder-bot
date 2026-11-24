@@ -1906,3 +1906,28 @@ def test_resolve_delete_failures_keeps_still_active_when_pending_left():
 
     assert result.ok is True
     assert result.extra["still_active"] is True
+
+
+
+def test_manual_delete_preserves_accepted_unverified_publication():
+    repo = _FakeRepo()
+    repo._run = {"id": 10, "rule_id": 3}
+    repo._messages = [{
+        "id": 33, "run_id": 10, "rule_id": 3,
+        "send_status": "failed", "delete_status": "failed",
+        "accepted_unverified": True, "target_id": "-1001",
+    }]
+    async def unexpected_delete(**kwargs):
+        raise AssertionError("Must not delete a publication with unknown IDs")
+    runtime = RepostCampaignRuntimeService(
+        repo=repo, renderer=_FakeRenderer(None),
+        deleter=SimpleNamespace(delete_message=unexpected_delete),
+    )
+    result = asyncio.run(runtime.delete_campaign_run_message_now(
+        rule_id=3, run_id=10, run_message_id=33,
+    ))
+    assert not result.ok and result.extra["manual_review_required"]
+    bulk = asyncio.run(runtime.delete_campaign_run_now(rule_id=3, run_id=10))
+    assert not bulk.ok and bulk.extra["failed"] == 1
+    assert repo.mark_campaign_run_message_deleted_calls == []
+    assert repo._messages[0]["delete_status"] == "failed"

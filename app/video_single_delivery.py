@@ -4,6 +4,8 @@ import logging
 
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from telethon.errors import FloodWaitError
+from .transport_policy import TransportRateLimited
+from .send_intent import PublicationWriteUnavailable
 
 from .runtime_utils import run_db
 from .sender_primitives import _detect_message_media_kind
@@ -185,6 +187,17 @@ class VideoSingleDelivery:
                     pass
 
             if isinstance(sent_msg, TelethonSendOutcome) and not sent_msg.authoritative_resolved:
+                if sent_msg.transport_accepted and sent_msg.resolution_method == "video_processing_pending":
+                    from .delivery_idempotency import build_delivery_idempotency_key
+                    from .single_publication_reconciliation import register_pending_single
+                    key = build_delivery_idempotency_key(operation_kind="video_send", delivery_id=delivery_id, target_id=str(target_id))
+                    if await register_pending_single(
+                        owner, key=key, delivery_id=delivery_id, rule_id=rule.id,
+                        target_id=target_id, target_thread_id=target_thread_id,
+                        source_channel=source_channel, source_message_id=message_id,
+                        scheduled_id=sent_msg.returned_candidate_id,
+                    ):
+                        return {"ok": False, "accepted": True, "retryable": False, "publication_pending": True}
                 error = "video_send_accepted_target_id_unresolved_non_retryable"
                 logger.warning("VIDEO_LEGACY_ACCEPTED_UNRESOLVED | rule_id=%s | delivery_id=%s | returned_candidate_ids=%s | action=no_resend", rule.id, delivery_id, sent_msg.returned_candidate_ids)
                 await run_db(
@@ -297,6 +310,8 @@ class VideoSingleDelivery:
                 "ok": False, "retryable": True, "accepted": False,
                 "rejected_before_send": True, "error_text": str(exc),
             }
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            raise
         except (TelegramRetryAfter, FloodWaitError) as exc:
             # A definite Bot API flood-control rejection happens before the
             # video is posted; never finalize as accepted or faulty, and let

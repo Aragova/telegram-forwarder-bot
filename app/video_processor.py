@@ -21,6 +21,8 @@ from .subprocess_safety import (
 from aiogram.types import FSInputFile, MessageEntity
 from telethon import types as tl_types
 from telethon.errors import FloodWaitError
+from .transport_policy import TransportRateLimited
+from .send_intent import PublicationWriteUnavailable
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1497,6 +1499,8 @@ class VideoProcessor:
 
                 return sent_msg
 
+            except (TransportRateLimited, PublicationWriteUnavailable):
+                raise
             except VideoPreSendError as exc:
                 self._stage_failed(stage_logger, "send", error_text=str(exc), extra={"retryable": True, "accepted": False})
                 logger.warning("VIDEO_SEND_PREFLIGHT_FAILED | action=safe_retry | error=%s", exc)
@@ -2304,6 +2308,8 @@ class VideoProcessor:
                         del self.video_info_cache[fp]
                 except:
                     pass
+            if isinstance(e, (TransportRateLimited, PublicationWriteUnavailable)):
+                raise
             if isinstance(e, TelegramEntityTooLarge):
                 # Keep the terminal 413 classification across the legacy pipeline.
                 raise

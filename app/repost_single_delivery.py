@@ -162,6 +162,15 @@ class RepostSingleDelivery:
                 error_text=copy_result.get("error_text"),
                 attempted=bool(copy_result.get("attempted", True)),
             )
+            if copy_result.get("accepted_unresolved"):
+                # A zero ID is an accepted request, not proof of rejection.
+                # Keep an empty published-ID vector in the attempt ledger.
+                if idempotency_key:
+                    await run_db(owner.db.mark_delivery_attempt_accepted,idempotency_key,
+                                 sent_message_ids=[],telegram_method="botapi_pending_unresolved")
+                error = "copy_single_uncertain_no_fallback: Bot API accepted without published ID"
+                await run_db(owner._mark_delivery_faulty_sync,delivery_id,error)
+                return False
             copy_sent_ids = send_result.sent_message_ids
             valid_sent_ids = send_result.sent_message_ids
             log_fn = logger.info if send_result.ok else logger.warning
@@ -489,6 +498,18 @@ class RepostSingleDelivery:
             return False
 
         if getattr(reupload_outcome, "transport_accepted", False) and not getattr(reupload_outcome, "authoritative_resolved", False):
+            if idempotency_key and getattr(reupload_outcome, "resolution_method", None) == "botapi_pending_unresolved":
+                await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                             sent_message_ids=[], telegram_method="botapi_pending_unresolved")
+            if getattr(reupload_outcome, "resolution_method", None) == "video_processing_pending":
+                from .single_publication_reconciliation import register_pending_single
+                if await register_pending_single(
+                    owner, key=idempotency_key, delivery_id=delivery_id, rule_id=rule.id,
+                    target_id=target_id, target_thread_id=target_thread_id,
+                    source_channel=source_channel, source_message_id=message_id,
+                    scheduled_id=getattr(reupload_outcome, "returned_candidate_id", None),
+                ):
+                    return False  # executor sees durable receipt and defers without another send
             error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
             logger.warning(
                 "REUPLOAD_SINGLE_ACCEPTED_TARGET_ID_UNRESOLVED | rule_id=%s | delivery_id=%s | target_id=%s | returned_candidate_id=%s | action=no_second_send_no_reaction_manual_review",
@@ -828,6 +849,8 @@ class RepostSingleDelivery:
         text_fallback_sent_message_id = None
 
         if html_text:
+            response_received = False
+            confirmed_ids = []
             try:
                 sent = await owner.bot.send_message(
                     chat_id=target_id,
@@ -838,14 +861,35 @@ class RepostSingleDelivery:
                     disable_web_page_preview=True,
                 )
 
-                await owner._add_reaction_for_rule_if_possible(
-                    rule=rule,
-                    target_id=target_id,
-                    sent_message_id=sent.message_id,
-                    source_channel=str(source_channel or ""),
-                    source_message_ids=source_message_ids,
-                    delivery_id=delivery_id,
-                )
+                response_received = True
+                from .telegram_publication import botapi_publication_ids
+                ids = botapi_publication_ids(sent, 1)
+                if not ids:
+                    if idempotency_key:
+                        await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                                     sent_message_ids=[], telegram_method="botapi_pending_unresolved")
+                    await run_db(owner._mark_delivery_faulty_sync, delivery_id,
+                                 "copy_single_uncertain_no_fallback: text fallback response unresolved")
+                    return False
+                confirmed_ids = ids
+                if idempotency_key:
+                    await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                                 sent_message_ids=ids, telegram_method="text_fallback")
+                    if hasattr(owner.db, "mark_delivery_attempt_verified"):
+                        await run_db(owner.db.mark_delivery_attempt_verified, idempotency_key,
+                                     sent_message_ids=ids)
+
+                try:
+                    await owner._add_reaction_for_rule_if_possible(
+                        rule=rule,
+                        target_id=target_id,
+                        sent_message_id=sent.message_id,
+                        source_channel=str(source_channel or ""),
+                        source_message_ids=source_message_ids,
+                        delivery_id=delivery_id,
+                    )
+                except Exception:
+                    logger.exception("TEXT_FALLBACK_REACTION_FAILED_NON_FATAL | delivery_id=%s", delivery_id)
 
                 text_fallback_ok = True
                 text_fallback_sent_message_id = sent.message_id
@@ -891,6 +935,21 @@ class RepostSingleDelivery:
                 return {"ok": True, "sent_message_ids": [int(sent.message_id)]}
 
             except Exception as exc:
+                if confirmed_ids:
+                    # Let the existing accepted/verified ledger recover finalization.
+                    # Never turn a known Telegram publication into a faulty delivery.
+                    raise
+                from .send_intent import definite_rejection
+                from .transport_policy import TransportRateLimited
+                if not response_received and isinstance(exc, TransportRateLimited):
+                    raise
+                if response_received or not definite_rejection(exc):
+                    error = "copy_single_uncertain_no_fallback: text fallback outcome unknown"
+                    if idempotency_key:
+                        await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key,
+                                     status="failed_after_send", error_text=error)
+                    await run_db(owner._mark_delivery_faulty_sync, delivery_id, error)
+                    return False
                 await owner._log_delivery_pipeline_step(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,

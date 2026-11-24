@@ -494,10 +494,15 @@ def test_text_fallback_passes_reaction_context():
     source_channel = "@src"
     target_id = "-1001"
     reaction_kwargs = {}
+    accepted = []
 
     class RuntimeRepo:
         def log_delivery_event(self, **_kwargs):
             return None
+
+        def mark_delivery_attempt_accepted(self, key, *, sent_message_ids, telegram_method=None):
+            accepted.append((key, sent_message_ids, telegram_method))
+            return True
 
     class RuntimeBot:
         async def send_message(self, **_kwargs):
@@ -540,6 +545,7 @@ def test_text_fallback_passes_reaction_context():
             return []
 
         async def _add_reaction_for_rule_if_possible(self, **kwargs):
+            assert accepted == [("key-r2-1-fallback", [777], "text_fallback")]
             reaction_kwargs.update(kwargs)
             return True
 
@@ -777,7 +783,7 @@ def test_copy_album_copy_first_does_not_override_caption_when_builder_not_requir
     class Bot:
         async def __call__(self, method):
             calls.append(method)
-            return [type("M", (), {"message_id": 501})()]
+            return [type("M", (), {"message_id": mid})() for mid in (501, 502)]
 
     s = SenderService(bot=Bot(), telethon_client=None, reaction_clients=[], db=Repo())
 

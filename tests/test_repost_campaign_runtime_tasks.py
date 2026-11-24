@@ -24,7 +24,7 @@ def test_repost_campaign_runtime_tasks_start_is_idempotent_and_stop_cancels(monk
         started = []
         cancelled = []
 
-        async def fake_loop(*, runtime=None, service=None, interval_seconds=0, batch_limit=None, worker_id=None):
+        async def fake_loop(*, runtime=None, service=None, interval_seconds=0, batch_limit=None, worker_id=None, stop_event=None):
             started.append((runtime or service, interval_seconds, batch_limit, worker_id))
             try:
                 await asyncio.Event().wait()

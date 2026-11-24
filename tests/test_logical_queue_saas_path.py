@@ -30,6 +30,10 @@ class _FakeCursor:
         q = " ".join(str(query).split())
         self.execute_calls.append((q, params))
 
+        if "SELECT id FROM routing WHERE id" in q and "FOR UPDATE" in q:
+            self._fetchone = {"id": params[0]}
+            return
+
         if "FROM deliveries d JOIN posts p ON p.id = d.post_id WHERE d.rule_id = %s ORDER BY p.id ASC" in q:
             self._fetchall = self.script.get("rows", [])
             return

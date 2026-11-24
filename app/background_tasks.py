@@ -27,3 +27,10 @@ def start_background_task(awaitable: Awaitable[Any], *, name: str) -> asyncio.Ta
 
     task.add_done_callback(_finished)
     return task
+
+async def shutdown_background_tasks() -> None:
+    tasks = [task for task in _RUNNING_TASKS if task is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)

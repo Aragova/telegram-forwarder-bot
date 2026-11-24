@@ -11,6 +11,20 @@ from app.transport_policy import (
     build_sender_telethon_upload_policy,
 )
 
+from app.send_intent import observe_write, PublicationWriteUnavailable
+from app.publication_transport_guard import run_with_shared_cooldown, validate_bot_publication
+from app.transport_operation import classify_transport_operation, TransportOperationKind
+
+
+async def _invoke_bot_write(op_name, invoke, *, repository, scope, kwargs, request=None):
+    if classify_transport_operation("bot", op_name) == TransportOperationKind.NON_IDEMPOTENT_WRITE:
+        validate_bot_publication(op_name, kwargs, request)
+        return await run_with_shared_cooldown(
+            repository, scope, "bot", op_name, lambda: observe_write(invoke),
+        )
+    return await invoke()
+
+
 logger = logging.getLogger("forwarder.transport")
 
 # Short, read-only RPCs must not occupy worker slots indefinitely.
@@ -26,8 +40,12 @@ class BotTransportProxy:
         *,
         label: str,
         policy: TransportPolicy,
+        repository=None,
     ) -> None:
         self._bot = bot
+        self._repository = repository
+        bot_id = getattr(bot, "id", None)
+        self._cooldown_scope = f"bot:{bot_id}" if type(bot_id) is int else None
         self._label = label
         self._policy = policy
         self._is_transport_proxy = True
@@ -38,11 +56,15 @@ class BotTransportProxy:
         return self._bot
 
     async def __call__(self, *args, **kwargs):
+        method = args[0] if args else kwargs.get("method")
+        op_name = type(method).__name__ if method is not None else "__call__"
         return await self._policy.execute(
             backend="bot",
-            key=f"{self._label}.__call__",
-            op_name="__call__",
-            func=lambda: self._bot(*args, **kwargs),
+            key=f"{self._label}.{op_name}",
+            op_name=op_name,
+            func=lambda: _invoke_bot_write(op_name, lambda: self._bot(*args, **kwargs),
+                                           repository=self._repository, scope=self._cooldown_scope,
+                                           kwargs=kwargs, request=method),
         )
 
     def __getattr__(self, name: str):
@@ -56,9 +78,12 @@ class BotTransportProxy:
                 backend="bot",
                 key=f"{self._label}.{name}",
                 op_name=name,
-                func=lambda: attr(*args, **kwargs),
+                func=lambda: _invoke_bot_write(name, lambda: attr(*args, **kwargs),
+                                               repository=self._repository, scope=self._cooldown_scope,
+                                               kwargs=kwargs),
             )
 
+        _wrapped.__name__ = name
         return _wrapped
 
 
@@ -101,6 +126,9 @@ class TelethonTransportProxy:
             return attr
 
         async def _wrapped(*args, **kwargs):
+            if (name in {"send_file", "send_message", "forward_messages"}
+                    and getattr(self._client, "publication_write_blocked", False) is True):
+                raise PublicationWriteUnavailable("MTProto publication evidence unavailable")
             if name in _TELETHON_CONTROL_OPS:
                 selected_policy = self._read_policy
                 lane = "control"
@@ -152,6 +180,7 @@ def wrap_bot(
     *,
     label: str,
     policy: TransportPolicy,
+    repository=None,
 ):
     if bot is None:
         return None
@@ -163,6 +192,7 @@ def wrap_bot(
         bot,
         label=label,
         policy=policy,
+        repository=repository,
     )
 
 

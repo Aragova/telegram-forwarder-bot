@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from .runtime_utils import run_db
+from .transport_policy import TransportRateLimited
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
+
+
+def _unverified_copy():
+    return {"ok":False,"accepted":True,"retryable":False,"manual_review_required":True,
+            "error_text":"Telegram мог принять копию; ID не подтверждён. Не повторяйте отправку."}
 
 
 class SenderCampaignCopyHelpers:
@@ -13,15 +20,30 @@ class SenderCampaignCopyHelpers:
             return {"ok": False, "retryable": False, "error_text": "Копия кампании не найдена"}
         if str(copy_row.get("send_status") or "") == "sent":
             return {"ok": True, "already_sent": True}
+        if copy_row.get("send_status") in {"processing","unverified"}:
+            return _unverified_copy()
         delivery = await run_db(self.owner.db.get_delivery, int(copy_row.get("delivery_id") or 0))
         if not delivery:
             await run_db(self.owner.db.mark_delivery_campaign_copy_send_failed, int(copy_id), "Delivery не найден")
             return {"ok": False, "retryable": False, "error_text": "Delivery не найден"}
         if str(delivery.get("delivery_method") or "") == "album":
             return {"ok": False, "retryable": False, "error_text": "Кампании для альбомов пока не поддерживаются в MVP"}
-        await run_db(self.owner.db.mark_delivery_campaign_copy_processing, int(copy_id))
-        sent = await self.owner.bot.copy_message(chat_id=str(copy_row.get("target_id")), from_chat_id=str(delivery.get("source_channel")), message_id=int(delivery.get("message_id")))
-        sent_ids = [int(sent.message_id)] if getattr(sent, "message_id", None) else []
+        if not await run_db(self.owner.db.mark_delivery_campaign_copy_processing, int(copy_id)):
+            return _unverified_copy()
+        try:
+            sent = await self.owner.bot.copy_message(chat_id=str(copy_row.get("target_id")), from_chat_id=str(delivery.get("source_channel")), message_id=int(delivery.get("message_id")))
+        except (TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter, TransportRateLimited) as exc:
+            await run_db(self.owner.db.mark_delivery_campaign_copy_send_failed,int(copy_id),str(exc))
+            raise
+        except Exception:
+            await run_db(self.owner.db.mark_delivery_campaign_copy_unverified,int(copy_id),"copy_rpc_outcome_unknown")
+            return _unverified_copy()
+        from .telegram_publication import botapi_publication_ids
+        sent_ids = botapi_publication_ids(sent,1)
+        if not sent_ids:
+            error = "botapi_accepted_without_published_id_no_resend"
+            await run_db(self.owner.db.mark_delivery_campaign_copy_unverified,int(copy_id),error)
+            return _unverified_copy()
         rule = await run_db(self.owner.db.get_rule, int(copy_row.get("rule_id") or 0))
         show_seconds = int(getattr(rule, "repost_campaign_show_seconds", 0) or 0)
         from app.repost_campaign_service import build_campaign_delete_after_iso

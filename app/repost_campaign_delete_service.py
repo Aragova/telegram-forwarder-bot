@@ -100,9 +100,9 @@ class RepostCampaignDeleteService:
             return RepostCampaignDeleteResult(ok=False, method="failed", target_id=str(target_id), message_id=ids[0], message_ids=ids, error_text=str(exc))
 
 
-async def run_repost_campaign_delete_loop(*, runtime, interval_seconds: int = 10, batch_limit: int = 50):
+async def run_repost_campaign_delete_loop(*, runtime, interval_seconds: int = 10, batch_limit: int = 50, stop_event=None):
     logger = logging.getLogger("forwarder")
-    while True:
+    while not (stop_event and stop_event.is_set()):
         try:
             result = await runtime.process_due_deletions(limit=batch_limit)
             if result.get("claimed", 0) > 0 or result.get("failed", 0) > 0:

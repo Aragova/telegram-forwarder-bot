@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 
 class _RawBot:
     def __init__(self, *args, **kwargs):
@@ -18,7 +20,20 @@ class _RawBot:
 
 
 class _RawTelethonClient:
-    pass
+    def __init__(self):
+        self.handlers = []
+        self.caught_up = False
+
+    async def get_me(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(id=12345)
+
+    def add_event_handler(self, callback, event):
+        self.handlers.append((callback, event))
+
+    async def catch_up(self):
+        assert self.handlers
+        self.caught_up = True
 
 
 class _Policy:
@@ -29,11 +44,15 @@ class _Policy:
         return await func()
 
 
-def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
+@pytest.mark.parametrize("delayed_bind", [False, True])
+def test_sender_runtime_wraps_only_sender_clients(monkeypatch, delayed_bind):
     async def scenario():
         import bot as runtime
 
         raw_telethon_client = _RawTelethonClient()
+        from types import SimpleNamespace
+        repository = SimpleNamespace(record_telegram_publication_mappings=lambda *args: None)
+        monkeypatch.setattr(runtime, "db", repository)
         reaction_client = object()
         sender_service_kwargs = {}
         builder_calls: list[str] = []
@@ -43,6 +62,8 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
         class _SenderService:
             def __init__(self, **kwargs):
                 sender_service_kwargs.update(kwargs)
+                self.telethon = kwargs["telethon_client"]
+                self.video_processor = SimpleNamespace(telethon=self.telethon)
 
         def _build_sender_bot_policy():
             builder_calls.append("sender.bot")
@@ -55,7 +76,7 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
         original_wrap_bot = runtime.wrap_bot
         original_wrap_telethon_client = runtime.wrap_telethon_client
 
-        def _wrap_bot(raw, *, label, policy):
+        def _wrap_bot(raw, *, label, policy, repository=None):
             bot_wrap_calls.append({"raw": raw, "label": label, "policy": policy})
             return original_wrap_bot(raw, label=label, policy=policy)
 
@@ -63,7 +84,17 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
             telethon_wrap_calls.append({"raw": raw, "label": label, "policy": policy})
             return original_wrap_telethon_client(raw, label=label, policy=policy)
 
-        async def _create_telethon_client():
+        finish_bind = None
+
+        async def _create_telethon_client(*, publication_repository=None):
+            nonlocal finish_bind
+            from app.telegram_publication import prepare_publication_inbox
+            assert publication_repository is repository
+            bind=prepare_publication_inbox(raw_telethon_client,publication_repository)
+            if delayed_bind:
+                finish_bind = bind
+            else:
+                await bind()
             return raw_telethon_client
 
         async def _create_reaction_clients():
@@ -87,7 +118,14 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
         assert raw_bot.init_kwargs["session"].api.api_url("123456:ABC", "sendVideo").startswith(runtime.settings.bot_api_base)
         assert "base_url" not in raw_bot.init_kwargs
         sender_bot = sender_service_kwargs["bot"]
-        sender_telethon = sender_service_kwargs["telethon_client"]
+        if delayed_bind:
+            assert runtime.sender_service.telethon is None
+            assert runtime.sender_service.video_processor.telethon is None
+            await finish_bind()
+            await asyncio.sleep(0)
+            assert runtime.sender_service.telethon is sender_service_kwargs["telethon_read_client"]
+            assert runtime.sender_service.video_processor.telethon is runtime.sender_service.telethon
+        sender_telethon = runtime.sender_service.telethon
 
         assert isinstance(raw_bot, _RawBot)
         assert getattr(raw_bot, "_is_transport_proxy", False) is False
@@ -95,6 +133,11 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
         assert sender_bot.raw is raw_bot
         assert getattr(sender_telethon, "_is_transport_proxy", False) is True
         assert sender_telethon.raw is raw_telethon_client
+        assert sender_service_kwargs["telethon_read_client"] is sender_telethon
+        assert sender_telethon.publication_inbox is raw_telethon_client.publication_inbox
+        assert sender_telethon.publication_inbox.sender_account_id == 12345
+        assert len(raw_telethon_client.handlers) == 1
+        assert not raw_telethon_client.caught_up
 
         assert sender_service_kwargs["reaction_clients"] == [reaction_client]
         assert runtime.reaction_clients == [reaction_client]
@@ -113,3 +156,52 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
         assert runtime.runtime_context.bot is raw_bot
         assert runtime.runtime_context.telethon_client is raw_telethon_client
     asyncio.run(scenario())
+
+
+
+def test_actual_sender_factory_captures_connect_events_and_retries_startup_write(monkeypatch):
+    from types import SimpleNamespace
+
+    from telethon import types, utils
+    from app import telegram_client
+
+    peer = types.PeerChannel(99)
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            self.handlers = []
+
+        def add_event_handler(self, callback, event):
+            self.handlers.append(callback)
+
+        async def connect(self):
+            assert len(self.handlers) == 1
+            await self.handlers[0](types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[1], sent_messages=[101],
+            ))
+            await self.handlers[0](types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[2], sent_messages=[102],
+            ))
+
+        async def get_me(self):
+            return SimpleNamespace(id=7)
+
+    class Repo:
+        def __init__(self):
+            self.calls = []
+            self.saved = []
+
+        def record_telegram_publication_mappings(self, account, peer_id, pairs):
+            self.calls.append(pairs)
+            if len(self.calls) == 2:
+                raise RuntimeError("temporary PostgreSQL failure")
+            self.saved.append((account, peer_id, pairs))
+
+    monkeypatch.setattr(telegram_client, "TelegramClient", Client)
+    repo = Repo()
+    client = asyncio.run(telegram_client.create_telethon_client(publication_repository=repo))
+    assert client.publication_inbox.sender_account_id == 7
+    assert len(client.handlers) == 1
+    assert repo.calls == [[(1,101)], [(2,102)], [(2,102)]]
+    assert repo.saved == [(7,utils.get_peer_id(peer),[(1,101)]),
+                          (7,utils.get_peer_id(peer),[(2,102)])]

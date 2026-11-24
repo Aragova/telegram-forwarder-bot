@@ -15,6 +15,7 @@ from typing import Any
 from aiogram.exceptions import TelegramEntityTooLarge
 
 from .delivery_result import normalize_delivery_result
+from .single_publication_reconciliation import publication_key_for_job, reconcile_pending_publication
 from .job_service import (
     enqueue_video_download,
     enqueue_video_delivery_fallback,
@@ -24,9 +25,10 @@ from .job_service import (
 from .limit_service import LimitService
 from .subscription_service import SubscriptionService
 from .transport_policy import TransportRateLimited
+from .send_intent import publication_intent, PublicationWriteUnavailable
 from .usage_service import UsageService
 from .worker_load_service import build_worker_load_snapshot
-from .worker_resource_policy import POLICY, WorkerResourcePolicy
+from .worker_resource_policy import POLICY, WorkerResourcePolicy, _env_int
 
 logger = logging.getLogger("forwarder")
 
@@ -182,6 +184,10 @@ def _complete_job_if_delivery_already_sent(
         return False
     if not _delivery_ids_already_sent(repo, delivery_ids):
         return False
+    pending_reaction = getattr(repo, "has_unfinished_publication_reaction", None)
+    if (payload.get("job_type") in {"repost_single", "repost_album", "video_send", "video_delivery"} and callable(pending_reaction)
+            and any(pending_reaction(delivery_id) is True for delivery_id in delivery_ids)):
+        return False
     logger.info("IDEMPOTENCY_GUARD_ALREADY_SENT | job_id=%s | stage=%s | delivery_ids=%s", int(job_id), stage, delivery_ids)
     # Finalization may commit before the DB thread returns. Signal heartbeat
     # before the CAS so own completion never looks like an external takeover.
@@ -247,7 +253,7 @@ async def _heartbeat_active_job(
     if not hasattr(repo, "heartbeat_job_processing"):
         return
     started = time.monotonic()
-    last_stalled_log = 0.0
+    last_stalled_log: float | None = None
     while True:
         await asyncio.sleep(max(0.01, interval_seconds))
         try:
@@ -265,7 +271,7 @@ async def _heartbeat_active_job(
             running_task.cancel()
             return
         elapsed = time.monotonic() - started
-        if elapsed >= 120 and (last_stalled_log == 0.0 or elapsed - last_stalled_log >= 60):
+        if elapsed >= 120 and (last_stalled_log is None or elapsed - last_stalled_log >= 60):
             logger.warning(
                 "JOB_LONG_RUNNING | job_id=%s | job_type=%s | owner=%s | elapsed_sec=%s | await_chain=%s",
                 job_id, job_type, worker_id, round(elapsed), _await_chain(running_task),
@@ -495,19 +501,27 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     payload = _safe_payload(job)
     payload.pop("job_id", None)
     payload.pop("tenant_id", None)
-    tenant_id = int(payload.get("tenant_id") or getattr(repo, "get_rule_tenant_id", lambda _x: 1)(int(payload.get("rule_id") or 0)) or 1)
+    tenant_id = int(await asyncio.to_thread(
+        getattr(repo, "get_rule_tenant_id", lambda _x: 1), int(payload.get("rule_id") or 0)
+    ) or 1)
     subscription_service = SubscriptionService(repo)
     usage_service = UsageService(repo)
     limit_service = LimitService(repo, subscription_service, usage_service)
 
-    can_enqueue, enqueue_reason = limit_service.can_enqueue_job(tenant_id)
+    publication_key = publication_key_for_job(job_type, payload)
+    receipt_lookup = getattr(repo, "get_publication_receipt", None)
+    receipt = await asyncio.to_thread(receipt_lookup, publication_key) if publication_key and callable(receipt_lookup) else None
+    reconcile_only = (isinstance(receipt, dict)
+                      and receipt.get("rule_id") == int(payload.get("rule_id") or 0)
+                      and receipt.get("tenant_id") == tenant_id)
+    can_enqueue, enqueue_reason = (True, None) if reconcile_only else await asyncio.to_thread(limit_service.can_enqueue_job, tenant_id)
     if not can_enqueue:
         logger.warning("Worker блокирует выполнение job #%s tenant_id=%s: %s", job_id, tenant_id, enqueue_reason)
         if hasattr(repo, "create_billing_event"):
-            sub = subscription_service.get_active_subscription(int(tenant_id)) or {}
-            usage_today = usage_service.get_today_usage(int(tenant_id)) or {}
+            sub = await asyncio.to_thread(subscription_service.get_active_subscription, int(tenant_id)) or {}
+            usage_today = await asyncio.to_thread(usage_service.get_today_usage, int(tenant_id)) or {}
             event_type = "subscription_blocked_action" if str(enqueue_reason or "").strip().lower() == "подписка неактивна" else "limit_job_blocked"
-            repo.create_billing_event(
+            await asyncio.to_thread(repo.create_billing_event,
                 int(tenant_id),
                 event_type,
                 event_source="worker_runtime",
@@ -525,14 +539,14 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         await asyncio.to_thread(repo.fail_job, job_id, enqueue_reason or "Подписка неактивна")
         return True
 
-    if str(job_type).startswith("video_"):
-        can_video, video_reason = limit_service.can_process_video(tenant_id)
+    if str(job_type).startswith("video_") and not reconcile_only:
+        can_video, video_reason = await asyncio.to_thread(limit_service.can_process_video, tenant_id)
         if not can_video:
             logger.warning("Видео не обработано: лимит тарифа tenant_id=%s reason=%s", tenant_id, video_reason or "unknown")
             if hasattr(repo, "create_billing_event"):
-                sub = subscription_service.get_active_subscription(int(tenant_id)) or {}
-                usage_today = usage_service.get_today_usage(int(tenant_id)) or {}
-                repo.create_billing_event(
+                sub = await asyncio.to_thread(subscription_service.get_active_subscription, int(tenant_id)) or {}
+                usage_today = await asyncio.to_thread(usage_service.get_today_usage, int(tenant_id)) or {}
+                await asyncio.to_thread(repo.create_billing_event,
                     int(tenant_id),
                     "limit_video_blocked",
                     event_source="worker_runtime",
@@ -580,7 +594,22 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     )
     result: dict[str, Any] | None = None
     try:
-        if job_type in {"repost_single", "repost_album", "repost_campaign_send_copy", "repost_campaign_delete_copy", "video_delivery", "video_send"}:
+        if not reconcile_only and job_type in {"repost_single", "repost_album", "video_delivery", "video_send"}:
+            suppress_echo = getattr(repo, "suppress_self_target_echo_deliveries", None)
+            if callable(suppress_echo):
+                delivery_ids = _extract_delivery_ids_from_payload(payload)
+                echo_ids = await asyncio.to_thread(
+                    suppress_echo, int(payload.get("rule_id") or 0), delivery_ids,
+                )
+                if echo_ids:
+                    remaining_ids = [item for item in delivery_ids if item not in echo_ids]
+                    if not remaining_ids:
+                        await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
+                        return True
+                    if job_type == "repost_album":
+                        payload["delivery_ids"] = remaining_ids
+                        payload["delivery_id"] = remaining_ids[0]
+        if not reconcile_only and job_type in {"repost_single", "repost_album", "repost_campaign_send_copy", "repost_campaign_delete_copy", "video_delivery", "video_send"}:
             guarded = await asyncio.to_thread(
                 _complete_job_if_delivery_already_sent,
                 repo,
@@ -592,13 +621,32 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             )
             if guarded:
                 return True
-        if job_type == "repost_single":
-            raw_result = await sender_service.execute_repost_single_from_job(**payload)
+        if reconcile_only:
+            # This path can never initiate a send, even if rollback removed
+            # the receipt between the initial lookup and acquiring the job.
+            try:
+                raw_result = await reconcile_pending_publication(sender_service, publication_key)
+            except Exception:
+                # Telegram has already accepted this publication. A transient
+                # reconciliation failure must not consume the send retry budget.
+                logger.exception("JOB_PUBLICATION_RECONCILE_FAILED | job_id=%s | action=defer_read_only", job_id)
+                raw_result = {"ok": False, "accepted": True, "retryable": False,
+                              "publication_pending": True}
+            delivery_result = normalize_delivery_result(raw_result or {
+                "ok": False, "retryable": False, "accepted": True,
+                "error_text": "publication_receipt_changed_no_resend",
+            })
+            result = delivery_result.to_dict()
+            ok = delivery_result.ok
+        elif job_type == "repost_single":
+            with publication_intent("delivery", publication_key_for_job("repost_single", payload)):
+                raw_result = await sender_service.execute_repost_single_from_job(**payload)
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
             ok = delivery_result.ok
         elif job_type == "repost_album":
-            raw_result = await sender_service.execute_repost_album_from_job(**payload)
+            with publication_intent("delivery", publication_key_for_job("repost_album", payload)):
+                raw_result = await sender_service.execute_repost_album_from_job(**payload)
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
             ok = delivery_result.ok
@@ -609,7 +657,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 job_attempt=int(job.get("attempts") or 0) + 1,
             )
             if result.get("fallback_to_legacy"):
-                enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
+                await asyncio.to_thread(enqueue_video_delivery_fallback, repo, int(payload.get("delivery_id") or 0))
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
@@ -620,7 +668,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 next_payload["processed_video_path"] = None
                 next_payload["thumbnail_path"] = None
                 next_payload["cleanup_paths"] = [result.get("source_video_path")] if result.get("source_video_path") else []
-                enqueue_video_process(repo, next_payload)
+                await asyncio.to_thread(enqueue_video_process, repo, next_payload)
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO DOWNLOAD DONE | стадия скачивания завершена", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
@@ -633,7 +681,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 job_attempt=int(job.get("attempts") or 0) + 1,
             )
             if result.get("fallback_to_legacy"):
-                enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
+                await asyncio.to_thread(enqueue_video_delivery_fallback, repo, int(payload.get("delivery_id") or 0))
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
@@ -644,14 +692,14 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 next_payload["processed_video_path"] = result.get("processed_video_path")
                 next_payload["thumbnail_path"] = result.get("thumbnail_path")
                 next_payload["cleanup_paths"] = result.get("cleanup_paths") or payload.get("cleanup_paths") or []
-                enqueue_video_send(repo, next_payload)
+                await asyncio.to_thread(enqueue_video_send, repo, next_payload)
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO PROCESS DONE | стадия обработки завершена", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
             if result.get("restart_download"):
                 delivery_id = int(payload.get("delivery_id") or 0)
-                enqueue_video_download(
+                await asyncio.to_thread(enqueue_video_download,
                     repo,
                     delivery_id,
                     extra_payload={
@@ -669,11 +717,12 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             ok = False
         elif job_type == "video_send":
             _log_video_stage_event("VIDEO SEND START | запуск стадии отправки", int(payload.get("delivery_id") or 0))
-            raw_result = await sender_service.execute_video_send_from_job(**payload)
+            with publication_intent("delivery", publication_key_for_job("video_send", payload)):
+                raw_result = await sender_service.execute_video_send_from_job(**payload)
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
             if delivery_result.fallback_to_legacy:
-                enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
+                await asyncio.to_thread(enqueue_video_delivery_fallback, repo, int(payload.get("delivery_id") or 0))
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
@@ -682,7 +731,8 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             if ok:
                 _log_video_stage_event("VIDEO SEND DONE | стадия отправки завершена", int(payload.get("delivery_id") or 0))
         elif job_type == "video_delivery":
-            raw_result = await sender_service.execute_video_delivery_from_job(**payload)
+            with publication_intent("delivery", publication_key_for_job("video_delivery", payload)):
+                raw_result = await sender_service.execute_video_delivery_from_job(**payload)
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
             ok = delivery_result.ok
@@ -711,6 +761,17 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                     bool(result.get("fallback_to_legacy")),
                     result.get("sent_message_ids") or [],
                 )
+
+        if isinstance(result, dict) and result.get("publication_pending") is True:
+            # The only action on this receipt is read-only reconciliation.
+            # Release the light slot and preserve the ordinary retry budget.
+            await _finish_owned_job(
+                repo, "defer", job_id, worker_id, "",
+                _env_int("PUBLICATION_RECONCILE_INTERVAL_SEC", 30),
+                finalization_started=finalization_started,
+            )
+            logger.info("JOB_PUBLICATION_PENDING | job_id=%s | action=defer_read_only", job_id)
+            return True
 
         if ok:
             completed = await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
@@ -837,6 +898,10 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             await _runtime_metrics.record_retry(job_type=job_type)
         return True
 
+    except PublicationWriteUnavailable as exc:
+        await _finish_owned_job(repo, "defer", job_id, worker_id, str(exc), 30,
+                                finalization_started=finalization_started)
+        return True
     except TransportRateLimited as exc:
         delay = int(exc.retry_after_seconds) + 10
         error_text = (

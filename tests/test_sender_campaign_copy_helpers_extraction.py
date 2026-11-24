@@ -46,9 +46,17 @@ class FakeDb:
 
     def mark_delivery_campaign_copy_send_failed(self, copy_id, text):
         self.calls.append(("mark_delivery_campaign_copy_send_failed", copy_id, text))
+        self.copy_row["send_status"] = "failed"
 
     def mark_delivery_campaign_copy_processing(self, copy_id):
         self.calls.append(("mark_delivery_campaign_copy_processing", copy_id))
+        self.copy_row["send_status"]="processing"
+        return True
+
+    def mark_delivery_campaign_copy_unverified(self, copy_id, reason):
+        self.copy_row["send_status"]="unverified"
+        self.calls.append(("unverified",copy_id,reason))
+        return True
 
     def mark_delivery_campaign_copy_sent(self, copy_id, **kwargs):
         self.calls.append(("mark_delivery_campaign_copy_sent", copy_id, kwargs))
@@ -256,3 +264,54 @@ def test_delete_copy_non_retryable_failure():
     assert result["ok"] is False
     assert result["retryable"] is False
     assert "Forbidden" in result["error_text"]
+
+
+def test_accepted_zero_copy_is_never_sent_again():
+    db=FakeDb(copy_row={"send_status":"pending","delivery_id":11,"target_id":"-100target"},
+              delivery={"source_channel":"-100source","message_id":333})
+    bot=FakeBot(copy_message_id=0)
+    helper=_helper(SimpleNamespace(db=db,bot=bot))
+    first=asyncio.run(helper.execute_send_copy_from_job(copy_id=9))
+    second=asyncio.run(helper.execute_send_copy_from_job(copy_id=9))
+    assert first["manual_review_required"] and second["manual_review_required"]
+    assert db.copy_row["send_status"]=="unverified"
+    assert len(bot.copy_message_calls)==1
+
+
+
+def test_transport_rate_limit_releases_copy_claim_for_worker_retry(monkeypatch):
+    from app.transport_policy import TransportRateLimited
+
+    class RateLimitedBot(FakeBot):
+        async def copy_message(self, **kwargs):
+            if not self.copy_message_calls:
+                self.copy_message_calls.append(kwargs)
+                raise TransportRateLimited(
+                    retry_after_seconds=90, backend="botapi",
+                    op_name="copy_message", key="-100target",
+                )
+            return await super().copy_message(**kwargs)
+
+    db = FakeDb(
+        copy_row={"send_status": "pending", "delivery_id": 11,
+                  "rule_id": 22, "target_id": "-100target"},
+        delivery={"source_channel": "-100source", "message_id": 333},
+    )
+    bot = RateLimitedBot()
+    helper = _helper(SimpleNamespace(db=db, bot=bot))
+    enqueue_calls = []
+    monkeypatch.setattr(
+        importlib.import_module("app.job_service"),
+        "enqueue_repost_campaign_delete_copy",
+        lambda *args, **kwargs: enqueue_calls.append((args, kwargs)),
+    )
+    with pytest.raises(TransportRateLimited) as raised:
+        asyncio.run(helper.execute_send_copy_from_job(copy_id=9))
+    assert raised.value.retry_after_seconds == 90
+    assert db.copy_row["send_status"] == "failed"
+    assert not any(call[0] == "unverified" for call in db.calls)
+    assert not enqueue_calls
+    result = asyncio.run(helper.execute_send_copy_from_job(copy_id=9))
+    assert result["ok"] and result["sent_message_ids"] == [444]
+    assert len(bot.copy_message_calls) == 2
+    assert len(enqueue_calls) == 1

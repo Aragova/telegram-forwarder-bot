@@ -3,7 +3,11 @@ from __future__ import annotations
 import logging
 
 from aiogram.methods import CopyMessages
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from .transport_policy import TransportRateLimited
+from .publication_transport_guard import PublicationContentError
+
+from .telegram_publication import botapi_publication_ids
 
 from .sender_primitives import (
     DEBUG_FORCE_SKIP_COPY_ALBUM,
@@ -42,14 +46,22 @@ class SenderBotApiCopyHelpers:
                 message_id=message_id,
                 message_thread_id=target_thread_id,
             )
-            sent_ids = self.owner._extract_sent_message_ids(sent)
+            if getattr(sent, "message_id", None) == 0:
+                logger.info(
+                    "TELEGRAM_BOTAPI_VIDEO_PROCESSING_PENDING | target_id=%s | source_message_id=%s | action=no_second_send",
+                    target_id, message_id,
+                )
+            sent_ids = botapi_publication_ids(sent,1)
             return {
+                "accepted_unresolved": not bool(sent_ids),
                 "attempted": True,
                 "sent_ids": sent_ids,
                 "fallback_allowed": False,
                 "raw_result_type": type(sent).__name__,
                 "raw_result": sent,
             }
+        except (TelegramRetryAfter, TransportRateLimited):
+            raise
         except Exception as exc:
             logger.warning(
                 "Не удалось скопировать сообщение %s/%s в %s: %s",
@@ -64,7 +76,8 @@ class SenderBotApiCopyHelpers:
                 "fallback_allowed": False,
                 "raw_result_type": "exception",
                 "error_text": str(exc),
-                "definitely_rejected": isinstance(exc, TelegramBadRequest),
+                "definitely_rejected": isinstance(exc, (TelegramBadRequest, PublicationContentError)),
+                "outcome_unknown": not isinstance(exc, (TelegramBadRequest, PublicationContentError)),
             }
 
     async def copy_album_via_bot(
@@ -96,10 +109,25 @@ class SenderBotApiCopyHelpers:
             )
 
             if sent_messages and len(sent_messages) > 0:
+                confirmed_ids = botapi_publication_ids(sent_messages,len(message_ids))
+                if not confirmed_ids:
+                    logger.info(
+                        "TELEGRAM_BOTAPI_ALBUM_PROCESSING_PENDING | target_id=%s | source_message_ids=%s | action=no_second_send",
+                        target_id, message_ids,
+                    )
+                if not confirmed_ids:
+                    return {
+                        "ok": False, "attempted": True, "definitely_rejected": False,
+                        "accepted_unresolved": True, "sent_message_id": None,
+                        "sent_message_ids": [], "sent_count": len(sent_messages),
+                        "raw_message_ids": [m.message_id for m in sent_messages],
+                        "error_text": "botapi_accepted_partial_or_zero_ids_no_resend",
+                    }
                 return {
                     "ok": True,
-                    "sent_message_id": sent_messages[0].message_id,
-                    "sent_message_ids": [int(m.message_id) for m in sent_messages],
+                    "attempted": True,
+                    "sent_message_id": confirmed_ids[0],
+                    "sent_message_ids": confirmed_ids,
                     "sent_count": len(sent_messages),
                     "error_text": None,
                 }
@@ -109,10 +137,13 @@ class SenderBotApiCopyHelpers:
                 "sent_message_id": None,
                 "sent_count": 0,
                 "error_text": "CopyMessages вернул пустой результат",
+                "accepted_unresolved": True,
                 "attempted": True,
                 "definitely_rejected": False,
             }
 
+        except (TelegramRetryAfter, TransportRateLimited):
+            raise
         except Exception as exc:
             return {
                 "ok": False,
@@ -120,5 +151,5 @@ class SenderBotApiCopyHelpers:
                 "sent_count": 0,
                 "error_text": str(exc),
                 "attempted": True,
-                "definitely_rejected": isinstance(exc, TelegramBadRequest),
+                "definitely_rejected": isinstance(exc, (TelegramBadRequest, PublicationContentError)),
             }

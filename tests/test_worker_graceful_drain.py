@@ -121,4 +121,5 @@ def test_all_role_keeps_bot_session_open_until_after_worker_drain():
     shutdown_start = source.index("async def _shutdown_runtime(")
     shutdown_end = source.index("async def _run_scheduler_role_loop()", shutdown_start)
     shutdown = source[shutdown_start:shutdown_end]
-    assert shutdown.index("await stop_job_workers_runtime()") < shutdown.index("await bot.session.close()")
+    assert shutdown.index("drains.append(stop_job_workers_runtime())") < shutdown.index("await asyncio.gather(*drains") < shutdown.index("await bot.session.close()")
+    assert shutdown.index("await asyncio.gather(*drains") < shutdown.index("await raw_telethon.disconnect()")

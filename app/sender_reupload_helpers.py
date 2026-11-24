@@ -4,6 +4,12 @@ import logging
 import mimetypes
 from pathlib import Path
 
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, TelegramRetryAfter
+from telethon.errors import FloodWaitError
+from .transport_policy import TransportRateLimited
+from .send_intent import PublicationWriteUnavailable, possible_write
+from .publication_transport_guard import PublicationContentError
+from .telegram_publication import botapi_publication_ids
 from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo
 
 from .config import settings
@@ -108,9 +114,35 @@ class SenderReuploadHelpers:
                 "error_text": None,
             }
 
-        except Exception as exc:
+        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited, PublicationWriteUnavailable) as exc:
+            if not sent_ids and not accepted_transport_count and not possible_write():
+                if isinstance(exc, (TelegramRetryAfter, FloodWaitError)):
+                    delay = exc.retry_after if isinstance(exc, TelegramRetryAfter) else exc.seconds
+                    raise TransportRateLimited(
+                        retry_after_seconds=max(1, int(delay)), backend="telegram",
+                        op_name="send_album_one_by_one", key=str(target_id),
+                    ) from exc
+                raise
+            # A later rejection cannot undo an earlier accepted or uncertain send.
             return {
                 "ok": False,
+                "transport_attempted": True,
+                "transport_accepted": bool(sent_ids or accepted_transport_count),
+                "authoritative_resolved": False,
+                "sent_message_id": sent_ids[0] if sent_ids else None,
+                "sent_message_ids": sent_ids[:],
+                "sent_count": len(sent_ids),
+                "error_text": str(exc),
+                "manual_review_required": True,
+                "non_retryable": True,
+                "action": "no_second_send",
+            }
+
+        except Exception as exc:
+            # A raised send may have committed even when the first ID is absent.
+            return {
+                "ok": False,
+                "transport_attempted": True,
                 "transport_accepted": bool(sent_ids),
                 "authoritative_resolved": False,
                 "sent_message_id": sent_ids[0] if sent_ids else None,
@@ -121,6 +153,7 @@ class SenderReuploadHelpers:
 
     async def reupload_album(self, messages, target_id, target_thread_id, post_rows: list[dict] | None = None, is_self_loop: bool = False, caption_override: dict | None = None):
         downloaded_paths: list[Path] = []
+        botapi_entered = False
 
         try:
             if not messages:
@@ -290,34 +323,48 @@ class SenderReuploadHelpers:
                         )
                     )
 
+            if not 2 <= len(media_items) <= 10:
+                return {"ok": False, "sent_count": 0, "error_text": "Недопустимый размер медиагруппы"}
+            botapi_entered = True
             sent_messages = await self.owner.bot.send_media_group(
                 chat_id=target_id,
                 media=media_items,
                 message_thread_id=target_thread_id,
             )
 
-            if sent_messages and len(sent_messages) > 0:
+            ids = botapi_publication_ids(sent_messages, len(media_items))
+            if ids:
                 return {
-                    "ok": True,
-                    "sent_message_id": sent_messages[0].message_id,
-                    "sent_message_ids": [int(m.message_id) for m in sent_messages],
-                    "sent_count": len(sent_messages),
-                    "error_text": None,
+                    "ok": True, "transport_attempted": True,
+                    "transport_accepted": True, "authoritative_resolved": True,
+                    "sent_message_id": ids[0], "sent_message_ids": ids,
+                    "sent_count": len(ids), "error_text": None,
                 }
-
             return {
-                "ok": False,
-                "sent_message_id": None,
-                "sent_count": 0,
-                "error_text": telethon_result.get("error_text") or "send_media_group вернул пустой результат",
+                "ok": False, "transport_attempted": True,
+                "transport_accepted": True, "authoritative_resolved": False,
+                "accepted_unresolved": True, "sent_message_ids": [],
+                "raw_message_ids": [getattr(m, "message_id", None) for m in (sent_messages or [])],
+                "sent_count": len(sent_messages or []),
+                "error_text": "botapi_accepted_partial_or_zero_ids_no_resend",
             }
 
+        except FloodWaitError as exc:
+            raise TransportRateLimited(
+                retry_after_seconds=max(1, int(exc.seconds)), backend="telethon",
+                op_name="reupload_album", key=str(target_id),
+            ) from exc
+        except (TelegramRetryAfter, TransportRateLimited, PublicationWriteUnavailable):
+            raise
+        except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, PublicationContentError) as exc:
+            return {"ok": False, "sent_message_id": None, "sent_count": 0,
+                    "definitely_rejected": True, "error_text": str(exc)}
         except Exception as exc:
             logger.exception("reupload_album: ошибка reupload альбома: %s", exc)
             return {
-                "ok": False,
-                "sent_message_id": None,
-                "sent_count": 0,
+                "ok": False, "sent_message_id": None, "sent_count": 0,
+                "transport_attempted": botapi_entered,
+                "transport_accepted": False,
                 "error_text": str(exc),
             }
 
@@ -370,13 +417,25 @@ class SenderReuploadHelpers:
                     entities=bot_entities,
                     disable_web_page_preview=True,
                 )
-                logger.info("REUPLOAD_MESSAGE | BOTAPI_TEXT_FALLBACK | OK | sent_message_id=%s", sent.message_id)
-                return TelethonSendOutcome(True, True, True, int(sent.message_id), [int(sent.message_id)], resolution_method="botapi_text_fallback")
+                ids = botapi_publication_ids(sent, 1)
+                if not ids:
+                    return TelethonSendOutcome(True, True, False, None, [], resolution_method="botapi_pending_unresolved")
+                logger.info("REUPLOAD_MESSAGE | BOTAPI_TEXT_FALLBACK | OK | sent_message_id=%s", ids[0])
+                return TelethonSendOutcome(True, True, True, ids[0], ids, resolution_method="botapi_text_fallback")
 
             logger.warning("REUPLOAD_MESSAGE | TEXT_ONLY | ALL_METHODS_FAILED")
             return telethon_outcome if isinstance(telethon_outcome, TelethonSendOutcome) else telethon_not_attempted("text_only_all_methods_failed")
 
-        file_path = await self.owner.telethon.download_media(message, file=str(settings.media_cache_path))
+        reader = getattr(self.owner, "telethon_read", None) or self.owner.telethon
+        if reader is None:
+            raise PublicationWriteUnavailable("MTProto source reader is not ready")
+        try:
+            file_path = await reader.download_media(message, file=str(settings.media_cache_path))
+        except FloodWaitError as exc:
+            raise TransportRateLimited(
+                retry_after_seconds=max(1, int(exc.seconds)), backend="telethon",
+                op_name="download_media", key=str(target_id),
+            ) from exc
         if not file_path:
             logger.warning("REUPLOAD_MESSAGE | DOWNLOAD_FAILED")
             return telethon_not_attempted("download_failed_before_send")
@@ -447,9 +506,18 @@ class SenderReuploadHelpers:
                     caption_entities=bot_entities,
                 )
 
-            logger.info("REUPLOAD_MESSAGE | BOTAPI_MEDIA_FALLBACK | OK | sent_message_id=%s", sent.message_id)
-            return TelethonSendOutcome(True, True, True, int(sent.message_id), [int(sent.message_id)], resolution_method="botapi_media_fallback")
+            ids = botapi_publication_ids(sent, 1)
+            if not ids:
+                return TelethonSendOutcome(True, True, False, None, [], resolution_method="botapi_pending_unresolved")
+            logger.info("REUPLOAD_MESSAGE | BOTAPI_MEDIA_FALLBACK | OK | sent_message_id=%s", ids[0])
+            return TelethonSendOutcome(True, True, True, ids[0], ids, resolution_method="botapi_media_fallback")
 
+        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
+            raise
+        except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, PublicationContentError) as exc:
+            return telethon_not_attempted(str(exc))
+        except Exception as exc:
+            return telethon_transport_failed(str(exc))
         finally:
             try:
                 Path(file_path).unlink(missing_ok=True)
