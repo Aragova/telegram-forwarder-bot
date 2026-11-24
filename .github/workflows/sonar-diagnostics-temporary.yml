@@ -1,0 +1,21 @@
+name: Temporary Sonar diagnostics
+
+on:
+  pull_request:
+    branches: [main]
+    types: [synchronize]
+
+permissions:
+  checks: read
+
+jobs:
+  sonar-diagnostics:
+    if: github.event.pull_request.number == 525 && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Read previous Sonar check annotations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate 'repos/Aragova/telegram-forwarder-bot/check-runs/138449947578/annotations' --jq '.[] | {path,start_line,end_line,title,message,annotation_level}'
