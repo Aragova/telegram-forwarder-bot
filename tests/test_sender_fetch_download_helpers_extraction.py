@@ -329,3 +329,21 @@ def test_source_download_rate_limit_removes_partial_file_without_failure_event(m
     assert error.value.retry_after_seconds == 9
     assert not list(settings.media_cache_path.iterdir())
     assert not owner.logged_events
+
+def test_source_fetch_and_download_use_read_client_when_writer_is_unavailable(monkeypatch, tmp_path):
+    from app.sender_fetch_download_helpers import SenderFetchDownloadHelpers, settings
+
+    class Reader(FakeGetMessagesTelethon):
+        async def download_media(self, message, file, progress_callback):
+            Path(file).write_bytes(b"video")
+            return file
+
+    reader = Reader()
+    owner = _owner(None)
+    owner.telethon_read = reader
+    helper = SenderFetchDownloadHelpers(owner)
+    assert asyncio.run(helper.fetch_message("source", 55)) == {"ok": True}
+    monkeypatch.setattr(settings, "base_dir_raw", str(tmp_path))
+    monkeypatch.setattr(settings, "media_cache_dir", "cache")
+    path = asyncio.run(helper.download_video_source(SimpleNamespace(id=55)))
+    assert path.read_bytes() == b"video"
