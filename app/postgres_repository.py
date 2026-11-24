@@ -3713,6 +3713,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                           AND (
                             %s=ANY(r.published_ids)
                             OR EXISTS (
+                              SELECT 1 FROM unnest(r.scheduled_ids,r.pending_mask) AS member(message_id,pending)
+                              WHERE member.pending IS FALSE AND member.message_id=%s
+                            )
+                            OR EXISTS (
                               SELECT 1 FROM telegram_publication_claims c
                               JOIN telegram_publication_mappings m
                                 ON m.sender_account_id=c.sender_account_id
@@ -3729,7 +3733,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             )
                           )
                         LIMIT 1
-                        """,(rule_id,row["source_channel"],row["source_thread_id"],row["message_id"],row["message_id"]),
+                        """,(rule_id,row["source_channel"],row["source_thread_id"],row["message_id"],row["message_id"],row["message_id"]),
                     )
                     if cur.fetchone():
                         echo_ids.append(int(row["id"]))
@@ -5830,6 +5834,17 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     JOIN posts p ON p.id = d.post_id
                     WHERE d.rule_id = %s
                       AND d.status = 'pending'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM telegram_publication_receipts pr
+                          WHERE pr.rule_id=d.rule_id AND pr.manual_review IS NOT NULL
+                            AND pr.published_ids IS NULL
+                            AND pr.tenant_id=COALESCE(r.tenant_id,1)
+                            AND pr.target_peer_id::text=r.target_id::text
+                            AND pr.target_thread_id IS NOT DISTINCT FROM r.target_thread_id
+                            AND p.source_channel=pr.source_channel
+                            AND p.source_thread_id IS NOT DISTINCT FROM pr.source_thread_id
+                            AND p.message_id=ANY(pr.source_message_ids)
+                      )
                       AND r.is_active = TRUE
                       AND (r.next_run_at IS NULL OR r.next_run_at <= %s)
                       AND (
