@@ -10,6 +10,7 @@ on:
       - 'requirements.txt'
       - '.github/workflows/logical-queue-path.yml'
       - '.github/requirements/postgres-test.lock'
+      - '.github/requirements/python-ci.lock'
   workflow_dispatch:
 
 jobs:
@@ -30,18 +31,8 @@ jobs:
       - name: Install dependencies
         run: |
           # Allow only pinned pyaes sdist required by Telethon; no surprise pip upgrade.
-          python -m pip install --only-binary=:all: --no-binary=pyaes --no-deps --report "$RUNNER_TEMP/python-ci-report.json" -r .github/requirements/python-ci.versions
+          python -m pip install --only-binary=:all: --no-binary=pyaes --no-deps --require-hashes -r .github/requirements/python-ci.lock
           python -m pip check
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          report = json.loads((Path(os.environ["RUNNER_TEMP"]) / "python-ci-report.json").read_text())
-          for item in sorted(report["install"], key=lambda i: i["metadata"]["name"].lower()):
-              meta = item["metadata"]
-              sha = item["download_info"]["archive_info"]["hashes"]["sha256"]
-              print(f"CI_LOCK {meta['name']}=={meta['version']} --hash=sha256:{sha}")
-          PY
 
       - name: Compile project
         run: python -m compileall app bot.py support_bot.py tests
