@@ -349,7 +349,12 @@ class SenderReuploadHelpers:
                 "error_text": "botapi_accepted_partial_or_zero_ids_no_resend",
             }
 
-        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited, PublicationWriteUnavailable):
+        except FloodWaitError as exc:
+            raise TransportRateLimited(
+                retry_after_seconds=max(1, int(exc.seconds)), backend="telethon",
+                op_name="reupload_album", key=str(target_id),
+            ) from exc
+        except (TelegramRetryAfter, TransportRateLimited, PublicationWriteUnavailable):
             raise
         except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, PublicationContentError) as exc:
             return {"ok": False, "sent_message_id": None, "sent_count": 0,
