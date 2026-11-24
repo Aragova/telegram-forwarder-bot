@@ -175,3 +175,13 @@ def test_failed_receipt_lookup_never_authorizes_another_send():
     assert result["publication_pending"] is True
     assert not result["ok"]
     assert not result["retryable"]
+
+
+def test_missing_telegram_clients_keeps_receipt_pending():
+    class Repo:
+        def get_publication_receipt(self, key):
+            return {"published_ids": None, "expired": False, "expired_at": None,
+                    "target_peer_id": -100, "source_message_ids": [7], "source_channel": "-200"}
+
+    result = asyncio.run(reconcile_pending_single(SimpleNamespace(db=Repo(), telethon=None), "key"))
+    assert result["publication_pending"]

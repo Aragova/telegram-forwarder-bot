@@ -536,7 +536,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         return True
 
     if not reconcile_only and str(job_type).startswith("video_"):
-        can_video, video_reason = limit_service.can_process_video(tenant_id)
+        can_video, video_reason = await asyncio.to_thread(limit_service.can_process_video, tenant_id)
         if not can_video:
             logger.warning("Видео не обработано: лимит тарифа tenant_id=%s reason=%s", tenant_id, video_reason or "unknown")
             if hasattr(repo, "create_billing_event"):
