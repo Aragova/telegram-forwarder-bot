@@ -582,6 +582,15 @@ def test_reviewed_expired_receipt_allows_rescan_but_never_replays_members(repo):
     assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "accepted"
     assert [repo.get_delivery(d)["status"] for d in deliveries] == ["faulty", "faulty"]
     assert repo.backfill_rule(rule_id) == 1
+    # Legacy resets can reopen a faulty row, but even the final album read
+    # must not expand the outgoing vector to include quarantined members.
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE deliveries SET status='pending' WHERE id=ANY(%s)", (deliveries,))
+    assert repo.get_processing_album_for_rule(rule_id, source, None, "group-119") == []
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE deliveries SET status='faulty' WHERE id=ANY(%s)", (deliveries,))
     # Even if another cleanup removes a delivery, its durable source identity
     # remains quarantined. The next backfill cannot recreate it.
     with repo.connect() as conn:
