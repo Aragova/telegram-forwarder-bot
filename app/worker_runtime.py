@@ -25,7 +25,7 @@ from .job_service import (
 from .limit_service import LimitService
 from .subscription_service import SubscriptionService
 from .transport_policy import TransportRateLimited
-from .send_intent import publication_intent
+from .send_intent import publication_intent, PublicationWriteUnavailable
 from .usage_service import UsageService
 from .worker_load_service import build_worker_load_snapshot
 from .worker_resource_policy import POLICY, WorkerResourcePolicy, _env_int
@@ -500,8 +500,8 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     job_type = str(job["job_type"])
     payload = _safe_payload(job)
     payload.pop("job_id", None)
-    payload_tenant_id = payload.pop("tenant_id", None)
-    tenant_id = int(payload_tenant_id or await asyncio.to_thread(
+    payload.pop("tenant_id", None)
+    tenant_id = int(await asyncio.to_thread(
         getattr(repo, "get_rule_tenant_id", lambda _x: 1), int(payload.get("rule_id") or 0)
     ) or 1)
     subscription_service = SubscriptionService(repo)
@@ -898,6 +898,10 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             await _runtime_metrics.record_retry(job_type=job_type)
         return True
 
+    except PublicationWriteUnavailable as exc:
+        await _finish_owned_job(repo, "defer", job_id, worker_id, str(exc), 30,
+                                finalization_started=finalization_started)
+        return True
     except TransportRateLimited as exc:
         delay = int(exc.retry_after_seconds) + 10
         error_text = (
