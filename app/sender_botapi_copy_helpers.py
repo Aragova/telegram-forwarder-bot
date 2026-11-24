@@ -42,6 +42,11 @@ class SenderBotApiCopyHelpers:
                 message_id=message_id,
                 message_thread_id=target_thread_id,
             )
+            if getattr(sent, "message_id", None) == 0:
+                logger.info(
+                    "TELEGRAM_BOTAPI_VIDEO_PROCESSING_PENDING | target_id=%s | source_message_id=%s | action=no_second_send",
+                    target_id, message_id,
+                )
             sent_ids = self.owner._extract_sent_message_ids(sent)
             return {
                 "attempted": True,
@@ -96,6 +101,11 @@ class SenderBotApiCopyHelpers:
             )
 
             if sent_messages and len(sent_messages) > 0:
+                if any(m.message_id == 0 for m in sent_messages):
+                    logger.info(
+                        "TELEGRAM_BOTAPI_ALBUM_PROCESSING_PENDING | target_id=%s | source_message_ids=%s | action=no_second_send",
+                        target_id, message_ids,
+                    )
                 return {
                     "ok": True,
                     "sent_message_id": sent_messages[0].message_id,

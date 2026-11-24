@@ -224,6 +224,19 @@ class TelethonAuthoritativeMessageResolver:
 
     async def resolve_authoritative_single_message(self, *, target_entity: Any, target_id: Any, sent: Any, expected_message: Any = None, expected_text: str = "", before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None, target_thread_id: int | None = None, target_is_broadcast_channel: bool = False, require_strong_media_match: bool = False, history_poll_delays: tuple[float, ...] | None = None) -> TelethonResolutionResult:
         returned_candidate_id = _message_id(sent)
+        if getattr(sent, "video_processing_pending", None) is True:
+            # Telegram allocates scheduled and published IDs in separate namespaces.
+            # Never look up a scheduled ID in the published history as a candidate.
+            logger.info(
+                "TELEGRAM_VIDEO_PROCESSING_PENDING | target_id=%s | scheduled_id=%s | estimated_publication_at=%s | action=await_publication_mapping",
+                target_id, returned_candidate_id, getattr(sent, "date", None),
+            )
+            return TelethonResolutionResult(
+                False, None, returned_candidate_id=returned_candidate_id,
+                returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [],
+                resolution_method="video_processing_pending",
+                error_text="telegram_video_processing_pending",
+            )
         expected_fp = build_media_fingerprint(expected_message or sent, text=expected_text)
         ok, message, reason = await self.validate_message_in_target(target_entity, target_id, returned_candidate_id, expected_fp, source_message_ids, target_thread_id, target_is_broadcast_channel)
         if ok and require_strong_media_match:
@@ -325,6 +338,22 @@ class TelethonAuthoritativeMessageResolver:
             return TelethonResolutionResult(False, None, returned_candidate_ids=[], resolution_method="album_unresolved", error_text="album_sent_messages_empty")
         if len(sent_messages) != len(expected_messages):
             return TelethonResolutionResult(False, None, returned_candidate_ids=[i for i in (_message_id(m) for m in sent_messages) if i], resolution_method="album_unresolved", error_text="album_sent_count_mismatch")
+
+        pending_ids = [
+            _message_id(m) for m in sent_messages
+            if getattr(m, "video_processing_pending", None) is True
+        ]
+        if pending_ids:
+            raw_ids = [mid for mid in (_message_id(m) for m in sent_messages) if mid]
+            logger.info(
+                "TELEGRAM_ALBUM_PROCESSING_PENDING | target_id=%s | scheduled_ids=%s | returned_ids=%s | action=await_publication_mapping",
+                target_id, pending_ids, raw_ids,
+            )
+            return TelethonResolutionResult(
+                False, None, returned_candidate_ids=raw_ids,
+                resolution_method="video_processing_pending",
+                error_text="telegram_video_processing_pending",
+            )
 
         grouped_ids = {getattr(m, "grouped_id", None) for m in sent_messages if getattr(m, "grouped_id", None) is not None}
         if len(grouped_ids) > 1:
