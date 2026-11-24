@@ -16,7 +16,7 @@ from .delivery_content_helpers import (
     video_caption_requires_premium,
 )
 from .runtime_utils import run_db
-from .send_intent import possible_write
+from .send_intent import possible_write, PublicationWriteUnavailable
 from .transport_policy import TransportRateLimited
 from .sender_primitives import (
     MAX_INVALID_MP4_RETRY,
@@ -1623,7 +1623,7 @@ class SenderService:
         except Exception as exc:
             # An exception inside the transport or finalizer is not proof that Telegram rejected the send.
             from .repost_album_delivery import AlbumPreflightError
-            failure_status = "failed_after_send" if possible_write() or (transport_entered and not isinstance(exc, (AlbumPreflightError, TransportRateLimited))) else "failed_before_send"
+            failure_status = "failed_after_send" if possible_write() or (transport_entered and not isinstance(exc, (AlbumPreflightError, TransportRateLimited, PublicationWriteUnavailable))) else "failed_before_send"
             await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status=failure_status, error_text=str(exc))
             logger.info("DELIVERY_ATTEMPT_FAILED | operation=album | key=%s | delivery_id=%s | status=%s", idempotency_key, delivery_id, failure_status)
             logger.warning(
