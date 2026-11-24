@@ -76,7 +76,7 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch, delayed_bind):
         original_wrap_bot = runtime.wrap_bot
         original_wrap_telethon_client = runtime.wrap_telethon_client
 
-        def _wrap_bot(raw, *, label, policy):
+        def _wrap_bot(raw, *, label, policy, repository=None):
             bot_wrap_calls.append({"raw": raw, "label": label, "policy": policy})
             return original_wrap_bot(raw, label=label, policy=policy)
 
