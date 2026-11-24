@@ -118,7 +118,8 @@ async def reconcile_pending_publication(owner,key: str) -> dict[str,Any] | None:
         if not receipt["dispatch_stale"]:
             return _pending()
         await run_db(owner.db.finish_publication_reaction,key,"uncertain",
-                     {"reason":"interrupted_reaction_dispatch"},expected_started_at=receipt["send_started_at"])
+                     {"reason":"interrupted_reaction_dispatch"},expected_started_at=receipt["send_started_at"],
+                     expected_reaction_updated_at=receipt["reaction_updated_at"])
     elif state == "pending":
         if not await run_db(owner.db.claim_publication_reaction,key,published_ids,expected_started_at=receipt['send_started_at']):
             return _pending()
