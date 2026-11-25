@@ -14,14 +14,23 @@ class _ExecutorRepo:
     def __init__(self, rows):
         self.rows = {int(k): dict(v) for k, v in rows.items()}
         self.failed_attempts = []
+        self.attempts = {}
 
-    def get_delivery_attempt_by_idempotency_key(self, _key):
-        return None
+    def get_delivery_attempt_by_idempotency_key(self, key):
+        return self.attempts.get(key)
 
-    def create_delivery_attempt(self, **_kwargs):
+    def create_delivery_attempt(self, **kwargs):
+        self.attempts.setdefault(kwargs["idempotency_key"], {
+            "status": kwargs["status"],
+            "source_message_ids_json": list(kwargs.get("source_message_ids") or []),
+        })
         return 1
 
-    def mark_delivery_attempt_sending(self, *_args, **_kwargs):
+    def mark_delivery_attempt_sending(self, key, **_kwargs):
+        attempt = self.attempts[key]
+        if attempt["status"] not in {"created", "failed_before_send"}:
+            return False
+        attempt["status"] = "sending"
         return True
 
     def mark_delivery_attempt_failed(self, key, *, status, error_text):
