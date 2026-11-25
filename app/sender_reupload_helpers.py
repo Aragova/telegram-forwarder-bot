@@ -5,6 +5,7 @@ import mimetypes
 from pathlib import Path
 
 from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge
 
 from .config import settings
 from .send_intent import PublicationWriteUnavailable, authorize_next_album_member
@@ -127,6 +128,7 @@ class SenderReuploadHelpers:
 
     async def reupload_album(self, messages, target_id, target_thread_id, post_rows: list[dict] | None = None, is_self_loop: bool = False, caption_override: dict | None = None):
         downloaded_paths: list[Path] = []
+        botapi_entered = False
 
         try:
             if not messages:
@@ -296,6 +298,9 @@ class SenderReuploadHelpers:
                         )
                     )
 
+            if not 2 <= len(media_items) <= 10:
+                return {"ok": False, "sent_count": 0, "definitely_rejected": True, "error_text": "Invalid media group size"}
+            botapi_entered = True
             sent_messages = await self.owner.bot.send_media_group(
                 chat_id=target_id,
                 media=media_items,
@@ -320,12 +325,23 @@ class SenderReuploadHelpers:
 
         except (TransportRateLimited, PublicationWriteUnavailable):
             raise
+        except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge) as exc:
+            return {
+                "ok": False, "sent_message_id": None, "sent_count": 0,
+                "definitely_rejected": True, "transport_attempted": False,
+                "error_text": str(exc),
+            }
         except Exception as exc:
             logger.exception("reupload_album: ошибка reupload альбома: %s", exc)
+            # After a timeout the Bot API could have accepted the entire
+            # group. Never let an alternate transport resend it.
             return {
-                "ok": False,
-                "sent_message_id": None,
-                "sent_count": 0,
+                "ok": False, "sent_message_id": None, "sent_count": 0,
+                "transport_attempted": botapi_entered,
+                "transport_accepted": False,
+                "authoritative_resolved": False,
+                "manual_review_required": botapi_entered,
+                "non_retryable": botapi_entered,
                 "error_text": str(exc),
             }
 
