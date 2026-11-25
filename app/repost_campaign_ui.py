@@ -2500,6 +2500,15 @@ def build_repost_campaign_run_delete_failures_resolve_confirm_view(*, rule_id: i
         "",
         "Публикации в Telegram удаляться не будут.",
     ]
+    if any(
+        row.get("accepted_unverified") and row.get("delete_status") == "failed"
+        for row in (details or {}).get("messages", [])
+    ):
+        lines.extend([
+            "",
+            "⚠️ Есть публикации без подтверждённых ID. Перед снятием проблемы вручную проверьте каждое размещение и убедитесь, что пост отсутствует или уже удалён в Telegram.",
+            "Подтверждение снимет блокировку проблемных размещений этого запуска.",
+        ])
     if pending_processing > 0:
         lines.extend([
             "",
