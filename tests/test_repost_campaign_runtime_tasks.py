@@ -200,3 +200,15 @@ def test_campaign_delete_failure_resolution_warns_about_unverified_placements():
     assert "без подтверждённых ID" in text
     assert "вручную проверьте" in text
     assert "Публикации в Telegram удаляться не будут" in text
+
+
+def test_campaign_background_renderer_uses_existing_bot_transport_guard():
+    raw_bot = SimpleNamespace()
+    manager = RepostCampaignRuntimeTasks(
+        repo=SimpleNamespace(), bot=raw_bot,
+        settings=SimpleNamespace(temp_dir="media/temp"),
+    )
+    runtime = manager._build_campaign_runtime()
+    assert runtime.renderer.bot.raw is raw_bot
+    assert runtime.renderer.bot._is_transport_proxy is True
+    assert runtime.deleter.bot is raw_bot
