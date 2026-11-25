@@ -4648,7 +4648,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                                   source_thread_id,target_id,target_thread_id,extra_json)
             SELECT %s,'rule_rescan_echo_snapshot',r.id,COALESCE(r.tenant_id,1),
                    r.source_id,r.source_thread_id,r.target_id,r.target_thread_id,
-                   jsonb_build_object('sent_message_ids',jsonb_agg(DISTINCT e.mid))::text
+                   (jsonb_populate_record(
+                       NULL::audit_log,
+                       jsonb_build_object(
+                           'extra_json',
+                           jsonb_build_object('sent_message_ids', jsonb_agg(DISTINCT e.mid))
+                       )
+                   )).extra_json
             FROM routing r
             JOIN deliveries d ON d.rule_id=r.id
             CROSS JOIN LATERAL (
