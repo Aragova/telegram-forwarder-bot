@@ -285,6 +285,7 @@ async def run_repost_campaign_launch_job_loop(
     interval_seconds: int = 15,
     worker_id: str = "repost-campaign-launch:bot",
     batch_limit: int = 5,
+    stop_event: asyncio.Event | None = None,
 ) -> None:
     service.logger.info(
         "REPOST_CAMPAIGN_LAUNCH_JOB_LOOP_STARTED | worker_id=%s | interval_seconds=%s | batch_limit=%s",
@@ -292,12 +293,20 @@ async def run_repost_campaign_launch_job_loop(
         interval_seconds,
         batch_limit,
     )
+    if stop_event is not None and stop_event.is_set():
+        return
     await service.recover_stale_jobs(worker_id=worker_id)
-    while True:
+    while not (stop_event and stop_event.is_set()):
         try:
             await service.process_due_jobs(worker_id=worker_id, limit=batch_limit)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             service.logger.warning("REPOST_CAMPAIGN_LAUNCH_JOB_LOOP_FAILED | worker_id=%s | error=%s", worker_id, exc)
-        await asyncio.sleep(max(1, int(interval_seconds)))
+        if stop_event is None:
+            await asyncio.sleep(max(1, int(interval_seconds)))
+        else:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=max(0.01, max(1, int(interval_seconds))))
+            except asyncio.TimeoutError:
+                pass
