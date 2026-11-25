@@ -8796,6 +8796,25 @@ async def _shutdown_runtime(
         await asyncio.gather(reaction_worker_task, return_exceptions=True)
     reaction_worker_task = None
 
+    # Drain publication evidence before stopping its retry tasks or closing
+    # Telethon. If both the SQLite spool and fsynced fallback journal were
+    # unavailable, failing shutdown loudly is safer than silently discarding
+    # the only in-memory scheduled-to-published mappings.
+    if telethon_client is not None:
+        raw_publication_client = getattr(telethon_client, "raw", telethon_client)
+        flush_publication = getattr(raw_publication_client, "flush_publication_inbox", None)
+        if callable(flush_publication):
+            try:
+                await asyncio.wait_for(flush_publication(), timeout=5)
+            except Exception:
+                logger.exception("PUBLICATION_SHUTDOWN_FLUSH_FAILED | recovery=next_startup")
+        if getattr(raw_publication_client, "publication_evidence_unpersisted", False):
+            logger.critical(
+                "PUBLICATION_UNSAFE_SHUTDOWN | evidence_only_in_memory | "
+                "action=restore_local_storage_or_database"
+            )
+            raise RuntimeError("Нельзя безопасно остановить сервис: подтверждения публикаций не сохранены")
+
     await stop_background_tasks()
     if sender_service is not None:
         await sender_service.video_processor.shutdown()
