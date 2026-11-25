@@ -1528,6 +1528,24 @@ class SenderService:
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
+        ledger_members = (attempt or {}).get("source_message_ids_json") if isinstance(attempt, dict) else None
+        if isinstance(ledger_members, str):
+            try:
+                ledger_members = json.loads(ledger_members)
+            except (TypeError, ValueError):
+                ledger_members = None
+        if attempt_status in {"verified", "accepted"} and cached_ids and len(cached_ids) == len(album_delivery_ids):
+            # The album key fingerprints a SET of members. A legacy verified
+            # attempt may store those members in a different order. Align
+            # each target ID with its source delivery, never by positional zip.
+            if (not isinstance(ledger_members, list)
+                    or len(ledger_members) != len(album_delivery_ids)
+                    or len(set(ledger_members)) != len(ledger_members)
+                    or set(ledger_members) != set(album_delivery_ids)):
+                error = "album_cache_member_provenance_unavailable_no_resend"
+                return _terminal_non_retryable_result(error)
+            cached_map = dict(zip(ledger_members, cached_ids))
+            cached_ids = [cached_map[member_id] for member_id in album_delivery_ids]
         if attempt_status == "verified" and len(cached_ids) == len(album_delivery_ids) and len(set(cached_ids)) == len(cached_ids):
             logger.info("DELIVERY_ATTEMPT_VERIFIED_CACHE_HIT | operation=album | key=%s | sent_message_ids=%s", idempotency_key, cached_ids)
             await run_db(
@@ -1558,7 +1576,11 @@ class SenderService:
             if verification.get("ok") and len(verified_ids) == len(album_delivery_ids):
                 promoted = await run_db(
                     self.db.mark_delivery_attempt_verified,
-                    idempotency_key, sent_message_ids=verified_ids,
+                    idempotency_key,
+                    sent_message_ids=[
+                        dict(zip(album_delivery_ids, verified_ids))[member_id]
+                        for member_id in ledger_members
+                    ],
                 )
                 if promoted:
                     await run_db(
@@ -1608,8 +1630,26 @@ class SenderService:
                 raise RuntimeError(f"Не найден processing-альбом media_group_id={media_group_id}")
             actual_delivery_ids = [int(r["delivery_id"]) for r in album_rows]
             if sorted(actual_delivery_ids) != sorted(album_delivery_ids):
-                raise RuntimeError("Album membership changed after the publication key was established")
-            album_delivery_ids = actual_delivery_ids
+                # No RPC was entered. Return a terminal, explicitly fenced
+                # result rather than requeueing the now-stale job forever.
+                error = "album_membership_changed_pre_send_manual_review"
+                await run_db(
+                    self.db.mark_delivery_attempt_failed, idempotency_key,
+                    status="failed_before_send", error_text=error,
+                )
+                return {
+                    "ok": False, "retryable": False, "accepted": False,
+                    "manual_review_required": True,
+                    "album_membership_changed_pre_send": True,
+                    "idempotency_key": idempotency_key, "error_text": error,
+                }
+            # Preserve the attempt's immutable delivery vector ordering
+            # throughout the RPC and target-ID ledger, even if DB rows arrive
+            # in a different order.
+            rows_by_delivery = {int(row["delivery_id"]): row for row in album_rows}
+            if len(rows_by_delivery) != len(album_delivery_ids):
+                raise RuntimeError("Album rows have duplicate delivery IDs")
+            album_rows = [rows_by_delivery[member_id] for member_id in album_delivery_ids]
 
             with publication_scope(intent):
                 ok = await self._deliver_album(
