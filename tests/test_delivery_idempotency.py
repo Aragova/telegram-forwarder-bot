@@ -29,3 +29,16 @@ def test_normalize_valid_sent_message_ids_filters_zero_and_invalid():
 def test_extract_sent_message_ids_from_attempt_filters_zero_and_invalid():
     attempt = {"sent_message_ids_json": [0, "0", None, "123", 456, -1]}
     assert extract_sent_message_ids_from_attempt(attempt) == [123, 456]
+
+
+def test_album_media_group_key_changes_with_member_vector():
+    def key(ids):
+        return build_delivery_idempotency_key(
+            operation_kind="album", rule_id=89, target_id="-1003812542665",
+            media_group_id="14211706065005946", source_message_ids=ids,
+        )
+
+    assert key([1, 2]) == key([2, 1])
+    assert key([1, 2]) != key([1, 2, 3])
+    assert key([1, 2]) != key([1, 3])
+    assert ":members:" in key([1, 2])
