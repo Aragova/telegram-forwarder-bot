@@ -131,14 +131,16 @@ def test_non_self_loop_attempted_copy_with_error_does_not_reupload():
     owner.final_failure.assert_called_once()
     assert owner.final_failure.call_args.kwargs["final_method"] == "copy_single_uncertain_no_fallback"
 
-def test_reupload_returned_id_verification_failed_marks_self_loop_without_text_fallback():
+def test_reupload_returned_id_verification_failed_never_marks_self_loop_sent():
     owner = _SingleOwner(self_loop=True, use_copy_first=False, verify_ids=[], reupload_id=1147)
-    assert _deliver_single(owner) is True
+    assert _deliver_single(owner) is False
     owner.reupload_message.assert_called_once()
     owner.bot.send_message.assert_not_called()
-    assert owner.mark_delivery_sent.call_args.kwargs["sent_message_id"] == 1147
-    assert owner.mark_delivery_sent.call_args.kwargs["delivery_method"] == "reupload_single_self_loop_unverified"
-    assert owner.final_success.call_args.kwargs["final_method"] == "reupload_single_self_loop_unverified"
+    owner.mark_delivery_sent.assert_not_called()
+    owner.final_success.assert_not_called()
+    owner.reaction.assert_not_called()
+    owner.mark_faulty.assert_called_once()
+    assert "accepted_unverified_no_resend" in owner.mark_faulty.call_args.args[1]
     assert owner.db.accepted[-1][1]["sent_message_ids"] == [1147]
 
 
@@ -234,14 +236,14 @@ def test_verified_self_loop_reaction_goes_to_new_id_not_source():
     assert all(call.kwargs.get("sent_message_id") != 469 for call in owner.reaction.call_args_list)
 
 
-def test_accepted_unverified_reaction_goes_to_candidate_new_id_no_second_send():
+def test_accepted_unverified_self_loop_has_no_reaction_and_no_second_send():
     owner = _SingleOwner(self_loop=True, use_copy_first=False, verify_ids=[], reupload_id=1147)
-    assert _deliver_single(owner) is True
+    assert _deliver_single(owner) is False
     assert owner.reupload_message.call_count == 1
-    assert owner.mark_delivery_sent.call_args.kwargs["sent_message_id"] == 1147
-    assert owner.reaction.call_args.kwargs["sent_message_id"] == 1147
-    assert owner.reaction.call_args.kwargs["allow_unverified_self_loop_target"] is True
-    assert all(call.kwargs.get("sent_message_id") != 469 for call in owner.reaction.call_args_list)
+    owner.bot.send_message.assert_not_called()
+    owner.mark_delivery_sent.assert_not_called()
+    owner.reaction.assert_not_called()
+    owner.mark_faulty.assert_called_once()
 
 
 def test_copy_first_reaction_goes_to_copy_result_new_id():
@@ -277,17 +279,17 @@ def test_self_loop_reaction_failure_is_non_fatal_no_fallback():
     assert owner.mark_delivery_sent.call_args.kwargs["sent_message_id"] == 777
 
 
-def test_unverified_reaction_failure_is_non_fatal_and_logs_reason(caplog):
+def test_unverified_self_loop_skips_reaction_even_when_reactor_available(caplog):
     owner = _SingleOwner(self_loop=True, use_copy_first=False, verify_ids=[], reupload_id=1147)
-    owner.reaction = AsyncMock(return_value={"applied": False, "enqueued": False, "reason": "no_accounts"})
+    owner.reaction = AsyncMock(return_value={"applied": True})
 
-    assert _deliver_single(owner) is True
+    assert _deliver_single(owner) is False
 
     owner.reupload_message.assert_called_once()
     owner.bot.send_message.assert_not_called()
-    assert owner.mark_delivery_sent.call_args.kwargs["delivery_method"] == "reupload_single_self_loop_unverified"
-    assert "SELF_LOOP_REACTION_FAILED_NON_FATAL" in caplog.text
-    assert "reason=no_accounts" in caplog.text
+    owner.mark_delivery_sent.assert_not_called()
+    owner.reaction.assert_not_called()
+    assert "SELF_LOOP_SINGLE_UNVERIFIED" in caplog.text
 
 
 def test_reaction_target_not_found_retries_then_applies_to_new_id(monkeypatch):
