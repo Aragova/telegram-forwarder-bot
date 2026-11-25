@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.runtime_utils import run_db
+
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -255,7 +257,7 @@ class RepostCampaignScheduledPostService:
 
 
     async def send_now(self, *, scheduled_post_id: int, actor_id: int | None = None) -> RepostCampaignActionResult:
-        row = self.repo.get_campaign_scheduled_post(scheduled_post_id)
+        row = await run_db(self.repo.get_campaign_scheduled_post, scheduled_post_id)
         if not row:
             return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=0, error_text="Запланированный пост не найден")
         rule_id = int(row.get("rule_id") or 0)
@@ -267,13 +269,13 @@ class RepostCampaignScheduledPostService:
         readiness = self.build_readiness(scheduled_post_id=scheduled_post_id)
         if not readiness.get("post_ready") or int(readiness.get("targets_total") or 0) <= 0 or int(readiness.get("show_seconds") or 0) <= 0:
             return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Запланированный пост не готов к запуску", extra={"readiness": readiness})
-        launch = self.campaign_runtime.build_campaign_launch_readiness(rule_id=rule_id)
+        launch = await run_db(self.campaign_runtime.build_campaign_launch_readiness,rule_id=rule_id)
         if launch.get("active_placement") or int(launch.get("delete_failed") or 0) > 0:
-            self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_active_placement_warning", actor_id=actor_id, extra={"active_placement": bool(launch.get("active_placement")), "delete_failed": int(launch.get("delete_failed") or 0), "active_run_id": launch.get("active_run_id")})
-        if not self.repo.mark_campaign_scheduled_post_processing(scheduled_post_id, actor_id=actor_id):
+            await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_active_placement_warning", actor_id=actor_id, extra={"active_placement": bool(launch.get("active_placement")), "delete_failed": int(launch.get("delete_failed") or 0), "active_run_id": launch.get("active_run_id")})
+        if not await run_db(self.repo.mark_campaign_scheduled_post_processing, scheduled_post_id, actor_id=actor_id):
             return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Пост уже обрабатывается или запускался")
-        targets_snapshot = self.repo.list_campaign_scheduled_post_targets(scheduled_post_id, active_only=True) or []
-        self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_started", actor_id=actor_id)
+        targets_snapshot = await run_db(self.repo.list_campaign_scheduled_post_targets, scheduled_post_id, active_only=True) or []
+        await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_started", actor_id=actor_id)
         captured_run_id: int | None = None
         def _remember_run(campaign_run_id: int) -> None:
             nonlocal captured_run_id
@@ -283,24 +285,24 @@ class RepostCampaignScheduledPostService:
         try:
             result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(row.get("saved_post_id") or 0), show_seconds=int(row.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=scheduled_post_id, admin_id=actor_id, on_campaign_run_created=_remember_run)
         except Exception as exc:
-            current = self.repo.get_campaign_scheduled_post(scheduled_post_id) or {}
+            current = await run_db(self.repo.get_campaign_scheduled_post, scheduled_post_id) or {}
             run_id = int(current.get("campaign_run_id") or captured_run_id or 0)
             if run_id:
-                self.repo.mark_campaign_scheduled_post_needs_review(scheduled_post_id, error_text=str(exc) or "Запуск прерван после создания campaign_run", campaign_run_id=run_id)
-                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_needs_review", actor_id=actor_id, error_text=str(exc), extra={"reason": "stale_processing_with_campaign_run", "campaign_run_id": run_id})
+                await run_db(self.repo.mark_campaign_scheduled_post_needs_review, scheduled_post_id, error_text=str(exc) or "Запуск прерван после создания campaign_run", campaign_run_id=run_id)
+                await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_needs_review", actor_id=actor_id, error_text=str(exc), extra={"reason": "stale_processing_with_campaign_run", "campaign_run_id": run_id})
                 self.logger.warning("VIP_SCHEDULED_POST_NEEDS_REVIEW | scheduled_post_id=%s | reason=stale_processing_with_campaign_run | campaign_run_id=%s", scheduled_post_id, run_id)
                 return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Запуск создан, но завершился с ошибкой. Пост отправлен на ручную проверку.", extra={"scheduled_post_id": scheduled_post_id, "campaign_run_id": run_id})
-            self.repo.reset_campaign_scheduled_post_after_send_now_failure(scheduled_post_id, status=status, error_text=str(exc) or "Временная ошибка запуска")
+            await run_db(self.repo.reset_campaign_scheduled_post_after_send_now_failure, scheduled_post_id, status=status, error_text=str(exc) or "Временная ошибка запуска")
             raise
         run_id = int((result.extra or {}).get("campaign_run_id") or captured_run_id or 0)
         if result.ok and run_id:
-            self.repo.mark_campaign_scheduled_post_launched(scheduled_post_id, campaign_run_id=run_id)
-            self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_finished", actor_id=actor_id, status_to="launched", extra={"campaign_run_id": run_id})
+            await run_db(self.repo.mark_campaign_scheduled_post_launched, scheduled_post_id, campaign_run_id=run_id)
+            await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_finished", actor_id=actor_id, status_to="launched", extra={"campaign_run_id": run_id})
         elif run_id:
             error_text = result.error_text or "Не удалось подтвердить запуск запланированного поста"
             runtime_result = result.to_dict() if hasattr(result, "to_dict") else {}
-            self.repo.mark_campaign_scheduled_post_needs_review(scheduled_post_id, error_text=error_text, campaign_run_id=run_id)
-            self.repo.log_campaign_scheduled_post_event(
+            await run_db(self.repo.mark_campaign_scheduled_post_needs_review, scheduled_post_id, error_text=error_text, campaign_run_id=run_id)
+            await run_db(self.repo.log_campaign_scheduled_post_event,
                 scheduled_post_id=scheduled_post_id,
                 rule_id=rule_id,
                 event_type="send_now_needs_review",
@@ -315,12 +317,12 @@ class RepostCampaignScheduledPostService:
             self.logger.warning("VIP_SCHEDULED_POST_NEEDS_REVIEW | scheduled_post_id=%s | reason=launch_result_not_ok_after_campaign_run | campaign_run_id=%s", scheduled_post_id, run_id)
             return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Запуск создан, но завершился с ошибкой. Пост отправлен на ручную проверку.", extra={"scheduled_post_id": scheduled_post_id, "campaign_run_id": run_id, "runtime_result": runtime_result})
         else:
-            self.repo.reset_campaign_scheduled_post_after_send_now_failure(
+            await run_db(self.repo.reset_campaign_scheduled_post_after_send_now_failure,
                 scheduled_post_id,
                 status=status,
                 error_text=result.error_text or "Временная ошибка запуска",
             )
-            self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_failed", actor_id=actor_id, error_text=result.error_text)
+            await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_failed", actor_id=actor_id, error_text=result.error_text)
         return RepostCampaignActionResult(ok=result.ok, action="send_now_scheduled_post", rule_id=rule_id, error_text=result.error_text, extra={"scheduled_post_id": scheduled_post_id, "campaign_run_id": run_id or None, "runtime_result": result.to_dict() if hasattr(result, "to_dict") else {}})
 
     def duplicate_post(self, *, scheduled_post_id: int, actor_id: int | None = None) -> RepostCampaignActionResult:
@@ -339,11 +341,11 @@ class RepostCampaignScheduledPostService:
         return RepostCampaignActionResult(ok=True, action="duplicate_scheduled_post", rule_id=rule_id, extra={"scheduled_post_id": new_id})
 
     async def check_targets(self, *, scheduled_post_id: int, active_only: bool = True, actor_id: int | None = None, limit: int = 50) -> RepostCampaignActionResult:
-        row = self.repo.get_campaign_scheduled_post(scheduled_post_id) or {}
+        row = await run_db(self.repo.get_campaign_scheduled_post, scheduled_post_id) or {}
         rule_id = int(row.get("rule_id") or 0)
         if not self.target_checker:
             return RepostCampaignActionResult(ok=False, action="check_scheduled_post_targets", rule_id=rule_id, error_text="Сервис проверки прав недоступен")
-        targets = (self.repo.list_campaign_scheduled_post_targets(scheduled_post_id, active_only=active_only) or [])[: int(limit)]
+        targets = (await run_db(self.repo.list_campaign_scheduled_post_targets, scheduled_post_id, active_only=active_only) or [])[: int(limit)]
         passed = failed = 0
         for t in targets:
             try:
@@ -351,17 +353,17 @@ class RepostCampaignScheduledPostService:
                 publish_status = getattr(check, "publish_status", "confirmed" if getattr(check, "can_publish", False) else "denied")
                 delete_status = getattr(check, "delete_status", "unknown")
                 status = "confirmed" if publish_status == "confirmed" else "denied" if publish_status == "denied" else "unknown"
-                self.repo.update_campaign_scheduled_post_target_check_result(int(t.get("id") or 0), can_publish=getattr(check, "can_publish", None), can_delete=getattr(check, "can_delete", None), publish_status=publish_status, delete_status=delete_status, publish_error_text=getattr(check, "publish_error_text", None), delete_error_text=getattr(check, "delete_error_text", None), check_source=getattr(check, "source", "telethon"))
-                self.repo.log_campaign_scheduled_post_check(scheduled_post_id=scheduled_post_id, rule_id=rule_id, target_id=t["target_id"], target_thread_id=t.get("target_thread_id"), target_row_id=int(t.get("id") or 0), check_type="full", status=status, source=getattr(check, "source", "telethon"), error_text=getattr(check, "publish_error_text", None), details=getattr(check, "details", None))
+                await run_db(self.repo.update_campaign_scheduled_post_target_check_result, int(t.get("id") or 0), can_publish=getattr(check, "can_publish", None), can_delete=getattr(check, "can_delete", None), publish_status=publish_status, delete_status=delete_status, publish_error_text=getattr(check, "publish_error_text", None), delete_error_text=getattr(check, "delete_error_text", None), check_source=getattr(check, "source", "telethon"))
+                await run_db(self.repo.log_campaign_scheduled_post_check, scheduled_post_id=scheduled_post_id, rule_id=rule_id, target_id=t["target_id"], target_thread_id=t.get("target_thread_id"), target_row_id=int(t.get("id") or 0), check_type="full", status=status, source=getattr(check, "source", "telethon"), error_text=getattr(check, "publish_error_text", None), details=getattr(check, "details", None))
                 if status == "denied":
                     failed += 1
                 else:
                     passed += 1
             except Exception as exc:
                 failed += 1
-                self.repo.log_campaign_scheduled_post_check(scheduled_post_id=scheduled_post_id, rule_id=rule_id, target_id=t["target_id"], target_thread_id=t.get("target_thread_id"), target_row_id=int(t.get("id") or 0), check_type="full", status="failed", source="target_checker", error_text=str(exc), details={"exception": exc.__class__.__name__})
+                await run_db(self.repo.log_campaign_scheduled_post_check, scheduled_post_id=scheduled_post_id, rule_id=rule_id, target_id=t["target_id"], target_thread_id=t.get("target_thread_id"), target_row_id=int(t.get("id") or 0), check_type="full", status="failed", source="target_checker", error_text=str(exc), details={"exception": exc.__class__.__name__})
         readiness = self.build_readiness(scheduled_post_id=scheduled_post_id)
-        self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="targets_checked", actor_id=actor_id, extra={"checked": len(targets), "passed": passed, "failed": failed})
+        await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="targets_checked", actor_id=actor_id, extra={"checked": len(targets), "passed": passed, "failed": failed})
         self.logger.info("VIP_SCHEDULED_POST_TARGETS_CHECKED | scheduled_post_id=%s | checked=%s", scheduled_post_id, len(targets))
         return RepostCampaignActionResult(ok=True, action="check_scheduled_post_targets", rule_id=rule_id, extra={"checked": len(targets), "passed": passed, "failed": failed, "readiness": readiness})
 
@@ -436,29 +438,29 @@ class RepostCampaignScheduledPostService:
         def _retry_seconds(attempt_count: int) -> int:
             return min(VIP_SCHEDULED_POST_RETRY_BASE_SECONDS * (2 ** max(0, attempt_count)), VIP_SCHEDULED_POST_RETRY_MAX_SECONDS)
 
-        reset_result = self.repo.reset_stuck_campaign_scheduled_posts(stuck_seconds=VIP_SCHEDULED_POST_STUCK_SECONDS)
+        reset_result = await run_db(self.repo.reset_stuck_campaign_scheduled_posts, stuck_seconds=VIP_SCHEDULED_POST_STUCK_SECONDS)
         if isinstance(reset_result, dict) and int(reset_result.get("needs_review") or 0) > 0:
             self.logger.warning("VIP_SCHEDULED_POST_NEEDS_REVIEW | reason=stale_processing_with_campaign_run | count=%s", reset_result.get("needs_review"))
-        claimed = self.repo.claim_due_campaign_scheduled_posts(now_iso=scheduled_post_now_utc().isoformat(), worker_id=worker_id, limit=limit)
+        claimed = await run_db(self.repo.claim_due_campaign_scheduled_posts, now_iso=scheduled_post_now_utc().isoformat(), worker_id=worker_id, limit=limit)
         if claimed:
             self.logger.info("VIP_SCHEDULED_POST_DUE_CLAIMED | worker_id=%s | count=%s", worker_id, len(claimed))
         for row in claimed:
             sid = int(row.get("id") or 0)
             rule_id = int(row.get("rule_id") or 0)
             attempt_count = int(row.get("attempt_count") or 0)
-            self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="claimed", worker_id=worker_id)
+            await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=sid, rule_id=rule_id, event_type="claimed", worker_id=worker_id)
             if row.get("campaign_run_id") is not None:
-                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="idempotency_skip", worker_id=worker_id)
+                await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=sid, rule_id=rule_id, event_type="idempotency_skip", worker_id=worker_id)
                 continue
-            targets_snapshot = self.repo.list_campaign_scheduled_post_targets(sid, active_only=True) or []
-            preflight = self._build_due_launch_preflight(scheduled_post=row, targets_snapshot=targets_snapshot)
+            targets_snapshot = await run_db(self.repo.list_campaign_scheduled_post_targets, sid, active_only=True) or []
+            preflight = await run_db(self._build_due_launch_preflight,scheduled_post=row,targets_snapshot=targets_snapshot)
             if not preflight.get("ok"):
-                ok = self.repo.mark_campaign_scheduled_post_failed(sid, error_text=preflight.get("permanent_error") or "Не удалось запустить запланированный пост")
-                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_preflight_failed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=preflight.get("permanent_error"))
+                ok = await run_db(self.repo.mark_campaign_scheduled_post_failed, sid, error_text=preflight.get("permanent_error") or "Не удалось запустить запланированный пост")
+                await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=sid, rule_id=rule_id, event_type="launch_preflight_failed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=preflight.get("permanent_error"))
                 continue
             if preflight.get("active_placement") or int(preflight.get("delete_failed") or 0) > 0:
-                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_active_placement_warning", worker_id=worker_id, extra={"active_placement": bool(preflight.get("active_placement")), "delete_failed": int(preflight.get("delete_failed") or 0), "active_run_id": preflight.get("active_run_id")})
-            self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_started", worker_id=worker_id)
+                await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=sid, rule_id=rule_id, event_type="launch_active_placement_warning", worker_id=worker_id, extra={"active_placement": bool(preflight.get("active_placement")), "delete_failed": int(preflight.get("delete_failed") or 0), "active_run_id": preflight.get("active_run_id")})
+            await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=sid, rule_id=rule_id, event_type="launch_started", worker_id=worker_id)
             self.logger.info("VIP_SCHEDULED_POST_LAUNCH_STARTED | scheduled_post_id=%s | rule_id=%s | worker_id=%s", sid, rule_id, worker_id)
             captured_run_id: int | None = None
             def _remember_run(campaign_run_id: int) -> None:
@@ -470,31 +472,31 @@ class RepostCampaignScheduledPostService:
                 result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(row.get("saved_post_id") or 0), show_seconds=int(row.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=sid, on_campaign_run_created=_remember_run)
             except Exception as exc:
                 self.logger.exception("VIP_SCHEDULED_POST_LAUNCH_FAILED | scheduled_post_id=%s", sid)
-                current = self.repo.get_campaign_scheduled_post(sid) or {}
+                current = await run_db(self.repo.get_campaign_scheduled_post, sid) or {}
                 run_id = int(current.get("campaign_run_id") or captured_run_id or 0)
                 if run_id:
-                    ok = self.repo.mark_campaign_scheduled_post_needs_review(sid, error_text=str(exc) or "Запуск прерван после создания campaign_run", campaign_run_id=run_id)
-                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_needs_review" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=str(exc), extra={"reason": "stale_processing_with_campaign_run", "campaign_run_id": run_id})
+                    ok = await run_db(self.repo.mark_campaign_scheduled_post_needs_review, sid, error_text=str(exc) or "Запуск прерван после создания campaign_run", campaign_run_id=run_id)
+                    await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=sid, rule_id=rule_id, event_type="launch_needs_review" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=str(exc), extra={"reason": "stale_processing_with_campaign_run", "campaign_run_id": run_id})
                     self.logger.warning("VIP_SCHEDULED_POST_NEEDS_REVIEW | scheduled_post_id=%s | reason=stale_processing_with_campaign_run | campaign_run_id=%s", sid, run_id)
                 elif attempt_count >= VIP_SCHEDULED_POST_MAX_ATTEMPTS:
-                    ok = self.repo.mark_campaign_scheduled_post_failed(sid, error_text=str(exc) or "Временная ошибка запуска")
-                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_failed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=str(exc))
+                    ok = await run_db(self.repo.mark_campaign_scheduled_post_failed, sid, error_text=str(exc) or "Временная ошибка запуска")
+                    await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=sid, rule_id=rule_id, event_type="launch_failed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=str(exc))
                 else:
                     retry_at = scheduled_post_now_utc() + timedelta(seconds=_retry_seconds(attempt_count))
-                    ok = self.repo.delay_campaign_scheduled_post_retry(sid, next_retry_at=retry_at.isoformat(), error_text=str(exc) or "Временная ошибка запуска")
+                    ok = await run_db(self.repo.delay_campaign_scheduled_post_retry, sid, next_retry_at=retry_at.isoformat(), error_text=str(exc) or "Временная ошибка запуска")
                     self.logger.info("VIP_SCHEDULED_POST_LAUNCH_DELAYED | scheduled_post_id=%s | attempt_count=%s | next_retry_at=%s", sid, attempt_count, retry_at.isoformat())
-                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=str(exc))
+                    await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=str(exc))
                 continue
             run_id = int((result.extra or {}).get("campaign_run_id") or captured_run_id or 0)
             self.logger.info("VIP_SCHEDULED_POST_LAUNCH_FINISHED | scheduled_post_id=%s | rule_id=%s | ok=%s | campaign_run_id=%s", sid, rule_id, result.ok, run_id or getattr(result, "campaign_run_id", None))
             if result.ok and run_id:
-                ok = self.repo.mark_campaign_scheduled_post_launched(sid, campaign_run_id=run_id)
-                self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_finished" if ok else "launch_state_update_failed", worker_id=worker_id)
+                ok = await run_db(self.repo.mark_campaign_scheduled_post_launched, sid, campaign_run_id=run_id)
+                await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=sid, rule_id=rule_id, event_type="launch_finished" if ok else "launch_state_update_failed", worker_id=worker_id)
             elif run_id:
                 error_text = result.error_text or "Не удалось подтвердить запуск запланированного поста"
                 runtime_result = result.to_dict() if hasattr(result, "to_dict") else {}
-                ok = self.repo.mark_campaign_scheduled_post_needs_review(sid, error_text=error_text, campaign_run_id=run_id)
-                self.repo.log_campaign_scheduled_post_event(
+                ok = await run_db(self.repo.mark_campaign_scheduled_post_needs_review, sid, error_text=error_text, campaign_run_id=run_id)
+                await run_db(self.repo.log_campaign_scheduled_post_event,
                     scheduled_post_id=sid,
                     rule_id=rule_id,
                     event_type="launch_needs_review" if ok else "launch_state_update_failed",
@@ -511,13 +513,13 @@ class RepostCampaignScheduledPostService:
                 if attempt_count >= VIP_SCHEDULED_POST_MAX_ATTEMPTS:
                     error_text = result.error_text or "Превышено число попыток запуска запланированного поста"
                     self.logger.warning("VIP_SCHEDULED_POST_LAUNCH_FAILED | scheduled_post_id=%s | error=%s", sid, error_text)
-                    ok = self.repo.mark_campaign_scheduled_post_failed(sid, error_text=error_text)
-                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_failed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=result.error_text)
+                    ok = await run_db(self.repo.mark_campaign_scheduled_post_failed, sid, error_text=error_text)
+                    await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=sid, rule_id=rule_id, event_type="launch_failed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=result.error_text)
                 else:
                     retry_at = scheduled_post_now_utc() + timedelta(seconds=_retry_seconds(attempt_count))
-                    ok = self.repo.delay_campaign_scheduled_post_retry(sid, next_retry_at=retry_at.isoformat(), error_text=result.error_text or "Временная ошибка запуска")
+                    ok = await run_db(self.repo.delay_campaign_scheduled_post_retry, sid, next_retry_at=retry_at.isoformat(), error_text=result.error_text or "Временная ошибка запуска")
                     self.logger.info("VIP_SCHEDULED_POST_LAUNCH_DELAYED | scheduled_post_id=%s | attempt_count=%s | next_retry_at=%s", sid, attempt_count, retry_at.isoformat())
-                    self.repo.log_campaign_scheduled_post_event(scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=result.error_text)
+                    await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=sid, rule_id=rule_id, event_type="launch_delayed" if ok else "launch_state_update_failed", worker_id=worker_id, error_text=result.error_text)
         if claimed:
             self.logger.info("VIP_SCHEDULED_POST_PROCESS_DUE_DONE | worker_id=%s | claimed=%s", worker_id, len(claimed))
         return {"claimed": len(claimed)}

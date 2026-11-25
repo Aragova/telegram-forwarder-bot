@@ -393,7 +393,7 @@ class RepostCampaignRuntimeService:
             last_check_error = "Не удалось подтвердить право публикации"
         elif delete_status == "denied":
             last_check_error = delete_error_text or "Нет права удаления"
-        saved = bool(await run_db(self.repo.update_rule_repost_campaign_target_check_result ,
+        saved = bool(await run_db(self.repo.update_rule_repost_campaign_target_check_result,
             target_row_id,
             title=check.title,
             last_check_error=last_check_error,
@@ -647,7 +647,7 @@ class RepostCampaignRuntimeService:
                 error_text="У правила не задан основной канал получателя",
             )
 
-        run_id = await run_db(self.repo.create_campaign_run ,
+        run_id = await run_db(self.repo.create_campaign_run,
             rule_id=rule_id,
             saved_post_id=saved_post_id,
             run_type="test",
@@ -670,7 +670,7 @@ class RepostCampaignRuntimeService:
             saved_post_id,
             run_id,
         )
-        run_message_id = await run_db(self.repo.create_campaign_run_message ,
+        run_message_id = await run_db(self.repo.create_campaign_run_message,
             run_id=run_id,
             rule_id=rule_id,
             saved_post_id=saved_post_id,
@@ -702,7 +702,7 @@ class RepostCampaignRuntimeService:
         if not render_result.ok:
             delete_status, delete_error_text = _build_failed_campaign_message_delete_fields(render_result.method)
             if render_result.method != "blocked":
-                await run_db(self.repo.mark_campaign_run_message_failed ,
+                await run_db(self.repo.mark_campaign_run_message_failed,
                     run_message_id,
                     error_text=render_result.error_text or "unknown error",
                     render_mode=render_result.method,
@@ -711,7 +711,7 @@ class RepostCampaignRuntimeService:
                     accepted_unverified=bool(getattr(render_result,"accepted",False)) or render_result.method.endswith("_unverified"),
                     raw_message_ids=getattr(render_result,"raw_message_ids",None),
                 )
-            await run_db(self.repo.update_campaign_run_status ,
+            await run_db(self.repo.update_campaign_run_status,
                 run_id,
                 status="failed",
                 render_mode=render_result.method,
@@ -741,7 +741,7 @@ class RepostCampaignRuntimeService:
                 premium_required=render_result.premium_required,
                 extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id},
             )
-        await run_db(self.repo.update_campaign_run_status ,
+        await run_db(self.repo.update_campaign_run_status,
             run_id,
             status="sent",
             render_mode=render_result.method,
@@ -822,7 +822,7 @@ class RepostCampaignRuntimeService:
         if run_id is None:
             return RepostCampaignActionResult(ok=False, action="launch_campaign_from_snapshot", rule_id=rule_id, saved_post_id=saved_post_id, error_text="Не удалось создать запись запуска рекламной кампании")
         if on_campaign_run_created:
-            on_campaign_run_created(int(run_id))
+            await run_db(on_campaign_run_created,int(run_id))
         content = saved_post.get("content_json") or saved_post.get("content") or {}
         targets_success = 0
         targets_failed = 0
@@ -1029,7 +1029,7 @@ class RepostCampaignRuntimeService:
                 "target_title": row.get("title") or row.get("target_id"),
             })
 
-        run_id = await run_db(self.repo.create_campaign_run ,
+        run_id = await run_db(self.repo.create_campaign_run,
             rule_id=rule_id,
             saved_post_id=saved_post_id,
             run_type=run_type,
@@ -1049,7 +1049,7 @@ class RepostCampaignRuntimeService:
                 error_text="Не удалось создать запись запуска рекламной кампании",
             )
         if on_campaign_run_created:
-            on_campaign_run_created(int(run_id))
+            await run_db(on_campaign_run_created,int(run_id))
 
         self.logger.info(
             "REPOST_CAMPAIGN_LAUNCH_STARTED | rule_id=%s | saved_post_id=%s | targets=%s | run_id=%s | run_type=%s | top_time_enabled=%s | top_time_seconds=%s",
@@ -1064,7 +1064,7 @@ class RepostCampaignRuntimeService:
         top_time_pauses_created: list[dict[str, Any]] = []
         for target in targets:
             delete_after_at = build_campaign_delete_after_iso(show_seconds) if show_seconds > 0 else None
-            run_message_id = await run_db(self.repo.create_campaign_run_message ,
+            run_message_id = await run_db(self.repo.create_campaign_run_message,
                 run_id=run_id,
                 rule_id=rule_id,
                 saved_post_id=saved_post_id,
@@ -1150,7 +1150,7 @@ class RepostCampaignRuntimeService:
             "extra_targets": len(targets) - 1,
             "top_time_pauses_created": len(top_time_pauses_created),
         }
-        await run_db(self.repo.update_campaign_run_status ,
+        await run_db(self.repo.update_campaign_run_status,
             run_id,
             status=final_status,
             render_mode=render_mode,
@@ -1816,7 +1816,7 @@ class RepostCampaignRuntimeService:
             if delete_failed <= 0:
                 self.logger.info("REPOST_CAMPAIGN_DELETE_FAILURES_RESOLVE_SKIPPED | rule_id=%s | run_id=%s | reason=no_failed", rule_id, run_id)
                 return RepostCampaignActionResult(ok=True, action=action, rule_id=rule_id, extra={"campaign_run_id": run_id, "noop": True, "resolved": 0})
-            result = await run_db(self.repo.resolve_campaign_run_delete_failures ,
+            result = await run_db(self.repo.resolve_campaign_run_delete_failures,
                 run_id=run_id,
                 rule_id=rule_id,
                 actor_id=admin_id,
