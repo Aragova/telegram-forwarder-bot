@@ -54,6 +54,10 @@ async def existing_publication_key_for_job(
         return (isinstance(receipt, dict) and receipt.get("rule_id") == rule_id
                 and receipt.get("tenant_id") == tenant_id)
 
+    if job_type == "repost_album" and payload.get("media_group_id"):
+        members = payload.get("delivery_ids") or [payload.get("delivery_id")]
+        if not _same_album_members(members, members):
+            return None
     receipt = await run_db(lookup, key)
     if receipt is not None:
         return key if scoped(receipt) else None

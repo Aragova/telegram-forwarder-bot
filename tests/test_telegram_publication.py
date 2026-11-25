@@ -579,6 +579,9 @@ def test_transient_postgres_failure_retries_durable_spool_without_permanent_writ
     from app import telegram_publication
     import app.publication_mapping_spool as spool_module
 
+    import threading
+    acknowledged = threading.Event()
+
     class MemorySpool:
         instance = None
 
@@ -596,6 +599,7 @@ def test_transient_postgres_failure_retries_durable_spool_without_permanent_writ
 
         def acknowledge(self, row_id):
             self.rows = [row for row in self.rows if row[0] != row_id]
+            acknowledged.set()
 
     monkeypatch.setattr(spool_module, "PublicationMappingSpool", MemorySpool)
 
@@ -621,7 +625,7 @@ def test_transient_postgres_failure_retries_durable_spool_without_permanent_writ
         await client.handler(types.UpdateDeleteScheduledMessages(
             peer=types.PeerChannel(99), messages=[33], sent_messages=[133],
         ))
-        await asyncio.sleep(0.45)
+        assert await asyncio.to_thread(acknowledged.wait, 5)
         assert len(calls) == 2
         assert persisted == [(33, 133)]
         assert MemorySpool.instance.rows == []
@@ -828,6 +832,9 @@ def test_general_topic_valid_reply_message_id_is_not_topic_header():
         broadcast=False,
     )
     assert verified_published_message(msg, **kwargs)
+    msg.reply_to.forum_topic = True
+    assert not verified_published_message(msg, **kwargs)
+    msg.reply_to.forum_topic = False
     msg.reply_to.reply_to_top_id = 5
     assert not verified_published_message(msg, **kwargs)
 
@@ -956,11 +963,20 @@ def test_fallback_publication_journal_replays_after_restart_and_requires_review(
     asyncio.run(scenario())
 
 
-def test_fallback_journal_keeps_old_bytes_if_write_cannot_complete(tmp_path):
+def test_fallback_journal_keeps_old_bytes_if_write_cannot_complete(tmp_path, monkeypatch):
     from app.publication_mapping_spool import PublicationFallbackJournal
     journal = PublicationFallbackJournal(tmp_path / "fallback.jsonl")
     journal.append(-10099, [12, 13], [112, 113])
     assert journal.pending() == [(-10099, [12, 13], [112, 113])]
+    import os
+    original = journal.path.read_bytes()
+    def fail(*_args):
+        raise OSError("replace failed")
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", fail)
+        with pytest.raises(OSError):
+            journal.clear()
+    assert journal.path.read_bytes() == original
     journal.clear()
     assert journal.pending() == []
 
@@ -1043,4 +1059,42 @@ def test_corrupt_fallback_journal_cannot_strand_new_emergency_mapping(monkeypatc
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
+    asyncio.run(scenario())
+
+
+def test_damaged_journal_preserves_valid_records_and_separates_new_append(tmp_path):
+    from app.publication_mapping_spool import PublicationFallbackJournal
+    journal = PublicationFallbackJournal(tmp_path / "fallback.jsonl")
+    journal.append(-10099, [1], [101])
+    with journal.path.open("ab") as stream:
+        stream.write(b'{"incomplete":')
+    journal.append(-10099, [2], [102])
+    assert journal.read_recoverable() == ([(-10099, [1], [101]), (-10099, [2], [102])], True)
+    assert b'{"incomplete":\n' in journal.path.read_bytes()
+    with pytest.raises(RuntimeError):
+        journal.pending()
+
+
+def test_journal_io_waits_for_thread_completion_on_cancellation():
+    import threading
+    from app.telegram_publication import _journal_io
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    def write():
+        started.set()
+        try:
+            assert release.wait(5)
+        finally:
+            finished.set()
+    async def scenario():
+        task = asyncio.create_task(_journal_io(write))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set()
     asyncio.run(scenario())

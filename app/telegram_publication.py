@@ -74,10 +74,33 @@ def verified_published_message(
         # a top-topic ID. Never mistake reply_to_msg_id for a topic ID.
         if thread_id != 1 and top is None:
             top = getattr(reply, "reply_to_msg_id", None)
+        if thread_id == 1 and getattr(reply, "forum_topic", False):
+            return False
         expected_top = None if thread_id == 1 else thread_id
         if top != expected_top:
             return False
     return True
+
+
+async def _journal_io(operation, *args):
+    """Keep the caller's lock until a non-cancellable file operation finishes."""
+    task = asyncio.create_task(asyncio.to_thread(operation, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled():
+            try:
+                task.result()
+            except Exception:
+                logger.exception("PUBLICATION_JOURNAL_IO_FAILED_DURING_CANCEL")
+        raise
 
 
 class PublicationInbox:
@@ -205,7 +228,11 @@ def prepare_publication_inbox(client: Any, repository: Any):
                             repository, "record_publication_inbox_overflow", None
                         )
                         try:
-                            journal_rows = await asyncio.to_thread(journal.pending)
+                            journal_rows, damaged = await _journal_io(journal.read_recoverable)
+                            if damaged:
+                                client.publication_write_blocked = True
+                                journal_failure = RuntimeError("Damaged publication journal; operator review required")
+                                logger.error("PUBLICATION_FALLBACK_JOURNAL_DAMAGED")
                         except Exception as exc:
                             # Corruption in the fallback file must not strand
                             # newer emergency evidence in process memory.
@@ -222,18 +249,19 @@ def prepare_publication_inbox(client: Any, repository: Any):
                             # until an operator acknowledges the persisted
                             # incident, even after PostgreSQL replays records.
                             client.publication_write_blocked = True
-                            if callable(persist_incident):
+                            if not incident_persisted and callable(persist_incident):
                                 first_peer, first_old, _ = journal_rows[0]
                                 await asyncio.to_thread(
                                     persist_incident,
                                     candidate.sender_account_id, first_peer, first_old,
                                 )
                                 incident_persisted = True
-                            try:
-                                await asyncio.to_thread(journal.clear)
-                            except Exception as exc:
-                                journal_failure = exc
-                                logger.exception("PUBLICATION_FALLBACK_JOURNAL_CLEAR_FAILED")
+                            if journal_failure is None:
+                                try:
+                                    await _journal_io(journal.clear)
+                                except Exception as exc:
+                                    journal_failure = exc
+                                    logger.exception("PUBLICATION_FALLBACK_JOURNAL_CLEAR_FAILED")
                             # These in-memory duplicates were already
                             # acknowledged in PostgreSQL by the journal pass.
                             for row in journal_rows:
@@ -261,10 +289,16 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 if spool_failure is not None:
                     raise spool_failure
                 if spool is None:
+                    if buffer_overflow and not incident_persisted and overflow_evidence is not None:
+                        persist = getattr(repository, "record_publication_inbox_overflow", None)
+                        if callable(persist):
+                            await asyncio.to_thread(persist, candidate.sender_account_id, *overflow_evidence)
+                            incident_persisted = True
                     while buffer:
                         peer, old, new = buffer[0]
                         await candidate.record(peer, old, new)
                         buffer.popleft()
+                    client.publication_evidence_unpersisted = False
                 # An append that completed while emergency persistence was
                 # awaiting PostgreSQL must not be stranded in SQLite.
                 # There are no awaits between this generation check and
@@ -314,15 +348,18 @@ def prepare_publication_inbox(client: Any, repository: Any):
                     overflow_evidence = (peer, old)
                     if journal is not None:
                         async with journal_lock:
+                            emergency.append((peer, old, new))
+                            previously_volatile = client.publication_evidence_unpersisted
+                            client.publication_evidence_unpersisted = True
                             try:
-                                await asyncio.to_thread(journal.append, peer, old, new)
+                                await _journal_io(journal.append, peer, old, new)
+                                client.publication_evidence_unpersisted = previously_volatile
                             except Exception:
                                 client.publication_evidence_unpersisted = True
                                 logger.critical(
                                     "PUBLICATION_EVIDENCE_VOLATILE | sqlite_and_fallback_write_failed | action=block_shutdown",
                                     exc_info=True,
                                 )
-                            emergency.append((peer, old, new))
                     else:
                         client.publication_evidence_unpersisted = True
                         emergency.append((peer, old, new))
@@ -347,11 +384,10 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 client.publication_write_blocked = True
                 overflow_evidence = (peer, old)
                 logger.error("TELEGRAM_PUBLICATION_MAPPING_BUFFER_FULL | bound=%s | peer=%s | scheduled_ids=%s", inbox is not None, peer, old)
-                if candidate is not None:
-                    persist = getattr(repository, "record_publication_inbox_overflow", None)
-                    if callable(persist):
-                        await asyncio.to_thread(persist, candidate.sender_account_id, peer, old)
                 buffer.append((peer, old, new))
+                client.publication_evidence_unpersisted = True
+                if candidate is not None:
+                    schedule_retry(0.25)
                 return
             # When SQLite is healthy the mapping is durable already. Bound
             # the in-memory wakeup cache, but do not manufacture an incident

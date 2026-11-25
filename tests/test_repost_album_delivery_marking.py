@@ -297,3 +297,15 @@ def test_album_verification_preserves_transport_order_and_requires_exact_ids(ret
         assert result["sent_message_ids"] == [502, 501]
     else:
         assert result["ok"] is False
+
+
+def test_copy_messages_sorts_request_but_preserves_ledger_mapping(monkeypatch):
+    from unittest.mock import AsyncMock
+    from types import SimpleNamespace
+    from app import sender_botapi_copy_helpers as module
+    monkeypatch.setattr(module, "DEBUG_FORCE_SKIP_COPY_ALBUM", False)
+    bot = AsyncMock(return_value=[SimpleNamespace(message_id=501), SimpleNamespace(message_id=502)])
+    helper = module.SenderBotApiCopyHelpers(SimpleNamespace(bot=bot))
+    result = asyncio.run(helper.copy_album_via_bot("-1001", "-1002", [102, 101], None))
+    assert list(bot.await_args.args[0].message_ids) == [101, 102]
+    assert result["sent_message_ids"] == [502, 501]

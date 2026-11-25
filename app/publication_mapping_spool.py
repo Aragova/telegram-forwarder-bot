@@ -94,8 +94,13 @@ class PublicationFallbackJournal:
         }
         data = (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "ab") as stream:
+        fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a+b") as stream:
+            # Keep a torn record intact, but separate it from new evidence.
+            if stream.seek(0, os.SEEK_END):
+                stream.seek(-1, os.SEEK_END)
+                if stream.read(1) != b"\n":
+                    stream.write(b"\n")
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
@@ -108,13 +113,21 @@ class PublicationFallbackJournal:
             os.close(dirfd)
 
     def pending(self) -> list[tuple[int, list[int], list[int]]]:
+        records, damaged = self.read_recoverable()
+        if damaged:
+            raise RuntimeError("Corrupt publication fallback journal; operator review required")
+        return records
+
+    def read_recoverable(self) -> tuple[list[tuple[int, list[int], list[int]]], bool]:
         if not self.path.exists():
-            return []
+            return [], False
         records = []
+        damaged = False
         with self.path.open("rb") as stream:
             for line in stream:
                 if not line.endswith(b"\n"):
-                    raise RuntimeError("Incomplete publication fallback journal; operator review required")
+                    damaged = True
+                    continue
                 try:
                     raw = json.loads(line)
                     peer = raw["peer"]
@@ -126,9 +139,9 @@ class PublicationFallbackJournal:
                             or any(type(value) is not int or value <= 0 for value in old + new)):
                         raise ValueError("Invalid publication journal pair")
                     records.append((peer, old, new))
-                except (ValueError, KeyError, TypeError) as exc:
-                    raise RuntimeError("Corrupt publication fallback journal; operator review required") from exc
-        return records
+                except (ValueError, KeyError, TypeError):
+                    damaged = True
+        return records, damaged
 
     def clear(self) -> None:
         # Called only under the publication journal lock after PG confirms all

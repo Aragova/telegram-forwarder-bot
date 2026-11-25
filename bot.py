@@ -8820,8 +8820,10 @@ async def _shutdown_runtime(
         await sender_service.video_processor.shutdown()
 
     if close_telegram_clients and campaign_drain_complete and telethon_client:
+        raw_telethon = getattr(telethon_client, "raw", telethon_client)
+        if getattr(raw_telethon, "publication_evidence_unpersisted", False):
+            raise RuntimeError("Нельзя отключить Telethon: новые подтверждения публикаций не сохранены")
         try:
-            raw_telethon = getattr(telethon_client, "raw", telethon_client)
             await raw_telethon.disconnect()
         except Exception as exc:
             logger.warning("Ошибка при закрытии Telethon: %s", exc)

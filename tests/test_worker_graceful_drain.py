@@ -133,4 +133,5 @@ def test_shutdown_drains_publication_before_cancelling_retries():
         source.index("async def _run_scheduler_role_loop()")
     ]
     assert shutdown.index("await asyncio.wait_for(flush_publication()") < shutdown.index("await stop_background_tasks()")
-    assert "publication_evidence_unpersisted" in shutdown
+    assert shutdown.rindex("publication_evidence_unpersisted") > shutdown.index("await stop_background_tasks()")
+    assert shutdown.rindex("publication_evidence_unpersisted") < shutdown.index("await raw_telethon.disconnect()")
