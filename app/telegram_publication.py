@@ -196,18 +196,24 @@ def prepare_publication_inbox(client: Any, repository: Any):
 
     def schedule_retry(delay: float) -> None:
         nonlocal retry_task
+        # Coalesce every emergency wakeup into one retry chain. Launching a
+        # task per incoming update during an outage is unbounded.
+        if retry_task is not None and not retry_task.done():
+            return
         from .background_tasks import start_background_task
         retry_task = start_background_task(
             retry_live(delay), name="telegram-publication-persist-retry",
         )
 
     async def retry_live(delay: float) -> None:
-        await asyncio.sleep(delay)
-        try:
-            await flush_live()
-        except Exception:
-            logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_RETRY_FAILED")
-            schedule_retry(min(delay * 2, 30))
+        while True:
+            await asyncio.sleep(delay)
+            try:
+                await flush_live()
+                return
+            except Exception:
+                logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_RETRY_FAILED")
+                delay = min(delay * 2, 30)
 
     async def handle(update: Any) -> None:
         nonlocal buffer_overflow, overflow_evidence, spool_generation
@@ -233,7 +239,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
                     # immediately. A disk failure must not strand the only
                     # remaining evidence until another Telegram update.
                     if candidate is not None:
-                        if live_lock.locked():
+                        if live_lock.locked() or (retry_task is not None and not retry_task.done()):
                             schedule_retry(0.25)
                         else:
                             try:
