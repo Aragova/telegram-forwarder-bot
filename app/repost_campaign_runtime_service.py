@@ -1787,6 +1787,16 @@ class RepostCampaignRuntimeService:
             return RepostCampaignActionResult(ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, error_text="Публикация кампании не найдена")
         if int(message.get("run_id") or 0) != int(run_id) or int(message.get("rule_id") or 0) != int(rule_id):
             return RepostCampaignActionResult(ok=False, action="delete_campaign_run_message_now", rule_id=rule_id, error_text="Публикация не относится к этому запуску")
+        if (message.get("send_status") or "").strip().lower() == "sending":
+            return RepostCampaignActionResult(
+                ok=False, action="delete_campaign_run_message_now", rule_id=rule_id,
+                error_text="Публикация ещё отправляется; нельзя отметить её удалённой.",
+            )
+        if message.get("accepted_unverified"):
+            return RepostCampaignActionResult(
+                ok=False, action="delete_campaign_run_message_now", rule_id=rule_id,
+                error_text="ID публикации не подтверждены; требуется ручная сверка.",
+            )
         if (message.get("send_status") or "").strip().lower() != "sent":
             self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_SKIPPED | rule_id=%s | run_id=%s | run_message_id=%s | reason=%s", rule_id, run_id, run_message_id, "send_status_not_sent")
             await run_db(self.repo.mark_campaign_run_message_deleted, run_message_id)
