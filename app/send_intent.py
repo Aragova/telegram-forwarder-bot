@@ -70,8 +70,10 @@ def authorize_next_album_member() -> None:
 
 def _definite_rejection(exc: Exception) -> bool:
     return not isinstance(exc, RandomIdDuplicateError) and isinstance(
-        exc, (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge,
-              TelegramRetryAfter, BadRequestError, ForbiddenError, FloodWaitError, SlowModeWaitError),
+        exc, (PublicationWriteUnavailable, TelegramBadRequest,
+              TelegramForbiddenError, TelegramEntityTooLarge,
+              TelegramRetryAfter, BadRequestError, ForbiddenError,
+              FloodWaitError, SlowModeWaitError),
     )
 
 
