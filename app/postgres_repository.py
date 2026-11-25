@@ -11796,7 +11796,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     UPDATE campaign_run_messages m SET send_status='failed',delete_status='none',
                         publication_review_required=FALSE,
                         publication_manual_review=jsonb_build_object('operator',%s::text,'note',%s::text,'reviewed_at',NOW()),
-                        send_error_text='Interrupted publication manually reviewed; do not replay',
+                        send_error_text='Прерванная публикация проверена вручную; повторная отправка запрещена',
                         delete_error_text=NULL,updated_at=NOW()
                     WHERE m.id=%s AND m.updated_at=%s AND m.updated_at<NOW()-INTERVAL '15 minutes'
                       AND (m.send_status='sending' OR m.publication_review_required OR
