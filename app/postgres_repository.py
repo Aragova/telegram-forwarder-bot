@@ -6983,6 +6983,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                          AND operation_kind='album'
                          AND starts_with(idempotency_key,%s)
                          AND idempotency_key<>%s
+                         AND idempotency_key NOT LIKE '%%:rescan:%%'
+                         AND idempotency_key NOT LIKE 'archived:%%'
                          AND status IN ('created','sending','accepted','verified','failed_after_send')
                        ORDER BY id ASC LIMIT 1""",
                     (int(rule_id), str(target_id), prefix, str(current_key)),
@@ -12718,7 +12720,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         deleted_at = NOW(),
                         delete_error_text = NULL,
                         updated_at = NOW()
-                    WHERE id = %s
+                    WHERE id = %s AND send_status <> 'sending'
+                      AND NOT publication_review_required
                     """,
                     (int(message_id),),
                 )
