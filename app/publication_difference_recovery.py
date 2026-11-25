@@ -80,15 +80,21 @@ class PublicationDifferenceRecovery:
                 pts_limit=1000,
             ))
         if isinstance(difference, types.updates.DifferenceTooLong):
-            # The server still cannot provide the range. Rebaseline for future
-            # sends, without treating old receipts as confirmed.
-            logger.warning("PUBLICATION_DIFFERENCE_RANGE_UNAVAILABLE | account=%s", self.sender_account_id)
-            # Do not jump to the later GetState; that would skip updates
-            # before the new checkpoint. Keep unresolved receipts quarantined.
+            # This is a *read* cursor only until its page has been persisted.
+            # Never persist an advanced checkpoint from GetState/TooLong:
+            # doing so can erase the only chance of recovering an exact pair.
             server_pts = getattr(difference, "pts", None)
             if type(server_pts) is int and server_pts > int(cursor["pts"]):
-                await self._advance(cursor, server_pts, cursor["qts"], cursor["state_date"])
-            return False
+                difference = await self._rpc(functions.updates.GetDifferenceRequest(
+                    pts=server_pts, qts=cursor["qts"], date=cursor["state_date"],
+                    pts_limit=1000,
+                ))
+            if isinstance(difference, types.updates.DifferenceTooLong):
+                logger.warning(
+                    "PUBLICATION_DIFFERENCE_RANGE_UNAVAILABLE | account=%s | checkpoint_not_advanced",
+                    self.sender_account_id,
+                )
+                return False
         if isinstance(difference, types.updates.DifferenceEmpty):
             await self._advance(cursor, cursor["pts"], cursor["qts"], difference.date)
             return False
