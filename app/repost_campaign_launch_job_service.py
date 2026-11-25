@@ -4,6 +4,7 @@ from app.runtime_utils import run_db
 
 import asyncio
 import logging
+from uuid import uuid4
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -96,9 +97,10 @@ class RepostCampaignLaunchJobService:
         for job in jobs:
             if stop_event is not None and stop_event.is_set():
                 break
+            lease_owner = f"{worker_id}:{uuid4().hex}"
             leased = await run_db(self.repo.lease_repost_campaign_launch_job,
                 int(job["id"]),
-                worker_id=worker_id,
+                worker_id=lease_owner,
                 lock_ttl_seconds=self.lock_ttl_seconds,
             )
             if not leased:
@@ -109,7 +111,7 @@ class RepostCampaignLaunchJobService:
                 leased.get("rule_id"),
                 worker_id,
             )
-            await self.run_once(job=leased, worker_id=worker_id)
+            await self.run_once(job=leased, worker_id=lease_owner)
             processed += 1
         return processed
 

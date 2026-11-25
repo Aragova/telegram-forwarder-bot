@@ -966,13 +966,13 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         return True
 
     except Exception as exc:
-        if publication_key and callable(receipt_lookup) and not finalization_started.is_set():
+        if not finalization_started.is_set():
             try:
-                latest = await asyncio.to_thread(receipt_lookup, publication_key)
+                latest_key = await existing_publication_key_for_job(repo, job_type, payload, tenant_id)
             except Exception:
-                latest = None
+                latest_key = None
                 logger.exception("JOB_PUBLICATION_RECEIPT_LOOKUP_FAILED | job_id=%s", job_id)
-            if isinstance(latest, dict) and latest.get("rule_id") == int(payload.get("rule_id") or 0) and latest.get("tenant_id") == tenant_id:
+            if latest_key is not None:
                 await _finish_owned_job(repo, "defer", job_id, worker_id, "", 30, finalization_started=finalization_started)
                 return True
         guarded = await asyncio.to_thread(

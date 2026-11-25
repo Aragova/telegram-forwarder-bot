@@ -42,6 +42,7 @@ class PublicationDifferenceRecovery:
             self.repository.get_publication_recovery_cursor, self.sender_account_id,
         )
         if cursor is not None:
+            await self._read_page(cursor)
             return
         state = await self._rpc(functions.updates.GetStateRequest())
         await asyncio.to_thread(

@@ -8808,12 +8808,17 @@ async def _shutdown_runtime(
                 await asyncio.wait_for(flush_publication(), timeout=5)
             except Exception:
                 logger.exception("PUBLICATION_SHUTDOWN_FLUSH_FAILED | recovery=next_startup")
-        if getattr(raw_publication_client, "publication_evidence_unpersisted", False):
+        while getattr(raw_publication_client, "publication_evidence_unpersisted", False):
+            raw_publication_client.publication_write_blocked = True
             logger.critical(
                 "PUBLICATION_UNSAFE_SHUTDOWN | evidence_only_in_memory | "
                 "action=restore_local_storage_or_database"
             )
-            raise RuntimeError("Нельзя безопасно остановить сервис: подтверждения публикаций не сохранены")
+            await asyncio.sleep(5)
+            try:
+                await asyncio.wait_for(flush_publication(), timeout=5)
+            except Exception:
+                logger.exception("PUBLICATION_SHUTDOWN_RETRY_FAILED")
 
     await stop_background_tasks()
     if sender_service is not None:
@@ -8821,8 +8826,13 @@ async def _shutdown_runtime(
 
     if close_telegram_clients and campaign_drain_complete and telethon_client:
         raw_telethon = getattr(telethon_client, "raw", telethon_client)
-        if getattr(raw_telethon, "publication_evidence_unpersisted", False):
-            raise RuntimeError("Нельзя отключить Telethon: новые подтверждения публикаций не сохранены")
+        while getattr(raw_telethon, "publication_evidence_unpersisted", False):
+            raw_telethon.publication_write_blocked = True
+            await asyncio.sleep(5)
+            try:
+                await asyncio.wait_for(raw_telethon.flush_publication_inbox(), timeout=5)
+            except Exception:
+                logger.exception("PUBLICATION_SHUTDOWN_RETRY_FAILED")
         try:
             await raw_telethon.disconnect()
         except Exception as exc:

@@ -6486,9 +6486,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     ON CONFLICT(sender_account_id) DO UPDATE SET blocked_at=NOW(),
                         last_peer_id=EXCLUDED.last_peer_id,last_scheduled_ids=EXCLUDED.last_scheduled_ids,
                         acknowledged_at=NULL,review_note=NULL
-                    WHERE EXCLUDED.last_peer_id <> 0
+                    WHERE (telegram_publication_inbox_incidents.acknowledged_at IS NOT NULL
+                           OR (telegram_publication_inbox_incidents.last_peer_id = 0) = (EXCLUDED.last_peer_id = 0))
+                      AND (EXCLUDED.last_peer_id <> 0
                        OR telegram_publication_inbox_incidents.last_peer_id IS DISTINCT FROM EXCLUDED.last_peer_id
-                       OR telegram_publication_inbox_incidents.last_scheduled_ids IS DISTINCT FROM EXCLUDED.last_scheduled_ids
+                       OR telegram_publication_inbox_incidents.last_scheduled_ids IS DISTINCT FROM EXCLUDED.last_scheduled_ids)
                     """,(account_id,peer_id,scheduled_ids))
 
     def get_publication_inbox_incident(self, account_id: int) -> dict[str, Any] | None:

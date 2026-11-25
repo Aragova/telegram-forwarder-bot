@@ -149,6 +149,7 @@ class PublicationFallbackJournal:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + ".clearing")
         with tmp.open("wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, self.path)
