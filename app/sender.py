@@ -1,5 +1,5 @@
 from __future__ import annotations
-import logging, time, asyncio
+import logging, time, asyncio, json
 from datetime import datetime, timezone, timedelta
 from typing import Any
 from telethon.tl import types as tl_types
@@ -1473,7 +1473,52 @@ class SenderService:
         if not album_delivery_ids and delivery_id is not None:
             album_delivery_ids = [int(delivery_id)]
         album_source_ids = list(album_delivery_ids)
-        idempotency_key = build_delivery_idempotency_key(operation_kind="album", rule_id=int(rule_id), target_id=str(target_id), media_group_id=media_group_id, source_message_ids=album_source_ids)
+        idempotency_key = build_delivery_idempotency_key(
+            operation_kind="album", rule_id=int(rule_id), target_id=str(target_id),
+            media_group_id=media_group_id, source_message_ids=album_source_ids,
+        )
+        # Existing production attempts used a group-only key. Reuse it only
+        # for exactly the same immutable delivery vector, never for a changed
+        # album that could otherwise inherit another member's sent IDs.
+        if media_group_id:
+            old_key = build_delivery_idempotency_key(
+                operation_kind="album", rule_id=int(rule_id), target_id=str(target_id),
+                media_group_id=media_group_id,
+            )
+            if old_key != idempotency_key:
+                old_attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, old_key)
+                if isinstance(old_attempt, dict) and str(old_attempt.get("status") or "") not in {"failed_before_send", ""}:
+                    old_members = old_attempt.get("source_message_ids_json") or []
+                    if isinstance(old_members, str):
+                        try:
+                            old_members = json.loads(old_members)
+                        except (TypeError, ValueError):
+                            old_members = []
+                    if (
+                        isinstance(old_members, list)
+                        and sorted(old_members) == sorted(album_delivery_ids)
+                    ):
+                        idempotency_key = old_key
+                    else:
+                        error = "album_member_set_changed_manual_review_no_resend"
+                        for album_id in album_delivery_ids:
+                            await run_db(self._mark_delivery_faulty_sync, album_id, error)
+                        return _terminal_non_retryable_result(error)
+            conflict_lookup = getattr(self.db, "find_conflicting_album_attempt", None)
+            if callable(conflict_lookup):
+                conflict = await run_db(
+                    conflict_lookup, rule_id=int(rule_id), target_id=str(target_id),
+                    media_group_id=str(media_group_id), current_key=idempotency_key,
+                )
+                if conflict:
+                    error = "album_conflicting_member_vector_manual_review_no_resend"
+                    logger.warning(
+                        "ALBUM_MEMBER_VECTOR_CONFLICT | rule=%s | target=%s | old_key=%s | new_key=%s",
+                        rule_id, target_id, conflict.get("idempotency_key"), idempotency_key,
+                    )
+                    for album_id in album_delivery_ids:
+                        await run_db(self._mark_delivery_faulty_sync, album_id, error)
+                    return _terminal_non_retryable_result(error)
         from .single_publication_reconciliation import reconcile_pending_publication
         pending_result = await reconcile_pending_publication(self, idempotency_key)
         if pending_result is not None:
@@ -1481,7 +1526,7 @@ class SenderService:
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
-        if attempt_status == "verified" and cached_ids:
+        if attempt_status == "verified" and len(cached_ids) == len(album_delivery_ids) and len(set(cached_ids)) == len(cached_ids):
             logger.info("DELIVERY_ATTEMPT_VERIFIED_CACHE_HIT | operation=album | key=%s | sent_message_ids=%s", idempotency_key, cached_ids)
             await run_db(
                 self._mark_album_deliveries_sent_sync,
@@ -1559,7 +1604,10 @@ class SenderService:
             )
             if not album_rows:
                 raise RuntimeError(f"Не найден processing-альбом media_group_id={media_group_id}")
-            album_delivery_ids = [int(r["delivery_id"]) for r in album_rows] or album_delivery_ids
+            actual_delivery_ids = [int(r["delivery_id"]) for r in album_rows]
+            if sorted(actual_delivery_ids) != sorted(album_delivery_ids):
+                raise RuntimeError("Album membership changed after the publication key was established")
+            album_delivery_ids = actual_delivery_ids
 
             with publication_scope(intent):
                 ok = await self._deliver_album(
