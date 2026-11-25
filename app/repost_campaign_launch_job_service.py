@@ -136,7 +136,7 @@ class RepostCampaignLaunchJobService:
             def _remember_campaign_run_id(campaign_run_id: int) -> None:
                 nonlocal remembered_campaign_run_id
                 remembered_campaign_run_id = int(campaign_run_id)
-                updated_job = self.repo.set_repost_campaign_launch_job_campaign_run_id(job_id, int(campaign_run_id))
+                updated_job = self.repo.set_repost_campaign_launch_job_campaign_run_id(job_id, int(campaign_run_id), worker_id=worker_id)
                 if not updated_job:
                     raise RuntimeError("Не удалось сохранить campaign_run_id для durable job запуска кампании")
 
@@ -164,8 +164,11 @@ class RepostCampaignLaunchJobService:
             )
             result_ok = bool(result_json.get("ok"))
             if result_ok and campaign_run_id:
-                updated = await run_db(self.repo.mark_repost_campaign_launch_job_sent, job_id, campaign_run_id=campaign_run_id, result_json=result_json)
-                await self._update_progress_message(rule_id=rule_id, job=updated or {**job, "status": "sent", "result_json": result_json, "campaign_run_id": campaign_run_id})
+                updated = await run_db(self.repo.mark_repost_campaign_launch_job_sent, job_id, campaign_run_id=campaign_run_id, result_json=result_json, worker_id=worker_id)
+                if not updated:
+                    self.logger.warning("REPOST_CAMPAIGN_LAUNCH_JOB_OWNER_LOST | job_id=%s | worker=%s | action=no_state_change", job_id, worker_id)
+                    return None
+                await self._update_progress_message(rule_id=rule_id, job=updated)
                 self.logger.info(
                     "REPOST_CAMPAIGN_LAUNCH_JOB_SENT | job_id=%s | rule_id=%s | campaign_run_id=%s | ok=%s",
                     job_id,
@@ -182,9 +185,12 @@ class RepostCampaignLaunchJobService:
                     job_id,
                     last_error=review_error_text,
                     campaign_run_id=campaign_run_id,
-                    result_json=result_json,
+                    result_json=result_json, worker_id=worker_id,
                 )
-                await self._update_progress_message(rule_id=rule_id, job=updated or {**job, "status": "needs_review", "last_error": review_error_text, "result_json": result_json, "campaign_run_id": campaign_run_id})
+                if not updated:
+                    self.logger.warning("REPOST_CAMPAIGN_LAUNCH_JOB_OWNER_LOST | job_id=%s | worker=%s | action=no_state_change", job_id, worker_id)
+                    return None
+                await self._update_progress_message(rule_id=rule_id, job=updated)
                 self.logger.warning(
                     "REPOST_CAMPAIGN_LAUNCH_JOB_NEEDS_REVIEW | job_id=%s | rule_id=%s | campaign_run_id=%s | reason=launch_result_not_ok_after_campaign_run",
                     job_id,
@@ -193,8 +199,11 @@ class RepostCampaignLaunchJobService:
                 )
                 return updated
 
-            updated = await run_db(self.repo.mark_repost_campaign_launch_job_failed, job_id, last_error=error_text, result_json=result_json)
-            await self._update_progress_message(rule_id=rule_id, job=updated or {**job, "status": "failed", "last_error": error_text, "result_json": result_json})
+            updated = await run_db(self.repo.mark_repost_campaign_launch_job_failed, job_id, last_error=error_text, result_json=result_json, worker_id=worker_id)
+            if not updated:
+                self.logger.warning("REPOST_CAMPAIGN_LAUNCH_JOB_OWNER_LOST | job_id=%s | worker=%s | action=no_state_change", job_id, worker_id)
+                return None
+            await self._update_progress_message(rule_id=rule_id, job=updated)
             self.logger.warning(
                 "REPOST_CAMPAIGN_LAUNCH_JOB_FAILED | job_id=%s | rule_id=%s | reason=launch_result_not_ok_without_campaign_run | error=%s",
                 job_id,
@@ -210,9 +219,12 @@ class RepostCampaignLaunchJobService:
                 updated = await run_db(self.repo.mark_repost_campaign_launch_job_needs_review,
                     job_id,
                     last_error=error_text,
-                    campaign_run_id=detected_run_id,
+                    campaign_run_id=detected_run_id, worker_id=worker_id,
                 )
-                await self._update_progress_message(rule_id=rule_id, job=updated or {**job, "status": "needs_review", "last_error": error_text, "campaign_run_id": detected_run_id})
+                if not updated:
+                    self.logger.warning("REPOST_CAMPAIGN_LAUNCH_JOB_OWNER_LOST | job_id=%s | worker=%s | action=no_state_change", job_id, worker_id)
+                    return None
+                await self._update_progress_message(rule_id=rule_id, job=updated)
                 self.logger.warning(
                     "REPOST_CAMPAIGN_LAUNCH_JOB_NEEDS_REVIEW | job_id=%s | rule_id=%s | campaign_run_id=%s | error=%s",
                     job_id,
@@ -222,7 +234,7 @@ class RepostCampaignLaunchJobService:
                 )
                 return updated
 
-            updated = await run_db(self.repo.mark_repost_campaign_launch_job_failed, job_id, last_error=error_text, retryable=True)
+            updated = await run_db(self.repo.mark_repost_campaign_launch_job_failed, job_id, last_error=error_text, retryable=True, worker_id=worker_id)
             self.logger.warning(
                 "REPOST_CAMPAIGN_LAUNCH_JOB_FAILED | job_id=%s | rule_id=%s | error=%s",
                 job_id,
