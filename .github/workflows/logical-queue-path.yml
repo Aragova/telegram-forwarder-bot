@@ -37,6 +37,11 @@ jobs:
       - name: Compile project
         run: python -m compileall app bot.py support_bot.py tests
 
+      - name: Verify FFmpeg integration test dependencies
+        run: |
+          ffmpeg -version
+          ffprobe -version
+
       - name: Run all tests
         run: pytest -q tests/
 

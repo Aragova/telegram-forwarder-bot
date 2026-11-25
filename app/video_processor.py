@@ -3,6 +3,8 @@ import shutil
 import time
 import asyncio
 import json
+import math
+from fractions import Fraction
 from pathlib import Path
 import logging
 from datetime import datetime, timezone
@@ -397,6 +399,33 @@ class VideoProcessor:
         except (ValueError, TypeError):
             return 30
 
+    @staticmethod
+    def _parse_frame_rate(raw):
+        """A missing or invalid ffprobe rate is not a measured frame rate."""
+        try:
+            value = float(Fraction(str(raw)))
+        except (ValueError, ZeroDivisionError, OverflowError):
+            return None
+        return value if math.isfinite(value) and value > 0 else None
+
+    @staticmethod
+    def _matches_target_fps(info, target_fps):
+        # Preserve the existing 29.97/30 and 23.976/24 equivalence for
+        # passthrough, but do not confuse a nominal VFR rate with its average.
+        nominal = info.get("fps", info.get("fps_normalized"))
+        average = info.get("fps_avg")
+        return (
+            info.get("fps_rate_known", True)
+            and nominal is not None
+            and abs(nominal - target_fps) <= 0.5
+            and (average is None or abs(average - target_fps) <= 0.5)
+        )
+
+    @staticmethod
+    def _cfr_output_args(target_fps):
+        # Explicit OUTPUT options: r_frame_rate is only a nominal estimate.
+        return ["-r", str(target_fps), "-fps_mode", "cfr"]
+
     # ==================== PROFILE ====================
 
     def _get_processing_profile(self, video_info):
@@ -650,17 +679,11 @@ class VideoProcessor:
                 logger.error("❌ Видеопоток не найден")
                 return None
 
-            # FPS
-            fps_parts = video_stream.get('r_frame_rate', '25/1').split('/')
-            fps = 25
-            try:
-                if len(fps_parts) == 2:
-                    numerator = float(fps_parts[0])
-                    denominator = float(fps_parts[1])
-                    if denominator != 0:
-                        fps = numerator / denominator
-            except:
-                pass
+            # Keep the existing nominal-rate profile policy. The average
+            # is additional evidence for VFR and the fallback for unknown r_frame_rate.
+            nominal_fps = self._parse_frame_rate(video_stream.get("r_frame_rate"))
+            average_fps = self._parse_frame_rate(video_stream.get("avg_frame_rate"))
+            fps = nominal_fps or average_fps or 25
 
             format_info = info.get('format', {})
             duration = float(format_info.get('duration', 0))
@@ -686,6 +709,8 @@ class VideoProcessor:
                 'width': int(video_stream.get('width', 0)),
                 'height': int(video_stream.get('height', 0)),
                 'fps': round(fps, 3),
+                'fps_avg': round(average_fps, 3) if average_fps is not None else None,
+                'fps_rate_known': nominal_fps is not None or average_fps is not None,
                 'fps_normalized': self._normalize_fps(fps),
                 'duration': duration,
                 'has_audio': audio_stream is not None,
@@ -931,13 +956,15 @@ class VideoProcessor:
         logger.info(f"   🔄 Нормализация под {profile['target_width']}x{profile['target_height']} @ {profile['target_fps']}fps")
         
         input_info = await self.get_video_info(input_path, use_cache=False)
-        
+        if not input_info:
+            return False
+
         vf = self._build_video_filter(
             profile['target_width'], profile['target_height'], profile['target_fps'],
             rotate_filter,
             original_width=input_info['width'],
             original_height=input_info['height'],
-            original_fps=input_info['fps_normalized'],
+            original_fps=None,  # Explicit fps filter even if nominal FPS matches.
             original_pix_fmt=input_info.get('pix_fmt')
         )
         
@@ -947,6 +974,7 @@ class VideoProcessor:
             cmd += ["-vf", vf]
         
         cmd += [
+            *self._cfr_output_args(profile["target_fps"]),
             *self._build_video_encode_args("veryfast", 26),
             *self._build_audio_encode_args(has_audio, input_info),
             "-movflags", "+faststart",
@@ -968,8 +996,11 @@ class VideoProcessor:
                 if info['width'] != profile['target_width'] or info['height'] != profile['target_height']:
                     logger.warning(f"   ⚠️ Размер не совпадает: {info['width']}x{info['height']} != {profile['target_width']}x{profile['target_height']}")
                     return False
-                if info['fps_normalized'] != profile['target_fps']:
-                    logger.warning(f"   ⚠️ FPS не совпадает: {info['fps_normalized']} != {profile['target_fps']}")
+                if not self._matches_target_fps(info, profile["target_fps"]):
+                    logger.warning(
+                        "FPS не совпадает: nominal=%s average=%s target=%s",
+                        info["fps"], info.get("fps_avg"), profile["target_fps"],
+                    )
                     return False
                 logger.info(f"   ✅ Нормализация успешна: {info['width']}x{info['height']} @ {info['fps_normalized']}fps")
                 return True
@@ -985,7 +1016,7 @@ class VideoProcessor:
             video_info.get('rotate_filter'),
             original_width=video_info['width'],
             original_height=video_info['height'],
-            original_fps=video_info['fps_normalized'],
+            original_fps=None,
             original_pix_fmt=video_info.get('pix_fmt')
         )
         
@@ -996,7 +1027,7 @@ class VideoProcessor:
             cmd += ["-vf", vf]
         
         cmd += [
-            "-fps_mode", "cfr",
+            *self._cfr_output_args(profile["target_fps"]),
             *self._build_video_encode_args("veryfast", 26),
             *self._build_audio_encode_args(video_info['has_audio'], video_info),
             "-movflags", "+faststart",
@@ -1098,6 +1129,7 @@ class VideoProcessor:
             cmd = [
                 "ffmpeg", "-loop", "1", "-i", source_path,
                 "-vf", vf,
+                *self._cfr_output_args(profile["target_fps"]),
                 *self._build_video_encode_args("veryfast", 26),
                 "-an", "-t", str(duration),
                 "-movflags", "+faststart",
@@ -1108,6 +1140,7 @@ class VideoProcessor:
             cmd = [
                 "ffmpeg", "-i", source_path,
                 "-vf", vf,
+                *self._cfr_output_args(profile["target_fps"]),
                 *self._build_video_encode_args("veryfast", 26),
                 "-an",
                 "-movflags", "+faststart",
@@ -1196,7 +1229,7 @@ class VideoProcessor:
             intro_info and (
                 intro_info['width'] != w or
                 intro_info['height'] != h or
-                intro_info['fps_normalized'] != fps or
+                not self._matches_target_fps(intro_info, fps) or
                 intro_info.get('sar', '1:1') != '1:1' or
                 intro_info.get('pix_fmt', 'yuv420p') != 'yuv420p'
             )
@@ -1207,7 +1240,7 @@ class VideoProcessor:
             main_info and (
                 main_info['width'] != w or
                 main_info['height'] != h or
-                main_info['fps_normalized'] != fps or
+                not self._matches_target_fps(main_info, fps) or
                 main_info.get('sar', '1:1') != '1:1' or
                 main_info.get('pix_fmt', 'yuv420p') != 'yuv420p'
             )
@@ -1217,7 +1250,7 @@ class VideoProcessor:
             vf_intro = self._build_video_filter(w, h, fps,
                                                 original_width=intro_info['width'],
                                                 original_height=intro_info['height'],
-                                                original_fps=intro_info['fps_normalized'],
+                                                original_fps=None,
                                                 original_pix_fmt=intro_info.get('pix_fmt'))
         else:
             vf_intro = "null"
@@ -1226,7 +1259,7 @@ class VideoProcessor:
             vf_main = self._build_video_filter(w, h, fps,
                                                original_width=main_info['width'],
                                                original_height=main_info['height'],
-                                               original_fps=main_info['fps_normalized'],
+                                               original_fps=None,
                                                original_pix_fmt=main_info.get('pix_fmt'))
         else:
             vf_main = "null"
@@ -1247,6 +1280,7 @@ class VideoProcessor:
                 "ffmpeg", "-y", "-i", intro_path, "-i", main_path,
                 "-filter_complex", filter_complex,
                 "-map", "[outv]", "-map", "[outa]",
+                *self._cfr_output_args(fps),
                 *self._build_video_encode_args("veryfast", 26),
                 *self._build_audio_encode_args(True, main_info),
                 "-movflags", "+faststart", output_path
@@ -1256,6 +1290,7 @@ class VideoProcessor:
                 "ffmpeg", "-y", "-i", intro_path, "-i", main_path,
                 "-filter_complex", filter_complex,
                 "-map", "[outv]",
+                *self._cfr_output_args(fps),
                 *self._build_video_encode_args("veryfast", 26),
                 "-an",
                 "-movflags", "+faststart", output_path
@@ -1272,8 +1307,10 @@ class VideoProcessor:
         if result and os.path.exists(output_path):
             logger.info(f"   ✅ Склейка завершена, размер: {os.path.getsize(output_path) / (1024 * 1024):.1f} MB")
             result_info = await self.get_video_info(output_path, use_cache=False)
-            if result_info:
-                logger.info(f"   🔍 Проверка: {result_info['width']}x{result_info['height']} @ {result_info['fps']:.2f} fps, аудио: {'✅' if result_info['has_audio'] else '❌'}")
+            if not result_info or not self._matches_target_fps(result_info, fps):
+                logger.error("VIDEO_CONCAT_FPS_MISMATCH | target=%s", fps)
+                return False
+            logger.info(f"   🔍 Проверка: {result_info['width']}x{result_info['height']} @ {result_info['fps']:.2f} fps, аудио: {'✅' if result_info['has_audio'] else '❌'}")
             return True
         return False
 
@@ -1924,7 +1961,7 @@ class VideoProcessor:
                     needs_normalize = (
                         clipped_info['width'] != profile['target_width'] or
                         clipped_info['height'] != profile['target_height'] or
-                        clipped_info['fps_normalized'] != profile['target_fps'] or
+                        not self._matches_target_fps(clipped_info, profile['target_fps']) or
                         clipped_info.get('sar', '1:1') != '1:1' or
                         clipped_info.get('pix_fmt', 'yuv420p') != 'yuv420p'
                     )
@@ -1995,7 +2032,7 @@ class VideoProcessor:
                 needs_normalize = (
                     clipped_info['width'] != profile['target_width'] or
                     clipped_info['height'] != profile['target_height'] or
-                    clipped_info['fps_normalized'] != profile['target_fps'] or
+                    not self._matches_target_fps(clipped_info, profile['target_fps']) or
                     clipped_info.get('sar', '1:1') != '1:1' or
                     clipped_info.get('pix_fmt', 'yuv420p') != 'yuv420p'
                 )
@@ -2234,6 +2271,13 @@ class VideoProcessor:
                 if final_info['width'] > profile['target_width'] or final_info['height'] > profile['target_height']:
                     logger.error(f"❌ Финальный файл не соответствует downscale: {final_info['width']}x{final_info['height']} > {profile['target_width']}x{profile['target_height']}")
                     return False
+
+            if not self._matches_target_fps(final_info, profile["target_fps"]):
+                logger.error(
+                    "VIDEO_FINAL_FPS_MISMATCH | nominal=%s average=%s target=%s",
+                    final_info["fps"], final_info.get("fps_avg"), profile["target_fps"],
+                )
+                return False
 
             if video_info['has_audio'] != final_info['has_audio']:
                 logger.warning(f"⚠️ Аудио не соответствует: исходное {video_info['has_audio']}, финал {final_info['has_audio']}")
