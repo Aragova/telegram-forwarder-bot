@@ -592,7 +592,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     try:
         # Late publication mappings may identify an already queued self-loop
         # echo. Suppress exact echoes before entering any Telegram RPC.
-        if not reconcile_only and job_type in {"repost_single", "repost_album", "video_delivery", "video_send"}:
+        if not reconcile_only and job_type in {"repost_single", "repost_album", "video_download", "video_process", "video_delivery", "video_send"}:
             echo_guard = getattr(repo, "quarantine_queued_self_target_echo_deliveries", None)
             ids = _extract_delivery_ids_from_payload(payload)
             if callable(echo_guard) and ids:
@@ -608,7 +608,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                         repo, "complete", job_id, worker_id,
                         finalization_started=finalization_started,
                     )
-                    if completed and job_type in {"video_delivery", "video_send"}:
+                    if completed and job_type in {"video_download", "video_process", "video_delivery", "video_send"}:
                         try:
                             cleanup_video_artifacts(payload, mode="success")
                         except Exception:
