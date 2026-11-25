@@ -133,7 +133,15 @@ class RepostCampaignRuntimeTasks:
             tasks=tasks, stop_event=self._stop_event,
             timeout_sec=timeout_sec, logger=self.logger,
         )
-        self._tasks.clear()
+        self._tasks = [task for task in tasks if not task.done()]
+        if self._tasks:
+            self.logger.error(
+                "REPOST_CAMPAIGN_RUNTIME_TASKS_DRAIN_INCOMPLETE | remaining=%s | action=retain_ownership",
+                len(self._tasks),
+            )
+            raise RuntimeError(
+                f"Не завершены фоновые задачи кампании ({len(self._tasks)}); Telegram-клиенты нельзя закрывать"
+            )
         self.logger.info("REPOST_CAMPAIGN_RUNTIME_TASKS_STOPPED | tasks=%s", len(tasks))
 
     def _cancel_started_tasks_after_failed_start(self, started_tasks_before: int) -> None:
