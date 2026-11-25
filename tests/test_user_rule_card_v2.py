@@ -257,8 +257,9 @@ def test_rule_callbacks_with_rule_id_are_not_admin_only_for_user_flows():
     source = Path("bot.py").read_text(encoding="utf-8")
     for marker in [
         'c.data.startswith("rescan_rule_menu:")',
-        'c.data.startswith("rescan_rule_fresh:")',
-        'c.data.startswith("rescan_rule_keep:")',
+        '(c.data or "").startswith("rescan_rule_fresh:")',
+        '(c.data or "").startswith("rescan_rule_fresh_confirm:")',
+        '(c.data or "").startswith("rescan_rule_keep:")',
         'c.data.startswith("startpos_prev:")',
         'c.data.startswith("startpos_next:")',
         'c.data.startswith("startpos_apply:")',

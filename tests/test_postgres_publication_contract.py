@@ -523,3 +523,19 @@ def test_keep_refuses_orphan_album_without_stable_identity(repo):
             cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
     with pytest.raises(RuntimeError,match="точной привязки"):
         repo.begin_rule_rescan(rule_id)
+
+
+def test_keep_prune_preserves_stable_album_attempt_with_zero_anchor(repo):
+    _, rule_id, deliveries, source_ids, source, target = seed(repo,138,count=2)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE delivery_attempts SET idempotency_key=%s,delivery_id=0,status='accepted',source_message_ids_json=%s::jsonb WHERE rule_id=%s",
+                (f"rule:{rule_id}:target:{target}:media_group:group-138:album",str(deliveries),rule_id))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+    active, owner = repo.begin_rule_rescan(rule_id)
+    # Both members are absent from the Telegram snapshot. Evidence still survives.
+    assert repo.rebuild_rule_keep_position(rule_id,owner_token=owner,
+        allowed_message_ids=set(),include_newer_than_message_id=max(source_ids),
+        before_message_id=max(source_ids)+1)==(0,0,0,2)
+    assert all(repo.get_delivery(d)["status"]=="faulty" for d in deliveries)
+    repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)

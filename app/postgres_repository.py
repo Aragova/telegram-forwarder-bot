@@ -4881,16 +4881,20 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                   AND p.source_thread_id IS NOT DISTINCT FROM %s
                   AND NOT EXISTS (
                       SELECT 1 FROM delivery_attempts a
-                      JOIN deliveries ad ON ad.id=a.delivery_id AND ad.rule_id=a.rule_id
-                      JOIN posts ap ON ap.id=ad.post_id
+                      LEFT JOIN deliveries ad ON ad.id=a.delivery_id AND ad.rule_id=a.rule_id
+                      LEFT JOIN posts ap ON ap.id=ad.post_id
                       WHERE a.rule_id=d.rule_id
                         AND a.status IN ('sending','accepted','verified','failed_after_send')
                         AND a.idempotency_key NOT LIKE '%%:rescan:%%'
                         AND a.idempotency_key NOT LIKE 'archived:%%'
                         AND (a.delivery_id=d.id
-                            OR (p.media_group_id IS NOT NULL AND ap.media_group_id=p.media_group_id
-                                AND ap.source_channel=p.source_channel
-                                AND ap.source_thread_id IS NOT DISTINCT FROM p.source_thread_id))
+                            OR (a.operation_kind='album' AND p.media_group_id IS NOT NULL AND (
+                                a.idempotency_key=('rule:'||a.rule_id::text||':target:'||a.target_id
+                                    ||':media_group:'||p.media_group_id||':album')
+                                OR (ap.media_group_id=p.media_group_id
+                                    AND ap.source_channel=p.source_channel
+                                    AND ap.source_thread_id IS NOT DISTINCT FROM p.source_thread_id)
+                            )))
                   )
                   AND NOT EXISTS (
                       SELECT 1 FROM telegram_publication_receipts pr
