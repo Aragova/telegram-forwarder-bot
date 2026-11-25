@@ -265,9 +265,18 @@ def publication_client_class(base):
 
                 async def publish():
                     await _bind_identity(account_id, intent, item, members)
-                    return await observe_publication(
-                        lambda: invoke(request, ordered=ordered, flood_sleep_threshold=0),
-                    )
+                    # The last readiness check must run immediately before
+                    # invoke, after all DB/identity/cooldown awaits.
+                    async def publish_fenced():
+                        if getattr(self, "publication_write_blocked", False) or (
+                            getattr(self, "publication_inbox_required", False)
+                            and getattr(self, "publication_inbox", None) is None
+                        ):
+                            intent.blocked = True
+                            raise PublicationWriteUnavailable("MTProto publication inbox no longer writable")
+                        return await invoke(request, ordered=ordered, flood_sleep_threshold=0)
+
+                    return await observe_publication(publish_fenced)
 
                 return await run_with_cooldown(
                     publish, account_scope=account_scope, peer_scope=peer_scope,
