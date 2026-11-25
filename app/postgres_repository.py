@@ -6967,6 +6967,29 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
             return int(existing["id"]) if existing else None
 
+    def find_conflicting_album_attempt(self, *, rule_id: int, target_id: str, media_group_id: str, current_key: str) -> dict[str, Any] | None:
+        """Prevent cross-cohort replay, including records written before v2 keys.
+
+        An old receipt remains authoritative for its own media group. Adding
+        a late member must be handled by an operator, not by a second send.
+        """
+        prefix = f"rule:{int(rule_id)}:target:{target_id}:media_group:{media_group_id}:album"
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT idempotency_key, status, source_message_ids_json
+                       FROM delivery_attempts
+                       WHERE rule_id=%s AND target_id::text=%s
+                         AND operation_kind='album'
+                         AND starts_with(idempotency_key,%s)
+                         AND idempotency_key<>%s
+                         AND status IN ('created','sending','accepted','verified','failed_after_send')
+                       ORDER BY id ASC LIMIT 1""",
+                    (int(rule_id), str(target_id), prefix, str(current_key)),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
     def mark_delivery_attempt_sending(self, idempotency_key: str, *, job_id: int | None = None, telegram_method: str | None = None) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
