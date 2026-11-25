@@ -5,7 +5,7 @@ import mimetypes
 from pathlib import Path
 
 from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, TelegramRetryAfter
 
 from .config import settings
 from .send_intent import PublicationWriteUnavailable, authorize_next_album_member
@@ -321,8 +321,21 @@ class SenderReuploadHelpers:
                 "sent_message_id": None,
                 "sent_count": 0,
                 "error_text": telethon_result.get("error_text") or "send_media_group вернул пустой результат",
+                "transport_attempted": botapi_entered,
+                "transport_accepted": False,
+                "authoritative_resolved": False,
+                "manual_review_required": botapi_entered,
+                "non_retryable": botapi_entered,
             }
 
+        except TelegramRetryAfter as exc:
+            # Telegram explicitly rejected this request with 429; no media
+            # group was accepted. Honor retry_after rather than quarantining
+            # an otherwise safe deferred send as an ambiguous timeout.
+            raise TransportRateLimited(
+                retry_after_seconds=exc.retry_after, backend="botapi",
+                op_name="send_media_group", key=str(target_id),
+            ) from exc
         except (TransportRateLimited, PublicationWriteUnavailable):
             raise
         except (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge) as exc:
