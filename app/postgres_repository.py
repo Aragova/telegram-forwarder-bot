@@ -1258,6 +1258,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         CREATE INDEX IF NOT EXISTS idx_campaign_publication_pending
             ON campaign_run_messages(id)
             WHERE publication_receipt IS NOT NULL AND publication_review_required;
+        CREATE TABLE IF NOT EXISTS campaign_publication_claims (
+            sender_account_id BIGINT NOT NULL,
+            target_peer_id BIGINT NOT NULL,
+            scheduled_id BIGINT NOT NULL CHECK(scheduled_id > 0),
+            campaign_message_id BIGINT NOT NULL REFERENCES campaign_run_messages(id),
+            PRIMARY KEY(sender_account_id,target_peer_id,scheduled_id)
+        );
         CREATE TABLE IF NOT EXISTS campaign_mtproto_send_intents (
             message_id BIGINT NOT NULL REFERENCES campaign_run_messages(id) ON DELETE CASCADE,
             ordinal INTEGER NOT NULL CHECK(ordinal>=0),
@@ -6540,6 +6547,16 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     groups = {r["media_group_id"] for r in rows}
                     if len(groups) != 1 or not next(iter(groups)):
                         return False
+                # Serialize claims across ordinary deliveries and campaign placements.
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                            (f"publication:{account_id}:{peer_id}",))
+                cur.execute("""
+                    SELECT 1 FROM campaign_publication_claims
+                    WHERE sender_account_id=%s AND target_peer_id=%s
+                      AND scheduled_id=ANY(%s::bigint[]) LIMIT 1
+                    """, (account_id,peer_id,pending_ids))
+                if cur.fetchone():
+                    return False
                 cur.execute(
                     """
                     INSERT INTO telegram_publication_receipts
@@ -11731,6 +11748,12 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     UPDATE campaign_run_messages m SET send_status='sending',render_mode=%s,target_id=%s,updated_at=NOW()
                     WHERE m.id=%s AND m.send_status='pending' AND m.target_id=%s
                       AND NOT EXISTS (
+                        SELECT 1 FROM campaign_run_messages same_run
+                        WHERE same_run.run_id=m.run_id AND same_run.id<>m.id
+                          AND same_run.target_id=%s
+                          AND same_run.target_thread_id IS NOT DISTINCT FROM m.target_thread_id
+                      )
+                      AND NOT EXISTS (
                         SELECT 1 FROM campaign_run_messages p
                         WHERE p.id<>m.id AND p.rule_id=m.rule_id AND p.saved_post_id=m.saved_post_id
                           AND p.target_id IN (%s,%s) AND p.target_thread_id IS NOT DISTINCT FROM m.target_thread_id
@@ -11740,7 +11763,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             OR (p.send_status='sent' AND p.sent_at >=
                                 (SELECT started_at FROM campaign_runs WHERE id=m.run_id)))
                       )
-                    """, (render_mode,target,int(message_id),original_target,target,original_target))
+                    """, (render_mode,target,int(message_id),original_target,target,target,original_target))
                 if cur.rowcount == 1:
                     return True
                 cur.execute("""
@@ -11825,15 +11848,38 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         started = datetime.fromisoformat(receipt["started_at"])
         if started.tzinfo is None:
             return False
+        pending_ids = [mid for mid,flag in zip(receipt["ids"],receipt["mask"]) if flag]
+        account,peer = receipt["account_id"],receipt["peer_id"]
         with self.connect() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                            (f"publication:{account}:{peer}",))
+                cur.execute("""
+                    SELECT 1 FROM telegram_publication_claims
+                    WHERE sender_account_id=%s AND target_peer_id=%s
+                      AND scheduled_id=ANY(%s::bigint[]) LIMIT 1
+                    """,(account,peer,pending_ids))
+                if cur.fetchone():
+                    return False
                 cur.execute("""
                     UPDATE campaign_run_messages SET publication_receipt=%s::jsonb,
                         publication_review_required=TRUE, updated_at=NOW()
                     WHERE id=%s AND send_status='sending' AND publication_receipt IS NULL
                       AND target_id=%s AND target_thread_id IS NOT DISTINCT FROM %s
                     """, (_json_dumps(receipt),int(message_id),str(receipt["peer_id"]),receipt["thread_id"]))
-                return cur.rowcount == 1
+                if cur.rowcount != 1:
+                    return False
+                cur.execute("""
+                    INSERT INTO campaign_publication_claims
+                    (sender_account_id,target_peer_id,scheduled_id,campaign_message_id)
+                    SELECT %s,%s,scheduled_id,%s
+                    FROM unnest(%s::bigint[]) AS member(scheduled_id)
+                    ON CONFLICT DO NOTHING
+                    """,(account,peer,int(message_id),pending_ids))
+                if cur.rowcount != len(pending_ids):
+                    conn.rollback()
+                    return False
+                return True
 
     def list_pending_campaign_publications(self, *, account_id: int, limit: int = 30) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -11878,15 +11924,17 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         continue
                     cur.execute("""
                         SELECT 1 FROM telegram_publication_mappings m
+                        JOIN campaign_publication_claims c USING(sender_account_id,target_peer_id,scheduled_id)
                         WHERE m.sender_account_id=%s AND m.target_peer_id=%s
                           AND m.scheduled_id=%s AND m.published_id=%s
+                          AND c.campaign_message_id=%s
                           AND NOT EXISTS (
                             SELECT 1 FROM telegram_publication_mappings x
                             WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
                               AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
                                 OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
                           )
-                        """, (receipt["account_id"],receipt["peer_id"],old,new))
+                        """, (receipt["account_id"],receipt["peer_id"],old,new,int(message_id)))
                     if not cur.fetchone():
                         return False
                 cur.execute("""
@@ -11915,7 +11963,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                       status=CASE WHEN NOT EXISTS(SELECT 1 FROM campaign_run_messages WHERE run_id=r.id AND send_status<>'sent')
                                   AND r.targets_total=(SELECT COUNT(*) FROM campaign_run_messages WHERE run_id=r.id)
                                   THEN 'sent' ELSE 'partial' END,updated_at=NOW()
-                    WHERE r.id=%s AND r.status IN ('failed','partial','sent')
+                    WHERE r.id=%s AND (r.status IN ('failed','partial','sent')
+                        OR (r.status='sending' AND r.targets_total=(SELECT COUNT(*) FROM campaign_run_messages WHERE run_id=r.id)
+                            AND NOT EXISTS(SELECT 1 FROM campaign_run_messages WHERE run_id=r.id AND send_status IN ('pending','sending'))))
                     """, (row["run_id"],))
                 return True
 

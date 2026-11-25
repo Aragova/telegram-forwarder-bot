@@ -837,3 +837,29 @@ def test_inbox_incident_survives_new_connection_and_requires_explicit_review(rep
         assert other.get_publication_inbox_incident(account)["acknowledged_at"] is None
     finally:
         other.client.close_all_connections()
+
+
+def test_campaign_scheduled_id_cannot_be_claimed_by_two_placements_or_delivery(repo):
+    from datetime import datetime, timezone
+    key, rule_id, delivery_ids, source_ids, source, target = seed(repo, uuid4().int % 10**12)
+    account = uuid4().int % 10**12 + 1
+    receipt = {"ids":[411],"mask":[True],"peer_id":int(target),"thread_id":None,
+        "account_id":account,"started_at":datetime.now(timezone.utc).isoformat(),"method":"telethon_source"}
+    def placement(post):
+        run = repo.create_campaign_run(rule_id=rule_id,saved_post_id=post,run_type="manual",
+            status="sending",show_seconds=60,started_by=None,targets_total=1)
+        mid = repo.create_campaign_run_message(run_id=run,rule_id=rule_id,saved_post_id=post,
+            target_kind="main",target_id=target,show_seconds=60)
+        assert repo.mark_campaign_run_message_sending(mid)
+        return mid
+    first, second = placement(901), placement(902)
+    assert repo.record_campaign_publication_receipt(first,receipt)
+    assert not repo.record_campaign_publication_receipt(second,receipt)
+    assert not repo.register_publication_receipt(key=key,delivery_ids=delivery_ids,rule_id=rule_id,
+        account_id=account,peer_id=int(target),thread_id=None,source_channel=source,
+        source_message_ids=source_ids,scheduled_ids=[411])
+    assert repo.register_publication_receipt(key=key,delivery_ids=delivery_ids,rule_id=rule_id,
+        account_id=account,peer_id=int(target),thread_id=None,source_channel=source,
+        source_message_ids=source_ids,scheduled_ids=[412])
+    assert not repo.record_campaign_publication_receipt(second,{**receipt,"ids":[412]})
+    assert repo.get_campaign_run_message(second)["publication_receipt"] is None
