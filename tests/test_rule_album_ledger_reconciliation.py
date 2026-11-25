@@ -654,3 +654,60 @@ def test_fresh_replay_requires_one_time_db_confirmation():
     assert confirm.index("consume_rule_rescan_confirmation") < confirm.index("_schedule_rule_ui_task")
 
 
+
+
+
+def test_reconciliation_recognizes_modern_fingerprinted_album_key():
+    from app.delivery_idempotency import build_delivery_idempotency_key
+    repo, cursor, connection = _repository()
+    modern_key = build_delivery_idempotency_key(
+        operation_kind="album", rule_id=214,
+        target_id="-100456", media_group_id="album-a",
+        source_message_ids=[11, 12, 13],
+    )
+    old_execute = cursor.execute
+
+    def execute(sql, args=None):
+        old_execute(sql, args)
+        if "FROM delivery_attempts WHERE id =" in str(sql):
+            cursor.result["idempotency_key"] = modern_key
+            cursor.result["source_message_ids_json"] = [11, 12, 13]
+
+    cursor.execute = execute
+    assert _apply(repo) == 3
+    assert connection.commits == 1
+    assert any("UPDATE deliveries SET status = 'sent'" in q
+               for q, _ in cursor.executed)
+
+
+def test_album_recovery_sql_recognizes_modern_keys_without_archived_attempts():
+    source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+    candidate_sql = source.split("def get_pending_album_ledger_candidates(", 1)[1].split(
+        "def reconcile_confirmed_album_ledger(", 1
+    )[0]
+    orphan_sql = source.split("def _quarantine_rescan_orphans(", 1)[1].split(
+        "def rebuild_rule_keep_position(", 1
+    )[0]
+    assert ":album:members:" in candidate_sql
+    assert ":album:members:" in orphan_sql
+    assert "a.idempotency_key NOT LIKE '%%:rescan:%%'" in candidate_sql
+    assert "a.idempotency_key NOT LIKE '%%:rescan:%%'" in orphan_sql
+
+
+def test_fingerprinted_album_reconciliation_keeps_original_member_vector():
+    import json
+    from app.delivery_idempotency import build_delivery_idempotency_key
+    repo, cursor, conn = _repository()
+    original = cursor.execute
+    def execute(sql, args=None):
+        original(sql, args)
+        if "FROM delivery_attempts WHERE id =" in str(sql):
+            cursor.result["delivery_id"] = 11
+            cursor.result["source_message_ids_json"] = [11, 12, 13]
+            cursor.result["idempotency_key"] = build_delivery_idempotency_key(
+                operation_kind="album", rule_id=214, target_id="-100456",
+                media_group_id="album-a", source_message_ids=[11, 12, 13])
+    cursor.execute = execute
+    assert _apply(repo) == 3 and conn.commits == 1
+    args = next(args for query, args in cursor.executed if "UPDATE delivery_attempts SET status = 'verified'" in query)
+    assert args[0] == 11 and json.loads(args[1]) == [11, 12, 13]

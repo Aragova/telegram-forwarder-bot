@@ -914,3 +914,110 @@ def test_campaign_definite_pre_rpc_failure_is_atomic_and_does_not_touch_claims(r
         assert reader.get_campaign_run_message(mid)["send_status"] == after["send_status"]
     finally:
         reader.client.close_all_connections()
+
+
+
+def test_campaign_cancel_before_send_and_delete_after_send_are_disjoint(repo):
+    _, rule_id, _, _, _, target = seed(repo, uuid4().int % 10**12)
+    def placement(saved_id):
+        run = repo.create_campaign_run(rule_id=rule_id, saved_post_id=saved_id,
+            run_type="manual", status="sending", show_seconds=60, targets_total=1, started_by=None)
+        return repo.create_campaign_run_message(run_id=run, rule_id=rule_id, saved_post_id=saved_id,
+            target_kind="main", target_id=str(target), show_seconds=60)
+    cancelled = placement(901)
+    assert not repo.mark_campaign_run_message_deleted(cancelled)
+    assert repo.mark_campaign_run_message_deleted(cancelled, expected_sent=False)
+    assert not repo.mark_campaign_run_message_sending(cancelled)
+    row = repo.get_campaign_run_message(cancelled)
+    assert row["send_status"] == "failed" and row["delete_status"] == "deleted"
+    sent = placement(902)
+    assert repo.mark_campaign_run_message_sending(sent)
+    assert not repo.mark_campaign_run_message_deleted(sent, expected_sent=False)
+    assert repo.mark_campaign_run_message_sent(sent, sent_message_id=4321)
+    assert not repo.mark_campaign_run_message_deleted(sent, expected_sent=False)
+    assert repo.mark_campaign_run_message_deleted(sent)
+    unresolved = placement(903)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE campaign_run_messages SET send_status='failed', render_mode='copy_album_unverified' WHERE id=%s", (unresolved,))
+    assert not repo.mark_campaign_run_message_deleted(unresolved, expected_sent=False)
+
+
+
+def test_stale_album_release_retires_old_job_before_new_group_claim(repo):
+    from app.delivery_idempotency import build_delivery_idempotency_key
+
+    suffix = uuid4().int % 10**12
+    seed_key, rule_id, ids, _, source, target = seed(repo, suffix, count=3)
+    assert repo.mark_delivery_attempt_failed(seed_key, status="failed_before_send", error_text="test setup")
+    old_ids = ids[:2]
+    payload = {"rule_id": rule_id, "delivery_id": old_ids[0], "delivery_ids": old_ids}
+    job_id = repo.create_job("repost_album", payload, "light")
+    key = build_delivery_idempotency_key(operation_kind="album", rule_id=rule_id,
+        target_id=target, media_group_id=f"group-{suffix}", source_message_ids=old_ids)
+    assert repo.create_delivery_attempt(delivery_id=old_ids[0], rule_id=rule_id,
+        tenant_id=1, job_id=job_id, idempotency_key=key, operation_kind="album",
+        status="created", target_id=target, source_message_ids=old_ids)
+    assert repo.mark_delivery_attempt_sending(key)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE jobs SET status='processing',locked_by='current' WHERE id=%s", (job_id,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE id=%s", (ids[2],))
+            cur.execute("UPDATE routing SET is_active=TRUE, mode='repost', next_run_at=NULL WHERE id=%s", (rule_id,))
+    def release(worker, members):
+        return repo.release_stale_album_job_members(job_id=job_id, worker_id=worker,
+            rule_id=rule_id, delivery_ids=members, idempotency_key=key)
+    assert release("current", old_ids) is None  # sending is not safe to release
+    assert repo.mark_delivery_attempt_failed(key, status="failed_before_send", error_text="membership changed")
+    assert release("stale", old_ids) is None
+    assert release("current", ids) is None
+    assert [repo.get_delivery(i)["status"] for i in ids] == ["processing", "processing", "pending"]
+    assert release("current", old_ids) == 2
+    assert [repo.get_delivery(i)["status"] for i in ids] == ["pending"] * 3
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, locked_by FROM jobs WHERE id=%s", (job_id,))
+            assert cur.fetchone() == {"status": "failed", "locked_by": None}
+    new_job = repo.take_due_delivery_and_create_job(rule_id, "2027-01-01T00:00:00+00:00")
+    assert new_job["status"] == "created" and new_job["job_id"] != job_id
+    assert [repo.get_delivery(i)["status"] for i in ids] == ["processing"] * 3
+    assert release("current", old_ids) is None
+    assert [repo.get_delivery(i)["status"] for i in ids] == ["processing"] * 3
+
+
+@pytest.mark.parametrize("job_type", ["video_download", "video_process", "video_delivery", "video_send", "repost_single", "repost_album"])
+def test_previously_quarantined_echo_still_fences_retried_job(repo, job_type):
+    suffix = uuid4().int % 10**12
+    _, rule_id, ids, _, source, _ = seed(repo, suffix, count=2)
+    echo_id, sibling = ids
+    members = ids if job_type == "repost_album" else [echo_id]
+    payload = {"rule_id": rule_id, "delivery_id": echo_id, "delivery_ids": members}
+    job_id = repo.create_job(job_type, payload, "light")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET target_id=%s WHERE id=%s", (source, rule_id))
+            cur.execute("UPDATE deliveries SET status='faulty',error_text='Self-loop: confirmed publication echo' WHERE id=%s", (echo_id,))
+            cur.execute("UPDATE jobs SET status='processing',locked_by='retried' WHERE id=%s", (job_id,))
+    def guard():
+        return repo.quarantine_queued_self_target_echo_deliveries(
+            rule_id, members, job_id=job_id, worker_id="retried")
+    # A crash after the original quarantine must not make the echo eligible.
+    assert repo.quarantine_queued_self_target_echo_deliveries(
+        rule_id, members, job_id=job_id, worker_id="stale") is None
+    assert guard() == [echo_id]
+    assert guard() == [echo_id]
+    assert repo.get_delivery(echo_id)["status"] == "faulty"
+    # Previously released unrelated album members may now be owned by a new job.
+    assert repo.get_delivery(sibling)["status"] == "processing"
+
+
+def test_same_difference_gap_preserves_acknowledgement(repo):
+    account = uuid4().int % 10**12 + 1
+    repo.record_publication_inbox_overflow(account, 0, [42])
+    incident = repo.get_publication_inbox_incident(account)
+    assert repo.acknowledge_publication_inbox_incident(account, expected_blocked_at=incident["blocked_at"], note="reviewed")
+    repo.record_publication_inbox_overflow(account, 0, [42])
+    same = repo.get_publication_inbox_incident(account)
+    assert same["blocked_at"] == incident["blocked_at"] and same["acknowledged_at"] is not None
+    repo.record_publication_inbox_overflow(account, 0, [43])
+    assert repo.get_publication_inbox_incident(account)["acknowledged_at"] is None

@@ -1,5 +1,8 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 from app.sender import SenderService
 from app.worker_resource_policy import POLICY
@@ -14,14 +17,23 @@ class _ExecutorRepo:
     def __init__(self, rows):
         self.rows = {int(k): dict(v) for k, v in rows.items()}
         self.failed_attempts = []
+        self.attempts = {}
 
-    def get_delivery_attempt_by_idempotency_key(self, _key):
-        return None
+    def get_delivery_attempt_by_idempotency_key(self, key):
+        return self.attempts.get(key)
 
-    def create_delivery_attempt(self, **_kwargs):
+    def create_delivery_attempt(self, **kwargs):
+        self.attempts.setdefault(kwargs["idempotency_key"], {
+            "status": kwargs["status"],
+            "source_message_ids_json": list(kwargs.get("source_message_ids") or []),
+        })
         return 1
 
-    def mark_delivery_attempt_sending(self, *_args, **_kwargs):
+    def mark_delivery_attempt_sending(self, key, **_kwargs):
+        attempt = self.attempts[key]
+        if attempt["status"] not in {"created", "failed_before_send"}:
+            return False
+        attempt["status"] = "sending"
         return True
 
     def mark_delivery_attempt_failed(self, key, *, status, error_text):
@@ -255,3 +267,74 @@ def test_album_executor_keeps_partial_rpc_terminal_when_audit_fails():
     ))
     assert result["retryable"] is False
     assert repo.failed_attempts[-1][1] == "failed_after_send"
+
+
+@pytest.mark.parametrize("receipt_changes,allowed", [
+    ({}, True),
+    ({"delivery_ids": [2, 1]}, True),
+    ({"delivery_ids": [1, 2, 3]}, False),
+    ({"delivery_ids": [1, 1]}, False),
+    ({"delivery_ids": [True, 2]}, False),
+    ({"delivery_ids": None}, False),
+    ({"tenant_id": 99}, False),
+    ({"rule_id": 99}, False),
+    ({"target_peer_id": -999}, False),
+    ({"target_thread_id": 123}, False),
+])
+def test_worker_reconciles_exact_legacy_album_receipt_before_billing_gate(
+    monkeypatch, receipt_changes, allowed,
+):
+    from app import worker_runtime
+    from app.delivery_idempotency import build_delivery_idempotency_key
+
+    repo = _WorkerRepo()
+    sender = _WorkerSender({"ok": True})
+    payload = {"rule_id": 1, "delivery_id": 1, "delivery_ids": [1, 2],
+               "target_id": "-100123", "target_thread_id": None, "media_group_id": "g"}
+    legacy_key = build_delivery_idempotency_key(
+        operation_kind="album", rule_id=1, target_id="-100123", media_group_id="g",
+    )
+    receipt = {"rule_id": 1, "tenant_id": 1, "delivery_ids": [1, 2],
+               "target_peer_id": -100123, "target_thread_id": None, **receipt_changes}
+    repo.get_publication_receipt = Mock(side_effect=lambda key: receipt if key == legacy_key else None)
+    billing = Mock(return_value=(False, "Подписка неактивна"))
+    monkeypatch.setattr(worker_runtime.LimitService, "can_enqueue_job", billing)
+    reconcile = AsyncMock(return_value={"ok": True, "accepted": True, "sent_message_ids": [501, 502]})
+    monkeypatch.setattr(worker_runtime, "reconcile_pending_publication", reconcile)
+    job = {"id": 15, "job_type": "repost_album", "payload_json": payload, "attempts": 0, "max_attempts": 3}
+
+    assert asyncio.run(_process_job(repo, sender, "w", "light", job, policy=POLICY, state=_InFlightState()))
+    assert sender.calls == 0
+    if allowed:
+        billing.assert_not_called()
+        reconcile.assert_awaited_once_with(sender, legacy_key)
+        assert repo.complete_calls == [15] and not repo.fail_calls
+    else:
+        billing.assert_called_once_with(1)
+        reconcile.assert_not_awaited()
+        assert len(repo.fail_calls) == 1 and not repo.complete_calls
+
+
+def test_existing_current_receipt_has_priority_over_legacy_lookup():
+    from app.single_publication_reconciliation import (
+        existing_publication_key_for_job, publication_key_for_job,
+    )
+    payload = {"rule_id": 1, "delivery_id": 1, "delivery_ids": [1, 2],
+               "target_id": "-100123", "media_group_id": "g"}
+    modern = publication_key_for_job("repost_album", payload)
+    lookup = Mock(return_value={"rule_id": 1, "tenant_id": 1})
+    repo = SimpleNamespace(get_publication_receipt=lookup)
+    assert asyncio.run(existing_publication_key_for_job(repo, "repost_album", payload, 1)) == modern
+    lookup.assert_called_once_with(modern)
+
+
+@pytest.mark.parametrize("job_type", ["repost_single", "repost_album"])
+def test_worker_lost_echo_guard_ownership_never_sends(job_type):
+    repo = _WorkerRepo()
+    repo.quarantine_queued_self_target_echo_deliveries = Mock(return_value=None)
+    sender = _WorkerSender({"ok": True})
+    job = {"id": 16, "job_type": job_type, "payload_json": {"rule_id": 1,
+           "delivery_id": 1, "delivery_ids": [1, 2]}, "attempts": 0, "max_attempts": 3}
+    assert asyncio.run(_process_job(repo, sender, "w", "light", job, policy=POLICY, state=_InFlightState()))
+    assert sender.calls == 0
+    assert not repo.complete_calls and not repo.fail_calls and not repo.retry_calls

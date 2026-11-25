@@ -32,6 +32,55 @@ def publication_key_for_job(job_type: str, payload: dict[str, Any]) -> str | Non
     )
 
 
+def _same_album_members(left: Any, right: Any) -> bool:
+    if not isinstance(left, list) or not isinstance(right, list) or not left:
+        return False
+    if any(type(value) is not int or value <= 0 for value in (*left, *right)):
+        return False
+    return len(left) == len(right) == len(set(left)) == len(set(right)) and set(left) == set(right)
+
+
+async def existing_publication_key_for_job(
+    repo: Any, job_type: str, payload: dict[str, Any], tenant_id: int,
+) -> str | None:
+    """Find a durable receipt before billing gates; never grant permission to send."""
+    key = publication_key_for_job(job_type, payload)
+    lookup = getattr(repo, "get_publication_receipt", None)
+    if not key or not callable(lookup):
+        return None
+    rule_id = int(payload.get("rule_id") or 0)
+
+    def scoped(receipt: Any) -> bool:
+        return (isinstance(receipt, dict) and receipt.get("rule_id") == rule_id
+                and receipt.get("tenant_id") == tenant_id)
+
+    if job_type == "repost_album" and payload.get("media_group_id"):
+        members = payload.get("delivery_ids") or [payload.get("delivery_id")]
+        if not _same_album_members(members, members):
+            return None
+    receipt = await run_db(lookup, key)
+    if receipt is not None:
+        return key if scoped(receipt) else None
+    if job_type != "repost_album" or not payload.get("media_group_id"):
+        return None
+    legacy = build_delivery_idempotency_key(
+        operation_kind="album", rule_id=rule_id, target_id=payload.get("target_id"),
+        media_group_id=payload["media_group_id"],
+    )
+    if legacy == key:
+        return None
+    receipt = await run_db(lookup, legacy)
+    members = payload.get("delivery_ids") or [payload.get("delivery_id")]
+    # The receipt's delivery vector was validated transactionally on insert.
+    # Group identity alone is insufficient after an album gains a late member.
+    if (scoped(receipt)
+            and str(receipt.get("target_peer_id")) == str(payload.get("target_id"))
+            and receipt.get("target_thread_id") == payload.get("target_thread_id")
+            and _same_album_members(receipt.get("delivery_ids"), members)):
+        return legacy
+    return None
+
+
 def _pending() -> dict[str, Any]:
     return {"ok": False,"accepted": True,"retryable": False,"publication_pending": True}
 

@@ -131,7 +131,7 @@ class _FakeRepo:
         self.claim_due_campaign_run_messages_for_delete_calls.append(limit)
         return list(self._due_delete_rows)
 
-    def mark_campaign_run_message_deleted(self, message_id):
+    def mark_campaign_run_message_deleted(self, message_id, *, expected_sent=True):
         self.mark_campaign_run_message_deleted_calls.append(message_id)
         for row in self._messages:
             if int(row.get("id") or 0) == int(message_id):
@@ -1999,3 +1999,21 @@ def test_invalid_canonical_campaign_target_fails_before_claim(bad_id):
     ]
     assert not repo.mark_campaign_run_message_sending_calls
     assert not renderer.calls
+
+
+
+def test_manual_delete_rejects_concurrent_send_after_unsent_snapshot():
+    repo = _FakeRepo()
+    repo._run = {"id": 10, "rule_id": 3}
+    repo._message = {"id": 33, "run_id": 10, "rule_id": 3, "send_status": "pending"}
+    def raced_delete(message_id, *, expected_sent=True):
+        assert message_id == 33 and expected_sent is False
+        repo._message["send_status"] = "sent"
+        return False
+    repo.mark_campaign_run_message_deleted = raced_delete
+    deleter = _FakeDeleter(result=None)
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=_FakeRenderer(None), deleter=deleter)
+    result = asyncio.run(runtime.delete_campaign_run_message_now(rule_id=3, run_id=10, run_message_id=33))
+    assert not result.ok
+    assert repo._message["send_status"] == "sent"
+    assert not deleter.delete_message_calls

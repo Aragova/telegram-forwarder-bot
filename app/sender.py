@@ -1,5 +1,5 @@
 from __future__ import annotations
-import logging, time, asyncio
+import logging, time, asyncio, json
 from datetime import datetime, timezone, timedelta
 from typing import Any
 from telethon.tl import types as tl_types
@@ -42,6 +42,8 @@ TERMINAL_NON_RETRYABLE_DELIVERY_REASONS = (
     "copy_single_uncertain_no_fallback",
     "telethon_send_accepted_target_id_unresolved_non_retryable",
     "telethon_one_by_one_send_accepted_target_id_unresolved_non_retryable",
+    "self_loop_single_accepted_unverified_no_resend",
+    "self_loop_album_accepted_unverified_no_resend",
 )
 
 
@@ -1278,6 +1280,34 @@ class SenderService:
             normalized_mode,
             normalized_schedule_mode,
         )
+        # A previous worker can quarantine a confirmed self-loop echo and
+        # crash before completing its job. That delivery must never reach a
+        # new Telegram RPC merely because no attempt was created.
+        async def check_quarantined_echo() -> dict | bool | None:
+            lookup = getattr(self.db, "get_delivery", None)
+            if not callable(lookup):
+                return None
+            row = await run_db(lookup, int(delivery_id))
+            if not isinstance(row, dict):
+                return None
+            status = str(row.get("status") or "").lower()
+            reason = str(row.get("error_text") or "").lower()
+            if status == "sent":
+                return True
+            if status == "faulty" and (
+                "self-loop: confirmed publication echo" in reason
+                or "self_loop" in reason
+            ):
+                return {
+                    "ok": False, "retryable": False, "accepted": False,
+                    "manual_review_required": True, "non_retryable": True,
+                    "error_text": "self_loop_echo_delivery_already_quarantined",
+                }
+            return None
+
+        early_echo = await check_quarantined_echo()
+        if early_echo is not None:
+            return early_echo
         idempotency_key = build_delivery_idempotency_key(operation_kind="single", delivery_id=int(delivery_id), target_id=str(target_id))
         from .single_publication_reconciliation import reconcile_pending_publication
         pending_result = await reconcile_pending_publication(self, idempotency_key)
@@ -1375,6 +1405,16 @@ class SenderService:
             rule = await run_db(self.db.get_rule, int(rule_id))
             if not rule:
                 raise RuntimeError(f"Правило #{rule_id} не найдено для repost_single")
+            # A competing recovery may have fenced this delivery during
+            # identity persistence. Recheck immediately before the transport.
+            late_echo = await check_quarantined_echo()
+            if late_echo is not None:
+                await run_db(
+                    self.db.mark_delivery_attempt_failed, idempotency_key,
+                    status="failed_before_send",
+                    error_text="self_loop_echo_delivery_already_quarantined",
+                )
+                return late_echo
             with publication_scope(intent):
                 ok = await self._deliver_single(
                     rule,
@@ -1458,6 +1498,7 @@ class SenderService:
         schedule_mode: str = "interval",
         job_type: str | None = None,
         delivery_ids: list[int] | None = None,
+        pre_send_echo_guard=None,
     ) -> bool:
         normalized_schedule_mode = str(schedule_mode or "interval")
         normalized_mode = str(mode or "repost")
@@ -1473,7 +1514,52 @@ class SenderService:
         if not album_delivery_ids and delivery_id is not None:
             album_delivery_ids = [int(delivery_id)]
         album_source_ids = list(album_delivery_ids)
-        idempotency_key = build_delivery_idempotency_key(operation_kind="album", rule_id=int(rule_id), target_id=str(target_id), media_group_id=media_group_id, source_message_ids=album_source_ids)
+        idempotency_key = build_delivery_idempotency_key(
+            operation_kind="album", rule_id=int(rule_id), target_id=str(target_id),
+            media_group_id=media_group_id, source_message_ids=album_source_ids,
+        )
+        # Existing production attempts used a group-only key. Reuse it only
+        # for exactly the same immutable delivery vector, never for a changed
+        # album that could otherwise inherit another member's sent IDs.
+        if media_group_id:
+            old_key = build_delivery_idempotency_key(
+                operation_kind="album", rule_id=int(rule_id), target_id=str(target_id),
+                media_group_id=media_group_id,
+            )
+            if old_key != idempotency_key:
+                old_attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, old_key)
+                if isinstance(old_attempt, dict) and str(old_attempt.get("status") or "") not in {"failed_before_send", ""}:
+                    old_members = old_attempt.get("source_message_ids_json") or []
+                    if isinstance(old_members, str):
+                        try:
+                            old_members = json.loads(old_members)
+                        except (TypeError, ValueError):
+                            old_members = []
+                    if (
+                        isinstance(old_members, list)
+                        and sorted(old_members) == sorted(album_delivery_ids)
+                    ):
+                        idempotency_key = old_key
+                    else:
+                        error = "album_member_set_changed_manual_review_no_resend"
+                        for album_id in album_delivery_ids:
+                            await run_db(self._mark_delivery_faulty_sync, album_id, error)
+                        return _terminal_non_retryable_result(error)
+            conflict_lookup = getattr(self.db, "find_conflicting_album_attempt", None)
+            if callable(conflict_lookup):
+                conflict = await run_db(
+                    conflict_lookup, rule_id=int(rule_id), target_id=str(target_id),
+                    media_group_id=str(media_group_id), current_key=idempotency_key,
+                )
+                if conflict:
+                    error = "album_conflicting_member_vector_manual_review_no_resend"
+                    logger.warning(
+                        "ALBUM_MEMBER_VECTOR_CONFLICT | rule=%s | target=%s | old_key=%s | new_key=%s",
+                        rule_id, target_id, conflict.get("idempotency_key"), idempotency_key,
+                    )
+                    for album_id in album_delivery_ids:
+                        await run_db(self._mark_delivery_faulty_sync, album_id, error)
+                    return _terminal_non_retryable_result(error)
         from .single_publication_reconciliation import reconcile_pending_publication
         pending_result = await reconcile_pending_publication(self, idempotency_key)
         if pending_result is not None:
@@ -1481,7 +1567,28 @@ class SenderService:
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
-        if attempt_status == "verified" and cached_ids:
+        ledger_members = (attempt or {}).get("source_message_ids_json") if isinstance(attempt, dict) else None
+        if isinstance(ledger_members, str):
+            try:
+                ledger_members = json.loads(ledger_members)
+            except (TypeError, ValueError):
+                ledger_members = None
+        ledger_cached_ids = list(cached_ids)
+        if attempt_status in {"verified", "accepted"} and cached_ids and len(cached_ids) == len(album_delivery_ids):
+            # The album key fingerprints a SET of members. A legacy verified
+            # attempt may store those members in a different order. Align
+            # each target ID with its source delivery, never by positional zip.
+            if (not isinstance(ledger_members, list)
+                    or len(ledger_members) != len(album_delivery_ids)
+                    or any(type(member_id) is not int for member_id in ledger_members)
+                    or len(set(ledger_members)) != len(ledger_members)
+                    or set(ledger_members) != set(album_delivery_ids)
+                    or len(set(cached_ids)) != len(cached_ids)):
+                error = "album_cache_member_provenance_unavailable_no_resend"
+                return _terminal_non_retryable_result(error)
+            cached_map = dict(zip(ledger_members, cached_ids))
+            cached_ids = [cached_map[member_id] for member_id in album_delivery_ids]
+        if attempt_status == "verified" and len(cached_ids) == len(album_delivery_ids) and len(set(cached_ids)) == len(cached_ids):
             logger.info("DELIVERY_ATTEMPT_VERIFIED_CACHE_HIT | operation=album | key=%s | sent_message_ids=%s", idempotency_key, cached_ids)
             await run_db(
                 self._mark_album_deliveries_sent_sync,
@@ -1506,22 +1613,27 @@ class SenderService:
                 target_thread_id=target_thread_id,
             )
             verified_ids = normalize_valid_sent_message_ids(
-                (verification.get("sent_message_ids") or cached_ids) if verification.get("ok") else []
+                verification.get("sent_message_ids") if verification.get("ok") else []
             )
-            if verification.get("ok") and len(verified_ids) == len(album_delivery_ids):
+            # The verifier reports a set of Telegram IDs, often sorted by
+            # ID. It does not provide a new delivery-to-message association.
+            if (verification.get("ok")
+                    and len(verified_ids) == len(cached_ids)
+                    and set(verified_ids) == set(cached_ids)):
                 promoted = await run_db(
                     self.db.mark_delivery_attempt_verified,
-                    idempotency_key, sent_message_ids=verified_ids,
+                    idempotency_key,
+                    sent_message_ids=ledger_cached_ids,
                 )
                 if promoted:
                     await run_db(
                         self._mark_album_deliveries_sent_sync,
-                        album_delivery_ids, sent_message_ids=verified_ids,
+                        album_delivery_ids, sent_message_ids=cached_ids,
                         target_id=str(target_id), delivery_method="idempotency_album_cache_reconciled",
                     )
                     logger.info(
                         "REPOST_ALBUM_CACHE_RECONCILED | rule_id=%s | delivery_ids=%s | target_ids=%s",
-                        rule_id, album_delivery_ids, verified_ids,
+                        rule_id, album_delivery_ids, cached_ids,
                     )
                     return True
         if attempt_status in {"sending", "accepted", "failed_after_send"}:
@@ -1544,6 +1656,27 @@ class SenderService:
         logger.info("DELIVERY_ATTEMPT_SENDING | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
         intent = PublicationIntent(self.db, idempotency_key)
         try:
+            # INSERT ON CONFLICT preserves the original vector. Re-read it
+            # after acquiring the send right, including a concurrent insert
+            # between the initial lookup and creation. Never infer its order
+            # from the retried job or the membership fingerprint.
+            claimed_attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
+            claimed_members = claimed_attempt.get("source_message_ids_json") if isinstance(claimed_attempt, dict) else None
+            if isinstance(claimed_members, str):
+                try:
+                    claimed_members = json.loads(claimed_members)
+                except (TypeError, ValueError):
+                    claimed_members = None
+            if (not isinstance(claimed_members, list)
+                    or len(claimed_members) != len(album_delivery_ids)
+                    or any(type(member_id) is not int for member_id in claimed_members)
+                    or len(set(claimed_members)) != len(claimed_members)
+                    or set(claimed_members) != set(album_delivery_ids)):
+                error = "album_cache_member_provenance_unavailable_no_resend"
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key,
+                             status="failed_before_send", error_text=error)
+                return _terminal_non_retryable_result(error)
+            album_delivery_ids = list(claimed_members)
             rule = await run_db(self.db.get_rule, int(rule_id))
             if not rule:
                 raise RuntimeError(f"Правило #{rule_id} не найдено для repost_album")
@@ -1559,8 +1692,36 @@ class SenderService:
             )
             if not album_rows:
                 raise RuntimeError(f"Не найден processing-альбом media_group_id={media_group_id}")
-            album_delivery_ids = [int(r["delivery_id"]) for r in album_rows] or album_delivery_ids
+            actual_delivery_ids = [int(r["delivery_id"]) for r in album_rows]
+            if sorted(actual_delivery_ids) != sorted(album_delivery_ids):
+                # No RPC was entered. Return a terminal, explicitly fenced
+                # result rather than requeueing the now-stale job forever.
+                error = "album_membership_changed_pre_send_manual_review"
+                await run_db(
+                    self.db.mark_delivery_attempt_failed, idempotency_key,
+                    status="failed_before_send", error_text=error,
+                )
+                return {
+                    "ok": False, "retryable": False, "accepted": False,
+                    "manual_review_required": True,
+                    "album_membership_changed_pre_send": True,
+                    "idempotency_key": idempotency_key, "error_text": error,
+                }
+            # Preserve the attempt's immutable delivery vector ordering
+            # throughout the RPC and target-ID ledger, even if DB rows arrive
+            # in a different order.
+            rows_by_delivery = {int(row["delivery_id"]): row for row in album_rows}
+            if len(rows_by_delivery) != len(album_delivery_ids):
+                raise RuntimeError("Album rows have duplicate delivery IDs")
+            album_rows = [rows_by_delivery[member_id] for member_id in album_delivery_ids]
 
+            if pre_send_echo_guard is not None:
+                echoes = await pre_send_echo_guard(album_delivery_ids)
+                if echoes is None or echoes:
+                    error = "self_loop_album_echo_fenced_before_send"
+                    await run_db(self.db.mark_delivery_attempt_failed, idempotency_key,
+                                 status="failed_before_send", error_text=error)
+                    return {"ok": False, "retryable": False, "self_loop_echo_fenced": True}
             with publication_scope(intent):
                 ok = await self._deliver_album(
                     rule,

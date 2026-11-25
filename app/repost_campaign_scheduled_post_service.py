@@ -31,6 +31,10 @@ def scheduled_post_now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class _ScheduledClaimLost(RuntimeError):
+    pass
+
+
 class RepostCampaignScheduledPostService:
     def __init__(self, *, repo, campaign_runtime, target_checker=None, logger_=None):
         self.repo = repo
@@ -39,7 +43,7 @@ class RepostCampaignScheduledPostService:
         self.logger = logger_ or logging.getLogger("forwarder")
 
     def _can_edit(self, row: dict) -> bool:
-        return str(row.get("status")) in {"draft", "ready"}
+        return str(row.get("status")) in {"draft", "ready"} and row.get("campaign_run_id") is None
 
     def _can_cancel(self, row: dict) -> bool:
         return str(row.get("status")) in {"draft", "ready", "scheduled"}
@@ -92,7 +96,11 @@ class RepostCampaignScheduledPostService:
         saved_post = self.repo.get_saved_post(saved_post_id)
         if not saved_post:
             return RepostCampaignActionResult(ok=False, action="update_draft_saved_post", rule_id=int(row.get("rule_id") or 0), error_text="Рекламный пост не найден")
-        self.repo.update_campaign_scheduled_post(scheduled_post_id, saved_post_id=int(saved_post_id), post_snapshot=self._build_post_snapshot(saved_post))
+        if not self.repo.update_campaign_scheduled_post(scheduled_post_id, saved_post_id=int(saved_post_id), post_snapshot=self._build_post_snapshot(saved_post)):
+            return RepostCampaignActionResult(
+                ok=False, action="update_draft_saved_post", rule_id=int(row.get("rule_id") or 0),
+                error_text="Запланированный пост больше нельзя редактировать",
+            )
         self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=int(row.get("rule_id") or 0), event_type="saved_post_updated", actor_id=actor_id)
         self.logger.info("VIP_SCHEDULED_POST_SAVED_POST_UPDATED | scheduled_post_id=%s", scheduled_post_id)
         return RepostCampaignActionResult(ok=True, action="update_draft_saved_post", rule_id=int(row.get("rule_id") or 0), saved_post_id=int(saved_post_id), extra={"scheduled_post_id": scheduled_post_id})
@@ -105,7 +113,13 @@ class RepostCampaignScheduledPostService:
         rule = self.repo.get_rule(rule_id)
         targets = self.repo.list_rule_repost_campaign_targets(rule_id, active_only=True) or []
         snapshot = self._build_targets_from_current_campaign(rule=rule, targets=targets, include_main_target=include_main_target)
-        total = self.repo.replace_campaign_scheduled_post_targets(scheduled_post_id=scheduled_post_id, rule_id=rule_id, targets=snapshot)
+        try:
+            total = self.repo.replace_campaign_scheduled_post_targets(scheduled_post_id=scheduled_post_id, rule_id=rule_id, targets=snapshot)
+        except ValueError:
+            return RepostCampaignActionResult(
+                ok=False, action="update_draft_targets", rule_id=rule_id,
+                error_text="Запланированный пост больше нельзя редактировать",
+            )
         self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="targets_snapshot_saved", actor_id=actor_id, extra={"targets_total": total})
         self.logger.info("VIP_SCHEDULED_POST_TARGETS_SNAPSHOT_SAVED | scheduled_post_id=%s | targets_total=%s", scheduled_post_id, total)
         return RepostCampaignActionResult(ok=True, action="update_draft_targets", rule_id=rule_id, extra={"scheduled_post_id": scheduled_post_id, "targets_total": total})
@@ -120,7 +134,11 @@ class RepostCampaignScheduledPostService:
                 raise ValueError()
         except Exception:
             return RepostCampaignActionResult(ok=False, action="update_draft_show_seconds", rule_id=int(row.get("rule_id") or 0), error_text="Некорректный срок показа")
-        self.repo.update_campaign_scheduled_post(scheduled_post_id, show_seconds=normalized)
+        if not self.repo.update_campaign_scheduled_post(scheduled_post_id, show_seconds=normalized):
+            return RepostCampaignActionResult(
+                ok=False, action="update_draft_show_seconds", rule_id=int(row.get("rule_id") or 0),
+                error_text="Запланированный пост больше нельзя редактировать",
+            )
         self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=int(row.get("rule_id") or 0), event_type="show_seconds_updated", actor_id=actor_id, extra={"show_seconds": normalized})
         self.logger.info("VIP_SCHEDULED_POST_SHOW_SECONDS_UPDATED | scheduled_post_id=%s | show_seconds=%s", scheduled_post_id, normalized)
         return RepostCampaignActionResult(ok=True, action="update_draft_show_seconds", rule_id=int(row.get("rule_id") or 0), extra={"show_seconds": normalized})
@@ -147,7 +165,13 @@ class RepostCampaignScheduledPostService:
             return RepostCampaignActionResult(ok=True, action="add_manual_target", rule_id=rule_id, extra={"scheduled_post_id": scheduled_post_id, "already_exists": True})
         if not any(str(t.get("target_id")) == str(target_id) and t.get("target_thread_id") == target_thread_id for t in normalized_targets):
             normalized_targets.append({"target_kind": "extra", "target_id": str(target_id), "target_thread_id": target_thread_id, "target_title": target_title or str(target_id), "is_active": True, "metadata": {"source": "manual_input", "added_by": actor_id}})
-        total = self.repo.replace_campaign_scheduled_post_targets(scheduled_post_id=scheduled_post_id, rule_id=rule_id, targets=normalized_targets)
+        try:
+            total = self.repo.replace_campaign_scheduled_post_targets(scheduled_post_id=scheduled_post_id, rule_id=rule_id, targets=normalized_targets)
+        except ValueError:
+            return RepostCampaignActionResult(
+                ok=False, action="add_manual_target", rule_id=rule_id,
+                error_text="Запланированный пост больше нельзя редактировать",
+            )
         self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="manual_target_added", actor_id=actor_id, extra={"target_id": str(target_id), "target_thread_id": target_thread_id, "targets_total": total})
         readiness = self.build_readiness(scheduled_post_id=scheduled_post_id)
         return RepostCampaignActionResult(ok=True, action="add_manual_target", rule_id=rule_id, extra={"scheduled_post_id": scheduled_post_id, "targets_total": total, "readiness": readiness})
@@ -160,7 +184,11 @@ class RepostCampaignScheduledPostService:
         min_dt = scheduled_post_now_utc() + timedelta(seconds=VIP_SCHEDULED_POST_MIN_START_DELAY_SECONDS)
         if not dt or dt < min_dt:
             return RepostCampaignActionResult(ok=False, action="update_draft_scheduled_at", rule_id=int(row.get("rule_id") or 0), error_text="Время запуска должно быть в будущем")
-        self.repo.update_campaign_scheduled_post(scheduled_post_id, scheduled_at=dt.isoformat(), timezone_offset_minutes=VIP_SCHEDULED_POST_TIMEZONE_OFFSET_MINUTES, timezone_label=VIP_SCHEDULED_POST_TIMEZONE_LABEL)
+        if not self.repo.update_campaign_scheduled_post(scheduled_post_id, scheduled_at=dt.isoformat(), timezone_offset_minutes=VIP_SCHEDULED_POST_TIMEZONE_OFFSET_MINUTES, timezone_label=VIP_SCHEDULED_POST_TIMEZONE_LABEL):
+            return RepostCampaignActionResult(
+                ok=False, action="update_draft_scheduled_at", rule_id=int(row.get("rule_id") or 0),
+                error_text="Запланированный пост больше нельзя редактировать",
+            )
         self.repo.log_campaign_scheduled_post_event(scheduled_post_id=scheduled_post_id, rule_id=int(row.get("rule_id") or 0), event_type="scheduled_at_updated", actor_id=actor_id)
         self.logger.info("VIP_SCHEDULED_POST_SCHEDULED_AT_UPDATED | scheduled_post_id=%s", scheduled_post_id)
         return RepostCampaignActionResult(ok=True, action="update_draft_scheduled_at", rule_id=int(row.get("rule_id") or 0), extra={"scheduled_at": dt.isoformat()})
@@ -273,18 +301,42 @@ class RepostCampaignScheduledPostService:
         launch = await run_db(self.campaign_runtime.build_campaign_launch_readiness,rule_id=rule_id)
         if launch.get("active_placement") or int(launch.get("delete_failed") or 0) > 0:
             await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_active_placement_warning", actor_id=actor_id, extra={"active_placement": bool(launch.get("active_placement")), "delete_failed": int(launch.get("delete_failed") or 0), "active_run_id": launch.get("active_run_id")})
-        if not await run_db(self.repo.mark_campaign_scheduled_post_processing, scheduled_post_id, actor_id=actor_id):
+        snapshot = await run_db(
+            self.repo.claim_campaign_scheduled_post_snapshot,
+            scheduled_post_id, actor_id=actor_id,
+        )
+        if not snapshot:
             return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Пост уже обрабатывается или запускался")
-        targets_snapshot = await run_db(self.repo.list_campaign_scheduled_post_targets, scheduled_post_id, active_only=True) or []
+        # Publish only the row and targets claimed under a single SQL lock.
+        targets_snapshot = snapshot["targets_snapshot"]
+        if not targets_snapshot or not snapshot.get("saved_post_id") or int(snapshot.get("show_seconds") or 0) <= 0:
+            # No RPC or campaign_run was created. Do not strand an editable
+            # draft in needs_review because its target snapshot changed
+            # between readiness and claim.
+            reset = await run_db(
+                self.repo.reset_campaign_scheduled_post_after_send_now_failure,
+                scheduled_post_id, status="draft",
+                error_text="Снимок запуска изменился; требуется повторная настройка",
+            )
+            return RepostCampaignActionResult(
+                ok=False, action="send_now_scheduled_post", rule_id=rule_id,
+                error_text=(
+                    "Состав публикации изменился. Проверьте настройки и запустите снова."
+                    if reset else "Состояние запуска изменилось; требуется проверка."
+                ),
+            )
         await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_started", actor_id=actor_id)
         captured_run_id: int | None = None
         def _remember_run(campaign_run_id: int) -> None:
             nonlocal captured_run_id
+            if not self.repo.set_campaign_scheduled_post_campaign_run_id(scheduled_post_id, int(campaign_run_id), expected_locked_at=snapshot.get("locked_at")):
+                raise _ScheduledClaimLost("Захват запланированного поста потерян")
             captured_run_id = int(campaign_run_id)
-            self.repo.set_campaign_scheduled_post_campaign_run_id(scheduled_post_id, int(campaign_run_id))
 
         try:
-            result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(row.get("saved_post_id") or 0), show_seconds=int(row.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=scheduled_post_id, admin_id=actor_id, on_campaign_run_created=_remember_run)
+            result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(snapshot.get("saved_post_id") or 0), show_seconds=int(snapshot.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=scheduled_post_id, admin_id=actor_id, on_campaign_run_created=_remember_run)
+        except _ScheduledClaimLost as exc:
+            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text=str(exc))
         except Exception as exc:
             current = await run_db(self.repo.get_campaign_scheduled_post, scheduled_post_id) or {}
             run_id = int(current.get("campaign_run_id") or captured_run_id or 0)
@@ -468,11 +520,15 @@ class RepostCampaignScheduledPostService:
             captured_run_id: int | None = None
             def _remember_run(campaign_run_id: int) -> None:
                 nonlocal captured_run_id
+                if not self.repo.set_campaign_scheduled_post_campaign_run_id(sid, int(campaign_run_id), expected_locked_at=row.get("locked_at")):
+                    raise _ScheduledClaimLost("Захват запланированного поста потерян")
                 captured_run_id = int(campaign_run_id)
-                self.repo.set_campaign_scheduled_post_campaign_run_id(sid, int(campaign_run_id))
 
             try:
                 result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(row.get("saved_post_id") or 0), show_seconds=int(row.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=sid, on_campaign_run_created=_remember_run)
+            except _ScheduledClaimLost:
+                self.logger.warning("VIP_SCHEDULED_POST_CLAIM_LOST | scheduled_post_id=%s", sid)
+                continue
             except Exception as exc:
                 self.logger.exception("VIP_SCHEDULED_POST_LAUNCH_FAILED | scheduled_post_id=%s", sid)
                 current = await run_db(self.repo.get_campaign_scheduled_post, sid) or {}

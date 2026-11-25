@@ -8796,13 +8796,44 @@ async def _shutdown_runtime(
         await asyncio.gather(reaction_worker_task, return_exceptions=True)
     reaction_worker_task = None
 
+    # Drain publication evidence before stopping its retry tasks or closing
+    # Telethon. If both the SQLite spool and fsynced fallback journal were
+    # unavailable, failing shutdown loudly is safer than silently discarding
+    # the only in-memory scheduled-to-published mappings.
+    if telethon_client is not None:
+        raw_publication_client = getattr(telethon_client, "raw", telethon_client)
+        flush_publication = getattr(raw_publication_client, "flush_publication_inbox", None)
+        if callable(flush_publication):
+            try:
+                await asyncio.wait_for(flush_publication(), timeout=5)
+            except Exception:
+                logger.exception("PUBLICATION_SHUTDOWN_FLUSH_FAILED | recovery=next_startup")
+        while getattr(raw_publication_client, "publication_evidence_unpersisted", False):
+            raw_publication_client.publication_write_blocked = True
+            logger.critical(
+                "PUBLICATION_UNSAFE_SHUTDOWN | evidence_only_in_memory | "
+                "action=restore_local_storage_or_database"
+            )
+            await asyncio.sleep(5)
+            try:
+                await asyncio.wait_for(flush_publication(), timeout=5)
+            except Exception:
+                logger.exception("PUBLICATION_SHUTDOWN_RETRY_FAILED")
+
     await stop_background_tasks()
     if sender_service is not None:
         await sender_service.video_processor.shutdown()
 
     if close_telegram_clients and campaign_drain_complete and telethon_client:
+        raw_telethon = getattr(telethon_client, "raw", telethon_client)
+        while getattr(raw_telethon, "publication_evidence_unpersisted", False):
+            raw_telethon.publication_write_blocked = True
+            await asyncio.sleep(5)
+            try:
+                await asyncio.wait_for(raw_telethon.flush_publication_inbox(), timeout=5)
+            except Exception:
+                logger.exception("PUBLICATION_SHUTDOWN_RETRY_FAILED")
         try:
-            raw_telethon = getattr(telethon_client, "raw", telethon_client)
             await raw_telethon.disconnect()
         except Exception as exc:
             logger.warning("Ошибка при закрытии Telethon: %s", exc)

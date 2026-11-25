@@ -15,7 +15,7 @@ from typing import Any
 from aiogram.exceptions import TelegramEntityTooLarge
 
 from .delivery_result import normalize_delivery_result
-from .single_publication_reconciliation import publication_key_for_job, reconcile_pending_publication
+from .single_publication_reconciliation import existing_publication_key_for_job, reconcile_pending_publication
 from .job_service import (
     enqueue_video_download,
     enqueue_video_delivery_fallback,
@@ -506,18 +506,16 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     usage_service = UsageService(repo)
     limit_service = LimitService(repo, subscription_service, usage_service)
 
-    publication_key = publication_key_for_job(job_type, payload)
-    receipt_lookup = getattr(repo, "get_publication_receipt", None)
-    receipt = await asyncio.to_thread(receipt_lookup, publication_key) if publication_key and callable(receipt_lookup) else None
-    reconcile_only = isinstance(receipt, dict) and receipt.get("rule_id") == int(payload.get("rule_id") or 0) and receipt.get("tenant_id") == tenant_id
+    publication_key = await existing_publication_key_for_job(repo, job_type, payload, tenant_id)
+    reconcile_only = publication_key is not None
     can_enqueue, enqueue_reason = (True, None) if reconcile_only else await asyncio.to_thread(limit_service.can_enqueue_job, tenant_id)
     if not can_enqueue:
         logger.warning("Worker блокирует выполнение job #%s tenant_id=%s: %s", job_id, tenant_id, enqueue_reason)
         if hasattr(repo, "create_billing_event"):
-            sub = subscription_service.get_active_subscription(int(tenant_id)) or {}
-            usage_today = usage_service.get_today_usage(int(tenant_id)) or {}
+            sub = await asyncio.to_thread(subscription_service.get_active_subscription, int(tenant_id)) or {}
+            usage_today = await asyncio.to_thread(usage_service.get_today_usage, int(tenant_id)) or {}
             event_type = "subscription_blocked_action" if str(enqueue_reason or "").strip().lower() == "подписка неактивна" else "limit_job_blocked"
-            repo.create_billing_event(
+            await asyncio.to_thread(repo.create_billing_event,
                 int(tenant_id),
                 event_type,
                 event_source="worker_runtime",
@@ -540,9 +538,9 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         if not can_video:
             logger.warning("Видео не обработано: лимит тарифа tenant_id=%s reason=%s", tenant_id, video_reason or "unknown")
             if hasattr(repo, "create_billing_event"):
-                sub = subscription_service.get_active_subscription(int(tenant_id)) or {}
-                usage_today = usage_service.get_today_usage(int(tenant_id)) or {}
-                repo.create_billing_event(
+                sub = await asyncio.to_thread(subscription_service.get_active_subscription, int(tenant_id)) or {}
+                usage_today = await asyncio.to_thread(usage_service.get_today_usage, int(tenant_id)) or {}
+                await asyncio.to_thread(repo.create_billing_event,
                     int(tenant_id),
                     "limit_video_blocked",
                     event_source="worker_runtime",
@@ -590,6 +588,34 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     )
     result: dict[str, Any] | None = None
     try:
+        # Late publication mappings may identify an already queued self-loop
+        # echo. Suppress exact echoes before entering any Telegram RPC.
+        if not reconcile_only and job_type in {"repost_single", "repost_album", "video_download", "video_process", "video_delivery", "video_send"}:
+            echo_guard = getattr(repo, "quarantine_queued_self_target_echo_deliveries", None)
+            ids = _extract_delivery_ids_from_payload(payload)
+            if callable(echo_guard) and ids:
+                echoes = await asyncio.to_thread(
+                    echo_guard, int(payload.get("rule_id") or 0), ids,
+                    job_id=job_id, worker_id=worker_id,
+                )
+                if echoes is None:
+                    logger.warning("JOB_FENCED_STALE_ECHO_GUARD | job_id=%s", job_id)
+                    return True
+                if echoes:
+                    logger.warning(
+                        "SELF_LOOP_ECHO_FENCED_BEFORE_SEND | rule=%s | job=%s | echoes=%s",
+                        payload.get("rule_id"), job_id, echoes,
+                    )
+                    completed = await _finish_owned_job(
+                        repo, "complete", job_id, worker_id,
+                        finalization_started=finalization_started,
+                    )
+                    if completed and job_type in {"video_download", "video_process", "video_delivery", "video_send"}:
+                        try:
+                            cleanup_video_artifacts(payload, mode="success")
+                        except Exception:
+                            logger.exception("SELF_LOOP_ECHO_VIDEO_CLEANUP_FAILED | job=%s", job_id)
+                    return True
         if not reconcile_only and job_type in {"repost_single", "repost_album", "repost_campaign_send_copy", "repost_campaign_delete_copy", "video_delivery", "video_send"}:
             guarded = await asyncio.to_thread(
                 _complete_job_if_delivery_already_sent,
@@ -620,7 +646,19 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             result = delivery_result.to_dict()
             ok = delivery_result.ok
         elif job_type == "repost_album":
-            raw_result = await sender_service.execute_repost_album_from_job(**payload)
+            async def pre_send_echo_guard(member_ids):
+                return await asyncio.to_thread(
+                    echo_guard, int(payload.get("rule_id") or 0), member_ids,
+                    job_id=job_id, worker_id=worker_id,
+                )
+
+            album_payload = dict(payload)
+            if callable(echo_guard):
+                album_payload["pre_send_echo_guard"] = pre_send_echo_guard
+            raw_result = await sender_service.execute_repost_album_from_job(**album_payload)
+            if isinstance(raw_result, dict) and raw_result.get("self_loop_echo_fenced"):
+                await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
+                return True
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
             ok = delivery_result.ok
@@ -711,6 +749,38 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         else:
             await _finish_owned_job(repo, "fail", job_id, worker_id, f"Неподдерживаемый job_type: {job_type}", finalization_started=finalization_started)
             logger.warning("JOB FAILED | %s завершил задачу #%s с ошибкой: неподдерживаемый тип", worker_id, job_id)
+            return True
+
+        if isinstance(result, dict) and result.get("album_membership_changed_pre_send"):
+            # No send RPC was invoked. After checking job ownership and the
+            # exact failed-before-send attempt, let the scheduler regroup
+            # the album from the authoritative logical queue.
+            release = getattr(repo, "release_stale_album_job_members", None)
+            released = None
+            if callable(release):
+                finalization_started.set()
+                try:
+                    released = await asyncio.to_thread(
+                        release, job_id=job_id, worker_id=worker_id,
+                        rule_id=int(payload.get("rule_id") or 0),
+                        delivery_ids=_extract_delivery_ids_from_payload(payload),
+                        idempotency_key=str(result.get("idempotency_key") or ""),
+                    )
+                except Exception:
+                    logger.exception("ALBUM_STALE_PAYLOAD_RELEASE_FAILED | job_id=%s", job_id)
+            if released is None:
+                # A failed/vetoed release must not abandon processing rows.
+                # CAS also rejects an owner whose transaction already committed.
+                await _finish_owned_job(
+                    repo, "defer", job_id, worker_id,
+                    "Альбом изменился; безопасный сброс недоступен", 60,
+                    finalization_started=finalization_started,
+                )
+            else:
+                logger.warning(
+                    "ALBUM_STALE_PAYLOAD_RELEASED | job_id=%s | members=%s | count=%s",
+                    job_id, payload.get("delivery_ids"), released,
+                )
             return True
 
         if result is not None:
@@ -908,13 +978,13 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         return True
 
     except Exception as exc:
-        if publication_key and callable(receipt_lookup) and not finalization_started.is_set():
+        if not finalization_started.is_set():
             try:
-                latest = await asyncio.to_thread(receipt_lookup, publication_key)
+                latest_key = await existing_publication_key_for_job(repo, job_type, payload, tenant_id)
             except Exception:
-                latest = None
+                latest_key = None
                 logger.exception("JOB_PUBLICATION_RECEIPT_LOOKUP_FAILED | job_id=%s", job_id)
-            if isinstance(latest, dict) and latest.get("rule_id") == int(payload.get("rule_id") or 0) and latest.get("tenant_id") == tenant_id:
+            if latest_key is not None:
                 await _finish_owned_job(repo, "defer", job_id, worker_id, "", 30, finalization_started=finalization_started)
                 return True
         guarded = await asyncio.to_thread(

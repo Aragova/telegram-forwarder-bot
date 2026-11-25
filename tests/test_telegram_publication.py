@@ -357,11 +357,14 @@ def test_startup_overflow_keeps_live_evidence_without_enabling_writer(monkeypatc
             await bind()
         assert client.publication_inbox_ready.done()
         assert not hasattr(client, "publication_inbox")
-        assert len(saved) == 1024
+        # Overflow must never drop a publication mapping, even in the
+        # non-session test fallback that has no durable SQLite spool.
+        assert len(saved) == 1025
         await client.handler(types.UpdateDeleteScheduledMessages(
             peer=peer, messages=[1026], sent_messages=[3026],
         ))
-        assert len(saved) == 1025
+        await client.flush_publication_inbox()
+        assert len(saved) == 1026
         assert saved[-1] == (1026, 3026)
 
     asyncio.run(scenario())
@@ -385,7 +388,7 @@ def test_difference_total_limit_does_not_discard_recoverable_page(server_unavail
             chats=[], users=[], intermediate_state=state,
         )
         too_long = types.updates.DifferenceTooLong(pts=20000)
-        responses = [too_long, too_long, state] if server_unavailable else [too_long, page]
+        responses = [too_long, too_long] if server_unavailable else [too_long, page]
         client = AsyncMock(side_effect=responses)
         inbox = SimpleNamespace(repository=object(), sender_account_id=7,
                                 record=AsyncMock(return_value=True))
@@ -398,11 +401,869 @@ def test_difference_total_limit_does_not_discard_recoverable_page(server_unavail
         assert requests[1].pts == requests[0].pts == 1
         assert requests[1].pts_limit == 1000
         if server_unavailable:
-            assert isinstance(requests[2], functions.updates.GetStateRequest)
+            # No third call from the server's newer pts: it could skip
+            # exact scheduled-to-published mappings between checkpoints.
+            assert len(requests) == 2
             inbox.record.assert_not_awaited()
+            recovery._advance.assert_not_awaited()
         else:
             assert len(requests) == 2
             inbox.record.assert_awaited_once()
-        recovery._advance.assert_awaited_once_with(cursor, 20000, 0, date)
+            recovery._advance.assert_awaited_once_with(cursor, 20000, 0, date)
 
     asyncio.run(scenario())
+
+
+def test_spool_append_during_empty_drain_is_not_stranded(monkeypatch, tmp_path):
+    """An append while the last pending() read is suspended must cause a new read."""
+    import threading
+    from telethon import types
+    from app import telegram_publication
+
+    class ControlledSpool:
+        instance = None
+
+        def __init__(self, _path):
+            ControlledSpool.instance = self
+            self.rows = []
+            self.next_id = 0
+            self.armed = False
+            self.stall_once = True
+            self.empty_read = threading.Event()
+            self.release_read = threading.Event()
+
+        def append(self, peer, old, new):
+            self.next_id += 1
+            self.rows.append((self.next_id, peer, old, new))
+
+        def pending(self, _limit=128):
+            snapshot = self.rows[:]
+            if self.armed and not snapshot and self.stall_once:
+                self.stall_once = False
+                self.empty_read.set()
+                assert self.release_read.wait(5)
+                return snapshot
+            return snapshot
+
+        def acknowledge(self, row_id):
+            self.rows = [row for row in self.rows if row[0] != row_id]
+
+    monkeypatch.setattr(telegram_publication, "PublicationInbox", PublicationInbox)
+    monkeypatch.setattr(
+        __import__("app.publication_mapping_spool", fromlist=["PublicationMappingSpool"]),
+        "PublicationMappingSpool", ControlledSpool,
+    )
+
+    async def scenario():
+        recorded = []
+
+        def record(account, peer, pairs):
+            recorded.extend(pairs)
+
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(record_telegram_publication_mappings=record)
+        bind = telegram_publication.prepare_publication_inbox(client, repo)
+        await bind()
+        spool = ControlledSpool.instance
+        spool.armed = True
+        peer = types.PeerChannel(99)
+        first = asyncio.create_task(client.handler(types.UpdateDeleteScheduledMessages(
+            peer=peer, messages=[10], sent_messages=[110],
+        )))
+        try:
+            assert await asyncio.to_thread(spool.empty_read.wait, 5)
+            await client.handler(types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[11], sent_messages=[111],
+            ))
+        finally:
+            spool.release_read.set()
+        await asyncio.wait_for(first, 5)
+        assert recorded == [(10, 110), (11, 111)]
+        assert spool.rows == []
+
+    asyncio.run(scenario())
+
+
+def test_sqlite_spool_failure_persists_to_postgres_without_next_update(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as spool_module
+
+    class BrokenSpool:
+        def __init__(self, _path):
+            pass
+
+        def pending(self, _limit=128):
+            return []
+
+        def append(self, *_args):
+            raise OSError("disk full")
+
+    monkeypatch.setattr(spool_module, "PublicationMappingSpool", BrokenSpool)
+
+    async def scenario():
+        saved = []
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(record_telegram_publication_mappings=lambda account, peer, pairs: saved.extend(pairs))
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[12], sent_messages=[112],
+        ))
+        assert saved == [(12, 112)]
+        assert client.publication_write_blocked is True
+
+    asyncio.run(scenario())
+
+
+def test_emergency_mapping_reaches_postgres_when_sqlite_append_and_pending_fail(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as spool_module
+
+    class BrokenSpool:
+        instance = None
+
+        def __init__(self, _path):
+            BrokenSpool.instance = self
+            self.read_failed = False
+
+        def pending(self, _limit=128):
+            if self.read_failed:
+                raise OSError("SQLite corruption prevents pending read")
+            return []
+
+        def append(self, *_args):
+            raise OSError("SQLite corruption prevents append")
+
+    monkeypatch.setattr(spool_module, "PublicationMappingSpool", BrokenSpool)
+
+    async def scenario():
+        recorded = []
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=lambda _account, _peer, pairs: recorded.extend(pairs),
+        )
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        BrokenSpool.instance.read_failed = True
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[21], sent_messages=[121],
+        ))
+        # One update, both SQLite operations failed. The mapping is still
+        # persisted directly, before any retry or future Telegram update.
+        assert recorded == [(21, 121)]
+        assert client.publication_write_blocked is True
+
+    asyncio.run(scenario())
+
+
+def test_transient_postgres_failure_retries_durable_spool_without_permanent_write_lock(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as spool_module
+
+    import threading
+    acknowledged = threading.Event()
+
+    class MemorySpool:
+        instance = None
+
+        def __init__(self, _path):
+            MemorySpool.instance = self
+            self.rows = []
+            self.next_id = 0
+
+        def append(self, peer, old, new):
+            self.next_id += 1
+            self.rows.append((self.next_id, peer, old, new))
+
+        def pending(self, _limit=128):
+            return self.rows[:]
+
+        def acknowledge(self, row_id):
+            self.rows = [row for row in self.rows if row[0] != row_id]
+            acknowledged.set()
+
+    monkeypatch.setattr(spool_module, "PublicationMappingSpool", MemorySpool)
+
+    async def scenario():
+        calls = []
+        persisted = []
+
+        def record(_account, _peer, pairs):
+            calls.append(list(pairs))
+            if len(calls) == 1:
+                raise OSError("temporary PostgreSQL outage")
+            persisted.extend(pairs)
+
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(record_telegram_publication_mappings=record)
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[33], sent_messages=[133],
+        ))
+        assert await asyncio.to_thread(acknowledged.wait, 5)
+        assert len(calls) == 2
+        assert persisted == [(33, 133)]
+        assert MemorySpool.instance.rows == []
+        assert not getattr(client, "publication_write_blocked", False)
+
+    asyncio.run(scenario())
+
+
+def test_durable_sqlite_spool_over_1024_does_not_falsely_block_publication(tmp_path):
+    """A full memory cache is not evidence loss when every pair is in SQLite."""
+    from telethon import types
+    from app.telegram_publication import prepare_publication_inbox
+
+    async def scenario():
+        state = {"db_up": False}
+        persisted = []
+        incidents = []
+
+        def record(_account, _peer, pairs):
+            if not state["db_up"]:
+                raise OSError("temporary PostgreSQL outage")
+            persisted.extend(pairs)
+
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=record,
+            record_publication_inbox_overflow=lambda *args: incidents.append(args),
+        )
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        await prepare_publication_inbox(client, repo)()
+        peer = types.PeerChannel(99)
+        for old in range(1, 1026):
+            await client.handler(types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[old], sent_messages=[old + 5000],
+            ))
+        assert not getattr(client, "publication_write_blocked", False)
+        assert incidents == []
+
+        state["db_up"] = True
+        await client.flush_publication_inbox()
+        assert persisted == [(old, old + 5000) for old in range(1, 1026)]
+        assert not getattr(client, "publication_write_blocked", False)
+
+    asyncio.run(scenario())
+
+
+def test_sqlite_outage_coalesces_101_emergency_retries_into_one_task(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as spool_module
+
+    class BrokenSpool:
+        instance = None
+
+        def __init__(self, _path):
+            BrokenSpool.instance = self
+            self.broken = False
+
+        def pending(self, _limit=128):
+            if self.broken:
+                raise OSError("SQLite pending unavailable")
+            return []
+
+        def append(self, *_args):
+            raise OSError("SQLite append unavailable")
+
+    monkeypatch.setattr(spool_module, "PublicationMappingSpool", BrokenSpool)
+
+    async def scenario():
+        def record(_account, _peer, _pairs):
+            raise OSError("PostgreSQL unavailable")
+
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        await telegram_publication.prepare_publication_inbox(
+            client, SimpleNamespace(record_telegram_publication_mappings=record),
+        )()
+        BrokenSpool.instance.broken = True
+        peer = types.PeerChannel(99)
+        for old in range(1, 102):
+            await client.handler(types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[old], sent_messages=[old + 5000],
+            ))
+        def active_retries():
+            return [
+                task for task in asyncio.all_tasks()
+                if task.get_name() == "telegram-publication-persist-retry" and not task.done()
+            ]
+
+        assert len(active_retries()) == 1
+        await asyncio.sleep(0.30)
+        assert len(active_retries()) == 1
+        assert client.publication_write_blocked is True
+        for task in active_retries():
+            task.cancel()
+        await asyncio.gather(*active_retries(), return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+
+def test_emergency_drain_cannot_strand_concurrent_recovered_spool_append(monkeypatch, tmp_path):
+    """SQLite recovers while emergency PostgreSQL write is awaiting: both mappings drain."""
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as spool_module
+
+    class RecoveringSpool:
+        instance = None
+
+        def __init__(self, _path):
+            RecoveringSpool.instance = self
+            self.first_append_fails = True
+            self.rows = []
+            self.sequence = 0
+
+        def pending(self, _limit=128):
+            return self.rows[:]
+
+        def append(self, peer, old, new):
+            if self.first_append_fails:
+                self.first_append_fails = False
+                raise OSError("SQLite append temporarily unavailable")
+            self.sequence += 1
+            self.rows.append((self.sequence, peer, old, new))
+
+        def acknowledge(self, row_id):
+            self.rows = [row for row in self.rows if row[0] != row_id]
+
+    monkeypatch.setattr(spool_module, "PublicationMappingSpool", RecoveringSpool)
+
+    async def scenario():
+        persisted = []
+        emergency_started = asyncio.Event()
+        allow_emergency = asyncio.Event()
+        original_record = telegram_publication.PublicationInbox.record
+
+        async def pause_emergency_record(self, peer, old, new):
+            if old == [11]:
+                emergency_started.set()
+                await allow_emergency.wait()
+            return await original_record(self, peer, old, new)
+
+        monkeypatch.setattr(
+            telegram_publication.PublicationInbox, "record", pause_emergency_record,
+        )
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=lambda _account, _peer, pairs: persisted.extend(pairs),
+        )
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        peer = types.PeerChannel(99)
+        first = asyncio.create_task(client.handler(types.UpdateDeleteScheduledMessages(
+            peer=peer, messages=[11], sent_messages=[111],
+        )))
+        try:
+            await asyncio.wait_for(emergency_started.wait(), 5)
+            # This append occurs after the last empty spool.pending() read,
+            # but before the first emergency mapping reaches PostgreSQL.
+            await client.handler(types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[12], sent_messages=[112],
+            ))
+            assert RecoveringSpool.instance.rows
+        finally:
+            allow_emergency.set()
+        await asyncio.wait_for(first, 5)
+        assert persisted == [(11, 111), (12, 112)]
+        assert RecoveringSpool.instance.rows == []
+        assert not [
+            task for task in asyncio.all_tasks()
+            if task.get_name() == "telegram-publication-persist-retry" and not task.done()
+        ]
+
+    asyncio.run(scenario())
+
+
+
+def test_general_topic_valid_reply_message_id_is_not_topic_header():
+    now = datetime.now(timezone.utc)
+    msg = SimpleNamespace(
+        id=100, chat_id=-100, from_scheduled=True, out=True,
+        reply_to=SimpleNamespace(reply_to_msg_id=82, reply_to_top_id=None),
+        date=now,
+    )
+    kwargs = dict(
+        peer_id=-100, published_id=100, thread_id=1,
+        source_ids={2}, before_id=99, started_at=now,
+        broadcast=False,
+    )
+    assert verified_published_message(msg, **kwargs)
+    msg.reply_to.forum_topic = True
+    assert not verified_published_message(msg, **kwargs)
+    msg.reply_to.forum_topic = False
+    msg.reply_to.reply_to_top_id = 5
+    assert not verified_published_message(msg, **kwargs)
+
+
+def test_spool_append_failure_retains_incident_evidence_even_if_postgres_fails(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as spool_module
+
+    class FailedSpool:
+        def __init__(self, _path):
+            pass
+
+        def pending(self, _limit=128):
+            return []
+
+        def append(self, *_args):
+            raise OSError("corrupt SQLite")
+
+    monkeypatch.setattr(spool_module, "PublicationMappingSpool", FailedSpool)
+
+    async def scenario():
+        incidents = []
+        recorded = []
+        db_up = False
+        class Repository:
+            def record_telegram_publication_mappings(self, account, peer, pairs):
+                if not db_up:
+                    raise ConnectionError("PostgreSQL offline")
+                recorded.extend(pairs)
+
+            def record_publication_inbox_overflow(self, account, peer, ids):
+                incidents.append((account, peer, list(ids)))
+
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        bind = telegram_publication.prepare_publication_inbox(client, Repository())
+        peer = types.PeerChannel(99)
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=peer, messages=[28], sent_messages=[128],
+        ))
+        assert client.publication_write_blocked is True
+        db_up = True
+        with pytest.raises(RuntimeError, match="overflow"):
+            await bind()
+        # Startup may not reopen sends after disk evidence fails;
+        # it must commit an incident that survives this process.
+        assert recorded == [(28, 128)]
+        assert len(incidents) == 1
+        assert incidents[0][0] == 7
+        assert incidents[0][2] == [28]
+
+    asyncio.run(scenario())
+
+
+
+def test_fallback_publication_journal_replays_after_restart_and_requires_review(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as module
+
+    class FailedSpool:
+        def __init__(self, _path):
+            pass
+        def append(self, *_args):
+            raise OSError("SQLite damaged")
+        def pending(self, _limit=128):
+            return []
+
+    async def scenario():
+        session_file = str(tmp_path / "sender.session")
+        peer = types.PeerChannel(99)
+
+        def client():
+            c = SimpleNamespace(session=SimpleNamespace(filename=session_file))
+            c.add_event_handler = lambda callback, _event: setattr(c, "handler", callback)
+            async def get_me():
+                return SimpleNamespace(id=7)
+            c.get_me = get_me
+            return c
+
+        # A first process loses its session SQLite file; its event has to
+        # survive in the independent journal even without a DB connection.
+        monkeypatch.setattr(module, "PublicationMappingSpool", FailedSpool)
+        first = client()
+        telegram_publication.prepare_publication_inbox(first, SimpleNamespace())
+        await first.handler(types.UpdateDeleteScheduledMessages(
+            peer=peer, messages=[41], sent_messages=[141],
+        ))
+        journal = module.PublicationFallbackJournal(
+            tmp_path / "sender.publication-mappings.fallback.jsonl"
+        )
+        assert len(journal.pending()) == 1
+        assert first.publication_write_blocked is True
+
+        # New process, recovered SQLite/PostgreSQL: replay before opening
+        # sends and leave a durable operator incident.
+        class RecoveredSpool:
+            def __init__(self, _path):
+                pass
+            def pending(self, _limit=128):
+                return []
+            def append(self, *_args):
+                raise AssertionError("No new Telegram event required")
+
+        monkeypatch.setattr(module, "PublicationMappingSpool", RecoveredSpool)
+        stored, incidents = [], []
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=lambda account, peer, pairs: stored.extend(pairs),
+            record_publication_inbox_overflow=lambda account, peer, ids: incidents.append((account, peer, ids)),
+        )
+        second = client()
+        await telegram_publication.prepare_publication_inbox(second, repo)()
+        assert stored == [(41, 141)]
+        assert len(incidents) == 1
+        assert incidents[0][0] == 7
+        assert incidents[0][2] == [41]
+        assert journal.pending() == []
+        assert second.publication_write_blocked is True
+
+    asyncio.run(scenario())
+
+
+def test_fallback_journal_keeps_old_bytes_if_write_cannot_complete(tmp_path, monkeypatch):
+    from app.publication_mapping_spool import PublicationFallbackJournal
+    journal = PublicationFallbackJournal(tmp_path / "fallback.jsonl")
+    journal.append(-10099, [12, 13], [112, 113])
+    assert journal.pending() == [(-10099, [12, 13], [112, 113])]
+    import os
+    original = journal.path.read_bytes()
+    def fail(*_args):
+        raise OSError("replace failed")
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", fail)
+        with pytest.raises(OSError):
+            journal.clear()
+    assert journal.path.read_bytes() == original
+    journal.clear()
+    assert journal.pending() == []
+
+
+
+def test_irrecoverable_difference_records_durable_incident_without_advancing_cursor():
+    from unittest.mock import AsyncMock
+    from telethon import types
+    from app.publication_difference_recovery import PublicationDifferenceRecovery
+
+    async def scenario():
+        date = datetime.now(timezone.utc)
+        saved_incidents = []
+        repo = SimpleNamespace(
+            record_publication_inbox_overflow=lambda account, peer, ids:
+                saved_incidents.append((account, peer, ids)),
+        )
+        client = AsyncMock(
+            side_effect=[
+                types.updates.DifferenceTooLong(pts=8888),
+                types.updates.DifferenceTooLong(pts=8888),
+            ],
+        )
+        inbox = SimpleNamespace(repository=repo, sender_account_id=7)
+        recovery = PublicationDifferenceRecovery(client, inbox)
+        recovery._advance = AsyncMock()
+        cursor = {"pts": 42, "qts": 0, "state_date": date, "version": 1}
+        assert await recovery._read_page(cursor) is False
+        assert saved_incidents == [(7, 0, [42])]
+        assert client.publication_write_blocked is True
+        recovery._advance.assert_not_awaited()
+    asyncio.run(scenario())
+
+
+
+def test_corrupt_fallback_journal_cannot_strand_new_emergency_mapping(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as module
+
+    class FailedSpool:
+        def __init__(self, _path):
+            pass
+        def pending(self, _limit=128):
+            return []
+        def append(self, *_args):
+            raise OSError("SQLite unavailable")
+
+    def partial_append(self, *_args):
+        self.path.write_bytes(b'{"incomplete":')
+        raise OSError("Journal write interrupted")
+
+    monkeypatch.setattr(module, "PublicationMappingSpool", FailedSpool)
+    monkeypatch.setattr(module.PublicationFallbackJournal, "append", partial_append)
+
+    async def scenario():
+        saved, incidents = [], []
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+        async def get_me():
+            return SimpleNamespace(id=7)
+        client.get_me = get_me
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=lambda account, peer, pairs: saved.extend(pairs),
+            record_publication_inbox_overflow=lambda account, peer, ids: incidents.append((account, peer, ids)),
+        )
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[55], sent_messages=[155],
+        ))
+        assert saved == [(55, 155)]
+        assert len(incidents) == 1 and incidents[0][2] == [55]
+        assert client.publication_write_blocked is True
+        assert client.publication_evidence_unpersisted is False
+        journal = tmp_path / "sender.publication-mappings.fallback.jsonl"
+        assert journal.read_bytes() == b'{"incomplete":'
+        tasks = [task for task in asyncio.all_tasks()
+                 if task.get_name() == "telegram-publication-persist-retry"]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_damaged_journal_preserves_valid_records_and_separates_new_append(tmp_path):
+    from app.publication_mapping_spool import PublicationFallbackJournal
+    journal = PublicationFallbackJournal(tmp_path / "fallback.jsonl")
+    journal.append(-10099, [1], [101])
+    with journal.path.open("ab") as stream:
+        stream.write(b'{"incomplete":')
+    journal.append(-10099, [2], [102])
+    assert journal.read_recoverable() == ([(-10099, [1], [101]), (-10099, [2], [102])], True)
+    assert b'{"incomplete":\n' in journal.path.read_bytes()
+    with pytest.raises(RuntimeError):
+        journal.pending()
+
+
+def test_journal_io_waits_for_thread_completion_on_cancellation():
+    import threading
+    from app.telegram_publication import _journal_io
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    def write():
+        started.set()
+        try:
+            assert release.wait(5)
+        finally:
+            finished.set()
+    async def scenario():
+        task = asyncio.create_task(_journal_io(write))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("postgres_fails", [False, True])
+def test_cancelled_emergency_handler_waiting_for_journal_lock_retains_evidence(
+    monkeypatch, tmp_path, postgres_fails,
+):
+    import threading
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as module
+
+    class BrokenSpool:
+        def __init__(self, _path):
+            pass
+
+        def pending(self, _limit=128):
+            return []
+
+        def append(self, *_args):
+            raise OSError("SQLite unavailable")
+
+    monkeypatch.setattr(module, "PublicationMappingSpool", BrokenSpool)
+
+    async def scenario():
+        started, release = threading.Event(), threading.Event()
+        saved = set()
+        db_up = not postgres_fails
+
+        def record(_account, _peer, pairs):
+            if (41, 141) in pairs and not started.is_set():
+                started.set()
+                assert release.wait(5)
+            if not db_up:
+                raise OSError("PostgreSQL unavailable")
+            saved.update(pairs)
+
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(record_telegram_publication_mappings=record)
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        journal = module.PublicationFallbackJournal(
+            tmp_path / "sender.publication-mappings.fallback.jsonl"
+        )
+        peer = types.PeerChannel(99)
+
+        def event(old):
+            return types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[old], sent_messages=[old + 100],
+            )
+
+        async def wait_until(predicate):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+        first = asyncio.create_task(client.handler(event(41)))
+        second = None
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            second = asyncio.create_task(client.handler(event(42)))
+            await asyncio.wait_for(
+                wait_until(lambda: client.publication_evidence_unpersisted), 5,
+            )
+            assert not second.done()
+            second.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await second
+            assert client.publication_evidence_unpersisted
+            release.set()
+            await asyncio.wait_for(first, 5)
+            if postgres_fails:
+                # The retry must persist the cancelled handler's vector
+                # to the fallback journal while PostgreSQL is still down.
+                async def wait_for_journal():
+                    while not any(
+                        old == [42] and new == [142]
+                        for _, old, new in await asyncio.to_thread(journal.pending)
+                    ):
+                        await asyncio.sleep(0.01)
+
+                await asyncio.wait_for(wait_for_journal(), 5)
+                db_up = True
+            await asyncio.wait_for(client.flush_publication_inbox(), 5)
+            assert saved == {(41, 141), (42, 142)}
+            assert not client.publication_evidence_unpersisted
+        finally:
+            release.set()
+            tasks = [first] + ([second] if second is not None else [])
+            tasks += [
+                task for task in asyncio.all_tasks()
+                if task.get_name() == "telegram-publication-persist-retry"
+            ]
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+
+@pytest.mark.parametrize("sqlite_fails", [False, True])
+def test_cancelled_initial_sqlite_append_keeps_exact_mapping(monkeypatch, tmp_path, sqlite_fails):
+    import threading
+    from telethon import types
+    from app import telegram_publication
+    from app.publication_mapping_spool import PublicationMappingSpool
+
+    started, release = threading.Event(), threading.Event()
+    original_append = PublicationMappingSpool.append
+
+    def blocked_append(self, *args):
+        started.set()
+        assert release.wait(5)
+        if sqlite_fails:
+            raise OSError("SQLite write failed")
+        return original_append(self, *args)
+
+    monkeypatch.setattr(PublicationMappingSpool, "append", blocked_append)
+
+    async def scenario():
+        saved = set()
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=lambda _account, _peer, pairs: saved.update(pairs),
+        )
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        task = asyncio.create_task(client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[51], sent_messages=[151],
+        )))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            assert client.publication_evidence_unpersisted
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+            await asyncio.wait_for(client.flush_publication_inbox(), 5)
+            assert saved == {(51, 151)}
+            assert not client.publication_evidence_unpersisted
+            assert bool(getattr(client, "publication_write_blocked", False)) is sqlite_fails
+        finally:
+            release.set()
+            tasks = [task] + [
+                item for item in asyncio.all_tasks()
+                if item.get_name() == "telegram-publication-persist-retry"
+            ]
+            for item in tasks:
+                if not item.done():
+                    item.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+

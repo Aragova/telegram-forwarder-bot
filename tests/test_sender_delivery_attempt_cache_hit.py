@@ -257,3 +257,30 @@ def test_inflight_cached_attempt_is_not_finalized_by_competing_worker():
     ))
     assert result["retryable"] is True
     assert result["manual_review_required"] is True
+
+
+
+def test_repost_single_retried_after_echo_quarantine_never_sends():
+    class EchoRepo(FakeRepo):
+        def get_delivery(self, _delivery_id):
+            return {
+                "status": "faulty",
+                "error_text": "Self-loop: confirmed publication echo",
+            }
+        def get_delivery_attempt_by_idempotency_key(self, _key):
+            raise AssertionError("Echo guard must run before a publication attempt")
+
+    repo = EchoRepo()
+    service = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=repo)
+
+    async def must_not_send(*_args, **_kwargs):
+        raise AssertionError("A quarantined self-loop echo must never reach Telegram")
+
+    service._deliver_single = must_not_send
+    result = asyncio.run(service.execute_repost_single_from_job(
+        rule_id=1, delivery_id=10, message_id=11,
+        source_channel="@src", target_id="-1001",
+    ))
+    assert result["ok"] is False
+    assert result["retryable"] is False
+    assert result["manual_review_required"] is True

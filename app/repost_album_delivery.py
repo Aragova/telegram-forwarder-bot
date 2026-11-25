@@ -5,6 +5,8 @@ import logging
 
 from .delivery_idempotency import normalize_valid_sent_message_ids
 from .runtime_utils import run_db
+from .transport_policy import TransportRateLimited
+from .send_intent import PublicationWriteUnavailable
 from .repost_caption import get_repost_caption_override, caption_override_content
 
 
@@ -110,6 +112,10 @@ class RepostAlbumDelivery:
                         for m in source_messages
                     ],
                 )
+        except (TransportRateLimited, PublicationWriteUnavailable):
+            # Telegram rate limits and missing publication prerequisites are
+            # deferrals, not a cue to immediately perform another source read.
+            raise
         except Exception as exc:
             logger.warning(
                 "Не удалось заранее получить preview альбома %s -> %s: %s",
@@ -892,73 +898,21 @@ class RepostAlbumDelivery:
                 return True
 
             if is_self_loop and reupload_candidate_sent_ids:
-                if any(int(x) in set(message_ids) for x in reupload_candidate_sent_ids):
-                    logger.warning(
-                        "SELF_LOOP_SENT_ID_COLLISION | rule_id=%s | delivery_id=%s | source_message_ids=%s | candidate_sent_message_ids=%s | action=reject_as_new_target",
-                        rule.id, (delivery_ids[0] if delivery_ids else None), message_ids, reupload_candidate_sent_ids,
-                    )
-                    return False
+                # Candidate IDs are NOT publication proof.  Never mark the
+                # delivery sent or react to a message that was not verified.
+                # Retain the durable attempt as accepted/uncertain to forbid
+                # replay after a restart or rescan.
+                error_text = "self_loop_album_accepted_unverified_no_resend"
                 logger.warning(
-                    "SELF_LOOP_ALBUM_ACCEPTED_UNVERIFIED | rule_id=%s | delivery_ids=%s | candidate_sent_message_ids=%s | action=mark_sent_no_second_send",
+                    "SELF_LOOP_ALBUM_UNVERIFIED | rule_id=%s | delivery_ids=%s | candidate_ids=%s | action=manual_review",
                     rule.id, delivery_ids, reupload_candidate_sent_ids,
                 )
-                reaction_message_id = int(reupload_candidate_sent_ids[0])
-                logger.info(
-                    "SELF_LOOP_REACTION_TARGET_RESOLVED | rule_id=%s | delivery_id=%s | source_message_ids=%s | accepted_target_message_ids=%s | reaction_target_message_id=%s | method=reupload_album",
-                    rule.id, (delivery_ids[0] if delivery_ids else None), message_ids, reupload_candidate_sent_ids, reaction_message_id,
-                )
-                async def _apply_unverified_album_reaction():
-                    return await owner._add_reaction_for_rule_if_possible(
-                        rule=rule,
-                        target_id=target_id,
-                        sent_message_id=reaction_message_id,
-                        source_channel=str(source_channel or ""),
-                        source_message_ids=message_ids,
-                        delivery_id=(delivery_ids[0] if delivery_ids else None),
-                        allow_unverified_self_loop_target=True,
-                    )
-
-                if hasattr(owner, "_run_post_send_step_safe"):
-                    reaction_result = await owner._run_post_send_step_safe(
-                        step_name="reaction_after_reupload_album_self_loop_unverified",
-                        rule_id=rule.id,
-                        delivery_id=delivery_ids[0] if delivery_ids else None,
-                        idempotency_key=idempotency_key,
-                        accepted_sent_message_ids=reupload_candidate_sent_ids,
-                        coro_factory=_apply_unverified_album_reaction,
-                    )
-                else:
-                    try:
-                        reaction_result = {"ok": True, "result": await _apply_unverified_album_reaction()}
-                    except Exception as exc:
-                        reaction_result = {"ok": False, "error": str(exc)}
-                if _reaction_applied_or_enqueued(reaction_result):
-                    logger.info("SELF_LOOP_REACTION_APPLIED | rule_id=%s | target_id=%s | reaction_target_message_id=%s", rule.id, target_id, reaction_message_id)
-                else:
-                    reaction_payload = reaction_result.get("result") if isinstance(reaction_result, dict) and isinstance(reaction_result.get("result"), dict) else reaction_result
-                    reaction_reason = reaction_payload.get("reason") if isinstance(reaction_payload, dict) else None
-                    reaction_error = reaction_result.get("error") if isinstance(reaction_result, dict) else None
-                    logger.warning(
-                        "SELF_LOOP_REACTION_FAILED_NON_FATAL | rule_id=%s | delivery_id=%s | target_id=%s | reaction_target_message_id=%s | reason=%s",
-                        rule.id, (delivery_ids[0] if delivery_ids else None), target_id, reaction_message_id, reaction_reason or reaction_error or "unknown",
-                    )
-                await owner._log_delivery_final_success(
-                    rule_id=rule.id, delivery_ids=delivery_ids, final_method="reupload_album_self_loop_unverified",
-                    source_channel=source_channel, target_id=target_id, source_message_ids=message_ids,
-                    sent_message_id=int(reupload_candidate_sent_ids[0]), sent_message_ids=reupload_candidate_sent_ids,
-                    verify_result=verified,
-                    extra={
-                        "caption_delivery_mode": caption_mode, "requires_builder": requires_builder,
-                        "verification_ok": False, "post_send_warning": "target_message_not_found_after_send",
-                        "candidate_sent_message_ids": reupload_candidate_sent_ids, "second_send_blocked": True,
-                    },
-                )
-                await run_db(
-                    owner._mark_album_deliveries_sent_sync,
-                    delivery_ids=delivery_ids, sent_message_ids=reupload_candidate_sent_ids,
-                    target_id=str(target_id), delivery_method="reupload_album_self_loop_unverified",
-                )
-                return True
+                for disputed_id in delivery_ids:
+                    if idempotency_key and hasattr(owner.db, "mark_delivery_faulty_if_attempt_unverified"):
+                        await run_db(owner.db.mark_delivery_faulty_if_attempt_unverified, disputed_id, idempotency_key, error_text)
+                    else:
+                        await run_db(owner._mark_delivery_faulty_sync, disputed_id, error_text)
+                return False
 
             if upload_confirmed_by_send_result:
                 # Telethon accepted an album upload, but the channel has not

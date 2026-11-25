@@ -42,7 +42,15 @@ class PublicationDifferenceRecovery:
             self.repository.get_publication_recovery_cursor, self.sender_account_id,
         )
         if cursor is not None:
-            return
+            for _ in range(_MAX_PAGES):
+                if not await self._read_page(cursor):
+                    return
+                cursor = await asyncio.to_thread(
+                    self.repository.get_publication_recovery_cursor, self.sender_account_id,
+                )
+                if cursor is None:
+                    raise RuntimeError("Publication recovery cursor disappeared")
+            raise RuntimeError("Publication recovery requires another startup pass")
         state = await self._rpc(functions.updates.GetStateRequest())
         await asyncio.to_thread(
             self.repository.initialize_publication_recovery_cursor,
@@ -80,11 +88,39 @@ class PublicationDifferenceRecovery:
                 pts_limit=1000,
             ))
         if isinstance(difference, types.updates.DifferenceTooLong):
-            # The server still cannot provide the range. Rebaseline for future
-            # sends, without treating old receipts as confirmed.
-            logger.warning("PUBLICATION_DIFFERENCE_RANGE_UNAVAILABLE | account=%s", self.sender_account_id)
-            state = await self._rpc(functions.updates.GetStateRequest())
-            await self._advance(cursor, state.pts, state.qts, state.date)
+            # This is a *read* cursor only until its page has been persisted.
+            # Never persist an advanced checkpoint from GetState/TooLong:
+            # doing so can erase the only chance of recovering an exact pair.
+            logger.error(
+                "PUBLICATION_DIFFERENCE_RANGE_UNAVAILABLE | account=%s | pts=%s | action=durable_manual_review",
+                self.sender_account_id, cursor["pts"],
+            )
+            # This checkpoint cannot be recovered automatically. Keep the
+            # original cursor, block new MTProto publication and record a
+            # durable incident; pretending that another 30s retry is progress
+            # would leave later mappings silently unresolved.
+            # An acknowledged identical gap must not manufacture a new
+            # incident or re-fence a restarted sender. Never clear an
+            # existing block here; it may represent another storage failure.
+            read_incident = getattr(self.repository, "get_publication_inbox_incident", None)
+            if callable(read_incident):
+                try:
+                    incident = await asyncio.to_thread(read_incident, self.sender_account_id)
+                except Exception:
+                    self.client.publication_write_blocked = True
+                    raise
+                if (isinstance(incident, dict)
+                        and incident.get("last_peer_id") == 0
+                        and incident.get("last_scheduled_ids") == [int(cursor["pts"])]
+                        and incident.get("acknowledged_at") is not None):
+                    return False
+            self.client.publication_write_blocked = True
+            persist_incident = getattr(self.repository, "record_publication_inbox_overflow", None)
+            if callable(persist_incident):
+                await asyncio.to_thread(
+                    persist_incident, self.sender_account_id, 0,
+                    [int(cursor["pts"])],
+                )
             return False
         if isinstance(difference, types.updates.DifferenceEmpty):
             await self._advance(cursor, cursor["pts"], cursor["qts"], difference.date)
@@ -99,7 +135,9 @@ class PublicationDifferenceRecovery:
             raise RuntimeError("Unknown Telegram difference response")
         await self._persist_pairs(difference.other_updates)
         advanced = await self._advance(cursor, state.pts, state.qts, state.date)
-        return advanced and more
+        if not advanced:
+            raise RuntimeError("Publication recovery cursor changed concurrently")
+        return more
 
     async def recover(self) -> None:
         """One bounded replay pass per account, on demand from reconciliation."""

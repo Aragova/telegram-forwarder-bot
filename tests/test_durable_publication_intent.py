@@ -242,3 +242,29 @@ def test_positional_album_payload_is_checked_for_partial_response():
         assert raw.calls == 1
 
     asyncio.run(scenario())
+
+
+
+def test_mtproto_last_moment_inbox_failure_fences_alternate_send():
+    async def scenario():
+        repo = MemoryRepository()
+        client = publication_client_class(RawTelethon)()
+        client.publication_inbox_required = True
+        client.publication_inbox = object()
+        client.publication_write_blocked = False
+
+        def block_after_identity(*_args, **_kwargs):
+            client.publication_write_blocked = True
+            return [100]
+
+        repo.get_or_create_mtproto_random_ids = block_after_identity
+        intent = PublicationIntent(repo, "fenced")
+        with publication_scope(intent):
+            with pytest.raises(PublicationWriteUnavailable):
+                await client(_request("original"))
+            assert intent.blocked and not intent.possible_write
+            with pytest.raises(PublicationAlreadyAttempted):
+                await client(_request("fallback"))
+        assert client.calls == []
+
+    asyncio.run(scenario())

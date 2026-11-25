@@ -70,8 +70,10 @@ def authorize_next_album_member() -> None:
 
 def _definite_rejection(exc: Exception) -> bool:
     return not isinstance(exc, RandomIdDuplicateError) and isinstance(
-        exc, (TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge,
-              TelegramRetryAfter, BadRequestError, ForbiddenError, FloodWaitError, SlowModeWaitError),
+        exc, (PublicationWriteUnavailable, TelegramBadRequest,
+              TelegramForbiddenError, TelegramEntityTooLarge,
+              TelegramRetryAfter, BadRequestError, ForbiddenError,
+              FloodWaitError, SlowModeWaitError),
     )
 
 
@@ -119,7 +121,13 @@ async def observe_publication(call, *, bot_result=False, expected_count=None):
     try:
         result = await call()
     except Exception as exc:
-        if _definite_rejection(exc):
+        if isinstance(exc, PublicationWriteUnavailable):
+            # Preflight failure is a definite no-RPC, but MUST keep the
+            # current intent fenced against alternate transport fallback.
+            intent.possible_write = previous
+            intent.blocked = True
+            intent.uncertain = False
+        elif _definite_rejection(exc):
             intent.possible_write = previous
             intent.blocked = intent.uncertain = False
         raise
@@ -221,6 +229,7 @@ def publication_client_class(base):
             try:
                 if not scoped:
                     return await invoke(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold)
+                _check_fence(intent)
                 if getattr(self, "publication_inbox_required", False) and (
                     getattr(self, "publication_write_blocked", False)
                     or getattr(self, "publication_inbox", None) is None
@@ -265,9 +274,18 @@ def publication_client_class(base):
 
                 async def publish():
                     await _bind_identity(account_id, intent, item, members)
-                    return await observe_publication(
-                        lambda: invoke(request, ordered=ordered, flood_sleep_threshold=0),
-                    )
+                    # The last readiness check must run immediately before
+                    # invoke, after all DB/identity/cooldown awaits.
+                    async def publish_fenced():
+                        if getattr(self, "publication_write_blocked", False) or (
+                            getattr(self, "publication_inbox_required", False)
+                            and getattr(self, "publication_inbox", None) is None
+                        ):
+                            intent.blocked = True
+                            raise PublicationWriteUnavailable("MTProto publication inbox no longer writable")
+                        return await invoke(request, ordered=ordered, flood_sleep_threshold=0)
+
+                    return await observe_publication(publish_fenced)
 
                 return await run_with_cooldown(
                     publish, account_scope=account_scope, peer_scope=peer_scope,

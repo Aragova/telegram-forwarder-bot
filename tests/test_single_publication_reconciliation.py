@@ -90,7 +90,11 @@ def test_publication_key_matches_sender_jobs():
     from app.single_publication_reconciliation import publication_key_for_job
     payload = dict(rule_id=149,delivery_id=12,delivery_ids=[12,13],target_id="-100123",media_group_id="abc")
     assert publication_key_for_job("repost_single",payload) == "delivery:12:target:-100123:single"
-    assert publication_key_for_job("repost_album",payload) == "rule:149:target:-100123:media_group:abc:album"
+    album_key = publication_key_for_job("repost_album",payload)
+    assert album_key.startswith("rule:149:target:-100123:media_group:abc:album:members:")
+    assert album_key != publication_key_for_job(
+        "repost_album", {**payload, "delivery_ids": [12, 13, 14]},
+    )
     assert publication_key_for_job("video_send",payload) == publication_key_for_job("video_delivery",payload)
     assert publication_key_for_job("video_download",payload) is None
 
