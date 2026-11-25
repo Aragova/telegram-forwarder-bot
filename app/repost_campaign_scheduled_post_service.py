@@ -306,11 +306,21 @@ class RepostCampaignScheduledPostService:
         # Publish only the row and targets claimed under a single SQL lock.
         targets_snapshot = snapshot["targets_snapshot"]
         if not targets_snapshot or not snapshot.get("saved_post_id") or int(snapshot.get("show_seconds") or 0) <= 0:
-            await run_db(
-                self.repo.mark_campaign_scheduled_post_needs_review, scheduled_post_id,
-                error_text="Снимок запуска больше не готов к отправке",
+            # No RPC or campaign_run was created. Do not strand an editable
+            # draft in needs_review because its target snapshot changed
+            # between readiness and claim.
+            reset = await run_db(
+                self.repo.reset_campaign_scheduled_post_after_send_now_failure,
+                scheduled_post_id, status="draft",
+                error_text="Снимок запуска изменился; требуется повторная настройка",
             )
-            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Снимок запуска больше не готов к отправке")
+            return RepostCampaignActionResult(
+                ok=False, action="send_now_scheduled_post", rule_id=rule_id,
+                error_text=(
+                    "Состав публикации изменился. Проверьте настройки и запустите снова."
+                    if reset else "Состояние запуска изменилось; требуется проверка."
+                ),
+            )
         await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_started", actor_id=actor_id)
         captured_run_id: int | None = None
         def _remember_run(campaign_run_id: int) -> None:
