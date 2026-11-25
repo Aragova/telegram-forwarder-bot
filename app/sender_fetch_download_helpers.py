@@ -27,9 +27,13 @@ class SenderFetchDownloadHelpers:
         return getattr(self.owner, "telethon_read", None) or getattr(self.owner, "telethon", None)
 
     async def fetch_message(self, source_channel, message_id):
+        client = self._read_client()
+        if client is None:
+            logger.warning("Telethon клиент недоступен для получения сообщения %s/%s", source_channel, message_id)
+            return None
         try:
             entity = int(source_channel) if str(source_channel).lstrip("-").isdigit() else source_channel
-            return await self._read_client().get_messages(entity, ids=message_id)
+            return await client.get_messages(entity, ids=message_id)
         except TransportRateLimited:
             raise
         except FloodWaitError as exc:
