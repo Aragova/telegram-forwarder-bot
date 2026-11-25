@@ -61,6 +61,7 @@ async def _execute(repo, *, delivery_ids=None):
     service.db = repo
 
     async def fake_deliver_album(*_args, **_kwargs):
+        repo.attempt = {"status": "verified", "sent_message_ids_json": [501, 502]}
         return True
 
     service._deliver_album = fake_deliver_album
