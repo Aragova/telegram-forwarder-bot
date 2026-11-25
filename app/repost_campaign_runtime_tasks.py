@@ -11,6 +11,8 @@ from app.repost_campaign_schedule_service import RepostCampaignScheduleService, 
 from app.repost_campaign_scheduled_post_service import RepostCampaignScheduledPostService, run_repost_campaign_scheduled_post_loop
 from app.repost_campaign_target_check_service import RepostCampaignTargetCheckService
 from app.saved_post_renderer import SavedPostRenderer
+from app.transport import wrap_bot
+from app.transport_policy import build_sender_bot_policy
 from app.worker_shutdown import drain_job_workers
 
 
@@ -142,7 +144,7 @@ class RepostCampaignRuntimeTasks:
 
     def _build_campaign_runtime(self) -> RepostCampaignRuntimeService:
         renderer = SavedPostRenderer(
-            bot=self.bot,
+            bot=wrap_bot(self.bot, label="campaign.runtime.bot", policy=build_sender_bot_policy()),
             telethon_client=self.telethon_client,
             temp_dir=getattr(self.settings, "temp_dir", "media/temp"),
             logger_=self.logger,
