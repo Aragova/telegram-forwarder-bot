@@ -7200,13 +7200,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         target_id=target_id, media_group_id=media_group_id,
                         source_message_ids=stored_members,
                     ) if (isinstance(stored_members, list) and stored_members
-                          and len(set(stored_members)) == len(stored_members)
                           and all(type(value) is int and value > 0
-                                  for value in stored_members))
+                                  for value in stored_members)
+                          and len(set(stored_members)) == len(stored_members))
                     else None
                 )
-                if (not attempt or attempt["idempotency_key"] not in {key, member_key}
-                        or not member_key):
+                if (not attempt or (
+                        attempt["idempotency_key"] != key
+                        and (member_key is None or attempt["idempotency_key"] != member_key)
+                    )):
                     raise RuntimeError("Attempt key changed; reconciliation aborted")
                 if (attempt["status"] not in ("accepted", "verified")
                         or attempt["operation_kind"] != "album"
