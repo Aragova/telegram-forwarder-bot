@@ -538,4 +538,10 @@ async def run_repost_campaign_scheduled_post_loop(*, runtime: RepostCampaignSche
             await runtime.process_due_posts(worker_id=wid)
         except Exception as exc:
             runtime.logger.exception("VIP_SCHEDULED_POST_LOOP_ERROR | worker_id=%s | error=%s", wid, exc)
-        await asyncio.sleep(interval_seconds)
+        if stop_event is None:
+            await asyncio.sleep(interval_seconds)
+        else:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=max(0.01, interval_seconds))
+            except asyncio.TimeoutError:
+                pass
