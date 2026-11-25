@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from typing import Any
 
 logger = logging.getLogger("forwarder")
@@ -215,10 +216,10 @@ async def _save_history_batch(db, batch, *, preserve_existing_deliveries: bool):
     except asyncio.CancelledError:
         # shield() alone does not delay the caller's finally/owner release.
         while not write.done():
-            try:
+            # Preserve the outer cancellation, but drain repeated cancellations
+            # until the off-thread DB transaction is no longer running.
+            with suppress(asyncio.CancelledError):
                 await asyncio.shield(write)
-            except asyncio.CancelledError:
-                continue
         if not write.cancelled():
             try:
                 write.result()
