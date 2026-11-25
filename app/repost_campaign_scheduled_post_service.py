@@ -273,9 +273,20 @@ class RepostCampaignScheduledPostService:
         launch = await run_db(self.campaign_runtime.build_campaign_launch_readiness,rule_id=rule_id)
         if launch.get("active_placement") or int(launch.get("delete_failed") or 0) > 0:
             await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_active_placement_warning", actor_id=actor_id, extra={"active_placement": bool(launch.get("active_placement")), "delete_failed": int(launch.get("delete_failed") or 0), "active_run_id": launch.get("active_run_id")})
-        if not await run_db(self.repo.mark_campaign_scheduled_post_processing, scheduled_post_id, actor_id=actor_id):
+        snapshot = await run_db(
+            self.repo.claim_campaign_scheduled_post_snapshot,
+            scheduled_post_id, actor_id=actor_id,
+        )
+        if not snapshot:
             return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Пост уже обрабатывается или запускался")
-        targets_snapshot = await run_db(self.repo.list_campaign_scheduled_post_targets, scheduled_post_id, active_only=True) or []
+        # Publish only the row and targets claimed under a single SQL lock.
+        targets_snapshot = snapshot["targets_snapshot"]
+        if not targets_snapshot or not snapshot.get("saved_post_id") or int(snapshot.get("show_seconds") or 0) <= 0:
+            await run_db(
+                self.repo.mark_campaign_scheduled_post_needs_review, scheduled_post_id,
+                error_text="Снимок запуска больше не готов к отправке",
+            )
+            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text="Снимок запуска больше не готов к отправке")
         await run_db(self.repo.log_campaign_scheduled_post_event, scheduled_post_id=scheduled_post_id, rule_id=rule_id, event_type="send_now_started", actor_id=actor_id)
         captured_run_id: int | None = None
         def _remember_run(campaign_run_id: int) -> None:
@@ -284,7 +295,7 @@ class RepostCampaignScheduledPostService:
             self.repo.set_campaign_scheduled_post_campaign_run_id(scheduled_post_id, int(campaign_run_id))
 
         try:
-            result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(row.get("saved_post_id") or 0), show_seconds=int(row.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=scheduled_post_id, admin_id=actor_id, on_campaign_run_created=_remember_run)
+            result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(snapshot.get("saved_post_id") or 0), show_seconds=int(snapshot.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=scheduled_post_id, admin_id=actor_id, on_campaign_run_created=_remember_run)
         except Exception as exc:
             current = await run_db(self.repo.get_campaign_scheduled_post, scheduled_post_id) or {}
             run_id = int(current.get("campaign_run_id") or captured_run_id or 0)
