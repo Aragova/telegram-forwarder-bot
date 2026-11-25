@@ -301,7 +301,7 @@ def test_worker_reconciles_exact_legacy_album_receipt_before_billing_gate(
     monkeypatch.setattr(worker_runtime.LimitService, "can_enqueue_job", billing)
     reconcile = AsyncMock(return_value={"ok": True, "accepted": True, "sent_message_ids": [501, 502]})
     monkeypatch.setattr(worker_runtime, "reconcile_pending_publication", reconcile)
-    job = {"id": 15, "job_type": "repost_album", "payload": payload, "attempts": 0, "max_attempts": 3}
+    job = {"id": 15, "job_type": "repost_album", "payload_json": payload, "attempts": 0, "max_attempts": 3}
 
     assert asyncio.run(_process_job(repo, sender, "w", "light", job, policy=POLICY, state=_InFlightState()))
     assert sender.calls == 0
