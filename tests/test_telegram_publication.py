@@ -886,3 +886,80 @@ def test_spool_append_failure_retains_incident_evidence_even_if_postgres_fails(m
         assert incidents[0][2] == [28]
 
     asyncio.run(scenario())
+
+
+
+def test_fallback_publication_journal_replays_after_restart_and_requires_review(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as module
+
+    class FailedSpool:
+        def __init__(self, _path):
+            pass
+        def append(self, *_args):
+            raise OSError("SQLite damaged")
+        def pending(self, _limit=128):
+            return []
+
+    async def scenario():
+        session_file = str(tmp_path / "sender.session")
+        peer = types.PeerChannel(99)
+
+        def client():
+            c = SimpleNamespace(session=SimpleNamespace(filename=session_file))
+            c.add_event_handler = lambda callback, _event: setattr(c, "handler", callback)
+            async def get_me():
+                return SimpleNamespace(id=7)
+            c.get_me = get_me
+            return c
+
+        # A first process loses its session SQLite file; its event has to
+        # survive in the independent journal even without a DB connection.
+        monkeypatch.setattr(module, "PublicationMappingSpool", FailedSpool)
+        first = client()
+        telegram_publication.prepare_publication_inbox(first, SimpleNamespace())
+        await first.handler(types.UpdateDeleteScheduledMessages(
+            peer=peer, messages=[41], sent_messages=[141],
+        ))
+        journal = module.PublicationFallbackJournal(
+            tmp_path / "sender.publication-mappings.fallback.jsonl"
+        )
+        assert len(journal.pending()) == 1
+        assert first.publication_write_blocked is True
+
+        # New process, recovered SQLite/PostgreSQL: replay before opening
+        # sends and leave a durable operator incident.
+        class RecoveredSpool:
+            def __init__(self, _path):
+                pass
+            def pending(self, _limit=128):
+                return []
+            def append(self, *_args):
+                raise AssertionError("No new Telegram event required")
+
+        monkeypatch.setattr(module, "PublicationMappingSpool", RecoveredSpool)
+        stored, incidents = [], []
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=lambda account, peer, pairs: stored.extend(pairs),
+            record_publication_inbox_overflow=lambda account, peer, ids: incidents.append((account, peer, ids)),
+        )
+        second = client()
+        await telegram_publication.prepare_publication_inbox(second, repo)()
+        assert stored == [(41, 141)]
+        assert len(incidents) == 1
+        assert incidents[0][0] == 7
+        assert incidents[0][2] == [41]
+        assert journal.pending() == []
+        assert second.publication_write_blocked is True
+
+    asyncio.run(scenario())
+
+
+def test_fallback_journal_keeps_old_bytes_if_write_cannot_complete(tmp_path):
+    from app.publication_mapping_spool import PublicationFallbackJournal
+    journal = PublicationFallbackJournal(tmp_path / "fallback.jsonl")
+    journal.append(-10099, [12, 13], [112, 113])
+    assert journal.pending() == [(-10099, [12, 13], [112, 113])]
+    journal.clear()
+    assert journal.pending() == []
