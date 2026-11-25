@@ -5,6 +5,7 @@ import asyncio
 import argparse
 import json
 import re
+import secrets
 import time
 from html import escape
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from app.repository_models import utc_now_iso
 from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
 from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view, _button as rule_ui_button
 from app.repository import RepositoryProtocol
+from app.rescan_safety import RescanBlocked
 from app.repository_factory import create_repository
 from app.transport import wrap_bot, wrap_telethon_client
 from app.transport_policy import (
@@ -296,6 +298,8 @@ def _rule_ui_task_key(kind: str, rule_id: int) -> str:
 def _schedule_rule_ui_task(task_key: str, coro) -> bool:
     existing = rule_ui_tasks.get(task_key)
     if existing and not existing.done():
+        if asyncio.iscoroutine(coro):
+            coro.close()
         return False
 
     task = asyncio.create_task(coro)
@@ -308,6 +312,8 @@ def _schedule_rule_ui_task(task_key: str, coro) -> bool:
 
         try:
             done_task.result()
+        except asyncio.CancelledError:
+            pass
         except Exception as exc:
             logger.exception("Фоновая UI-задача %s завершилась с ошибкой: %s", task_key, exc)
 
@@ -506,7 +512,11 @@ async def _run_rescan_rule_fresh_job(
 
         # A persisted owner token fences concurrent scans in every worker.
         # This includes the entire Telegram parse, DB replay, and resume phase.
-        was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
+        await _show_rule_processing_screen(
+            chat_id=chat_id, message_id=message_id,
+            text=f"🔄 Пересканирование правила #{rule_id}\n\nРежим: начать заново\nПроверка и пересборка очереди.",
+        )
+        was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id, fresh=True)
         replay_committed = False
         successful = False
         try:
@@ -528,18 +538,16 @@ async def _run_rescan_rule_fresh_job(
                 )
             # Old accepted receipts stay in the audit ledger, but do not
             # count toward a user's intentional new replay cycle.
-            archived_attempts, old_deliveries = await run_db(
+            archived_attempts, old_deliveries, rebuilt_count = await run_db(
                 db.reset_rule_history_for_replay, rule_id,
                 owner_token=owner_token,
-            )
-            replay_committed = True
-            rebuilt_count = await run_db(
-                db.backfill_rule, rule_id,
                 allowed_message_ids=seen_message_ids,
                 include_newer_than_message_id=scan_start_max_message_id,
+                expected_scope=(str(rule.source_id), rule.source_thread_id,
+                                str(rule.target_id), rule.target_thread_id, rule.mode),
             )
+            replay_committed = True
             invalidate_preview_cache(rule_id)
-            await run_db(scheduler_service.set_next_run, rule_id, utc_now_iso())
             successful = True
         finally:
             # If replay committed but rebuild failed, leave the rule paused.
@@ -610,7 +618,10 @@ async def _run_rescan_rule_fresh_job(
                 )
 
     except Exception as exc:
-        logger.exception("Ошибка полного перескана правила %s: %s", rule_id, exc)
+        if isinstance(exc, RescanBlocked):
+            logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
+        else:
+            logger.exception("Ошибка полного перескана правила %s: %s", rule_id, exc)
 
         await _show_rule_processing_screen(
             chat_id=chat_id,
@@ -640,6 +651,10 @@ async def _run_rescan_rule_keep_job(
             )
             return
 
+        await _show_rule_processing_screen(
+            chat_id=chat_id, message_id=message_id,
+            text=f"🔄 Пересканирование правила #{rule_id}\n\nРежим: сохранить позицию\nПроверка и пересборка очереди.",
+        )
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
         scan_complete = False
         try:
@@ -670,29 +685,15 @@ async def _run_rescan_rule_keep_job(
                     preserve_existing_deliveries=True,
                     collect_seen_message_ids=True,
                 )
-            rebuilt_count = await run_db(
-                db.backfill_rule, rule_id,
-                allowed_message_ids=seen_message_ids,
+            rebuilt_count, removed_stale, removed_before, quarantined = await run_db(
+                db.rebuild_rule_keep_position, rule_id,
+                owner_token=owner_token, allowed_message_ids=seen_message_ids,
                 include_newer_than_message_id=scan_start_max_message_id,
+                before_message_id=saved_first_pending_message_id,
+                expected_scope=(str(rule.source_id), rule.source_thread_id,
+                                str(rule.target_id), rule.target_thread_id, rule.mode),
             )
-            removed_stale = await run_db(
-                db.drop_rule_pending_not_in_message_ids, rule_id,
-                source_channel=str(rule.source_id),
-                source_thread_id=rule.source_thread_id,
-                seen_message_ids=seen_message_ids,
-                scan_start_max_message_id=scan_start_max_message_id,
-            )
-            removed_before = 0
-            if saved_first_pending_message_id is not None:
-                # Preserve a previously selected "start at position" cutoff.
-                removed_before = await run_db(
-                    db.drop_rule_pending_before_message,
-                    rule_id=rule_id, source_channel=str(rule.source_id),
-                    source_thread_id=rule.source_thread_id,
-                    message_id=saved_first_pending_message_id,
-                )
             invalidate_preview_cache(rule_id)
-            await run_db(scheduler_service.set_next_run, rule_id, old_next_run_at)
             scan_complete = True
         finally:
             await run_db(
@@ -721,6 +722,7 @@ async def _run_rescan_rule_keep_job(
                 "preserved_delivery_state": True,
                 "removed_before": removed_before,
                 "removed_stale": removed_stale,
+                "quarantined": quarantined,
                 "source_id": str(rule.source_id),
                 "source_thread_id": rule.source_thread_id,
             },
@@ -738,7 +740,8 @@ async def _run_rescan_rule_keep_job(
                 f"Найдено постов источника: {parsed_count}\n"
                 f"Очередь пересобрана: {rebuilt_count}\n"
                 f"Исключено удалённых из источника: {removed_stale}\n"
-                f"Убрано pending до нужной точки: {removed_before}"
+                f"Убрано pending до нужной точки: {removed_before}\n"
+                f"На ручной проверке без повторной отправки: {quarantined}"
             ),
         )
 
@@ -764,12 +767,16 @@ async def _run_rescan_rule_keep_job(
                         f"Найдено постов источника: {parsed_count}\n"
                         f"Очередь пересобрана: {rebuilt_count}\n"
                         f"Исключено удалённых из источника: {removed_stale}\n"
-                        f"Убрано pending до нужной точки: {removed_before}"
+                        f"Убрано pending до нужной точки: {removed_before}\n"
+                        f"На ручной проверке без повторной отправки: {quarantined}"
                     ),
                 )
 
     except Exception as exc:
-        logger.exception("Ошибка перескана правила %s с сохранением позиции: %s", rule_id, exc)
+        if isinstance(exc, RescanBlocked):
+            logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
+        else:
+            logger.exception("Ошибка перескана правила %s с сохранением позиции: %s", rule_id, exc)
 
         await _show_rule_processing_screen(
             chat_id=chat_id,
@@ -6802,7 +6809,7 @@ async def handle_rescan_rule_menu(callback: CallbackQuery):
                 f"Источник: {source_name}\n\n"
                 f"Выбери режим:\n"
                 f"• ♻️ Сохранить позицию — пересканировать источник и попытаться сохранить текущую точку старта\n"
-                f"• 🆕 Начать заново — полностью обновить источник и очередь правила с начала"
+                f"• 🆕 Начать заново — новый цикл; ранее отправленные посты могут быть опубликованы повторно"
             ),
             reply_markup=build_rescan_rule_keyboard(rule_id),
         )
@@ -6812,19 +6819,72 @@ async def handle_rescan_rule_menu(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
-@dp.callback_query(lambda c: c.data.startswith("rescan_rule_fresh:"))
+@dp.callback_query(lambda c: (c.data or "").startswith("rescan_rule_fresh:"))
 async def handle_rescan_rule_fresh(callback: CallbackQuery):
     try:
-        rule_id = int(callback.data.split(":")[1])
-    except Exception:
+        rule_id = int((callback.data or "").split(":")[1])
+    except (TypeError, ValueError, IndexError):
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
     if not await ensure_rule_callback_access(callback, rule_id):
         return
-
+    actor_id = callback.from_user.id if callback.from_user else None
+    if actor_id is None:
+        await answer_callback_safe(callback, "Не удалось определить пользователя", show_alert=True)
+        return
+    token = secrets.token_urlsafe(12)
+    if not await run_db(db.issue_rule_rescan_confirmation, rule_id, actor_id, token):
+        await answer_callback_safe(callback, "Пересканирование уже выполняется", show_alert=True)
+        return
     await answer_callback_safe_once(callback)
+    text = (
+        f"🆕 Начать заново: правило #{rule_id}\n\n"
+        "Очередь будет построена с начала. Ранее опубликованные посты "
+        "могут быть опубликованы повторно. Старые принятые видео "
+        "сохранятся в истории без отметки о проверке. "
+        "Незавершённые отправки по-прежнему блокируют сброс."
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить новый цикл",
+                              callback_data=f"rescan_rule_fresh_confirm:{rule_id}:{token}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rescan_rule_menu:{rule_id}")],
+    ])
+    edited = bool(callback.message) and await edit_message_text_safe(
+        message=callback.message, text=text, reply_markup=keyboard,
+    )
+    if not edited:
+        await send_message_safe(
+            chat_id=callback.message.chat.id if callback.message else actor_id,
+            text=text, reply_markup=keyboard,
+        )
 
-    task_key = _rule_ui_task_key("rescan_fresh", rule_id)
+
+@dp.callback_query(lambda c: (c.data or "").startswith("rescan_rule_fresh_confirm:"))
+async def handle_rescan_rule_fresh_confirm(callback: CallbackQuery):
+    try:
+        parts = (callback.data or "").split(":")
+        if len(parts) != 3 or not parts[2]:
+            raise ValueError("missing confirmation token")
+        rule_id = int(parts[1])
+        token = parts[2]
+    except (TypeError, ValueError, IndexError):
+        await answer_callback_safe(callback, "Подтверждение устарело. Откройте новый цикл заново.", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    actor_id = callback.from_user.id if callback.from_user else None
+    if actor_id is None or not await run_db(
+        db.consume_rule_rescan_confirmation, rule_id, actor_id, token,
+    ):
+        await answer_callback_safe(
+            callback, "Подтверждение уже использовано или истекло. Откройте новый цикл.", show_alert=True,
+        )
+        return
+    await answer_callback_safe_once(callback)
+    if callback.message is None:
+        return
+
+    task_key = _rule_ui_task_key("rescan", rule_id)
     started = _schedule_rule_ui_task(
         task_key,
         _run_rescan_rule_fresh_job(
@@ -6842,21 +6902,11 @@ async def handle_rescan_rule_fresh(callback: CallbackQuery):
         )
         return
 
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            f"🔄 Пересканирование правила #{rule_id}\n\n"
-            f"Режим: начать заново\n"
-            f"Идёт парсинг источника и пересборка очереди.\n"
-            f"Это может занять время."
-        ),
-        reply_markup=None,
-    )
 
-@dp.callback_query(lambda c: c.data.startswith("rescan_rule_keep:"))
+@dp.callback_query(lambda c: (c.data or "").startswith("rescan_rule_keep:"))
 async def handle_rescan_rule_keep(callback: CallbackQuery):
     try:
-        rule_id = int(callback.data.split(":")[1])
+        rule_id = int((callback.data or "").split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
@@ -6865,7 +6915,7 @@ async def handle_rescan_rule_keep(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
-    task_key = _rule_ui_task_key("rescan_keep", rule_id)
+    task_key = _rule_ui_task_key("rescan", rule_id)
     started = _schedule_rule_ui_task(
         task_key,
         _run_rescan_rule_keep_job(
@@ -6883,16 +6933,6 @@ async def handle_rescan_rule_keep(callback: CallbackQuery):
         )
         return
 
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            f"🔄 Пересканирование правила #{rule_id}\n\n"
-            f"Режим: сохранить позицию\n"
-            f"Идёт парсинг источника и пересборка очереди.\n"
-            f"Это может занять время."
-        ),
-        reply_markup=None,
-    )
 
 @dp.callback_query(lambda c: c.data.startswith("change_interval:") or c.data.startswith("user_rule_interval:"))
 async def handle_change_interval_callback(callback: CallbackQuery):

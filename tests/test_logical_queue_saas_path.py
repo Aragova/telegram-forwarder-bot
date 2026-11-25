@@ -30,8 +30,8 @@ class _FakeCursor:
         q = " ".join(str(query).split())
         self.execute_calls.append((q, params))
 
-        if "SELECT id FROM routing WHERE id=%s FOR UPDATE" in q:
-            self._fetchone = {"id": params[0]}
+        if "rescan_owner_token IS NULL FOR UPDATE" in q:
+            self._fetchone = None if self.script.get("rescan_owned") else {"id": params[0], "mode": "repost"}
             return
 
         if "SELECT 1 FROM telegram_publication_receipts" in q:
@@ -194,7 +194,7 @@ def test_rollback_repost_rolls_back_whole_album():
 
 def test_start_from_position_marks_previous_logical_items_sent():
     repo = _RepoForTests()
-    repo.get_rule_queue_logical_items = lambda rule_id: [
+    repo._get_rule_pending_logical_items_conn = lambda conn, rule_id, mode: [
         {"position": 1, "kind": "album", "delivery_ids": [1, 2], "first_post_id": 101, "first_message_id": 201, "count": 2},
         {"position": 2, "kind": "single", "delivery_ids": [3], "first_post_id": 103, "first_message_id": 203, "count": 1},
         {"position": 3, "kind": "single", "delivery_ids": [4], "first_post_id": 104, "first_message_id": 204, "count": 1},
@@ -217,3 +217,38 @@ def test_rollback_refuses_unfinished_publication():
     repo = _RepoForTests(script={"unfinished_receipt": {"exists": 1}})
     assert repo.rollback_last_delivery(rule_id=30, admin_id=1) is None
     assert not repo.fake_conn.cursor_obj.executemany_calls
+
+
+def test_manual_queue_mutations_refused_during_rescan():
+    script = {
+        "rows": [
+            _mk_row(1, post_id=101, message_id=201, status="sent"),
+            _mk_row(2, post_id=102, message_id=202, status="pending"),
+            _mk_row(3, post_id=103, message_id=203, status="pending"),
+        ],
+        "current_rows": [
+            {"id": 1, "post_id": 101, "status": "sent", "sent_at": "x",
+             "error_text": None, "attempt_count": 1, "sent_message_id": 901,
+             "sent_message_ids_json": "[901]", "target_id_snapshot": "target",
+             "delivery_method": "copy"},
+        ],
+    }
+    def setup(owned):
+        repo = _RepoForTests(script={**script, "rescan_owned": owned})
+        repo._get_rule_pending_logical_items_conn = lambda conn, rule_id, mode: [
+            {"position": 1, "kind": "single", "delivery_ids": [2],
+             "first_post_id": 102, "first_message_id": 202, "count": 1},
+            {"position": 2, "kind": "single", "delivery_ids": [3],
+             "first_post_id": 103, "first_message_id": 203, "count": 1},
+        ]
+        return repo
+
+    owned = setup(True)
+    assert owned.rollback_last_delivery(30) is None
+    assert owned.set_rule_start_from_position(30, 2) is None
+    assert not owned.fake_conn.cursor_obj.executemany_calls
+
+    available = setup(False)
+    assert available.rollback_last_delivery(30) is not None
+    assert available.set_rule_start_from_position(30, 2) is not None
+    assert available.fake_conn.cursor_obj.executemany_calls

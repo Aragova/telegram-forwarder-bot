@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import suppress
 from typing import Any
 
 logger = logging.getLogger("forwarder")
@@ -201,10 +203,29 @@ def message_to_content_dict(message):
 
     return content
 
-def _save_history_batch(db, batch, *, preserve_existing_deliveries: bool):
+async def _save_history_batch(db, batch, *, preserve_existing_deliveries: bool):
+    """Do not release the rescan owner while an off-thread DB write is still running."""
     if preserve_existing_deliveries:
-        return db.save_post_batch(batch, preserve_existing_deliveries=True)
-    return db.save_post_batch(batch)
+        write = asyncio.create_task(
+            asyncio.to_thread(db.save_post_batch, batch, preserve_existing_deliveries=True)
+        )
+    else:
+        write = asyncio.create_task(asyncio.to_thread(db.save_post_batch, batch))
+    try:
+        return await asyncio.shield(write)
+    except asyncio.CancelledError:
+        # shield() alone does not delay the caller's finally/owner release.
+        while not write.done():
+            # Preserve the outer cancellation, but drain repeated cancellations
+            # until the off-thread DB transaction is no longer running.
+            with suppress(asyncio.CancelledError):
+                await asyncio.shield(write)
+        if not write.cancelled():
+            try:
+                write.result()
+            except Exception:
+                logger.exception("History DB write failed while cancelling rescan")
+        raise
 
 
 async def parse_channel_history(
@@ -273,7 +294,7 @@ async def parse_channel_history(
 
         if len(batch) >= 100:
             try:
-                saved += _save_history_batch(
+                saved += await _save_history_batch(
                     db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
                 )
             except Exception as exc:
@@ -289,7 +310,7 @@ async def parse_channel_history(
 
     if batch:
         try:
-            saved += _save_history_batch(
+            saved += await _save_history_batch(
                     db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
                 )
         except Exception as exc:
@@ -389,7 +410,7 @@ async def parse_group_history(
 
         if len(batch) >= 100:
             try:
-                saved += _save_history_batch(
+                saved += await _save_history_batch(
                     db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
                 )
             except Exception as exc:
@@ -406,7 +427,7 @@ async def parse_group_history(
 
     if batch:
         try:
-            saved += _save_history_batch(
+            saved += await _save_history_batch(
                     db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
                 )
         except Exception as exc:
