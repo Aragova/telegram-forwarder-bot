@@ -11660,39 +11660,39 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
         return self._normalize_repost_campaign_launch_job_row(row)
 
-    def set_repost_campaign_launch_job_campaign_run_id(self, job_id: int, campaign_run_id: int) -> dict[str, Any] | None:
+    def set_repost_campaign_launch_job_campaign_run_id(self, job_id: int, campaign_run_id: int, *, worker_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE repost_campaign_launch_jobs
                     SET campaign_run_id=%s, updated_at=NOW()
-                    WHERE id=%s AND status='processing'
+                    WHERE id=%s AND status='processing' AND locked_by=%s AND locked_until > NOW()
                     RETURNING *
                     """,
-                    (int(campaign_run_id), int(job_id)),
+                    (int(campaign_run_id), int(job_id), worker_id),
                 )
                 row = cur.fetchone()
             conn.commit()
         return self._normalize_repost_campaign_launch_job_row(row)
 
-    def mark_repost_campaign_launch_job_sent(self, job_id: int, *, campaign_run_id: int | None, result_json: dict[str, Any] | None) -> dict[str, Any] | None:
+    def mark_repost_campaign_launch_job_sent(self, job_id: int, *, campaign_run_id: int | None, result_json: dict[str, Any] | None, worker_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE repost_campaign_launch_jobs
                     SET status='sent', campaign_run_id=%s, result_json=%s::jsonb, locked_by=NULL, locked_until=NULL, updated_at=NOW(), finished_at=NOW()
-                    WHERE id=%s AND status='processing'
+                    WHERE id=%s AND status='processing' AND locked_by=%s AND locked_until > NOW()
                     RETURNING *
                     """,
-                    (campaign_run_id, _json_dumps(result_json or {}), int(job_id)),
+                    (campaign_run_id, _json_dumps(result_json or {}), int(job_id), worker_id),
                 )
                 row = cur.fetchone()
             conn.commit()
         return self._normalize_repost_campaign_launch_job_row(row)
 
-    def mark_repost_campaign_launch_job_failed(self, job_id: int, *, last_error: str, result_json: dict[str, Any] | None = None, retryable: bool = False) -> dict[str, Any] | None:
+    def mark_repost_campaign_launch_job_failed(self, job_id: int, *, last_error: str, result_json: dict[str, Any] | None = None, retryable: bool = False, worker_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -11705,16 +11705,16 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         locked_until=NULL,
                         updated_at=NOW(),
                         finished_at=CASE WHEN %s AND campaign_run_id IS NULL AND attempts < max_attempts THEN finished_at ELSE NOW() END
-                    WHERE id=%s AND status='processing'
+                    WHERE id=%s AND status='processing' AND locked_by=%s AND locked_until > NOW()
                     RETURNING *
                     """,
-                    (bool(retryable), last_error, _json_dumps(result_json) if result_json is not None else None, bool(retryable), int(job_id)),
+                    (bool(retryable), last_error, _json_dumps(result_json) if result_json is not None else None, bool(retryable), int(job_id), worker_id),
                 )
                 row = cur.fetchone()
             conn.commit()
         return self._normalize_repost_campaign_launch_job_row(row)
 
-    def mark_repost_campaign_launch_job_needs_review(self, job_id: int, *, last_error: str, campaign_run_id: int | None = None, result_json: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    def mark_repost_campaign_launch_job_needs_review(self, job_id: int, *, last_error: str, campaign_run_id: int | None = None, result_json: dict[str, Any] | None = None, worker_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -11728,10 +11728,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         locked_until=NULL,
                         updated_at=NOW(),
                         finished_at=NOW()
-                    WHERE id=%s AND status IN ('pending','processing')
+                    WHERE id=%s AND status='processing' AND locked_by=%s AND locked_until > NOW()
                     RETURNING *
                     """,
-                    (last_error, campaign_run_id, _json_dumps(result_json) if result_json is not None else None, int(job_id)),
+                    (last_error, campaign_run_id, _json_dumps(result_json) if result_json is not None else None, int(job_id), worker_id),
                 )
                 row = cur.fetchone()
             conn.commit()
