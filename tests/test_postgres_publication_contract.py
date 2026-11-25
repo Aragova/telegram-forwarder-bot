@@ -426,14 +426,18 @@ def test_rescan_legacy_video_history_431_and_atomic_rebuild(repo, monkeypatch):
     repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner, queue_rebuilt=True)
 
 
-@pytest.mark.parametrize(("raw_ids", "allowed"), [
-    ("[651]", True),
-    ("[651, null]", False),
-    ("[651, 652]", False),
-    ("null", False),
-    ('{"id": 651}', False),
+@pytest.mark.parametrize(("raw_ids", "allowed", "has_anchor"), [
+    ("[651]", True, True),
+    ("[651, null]", False, True),
+    ("[651, 652]", False, True),
+    ("null", False, True),
+    ('{"id": 651}', False, True),
+    ("[651]", True, False),
+    ("[651, 652]", False, False),
 ])
-def test_fresh_replay_legacy_video_accepts_only_one_numeric_id(repo, raw_ids, allowed):
+def test_fresh_replay_legacy_video_accepts_only_one_numeric_id(
+    repo, raw_ids, allowed, has_anchor,
+):
     """Malformed historical send IDs must fail closed without mutating the attempt."""
     _, rule_id, deliveries, _, _, target = seed(repo, uuid4().int % 10**12)
     delivery_id = deliveries[0]
@@ -454,6 +458,9 @@ def test_fresh_replay_legacy_video_accepts_only_one_numeric_id(repo, raw_ids, al
                    WHERE rule_id=%s""",
                 (key, target, raw_ids, rule_id),
             )
+            if not has_anchor:
+                # The attempt ledger is not FK-cascade-linked to deliveries.
+                cur.execute("DELETE FROM deliveries WHERE id=%s", (delivery_id,))
     if allowed:
         was_active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
         repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner)
