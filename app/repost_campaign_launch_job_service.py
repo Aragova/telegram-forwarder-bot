@@ -121,7 +121,13 @@ class RepostCampaignLaunchJobService:
         if not isinstance(payload, dict):
             payload = {}
         force_ignore_clean_channel = bool(payload.get("force_ignore_clean_channel"))
-        await run_db(self.repo.mark_repost_campaign_launch_job_processing, job_id, worker_id=worker_id)
+        owned = await run_db(self.repo.mark_repost_campaign_launch_job_processing, job_id, worker_id=worker_id)
+        if not owned:
+            self.logger.warning(
+                "REPOST_CAMPAIGN_STALE_LEASE | job_id=%s | worker_id=%s | action=no_launch",
+                job_id, worker_id,
+            )
+            return None
         self.logger.info("REPOST_CAMPAIGN_LAUNCH_JOB_STARTED | job_id=%s | rule_id=%s", job_id, rule_id)
         before_run_id = await run_db(self._latest_campaign_run_id,rule_id)
         try:
