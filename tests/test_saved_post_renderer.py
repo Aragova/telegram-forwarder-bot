@@ -450,3 +450,14 @@ def test_verify_raw_album_ids_old_album_time_fails():
 
     result = asyncio.run(verify_raw_album_ids(telethon_client=_Old(), target_id="-1002451047809", raw_message_ids=[900, 901], expected_count=2, expected_caption="cap", started_at=datetime.now(timezone.utc)))
     assert result.ok is False
+
+
+@pytest.mark.parametrize("ids", [[0], [0, 7], [7, 7], [7]])
+def test_botapi_album_requires_complete_unique_positive_ids(ids):
+    class Bot:
+        async def send_media_group(self, **kwargs):
+            return [SimpleNamespace(message_id=mid) for mid in ids]
+    renderer=SavedPostRenderer(bot=Bot())
+    result=asyncio.run(renderer.send(chat_id=123,content={"kind":"album","media_items":[
+        {"kind":"photo","file_id":"x"},{"kind":"photo","file_id":"y"}]}))
+    assert not result.ok and result.accepted and result.manual_review_required
