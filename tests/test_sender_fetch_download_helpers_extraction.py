@@ -349,3 +349,13 @@ def test_source_fetch_and_download_use_read_client_when_writer_is_unavailable(mo
     monkeypatch.setattr(settings, "media_cache_dir", "cache")
     path = asyncio.run(helper.download_video_source(SimpleNamespace(id=55)))
     assert path.read_bytes() == b"video"
+
+
+def test_source_read_helper_handles_owner_without_writer_attribute():
+    from app.sender_fetch_download_helpers import SenderFetchDownloadHelpers
+
+    reader = FakeGetMessagesTelethon()
+    owner = SimpleNamespace(telethon_read=reader)
+    result = asyncio.run(SenderFetchDownloadHelpers(owner).fetch_message("source", 55))
+    assert result == {"ok": True}
+    assert reader.calls == [("source", 55)]
