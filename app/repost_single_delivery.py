@@ -840,6 +840,7 @@ class RepostSingleDelivery:
         text_fallback_sent_message_id = None
 
         if html_text:
+            text_fallback_response_received = False
             try:
                 sent = await owner.bot.send_message(
                     chat_id=target_id,
@@ -849,41 +850,55 @@ class RepostSingleDelivery:
                     **({"entities": bot_entities} if custom_caption is not None else {}),
                     disable_web_page_preview=True,
                 )
+                text_fallback_response_received = True
 
                 if idempotency_key:
                     sent_ids = normalize_valid_sent_message_ids([sent.message_id])
                     await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
                                  sent_message_ids=sent_ids, telegram_method="text_fallback")
 
-                await owner._add_reaction_for_rule_if_possible(
-                    rule=rule,
-                    target_id=target_id,
-                    sent_message_id=sent.message_id,
-                    source_channel=str(source_channel or ""),
-                    source_message_ids=source_message_ids,
-                    delivery_id=delivery_id,
-                )
+                try:
+                    await owner._add_reaction_for_rule_if_possible(
+                        rule=rule,
+                        target_id=target_id,
+                        sent_message_id=sent.message_id,
+                        source_channel=str(source_channel or ""),
+                        source_message_ids=source_message_ids,
+                        delivery_id=delivery_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "TEXT_FALLBACK_REACTION_NON_FATAL | rule=%s | delivery=%s",
+                        rule.id, delivery_id,
+                    )
 
                 text_fallback_ok = True
                 text_fallback_sent_message_id = sent.message_id
 
-                await owner._log_delivery_pipeline_step(
-                    rule_id=rule.id,
-                    delivery_ids=delivery_ids,
-                    event_type="delivery_pipeline_step",
-                    pipeline_stage="text_fallback",
-                    pipeline_result="ok",
+                try:
+                    await owner._log_delivery_pipeline_step(
+                        rule_id=rule.id,
+                        delivery_ids=delivery_ids,
+                        event_type="delivery_pipeline_step",
+                        pipeline_stage="text_fallback",
+                        pipeline_result="ok",
                     source_channel=source_channel,
                     target_id=target_id,
                     source_message_ids=source_message_ids,
-                    extra={
-                        "sent_message_id": sent.message_id,
-                        "caption_delivery_mode": caption_mode,
-                        "requires_builder": requires_builder,
-                    },
-                )
+                        extra={
+                            "sent_message_id": sent.message_id,
+                            "caption_delivery_mode": caption_mode,
+                            "requires_builder": requires_builder,
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "TEXT_FALLBACK_PIPELINE_AUDIT_NON_FATAL | rule=%s | delivery=%s",
+                        rule.id, delivery_id,
+                    )
 
-                await owner._log_delivery_final_success(
+                try:
+                    await owner._log_delivery_final_success(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
                     final_method="text_fallback",
@@ -892,11 +907,16 @@ class RepostSingleDelivery:
                     source_message_ids=source_message_ids,
                     sent_message_id=sent.message_id,
                     verify_result=None,
-                    extra={
-                        "caption_delivery_mode": caption_mode,
-                        "requires_builder": requires_builder,
-                    },
-                )
+                        extra={
+                            "caption_delivery_mode": caption_mode,
+                            "requires_builder": requires_builder,
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "TEXT_FALLBACK_FINAL_AUDIT_NON_FATAL | rule=%s | delivery=%s",
+                        rule.id, delivery_id,
+                    )
 
                 await run_db(
                     owner._mark_delivery_sent_sync, delivery_id,
@@ -910,6 +930,10 @@ class RepostSingleDelivery:
             except (TransportRateLimited, PublicationWriteUnavailable):
                 raise
             except Exception as exc:
+                if text_fallback_response_received:
+                    # The send returned a positive ID. Never convert a later
+                    # DB/audit failure into a retryable publishing failure.
+                    raise
                 await owner._log_delivery_pipeline_step(
                     rule_id=rule.id,
                     delivery_ids=delivery_ids,
