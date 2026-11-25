@@ -534,10 +534,11 @@ async def _run_rescan_rule_fresh_job(
                 owner_token=owner_token,
                 allowed_message_ids=seen_message_ids,
                 include_newer_than_message_id=scan_start_max_message_id,
+                expected_scope=(str(rule.source_id), rule.source_thread_id,
+                                str(rule.target_id), rule.target_thread_id, rule.mode),
             )
             replay_committed = True
             invalidate_preview_cache(rule_id)
-            await run_db(scheduler_service.set_next_run, rule_id, utc_now_iso())
             successful = True
         finally:
             # If replay committed but rebuild failed, leave the rule paused.
@@ -671,29 +672,15 @@ async def _run_rescan_rule_keep_job(
                     preserve_existing_deliveries=True,
                     collect_seen_message_ids=True,
                 )
-            rebuilt_count = await run_db(
-                db.backfill_rule, rule_id,
-                allowed_message_ids=seen_message_ids,
+            rebuilt_count, removed_stale, removed_before, quarantined = await run_db(
+                db.rebuild_rule_keep_position, rule_id,
+                owner_token=owner_token, allowed_message_ids=seen_message_ids,
                 include_newer_than_message_id=scan_start_max_message_id,
+                before_message_id=saved_first_pending_message_id,
+                expected_scope=(str(rule.source_id), rule.source_thread_id,
+                                str(rule.target_id), rule.target_thread_id, rule.mode),
             )
-            removed_stale = await run_db(
-                db.drop_rule_pending_not_in_message_ids, rule_id,
-                source_channel=str(rule.source_id),
-                source_thread_id=rule.source_thread_id,
-                seen_message_ids=seen_message_ids,
-                scan_start_max_message_id=scan_start_max_message_id,
-            )
-            removed_before = 0
-            if saved_first_pending_message_id is not None:
-                # Preserve a previously selected "start at position" cutoff.
-                removed_before = await run_db(
-                    db.drop_rule_pending_before_message,
-                    rule_id=rule_id, source_channel=str(rule.source_id),
-                    source_thread_id=rule.source_thread_id,
-                    message_id=saved_first_pending_message_id,
-                )
             invalidate_preview_cache(rule_id)
-            await run_db(scheduler_service.set_next_run, rule_id, old_next_run_at)
             scan_complete = True
         finally:
             await run_db(
@@ -722,6 +709,7 @@ async def _run_rescan_rule_keep_job(
                 "preserved_delivery_state": True,
                 "removed_before": removed_before,
                 "removed_stale": removed_stale,
+                "quarantined": quarantined,
                 "source_id": str(rule.source_id),
                 "source_thread_id": rule.source_thread_id,
             },
@@ -739,7 +727,8 @@ async def _run_rescan_rule_keep_job(
                 f"Найдено постов источника: {parsed_count}\n"
                 f"Очередь пересобрана: {rebuilt_count}\n"
                 f"Исключено удалённых из источника: {removed_stale}\n"
-                f"Убрано pending до нужной точки: {removed_before}"
+                f"Убрано pending до нужной точки: {removed_before}\n"
+                f"На ручной проверке без повторной отправки: {quarantined}"
             ),
         )
 
@@ -765,12 +754,16 @@ async def _run_rescan_rule_keep_job(
                         f"Найдено постов источника: {parsed_count}\n"
                         f"Очередь пересобрана: {rebuilt_count}\n"
                         f"Исключено удалённых из источника: {removed_stale}\n"
-                        f"Убрано pending до нужной точки: {removed_before}"
+                        f"Убрано pending до нужной точки: {removed_before}\n"
+                f"На ручной проверке без повторной отправки: {quarantined}"
                     ),
                 )
 
     except Exception as exc:
-        logger.exception("Ошибка перескана правила %s с сохранением позиции: %s", rule_id, exc)
+        if isinstance(exc, RescanBlocked):
+            logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
+        else:
+            logger.exception("Ошибка перескана правила %s с сохранением позиции: %s", rule_id, exc)
 
         await _show_rule_processing_screen(
             chat_id=chat_id,

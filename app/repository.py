@@ -134,7 +134,13 @@ class RepositoryProtocol(Protocol):
     def reset_rule_history_for_replay(
         self, rule_id: int, *, owner_token: str,
         allowed_message_ids: set[int], include_newer_than_message_id: int,
+        expected_scope: tuple | None = None,
     ) -> tuple[int, int, int]: ...
+    def rebuild_rule_keep_position(
+        self, rule_id: int, *, owner_token: str, allowed_message_ids: set[int],
+        include_newer_than_message_id: int, before_message_id: int | None,
+        expected_scope: tuple | None = None,
+    ) -> tuple[int, int, int, int]: ...
     def backfill_rule(
         self, rule_id: int, *, allowed_message_ids: set[int] | None = None,
         include_newer_than_message_id: int | None = None,

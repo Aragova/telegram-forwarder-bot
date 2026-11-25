@@ -196,7 +196,7 @@ def test_rescan_never_deletes_shared_source_posts_and_keep_does_not_reset_queue(
     assert "db.reset_rule_history_for_replay" in fresh
     assert "db.reset_rule_history_for_replay" not in keep
     assert "db.mark_rule_messages_sent" not in keep
-    assert "db.drop_rule_pending_before_message" in keep
+    assert "db.rebuild_rule_keep_position" in keep
     assert "saved_first_pending_message_id" in keep
     assert "previous_sent" in keep
 
@@ -442,7 +442,7 @@ def test_stale_pending_prune_is_rule_scoped():
     assert "DELETE FROM deliveries d" in query
     assert "d.rule_id = %s" in query and "d.status = 'pending'" in query
     assert "p.source_thread_id IS NOT DISTINCT FROM %s" in query
-    assert params == (214, "-100123", None, [101, 103], 103)
+    assert params == (214, "-100123", None, None, None, None, [101, 103], 103)
     assert "p.message_id <= %s" in query
 
 
@@ -589,7 +589,7 @@ def test_scan_high_water_is_captured_inside_owner_finally_scope():
             "db.get_rule_scan_start_max_message_id"
         )
         assert "include_newer_than_message_id=scan_start_max_message_id" in block
-    assert "scan_start_max_message_id=scan_start_max_message_id" in source
+    assert "include_newer_than_message_id=scan_start_max_message_id" in source
 
 
 def test_fresh_preflight_rejects_unknown_before_owner_is_acquired():

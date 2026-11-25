@@ -398,7 +398,7 @@ def test_rescan_legacy_video_history_431_and_atomic_rebuild(repo, monkeypatch):
                     target_id,source_message_ids_json,sent_message_ids_json,created_at,updated_at)
                    SELECT n,%s,1,'delivery:'||n::text||':target:'||%s||':video_send:v1',
                           'video_send','accepted','video_send',%s,'[1001]'::jsonb,
-                          jsonb_build_array(651),NOW()-INTERVAL '3 days',NOW()-INTERVAL '3 days'
+                          jsonb_build_array(651),TIMESTAMPTZ '2026-11-21 10:00:00+00',TIMESTAMPTZ '2026-11-21 10:00:00+00'
                    FROM unnest(%s::bigint[]) AS members(n)""",
                 (rule_id,target,target,[deliveries[0]]+list(range(9000001,9000431))),
             )
@@ -436,7 +436,40 @@ def test_rescan_durable_video_intent_cannot_be_archived_as_legacy(repo):
     assert repo.mark_delivery_attempt_accepted(key,sent_message_ids=[651],telegram_method="video_send")
     with repo.connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE delivery_attempts SET updated_at=NOW()-INTERVAL '3 days' WHERE rule_id=%s", (rule_id,))
+            cur.execute("UPDATE delivery_attempts SET updated_at=TIMESTAMPTZ '2026-11-21 10:00:00+00' WHERE rule_id=%s", (rule_id,))
     with pytest.raises(RuntimeError, match="неизвестным результатом"):
         repo.begin_rule_rescan(rule_id, fresh=True)
     assert repo.get_delivery_attempt_by_idempotency_key(key)["status"]=="accepted"
+
+
+def test_keep_position_quarantines_orphan_without_resending(repo):
+    _, rule_id, deliveries, source_ids, _, _ = seed(repo, 133)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE delivery_attempts SET delivery_id=9001000,status='accepted',sent_message_ids_json='[77]'::jsonb WHERE rule_id=%s", (rule_id,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+    active, owner = repo.begin_rule_rescan(rule_id)
+    assert repo.rebuild_rule_keep_position(rule_id, owner_token=owner,
+        allowed_message_ids=set(source_ids), include_newer_than_message_id=max(source_ids),
+        before_message_id=None)==(0,0,0,1)
+    assert repo.get_delivery(deliveries[0])["status"]=="faulty"
+    repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
+
+
+def test_fresh_self_loop_keeps_old_echo_evidence_across_replays(repo):
+    _, rule_id, deliveries, source_ids, source, _ = seed(repo, 134,count=2)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE rule_id=%s", (rule_id,))
+            cur.execute("UPDATE routing SET target_id=source_id WHERE id=%s", (rule_id,))
+            cur.execute("UPDATE deliveries SET status='sent',sent_message_id=%s,target_id_snapshot=%s WHERE id=%s", (source_ids[1],source,deliveries[0]))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE id=%s", (deliveries[1],))
+    for _ in range(2):
+        active, owner = repo.begin_rule_rescan(rule_id,fresh=True)
+        _,_,rebuilt = repo.reset_rule_history_for_replay(rule_id,owner_token=owner,
+            allowed_message_ids=set(source_ids), include_newer_than_message_id=max(source_ids))
+        assert rebuilt==1
+        with repo.connect() as conn:
+            assert repo._is_self_target_echo_post_for_rule_conn(conn,rule_id=rule_id,
+                source_channel=source,source_thread_id=None,message_id=source_ids[1])
+        repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
