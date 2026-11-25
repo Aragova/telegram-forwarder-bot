@@ -24,11 +24,14 @@ def processor(tmp_path):
     return result
 
 
-def _source(path, rate, *, vfr=False):
+def _source(path, rate, *, vfr=False, audio=False):
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-f", "lavfi", "-i", f"testsrc2=size=244x432:rate={rate}:duration=2",
     ]
+    if audio:
+        cmd += ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2",
+                "-c:a", "aac"]
     if vfr:
         # A nominal 29.97 fps stream with much lower average cadence.
         cmd += ["-vf", "select=eq(n\\,1)+not(mod(n\\,2))", "-fps_mode", "vfr"]
@@ -36,11 +39,13 @@ def _source(path, rate, *, vfr=False):
     subprocess.run(cmd, check=True, timeout=30, capture_output=True)
 
 
-@pytest.mark.parametrize("rate,vfr,target", [("30000/1001", True, 30), ("15", False, 15)])
-def test_normalize_real_video_enforces_selected_profile(tmp_path, processor, rate, vfr, target):
+@pytest.mark.parametrize("rate,vfr,target,audio", [
+    ("30000/1001", True, 30, True), ("30000/1001", True, 30, False), ("15", False, 15, False),
+])
+def test_normalize_real_video_enforces_selected_profile(tmp_path, processor, rate, vfr, target, audio):
     source = tmp_path / "source.mp4"
     output = tmp_path / "normalized.mp4"
-    _source(source, rate, vfr=vfr)
+    _source(source, rate, vfr=vfr, audio=audio)
 
     async def run():
         info = await processor.get_video_info(str(source), use_cache=False)
@@ -51,12 +56,13 @@ def test_normalize_real_video_enforces_selected_profile(tmp_path, processor, rat
             assert info["fps_avg"] < 20
             assert not processor._matches_target_fps(info, target)
         assert await processor.normalize_video(
-            str(source), str(output), profile, False, info["duration"],
+            str(source), str(output), profile, info["has_audio"], info["duration"],
         )
         result = await processor.get_video_info(str(output), use_cache=False)
         assert result["width"] == 720 and result["height"] == 1280
         assert result["fps"] == target
         assert result["fps_avg"] == target
+        assert result["has_audio"] is audio
         assert abs(result["duration"] - info["duration"]) < 0.2
 
     asyncio.run(run())
@@ -153,6 +159,39 @@ def test_failed_processing_cleans_temp_files_but_preserves_retry_source(
 
 def test_fps_match_handles_unknown_rate_and_average():
     match = VideoProcessor._matches_target_fps
+    assert not match(None, 30)
     assert match({"fps": None, "fps_normalized": 30, "fps_avg": 30}, 30)
     assert not match({"fps": 30, "fps_avg": 15}, 30)
     assert not match({"fps": 25, "fps_rate_known": False}, 25)
+
+
+@pytest.mark.parametrize("cut_required", [False, True])
+def test_failed_intermediate_probe_preserves_source(tmp_path, processor, monkeypatch, cut_required):
+    source = tmp_path / "source.mp4"
+    _source(source, "30000/1001", vfr=True)
+    real_probe = processor.get_video_info
+
+    async def probe(path, **kwargs):
+        if path != str(source):
+            return None
+        info = await real_probe(path, **kwargs)
+        if cut_required:
+            info["duration"] = 120
+        return info
+
+    async def fake_cut(_input, output, *_args, **_kwargs):
+        from pathlib import Path
+        Path(output).write_bytes(b"partial")
+        return True, 1.0, 118.0
+
+    monkeypatch.setattr(processor, "get_video_info", probe)
+    monkeypatch.setattr(processor, "cut_video_fast", fake_cut)
+
+    async def run():
+        result = await processor.build_processed_video(
+            input_file_path=str(source), clip_duration_seconds=118,
+        )
+        assert result is False
+        assert list(tmp_path.iterdir()) == [source]
+
+    asyncio.run(run())

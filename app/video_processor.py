@@ -411,6 +411,8 @@ class VideoProcessor:
 
     @staticmethod
     def _matches_target_fps(info, target_fps):
+        if not info:
+            return False
         # Preserve the existing 29.97/30 and 23.976/24 equivalence for
         # passthrough, but do not confuse a nominal VFR rate with its average.
         nominal = info.get("fps")
@@ -1231,7 +1233,10 @@ class VideoProcessor:
 
         intro_info = await self.get_video_info(intro_path, use_cache=False)
         main_info = await self.get_video_info(main_path, use_cache=False)
-        intro_duration = intro_info['duration'] if intro_info else 5
+        if not intro_info or not main_info:
+            logger.error("VIDEO_CONCAT_PROBE_FAILED | missing intro or main metadata")
+            return False
+        intro_duration = intro_info['duration']
 
         # ✅ ИСПРАВЛЕНО: добавлена проверка pix_fmt
         intro_needs_normalize = (
@@ -1972,6 +1977,9 @@ class VideoProcessor:
                 if success:
                     logger.info("VIDEO_CLIP_CUT_OK | start=%s | duration=%s", exact_start, exact_duration)
                     clipped_info = await self.get_video_info(clipped_main_path, use_cache=False)
+                    if not clipped_info:
+                        self._stage_failed(stage_logger, "trim", error_text="Не удалось проверить обрезанное видео")
+                        return False
 
                     self._stage_completed(
                         stage_logger,
@@ -2052,6 +2060,9 @@ class VideoProcessor:
                 logger.info("VIDEO_CLIP_SKIP_SOURCE_SHORTER | source_duration=%s | requested_clip=%s | action=use_full_source", source_duration, requested_clip)
                 shutil.copy2(input_path, clipped_main_path)
                 clipped_info = await self.get_video_info(clipped_main_path, use_cache=False)
+                if not clipped_info:
+                    self._stage_failed(stage_logger, "probe", error_text="Не удалось проверить копию исходного видео")
+                    return False
                 needs_normalize = (
                     clipped_info['width'] != profile['target_width'] or
                     clipped_info['height'] != profile['target_height'] or
@@ -2109,6 +2120,9 @@ class VideoProcessor:
                         return False
 
             clipped_info = await self.get_video_info(clipped_main_path)
+            if not clipped_info:
+                self._stage_failed(stage_logger, "probe", error_text="Не удалось проверить обработанное видео")
+                return False
             logger.info(f"   📦 Размер: {clipped_info['file_size'] / (1024 * 1024):.1f} MB")
 
             # INTRO
@@ -2165,6 +2179,9 @@ class VideoProcessor:
                         intro_created = True
                         files_to_delete.append(intro_processed_path)
                         intro_info = await self.get_video_info(intro_processed_path)
+                        if not intro_info:
+                            self._stage_failed(stage_logger, "intro", error_text="Не удалось проверить подготовленную заставку")
+                            return False
                         logger.info(f"   📦 Размер заставки: {intro_info['file_size'] / (1024 * 1024):.1f} MB")
 
                         self._stage_completed(
