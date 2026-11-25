@@ -3753,6 +3753,58 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             )
             return cur.fetchone() is not None
 
+    def quarantine_queued_self_target_echo_deliveries(self, rule_id: int, delivery_ids: list[int]) -> list[int]:
+        """Recheck authoritative self-loop outputs immediately before an RPC.
+
+        Reject the exact echoes and return unrelated album members to pending;
+        the current job is completed by its owner without publishing anything.
+        """
+        identifiers = sorted({int(value) for value in delivery_ids if int(value) > 0})
+        if not identifiers:
+            return []
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT d.id, p.source_channel, p.source_thread_id, p.message_id
+                       FROM deliveries d
+                       JOIN posts p ON p.id=d.post_id
+                       JOIN routing r ON r.id=d.rule_id
+                       WHERE d.id=ANY(%s) AND d.rule_id=%s
+                         AND d.status IN ('pending','processing')
+                         AND r.source_id::text=r.target_id::text
+                         AND r.source_thread_id IS NOT DISTINCT FROM r.target_thread_id
+                       ORDER BY d.id FOR UPDATE OF d""",
+                    (identifiers, int(rule_id)),
+                )
+                members = list(cur.fetchall() or [])
+                echoes = [
+                    int(row["id"]) for row in members
+                    if self._is_self_target_echo_post_for_rule_conn(
+                        conn, rule_id=int(rule_id),
+                        source_channel=str(row["source_channel"]),
+                        source_thread_id=row["source_thread_id"],
+                        message_id=int(row["message_id"]),
+                    )
+                ]
+                if echoes:
+                    cur.execute(
+                        """UPDATE deliveries SET status='faulty',
+                           error_text='Self-loop: confirmed publication echo'
+                           WHERE rule_id=%s AND id=ANY(%s)
+                             AND status IN ('pending','processing')""",
+                        (int(rule_id), echoes),
+                    )
+                    # Do not strand unrelated members in processing after the
+                    # old album job is cancelled. The scheduler may regroup.
+                    cur.execute(
+                        """UPDATE deliveries SET status='pending'
+                           WHERE rule_id=%s AND id=ANY(%s) AND NOT(id=ANY(%s))
+                             AND status='processing'""",
+                        (int(rule_id), identifiers, echoes),
+                    )
+            conn.commit()
+        return sorted(echoes)
+
     def _log_self_target_echo_delivery_skipped(
         self,
         *,
@@ -11192,10 +11244,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             if k in kwargs and kwargs[k] is not None:
                 set_parts.append(sql); params.append(_json_dumps(kwargs[k]) if k in {"post_snapshot","readiness_snapshot","preview","metadata"} else kwargs[k])
         if not set_parts: return False
+        editing = any(key in kwargs for key in (
+            "saved_post_id", "show_seconds", "scheduled_at", "post_snapshot",
+            "title", "timezone_offset_minutes", "timezone_label", "metadata",
+        ))
         set_parts.append("updated_at=NOW()"); params.append(int(scheduled_post_id))
+        guard = " AND status IN ('draft','ready') AND campaign_run_id IS NULL" if editing else ""
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"UPDATE campaign_scheduled_posts SET {', '.join(set_parts)} WHERE id=%s", tuple(params)); ok=cur.rowcount>0
+                cur.execute(f"UPDATE campaign_scheduled_posts SET {', '.join(set_parts)} WHERE id=%s{guard}", tuple(params)); ok=cur.rowcount>0
             conn.commit()
         if ok: logger.info("VIP_SCHEDULED_POST_UPDATED id=%s", scheduled_post_id)
         return ok
@@ -11219,6 +11276,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         active = 0
         with self.connect() as conn:
             with conn.cursor() as cur:
+                # Lock the same parent row used by send-now claim; a snapshot
+                # cannot be replaced after the campaign has been claimed.
+                cur.execute(
+                    "SELECT status,campaign_run_id FROM campaign_scheduled_posts WHERE id=%s FOR UPDATE",
+                    (int(scheduled_post_id),),
+                )
+                parent = cur.fetchone()
+                if not parent or parent["status"] not in {"draft", "ready"} or parent["campaign_run_id"] is not None:
+                    raise ValueError("Запланированный пост больше нельзя редактировать")
                 cur.execute("DELETE FROM campaign_scheduled_post_targets WHERE scheduled_post_id=%s", (int(scheduled_post_id),))
                 for t in targets:
                     cur.execute("""INSERT INTO campaign_scheduled_post_targets(scheduled_post_id, rule_id, target_kind, target_id, target_thread_id, target_title, is_active, metadata_json)
@@ -11320,6 +11386,39 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='needs_review', failed_at=NOW(), error_text=%s, campaign_run_id=COALESCE(%s, campaign_run_id), locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (error_text, campaign_run_id), "status='processing'", "VIP_SCHEDULED_POST_NEEDS_REVIEW")
     def set_campaign_scheduled_post_campaign_run_id(self, scheduled_post_id: int, campaign_run_id: int) -> bool:
         return self._update_campaign_scheduled_post_status(scheduled_post_id, "campaign_run_id=%s, updated_at=NOW()", (int(campaign_run_id),), "status='processing' AND campaign_run_id IS NULL", "VIP_SCHEDULED_POST_RUN_ID_SET")
+    def claim_campaign_scheduled_post_snapshot(self, scheduled_post_id: int, *, actor_id: int | None = None) -> dict[str, Any] | None:
+        """Atomically claim the editable row and its target vector.
+
+        All mutations of the post or target set lock/condition this parent
+        row. The resulting snapshot is consistent even under concurrent UI edits.
+        """
+        owner = f"send-now:{actor_id}" if actor_id is not None else "send-now"
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE campaign_scheduled_posts
+                       SET status='processing', locked_by=%s, locked_at=NOW(),
+                           lock_until=NOW() + INTERVAL '5 minutes', updated_at=NOW()
+                       WHERE id=%s AND status IN ('draft','ready','scheduled')
+                         AND campaign_run_id IS NULL RETURNING *""",
+                    (owner, int(scheduled_post_id)),
+                )
+                row = cur.fetchone()
+                if not row:
+                    conn.commit()
+                    return None
+                cur.execute(
+                    """SELECT * FROM campaign_scheduled_post_targets
+                       WHERE scheduled_post_id=%s AND is_active=TRUE
+                       ORDER BY id ASC""",
+                    (int(scheduled_post_id),),
+                )
+                targets = [dict(target) for target in (cur.fetchall() or [])]
+            conn.commit()
+        snapshot = self._normalize_campaign_scheduled_post_row(row)
+        snapshot["targets_snapshot"] = targets
+        return snapshot
+
     def mark_campaign_scheduled_post_processing(self, scheduled_post_id: int, *, actor_id: int | None = None) -> bool:
         lock_owner = f"send-now:{actor_id}" if actor_id is not None else "send-now"
         return self._update_campaign_scheduled_post_status(
@@ -11527,10 +11626,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     """
                     UPDATE repost_campaign_launch_jobs
                     SET status='processing', locked_by=%s, started_at=COALESCE(started_at, NOW()), updated_at=NOW()
-                    WHERE id=%s AND status='processing'
+                    WHERE id=%s AND status='processing' AND locked_by=%s AND locked_until > NOW()
                     RETURNING *
                     """,
-                    (worker_id, int(job_id)),
+                    (worker_id, int(job_id), worker_id),
                 )
                 row = cur.fetchone()
             conn.commit()
