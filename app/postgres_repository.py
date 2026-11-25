@@ -4634,7 +4634,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         WHERE pr.idempotency_key=a.idempotency_key AND pr.rule_id=a.rule_id)
                     OR (a.target_id IS NOT NULL
                         AND starts_with(a.idempotency_key,'rule:'||a.rule_id::text||':target:'||a.target_id||':media_group:')
-                        AND right(a.idempotency_key,6)=':album'
+                        AND (right(a.idempotency_key,6)=':album'
+                             OR a.idempotency_key LIKE
+                                ('rule:'||a.rule_id::text||':target:'||a.target_id||':media_group:%%:album:members:%%'))
                         AND length(a.idempotency_key)>length('rule:'||a.rule_id::text||':target:'||a.target_id||':media_group::album'))
                 WHEN a.operation_kind IN ('single','video_send') THEN
                     jsonb_typeof(a.source_message_ids_json)='array'
@@ -5154,8 +5156,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             (a.operation_kind IN ('single','video_send')
                              AND a.source_message_ids_json @> jsonb_build_array(member.message_id))
                             OR (a.operation_kind='album' AND member.media_group_id IS NOT NULL
-                                AND a.idempotency_key=('rule:'||a.rule_id::text||':target:'||a.target_id
-                                    ||':media_group:'||member.media_group_id||':album'))
+                                AND (
+                                    a.idempotency_key=('rule:'||a.rule_id::text||':target:'||a.target_id
+                                        ||':media_group:'||member.media_group_id||':album')
+                                    OR starts_with(
+                                        a.idempotency_key,
+                                        'rule:'||a.rule_id::text||':target:'||a.target_id
+                                        ||':media_group:'||member.media_group_id||':album:members:'
+                                    )
+                                ))
                           )
                           AND (a.operation_kind='album' OR NOT EXISTS (
                               SELECT 1 FROM deliveries old
@@ -7114,13 +7123,20 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     FROM deliveries d
                     JOIN posts p ON p.id = d.post_id
                     JOIN routing r ON r.id = d.rule_id
-                    JOIN delivery_attempts a ON a.idempotency_key =
-                        ('rule:' || r.id::text || ':target:' || r.target_id
-                         || ':media_group:' || p.media_group_id || ':album')
+                    JOIN delivery_attempts a ON (
+                        a.idempotency_key =
+                            ('rule:' || r.id::text || ':target:' || r.target_id
+                             || ':media_group:' || p.media_group_id || ':album')
+                        OR starts_with(a.idempotency_key,
+                            'rule:' || r.id::text || ':target:' || r.target_id
+                            || ':media_group:' || p.media_group_id || ':album:members:')
+                    )
                     WHERE d.rule_id = %s AND d.status = 'pending'
                       AND r.mode = 'repost'
                       AND p.media_group_id IS NOT NULL
                       AND a.operation_kind = 'album'
+                      AND a.idempotency_key NOT LIKE '%%:rescan:%%'
+                      AND a.idempotency_key NOT LIKE 'archived:%%'
                       AND a.status IN ('accepted', 'verified')
                     ORDER BY p.id, p.message_id
                     """,
@@ -7174,7 +7190,23 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (int(attempt_id),),
                 )
                 attempt = cur.fetchone()
-                if not attempt or attempt["idempotency_key"] != key:
+                stored_members = (
+                    _safe_json_loads(attempt.get("source_message_ids_json"), [])
+                    if attempt else []
+                )
+                member_key = (
+                    build_delivery_idempotency_key(
+                        operation_kind="album", rule_id=rule_id,
+                        target_id=target_id, media_group_id=media_group_id,
+                        source_message_ids=stored_members,
+                    ) if (isinstance(stored_members, list) and stored_members
+                          and len(set(stored_members)) == len(stored_members)
+                          and all(type(value) is int and value > 0
+                                  for value in stored_members))
+                    else None
+                )
+                if (not attempt or attempt["idempotency_key"] not in {key, member_key}
+                        or not member_key):
                     raise RuntimeError("Attempt key changed; reconciliation aborted")
                 if (attempt["status"] not in ("accepted", "verified")
                         or attempt["operation_kind"] != "album"
