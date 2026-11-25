@@ -1799,7 +1799,7 @@ class RepostCampaignRuntimeService:
             )
         if (message.get("send_status") or "").strip().lower() != "sent":
             self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_SKIPPED | rule_id=%s | run_id=%s | run_message_id=%s | reason=%s", rule_id, run_id, run_message_id, "send_status_not_sent")
-            updated = await run_db(self.repo.mark_campaign_run_message_deleted, run_message_id)
+            updated = await run_db(self.repo.mark_campaign_run_message_deleted, run_message_id, expected_sent=False)
             if not updated:
                 return RepostCampaignActionResult(
                     ok=False, action="delete_campaign_run_message_now", rule_id=rule_id,
@@ -1835,7 +1835,12 @@ class RepostCampaignRuntimeService:
         else:
             result = await self.deleter.delete_message(target_id=message["target_id"], message_id=message_ids[0], render_mode=message.get("render_mode"))
         if result.ok:
-            await run_db(self.repo.mark_campaign_run_message_deleted, run_message_id)
+            marked = await run_db(self.repo.mark_campaign_run_message_deleted, run_message_id)
+            if not marked:
+                return RepostCampaignActionResult(
+                    ok=False, action="delete_campaign_run_message_now", rule_id=rule_id,
+                    error_text="Telegram подтвердил удаление, но статус в базе изменился; требуется сверка.",
+                )
             self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_DONE | rule_id=%s | run_id=%s | run_message_id=%s | target_id=%s | message_id=%s | method=%s", rule_id, run_id, run_message_id, message["target_id"], int(message["sent_message_id"]), result.method)
             return RepostCampaignActionResult(
                 ok=True, action="delete_campaign_run_message_now", rule_id=rule_id, target_id=str(message["target_id"]), message_id=int(message["sent_message_id"]), method=result.method,

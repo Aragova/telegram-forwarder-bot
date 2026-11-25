@@ -914,3 +914,25 @@ def test_campaign_definite_pre_rpc_failure_is_atomic_and_does_not_touch_claims(r
         assert reader.get_campaign_run_message(mid)["send_status"] == after["send_status"]
     finally:
         reader.client.close_all_connections()
+
+
+
+def test_campaign_cancel_before_send_and_delete_after_send_are_disjoint(repo):
+    _, rule_id, _, _, _, target = seed(repo, uuid4().int % 10**12)
+    def placement(saved_id):
+        run = repo.create_campaign_run(rule_id=rule_id, saved_post_id=saved_id,
+            run_type="manual", status="sending", show_seconds=60, targets_total=1, started_by=None)
+        return repo.create_campaign_run_message(run_id=run, rule_id=rule_id, saved_post_id=saved_id,
+            target_kind="main", target_id=str(target), show_seconds=60)
+    cancelled = placement(901)
+    assert not repo.mark_campaign_run_message_deleted(cancelled)
+    assert repo.mark_campaign_run_message_deleted(cancelled, expected_sent=False)
+    assert not repo.mark_campaign_run_message_sending(cancelled)
+    row = repo.get_campaign_run_message(cancelled)
+    assert row["send_status"] == "failed" and row["delete_status"] == "deleted"
+    sent = placement(902)
+    assert repo.mark_campaign_run_message_sending(sent)
+    assert not repo.mark_campaign_run_message_deleted(sent, expected_sent=False)
+    assert repo.mark_campaign_run_message_sent(sent, sent_message_id=4321)
+    assert not repo.mark_campaign_run_message_deleted(sent, expected_sent=False)
+    assert repo.mark_campaign_run_message_deleted(sent)

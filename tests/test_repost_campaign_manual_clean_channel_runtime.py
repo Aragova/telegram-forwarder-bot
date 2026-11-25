@@ -102,7 +102,7 @@ class FakeRepo:
         self.mark_campaign_run_message_failed_calls.append({"args": args, "kwargs": kwargs})
         return True
 
-    def mark_campaign_run_message_deleted(self, message_id: int):
+    def mark_campaign_run_message_deleted(self, message_id: int, *, expected_sent=True):
         self.mark_campaign_run_message_deleted_calls.append(message_id)
         return True
 

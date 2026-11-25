@@ -12795,7 +12795,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
             return updated
 
-    def mark_campaign_run_message_deleted(self, message_id: int) -> bool:
+    def mark_campaign_run_message_deleted(self, message_id: int, *, expected_sent: bool = True) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -12804,11 +12804,17 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SET delete_status = 'deleted',
                         deleted_at = NOW(),
                         delete_error_text = NULL,
+                        send_error_text = CASE WHEN send_status='pending'
+                            THEN 'Публикация отменена до отправки' ELSE send_error_text END,
+                        send_status = CASE WHEN send_status='pending' THEN 'failed' ELSE send_status END,
                         updated_at = NOW()
-                    WHERE id = %s AND send_status <> 'sending'
+                    WHERE id = %s
                       AND NOT publication_review_required
+                      AND ((%s AND send_status='sent')
+                           OR (NOT %s AND send_status IN ('pending','failed','skipped')
+                               AND publication_receipt IS NULL))
                     """,
-                    (int(message_id),),
+                    (int(message_id), bool(expected_sent), bool(expected_sent)),
                 )
                 updated = cur.rowcount > 0
             conn.commit()
