@@ -6724,6 +6724,71 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
         return True
 
+    def acknowledge_expired_publication_receipt(self, key: str, *, operator: str, note: str) -> bool:
+        """Operator quarantine: retain accepted evidence, never invent published IDs."""
+        operator, note = operator.strip(), note.strip()
+        if not operator or len(operator)>128 or not note or len(note)>1000:
+            raise ValueError("Operator and manual review note are required")
+        receipt = self.get_publication_receipt(key)
+        if not receipt:
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT is_active,rescan_owner_token FROM routing WHERE id=%s FOR UPDATE",
+                    (receipt["rule_id"],),
+                )
+                rule = cur.fetchone()
+                if not rule or rule["is_active"] or rule["rescan_owner_token"] is not None:
+                    return False
+                cur.execute(
+                    """
+                    SELECT 1 FROM delivery_attempts
+                    WHERE idempotency_key=%s AND rule_id=%s AND status='accepted'
+                      AND telegram_method='mtproto_pending_publication' FOR UPDATE
+                    """,
+                    (key,receipt["rule_id"]),
+                )
+                if not cur.fetchone():
+                    return False
+                cur.execute(
+                    """
+                    UPDATE telegram_publication_receipts r
+                    SET manual_review=jsonb_build_object('operator',%s::text,'note',%s::text,'reviewed_at',NOW())
+                    WHERE r.idempotency_key=%s AND r.rule_id=%s AND r.send_started_at=%s
+                      AND r.expired_at IS NOT NULL AND r.published_ids IS NULL AND r.manual_review IS NULL
+                      AND EXISTS (
+                          SELECT 1 FROM routing rr WHERE rr.id=r.rule_id
+                            AND COALESCE(rr.tenant_id,1)=r.tenant_id
+                            AND rr.source_id::text=r.source_channel
+                            AND rr.source_thread_id IS NOT DISTINCT FROM r.source_thread_id
+                            AND rr.target_id::text=r.target_peer_id::text
+                            AND rr.target_thread_id IS NOT DISTINCT FROM r.target_thread_id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM jobs j WHERE j.payload_json->>'rule_id'=r.rule_id::text
+                            AND j.status IN ('pending','leased','processing','retry')
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM deliveries d WHERE d.rule_id=r.rule_id AND d.status='processing'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM unnest(r.delivery_ids,r.source_message_ids) AS member(delivery_id,message_id)
+                          WHERE NOT EXISTS (
+                              SELECT 1 FROM deliveries d JOIN posts p ON p.id=d.post_id
+                              WHERE d.rule_id=r.rule_id AND d.id=member.delivery_id AND d.status='faulty'
+                                AND p.message_id=member.message_id AND p.source_channel=r.source_channel
+                                AND p.source_thread_id IS NOT DISTINCT FROM r.source_thread_id
+                          )
+                      )
+                    """,
+                    (operator,note,key,receipt["rule_id"],receipt["send_started_at"]),
+                )
+                updated = cur.rowcount == 1
+            conn.commit()
+        return updated
+
+
     def claim_publication_reaction(self, key: str, published_ids: list[int], *, expected_started_at: datetime) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -11638,6 +11703,46 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     WHERE id=%s AND send_status='pending'
                     """, (int(message_id),))
                 return False
+
+    def acknowledge_interrupted_campaign_send(
+        self, message_id: int, *, expected_updated_at: datetime, operator: str, note: str,
+    ) -> bool:
+        """Release only an inspected abandoned placement, never replay its RPC."""
+        operator, note = operator.strip(), note.strip()
+        if not operator or len(operator)>128 or not note or len(note)>1000:
+            raise ValueError("Operator and review note are required")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT rule_id,saved_post_id,target_id,target_thread_id FROM campaign_run_messages WHERE id=%s",(int(message_id),))
+                row=cur.fetchone()
+                if not row:
+                    return False
+                cur.execute("SELECT is_active,rescan_owner_token FROM routing WHERE id=%s FOR UPDATE",(row["rule_id"],))
+                rule=cur.fetchone()
+                if not rule or rule["is_active"] or rule["rescan_owner_token"] is not None:
+                    return False
+                lock_key=f"campaign:{row['rule_id']}:{row['saved_post_id']}:{row['target_id']}:{row['target_thread_id']}"
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",(lock_key,))
+                cur.execute("""
+                    UPDATE campaign_run_messages m SET send_status='failed',delete_status='none',
+                        publication_review_required=FALSE,
+                        publication_manual_review=jsonb_build_object('operator',%s::text,'note',%s::text,'reviewed_at',NOW()),
+                        send_error_text='Interrupted publication manually reviewed; do not replay',
+                        delete_error_text=NULL,updated_at=NOW()
+                    WHERE m.id=%s AND m.updated_at=%s AND m.updated_at<NOW()-INTERVAL '15 minutes'
+                      AND (m.send_status='sending' OR m.publication_review_required OR
+                           (m.send_status='failed' AND m.render_mode LIKE '%%_unverified'))
+                      AND m.publication_manual_review IS NULL
+                      AND m.sent_message_id IS NULL
+                      AND COALESCE(m.sent_message_ids_json,'[]'::jsonb) IN ('[]'::jsonb,'null'::jsonb)
+                      AND (m.publication_receipt IS NULL OR
+                           (m.publication_receipt->>'started_at')::timestamptz<=NOW()-INTERVAL '24 hours')
+                      AND NOT EXISTS(SELECT 1 FROM repost_campaign_launch_jobs j
+                                     WHERE j.rule_id=m.rule_id AND j.status IN ('pending','processing'))
+                      AND NOT EXISTS(SELECT 1 FROM campaign_scheduled_posts j WHERE j.rule_id=m.rule_id AND j.status='processing')
+                      AND NOT EXISTS(SELECT 1 FROM campaign_scheduled_launches j WHERE j.rule_id=m.rule_id AND j.status='processing')
+                    """,(operator,note,int(message_id),expected_updated_at))
+                return cur.rowcount==1
 
     def get_or_create_campaign_mtproto_random_ids(self, key: str, ordinal: int,
                                                    fingerprint: str, count: int) -> list[int]:
