@@ -134,6 +134,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
     buffer_overflow = False
     overflow_evidence = None
     live_lock = asyncio.Lock()
+    spool_generation = 0
     retry_task: asyncio.Task | None = None
 
     async def flush_live() -> None:
@@ -144,8 +145,14 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 # ACK SQLite only after PostgreSQL commits the exact pair.
                 # Replaying a committed-but-unacked pair is idempotent.
                 while True:
+                    # A handler can append while the empty SQLite read is
+                    # running. Check a generation captured before that await
+                    # so the final drain cannot discard its wakeup.
+                    generation_before_read = spool_generation
                     entries = await asyncio.to_thread(spool.pending, 128)
                     if not entries:
+                        if spool_generation != generation_before_read:
+                            continue
                         break
                     for row_id, peer, old, new in entries:
                         await candidate.record(peer, old, new)
@@ -178,7 +185,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
             schedule_retry(min(delay * 2, 30))
 
     async def handle(update: Any) -> None:
-        nonlocal buffer_overflow, overflow_evidence
+        nonlocal buffer_overflow, overflow_evidence, spool_generation
         if not isinstance(update, types.UpdateDeleteScheduledMessages):
             return
         try:
@@ -190,12 +197,25 @@ def prepare_publication_inbox(client: Any, repository: Any):
             if spool is not None:
                 try:
                     await asyncio.to_thread(spool.append, peer, old, new)
+                    spool_generation += 1
                 except Exception:
                     # Disk failure is not an excuse to reopen Telegram writes.
                     client.publication_write_blocked = True
                     buffer_overflow = True
                     emergency.append((peer, old, new))
                     logger.exception("TELEGRAM_PUBLICATION_MAPPING_LOCAL_SPOOL_FAILED")
+                    # Preserve evidence in memory and attempt PostgreSQL
+                    # immediately. A disk failure must not strand the only
+                    # remaining evidence until another Telegram update.
+                    if candidate is not None:
+                        if live_lock.locked():
+                            schedule_retry(0.25)
+                        else:
+                            try:
+                                await flush_live()
+                            except Exception:
+                                logger.exception("TELEGRAM_PUBLICATION_MAPPING_EMERGENCY_PERSIST_FAILED")
+                                schedule_retry(0.25)
                     return
             if len(buffer) >= 1024:
                 buffer_overflow = True
