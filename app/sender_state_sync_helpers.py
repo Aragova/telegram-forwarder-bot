@@ -76,7 +76,7 @@ class SenderStateSyncHelpers:
         ):
             raise RuntimeError("Не подтверждены все уникальные ID альбома")
 
-        marker = getattr(self.owner.db, "mark_delivery_sent_with_target_message", None)
+        marker = getattr(getattr(self.owner, "db", None), "mark_delivery_sent_with_target_message", None)
         if not callable(marker):
             raise RuntimeError("Нет возможности сохранить ID каждого элемента альбома")
         for album_delivery_id, sent_message_id in zip(normalized_delivery_ids, valid_sent_message_ids):
