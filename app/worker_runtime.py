@@ -15,7 +15,7 @@ from typing import Any
 from aiogram.exceptions import TelegramEntityTooLarge
 
 from .delivery_result import normalize_delivery_result
-from .single_publication_reconciliation import publication_key_for_job, reconcile_pending_publication
+from .single_publication_reconciliation import existing_publication_key_for_job, reconcile_pending_publication
 from .job_service import (
     enqueue_video_download,
     enqueue_video_delivery_fallback,
@@ -506,10 +506,8 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     usage_service = UsageService(repo)
     limit_service = LimitService(repo, subscription_service, usage_service)
 
-    publication_key = publication_key_for_job(job_type, payload)
-    receipt_lookup = getattr(repo, "get_publication_receipt", None)
-    receipt = await asyncio.to_thread(receipt_lookup, publication_key) if publication_key and callable(receipt_lookup) else None
-    reconcile_only = isinstance(receipt, dict) and receipt.get("rule_id") == int(payload.get("rule_id") or 0) and receipt.get("tenant_id") == tenant_id
+    publication_key = await existing_publication_key_for_job(repo, job_type, payload, tenant_id)
+    reconcile_only = publication_key is not None
     can_enqueue, enqueue_reason = (True, None) if reconcile_only else await asyncio.to_thread(limit_service.can_enqueue_job, tenant_id)
     if not can_enqueue:
         logger.warning("Worker блокирует выполнение job #%s tenant_id=%s: %s", job_id, tenant_id, enqueue_reason)
