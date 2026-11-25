@@ -229,6 +229,7 @@ def publication_client_class(base):
             try:
                 if not scoped:
                     return await invoke(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold)
+                _check_fence(intent)
                 if getattr(self, "publication_inbox_required", False) and (
                     getattr(self, "publication_write_blocked", False)
                     or getattr(self, "publication_inbox", None) is None
