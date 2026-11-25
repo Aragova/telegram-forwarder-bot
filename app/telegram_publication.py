@@ -141,28 +141,39 @@ def prepare_publication_inbox(client: Any, repository: Any):
         async with live_lock:
             if candidate is None:
                 return
+            spool_failure: Exception | None = None
             if spool is not None:
-                # ACK SQLite only after PostgreSQL commits the exact pair.
-                # Replaying a committed-but-unacked pair is idempotent.
-                while True:
-                    # A handler can append while the empty SQLite read is
-                    # running. Check a generation captured before that await
-                    # so the final drain cannot discard its wakeup.
-                    generation_before_read = spool_generation
-                    entries = await asyncio.to_thread(spool.pending, 128)
-                    if not entries:
-                        if spool_generation != generation_before_read:
-                            continue
-                        break
-                    for row_id, peer, old, new in entries:
-                        await candidate.record(peer, old, new)
-                        await asyncio.to_thread(spool.acknowledge, row_id)
-                # All durable entries already include the in-memory buffer.
-                buffer.clear()
+                try:
+                    # ACK SQLite only after PostgreSQL commits the exact pair.
+                    # Replaying a committed-but-unacked pair is idempotent.
+                    while True:
+                        # A handler can append while the empty SQLite read is
+                        # running. Check a generation captured before that await
+                        # so the final drain cannot discard its wakeup.
+                        generation_before_read = spool_generation
+                        entries = await asyncio.to_thread(spool.pending, 128)
+                        if not entries:
+                            if spool_generation != generation_before_read:
+                                continue
+                            break
+                        for row_id, peer, old, new in entries:
+                            await candidate.record(peer, old, new)
+                            await asyncio.to_thread(spool.acknowledge, row_id)
+                    # All durable entries already include the in-memory buffer.
+                    buffer.clear()
+                except Exception as exc:
+                    spool_failure = exc
+                    client.publication_write_blocked = True
+                    logger.exception("TELEGRAM_PUBLICATION_MAPPING_SPOOL_DRAIN_FAILED")
+            # The SQLite file might be corrupt or inaccessible for reads too.
+            # Never let a failed pending()/acknowledge() strand emergency
+            # evidence when PostgreSQL is still available.
             while emergency:
                 peer, old, new = emergency[0]
                 await candidate.record(peer, old, new)
                 emergency.popleft()
+            if spool_failure is not None:
+                raise spool_failure
             if spool is None:
                 while buffer:
                     peer, old, new = buffer[0]
