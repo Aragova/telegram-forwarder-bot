@@ -671,3 +671,62 @@ def test_durable_sqlite_spool_over_1024_does_not_falsely_block_publication(tmp_p
         assert not getattr(client, "publication_write_blocked", False)
 
     asyncio.run(scenario())
+
+
+def test_sqlite_outage_coalesces_101_emergency_retries_into_one_task(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as spool_module
+
+    class BrokenSpool:
+        instance = None
+
+        def __init__(self, _path):
+            BrokenSpool.instance = self
+            self.broken = False
+
+        def pending(self, _limit=128):
+            if self.broken:
+                raise OSError("SQLite pending unavailable")
+            return []
+
+        def append(self, *_args):
+            raise OSError("SQLite append unavailable")
+
+    monkeypatch.setattr(spool_module, "PublicationMappingSpool", BrokenSpool)
+
+    async def scenario():
+        def record(_account, _peer, _pairs):
+            raise OSError("PostgreSQL unavailable")
+
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        await telegram_publication.prepare_publication_inbox(
+            client, SimpleNamespace(record_telegram_publication_mappings=record),
+        )()
+        BrokenSpool.instance.broken = True
+        peer = types.PeerChannel(99)
+        for old in range(1, 102):
+            await client.handler(types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[old], sent_messages=[old + 5000],
+            ))
+        def active_retries():
+            return [
+                task for task in asyncio.all_tasks()
+                if task.get_name() == "telegram-publication-persist-retry" and not task.done()
+            ]
+
+        assert len(active_retries()) == 1
+        await asyncio.sleep(0.30)
+        assert len(active_retries()) == 1
+        assert client.publication_write_blocked is True
+        for task in active_retries():
+            task.cancel()
+        await asyncio.gather(*active_retries(), return_exceptions=True)
+
+    asyncio.run(scenario())
