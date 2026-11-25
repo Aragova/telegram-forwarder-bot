@@ -1588,6 +1588,7 @@ def build_video_caption_mode_menu_text(rule_id: int) -> str:
 
 def build_dashboard_text() -> str:
     stats = db.get_queue_stats()
+    uncleared_faulty = db.count_uncleared_faulty_deliveries()
     health = get_system_health(db)
     next_rule = db.get_next_scheduled_rule()
     now_text = datetime.now(USER_TZ).strftime("%d.%m.%Y %H:%M:%S")
@@ -1619,7 +1620,7 @@ def build_dashboard_text() -> str:
         f"📦 Всего постов: {stats['posts']}\n"
         f"⏳ В очереди: {stats['pending']}\n"
         f"✅ Отправлено: {stats['sent']}\n"
-        f"⚠️ С ошибками: {stats['faulty']}\n"
+        f"⚠️ Неочищенные ошибки: {uncleared_faulty}\n"
         f"🔄 Правил: {stats['rules']}\n"
         f"🤖 Воркеров: {live_workers}\n\n"
         "📊 **СОСТОЯНИЕ СИСТЕМЫ**\n"
@@ -5555,7 +5556,7 @@ def build_faulty_inline_keyboard(page: int, total_pages: int, delivery_id: int |
             InlineKeyboardButton(text="✅ Взята в работу", callback_data=f"faulty_ack:{delivery_id}:{page}"),
         ])
         rows.append([
-            InlineKeyboardButton(text="🗂 Скрыть из списка", callback_data=f"faulty_clear:{delivery_id}:{page}"),
+            InlineKeyboardButton(text="🧹 Очистить", callback_data=f"faulty_clear:{delivery_id}:{page}"),
         ])
 
     if nav_row:

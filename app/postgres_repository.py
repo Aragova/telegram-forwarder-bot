@@ -7113,6 +7113,30 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             "active_rules": active_rules,
         }
 
+    def count_uncleared_faulty_deliveries(self) -> int:
+        """Count delivery IDs still visible in the admin faulty-delivery list."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
+                    WHERE d.status = 'faulty'
+                      AND (d.error_text IS NULL OR (
+                          d.error_text NOT LIKE 'Self-loop:%'
+                          AND d.error_text <> 'self_target_echo'
+                      ))
+                      AND NOT EXISTS (
+                          SELECT 1 FROM audit_log cleared
+                          WHERE cleared.delivery_id = d.id
+                            AND cleared.event_type = 'faulty_log_cleared'
+                      )
+                    """
+                )
+                return int(cur.fetchone()["cnt"])
+
     def get_faulty_deliveries(self, limit: int = 20):
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -7163,14 +7187,19 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     JOIN routing r ON r.id = d.rule_id
                     LEFT JOIN channels s
                       ON s.channel_id = r.source_id
+                     AND COALESCE(s.tenant_id, 1) = COALESCE(r.tenant_id, d.tenant_id, 1)
                      AND ((s.thread_id IS NULL AND r.source_thread_id IS NULL) OR s.thread_id = r.source_thread_id)
                      AND s.channel_type = 'source'
                     LEFT JOIN channels t
                       ON t.channel_id = r.target_id
+                     AND COALESCE(t.tenant_id, 1) = COALESCE(r.tenant_id, d.tenant_id, 1)
                      AND ((t.thread_id IS NULL AND r.target_thread_id IS NULL) OR t.thread_id = r.target_thread_id)
                      AND t.channel_type = 'target'
                     WHERE d.status = 'faulty'
-                      AND (d.error_text IS NULL OR d.error_text NOT LIKE 'Self-loop:%%')
+                      AND (d.error_text IS NULL OR (
+                          d.error_text NOT LIKE 'Self-loop:%%'
+                          AND d.error_text <> 'self_target_echo'
+                      ))
                       AND NOT EXISTS (
                           SELECT 1 FROM audit_log cleared
                           WHERE cleared.delivery_id = d.id

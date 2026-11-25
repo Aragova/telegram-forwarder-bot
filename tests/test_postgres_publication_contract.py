@@ -350,3 +350,36 @@ def test_stage2_multiple_scheduled_claims_are_all_or_nothing(repo):
 
     repo.record_telegram_publication_mappings(123, int(target), [(80, 180), (81, 181), (82, 182)])
     assert repo.finalize_publication_receipt(key, [180, 181, 182])
+
+
+def test_faulty_counter_and_clear_preserve_pending_publication_evidence(repo):
+    baseline = repo.count_uncleared_faulty_deliveries()
+    seeded = seed(repo, 124, count=3)
+    key, rule_id, deliveries, _, source, target = seeded
+    assert register(repo, seeded, [31, 32, 33])
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE telegram_publication_receipts SET deadline_at=NOW()-INTERVAL '1 second' WHERE idempotency_key=%s", (key,))
+    assert repo.expire_publication_receipt(key, "publication_receipt_expired_no_resend")
+    assert repo.count_uncleared_faulty_deliveries() == baseline + 3
+
+    # Acknowledgement is an audit event only, not permission to replay.
+    assert repo.clear_faulty_delivery_log(deliveries[0], admin_id=12345)
+    assert repo.count_uncleared_faulty_deliveries() == baseline + 2
+    assert repo.get_delivery(deliveries[0])["status"] == "faulty"
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "accepted"
+    receipt = repo.get_publication_receipt(key)
+    assert receipt["published_ids"] is None and receipt["expired_at"] is not None
+    with pytest.raises(RuntimeError, match="незавершённая публикация"):
+        repo.clear_rule_deliveries(rule_id)
+
+    # Neither the legacy nor the new self-target echo is a visible error.
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE deliveries SET error_text='Self-loop: skipped' WHERE id=%s", (deliveries[1],))
+            cur.execute("UPDATE deliveries SET error_text='self_target_echo' WHERE id=%s", (deliveries[2],))
+            cur.execute("UPDATE routing SET is_active=FALSE,rescan_owner_token='audit-124' WHERE id=%s", (rule_id,))
+    assert repo.count_uncleared_faulty_deliveries() == baseline
+    assert not set(deliveries).intersection(row["id"] for row in repo.get_faulty_deliveries(limit=10000))
+    with pytest.raises(RuntimeError, match="неизвестным результатом"):
+        repo.reset_rule_history_for_replay(rule_id, owner_token="audit-124")
