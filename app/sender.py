@@ -1572,14 +1572,17 @@ class SenderService:
                 ledger_members = json.loads(ledger_members)
             except (TypeError, ValueError):
                 ledger_members = None
+        ledger_cached_ids = list(cached_ids)
         if attempt_status in {"verified", "accepted"} and cached_ids and len(cached_ids) == len(album_delivery_ids):
             # The album key fingerprints a SET of members. A legacy verified
             # attempt may store those members in a different order. Align
             # each target ID with its source delivery, never by positional zip.
             if (not isinstance(ledger_members, list)
                     or len(ledger_members) != len(album_delivery_ids)
+                    or any(type(member_id) is not int for member_id in ledger_members)
                     or len(set(ledger_members)) != len(ledger_members)
-                    or set(ledger_members) != set(album_delivery_ids)):
+                    or set(ledger_members) != set(album_delivery_ids)
+                    or len(set(cached_ids)) != len(cached_ids)):
                 error = "album_cache_member_provenance_unavailable_no_resend"
                 return _terminal_non_retryable_result(error)
             cached_map = dict(zip(ledger_members, cached_ids))
@@ -1609,26 +1612,27 @@ class SenderService:
                 target_thread_id=target_thread_id,
             )
             verified_ids = normalize_valid_sent_message_ids(
-                (verification.get("sent_message_ids") or cached_ids) if verification.get("ok") else []
+                verification.get("sent_message_ids") if verification.get("ok") else []
             )
-            if verification.get("ok") and len(verified_ids) == len(album_delivery_ids):
+            # The verifier reports a set of Telegram IDs, often sorted by
+            # ID. It does not provide a new delivery-to-message association.
+            if (verification.get("ok")
+                    and len(verified_ids) == len(cached_ids)
+                    and set(verified_ids) == set(cached_ids)):
                 promoted = await run_db(
                     self.db.mark_delivery_attempt_verified,
                     idempotency_key,
-                    sent_message_ids=[
-                        dict(zip(album_delivery_ids, verified_ids))[member_id]
-                        for member_id in ledger_members
-                    ],
+                    sent_message_ids=ledger_cached_ids,
                 )
                 if promoted:
                     await run_db(
                         self._mark_album_deliveries_sent_sync,
-                        album_delivery_ids, sent_message_ids=verified_ids,
+                        album_delivery_ids, sent_message_ids=cached_ids,
                         target_id=str(target_id), delivery_method="idempotency_album_cache_reconciled",
                     )
                     logger.info(
                         "REPOST_ALBUM_CACHE_RECONCILED | rule_id=%s | delivery_ids=%s | target_ids=%s",
-                        rule_id, album_delivery_ids, verified_ids,
+                        rule_id, album_delivery_ids, cached_ids,
                     )
                     return True
         if attempt_status in {"sending", "accepted", "failed_after_send"}:

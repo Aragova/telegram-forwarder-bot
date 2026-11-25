@@ -206,3 +206,33 @@ def test_stale_album_payload_returns_terminal_no_rpc_and_requests_safe_release()
     assert result["retryable"] is False
     assert result["album_membership_changed_pre_send"] is True
     assert result["manual_review_required"] is True
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_accepted_album_cache_keeps_original_member_mapping_after_sorted_verification(legacy):
+    repo = FakeAlbumRepo()
+    key = _album_key() if legacy else _album_key([1, 2])
+    repo.attempt_by_key[key] = {
+        "status": "accepted", "sent_message_ids_json": [501, 502],
+        "source_message_ids_json": [1, 2],
+    }
+    # Telegram verification reports IDs sorted, not in current job order.
+    repo.verification_result = {"ok": True, "sent_message_ids": [501, 502]}
+    assert asyncio.run(_execute(repo, delivery_ids=[2, 1])) is True
+    assert repo.promoted == [(key, [501, 502])]
+    assert [(delivery_id, row["sent_message_id"]) for delivery_id, row in repo.marked] == [(2, 502), (1, 501)]
+
+
+@pytest.mark.parametrize("verified_ids", [[501, 999], [501, 501], []])
+def test_accepted_album_cache_rejects_wrong_verified_id_set(verified_ids):
+    repo = FakeAlbumRepo()
+    key = _album_key([1, 2])
+    repo.attempt_by_key[key] = {
+        "status": "accepted", "sent_message_ids_json": [501, 502],
+        "source_message_ids_json": [1, 2],
+    }
+    repo.verification_result = {"ok": True, "sent_message_ids": verified_ids}
+    result = asyncio.run(_execute(repo, delivery_ids=[2, 1]))
+    assert result["ok"] is False
+    assert result["manual_review_required"] is True
+    assert repo.promoted == [] and repo.marked == []
