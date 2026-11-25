@@ -3,6 +3,9 @@ from __future__ import annotations
 import logging
 
 from .runtime_utils import run_db
+from .delivery_idempotency import normalize_valid_sent_message_ids
+from .send_intent import PublicationWriteUnavailable
+from .transport_policy import TransportRateLimited
 from .repost_caption import get_repost_caption_override, caption_override_content
 from .sender_primitives import (
     DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK, _prepare_html_text,
@@ -489,6 +492,15 @@ class RepostSingleDelivery:
             return False
 
         if getattr(reupload_outcome, "transport_accepted", False) and not getattr(reupload_outcome, "authoritative_resolved", False):
+            if getattr(reupload_outcome, "resolution_method", None) == "video_processing_pending":
+                from .single_publication_reconciliation import register_pending_single
+                if await register_pending_single(
+                    owner, key=idempotency_key, delivery_id=delivery_id, rule_id=rule.id,
+                    target_id=target_id, target_thread_id=target_thread_id,
+                    source_channel=source_channel, source_message_id=message_id,
+                    scheduled_id=getattr(reupload_outcome, "returned_candidate_id", None),
+                ):
+                    return False
             error_text = "telethon_send_accepted_target_id_unresolved_non_retryable"
             logger.warning(
                 "REUPLOAD_SINGLE_ACCEPTED_TARGET_ID_UNRESOLVED | rule_id=%s | delivery_id=%s | target_id=%s | returned_candidate_id=%s | action=no_second_send_no_reaction_manual_review",
@@ -838,6 +850,11 @@ class RepostSingleDelivery:
                     disable_web_page_preview=True,
                 )
 
+                if idempotency_key:
+                    sent_ids = normalize_valid_sent_message_ids([sent.message_id])
+                    await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                                 sent_message_ids=sent_ids, telegram_method="text_fallback")
+
                 await owner._add_reaction_for_rule_if_possible(
                     rule=rule,
                     target_id=target_id,
@@ -890,6 +907,8 @@ class RepostSingleDelivery:
                 )
                 return {"ok": True, "sent_message_ids": [int(sent.message_id)]}
 
+            except (TransportRateLimited, PublicationWriteUnavailable):
+                raise
             except Exception as exc:
                 await owner._log_delivery_pipeline_step(
                     rule_id=rule.id,

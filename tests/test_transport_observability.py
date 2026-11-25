@@ -4,6 +4,8 @@ import asyncio
 import logging
 
 import pytest
+from aiogram.exceptions import TelegramRetryAfter
+from aiogram.methods import SendMessage
 
 from app.transport_policy import TransportPolicy, TransportRateLimited, build_sender_bot_policy
 
@@ -117,16 +119,15 @@ def test_unknown_operation_retry_skipped_log(caplog):
 
 def test_long_retry_after_logs_rate_limited(caplog):
     async def scenario():
-        class RetryAfterError(Exception):
-            def __init__(self, retry_after):
-                self.retry_after = retry_after
-                super().__init__(f"retry after {retry_after}")
-
         caplog.set_level(logging.DEBUG, logger="forwarder.transport")
         policy = build_sender_bot_policy()
 
         async def operation():
-            raise RetryAfterError(policy.long_retry_after_threshold_sec + 1)
+            raise TelegramRetryAfter(
+                method=SendMessage(chat_id=1, text="test"),
+                message="rate limited",
+                retry_after=policy.long_retry_after_threshold_sec + 1,
+            )
 
         with pytest.raises(TransportRateLimited):
             await policy.execute(backend="bot", key="sender.bot.send_message", op_name="send_message", func=operation)

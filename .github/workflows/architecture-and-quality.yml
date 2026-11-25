@@ -5,11 +5,9 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
 
-# Write permissions are available only for same-repository PRs.
-# Fork PRs receive a read-only token automatically.
+# Default read-only token; only the comment job receives write permission.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: architecture-quality-pr-${{ github.event.pull_request.number }}
@@ -19,14 +17,13 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    env:
-      PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
 
     steps:
       - name: Checkout exact PR head
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -41,10 +38,49 @@ jobs:
 
       - name: Install analyzers and Graphviz
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y graphviz
-          python -m pip install --upgrade pip
-          python -m pip install ruff mypy bandit radon "code2flow==2.5.1"
+          if ! command -v dot >/dev/null 2>&1; then
+            sudo apt-get -o Acquire::Retries=3 update
+            sudo apt-get -o Acquire::Retries=3 install -y graphviz
+          fi
+          dot -V
+          python -m venv "$RUNNER_TEMP/audit-venv"
+          source "$RUNNER_TEMP/audit-venv/bin/activate"
+          python -m pip install --require-hashes --only-binary :all: -r .github/requirements/audit.lock
+          python -m pip check
+          echo "$RUNNER_TEMP/audit-venv/bin" >> "$GITHUB_PATH"
+
+      # Upstream code2flow 2.5.1 ships only an sdist. Verify the official
+      # archive, copy its regular package files, and call its console entry
+      # point directly: no setup.py, build backend, or additional dependencies.
+      - name: Prepare verified code2flow source
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/code2flow-2.5.1.tar.gz"
+          curl --fail --silent --show-error --location --max-time 30 \
+            --proto '=https' --proto-redir '=https' \
+            'https://files.pythonhosted.org/packages/3b/a5/d1a0d78f1d31d592131eed19c48839c17a842094a683242ec0d0a825830e/code2flow-2.5.1.tar.gz' \
+            -o "$archive"
+          printf '%s  %s\n' 'ad98717920da6598dac38a1951f38b84891f4aa4bd2f36c119b0dbac729f4785' "$archive" | sha256sum --check
+          python - <<'PY'
+          import os
+          import tarfile
+          from pathlib import Path, PurePosixPath
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "code2flow-2.5.1"
+          root.mkdir()
+          with tarfile.open(root.parent / "code2flow-2.5.1.tar.gz", "r:gz") as archive:
+              for member in archive.getmembers():
+                  parts = PurePosixPath(member.name).parts
+                  if parts[:2] != ("code2flow-2.5.1", "code2flow") or not member.isfile():
+                      continue
+                  relative = parts[1:]
+                  if ".." in relative:
+                      raise ValueError("Invalid package path")
+                  target = root.joinpath(*relative)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with archive.extractfile(member) as source:
+                      target.write_bytes(source.read())
+          PY
 
       # Existing findings are reported before enabling hard quality gates.
       - name: Ruff, strict mypy and Bandit
@@ -81,7 +117,8 @@ jobs:
           mkdir -p docs "$REPORT_DIR"
           rm -f docs/architecture_flow.png
           set +e
-          timeout 180s code2flow --language py --hide-legend \
+          timeout 180s python -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from code2flow.engine import main; main()' \
+            "$RUNNER_TEMP/code2flow-2.5.1" --language py --hide-legend \
             bot.py \
             app/keyboards.py \
             app/admin_handlers \
@@ -110,18 +147,10 @@ jobs:
             echo "::error::code2flow failed (exit $status); see audit artifact"
           fi
 
-      # GITHUB_TOKEN commits do not retrigger pull_request workflows.
-      - name: Update image in PR branch
-        if: steps.graph.outputs.created == 'true' && github.event.pull_request.head.repo.full_name == github.repository
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f docs/architecture_flow.png
-          if ! git diff --cached --quiet; then
-            git commit -m "docs: refresh architecture call graph [skip ci]"
-            git push origin "HEAD:refs/heads/$PR_HEAD_REF"
-          fi
+      # Publish the generated diagram as an artifact without changing the reviewed HEAD.
+      - name: Save architecture diagram in audit artifact
+        if: steps.graph.outputs.created == 'true'
+        run: cp docs/architecture_flow.png "$REPORT_DIR/architecture_flow.png"
 
       - name: Build audit summary
         if: always()
@@ -208,27 +237,6 @@ jobs:
           PY
           cat "$REPORT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Post or update one PR comment
-        if: always() && github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const body = fs.readFileSync(process.env.REPORT_DIR + '/summary.md', 'utf8');
-            const { owner, repo } = context.repo;
-            const issue_number = context.issue.number;
-            const comments = await github.paginate(github.rest.issues.listComments,
-              { owner, repo, issue_number, per_page: 100 });
-            const existing = comments.find(c => c.user?.type === 'Bot' &&
-              c.body?.includes('<!-- vimi-quality-report -->'));
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner, repo, comment_id: existing.id, body
-              });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number, body });
-            }
-
       - name: Upload audit logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -243,3 +251,81 @@ jobs:
         run: |
           test "${{ steps.graph.outputs.created }}" = "true"
           test -s docs/architecture_flow.png
+
+  post-comment:
+    needs: audit
+    if: always() && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download audit report
+        uses: actions/download-artifact@v4
+        with:
+          name: architecture-quality-reports
+          path: quality-report
+
+      - name: Post or update one PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('quality-report/summary.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(c => c.user?.type === 'Bot' &&
+              c.body?.includes('<!-- vimi-quality-report -->'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+  sonar-diagnostics:
+    # Read only; no checkout, repository scripts, or write token.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      checks: read
+      pull-requests: read
+      contents: read
+    steps:
+      - name: Read latest completed SonarCloud and CodeQL annotations
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner, repo, pull_number: context.issue.number, per_page: 100
+            });
+            const head = context.payload.pull_request.head.sha;
+            const refs = [...new Set([head, ...commits.reverse().map(c => c.sha)])].slice(0, 12);
+            for (const checkName of ['SonarCloud Code Analysis', 'CodeQL']) {
+              for (const ref of refs) {
+                const checks = await github.paginate(github.rest.checks.listForRef, {
+                  owner, repo, ref, check_name: checkName, per_page: 100
+                });
+                const check = checks.find(c => c.status === 'completed');
+                if (!check) continue;
+                core.info('ANALYZER_CHECK ' + JSON.stringify({
+                  name: checkName, ref, head, conclusion: check.conclusion, id: check.id
+                }));
+                const annotations = await github.paginate(github.rest.checks.listAnnotations, {
+                  owner, repo, check_run_id: check.id, per_page: 100
+                });
+                for (const a of annotations) {
+                  core.info('ANALYZER_ANNOTATION ' + JSON.stringify({
+                    name: checkName, path: a.path, line: a.start_line, level: a.annotation_level,
+                    title: a.title, message: a.message
+                  }));
+                }
+                break;
+              }
+            }

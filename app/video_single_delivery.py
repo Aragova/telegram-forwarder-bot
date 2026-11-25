@@ -6,9 +6,12 @@ from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from telethon.errors import FloodWaitError
 
 from .runtime_utils import run_db
+from .send_intent import current_publication_intent
+from .delivery_idempotency import normalize_valid_sent_message_ids
 from .sender_primitives import _detect_message_media_kind
 from .telethon_authoritative_resolver import TelethonSendOutcome
 from .video_processor import VideoPreSendError
+from .transport_policy import TransportRateLimited
 
 logger = logging.getLogger("forwarder")
 
@@ -44,6 +47,26 @@ class VideoSingleDelivery:
                 "video_mode": True,
             },
         )
+
+        publication_returned = False
+        candidate_ids = []
+        async def post_send_failure(exc):
+            error = "video_send_accepted_target_id_unresolved_non_retryable"
+            logger.warning("VIDEO_LEGACY_POST_SEND_ERROR | delivery_id=%s | action=no_resend | error=%s", delivery_id, exc)
+            try:
+                await run_db(
+                    owner._finalize_video_failure_sync,
+                    delivery_id=delivery_id, rule_id=rule.id, post_id=post_id,
+                    source_channel=source_channel, target_id=target_id,
+                    target_thread_id=target_thread_id, source_message_id=message_id,
+                    error_text=error,
+                )
+            except Exception:
+                # A failure recording the delivery must not escape as a
+                # pre-send failure and authorize another publication.
+                logger.exception("VIDEO_LEGACY_POST_SEND_FINALIZE_FAILED | delivery_id=%s", delivery_id)
+            return {"ok": False, "accepted_unresolved": True, "retryable": False,
+                    "error_text": error, "candidate_sent_message_ids": candidate_ids}
 
         try:
             message = await owner._fetch_message(source_channel, message_id)
@@ -184,7 +207,31 @@ class VideoSingleDelivery:
                 except Exception:
                     pass
 
+            publication_returned = sent_msg is not None and sent_msg is not False
+            if isinstance(sent_msg, TelethonSendOutcome):
+                candidate_ids = [] if sent_msg.resolution_method == "video_processing_pending" else (sent_msg.returned_candidate_ids or [])
+            intent = current_publication_intent()
+            if publication_returned and intent is not None and hasattr(owner.db, "mark_delivery_attempt_accepted"):
+                if not isinstance(sent_msg, TelethonSendOutcome):
+                    candidate_ids = owner._extract_sent_message_ids(sent_msg)
+                elif sent_msg.authoritative_resolved:
+                    candidate_ids = list(sent_msg.authoritative_message_ids)
+                await run_db(
+                    owner.db.mark_delivery_attempt_accepted, intent.key,
+                    sent_message_ids=normalize_valid_sent_message_ids(candidate_ids), telegram_method="video_delivery",
+                )
             if isinstance(sent_msg, TelethonSendOutcome) and not sent_msg.authoritative_resolved:
+                if sent_msg.transport_accepted and sent_msg.resolution_method == "video_processing_pending":
+                    from .delivery_idempotency import build_delivery_idempotency_key
+                    from .single_publication_reconciliation import register_pending_single
+                    key = build_delivery_idempotency_key(operation_kind="video_send", delivery_id=delivery_id, target_id=str(target_id))
+                    if await register_pending_single(
+                        owner, key=key, delivery_id=delivery_id, rule_id=rule.id,
+                        target_id=target_id, target_thread_id=target_thread_id,
+                        source_channel=source_channel, source_message_id=message_id,
+                        scheduled_id=sent_msg.returned_candidate_id,
+                    ):
+                        return {"ok": False, "accepted": True, "retryable": False, "publication_pending": True}
                 error = "video_send_accepted_target_id_unresolved_non_retryable"
                 logger.warning("VIDEO_LEGACY_ACCEPTED_UNRESOLVED | rule_id=%s | delivery_id=%s | returned_candidate_ids=%s | action=no_resend", rule.id, delivery_id, sent_msg.returned_candidate_ids)
                 await run_db(
@@ -194,7 +241,7 @@ class VideoSingleDelivery:
                     target_thread_id=target_thread_id, source_message_id=message_id,
                     error_text=error,
                 )
-                return {"ok": False, "accepted_unresolved": True, "retryable": False, "error_text": error, "candidate_sent_message_ids": sent_msg.returned_candidate_ids or []}
+                return {"ok": False, "accepted_unresolved": True, "retryable": False, "error_text": error, "candidate_sent_message_ids": [] if sent_msg.resolution_method == "video_processing_pending" else (sent_msg.returned_candidate_ids or [])}
 
             if sent_msg:
                 sent_message_ids = (
@@ -202,6 +249,7 @@ class VideoSingleDelivery:
                     if isinstance(sent_msg, TelethonSendOutcome)
                     else owner._extract_sent_message_ids(sent_msg)
                 )
+                candidate_ids = sent_message_ids
                 valid_sent_message_ids = await owner._confirm_target_delivery_message_ids_with_retry(
                     rule_id=rule.id,
                     delivery_id=delivery_id,
@@ -269,7 +317,7 @@ class VideoSingleDelivery:
                     candidate_sent_message_ids=sent_message_ids,
                     valid_sent_message_ids=valid_sent_message_ids,
                 )
-                return True
+                return {"ok": True, "sent_message_ids": valid_sent_message_ids} if intent is not None else True
 
             await run_db(
                 owner._finalize_video_failure_sync,
@@ -289,6 +337,8 @@ class VideoSingleDelivery:
             return False
 
         except VideoPreSendError as exc:
+            if publication_returned:
+                return await post_send_failure(exc)
             logger.warning(
                 "VIDEO_LEGACY_PREFLIGHT_FAILED | rule_id=%s | delivery_id=%s | action=safe_retry | reason=%s",
                 rule.id, delivery_id, exc,
@@ -297,11 +347,16 @@ class VideoSingleDelivery:
                 "ok": False, "retryable": True, "accepted": False,
                 "rejected_before_send": True, "error_text": str(exc),
             }
-        except (TelegramRetryAfter, FloodWaitError) as exc:
+        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited) as exc:
+            if publication_returned:
+                return await post_send_failure(exc)
             # A definite Bot API flood-control rejection happens before the
             # video is posted; never finalize as accepted or faulty, and let
             # the worker retry only after the required delay.
-            delay = max(1, int(exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after))
+            if isinstance(exc, TransportRateLimited):
+                delay = max(1, exc.retry_after_seconds)
+            else:
+                delay = max(1, int(exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after))
             logger.warning(
                 "VIDEO_LEGACY_RATE_LIMITED | rule_id=%s | delivery_id=%s | retry_after=%s",
                 rule.id, delivery_id, delay,
@@ -315,6 +370,8 @@ class VideoSingleDelivery:
                 "error_text": f"{type(exc).__name__}: retry_after={delay}",
             }
         except Exception as exc:
+            if publication_returned:
+                return await post_send_failure(exc)
             logger.exception("Ошибка video delivery rule=%s delivery=%s", rule.id, delivery_id)
 
             await run_db(

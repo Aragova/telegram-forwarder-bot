@@ -161,3 +161,104 @@ def test_video_delivery_invalid_ids_not_accepted():
     assert ok is True
     accepted_calls = [call for call in repo.calls if call[0] == "accepted"]
     assert not accepted_calls
+
+
+def test_legacy_video_acceptance_db_failure_never_releases_publication():
+    import pytest
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def accepted(*_args, **_kwargs):
+        return {"ok": False, "accepted_unresolved": True, "candidate_sent_message_ids": [778]}
+
+    def write_failure(*_args, **_kwargs):
+        raise RuntimeError("acceptance commit failed")
+
+    service._deliver_single_video = accepted
+    repo.mark_delivery_attempt_accepted = write_failure
+    with pytest.raises(RuntimeError, match="acceptance commit failed"):
+        asyncio.run(service.execute_video_delivery_from_job(
+            rule_id=1, delivery_id=44, message_id=12, source_channel="src", target_id="dst",
+        ))
+    assert [c[2]["status"] for c in repo.calls if c[0] == "failed"] == ["failed_after_send"]
+
+
+def test_legacy_video_claim_failure_does_not_modify_another_attempt():
+    import pytest
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    def uncertain_claim(*_args, **_kwargs):
+        raise RuntimeError("claim commit response lost")
+
+    async def never_send(*_args, **_kwargs):
+        raise AssertionError("send without confirmed ownership")
+
+    repo.mark_delivery_attempt_sending = uncertain_claim
+    service._deliver_single_video = never_send
+    with pytest.raises(RuntimeError, match="claim commit response lost"):
+        asyncio.run(service.execute_video_delivery_from_job(
+            rule_id=1, delivery_id=45, message_id=13, source_channel="src", target_id="dst",
+        ))
+    assert not any(c[0] == "failed" for c in repo.calls)
+
+
+def test_legacy_video_exception_after_success_does_not_release_attempt():
+    import pytest
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def accepted(*_args, **_kwargs):
+        return {"ok": True, "sent_message_ids": [778]}
+
+    def write_failure(*_args, **_kwargs):
+        raise RuntimeError("follow-up failed")
+
+    service._deliver_single_video = accepted
+    service._touch_rule_after_send_sync = write_failure
+    with pytest.raises(RuntimeError, match="follow-up failed"):
+        asyncio.run(service.execute_video_delivery_from_job(
+            rule_id=1, delivery_id=46, message_id=14, source_channel="src", target_id="dst",
+        ))
+    assert [c[2]["status"] for c in repo.calls if c[0] == "failed"] == ["failed_after_send"]
+
+
+def test_legacy_video_failure_before_publication_rpc_is_retryable():
+    import pytest
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def fail_before(*_args, **_kwargs):
+        raise RuntimeError("preflight database unavailable")
+
+    service._deliver_single_video = fail_before
+    with pytest.raises(RuntimeError, match="preflight database unavailable"):
+        asyncio.run(service.execute_video_delivery_from_job(
+            rule_id=1, delivery_id=47, message_id=15, source_channel="src", target_id="dst",
+        ))
+    assert [c[2]["status"] for c in repo.calls if c[0] == "failed"] == ["failed_before_send"]
+
+
+def test_legacy_video_exception_after_ambiguous_rpc_never_releases_attempt():
+    import pytest
+    from app.send_intent import observe_publication
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def lost_reply():
+        raise TimeoutError("Telegram reply lost")
+
+    async def deliver(*_args, **_kwargs):
+        return await observe_publication(lost_reply)
+
+    service._deliver_single_video = deliver
+    with pytest.raises(TimeoutError, match="Telegram reply lost"):
+        asyncio.run(service.execute_video_delivery_from_job(
+            rule_id=1, delivery_id=49, message_id=16, source_channel="src", target_id="dst",
+        ))
+    assert [c[2]["status"] for c in repo.calls if c[0] == "failed"] == ["failed_after_send"]

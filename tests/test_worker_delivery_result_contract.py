@@ -337,3 +337,41 @@ def test_repost_orphan_zero_result_with_already_faulty_delivery_does_not_defer_f
     ))
     assert repo.failed and repo.failed[0][0] == 117
     assert repo.deferred == []
+
+
+def test_pending_publication_worker_defers_without_replaying_even_at_retry_limit(monkeypatch):
+    class Repo(FakeRepo):
+        def __init__(self):
+            super().__init__()
+            self.deferred = []
+
+        def get_publication_receipt(self, key):
+            assert key == "delivery:103:target:-100dst:single"
+            return {"rule_id": 1, "tenant_id": 1}
+
+        def defer_job(self, job_id, error, delay):
+            self.deferred.append((job_id, error, delay))
+            return True
+
+    class NoSend:
+        async def execute_repost_single_from_job(self, **kwargs):
+            raise AssertionError("must reconcile, not resend")
+
+    results = iter([
+        {"ok": False, "accepted": True, "retryable": False, "publication_pending": True},
+        {"ok": True, "accepted": True, "sent_message_ids": [321]},
+    ])
+
+    async def reconcile(sender, key):
+        return next(results)
+
+    monkeypatch.setattr("app.worker_runtime.reconcile_pending_publication", reconcile)
+    repo, sender = Repo(), NoSend()
+    job = {"id": 117, "job_type": "repost_single", "attempts": 3, "max_attempts": 3,
+           "payload_json": {"delivery_id": 103, "rule_id": 1, "target_id": "-100dst"}}
+    assert asyncio.run(_process_job(repo, sender, "w", "light", job, policy=POLICY, state=_InFlightState()))
+    assert repo.deferred == [(117, "", 30)]
+    assert not repo.completed and not repo.failed and not repo.retried
+    assert asyncio.run(_process_job(repo, sender, "w", "light", job, policy=POLICY, state=_InFlightState()))
+    assert repo.completed == [117]
+    assert not repo.failed and not repo.retried

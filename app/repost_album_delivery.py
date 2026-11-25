@@ -456,6 +456,11 @@ class RepostAlbumDelivery:
                 target_thread_id=target_thread_id,
             )
             attempts_debug.append({"stage": "copy_album_retry", **copy_retry_result})
+            if idempotency_key:
+                accepted_ids = normalize_valid_sent_message_ids(copy_retry_result.get("sent_message_ids") or [])
+                if accepted_ids:
+                    await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                                 sent_message_ids=accepted_ids, telegram_method="copy_album_retry")
 
             await owner._log_delivery_pipeline_step(
                 rule_id=rule.id,
@@ -677,6 +682,18 @@ class RepostAlbumDelivery:
             is_self_loop=is_self_loop,
                 **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
+        if reupload_result.get("resolution_method") == "video_processing_pending" and reupload_result.get("transport_accepted"):
+            if [int(m.id) for m in source_messages] != message_ids:
+                return False
+            from .single_publication_reconciliation import register_pending_publication
+            if await register_pending_publication(
+                owner, key=idempotency_key, delivery_ids=delivery_ids, rule_id=rule.id,
+                target_id=target_id, target_thread_id=target_thread_id,
+                source_channel=source_channel, source_message_ids=message_ids,
+                scheduled_ids=reupload_result.get("returned_candidate_ids") or [],
+                pending_mask=reupload_result.get("pending_mask"),
+            ):
+                return False
         attempts_debug.append({"stage": "reupload_album", **reupload_result})
         reupload_candidate_sent_ids = normalize_valid_sent_message_ids(reupload_result.get("sent_message_ids") or [])
         if idempotency_key and reupload_candidate_sent_ids:
@@ -1049,7 +1066,24 @@ class RepostAlbumDelivery:
                 is_self_loop=is_self_loop,
                 **({"caption_override": custom_caption} if custom_caption is not None else {}),
             )
+            if reupload_retry_result.get("resolution_method") == "video_processing_pending" and reupload_retry_result.get("transport_accepted"):
+                if [int(m.id) for m in source_messages] != message_ids:
+                    return False
+                from .single_publication_reconciliation import register_pending_publication
+                if await register_pending_publication(
+                    owner, key=idempotency_key, delivery_ids=delivery_ids, rule_id=rule.id,
+                    target_id=target_id, target_thread_id=target_thread_id,
+                    source_channel=source_channel, source_message_ids=message_ids,
+                    scheduled_ids=reupload_retry_result.get("returned_candidate_ids") or [],
+                    pending_mask=reupload_retry_result.get("pending_mask"),
+                ):
+                    return False
             attempts_debug.append({"stage": "reupload_album_retry", **reupload_retry_result})
+            if idempotency_key:
+                accepted_ids = normalize_valid_sent_message_ids(reupload_retry_result.get("sent_message_ids") or [])
+                if accepted_ids:
+                    await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                                 sent_message_ids=accepted_ids, telegram_method="reupload_album_retry")
 
             await owner._log_delivery_pipeline_step(
                 rule_id=rule.id,
@@ -1226,6 +1260,15 @@ class RepostAlbumDelivery:
             **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
         attempts_debug.append({"stage": "send_album_one_by_one", **one_by_one_result})
+        if idempotency_key:
+            accepted_ids = normalize_valid_sent_message_ids(
+                one_by_one_result.get("sent_message_ids")
+                or one_by_one_result.get("resolved_authoritative_message_ids_before_unresolved")
+                or []
+            )
+            if accepted_ids:
+                await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key,
+                             sent_message_ids=accepted_ids, telegram_method="one_by_one_fallback")
 
         await owner._log_delivery_pipeline_step(
             rule_id=rule.id,

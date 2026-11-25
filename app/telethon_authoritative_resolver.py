@@ -18,6 +18,7 @@ class TelethonResolutionResult:
     returned_candidate_ids: list[int] | None = None
     resolution_method: str | None = None
     error_text: str | None = None
+    pending_mask: list[bool] | None = None
 
 
 def _message_id(message: Any) -> int | None:
@@ -111,6 +112,7 @@ class TelethonSendOutcome:
     returned_candidate_ids: list[int] | None = None
     resolution_method: str | None = None
     error_text: str | None = None
+    pending_mask: list[bool] | None = None
 
     @property
     def ok(self) -> bool:
@@ -129,6 +131,7 @@ class TelethonSendOutcome:
             "returned_candidate_id": self.returned_candidate_id,
             "returned_candidate_ids": list(self.returned_candidate_ids or []),
             "resolution_method": self.resolution_method,
+            **({"pending_mask": self.pending_mask} if self.pending_mask is not None else {}),
         }
 
 
@@ -222,8 +225,104 @@ class TelethonAuthoritativeMessageResolver:
     def _is_safe_history_candidate(self, message: Any, *, expected_fp: dict[str, Any], before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None, target_thread_id: int | None, target_is_broadcast_channel: bool = False) -> bool:
         return self._history_candidate_rejection_reason(message, expected_fp=expected_fp, before_max_message_id=before_max_message_id, send_started_at=send_started_at, send_finished_at=send_finished_at, source_message_ids=source_message_ids, target_thread_id=target_thread_id, target_is_broadcast_channel=target_is_broadcast_channel) is None
 
+    async def resolve_scheduled_publication(
+        self, *, target_entity: Any, target_id: Any, scheduled_id: int | None,
+        source_message_ids: set[int] | None, target_thread_id: int | None,
+        before_max_message_id: int | None, send_started_at: datetime,
+        target_is_broadcast_channel: bool,
+    ) -> int | None:
+        """Use only explicit Telegram mapping; never scan by similar caption."""
+        if not scheduled_id:
+            return None
+        ids = await self.resolve_scheduled_publications(
+            target_entity=target_entity,target_id=target_id,scheduled_ids=[scheduled_id],
+            source_message_ids=source_message_ids,target_thread_id=target_thread_id,
+            before_max_message_id=before_max_message_id,send_started_at=send_started_at,
+            target_is_broadcast_channel=target_is_broadcast_channel,
+        )
+        return ids[0] if ids else None
+
+    async def resolve_scheduled_publications(
+        self, *, target_entity: Any, target_id: Any, scheduled_ids: list[int],
+        source_message_ids: set[int] | None, target_thread_id: int | None,
+        before_max_message_id: int | None, send_started_at: datetime,
+        target_is_broadcast_channel: bool, pending_mask: list[bool] | None = None,
+        publication_inbox: Any = None,
+    ) -> list[int]:
+        """Resolve the complete vector in its original order, never partial groups."""
+        from .telegram_publication import publication_candidate_mask, publication_pairs, verified_published_message
+
+        inbox = publication_inbox if publication_inbox is not None else getattr(self.telethon,"publication_inbox",None)
+        mask = publication_candidate_mask(scheduled_ids,pending_mask)
+        if inbox is None or not mask:
+            return []
+        pending_ids = [mid for mid,flag in zip(scheduled_ids,mask) if flag]
+        try:
+            from telethon import utils
+
+            peer_id = int(target_id) if str(target_id).lstrip("-").isdigit() else utils.get_peer_id(target_entity)
+            mapped = await inbox.lookup_many(peer_id, pending_ids)
+            if not publication_pairs(pending_ids,mapped):
+                return []
+            mapped_iter = iter(mapped)
+            ids = [next(mapped_iter) if flag else mid for mid,flag in zip(scheduled_ids,mask)]
+            if not publication_pairs(ids,ids):
+                return []
+            if len(ids)==1:
+                messages = [await self.telethon.get_messages(target_entity,ids=ids[0])]
+            else:
+                messages = await self.telethon.get_messages(target_entity,ids=ids)
+            if not isinstance(messages,(list,tuple)) or len(messages)!=len(ids):
+                return []
+            by_id = {getattr(m,"id",None):m for m in messages if m is not None}
+            if set(by_id)!=set(ids):
+                return []
+            if len(ids)>1:
+                groups = {getattr(m,"grouped_id",None) for m in messages}
+                if len(groups)!=1 or not next(iter(groups)):
+                    return []
+            if not all(verified_published_message(
+                by_id[mid],peer_id=peer_id,published_id=mid,thread_id=target_thread_id,
+                source_ids=source_message_ids,before_id=before_max_message_id,
+                started_at=send_started_at,broadcast=target_is_broadcast_channel,
+                require_scheduled=flag,
+            ) for mid,flag in zip(ids,mask)):
+                return []
+            if await inbox.lookup_many(peer_id, pending_ids) != mapped:
+                return []
+            return ids
+        except Exception as exc:
+            logger.warning("TELEGRAM_PUBLICATION_VECTOR_LOOKUP_FAILED | target_id=%s | error_type=%s",
+                           target_id,type(exc).__name__)
+            return []
+
     async def resolve_authoritative_single_message(self, *, target_entity: Any, target_id: Any, sent: Any, expected_message: Any = None, expected_text: str = "", before_max_message_id: int | None, send_started_at: datetime, send_finished_at: datetime, source_message_ids: set[int] | None = None, target_thread_id: int | None = None, target_is_broadcast_channel: bool = False, require_strong_media_match: bool = False, history_poll_delays: tuple[float, ...] | None = None) -> TelethonResolutionResult:
         returned_candidate_id = _message_id(sent)
+        if getattr(sent, "video_processing_pending", None) is True:
+            final_id = await self.resolve_scheduled_publication(
+                target_entity=target_entity, target_id=target_id,
+                scheduled_id=returned_candidate_id, source_message_ids=source_message_ids,
+                target_thread_id=target_thread_id, before_max_message_id=before_max_message_id,
+                send_started_at=send_started_at, target_is_broadcast_channel=target_is_broadcast_channel,
+            )
+            if final_id is not None:
+                return TelethonResolutionResult(
+                    True, final_id, authoritative_message_ids=[final_id],
+                    returned_candidate_id=returned_candidate_id,
+                    resolution_method="scheduled_publication_mapping",
+                )
+            # Telegram allocates scheduled and published IDs in separate namespaces.
+            # Never look up a scheduled ID in the published history as a candidate.
+            logger.info(
+                "TELEGRAM_VIDEO_PROCESSING_PENDING | target_id=%s | scheduled_id=%s | estimated_publication_at=%s | action=await_publication_mapping",
+                target_id, returned_candidate_id, getattr(sent, "date", None),
+            )
+            return TelethonResolutionResult(
+                False, None, returned_candidate_id=returned_candidate_id,
+                returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [],
+                resolution_method="video_processing_pending",
+                error_text="telegram_video_processing_pending",
+            )
         expected_fp = build_media_fingerprint(expected_message or sent, text=expected_text)
         ok, message, reason = await self.validate_message_in_target(target_entity, target_id, returned_candidate_id, expected_fp, source_message_ids, target_thread_id, target_is_broadcast_channel)
         if ok and require_strong_media_match:
@@ -325,6 +424,32 @@ class TelethonAuthoritativeMessageResolver:
             return TelethonResolutionResult(False, None, returned_candidate_ids=[], resolution_method="album_unresolved", error_text="album_sent_messages_empty")
         if len(sent_messages) != len(expected_messages):
             return TelethonResolutionResult(False, None, returned_candidate_ids=[i for i in (_message_id(m) for m in sent_messages) if i], resolution_method="album_unresolved", error_text="album_sent_count_mismatch")
+
+        pending_mask = [getattr(m,"video_processing_pending",None) is True for m in sent_messages]
+        pending_ids = [_message_id(m) for m,flag in zip(sent_messages,pending_mask) if flag]
+        if any(pending_mask):
+            raw_ids = [_message_id(m) for m in sent_messages]
+            final_ids = await self.resolve_scheduled_publications(
+                target_entity=target_entity,target_id=target_id,scheduled_ids=raw_ids,
+                source_message_ids=source_message_ids,target_thread_id=target_thread_id,
+                before_max_message_id=before_max_message_id,send_started_at=send_started_at,
+                target_is_broadcast_channel=target_is_broadcast_channel,pending_mask=pending_mask,
+            ) if all(type(mid) is int and mid > 0 for mid in raw_ids) else []
+            if final_ids:
+                return TelethonResolutionResult(
+                    True,final_ids[0],authoritative_message_ids=final_ids,
+                    returned_candidate_ids=raw_ids,resolution_method="scheduled_publication_mapping",
+                )
+            logger.info(
+                "TELEGRAM_ALBUM_PROCESSING_PENDING | target_id=%s | scheduled_ids=%s | returned_ids=%s | action=await_publication_mapping",
+                target_id, pending_ids, raw_ids,
+            )
+            return TelethonResolutionResult(
+                False, None, returned_candidate_ids=raw_ids,
+                pending_mask=pending_mask,
+                resolution_method="video_processing_pending",
+                error_text="telegram_video_processing_pending",
+            )
 
         grouped_ids = {getattr(m, "grouped_id", None) for m in sent_messages if getattr(m, "grouped_id", None) is not None}
         if len(grouped_ids) > 1:

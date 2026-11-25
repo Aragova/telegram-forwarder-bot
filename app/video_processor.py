@@ -12,6 +12,8 @@ from .video_clip_duration import calculate_center_clip_window
 from aiogram import Bot
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from .bot_api_session import create_bot_api_session
+from .transport_policy import TransportRateLimited
+from .send_intent import PublicationWriteUnavailable
 from .subprocess_safety import (
     communicate_safely,
     await_critical_cleanup,
@@ -69,6 +71,7 @@ class VideoProcessor:
         # Ограничение параллельности для слабого VPS - 1 задача
         self.semaphore = asyncio.Semaphore(1)
         self.cleanup_tasks = []
+        self._cleanup_stop = asyncio.Event()
         self.video_info_cache = {}
 
         # Лимиты кэша
@@ -257,8 +260,8 @@ class VideoProcessor:
             broadcast = bool(getattr(target_entity, "broadcast", False) and not getattr(target_entity, "megagroup", False))
             resolver = TelethonAuthoritativeMessageResolver(self.telethon)
             watermark = await resolver.get_before_max_message_id(target_entity, destination_channel)
-        except FloodWaitError:
-            # Explicit Telegram rejection: keep the wait duration intact.
+        except (FloodWaitError, TransportRateLimited):
+            # Preflight is read-only; preserve the server-imposed wait.
             raise
         except Exception as exc:
             # None of these reads sends media. They can be safely retried.
@@ -273,21 +276,33 @@ class VideoProcessor:
             return TelethonSendOutcome(True, True, False, None, [], resolution_method="empty_response", error_text="empty_response_after_send")
 
         raw_id = getattr(sent_msg, "id", None)
-        resolved = await resolver.resolve_authoritative_single_message(
-            target_entity=target_entity,
-            target_id=destination_channel,
-            sent=sent_msg,
-            expected_text=caption or "",
-            before_max_message_id=watermark,
-            send_started_at=started_at,
-            send_finished_at=finished_at,
-            target_thread_id=target_thread_id,
-            target_is_broadcast_channel=broadcast,
-            require_strong_media_match=True,
-            # Rule #141: the real post became visible ~6 seconds after send_file
-            # returned. Retry only safe history reads, never the media upload.
-            history_poll_delays=(0, 1, 2, 3, 4, 5),
-        )
+        try:
+            resolved = await resolver.resolve_authoritative_single_message(
+                target_entity=target_entity,
+                target_id=destination_channel,
+                sent=sent_msg,
+                expected_text=caption or "",
+                before_max_message_id=watermark,
+                send_started_at=started_at,
+                send_finished_at=finished_at,
+                target_thread_id=target_thread_id,
+                target_is_broadcast_channel=broadcast,
+                require_strong_media_match=True,
+                # Rule #141: the real post became visible ~6 seconds after send_file
+                # returned. Retry only safe history reads, never the media upload.
+                history_poll_delays=(0, 1, 2, 3, 4, 5),
+            )
+        except Exception as exc:
+            # The send RPC already returned. Even an explicit flood wait from
+            # verification is not evidence that Telegram rejected publication.
+            logger.warning("TELETHON_VIDEO_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | action=no_resend", destination_channel)
+            return TelethonSendOutcome(
+                True, True, False, None, [],
+                returned_candidate_id=raw_id,
+                returned_candidate_ids=[raw_id] if raw_id else [],
+                resolution_method="resolver_exception",
+                error_text=str(exc),
+            )
         logger.info(
             "TELETHON_VIDEO_SEND | ID_RESOLVED | target=%s | thread=%s | returned_candidate_id=%s | authoritative_message_id=%s | resolution_method=%s",
             destination_channel, target_thread_id, raw_id, resolved.authoritative_message_id, resolved.resolution_method,
@@ -1497,9 +1512,21 @@ class VideoProcessor:
 
                 return sent_msg
 
+            except PublicationWriteUnavailable as exc:
+                raise VideoPreSendError(str(exc)) from exc
             except VideoPreSendError as exc:
                 self._stage_failed(stage_logger, "send", error_text=str(exc), extra={"retryable": True, "accepted": False})
                 logger.warning("VIDEO_SEND_PREFLIGHT_FAILED | action=safe_retry | error=%s", exc)
+                raise
+            except TransportRateLimited as exc:
+                self._stage_failed(
+                    stage_logger, "send", error_text=str(exc),
+                    extra={"retryable": True, "accepted": False, "retry_after_seconds": exc.retry_after_seconds},
+                )
+                logger.warning(
+                    "VIDEO_SEND_RATE_LIMITED | transport=%s | retry_after=%s | action=retry_safe_rejection",
+                    exc.backend, exc.retry_after_seconds,
+                )
                 raise
             except FloodWaitError as exc:
                 self._stage_failed(
@@ -1575,7 +1602,10 @@ class VideoProcessor:
 
     async def delayed_cleanup(self, file_paths, delay=300):
         async def cleanup():
-            await asyncio.sleep(delay)
+            try:
+                await asyncio.wait_for(self._cleanup_stop.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
             logger.info(f"🧹 Отложенная очистка...")
             deleted = 0
             for fp in file_paths:
@@ -1739,6 +1769,7 @@ class VideoProcessor:
         thumbnail_path = os.path.join(self.temp_dir, f"thumb_{base_name}.jpg")
 
         files_to_delete = [input_path, clipped_main_path, final_output, normalized_main_path, thumbnail_path]
+        sent_msg = None
 
         try:
             bot = context.bot if hasattr(context, 'bot') else self.bot
@@ -2304,13 +2335,19 @@ class VideoProcessor:
                         del self.video_info_cache[fp]
                 except:
                     pass
-            if isinstance(e, TelegramEntityTooLarge):
-                # Keep the terminal 413 classification across the legacy pipeline.
+            if sent_msg is not None and sent_msg is not False:
+                # Cleanup/diagnostics failed after the send returned; retain
+                # its evidence instead of reporting a retryable pipeline failure.
+                return sent_msg
+            if isinstance(e, (TelegramEntityTooLarge, TelegramRetryAfter, FloodWaitError,
+                              TransportRateLimited, VideoPreSendError)):
+                # Preserve definite send rejection/preflight classification.
                 raise
             return False
 
     async def shutdown(self):
         logger.info("🛑 Завершение работы VideoProcessor...")
+        self._cleanup_stop.set()
         self._cleanup_watchdog()
         if self.cleanup_tasks:
             logger.info(f"⏳ Ожидание {len(self.cleanup_tasks)} задач...")

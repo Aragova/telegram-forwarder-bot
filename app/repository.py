@@ -8,6 +8,7 @@ from app.repository_models import IntroItem
 
 class RepositoryProtocol(Protocol):
     def init(self) -> None: ...
+    def close_all_connections(self) -> None: ...
 
     # =========================================================
     # SERVICE / MAINTENANCE

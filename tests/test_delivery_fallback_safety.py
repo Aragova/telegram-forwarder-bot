@@ -167,6 +167,7 @@ def test_live_faulty_count_uses_same_filter_as_faulty_list():
     for clause in (
         "d.status = 'faulty'",
         "d.error_text NOT LIKE 'Self-loop:",
+        "d.error_text <> 'self_target_echo'",
         "JOIN posts p ON p.id = d.post_id",
         "JOIN routing r ON r.id = d.rule_id",
         "NOT EXISTS",
