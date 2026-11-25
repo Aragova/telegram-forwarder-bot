@@ -963,3 +963,33 @@ def test_fallback_journal_keeps_old_bytes_if_write_cannot_complete(tmp_path):
     assert journal.pending() == [(-10099, [12, 13], [112, 113])]
     journal.clear()
     assert journal.pending() == []
+
+
+
+def test_irrecoverable_difference_records_durable_incident_without_advancing_cursor():
+    from unittest.mock import AsyncMock
+    from telethon import types
+    from app.publication_difference_recovery import PublicationDifferenceRecovery
+
+    async def scenario():
+        date = datetime.now(timezone.utc)
+        saved_incidents = []
+        repo = SimpleNamespace(
+            record_publication_inbox_overflow=lambda account, peer, ids:
+                saved_incidents.append((account, peer, ids)),
+        )
+        client = AsyncMock(
+            side_effect=[
+                types.updates.DifferenceTooLong(pts=8888),
+                types.updates.DifferenceTooLong(pts=8888),
+            ],
+        )
+        inbox = SimpleNamespace(repository=repo, sender_account_id=7)
+        recovery = PublicationDifferenceRecovery(client, inbox)
+        recovery._advance = AsyncMock()
+        cursor = {"pts": 42, "qts": 0, "state_date": date, "version": 1}
+        assert await recovery._read_page(cursor) is False
+        assert saved_incidents == [(7, 0, [42])]
+        assert client.publication_write_blocked is True
+        recovery._advance.assert_not_awaited()
+    asyncio.run(scenario())
