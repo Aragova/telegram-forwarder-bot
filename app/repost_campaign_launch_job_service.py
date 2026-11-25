@@ -313,6 +313,6 @@ async def run_repost_campaign_launch_job_loop(
             await asyncio.sleep(max(1, int(interval_seconds)))
         else:
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=max(0.01, max(1, int(interval_seconds))))
+                await asyncio.wait_for(stop_event.wait(), timeout=max(1, int(interval_seconds)))
             except asyncio.TimeoutError:
                 pass
