@@ -24,7 +24,7 @@ class SenderFetchDownloadHelpers:
         self.owner = owner
 
     def _read_client(self):
-        return getattr(self.owner, "telethon_read", None) or self.owner.telethon
+        return getattr(self.owner, "telethon_read", None) or getattr(self.owner, "telethon", None)
 
     async def fetch_message(self, source_channel, message_id):
         try:
