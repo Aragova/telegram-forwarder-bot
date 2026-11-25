@@ -201,8 +201,8 @@ class SenderPostSendHelpers:
 
         reader = next((
             client for client in (
-                getattr(self.owner, "telethon", None),
                 getattr(self.owner, "telethon_read", None),
+                getattr(self.owner, "telethon", None),
             )
             if callable(getattr(client, "get_messages", None))
         ), None)
