@@ -8851,6 +8851,8 @@ async def _start_bot_role() -> None:
         bot,
         polling_timeout=30,
         handle_as_tasks=True,
+        # Campaign tasks must finish before the shared Bot API session closes.
+        close_bot_session=False,
     )
 
 
