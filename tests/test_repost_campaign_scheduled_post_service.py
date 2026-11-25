@@ -94,10 +94,10 @@ class FakeRepo:
             if campaign_run_id is not None:
                 self.posts[scheduled_post_id]["campaign_run_id"] = campaign_run_id
         return True
-    def set_campaign_scheduled_post_campaign_run_id(self, scheduled_post_id, campaign_run_id):
+    def set_campaign_scheduled_post_campaign_run_id(self, scheduled_post_id, campaign_run_id, *, expected_locked_at=None):
         self.set_run_id_calls.append((scheduled_post_id, campaign_run_id))
         row = self.posts.get(scheduled_post_id)
-        if not row or row.get("status") != "processing" or row.get("campaign_run_id") is not None:
+        if not row or row.get("status") != "processing" or row.get("campaign_run_id") is not None or row.get("locked_at") != expected_locked_at:
             return False
         row["campaign_run_id"] = campaign_run_id
         return True

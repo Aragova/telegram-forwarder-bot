@@ -31,6 +31,10 @@ def scheduled_post_now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class _ScheduledClaimLost(RuntimeError):
+    pass
+
+
 class RepostCampaignScheduledPostService:
     def __init__(self, *, repo, campaign_runtime, target_checker=None, logger_=None):
         self.repo = repo
@@ -325,11 +329,14 @@ class RepostCampaignScheduledPostService:
         captured_run_id: int | None = None
         def _remember_run(campaign_run_id: int) -> None:
             nonlocal captured_run_id
+            if not self.repo.set_campaign_scheduled_post_campaign_run_id(scheduled_post_id, int(campaign_run_id), expected_locked_at=snapshot.get("locked_at")):
+                raise _ScheduledClaimLost("Захват запланированного поста потерян")
             captured_run_id = int(campaign_run_id)
-            self.repo.set_campaign_scheduled_post_campaign_run_id(scheduled_post_id, int(campaign_run_id))
 
         try:
             result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(snapshot.get("saved_post_id") or 0), show_seconds=int(snapshot.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=scheduled_post_id, admin_id=actor_id, on_campaign_run_created=_remember_run)
+        except _ScheduledClaimLost as exc:
+            return RepostCampaignActionResult(ok=False, action="send_now_scheduled_post", rule_id=rule_id, error_text=str(exc))
         except Exception as exc:
             current = await run_db(self.repo.get_campaign_scheduled_post, scheduled_post_id) or {}
             run_id = int(current.get("campaign_run_id") or captured_run_id or 0)
@@ -513,11 +520,15 @@ class RepostCampaignScheduledPostService:
             captured_run_id: int | None = None
             def _remember_run(campaign_run_id: int) -> None:
                 nonlocal captured_run_id
+                if not self.repo.set_campaign_scheduled_post_campaign_run_id(sid, int(campaign_run_id), expected_locked_at=row.get("locked_at")):
+                    raise _ScheduledClaimLost("Захват запланированного поста потерян")
                 captured_run_id = int(campaign_run_id)
-                self.repo.set_campaign_scheduled_post_campaign_run_id(sid, int(campaign_run_id))
 
             try:
                 result = await self.campaign_runtime.launch_campaign_from_snapshot(rule_id=rule_id, saved_post_id=int(row.get("saved_post_id") or 0), show_seconds=int(row.get("show_seconds") or 0), targets_snapshot=targets_snapshot, run_type="scheduled", scheduled_post_id=sid, on_campaign_run_created=_remember_run)
+            except _ScheduledClaimLost:
+                self.logger.warning("VIP_SCHEDULED_POST_CLAIM_LOST | scheduled_post_id=%s", sid)
+                continue
             except Exception as exc:
                 self.logger.exception("VIP_SCHEDULED_POST_LAUNCH_FAILED | scheduled_post_id=%s", sid)
                 current = await run_db(self.repo.get_campaign_scheduled_post, sid) or {}

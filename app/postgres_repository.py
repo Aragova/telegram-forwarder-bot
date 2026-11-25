@@ -11539,8 +11539,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='failed', failed_at=NOW(), error_text=%s, campaign_run_id=COALESCE(%s, campaign_run_id), locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (error_text, campaign_run_id), "status IN ('scheduled','processing')", "VIP_SCHEDULED_POST_MARKED_FAILED")
     def mark_campaign_scheduled_post_needs_review(self, scheduled_post_id: int, *, error_text: str, campaign_run_id: int | None = None) -> bool:
         return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='needs_review', failed_at=NOW(), error_text=%s, campaign_run_id=COALESCE(%s, campaign_run_id), locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (error_text, campaign_run_id), "status='processing'", "VIP_SCHEDULED_POST_NEEDS_REVIEW")
-    def set_campaign_scheduled_post_campaign_run_id(self, scheduled_post_id: int, campaign_run_id: int) -> bool:
-        return self._update_campaign_scheduled_post_status(scheduled_post_id, "campaign_run_id=%s, updated_at=NOW()", (int(campaign_run_id),), "status='processing' AND campaign_run_id IS NULL", "VIP_SCHEDULED_POST_RUN_ID_SET")
+    def set_campaign_scheduled_post_campaign_run_id(self, scheduled_post_id: int, campaign_run_id: int, *, expected_locked_at=None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_posts SET campaign_run_id=%s, updated_at=NOW() WHERE id=%s AND status='processing' AND campaign_run_id IS NULL AND locked_at IS NOT DISTINCT FROM %s AND lock_until > NOW()", (int(campaign_run_id), int(scheduled_post_id), expected_locked_at))
+                ok = cur.rowcount > 0
+            conn.commit()
+        return ok
     def claim_campaign_scheduled_post_snapshot(self, scheduled_post_id: int, *, actor_id: int | None = None) -> dict[str, Any] | None:
         """Atomically claim the editable row and its target vector.
 
