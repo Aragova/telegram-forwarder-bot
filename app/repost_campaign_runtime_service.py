@@ -1799,7 +1799,12 @@ class RepostCampaignRuntimeService:
             )
         if (message.get("send_status") or "").strip().lower() != "sent":
             self.logger.info("REPOST_CAMPAIGN_MANUAL_DELETE_SKIPPED | rule_id=%s | run_id=%s | run_message_id=%s | reason=%s", rule_id, run_id, run_message_id, "send_status_not_sent")
-            await run_db(self.repo.mark_campaign_run_message_deleted, run_message_id)
+            updated = await run_db(self.repo.mark_campaign_run_message_deleted, run_message_id)
+            if not updated:
+                return RepostCampaignActionResult(
+                    ok=False, action="delete_campaign_run_message_now", rule_id=rule_id,
+                    error_text="Статус публикации изменился; нельзя отметить её удалённой без проверки.",
+                )
             return RepostCampaignActionResult(
                 ok=True,
                 action="delete_campaign_run_message_now",
@@ -1971,7 +1976,14 @@ class RepostCampaignRuntimeService:
                 result = await self.deleter.delete_message(target_id=target_id, message_id=message_ids[0], render_mode=row.get("render_mode"))
             sent_message_id = message_ids[0]
             if result.ok:
-                await run_db(self.repo.mark_campaign_run_message_deleted, row_id)
+                marked = await run_db(self.repo.mark_campaign_run_message_deleted, row_id)
+                if not marked:
+                    failed_count += 1
+                    self.logger.warning(
+                        "REPOST_CAMPAIGN_DELETE_MARK_FENCED | message_id=%s | action=manual_review",
+                        row_id,
+                    )
+                    continue
                 deleted_count += 1
                 self.logger.info("REPOST_CAMPAIGN_DELETE_MESSAGE_DONE | row_id=%s | target_id=%s | sent_message_id=%s | method=%s", row_id, target_id, sent_message_id, result.method)
             else:
