@@ -634,6 +634,9 @@ class RepositoryProtocol(Protocol):
         show_seconds: int = 0,
         delete_after_at: str | None = None,
     ) -> int | None: ...
+    def mark_campaign_run_message_failed_before_send(
+        self, message_id: int, *, error_text: str,
+    ) -> bool: ...
     def mark_campaign_run_message_sending(
         self,
         message_id: int,

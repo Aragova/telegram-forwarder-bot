@@ -1,4 +1,5 @@
 import asyncio
+import pytest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ class _FakeRepo:
         self.update_campaign_run_status_calls = []
         self.create_campaign_run_message_calls = []
         self.mark_campaign_run_message_sending_calls = []
+        self.mark_campaign_run_message_failed_before_send_calls = []
         self.mark_campaign_run_message_sent_calls = []
         self.mark_campaign_run_message_failed_calls = []
         self.next_run_id = 101
@@ -85,6 +87,10 @@ class _FakeRepo:
                 return None
             return self.next_run_message_ids.pop(0)
         return self.next_run_message_id
+
+    def mark_campaign_run_message_failed_before_send(self, message_id, *, error_text):
+        self.mark_campaign_run_message_failed_before_send_calls.append((message_id, {"error_text": error_text}))
+        return True
 
     def mark_campaign_run_message_sending(self, message_id, **kwargs):
         self.mark_campaign_run_message_sending_calls.append((message_id, kwargs))
@@ -1924,3 +1930,72 @@ def test_campaign_resolves_username_before_claiming_and_sending():
     assert result.ok
     assert repo.mark_campaign_run_message_sending_calls[-1][1]["canonical_target_id"] == -100123
     assert renderer.calls[-1]["chat_id"] == -100123
+
+
+@pytest.mark.parametrize("method", ["bot_api", "telethon_builder"])
+@pytest.mark.parametrize("entrypoint", ["test", "snapshot", "manual"])
+def test_unresolvable_campaign_username_fails_placement_before_rpc(method, entrypoint):
+    rule = SimpleNamespace(
+        mode="repost", repost_campaign_saved_post_id=55,
+        repost_campaign_show_seconds=300, target_id="@missing_channel",
+        target_thread_id=None, target_title="Missing",
+    )
+    repo = _FakeRepo(rule=rule, saved_post={"content_json": {"kind": "text"}},
+                     summary={"can_launch": True, "ready_extra_targets": []})
+    renderer = _FakeRenderer(SavedPostRenderResult(True, "bot_api", "text", message_id=1))
+    renderer.detect_render_method = lambda _content: method
+
+    class UnreachableBot:
+        async def get_chat(self, _target):
+            raise LookupError("Bot API cannot resolve the username")
+
+    class UnreachableTelethon:
+        async def get_entity(self, _target):
+            raise LookupError("MTProto cannot resolve the username")
+
+    renderer.bot = UnreachableBot()
+    runtime = RepostCampaignRuntimeService(
+        repo=repo, renderer=renderer, telethon_client=UnreachableTelethon(),
+    )
+    if entrypoint == "test":
+        result = asyncio.run(runtime.test_send_saved_post_to_main_target(rule_id=8))
+    elif entrypoint == "snapshot":
+        result = asyncio.run(runtime.launch_campaign_from_snapshot(
+            rule_id=8, saved_post_id=55, show_seconds=300,
+            targets_snapshot=[{"target_id": "@missing_channel", "target_kind": "main"}],
+        ))
+    else:
+        result = asyncio.run(runtime.launch_campaign_now(rule_id=8))
+
+    error_text = "Не удалось установить точный ID получателя до отправки"
+    assert not result.ok
+    assert repo.mark_campaign_run_message_failed_before_send_calls == [
+        (1001, {"error_text": error_text})
+    ]
+    assert not repo.mark_campaign_run_message_sending_calls
+    assert not repo.mark_campaign_run_message_failed_calls
+    assert not repo.mark_campaign_run_message_sent_calls
+    assert renderer.calls == []
+    assert repo.update_campaign_run_status_calls[-1][1]["status"] == "failed"
+
+
+@pytest.mark.parametrize("bad_id", [0, True, "123"])
+def test_invalid_canonical_campaign_target_fails_before_claim(bad_id):
+    repo = _FakeRepo()
+    renderer = _FakeRenderer(SavedPostRenderResult(True, "bot_api", "text", message_id=1))
+    renderer.detect_render_method = lambda _content: "bot_api"
+
+    class InvalidTargetBot:
+        async def get_chat(self, _target):
+            return SimpleNamespace(id=bad_id)
+
+    renderer.bot = InvalidTargetBot()
+    runtime = RepostCampaignRuntimeService(repo=repo, renderer=renderer)
+    result = asyncio.run(runtime._send_claimed(7, "@invalid", None, {"kind": "text"}))
+
+    assert not result.ok and result.method == "blocked"
+    assert repo.mark_campaign_run_message_failed_before_send_calls == [
+        (7, {"error_text": "Не удалось установить точный ID получателя до отправки"})
+    ]
+    assert not repo.mark_campaign_run_message_sending_calls
+    assert not renderer.calls

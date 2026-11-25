@@ -11727,6 +11727,26 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
             return int(row["id"]) if row else None
 
+    def mark_campaign_run_message_failed_before_send(self, message_id: int, *, error_text: str) -> bool:
+        """Record a definite pre-RPC rejection without touching claimed sends."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE campaign_run_messages
+                    SET send_status='failed',
+                        render_mode='target_resolution_failed',
+                        send_error_text=%s,
+                        delete_after_at=NULL,
+                        delete_status='none',
+                        delete_error_text=NULL,
+                        updated_at=NOW()
+                    WHERE id=%s AND send_status='pending'
+                      AND sent_message_id IS NULL
+                      AND publication_receipt IS NULL
+                      AND NOT publication_review_required
+                    """, (error_text, int(message_id)))
+                return cur.rowcount == 1
+
     def mark_campaign_run_message_sending(self, message_id: int, *, render_mode: str | None = None,
                                          canonical_target_id: int | None = None) -> bool:
         """Claim exactly once; unresolved placements fence subsequent launches."""

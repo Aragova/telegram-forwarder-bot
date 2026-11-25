@@ -104,8 +104,21 @@ class RepostCampaignRuntimeService:
                     raise ValueError("Invalid resolved Telegram peer")
             except Exception:
                 self.logger.exception("CAMPAIGN_TARGET_RESOLUTION_FAILED | target=%s", target_id)
-                return SavedPostRenderResult(False,"blocked",str(content.get("kind") or "text"),
-                    error_text="Не удалось установить точный ID получателя до отправки")
+                error_text = "Не удалось установить точный ID получателя до отправки"
+                # No send RPC was attempted. Persist the definite local failure
+                # before returning "blocked" (callers deliberately skip failure
+                # transitions for blocked/possibly claimed placements).
+                if not await run_db(
+                    self.repo.mark_campaign_run_message_failed_before_send,
+                    message_id, error_text=error_text,
+                ):
+                    self.logger.warning(
+                        "CAMPAIGN_TARGET_RESOLUTION_STATE_CHANGED | message_id=%s", message_id
+                    )
+                return SavedPostRenderResult(
+                    False, "blocked", str(content.get("kind") or "text"),
+                    error_text=error_text,
+                )
             claim_kwargs["canonical_target_id"] = canonical
             target_id = canonical
         if not await run_db(self.repo.mark_campaign_run_message_sending,message_id,**claim_kwargs):

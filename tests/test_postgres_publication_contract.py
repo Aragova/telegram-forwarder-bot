@@ -863,3 +863,54 @@ def test_campaign_scheduled_id_cannot_be_claimed_by_two_placements_or_delivery(r
         source_message_ids=source_ids,scheduled_ids=[412])
     assert not repo.record_campaign_publication_receipt(second,{**receipt,"ids":[412]})
     assert repo.get_campaign_run_message(second)["publication_receipt"] is None
+
+
+@pytest.mark.parametrize("initial_status", ["pending", "sending", "sent", "failed"])
+def test_campaign_definite_pre_rpc_failure_is_atomic_and_does_not_touch_claims(repo, initial_status):
+    _, rule_id, _, _, _, target = seed(repo, uuid4().int % 10**12)
+    run = repo.create_campaign_run(
+        rule_id=rule_id, saved_post_id=991, run_type="manual", status="sending",
+        show_seconds=60, targets_total=1, started_by=None,
+    )
+    mid = repo.create_campaign_run_message(
+        run_id=run, rule_id=rule_id, saved_post_id=991, target_kind="main",
+        target_id=f"@missing_{initial_status}_{uuid4().hex[:10]}",
+        show_seconds=60, delete_after_at="2026-12-01T00:00:00+00:00",
+    )
+    assert mid is not None
+    if initial_status != "pending":
+        assert repo.mark_campaign_run_message_sending(mid)
+        if initial_status == "sent":
+            assert repo.mark_campaign_run_message_sent(
+                mid, sent_message_id=10001, render_mode="bot_api",
+            )
+        elif initial_status == "failed":
+            assert repo.mark_campaign_run_message_failed(
+                mid, error_text="prior failure", render_mode="bot_api",
+            )
+    before = repo.get_campaign_run_message(mid)
+    changed = repo.mark_campaign_run_message_failed_before_send(
+        mid, error_text="recipient resolution rejected",
+    )
+    assert changed is (initial_status == "pending")
+    after = repo.get_campaign_run_message(mid)
+    if initial_status == "pending":
+        assert after["send_status"] == "failed"
+        assert after["render_mode"] == "target_resolution_failed"
+        assert after["send_error_text"] == "recipient resolution rejected"
+        assert after["delete_status"] == "none"
+        assert after["delete_after_at"] is None
+        assert after["sent_message_id"] is None
+    else:
+        assert after["send_status"] == before["send_status"]
+        assert after["render_mode"] == before["render_mode"]
+        assert after["send_error_text"] == before["send_error_text"]
+        assert after["delete_after_at"] == before["delete_after_at"]
+        assert after["sent_message_id"] == before["sent_message_id"]
+    assert after["publication_review_required"] == before["publication_review_required"]
+    # The result must be committed, not only visible within the current connection.
+    reader = PostgresRepository()
+    try:
+        assert reader.get_campaign_run_message(mid)["send_status"] == after["send_status"]
+    finally:
+        reader.client.close_all_connections()
