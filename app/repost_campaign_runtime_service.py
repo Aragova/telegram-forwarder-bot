@@ -114,6 +114,9 @@ class RepostCampaignRuntimeService:
         inbox = getattr(client,"publication_inbox",None)
         if inbox is None:
             return
+        recovery = getattr(client,"publication_recovery",None)
+        if recovery is not None:
+            await recovery.recover()
         for row in await run_db(self.repo.list_pending_campaign_publications,account_id=inbox.sender_account_id,limit=limit):
             try:
                 receipt = row["publication_receipt"]
@@ -138,7 +141,7 @@ class RepostCampaignRuntimeService:
                     started_at=datetime.fromisoformat(receipt["started_at"]),broadcast=bool(getattr(entity,"broadcast",False)),
                     require_scheduled=flag) for mid,flag in zip(ids,receipt["mask"])):
                     continue
-                published_at = max(m.date for m in messages)
+                published_at = max(by_id[mid].date for mid in ids)
                 await run_db(self.repo.confirm_campaign_publication,row["id"],receipt=receipt,
                     published_ids=ids,published_at=published_at)
             except Exception:

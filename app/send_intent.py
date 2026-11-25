@@ -246,6 +246,16 @@ def publication_client_class(base):
                 except Exception as exc:
                     intent.blocked = True
                     raise PublicationWriteUnavailable("Could not resolve MTProto sender account") from exc
+                read_incident = getattr(intent.repository,"get_publication_inbox_incident",None)
+                if callable(read_incident):
+                    try:
+                        incident = await run_db(read_incident,account_id)
+                    except Exception as exc:
+                        intent.blocked = True
+                        raise PublicationWriteUnavailable("Could not inspect durable inbox health") from exc
+                    if incident and incident["acknowledged_at"] is None:
+                        intent.blocked = True
+                        raise PublicationWriteUnavailable("Publication inbox requires operator review")
                 account_scope = f"mtproto:{account_id}"
                 peer = getattr(item, "peer", None) or getattr(item, "to_peer", None)
                 try:

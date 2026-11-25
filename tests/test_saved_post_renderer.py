@@ -326,7 +326,7 @@ def test_premium_album_with_full_source_ids_never_downloads(monkeypatch):
         called["download"] += 1
         raise AssertionError("download should not be called")
     monkeypatch.setattr(spr, "download_saved_post_media_item_for_telethon", _download)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(SavedPostSentUnverifiedError):
         asyncio.run(send_saved_post_content_via_telethon(
             bot=_FakeBot(),
             telethon_client=_TelethonBroken(),

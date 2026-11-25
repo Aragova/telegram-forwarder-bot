@@ -559,6 +559,14 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
         -- Independent read-only difference cursor; never advance it before
         -- the exact publication mappings returned by Telegram are durable.
+        CREATE TABLE IF NOT EXISTS telegram_publication_inbox_incidents (
+            sender_account_id BIGINT PRIMARY KEY CHECK(sender_account_id>0),
+            blocked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_peer_id BIGINT NULL,
+            last_scheduled_ids BIGINT[] NULL,
+            acknowledged_at TIMESTAMPTZ NULL,
+            review_note TEXT NULL
+        );
         CREATE TABLE IF NOT EXISTS telegram_publication_recovery_cursor (
             sender_account_id BIGINT PRIMARY KEY CHECK(sender_account_id > 0),
             pts BIGINT NOT NULL CHECK(pts >= 0),
@@ -6313,6 +6321,37 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if stored["fingerprint"] != fingerprint or len(stored["random_ids"]) != count:
                     raise ValueError("MTProto publication identity mismatch")
                 return list(stored["random_ids"])
+
+    def record_publication_inbox_overflow(self, account_id: int, peer_id: int, scheduled_ids: list[int]) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO telegram_publication_inbox_incidents(sender_account_id,last_peer_id,last_scheduled_ids)
+                    VALUES (%s,%s,%s)
+                    ON CONFLICT(sender_account_id) DO UPDATE SET blocked_at=NOW(),
+                        last_peer_id=EXCLUDED.last_peer_id,last_scheduled_ids=EXCLUDED.last_scheduled_ids,
+                        acknowledged_at=NULL,review_note=NULL
+                    """,(account_id,peer_id,scheduled_ids))
+
+    def get_publication_inbox_incident(self, account_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM telegram_publication_inbox_incidents WHERE sender_account_id=%s",(account_id,))
+                row=cur.fetchone()
+                return dict(row) if row else None
+
+    def acknowledge_publication_inbox_incident(self, account_id: int, *, expected_blocked_at: datetime, note: str) -> bool:
+        """Offline operator review, not a claim that missing events were recovered."""
+        if not note.strip() or len(note)>1000:
+            raise ValueError("Review note is required")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE telegram_publication_inbox_incidents
+                    SET acknowledged_at=NOW(),review_note=%s
+                    WHERE sender_account_id=%s AND blocked_at=%s AND acknowledged_at IS NULL
+                    """,(note,account_id,expected_blocked_at))
+                return cur.rowcount==1
 
     def get_publication_recovery_cursor(self, account_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:

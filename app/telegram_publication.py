@@ -119,6 +119,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
     inbox: PublicationInbox | None = None
     candidate: PublicationInbox | None = None
     buffer_overflow = False
+    overflow_evidence = None
     live_lock = asyncio.Lock()
     retry_task: asyncio.Task | None = None
 
@@ -145,7 +146,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
             schedule_retry(min(delay * 2, 30))
 
     async def handle(update: Any) -> None:
-        nonlocal buffer_overflow
+        nonlocal buffer_overflow, overflow_evidence
         if not isinstance(update, types.UpdateDeleteScheduledMessages):
             return
         try:
@@ -157,7 +158,12 @@ def prepare_publication_inbox(client: Any, repository: Any):
             if len(buffer) == buffer.maxlen:
                 buffer_overflow = True
                 client.publication_write_blocked = True
-                logger.error("TELEGRAM_PUBLICATION_MAPPING_BUFFER_FULL | bound=%s", inbox is not None)
+                overflow_evidence = (peer,old)
+                logger.error("TELEGRAM_PUBLICATION_MAPPING_BUFFER_FULL | bound=%s | peer=%s | scheduled_ids=%s", inbox is not None,peer,old)
+                if candidate is not None:
+                    persist = getattr(repository,"record_publication_inbox_overflow",None)
+                    if callable(persist):
+                        await asyncio.to_thread(persist,candidate.sender_account_id,peer,old)
                 return
             buffer.append((peer,old,new))
             if inbox is None or live_lock.locked() or (retry_task is not None and not retry_task.done()):
@@ -221,6 +227,15 @@ def prepare_publication_inbox(client: Any, repository: Any):
                     return
             try:
                 await flush_live()
+                read_incident = getattr(repository,"get_publication_inbox_incident",None)
+                persist_incident = getattr(repository,"record_publication_inbox_overflow",None)
+                if buffer_overflow and overflow_evidence is not None and callable(persist_incident):
+                    await asyncio.to_thread(persist_incident,candidate.sender_account_id,*overflow_evidence)
+                if callable(read_incident):
+                    incident = await asyncio.to_thread(read_incident,candidate.sender_account_id)
+                    if incident and incident["acknowledged_at"] is None:
+                        client.publication_write_blocked = True
+                        logger.error("PUBLICATION_INBOX_REVIEW_REQUIRED | account=%s",candidate.sender_account_id)
                 if recovery is not None and not hasattr(client, "publication_recovery"):
                     # Checkpoint setup is part of startup, including retry
                     # after a DB outage. Events arriving during it stay buffered.
