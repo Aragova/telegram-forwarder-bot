@@ -746,3 +746,22 @@ def test_rescan_snapshot_accepts_both_production_and_ci_audit_schemas(
                 payload = json.loads(stored) if isinstance(stored, str) else stored
                 assert set(payload["sent_message_ids"]) == {mid, *album_ids}
         conn.commit()
+
+
+def test_campaign_send_claim_and_intent_are_durable(repo):
+    _, rule_id, _, _, _, target = seed(repo, uuid4().int % 10**12)
+    run = repo.create_campaign_run(rule_id=rule_id,saved_post_id=123,run_type="manual",status="sending",show_seconds=60,targets_total=1)
+    def placement(run_id):
+        return repo.create_campaign_run_message(run_id=run_id,rule_id=rule_id,saved_post_id=123,
+            target_kind="main",target_id=str(target),show_seconds=60,delete_after_at="2020-01-01T00:00:00+00:00")
+    mid = placement(run)
+    other_run = repo.create_campaign_run(rule_id=rule_id,saved_post_id=123,run_type="manual",status="sending",show_seconds=60,targets_total=1)
+    other = placement(other_run)
+    assert repo.mark_campaign_run_message_sending(mid)
+    assert not repo.mark_campaign_run_message_sending(mid)
+    assert not repo.mark_campaign_run_message_sending(other)
+    ids = repo.get_or_create_campaign_mtproto_random_ids(str(mid),0,"identity",2)
+    assert repo.get_or_create_campaign_mtproto_random_ids(str(mid),0,"identity",2)==ids
+    assert repo.mark_campaign_run_message_failed(mid,error_text="unknown",accepted_unverified=True)
+    assert not repo.mark_campaign_run_message_sending(other)
+    assert not repo.mark_campaign_run_message_sent(mid,sent_message_id=1)

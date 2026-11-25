@@ -1239,6 +1239,22 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS publication_review_required BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS publication_receipt JSONB NULL;
+        ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS publication_raw_ids JSONB NULL;
+        CREATE INDEX IF NOT EXISTS idx_campaign_publication_review
+            ON campaign_run_messages(rule_id, saved_post_id, target_id)
+            WHERE send_status='sending' OR publication_review_required;
+        CREATE INDEX IF NOT EXISTS idx_campaign_publication_pending
+            ON campaign_run_messages(id)
+            WHERE publication_receipt IS NOT NULL AND publication_review_required;
+        CREATE TABLE IF NOT EXISTS campaign_mtproto_send_intents (
+            message_id BIGINT NOT NULL REFERENCES campaign_run_messages(id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+            fingerprint TEXT NOT NULL,
+            random_ids BIGINT[] NOT NULL CHECK(cardinality(random_ids) BETWEEN 1 AND 10),
+            PRIMARY KEY(message_id, ordinal)
+        );
         CREATE INDEX IF NOT EXISTS idx_campaign_run_messages_run
         ON campaign_run_messages(run_id);
         CREATE INDEX IF NOT EXISTS idx_campaign_run_messages_rule_status
@@ -11589,18 +11605,142 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             return int(row["id"]) if row else None
 
     def mark_campaign_run_message_sending(self, message_id: int, *, render_mode: str | None = None) -> bool:
+        """Claim exactly once; unresolved placements fence subsequent launches."""
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE campaign_run_messages SET send_status='sending', render_mode=%s, updated_at=NOW() WHERE id=%s", (render_mode, int(message_id)))
-            conn.commit()
-            return True
+                cur.execute("SELECT rule_id,saved_post_id,target_id,target_thread_id FROM campaign_run_messages WHERE id=%s", (int(message_id),))
+                row = cur.fetchone()
+                if not row:
+                    return False
+                lock_key = f"campaign:{row['rule_id']}:{row['saved_post_id']}:{row['target_id']}:{row['target_thread_id']}"
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (lock_key,))
+                cur.execute("""
+                    UPDATE campaign_run_messages m SET send_status='sending',render_mode=%s,updated_at=NOW()
+                    WHERE m.id=%s AND m.send_status='pending'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM campaign_run_messages p
+                        WHERE p.id<>m.id AND p.rule_id=m.rule_id AND p.saved_post_id=m.saved_post_id
+                          AND p.target_id=m.target_id AND p.target_thread_id IS NOT DISTINCT FROM m.target_thread_id
+                          AND (p.send_status='sending' OR p.publication_review_required
+                            OR (p.send_status='failed' AND p.render_mode LIKE '%%_unverified'))
+                      )
+                    """, (render_mode,int(message_id)))
+                return cur.rowcount == 1
+
+    def get_or_create_campaign_mtproto_random_ids(self, key: str, ordinal: int,
+                                                   fingerprint: str, count: int) -> list[int]:
+        """Same identity contract as deliveries, without changing their FK/schema."""
+        import secrets
+        if not 1 <= count <= 10 or ordinal < 0:
+            raise ValueError("Invalid campaign send identity")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM campaign_run_messages WHERE id=%s AND send_status='sending' FOR UPDATE", (int(key),))
+                if not cur.fetchone():
+                    raise RuntimeError("No claimed campaign publication")
+                ids = set()
+                while len(ids) < count:
+                    ids.add(secrets.randbits(63) or 1)
+                cur.execute("""
+                    INSERT INTO campaign_mtproto_send_intents(message_id,ordinal,fingerprint,random_ids)
+                    VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING
+                    """, (int(key),ordinal,fingerprint,sorted(ids)))
+                cur.execute("SELECT fingerprint,random_ids FROM campaign_mtproto_send_intents WHERE message_id=%s AND ordinal=%s", (int(key),ordinal))
+                stored = cur.fetchone()
+                if stored["fingerprint"] != fingerprint or len(stored["random_ids"]) != count:
+                    raise ValueError("Campaign publication identity mismatch")
+                return list(stored["random_ids"])
+
+    def record_campaign_publication_receipt(self, message_id: int, receipt: dict[str, Any]) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE campaign_run_messages SET publication_receipt=%s::jsonb,
+                        publication_review_required=TRUE, updated_at=NOW()
+                    WHERE id=%s AND send_status='sending' AND publication_receipt IS NULL
+                      AND target_id=%s AND target_thread_id IS NOT DISTINCT FROM %s
+                    """, (_json_dumps(receipt),int(message_id),str(receipt["peer_id"]),receipt["thread_id"]))
+                return cur.rowcount == 1
+
+    def list_pending_campaign_publications(self, *, limit: int = 30) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT m.* FROM campaign_run_messages m JOIN campaign_runs r ON r.id=m.run_id
+                    WHERE m.publication_review_required AND m.publication_receipt IS NOT NULL
+                      AND m.send_status IN ('sending','failed')
+                      AND (r.status<>'sending' OR m.updated_at < NOW()-INTERVAL '15 minutes')
+                      AND (m.publication_receipt->>'started_at')::timestamptz >= NOW()-INTERVAL '24 hours'
+                    ORDER BY m.updated_at,m.id LIMIT %s
+                    """, (max(1,min(int(limit),100)),))
+                return [dict(row) for row in cur.fetchall()]
+
+    def confirm_campaign_publication(self, message_id: int, *, receipt: dict[str, Any],
+                                     published_ids: list[int], published_at: datetime) -> bool:
+        from app.telegram_publication import publication_pairs
+        if not publication_pairs(published_ids,published_ids) or len(published_ids)!=len(receipt["ids"]):
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE campaign_run_messages SET send_status='sent',sent_message_id=%s,
+                        sent_message_ids_json=%s::jsonb,sent_at=%s,render_mode=%s,
+                        publication_review_required=FALSE,send_error_text=NULL,delete_error_text=NULL,
+                        delete_after_at=CASE WHEN delete_after_at IS NOT NULL
+                            THEN %s::timestamptz+make_interval(secs=>show_seconds::double precision) ELSE NULL END,
+                        delete_status=CASE WHEN delete_after_at IS NOT NULL THEN 'pending' ELSE 'none' END,
+                        updated_at=NOW()
+                    WHERE id=%s AND publication_receipt=%s::jsonb AND publication_review_required
+                        AND send_status IN ('sending','failed')
+                    RETURNING *
+                    """, (published_ids[0],_json_dumps(published_ids),published_at,receipt["method"],
+                          published_at,int(message_id),_json_dumps(receipt)))
+                row = cur.fetchone()
+                if not row:
+                    return False
+                self._persist_campaign_top_time_conn(cur,row["id"])
+                cur.execute("""
+                    UPDATE campaign_runs r SET
+                      targets_success=(SELECT COUNT(*) FROM campaign_run_messages WHERE run_id=r.id AND send_status='sent'),
+                      targets_failed=(SELECT COUNT(*) FROM campaign_run_messages WHERE run_id=r.id AND send_status='failed'),
+                      status=CASE WHEN NOT EXISTS(SELECT 1 FROM campaign_run_messages WHERE run_id=r.id AND send_status<>'sent')
+                                  AND r.targets_total=(SELECT COUNT(*) FROM campaign_run_messages WHERE run_id=r.id)
+                                  THEN 'sent' ELSE 'partial' END,updated_at=NOW()
+                    WHERE r.id=%s AND r.status IN ('failed','partial','sent')
+                    """, (row["run_id"],))
+                return True
+
+    def _persist_campaign_top_time_conn(self, cur, message_id: int) -> None:
+        cur.execute("""
+            INSERT INTO campaign_top_time_pauses(rule_id,campaign_run_id,campaign_run_message_id,
+                target_id,target_thread_id,target_title,starts_at,ends_at,status)
+            SELECT m.rule_id,m.run_id,m.id,m.target_id,m.target_thread_id,m.target_title,
+                m.sent_at,m.sent_at+make_interval(secs=>r.top_time_seconds_snapshot::double precision),'active'
+            FROM campaign_run_messages m JOIN campaign_runs r ON r.id=m.run_id
+            WHERE m.id=%s AND m.send_status='sent' AND r.top_time_enabled_snapshot
+              AND r.top_time_seconds_snapshot>0 AND m.sent_at IS NOT NULL
+            ON CONFLICT(campaign_run_message_id) DO NOTHING
+            """, (int(message_id),))
 
     def mark_campaign_run_message_sent(self, message_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None = None, render_mode: str | None = None) -> bool:
+        from app.telegram_publication import publication_pairs
+        ids = sent_message_ids or [sent_message_id]
+        if not publication_pairs(ids,ids) or sent_message_id != ids[0]:
+            return False
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE campaign_run_messages SET send_status='sent', sent_message_id=%s, sent_message_ids_json=%s::jsonb, render_mode=%s, sent_at=NOW(), updated_at=NOW() WHERE id=%s", (sent_message_id, _json_dumps(sent_message_ids), render_mode, int(message_id)))
-            conn.commit()
-            return True
+                cur.execute("""
+                    UPDATE campaign_run_messages SET send_status='sent',sent_message_id=%s,
+                        sent_message_ids_json=%s::jsonb,render_mode=%s,sent_at=NOW(),
+                        delete_after_at=CASE WHEN delete_after_at IS NOT NULL
+                            THEN NOW()+make_interval(secs=>show_seconds::double precision) ELSE NULL END,
+                        updated_at=NOW()
+                    WHERE id=%s AND send_status='sending' AND NOT publication_review_required
+                    """, (sent_message_id,_json_dumps(ids),render_mode,int(message_id)))
+                if cur.rowcount != 1:
+                    return False
+                self._persist_campaign_top_time_conn(cur,message_id)
+                return True
 
     def mark_campaign_run_message_failed(
         self,
@@ -11610,6 +11750,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         render_mode: str | None = None,
         delete_status: str | None = "failed",
         delete_error_text: str | None = None,
+        accepted_unverified: bool = False,
+        raw_message_ids: list[int] | None = None,
     ) -> bool:
         safe_delete_status = str(delete_status or "failed")
         if safe_delete_status not in {"none", "pending", "processing", "deleted", "failed"}:
@@ -11627,13 +11769,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         render_mode=%s,
                         delete_status=%s,
                         delete_error_text=%s,
+                        publication_review_required=publication_review_required OR %s,
+                        publication_raw_ids=%s::jsonb,
                         updated_at=NOW()
-                    WHERE id=%s
+                    WHERE id=%s AND send_status='sending'
                     """,
-                    (error_text, render_mode, safe_delete_status, safe_delete_error_text, int(message_id)),
+                    (error_text, render_mode, safe_delete_status, safe_delete_error_text,
+                     accepted_unverified, _json_dumps(raw_message_ids), int(message_id)),
                 )
-            conn.commit()
-            return True
+                return cur.rowcount == 1
 
     def create_campaign_top_time_pause(
         self,
@@ -12398,13 +12542,22 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 return d
 
     def mark_delivery_campaign_copy_processing(self, copy_id: int) -> bool:
-        return self._update_copy_status(copy_id, 'send_status', 'processing')
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE delivery_campaign_copies SET send_status='processing',updated_at=NOW() WHERE id=%s AND send_status IN ('pending','failed')", (int(copy_id),))
+                return cur.rowcount == 1
+
+    def mark_delivery_campaign_copy_unverified(self, copy_id: int, reason: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE delivery_campaign_copies SET send_status='unverified',send_error_text=%s,delete_status='none',updated_at=NOW() WHERE id=%s AND send_status='processing'", (reason,int(copy_id)))
+                return cur.rowcount == 1
 
     def mark_delivery_campaign_copy_sent(self, copy_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None, delivery_method: str | None, delete_after_at: str | None) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE delivery_campaign_copies SET send_status='sent', sent_at=NOW(), sent_message_id=%s, sent_message_ids_json=%s, delivery_method=%s, delete_after_at=%s, delete_status='scheduled', updated_at=NOW() WHERE id=%s", (sent_message_id, _json_dumps(sent_message_ids or []), delivery_method, delete_after_at, int(copy_id)))
-            conn.commit(); return True
+                cur.execute("UPDATE delivery_campaign_copies SET send_status='sent', sent_at=NOW(), sent_message_id=%s, sent_message_ids_json=%s::jsonb, delivery_method=%s, delete_after_at=%s, delete_status='scheduled', updated_at=NOW() WHERE id=%s AND send_status='processing'", (sent_message_id, _json_dumps(sent_message_ids or []), delivery_method, delete_after_at, int(copy_id)))
+                return cur.rowcount == 1
 
     def _update_copy_status(self, copy_id: int, field: str, value: str) -> bool:
         with self.connect() as conn:
@@ -12412,7 +12565,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 cur.execute(f"UPDATE delivery_campaign_copies SET {field}=%s, updated_at=NOW() WHERE id=%s", (value, int(copy_id)))
             conn.commit(); return True
 
-    def mark_delivery_campaign_copy_send_failed(self, copy_id: int, error_text: str) -> bool: return self._update_copy_status(copy_id,'send_status','failed')
+    def mark_delivery_campaign_copy_send_failed(self, copy_id: int, error_text: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE delivery_campaign_copies SET send_status='failed',send_error_text=%s,updated_at=NOW() WHERE id=%s AND send_status IN ('pending','processing')", (error_text,int(copy_id)))
+                return cur.rowcount == 1
     def mark_delivery_campaign_copy_delete_processing(self, copy_id: int) -> bool: return self._update_copy_status(copy_id,'delete_status','processing')
     def mark_delivery_campaign_copy_deleted(self, copy_id: int) -> bool: return self._update_copy_status(copy_id,'delete_status','deleted')
     def mark_delivery_campaign_copy_delete_failed(self, copy_id: int, error_text: str) -> bool: return self._update_copy_status(copy_id,'delete_status','failed')

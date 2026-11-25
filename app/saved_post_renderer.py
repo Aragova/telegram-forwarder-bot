@@ -5,6 +5,9 @@ import mimetypes
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from app.telethon_delivery_resolver import recover_album_ids_by_scan, verify_raw_album_ids
+from app.telegram_publication import botapi_publication_ids, publication_pairs, publication_candidate_mask
+from app.send_intent import current_publication_intent
+from app.runtime_utils import run_db
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +31,8 @@ class SavedPostRenderResult:
     message_ids: list[int] | None = None
     raw_message_ids: list[int] | None = None
     recovery_status: str | None = None
+    accepted: bool = False
+    manual_review_required: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -172,6 +177,8 @@ class SavedPostRenderer:
                 message_ids=None,
                 raw_message_ids=exc.message_ids,
                 recovery_status="failed",
+                accepted=True,
+                manual_review_required=True,
             )
         except Exception as exc:
             self.logger.warning(
@@ -188,16 +195,43 @@ class SavedPostRenderer:
                 message_ids = raw.get("message_ids") or (
                     [raw.get("message_id")] if raw.get("message_id") else None
                 )
+            intent = current_publication_intent()
+            uncertain = bool(intent and intent.possible_write)
             return SavedPostRenderResult(
                 ok=False,
-                method=method,
+                method=method + "_unverified" if uncertain else method,
                 kind=kind,
                 chat_id=str(chat_id),
                 error_text=normalize_saved_post_render_error(exc, kind=kind, premium_required=premium_required),
                 premium_required=premium_required,
-                message_ids=message_ids,
+                message_ids=None if uncertain else message_ids,
+                accepted=uncertain,
+                manual_review_required=uncertain,
             )
 
+
+async def _capture_pending(telethon_client, chat_id, messages, expected_count, started_at, method):
+    """Persist the exact scheduled vector before any history lookup."""
+    if not any(getattr(m,"video_processing_pending",False) is True for m in messages):
+        return
+    ids = [getattr(m,"id",None) for m in messages]
+    mask = [getattr(m,"video_processing_pending",False) is True for m in messages]
+    intent = current_publication_intent()
+    inbox = getattr(telethon_client,"publication_inbox",None)
+    if intent and intent.kind == "campaign" and inbox and len(ids)==expected_count and publication_candidate_mask(ids,mask):
+        peer_id = normalize_telethon_target(chat_id)
+        if type(peer_id) is int and all(getattr(m,"chat_id",None)==peer_id for m in messages):
+            await run_db(intent.repository.record_campaign_publication_receipt,int(intent.key),{
+                "ids":ids,"mask":mask,"peer_id":peer_id,"thread_id":intent.target_thread_id,
+                "account_id":inbox.sender_account_id,"started_at":started_at.isoformat(),"method":method,
+            })
+    raise SavedPostSentUnverifiedError(target_id=chat_id,message_ids=[i for i in ids if type(i) is int and i>0],
+        method=method+"_unverified",reason="Telegram ещё не подтвердил опубликованные ID; повтор запрещён")
+
+def _topic_kwargs(*, telethon=False):
+    intent = current_publication_intent()
+    thread = intent.target_thread_id if intent and intent.kind=="campaign" else None
+    return {("reply_to" if telethon else "message_thread_id"):thread} if thread is not None else {}
 
 def normalize_telethon_target(chat_id: int | str) -> int | str:
     value = str(chat_id).strip()
@@ -409,12 +443,16 @@ async def send_saved_post_album_via_telethon_source(
     if not messages:
         raise ValueError("Не удалось получить исходные сообщения альбома")
     medias = [m.media for m in messages if getattr(m, "media", None)]
-    sent = await telethon_client.send_file(entity=target_entity, file=medias, caption=content.get("caption") or "", formatting_entities=saved_post_entities_to_telethon(content.get("caption_entities")))
+    sent = await telethon_client.send_file(entity=target_entity, file=medias, caption=content.get("caption") or "", formatting_entities=saved_post_entities_to_telethon(content.get("caption_entities")), **_topic_kwargs(telethon=True))
     sent_messages = sent if isinstance(sent, list) else [sent]
+    await _capture_pending(telethon_client,chat_id,sent_messages,media_items_count,started_at,"telethon_source")
     raw_ids = [int(m.id) for m in sent_messages if getattr(m, "id", None)]
     verified = await verify_raw_album_ids(telethon_client=telethon_client, target_id=chat_id, raw_message_ids=raw_ids, expected_count=media_items_count, expected_caption=content.get("caption"), started_at=started_at)
     if verified.ok:
         return {"ok": True, "message_id": verified.message_id, "message_ids": verified.message_ids, "chat_id": str(chat_id), "kind": "album", "method": verified.method}
+    if current_publication_intent() is not None:
+        raise SavedPostSentUnverifiedError(target_id=chat_id,message_ids=raw_ids,
+            method="telethon_source_unverified",reason="Точные ID альбома не подтверждены")
     recovered = await recover_album_ids_by_scan(telethon_client=telethon_client, target_id=chat_id, expected_count=media_items_count, expected_caption=content.get("caption"), started_at=started_at)
     if recovered.ok:
         return {"ok": True, "message_id": recovered.message_id, "message_ids": recovered.message_ids, "chat_id": str(chat_id), "kind": "album", "method": recovered.method}
@@ -439,10 +477,11 @@ async def send_saved_post_content_via_telethon(
     )
     local_path: Path | None = None
     local_paths: list[Path] = []
+    started_at = datetime.now(timezone.utc)
     try:
         if kind == "text":
             entities = saved_post_entities_to_telethon(content.get("entities"))
-            sent = await telethon_client.send_message(entity=target_entity, message=content.get("text") or "", formatting_entities=entities)
+            sent = await telethon_client.send_message(entity=target_entity, message=content.get("text") or "", formatting_entities=entities, **_topic_kwargs(telethon=True))
         elif kind == "album":
             media_items = content.get("media_items") or []
             if not media_items:
@@ -453,7 +492,12 @@ async def send_saved_post_content_via_telethon(
                     chat_id=chat_id,
                     content=content,
                 )
+            except SavedPostSentUnverifiedError:
+                raise
             except Exception as source_exc:
+                intent = current_publication_intent()
+                if intent and intent.possible_write:
+                    raise
                 source_message_ids = get_album_source_message_ids(content)
                 if source_message_ids and len(source_message_ids) >= len(media_items):
                     raise source_exc
@@ -464,9 +508,11 @@ async def send_saved_post_content_via_telethon(
                 )
             caption_entities = saved_post_entities_to_telethon(content.get("caption_entities"))
             started_at = datetime.now(timezone.utc)
-            local_paths = [await download_saved_post_media_item_for_telethon(bot=bot, item=item, temp_dir=temp_dir) for item in media_items]
-            sent = await telethon_client.send_file(entity=target_entity, file=[str(x) for x in local_paths], caption=content.get("caption") or "", formatting_entities=caption_entities)
+            for item in media_items:
+                local_paths.append(await download_saved_post_media_item_for_telethon(bot=bot,item=item,temp_dir=temp_dir))
+            sent = await telethon_client.send_file(entity=target_entity, file=[str(x) for x in local_paths], caption=content.get("caption") or "", formatting_entities=caption_entities, **_topic_kwargs(telethon=True))
             sent_messages = sent if isinstance(sent, list) else [sent]
+            await _capture_pending(telethon_client,chat_id,sent_messages,len(media_items),started_at,"telethon_builder")
             raw_ids = [int(m.id) for m in sent_messages if getattr(m, "id", None)]
             ids = await verify_telethon_sent_messages(
                 telethon_client=telethon_client,
@@ -474,8 +520,9 @@ async def send_saved_post_content_via_telethon(
                 message_ids=raw_ids,
                 min_date=started_at,
             )
-            if len(ids) < len(media_items):
-                raise ValueError("Не удалось подтвердить ID отправленного альбома в целевом канале.")
+            if len(ids) != len(media_items) or not publication_pairs(ids,ids):
+                raise SavedPostSentUnverifiedError(target_id=chat_id,message_ids=raw_ids,
+                    method="telethon_builder_unverified",reason="Не удалось подтвердить ID отправленного альбома в целевом канале.")
             logger.info("SAVED_POST_TELETHON_BUILDER_SEND_DONE | target_id=%s | message_id=%s | method=telethon_builder", chat_id, ids[0])
             return {"ok": True, "message_id": ids[0], "message_ids": ids, "chat_id": str(chat_id), "kind": kind, "method": "telethon_builder"}
         else:
@@ -486,7 +533,11 @@ async def send_saved_post_content_via_telethon(
                 file=str(local_path),
                 caption=content.get("caption") or "",
                 formatting_entities=caption_entities,
+                **_topic_kwargs(telethon=True),
             )
+        await _capture_pending(telethon_client,chat_id,[sent],1,started_at,"telethon_builder")
+        if not publication_pairs([getattr(sent,"id",None)],[getattr(sent,"id",None)]):
+            raise SavedPostSentUnverifiedError(target_id=chat_id,message_ids=[],method="telethon_builder_unverified",reason="ID не подтверждён")
         logger.info("SAVED_POST_TELETHON_BUILDER_SEND_DONE | target_id=%s | message_id=%s | method=telethon_builder", chat_id, sent.id)
         return {"ok": True, "message_id": sent.id, "message_ids": [sent.id], "chat_id": str(chat_id), "kind": kind, "method": "telethon_builder"}
     except Exception as exc:
@@ -520,6 +571,7 @@ async def send_saved_post_content(
             text=content.get("text") or "",
             entities=deserialize_message_entities(content.get("entities")),
             reply_markup=reply_markup,
+            **_topic_kwargs(),
         )
     elif kind == "photo":
         media = content.get("media") or {}
@@ -529,6 +581,7 @@ async def send_saved_post_content(
             caption=content.get("caption"),
             caption_entities=deserialize_message_entities(content.get("caption_entities")),
             reply_markup=reply_markup,
+            **_topic_kwargs(),
         )
     elif kind == "video":
         media = content.get("media") or {}
@@ -538,6 +591,7 @@ async def send_saved_post_content(
             caption=content.get("caption"),
             caption_entities=deserialize_message_entities(content.get("caption_entities")),
             reply_markup=reply_markup,
+            **_topic_kwargs(),
         )
     elif kind == "animation":
         media = content.get("media") or {}
@@ -547,6 +601,7 @@ async def send_saved_post_content(
             caption=content.get("caption"),
             caption_entities=deserialize_message_entities(content.get("caption_entities")),
             reply_markup=reply_markup,
+            **_topic_kwargs(),
         )
     elif kind == "album":
         media_items = content.get("media_items") or []
@@ -568,10 +623,15 @@ async def send_saved_post_content(
                 media_group.append(InputMediaDocument(**kwargs))
             else:
                 raise ValueError(f"Unsupported album item kind: {item_kind}")
-        messages = await bot.send_media_group(chat_id=chat_id, media=media_group)
+        messages = await bot.send_media_group(chat_id=chat_id, media=media_group, **_topic_kwargs())
+        ids = botapi_publication_ids(messages,len(media_group))
+        if not ids:
+            raise SavedPostSentUnverifiedError(target_id=chat_id,message_ids=[],method="bot_api_unverified",reason="Неполные ID альбома")
         if reply_markup is not None:
-            await bot.send_message(chat_id=chat_id, text="⬆️ Предпросмотр рекламного альбома", reply_markup=reply_markup)
-        ids = [m.message_id for m in messages]
+            try:
+                await bot.send_message(chat_id=chat_id, text="⬆️ Предпросмотр рекламного альбома", reply_markup=reply_markup)
+            except Exception:
+                logger.warning("SAVED_POST_PREVIEW_BUTTONS_FAILED",exc_info=True)
         return {"ok": True, "message_id": ids[0], "message_ids": ids, "chat_id": str(chat_id), "kind": kind, "method": "bot_api"}
     elif kind == "document":
         media = content.get("media") or {}
@@ -581,14 +641,18 @@ async def send_saved_post_content(
             caption=content.get("caption"),
             caption_entities=deserialize_message_entities(content.get("caption_entities")),
             reply_markup=reply_markup,
+            **_topic_kwargs(),
         )
     else:
         raise ValueError(f"Unsupported saved post kind: {kind}")
 
+    ids = botapi_publication_ids(msg,1)
+    if not ids:
+        raise SavedPostSentUnverifiedError(target_id=chat_id,message_ids=[],method="bot_api_unverified",reason="Telegram не вернул опубликованный ID")
     return {
         "ok": True,
-        "message_id": msg.message_id,
-        "message_ids": [msg.message_id],
+        "message_id": ids[0],
+        "message_ids": ids,
         "chat_id": str(chat_id),
         "kind": kind,
         "method": "bot_api",

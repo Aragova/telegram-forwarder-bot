@@ -49,9 +49,15 @@ class FakeDb:
 
     def mark_delivery_campaign_copy_processing(self, copy_id):
         self.calls.append(("mark_delivery_campaign_copy_processing", copy_id))
+        return True
+
+    def mark_delivery_campaign_copy_unverified(self, copy_id, reason):
+        self.calls.append(("mark_delivery_campaign_copy_unverified",copy_id,reason))
+        return True
 
     def mark_delivery_campaign_copy_sent(self, copy_id, **kwargs):
         self.calls.append(("mark_delivery_campaign_copy_sent", copy_id, kwargs))
+        return True
 
     def mark_delivery_campaign_copy_delete_skipped(self, copy_id, text):
         self.calls.append(("mark_delivery_campaign_copy_delete_skipped", copy_id, text))

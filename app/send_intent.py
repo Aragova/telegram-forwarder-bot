@@ -37,6 +37,8 @@ class PublicationIntent:
     possible_write: bool = False
     blocked: bool = False
     uncertain: bool = False
+    kind: str = "delivery"
+    target_thread_id: int | None = None
 
 
 _intent: ContextVar[PublicationIntent | None] = ContextVar("publication_intent", default=None)
@@ -171,7 +173,8 @@ async def _bind_identity(account_id: int, intent: PublicationIntent, request, me
             json.dumps(descriptor, sort_keys=True, default=str).encode()
         ).hexdigest()
         ids = await run_db(
-            intent.repository.get_or_create_mtproto_random_ids,
+            (intent.repository.get_or_create_campaign_mtproto_random_ids
+             if intent.kind == "campaign" else intent.repository.get_or_create_mtproto_random_ids),
             intent.key, intent.ordinal, fingerprint, len(members),
         )
         if (len(ids) != len(members) or len(set(ids)) != len(ids)
