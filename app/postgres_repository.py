@@ -4439,10 +4439,7923 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 AND a.tenant_id=COALESCE(r.tenant_id,1)
                 AND a.idempotency_key=('delivery:' || a.delivery_id::text
                     || ':target:' || a.target_id || ':video_send:v1')
-                AND jsonb_typeof(a.sent_message_ids_json)='array'
+                AND CASE
+                    WHEN jsonb_typeof(a.sent_message_ids_json)='array'
+                    THEN jsonb_array_length(a.sent_message_ids_json)=1
+                    ELSE FALSE
+                END
                 AND jsonb_typeof(a.sent_message_ids_json->0)='number'
-                AND a.sent_message_ids_json->>0 ~ '^[1-9][0-9]*$'
-                AND a.sent_message_ids_json->1 IS NULL
+                AND a.sent_message_ids_json->>0 ~ '^[1-9][0-9]*
+                AND (d.id IS NULL OR (
+                    d.rule_id=a.rule_id AND d.status='sent'
+                    AND d.sent_message_id>0
+                    AND a.sent_message_ids_json=jsonb_build_array(d.sent_message_id)
+                    AND COALESCE(d.target_id_snapshot,a.target_id)=a.target_id
+                ))
+                AND NOT EXISTS (
+                    SELECT 1 FROM mtproto_send_intents i WHERE i.attempt_id=a.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM telegram_publication_receipts pr
+                    WHERE pr.idempotency_key=a.idempotency_key
+                )
+              ), FALSE)
+            """, (int(rule_id),),
+        )
+        blocked = cur.fetchone()
+        if blocked["unresolved"]:
+            raise RescanBlocked(
+                "Есть отправка с неизвестным результатом; "
+                f"записей: {blocked['unresolved']}, "
+                f"первая попытка: {blocked.get('first_attempt_id')}. "
+                "Требуется ручная проверка."
+            )
+        cur.execute(
+            """SELECT idempotency_key FROM telegram_publication_receipts
+                WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching'))
+                ORDER BY idempotency_key LIMIT 1""", (int(rule_id),),
+        )
+        if cur.fetchone():
+            raise RescanBlocked("Есть незавершённая публикация или реакция; повтор запрещён")
+
+    def _assert_keep_rescan_safe(self, cur, rule_id: int) -> None:
+        cur.execute(
+            """
+            SELECT COUNT(*) AS unresolved, MIN(a.id) AS first_attempt_id
+            FROM delivery_attempts a
+            WHERE a.rule_id=%s AND a.status IN ('sending','accepted','verified','failed_after_send')
+              AND a.idempotency_key NOT LIKE '%%:rescan:%%' AND a.idempotency_key NOT LIKE 'archived:%%'
+              AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.id=a.delivery_id AND d.rule_id=a.rule_id)
+              AND NOT COALESCE((
+                CASE WHEN a.operation_kind='album' THEN
+                    EXISTS (SELECT 1 FROM telegram_publication_receipts pr
+                        WHERE pr.idempotency_key=a.idempotency_key AND pr.rule_id=a.rule_id)
+                    OR (a.target_id IS NOT NULL
+                        AND starts_with(a.idempotency_key,'rule:'||a.rule_id::text||':target:'||a.target_id||':media_group:')
+                        AND right(a.idempotency_key,6)=':album'
+                        AND length(a.idempotency_key)>length('rule:'||a.rule_id::text||':target:'||a.target_id||':media_group::album'))
+                WHEN a.operation_kind IN ('single','video_send') THEN
+                    jsonb_typeof(a.source_message_ids_json)='array'
+                    AND a.source_message_ids_json <> '[]'::jsonb
+                    AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(
+                        CASE WHEN jsonb_typeof(a.source_message_ids_json)='array'
+                             THEN a.source_message_ids_json ELSE '[]'::jsonb END) AS mid(value)
+                        WHERE jsonb_typeof(mid.value)<>'number' OR mid.value::text !~ '^[1-9][0-9]*$')
+                ELSE FALSE END
+              ),FALSE)
+            """, (int(rule_id),),
+        )
+        blocked = cur.fetchone()
+        if blocked["unresolved"]:
+            raise RescanBlocked(
+                f"У старых отправок нет точной привязки к источнику: {blocked['unresolved']}; "
+                f"первая попытка: {blocked.get('first_attempt_id')}. Требуется ручная проверка."
+            )
+
+    def begin_rule_rescan(self, rule_id: int, *, fresh: bool = False) -> tuple[bool, str]:
+        """Acquire a PostgreSQL-backed exclusive rescan owner before parsing.
+
+        Ownership survives individual DB transactions and excludes independent
+        handlers/processes. Crashed scans remain paused and require explicit
+        operator recovery rather than risking an unverified automatic replay.
+        """
+        owner_token = uuid.uuid4().hex
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT is_active, rescan_owner_token FROM routing WHERE id = %s FOR UPDATE",
+                    (int(rule_id),),
+                )
+                rule = cur.fetchone()
+                if rule is None:
+                    raise RescanBlocked(f"Правило #{rule_id} не найдено")
+                if rule["rescan_owner_token"] is not None:
+                    raise RescanBlocked(
+                        "Пересканирование этого правила уже выполняется. "
+                        "Повторный запуск запрещён до завершения текущего."
+                    )
+                cur.execute(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM deliveries
+                        WHERE rule_id = %s AND status = 'processing'
+                    ) OR EXISTS(
+                        SELECT 1 FROM jobs
+                        WHERE payload_json->>'rule_id' = %s
+                          AND status IN ('pending', 'leased', 'processing', 'retry')
+                    ) AS busy
+                    """,
+                    (int(rule_id), str(rule_id)),
+                )
+                if cur.fetchone()["busy"]:
+                    raise RescanBlocked(
+                        "У правила есть незавершённые доставки или задачи; "
+                        "пересканирование отложено во избежание дубликатов"
+                    )
+                if fresh:
+                    self._assert_rule_replay_safe(cur, rule_id)
+                else:
+                    self._assert_keep_rescan_safe(cur, rule_id)
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET is_active = FALSE, rescan_owner_token = %s,
+                        rescan_started_at = NOW()
+                    WHERE id = %s AND rescan_owner_token IS NULL
+                    """,
+                    (owner_token, int(rule_id)),
+                )
+                if cur.rowcount != 1:
+                    raise RescanBlocked("Другое пересканирование получило блокировку")
+            conn.commit()
+        return bool(rule["is_active"]), owner_token
+
+    def finish_rule_rescan(
+        self, rule_id: int, *, was_active: bool, owner_token: str,
+        queue_rebuilt: bool = False,
+    ) -> None:
+        """Only the original owner can resume or release a rescan."""
+        if not owner_token:
+            raise ValueError("Missing rescan owner")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET is_active = %s, rescan_owner_token = NULL,
+                        rescan_started_at = NULL,
+                        rescan_queue_built = rescan_queue_built OR %s
+                    WHERE id = %s AND rescan_owner_token = %s
+                    """,
+                    (bool(was_active), bool(queue_rebuilt), int(rule_id), str(owner_token)),
+                )
+                if cur.rowcount != 1:
+                    raise RuntimeError(
+                        "Владелец пересканирования изменился; нельзя менять статус правила"
+                    )
+            conn.commit()
+
+    def _snapshot_rescan_echo_ids(self, cur, rule_id: int) -> None:
+        """Keep existing self-loop output evidence when its delivery anchors are removed."""
+        cur.execute(
+            """
+            INSERT INTO audit_log(created_at,event_type,rule_id,tenant_id,source_id,
+                                  source_thread_id,target_id,target_thread_id,extra_json)
+            SELECT %s,'rule_rescan_echo_snapshot',r.id,COALESCE(r.tenant_id,1),
+                   r.source_id,r.source_thread_id,r.target_id,r.target_thread_id,
+                   jsonb_build_object('sent_message_ids',jsonb_agg(DISTINCT e.mid))::text
+            FROM routing r
+            JOIN deliveries d ON d.rule_id=r.id
+            CROSS JOIN LATERAL (
+                SELECT to_jsonb(d.sent_message_id) AS mid WHERE d.status='sent' AND d.sent_message_id>0
+                UNION
+                SELECT value FROM jsonb_array_elements(
+                    CASE WHEN d.status='sent' AND jsonb_typeof(d.sent_message_ids_json)='array'
+                         THEN d.sent_message_ids_json ELSE '[]'::jsonb END)
+                UNION
+                SELECT value FROM delivery_attempts a
+                CROSS JOIN LATERAL jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(a.sent_message_ids_json)='array'
+                         THEN a.sent_message_ids_json ELSE '[]'::jsonb END)
+                WHERE a.delivery_id=d.id AND a.rule_id=r.id AND a.status='verified'
+                  AND a.target_id=r.target_id
+            ) e
+            WHERE r.id=%s AND r.source_id=r.target_id
+              AND r.source_thread_id IS NOT DISTINCT FROM r.target_thread_id
+              AND COALESCE(d.target_id_snapshot,r.target_id)=r.target_id
+              AND jsonb_typeof(e.mid)='number' AND e.mid::text ~ '^[1-9][0-9]*$'
+            GROUP BY r.id
+            """, (utc_now_iso(),int(rule_id)),
+        )
+
+    def _lock_rescan_commit(self, cur, rule_id: int, owner_token: str, expected_scope):
+        cur.execute(
+            "SELECT is_active, rescan_owner_token, source_id, source_thread_id, "
+            "target_id, target_thread_id, mode FROM routing WHERE id = %s FOR UPDATE",
+            (int(rule_id),),
+        )
+        rule = cur.fetchone()
+        if (rule is None or rule["is_active"] or not owner_token
+                or rule["rescan_owner_token"] != owner_token):
+            raise RescanBlocked("Для начала заново нужно владеть остановленным пересканированием")
+        if expected_scope is not None and expected_scope != (
+            str(rule["source_id"]), rule["source_thread_id"],
+            str(rule["target_id"]), rule["target_thread_id"], rule["mode"],
+        ):
+            raise RescanBlocked("Настройки источника или получателя изменились; повторите пересканирование")
+        cur.execute(
+            """SELECT EXISTS(SELECT 1 FROM deliveries
+                   WHERE rule_id=%s AND status='processing')
+                OR EXISTS(SELECT 1 FROM jobs WHERE payload_json->>'rule_id'=%s
+                   AND status IN ('pending','leased','processing','retry')) AS busy""",
+            (int(rule_id), str(rule_id)),
+        )
+        if cur.fetchone()["busy"]:
+            raise RescanBlocked("Остались активные задачи; пересканирование отменено")
+        return rule
+
+    def reset_rule_history_for_replay(
+        self, rule_id: int, *, owner_token: str,
+        allowed_message_ids: set[int], include_newer_than_message_id: int,
+        expected_scope: tuple | None = None,
+    ) -> tuple[int, int, int]:
+        """Explicit 'start over': archive old attempt keys, then reset only this rule.
+
+        Retain original attempt rows and Telegram receipts for audit. A new
+        replay must use new idempotency keys, otherwise accepted historical
+        writes are incorrectly counted as fresh deliveries.
+        """
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                rule = self._lock_rescan_commit(cur, rule_id, owner_token, expected_scope)
+                self._assert_rule_replay_safe(cur, rule_id)
+                self._snapshot_rescan_echo_ids(cur, rule_id)
+                cur.execute("""
+                    UPDATE telegram_publication_receipts r
+                    SET idempotency_key=r.idempotency_key || ':rescan:' || a.id::text
+                    FROM delivery_attempts a
+                    WHERE r.rule_id=%s AND a.idempotency_key=r.idempotency_key
+                      AND r.published_ids IS NOT NULL
+                      AND r.idempotency_key NOT LIKE '%%:rescan:%%'
+                    """, (int(rule_id),))
+
+                # Unique suffix incorporates immutable attempt primary key.
+                # Previously archived rows are excluded, including on repeat reset.
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts
+                    SET idempotency_key = idempotency_key || ':rescan:' || id::text,
+                        updated_at = NOW()
+                    WHERE rule_id = %s
+                      AND idempotency_key NOT LIKE '%%:rescan:%%'
+                    """,
+                    (int(rule_id),),
+                )
+                archived = int(cur.rowcount or 0)
+                cur.execute("DELETE FROM deliveries WHERE rule_id = %s", (int(rule_id),))
+                deleted = int(cur.rowcount or 0)
+                rebuilt = self._backfill_deliveries_for_rule_conn(
+                    conn, int(rule_id), str(rule["source_id"]), rule["source_thread_id"],
+                    allowed_message_ids=allowed_message_ids,
+                    include_newer_than_message_id=include_newer_than_message_id,
+                )
+                cur.execute("UPDATE routing SET rescan_queue_built=TRUE,next_run_at=%s WHERE id=%s", (utc_now_iso(),rule_id))
+            conn.commit()
+        return archived, deleted, rebuilt
+
+    def clear_rule_deliveries(self, rule_id: int) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM routing WHERE id=%s AND rescan_owner_token IS NULL FOR UPDATE", (rule_id,))
+                if not cur.fetchone():
+                    raise RescanBlocked("Правило недоступно или пересканируется")
+                cur.execute("""SELECT 1 FROM telegram_publication_receipts
+                    WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""", (rule_id,))
+                if cur.fetchone():
+                    raise RuntimeError("Есть незавершённая публикация или реакция")
+                cur.execute("DELETE FROM deliveries WHERE rule_id = %s", (rule_id,))
+                count = int(cur.rowcount or 0)
+            conn.commit()
+            return count
+
+    def backfill_rule(
+        self, rule_id: int, *, allowed_message_ids: set[int] | None = None,
+        include_newer_than_message_id: int | None = None,
+    ) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, source_id, source_thread_id
+                    FROM routing
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (rule_id,),
+                )
+                row = cur.fetchone()
+
+                if not row:
+                    conn.commit()
+                    return 0
+
+            inserted = self._backfill_deliveries_for_rule_conn(
+                conn,
+                int(row["id"]),
+                str(row["source_id"]),
+                row["source_thread_id"],
+                allowed_message_ids=allowed_message_ids,
+                include_newer_than_message_id=include_newer_than_message_id,
+            )
+            conn.commit()
+            return inserted
+
+    def get_rule_first_pending_message_id(self, rule_id: int) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT p.message_id
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    WHERE d.rule_id = %s
+                      AND d.status = 'pending'
+                    ORDER BY p.id ASC
+                    LIMIT 1
+                    """,
+                    (rule_id,),
+                )
+                row = cur.fetchone()
+
+        if not row:
+            return None
+        return int(row["message_id"])
+
+    def get_rule_sent_message_ids(self, rule_id: int) -> list[int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT p.message_id
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    WHERE d.rule_id = %s
+                      AND d.status = 'sent'
+                    ORDER BY p.id ASC
+                    """,
+                    (rule_id,),
+                )
+                rows = cur.fetchall()
+
+        return [int(row["message_id"]) for row in rows]
+
+    def get_last_sent_post_for_reaction_test(self, tenant_id: int, rule_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        target_id,
+                        COALESCE(
+                            NULLIF(extra_json::json->>'reaction_message_id', '')::BIGINT,
+                            NULLIF(extra_json::json->>'sent_message_id', '')::BIGINT
+                        ) AS message_id
+                    FROM audit_log
+                    WHERE tenant_id = %s
+                      AND rule_id = %s
+                      AND event_type = 'delivery_sent'
+                      AND target_id IS NOT NULL
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (tenant_id, rule_id),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        message_id = row.get("message_id")
+        if not message_id:
+            return None
+        return {
+            "target_id": str(row["target_id"]),
+            "message_id": int(message_id),
+        }
+
+    def mark_rule_messages_sent(
+        self,
+        rule_id: int,
+        source_channel: str,
+        source_thread_id: int | None,
+        message_ids: list[int],
+    ) -> int:
+        if not message_ids:
+            return 0
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if source_thread_id is None:
+                    cur.execute(
+                        """
+                        UPDATE deliveries d
+                        SET status = 'sent',
+                            sent_at = %s,
+                            error_text = NULL
+                        FROM posts p
+                        WHERE d.post_id = p.id
+                          AND d.rule_id = %s
+                          AND p.source_channel = %s
+                          AND p.source_thread_id IS NULL
+                          AND p.message_id = ANY(%s)
+                        """,
+                        (utc_now_iso(), rule_id, str(source_channel), message_ids),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE deliveries d
+                        SET status = 'sent',
+                            sent_at = %s,
+                            error_text = NULL
+                        FROM posts p
+                        WHERE d.post_id = p.id
+                          AND d.rule_id = %s
+                          AND p.source_channel = %s
+                          AND p.source_thread_id = %s
+                          AND p.message_id = ANY(%s)
+                        """,
+                        (utc_now_iso(), rule_id, str(source_channel), source_thread_id, message_ids),
+                    )
+                count = int(cur.rowcount or 0)
+            conn.commit()
+            return count
+
+    def _prune_rule_pending_conn(
+        self, conn, rule_id: int, source_channel: str, source_thread_id: int | None,
+        *, seen_message_ids: set[int] | None = None, scan_start_max_message_id: int = 0,
+        before_message_id: int | None = None,
+    ) -> int:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM deliveries d USING posts p
+                WHERE d.post_id = p.id
+                  AND d.rule_id = %s AND d.status = 'pending'
+                  AND p.source_channel = %s
+                  AND p.source_thread_id IS NOT DISTINCT FROM %s
+                  AND NOT EXISTS (
+                      SELECT 1 FROM delivery_attempts a
+                      LEFT JOIN deliveries ad ON ad.id=a.delivery_id AND ad.rule_id=a.rule_id
+                      LEFT JOIN posts ap ON ap.id=ad.post_id
+                      WHERE a.rule_id=d.rule_id
+                        AND a.status IN ('sending','accepted','verified','failed_after_send')
+                        AND a.idempotency_key NOT LIKE '%%:rescan:%%'
+                        AND a.idempotency_key NOT LIKE 'archived:%%'
+                        AND (a.delivery_id=d.id
+                            OR (a.operation_kind='album' AND p.media_group_id IS NOT NULL AND (
+                                a.idempotency_key=('rule:'||a.rule_id::text||':target:'||a.target_id
+                                    ||':media_group:'||p.media_group_id||':album')
+                                OR (ap.media_group_id=p.media_group_id
+                                    AND ap.source_channel=p.source_channel
+                                    AND ap.source_thread_id IS NOT DISTINCT FROM p.source_thread_id)
+                            )))
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM telegram_publication_receipts pr
+                      WHERE pr.rule_id=d.rule_id AND d.id=ANY(pr.delivery_ids)
+                        AND pr.published_ids IS NULL
+                  )
+                  AND (
+                      (%s::bigint IS NOT NULL AND p.message_id < %s::bigint)
+                      OR (%s::bigint IS NULL AND NOT (p.message_id = ANY(%s::bigint[]))
+                          AND p.message_id <= %s)
+                  )
+                """,
+                (int(rule_id), str(source_channel), source_thread_id,
+                 before_message_id,before_message_id,before_message_id,
+                 sorted(seen_message_ids or set()),int(scan_start_max_message_id)),
+            )
+            return int(cur.rowcount or 0)
+
+    def drop_rule_pending_before_message(
+        self, rule_id: int, source_channel: str, source_thread_id: int | None, message_id: int,
+    ) -> int:
+        with self.connect() as conn:
+            count = self._prune_rule_pending_conn(
+                conn, rule_id, source_channel, source_thread_id, before_message_id=message_id,
+            )
+            conn.commit()
+            return count
+
+    def drop_rule_pending_not_in_message_ids(
+        self, rule_id: int, *, source_channel: str, source_thread_id: int | None,
+        seen_message_ids: set[int], scan_start_max_message_id: int,
+    ) -> int:
+        """Prune stale snapshot posts, never new arrivals after scan started."""
+        with self.connect() as conn:
+            count = self._prune_rule_pending_conn(
+                conn, rule_id, source_channel, source_thread_id,
+                seen_message_ids=seen_message_ids, scan_start_max_message_id=scan_start_max_message_id,
+            )
+            conn.commit()
+            return count
+
+    def _quarantine_rescan_orphans(self, cur, rule_id: int) -> int:
+        """A lost delivery ID must not turn an accepted write into a fresh send."""
+        cur.execute(
+            """
+            UPDATE deliveries d SET status='faulty',error_text='historical_attempt_unverified_no_resend'
+            FROM posts p, routing r
+            WHERE d.rule_id=%s AND r.id=d.rule_id AND d.post_id=p.id AND d.status='pending'
+              AND EXISTS (
+                SELECT 1 FROM posts member
+                WHERE member.source_channel=p.source_channel
+                  AND member.source_thread_id IS NOT DISTINCT FROM p.source_thread_id
+                  AND (member.id=p.id OR (r.mode='repost' AND p.media_group_id IS NOT NULL
+                       AND member.media_group_id=p.media_group_id))
+                  AND (
+                    EXISTS (
+                        SELECT 1 FROM delivery_attempts a
+                        WHERE a.rule_id=d.rule_id AND a.status IN ('sending','accepted','verified','failed_after_send')
+                          AND a.idempotency_key NOT LIKE '%%:rescan:%%' AND a.idempotency_key NOT LIKE 'archived:%%'
+                          AND (
+                            (a.operation_kind IN ('single','video_send')
+                             AND a.source_message_ids_json @> jsonb_build_array(member.message_id))
+                            OR (a.operation_kind='album' AND member.media_group_id IS NOT NULL
+                                AND a.idempotency_key=('rule:'||a.rule_id::text||':target:'||a.target_id
+                                    ||':media_group:'||member.media_group_id||':album'))
+                          )
+                          AND NOT EXISTS (SELECT 1 FROM deliveries old WHERE old.id=a.delivery_id AND old.rule_id=a.rule_id)
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM telegram_publication_receipts pr
+                        WHERE pr.rule_id=d.rule_id AND pr.source_channel=p.source_channel
+                          AND pr.source_thread_id IS NOT DISTINCT FROM p.source_thread_id
+                          AND pr.idempotency_key NOT LIKE '%%:rescan:%%' AND pr.idempotency_key NOT LIKE 'archived:%%'
+                          AND member.message_id=ANY(pr.source_message_ids)
+                          AND NOT EXISTS (SELECT 1 FROM deliveries old WHERE old.id=ANY(pr.delivery_ids)
+                              AND old.rule_id=d.rule_id AND old.post_id=member.id)
+                    )
+                  )
+              )
+            """, (int(rule_id),),
+        )
+        return int(cur.rowcount or 0)
+
+    def rebuild_rule_keep_position(
+        self, rule_id: int, *, owner_token: str, allowed_message_ids: set[int],
+        include_newer_than_message_id: int, before_message_id: int | None,
+        expected_scope: tuple | None = None,
+    ) -> tuple[int, int, int, int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                rule = self._lock_rescan_commit(cur, rule_id, owner_token, expected_scope)
+                self._assert_keep_rescan_safe(cur, rule_id)
+                source, thread = str(rule["source_id"]), rule["source_thread_id"]
+                rebuilt = self._backfill_deliveries_for_rule_conn(
+                    conn, rule_id, source, thread, allowed_message_ids=allowed_message_ids,
+                    include_newer_than_message_id=include_newer_than_message_id,
+                )
+                stale = self._prune_rule_pending_conn(
+                    conn, rule_id, source, thread, seen_message_ids=allowed_message_ids,
+                    scan_start_max_message_id=include_newer_than_message_id,
+                )
+                before = 0 if before_message_id is None else self._prune_rule_pending_conn(
+                    conn, rule_id, source, thread, before_message_id=before_message_id,
+                )
+                quarantined = self._quarantine_rescan_orphans(cur, rule_id)
+                cur.execute("UPDATE routing SET rescan_queue_built=TRUE WHERE id=%s", (rule_id,))
+            conn.commit()
+        return rebuilt, stale, before, quarantined
+
+    def get_rule_next_run_at(self, rule_id: int) -> str | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT next_run_at
+                    FROM routing
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (rule_id,),
+                )
+                row = cur.fetchone()
+
+        if not row:
+            return None
+        return row["next_run_at"]
+
+    def get_rule_sent_count(self, rule_id: int) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM deliveries
+                    WHERE rule_id = %s
+                      AND status = 'sent'
+                    """,
+                    (rule_id,),
+                )
+                row = cur.fetchone()
+        return int(row["cnt"] or 0) if row else 0
+
+    def drop_rule_first_n_deliveries(self, rule_id: int, count: int) -> int:
+        if count <= 0:
+            return 0
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT d.id
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    WHERE d.rule_id = %s
+                    ORDER BY p.id ASC
+                    LIMIT %s
+                    """,
+                    (rule_id, int(count)),
+                )
+                rows = cur.fetchall()
+
+                ids = [int(row["id"]) for row in rows]
+                if not ids:
+                    conn.commit()
+                    return 0
+
+                cur.execute(
+                    """
+                    DELETE FROM deliveries
+                    WHERE id = ANY(%s)
+                    """,
+                    (ids,),
+                )
+                deleted = int(cur.rowcount or 0)
+            conn.commit()
+            return deleted
+
+    def update_rule_interval(self, rule_id: int, new_interval: int) -> bool:
+        with self.connect() as conn:
+            base_dt = datetime.fromtimestamp(
+                datetime.now(timezone.utc).timestamp() + max(int(new_interval), 1),
+                tz=timezone.utc,
+            )
+            next_run_iso = self._find_next_interval_slot(
+                conn,
+                base_dt,
+                exclude_rule_id=rule_id,
+            )
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET schedule_mode = 'interval',
+                        interval = %s,
+                        next_run_at = %s
+                    WHERE id = %s
+                    """,
+                    (int(new_interval), next_run_iso, rule_id),
+                )
+                updated = cur.rowcount > 0
+
+            conn.commit()
+
+            logger.info(
+                "update_rule_interval: rule_id=%s, new_interval=%s, next_run_at=%s, updated=%s",
+                rule_id,
+                new_interval,
+                next_run_iso,
+                updated,
+            )
+            return updated
+
+    def update_rule_next_run_at(self, rule_id: int, next_run_iso: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET next_run_at = %s
+                    WHERE id = %s
+                    """,
+                    (next_run_iso, rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def trigger_rule_now(self, rule_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET next_run_at = %s
+                    WHERE id = %s AND is_active = TRUE
+                    """,
+                    (utc_now_iso(), rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def update_rule_fixed_times(self, rule_id: int, times: list[str]) -> bool:
+        normalized = normalize_fixed_times(times)
+        if not normalized:
+            return False
+
+        next_run = get_next_fixed_run_utc(normalized)
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET schedule_mode = 'fixed',
+                        fixed_times_json = %s,
+                        next_run_at = %s
+                    WHERE id = %s
+                    """,
+                    (_json_dumps(normalized), next_run, rule_id),
+                )
+                updated = cur.rowcount > 0
+
+                if updated:
+                    cur.execute(
+                        """
+                        UPDATE routing
+                        SET next_run_at = %s
+                        WHERE id = %s
+                        AND is_active = TRUE
+                    """,
+                        (next_run, rule_id),
+                    )
+
+            conn.commit()
+            return updated
+
+    def set_rule_interval_mode(self, rule_id: int, interval: int) -> bool:
+        with self.connect() as conn:
+            base_dt = datetime.fromtimestamp(
+                datetime.now(timezone.utc).timestamp() + max(interval, 1),
+                tz=timezone.utc,
+            )
+            next_run_iso = self._find_next_interval_slot(conn, base_dt, exclude_rule_id=rule_id)
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET schedule_mode = 'interval',
+                        interval = %s,
+                        fixed_times_json = NULL,
+                        next_run_at = %s
+                    WHERE id = %s
+                    """,
+                    (interval, next_run_iso, rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def update_rule_mode(self, rule_id: int, mode: str) -> bool:
+        if mode not in ("repost", "video"):
+            return False
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET mode = %s
+                    WHERE id = %s
+                    """,
+                    (mode, rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def update_rule_repost_caption(
+        self,
+        rule_id: int,
+        caption: str | None,
+        caption_entities_json: str | None = None,
+    ) -> bool:
+        # Do not implicitly switch the caption on for empty input. Clearing
+        # always restores original text; a valid save enables the override.
+        value = str(caption) if caption and str(caption).strip() else None
+        if value is not None and len(value.encode("utf-16-le")) // 2 > 1024:
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET repost_caption = %s,
+                        repost_caption_entities_json = %s,
+                        repost_caption_enabled = %s
+                    WHERE id = %s AND mode = 'repost'
+                    """,
+                    (value, caption_entities_json if value is not None else None,
+                     bool(value), int(rule_id)),
+                )
+                updated = cur.rowcount == 1
+            conn.commit()
+        return updated
+
+    def set_rule_repost_caption_enabled(self, rule_id: int, enabled: bool) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET repost_caption_enabled = %s
+                    WHERE id = %s AND mode = 'repost'
+                      AND (NOT %s OR NULLIF(BTRIM(repost_caption), '') IS NOT NULL)
+                    """,
+                    (bool(enabled), int(rule_id), bool(enabled)),
+                )
+                updated = cur.rowcount == 1
+            conn.commit()
+        return updated
+
+    def update_rule_repost_caption_delivery_mode(self, rule_id: int, mode: str) -> bool:
+        normalized = str(mode or "").strip().lower()
+        if normalized not in ("copy_first", "builder_first"):
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing SET repost_caption_delivery_mode = %s
+                    WHERE id = %s AND mode = 'repost'
+                    """,
+                    (normalized, int(rule_id)),
+                )
+                updated = cur.rowcount == 1
+            conn.commit()
+        return updated
+
+    def update_rule_video_caption(
+        self,
+        rule_id: int,
+        caption: str | None,
+        caption_entities_json: str | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET video_caption = %s,
+                        video_caption_entities_json = %s
+                    WHERE id = %s
+                    """,
+                    (caption, caption_entities_json, rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def update_rule_video_caption_delivery_mode(
+        self,
+        rule_id: int,
+        video_caption_delivery_mode: str,
+    ) -> bool:
+        allowed = {"copy_first", "builder_first"}
+        normalized = (video_caption_delivery_mode or "").strip().lower()
+
+        if normalized not in allowed:
+            return False
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET video_caption_delivery_mode = %s
+                    WHERE id = %s
+                    """,
+                    (normalized, rule_id),
+                )
+                updated = cur.rowcount > 0
+
+            conn.commit()
+
+        return updated
+
+    def update_rule_video_intro_horizontal(self, rule_id: int, path: str | None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET video_intro_horizontal = %s
+                    WHERE id = %s
+                    """,
+                    (path, rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def update_rule_video_intro_vertical(self, rule_id: int, path: str | None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET video_intro_vertical = %s
+                    WHERE id = %s
+                    """,
+                    (path, rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def set_rule_video_intro_enabled(self, rule_id: int, enabled: bool) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET video_add_intro = %s
+                    WHERE id = %s
+                    """,
+                    (bool(enabled), rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def update_rule_video_trim(self, rule_id: int, seconds: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET video_trim_seconds = %s
+                    WHERE id = %s
+                    """,
+                    (int(seconds), rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def update_rule_video_clip_duration_seconds(self, rule_id: int, seconds: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET video_clip_duration_seconds = %s
+                    WHERE id = %s
+                    """,
+                    (int(seconds), rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def set_rule_intro_horizontal(self, rule_id: int, intro_id: int | None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET video_intro_horizontal_id = %s
+                    WHERE id = %s
+                    """,
+                    (intro_id, rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def set_rule_intro_vertical(self, rule_id: int, intro_id: int | None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET video_intro_vertical_id = %s
+                    WHERE id = %s
+                    """,
+                    (intro_id, rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def set_rule_add_intro(self, rule_id: int, enabled: bool) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET video_add_intro = %s
+                    WHERE id = %s
+                    """,
+                    (bool(enabled), rule_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def touch_rule_after_send(self, rule_id: int, interval: int) -> None:
+        now_iso = utc_now_iso()
+        now_dt = datetime.now(timezone.utc)
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT mode, schedule_mode, fixed_times_json, interval, next_run_at
+                    FROM routing
+                    WHERE id = %s
+                    """,
+                    (rule_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    conn.commit()
+                    return
+
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM deliveries
+                    WHERE rule_id = %s
+                      AND status = 'pending'
+                    """,
+                    (rule_id,),
+                )
+                pending_row = cur.fetchone()
+                pending_count = int(pending_row["cnt"] or 0) if pending_row else 0
+
+                schedule_mode = row["schedule_mode"] or "interval"
+                rule_mode = (row.get("mode") or "repost").strip().lower()
+                next_run_iso = row.get("next_run_at")
+
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET last_sent_at = %s,
+                        next_run_at = COALESCE(next_run_at, %s)
+                    WHERE id = %s
+                    """,
+                    (now_iso, next_run_iso, rule_id),
+                )
+                logger.info(
+                    "RULE NEXT RUN UPDATED | rule_id=%s | mode=%s | schedule_mode=%s | interval=%s | pending=%s | last_sent_at=%s | next_run_at=%s",
+                    rule_id,
+                    rule_mode,
+                    schedule_mode,
+                    int(row["interval"] or interval or 0),
+                    pending_count,
+                    now_iso,
+                    next_run_iso,
+                )
+            conn.commit()
+
+    # =========================================================
+    # DUE DELIVERY / TAKING
+    # =========================================================
+
+    def get_due_delivery(self, rule_id: int, due_iso: str):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        d.id AS delivery_id,
+                        p.message_id,
+                        p.source_channel,
+                        p.source_thread_id,
+                        p.content_json,
+                        p.media_group_id,
+                        r.target_id,
+                        r.target_thread_id,
+                        r.interval,
+                        COALESCE(r.tenant_id, d.tenant_id, 1) AS tenant_id
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
+                    WHERE d.rule_id = %s
+                      AND d.status = 'pending'
+                      AND r.is_active = TRUE
+                      AND (r.next_run_at IS NULL OR r.next_run_at <= %s)
+                    ORDER BY p.id ASC
+                    LIMIT 1
+                    """,
+                    (rule_id, due_iso),
+                )
+                return cur.fetchone()
+
+    def take_due_delivery(self, rule_id: int, due_iso: str):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                # --- получаем режим правила ---
+                cur.execute(
+                    """
+                    SELECT mode, schedule_mode, fixed_times_json, interval, next_run_at
+                    FROM routing
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (rule_id,),
+                )
+                rule_row = cur.fetchone()
+
+                if not rule_row:
+                    conn.commit()
+                    return None
+
+                rule_mode = (rule_row["mode"] or "repost").strip().lower()
+                schedule_mode = (rule_row["schedule_mode"] or "interval").strip().lower()
+                next_run_at_before = rule_row["next_run_at"]
+
+                if next_run_at_before is None:
+                    cur.execute(
+                        """
+                        SELECT COUNT(*) AS cnt
+                        FROM deliveries
+                        WHERE rule_id = %s
+                          AND status = 'pending'
+                        """,
+                        (rule_id,),
+                    )
+                    pending_row = cur.fetchone()
+                    pending_count = int(pending_row["cnt"] or 0) if pending_row else 0
+                    if pending_count > 0:
+                        next_run_iso, resolution = self._compute_next_run_after_send(
+                            conn,
+                            rule_id=rule_id,
+                            schedule_mode=schedule_mode,
+                            fixed_times_json=rule_row["fixed_times_json"],
+                            interval_value=int(rule_row["interval"] or 0),
+                            now_dt=datetime.now(timezone.utc),
+                        )
+                        cur.execute(
+                            """
+                            UPDATE routing
+                            SET next_run_at = %s
+                            WHERE id = %s
+                            """,
+                            (next_run_iso, rule_id),
+                        )
+                        conn.commit()
+                        logger.warning(
+                            "TAKE DUE DELIVERY GUARD | rule_id=%s | pending=%s | schedule_mode=%s | previous_next_run_at=NULL | repaired_next_run_at=%s | resolution=%s",
+                            rule_id,
+                            pending_count,
+                            schedule_mode,
+                            next_run_iso,
+                            resolution,
+                        )
+                        return None
+
+                # --- выбираем следующую задачу ---
+                cur.execute(
+                    """
+                    SELECT
+                        d.id AS delivery_id,
+                        p.id AS post_id,
+                        p.message_id,
+                        p.source_channel,
+                        p.source_thread_id,
+                        p.content_json,
+                        p.media_group_id,
+                        r.target_id,
+                        r.target_thread_id,
+                        r.interval,
+                        COALESCE(r.tenant_id, d.tenant_id, 1) AS tenant_id
+                    FROM deliveries d
+                    JOIN routing r ON r.id = d.rule_id
+                    JOIN posts p ON p.id = d.post_id
+                    WHERE d.rule_id = %s
+                    AND d.status = 'pending'
+                    AND r.is_active = TRUE
+                    AND (r.next_run_at IS NULL OR r.next_run_at <= %s)
+
+                    AND (
+                            %s != 'video'
+                            OR COALESCE((p.content_json::jsonb ->> 'media_kind'), '') = 'video'
+                    )
+
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM deliveries d_rule
+                        WHERE d_rule.rule_id = d.rule_id
+                            AND d_rule.status = 'processing'
+                    )
+
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM deliveries d_sent
+                        JOIN posts p_sent ON p_sent.id = d_sent.post_id
+                        WHERE d_sent.rule_id = d.rule_id
+                            AND d_sent.status = 'sent'
+                            AND p.media_group_id IS NOT NULL
+                            AND p_sent.source_channel = p.source_channel
+                            AND (
+                                (p_sent.source_thread_id IS NULL AND p.source_thread_id IS NULL)
+                                OR p_sent.source_thread_id = p.source_thread_id
+                            )
+                            AND p_sent.media_group_id = p.media_group_id
+                            AND %s = 'repost'
+                    )
+
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM deliveries d_target
+                        JOIN routing r_target ON r_target.id = d_target.rule_id
+                        WHERE d_target.status = 'processing'
+                            AND r_target.target_id = r.target_id
+                            AND (
+                                (r_target.target_thread_id IS NULL AND r.target_thread_id IS NULL)
+                                OR r_target.target_thread_id = r.target_thread_id
+                            )
+                    )
+
+                    ORDER BY p.id ASC
+                    LIMIT 1
+                    """,
+                    (rule_id, due_iso, rule_mode, rule_mode),
+                )
+                row = cur.fetchone()
+
+                if not row:
+                    if next_run_at_before:
+                        logger.debug(
+                            "TAKE DUE DELIVERY SKIP | rule_id=%s | due_iso=%s | next_run_at=%s",
+                            rule_id,
+                            due_iso,
+                            next_run_at_before,
+                        )
+                    conn.commit()
+                    return None
+
+                delivery_id = int(row["delivery_id"])
+                source_channel = str(row["source_channel"])
+                media_group_id = row["media_group_id"]
+
+                # --- логика захвата ---
+                if media_group_id and rule_mode != "video":
+                    # REPOST режим — берём весь альбом
+                    source_thread_id = row["source_thread_id"]
+
+                    if source_thread_id is None:
+                        cur.execute(
+                            """
+                            SELECT d.id AS delivery_id
+                            FROM deliveries d
+                            JOIN posts p ON p.id = d.post_id
+                            WHERE d.rule_id = %s
+                            AND d.status = 'pending'
+                            AND p.source_channel = %s
+                            AND p.source_thread_id IS NULL
+                            AND p.media_group_id = %s
+                            ORDER BY p.message_id ASC
+                            """,
+                            (rule_id, source_channel, str(media_group_id)),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT d.id AS delivery_id
+                            FROM deliveries d
+                            JOIN posts p ON p.id = d.post_id
+                            WHERE d.rule_id = %s
+                            AND d.status = 'pending'
+                            AND p.source_channel = %s
+                            AND p.source_thread_id = %s
+                            AND p.media_group_id = %s
+                            ORDER BY p.message_id ASC
+                            """,
+                            (rule_id, source_channel, source_thread_id, str(media_group_id)),
+                        )
+
+                    album_rows = cur.fetchall()
+                    delivery_ids = [int(r["delivery_id"]) for r in album_rows]
+
+                    if not delivery_ids:
+                        conn.commit()
+                        return None
+
+                    cur.executemany(
+                        """
+                        UPDATE deliveries
+                        SET status = 'processing'
+                        WHERE id = %s
+                        AND status = 'pending'
+                        """,
+                        [(d_id,) for d_id in delivery_ids],
+                    )
+
+                    cur.execute(
+                        """
+                        SELECT COUNT(*) AS cnt
+                        FROM deliveries
+                        WHERE id = ANY(%s)
+                        AND status = 'processing'
+                        """,
+                        (delivery_ids,),
+                    )
+                    processing_count_row = cur.fetchone()
+                    processing_count = int(processing_count_row["cnt"] or 0) if processing_count_row else 0
+
+                    if processing_count != len(delivery_ids):
+                        conn.commit()
+                        return None
+
+                else:
+                    # VIDEO режим — всегда 1 элемент
+                    cur.execute(
+                        """
+                        UPDATE deliveries
+                        SET status = 'processing'
+                        WHERE id = %s
+                        AND status = 'pending'
+                        """,
+                        (delivery_id,),
+                    )
+
+                    if cur.rowcount == 0:
+                        conn.commit()
+                        return None
+
+                # --- возвращаем задачу ---
+                cur.execute(
+                    """
+                    SELECT
+                        d.id AS delivery_id,
+                        p.message_id,
+                        p.source_channel,
+                        p.source_thread_id,
+                        p.content_json,
+                        p.media_group_id,
+                        r.target_id,
+                        r.target_thread_id,
+                        r.interval
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
+                    WHERE d.id = %s
+                    LIMIT 1
+                    """,
+                    (delivery_id,),
+                )
+                taken = cur.fetchone()
+                logger.info(
+                    "TAKE DUE DELIVERY | rule_id=%s | delivery_id=%s | due_iso=%s | next_run_at_before=%s",
+                    rule_id,
+                    delivery_id,
+                    due_iso,
+                    next_run_at_before,
+                )
+
+            conn.commit()
+            return taken
+
+    def get_album_pending_for_rule(
+        self,
+        rule_id: int,
+        source_channel: str,
+        source_thread_id: int | None,
+        media_group_id: str,
+    ):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if source_thread_id is None:
+                    cur.execute(
+                        """
+                        SELECT d.id AS delivery_id, p.message_id
+                        FROM deliveries d
+                        JOIN posts p ON p.id = d.post_id
+                        WHERE d.rule_id = %s
+                          AND d.status IN ('pending', 'processing')
+                          AND p.source_channel = %s
+                          AND p.source_thread_id IS NULL
+                          AND p.media_group_id = %s
+                        ORDER BY p.message_id
+                        """,
+                        (rule_id, str(source_channel), media_group_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT d.id AS delivery_id, p.message_id
+                        FROM deliveries d
+                        JOIN posts p ON p.id = d.post_id
+                        WHERE d.rule_id = %s
+                          AND d.status IN ('pending', 'processing')
+                          AND p.source_channel = %s
+                          AND p.source_thread_id = %s
+                          AND p.media_group_id = %s
+                        ORDER BY p.message_id
+                        """,
+                        (rule_id, str(source_channel), source_thread_id, media_group_id),
+                    )
+                return cur.fetchall()
+
+    def take_due_delivery_and_create_job(self, rule_id: int, due_iso: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT mode, schedule_mode, interval, target_id, target_thread_id
+                    FROM routing
+                    WHERE id = %s
+                    FOR UPDATE
+                    LIMIT 1
+                    """,
+                    (rule_id,),
+                )
+                rule_row = cur.fetchone()
+                if not rule_row:
+                    conn.commit()
+                    return None
+
+                destination_lock = f"delivery-target:{rule_row['target_id']}:{rule_row['target_thread_id']}"
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (destination_lock,))
+                rule_mode = (rule_row["mode"] or "repost").strip().lower()
+                schedule_mode = (rule_row["schedule_mode"] or "interval").strip().lower()
+                interval = int(rule_row["interval"] or 0)
+
+                cur.execute(
+                    """
+                    SELECT
+                        d.id AS delivery_id,
+                        d.rule_id,
+                        p.id AS post_id,
+                        p.message_id,
+                        p.source_channel,
+                        p.source_thread_id,
+                        p.content_json,
+                        p.media_group_id,
+                        r.target_id,
+                        r.target_thread_id,
+                        COALESCE(r.tenant_id, d.tenant_id, 1) AS tenant_id
+                    FROM deliveries d
+                    JOIN routing r ON r.id = d.rule_id
+                    JOIN posts p ON p.id = d.post_id
+                    WHERE d.rule_id = %s
+                      AND d.status = 'pending'
+                      AND r.is_active = TRUE
+                      AND (r.next_run_at IS NULL OR r.next_run_at <= %s)
+                      AND (
+                            %s != 'video'
+                            OR COALESCE((p.content_json::jsonb ->> 'media_kind'), '') = 'video'
+                      )
+                      AND NOT EXISTS (
+                            SELECT 1
+                            FROM deliveries d_rule
+                            WHERE d_rule.rule_id = d.rule_id
+                              AND d_rule.status = 'processing'
+                      )
+                      AND NOT EXISTS (
+                            SELECT 1
+                            FROM deliveries d_sent
+                            JOIN posts p_sent ON p_sent.id = d_sent.post_id
+                            WHERE d_sent.rule_id = d.rule_id
+                              AND d_sent.status = 'sent'
+                              AND p.media_group_id IS NOT NULL
+                              AND p_sent.source_channel = p.source_channel
+                              AND (
+                                    (p_sent.source_thread_id IS NULL AND p.source_thread_id IS NULL)
+                                    OR p_sent.source_thread_id = p.source_thread_id
+                                  )
+                              AND p_sent.media_group_id = p.media_group_id
+                              AND %s = 'repost'
+                      )
+                      AND NOT EXISTS (
+                            SELECT 1
+                            FROM deliveries d_target
+                            JOIN routing r_target ON r_target.id = d_target.rule_id
+                            WHERE d_target.status = 'processing'
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM telegram_publication_receipts pr
+                                  JOIN delivery_attempts pa ON pa.idempotency_key=pr.idempotency_key
+                                  WHERE pr.delivery_ids @> ARRAY[d_target.id]::bigint[]
+                                    AND pr.published_ids IS NULL AND pr.expired_at IS NULL
+                                    AND pa.status='accepted'
+                              )
+                              AND r_target.target_id = r.target_id
+                              AND (
+                                    (r_target.target_thread_id IS NULL AND r.target_thread_id IS NULL)
+                                    OR r_target.target_thread_id = r.target_thread_id
+                                  )
+                      )
+                    ORDER BY p.id ASC
+                    FOR UPDATE OF d SKIP LOCKED
+                    LIMIT 1
+                    """,
+                    (rule_id, due_iso, rule_mode, rule_mode),
+                )
+                due_row = cur.fetchone()
+                if not due_row:
+                    conn.commit()
+                    return None
+
+                delivery_id = int(due_row["delivery_id"])
+                tenant_id = int(due_row["tenant_id"] or 1)
+                media_group_id = due_row.get("media_group_id")
+
+                payload: dict[str, Any] = {
+                    "rule_id": int(due_row["rule_id"]),
+                    "delivery_id": delivery_id,
+                    "tenant_id": tenant_id,
+                    "message_id": int(due_row["message_id"]),
+                    "source_channel": str(due_row["source_channel"]),
+                    "source_thread_id": due_row["source_thread_id"],
+                    "target_id": str(due_row["target_id"]),
+                    "target_thread_id": due_row["target_thread_id"],
+                    "mode": rule_mode,
+                    "interval": interval,
+                    "schedule_mode": schedule_mode,
+                    "media_group_id": media_group_id,
+                }
+
+                job_type = JOB_TYPE_REPOST_SINGLE
+                dedup_key = build_dedup_key_for_single(delivery_id)
+                delivery_ids_to_take = [delivery_id]
+
+                if rule_mode == "video":
+                    job_type = JOB_TYPE_VIDEO_DOWNLOAD
+                    dedup_key = build_dedup_key_for_video(delivery_id)
+                    payload["job_type"] = JOB_TYPE_VIDEO_DOWNLOAD
+                    payload["attempt_stage"] = "download"
+                    payload["source_video_path"] = None
+                    payload["processed_video_path"] = None
+                    payload["thumbnail_path"] = None
+                    payload["cleanup_paths"] = []
+                    payload["video_file_path"] = None
+                    payload["processed_file_path"] = None
+                    payload["artifact_version"] = VIDEO_ARTIFACT_VERSION
+                    payload["pipeline_version"] = VIDEO_PIPELINE_VERSION
+                elif media_group_id:
+                    if due_row["source_thread_id"] is None:
+                        cur.execute(
+                            """
+                            SELECT d.id AS delivery_id
+                            FROM deliveries d
+                            JOIN posts p ON p.id = d.post_id
+                            WHERE d.rule_id = %s
+                              AND d.status = 'pending'
+                              AND p.source_channel = %s
+                              AND p.source_thread_id IS NULL
+                              AND p.media_group_id = %s
+                            ORDER BY p.message_id ASC
+                            FOR UPDATE OF d SKIP LOCKED
+                            """,
+                            (rule_id, str(due_row["source_channel"]), str(media_group_id)),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT d.id AS delivery_id
+                            FROM deliveries d
+                            JOIN posts p ON p.id = d.post_id
+                            WHERE d.rule_id = %s
+                              AND d.status = 'pending'
+                              AND p.source_channel = %s
+                              AND p.source_thread_id = %s
+                              AND p.media_group_id = %s
+                            ORDER BY p.message_id ASC
+                            FOR UPDATE OF d SKIP LOCKED
+                            """,
+                            (rule_id, str(due_row["source_channel"]), due_row["source_thread_id"], str(media_group_id)),
+                        )
+
+                    album_rows = cur.fetchall() or []
+                    delivery_ids_to_take = [int(item["delivery_id"]) for item in album_rows]
+                    if not delivery_ids_to_take or delivery_id not in delivery_ids_to_take:
+                        conn.commit()
+                        return None
+
+                    job_type = JOB_TYPE_REPOST_ALBUM
+                    dedup_key = build_dedup_key_for_album(int(due_row["rule_id"]), str(media_group_id), delivery_ids_to_take)
+                    payload["job_type"] = JOB_TYPE_REPOST_ALBUM
+                    payload["delivery_ids"] = delivery_ids_to_take
+                    payload["media_group_id"] = media_group_id
+                else:
+                    payload["job_type"] = JOB_TYPE_REPOST_SINGLE
+
+                # The source update can be queued before its publication receipt
+                # is mapped. Recheck under the rule/delivery locks before enqueueing.
+                if (str(due_row["source_channel"]) == str(due_row["target_id"])
+                        and due_row["source_thread_id"] == due_row["target_thread_id"]):
+                    cur.execute(
+                        """SELECT d.id, p.message_id FROM deliveries d
+                           JOIN posts p ON p.id=d.post_id WHERE d.id=ANY(%s)""",
+                        (delivery_ids_to_take,),
+                    )
+                    echo_ids = []
+                    for item in cur.fetchall():
+                        if self._is_self_target_echo_post_for_rule_conn(
+                            conn, rule_id=int(rule_id), source_channel=str(due_row["source_channel"]),
+                            source_thread_id=due_row["source_thread_id"], message_id=int(item["message_id"]),
+                        ):
+                            echo_ids.append(int(item["id"]))
+                            self._log_self_target_echo_delivery_skipped(
+                                rule_id=int(rule_id), source_channel=str(due_row["source_channel"]),
+                                source_thread_id=due_row["source_thread_id"], message_id=int(item["message_id"]),
+                            )
+                    if echo_ids:
+                        cur.execute(
+                            """UPDATE deliveries SET status='faulty', error_text='self_target_echo'
+                               WHERE id=ANY(%s) AND status='pending'""", (echo_ids,),
+                        )
+                        conn.commit()
+                        return None
+
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM jobs
+                    WHERE dedup_key = %s
+                      AND status IN ('pending', 'leased', 'processing', 'retry')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (dedup_key,),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    conn.commit()
+                    return {
+                        "status": "duplicate",
+                        "delivery_id": delivery_id,
+                        "tenant_id": tenant_id,
+                        "dedup_key": dedup_key,
+                    }
+
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO jobs(job_type, payload_json, dedup_key, status, priority, queue, run_at, created_at, updated_at)
+                        VALUES(%s, %s::jsonb, %s, 'pending', %s, %s, NOW(), NOW(), NOW())
+                        RETURNING id
+                        """,
+                        (
+                            job_type,
+                            _json_dumps(payload) or "{}",
+                            dedup_key,
+                            int(JOB_PRIORITY_BY_TYPE.get(job_type, 100)),
+                            str(JOB_QUEUE_BY_TYPE.get(job_type, "default")),
+                        ),
+                    )
+                    job_row = cur.fetchone()
+                except Exception as exc:
+                    if "duplicate key value violates unique constraint" not in str(exc).lower():
+                        raise
+                    conn.rollback()
+                    return {
+                        "status": "duplicate",
+                        "delivery_id": delivery_id,
+                        "tenant_id": tenant_id,
+                        "dedup_key": dedup_key,
+                    }
+
+                cur.executemany(
+                    """
+                    UPDATE deliveries
+                    SET status = 'processing'
+                    WHERE id = %s
+                      AND status = 'pending'
+                    """,
+                    [(item_id,) for item_id in delivery_ids_to_take],
+                )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM deliveries
+                    WHERE id = ANY(%s)
+                      AND status = 'processing'
+                    """,
+                    (delivery_ids_to_take,),
+                )
+                taken_count_row = cur.fetchone()
+                taken_count = int(taken_count_row["cnt"] or 0) if taken_count_row else 0
+                if taken_count != len(delivery_ids_to_take):
+                    conn.rollback()
+                    return None
+
+                reserved_next_run_at = None
+                if schedule_mode == "fixed":
+                    reserved_next_run_at = self._compute_next_run_for_rule_conn(conn, int(rule_id))
+                else:
+                    reserve_from = datetime.now(timezone.utc) + timedelta(seconds=max(interval, 1))
+                    reserved_next_run_at = self._find_next_interval_slot(conn, reserve_from, exclude_rule_id=int(rule_id))
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET next_run_at = %s
+                    WHERE id = %s
+                    """,
+                    (reserved_next_run_at, int(rule_id)),
+                )
+
+            conn.commit()
+            return {
+                "status": "created",
+                "job_id": int(job_row["id"]) if job_row else None,
+                "delivery_id": delivery_id,
+                "tenant_id": tenant_id,
+                "dedup_key": dedup_key,
+                "job_type": job_type,
+                "reserved_next_run_at": reserved_next_run_at,
+            }
+
+    # =========================================================
+    # DELIVERY STATUS
+    # =========================================================
+
+    def mark_delivery_sent_with_target_message(self, delivery_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None, target_id: str | None, delivery_method: str | None):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'sent',
+                        sent_at = %s,
+                        error_text = NULL,
+                        sent_message_id = %s,
+                        sent_message_ids_json = %s,
+                        target_id_snapshot = %s,
+                        delivery_method = %s
+                    WHERE id = %s
+                    """,
+                    (utc_now_iso(), sent_message_id, _json_dumps(sent_message_ids or []), target_id, delivery_method, delivery_id),
+                )
+            conn.commit()
+
+    def get_transport_cooldown(self, scope_key: str) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT GREATEST(0, CEIL(EXTRACT(EPOCH FROM blocked_until-clock_timestamp())))::integer AS seconds
+                       FROM telegram_transport_cooldowns WHERE scope_key=%s""",
+                    (scope_key,),
+                )
+                row = cur.fetchone()
+                return int(row["seconds"]) if row else 0
+
+    def extend_transport_cooldown(self, scope_key: str, delay: int) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO telegram_transport_cooldowns(scope_key,blocked_until)
+                       VALUES (%s,clock_timestamp()+make_interval(secs=>%s))
+                       ON CONFLICT (scope_key) DO UPDATE SET blocked_until =
+                       GREATEST(telegram_transport_cooldowns.blocked_until,EXCLUDED.blocked_until)""",
+                    (scope_key, max(1, int(delay))),
+                )
+
+    def get_or_create_mtproto_random_ids(self, key: str, ordinal: int,
+                                         fingerprint: str, count: int) -> list[int]:
+        """Persist a request identity under the currently claimed ledger row."""
+        import secrets
+
+        if not 1 <= count <= 100 or ordinal < 0:
+            raise ValueError("Invalid MTProto send identity")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM delivery_attempts WHERE idempotency_key=%s AND status='sending' FOR UPDATE",
+                    (key,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise RuntimeError("No claimed MTProto delivery attempt")
+                attempt_id = row["id"]
+                ids = set()
+                while len(ids) < count:
+                    ids.add(secrets.randbits(63) or 1)
+                cur.execute(
+                    """
+                    INSERT INTO mtproto_send_intents(attempt_id,ordinal,fingerprint,random_ids)
+                    VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING
+                    """,
+                    (attempt_id, ordinal, fingerprint, sorted(ids)),
+                )
+                cur.execute(
+                    "SELECT fingerprint,random_ids FROM mtproto_send_intents WHERE attempt_id=%s AND ordinal=%s",
+                    (attempt_id, ordinal),
+                )
+                stored = cur.fetchone()
+                if stored["fingerprint"] != fingerprint or len(stored["random_ids"]) != count:
+                    raise ValueError("MTProto publication identity mismatch")
+                return list(stored["random_ids"])
+
+    def get_publication_recovery_cursor(self, account_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pts,qts,state_date,version FROM telegram_publication_recovery_cursor WHERE sender_account_id=%s",
+                    (account_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row is not None else None
+
+    def initialize_publication_recovery_cursor(
+        self, account_id: int, pts: int, qts: int, state_date: datetime,
+    ) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO telegram_publication_recovery_cursor(sender_account_id,pts,qts,state_date)
+                    VALUES (%s,%s,%s,%s) ON CONFLICT(sender_account_id) DO NOTHING
+                    """,
+                    (account_id, pts, qts, state_date),
+                )
+            conn.commit()
+
+    def advance_publication_recovery_cursor(
+        self, account_id: int, version: int, pts: int, qts: int, state_date: datetime,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE telegram_publication_recovery_cursor
+                    SET pts=%s,qts=%s,state_date=%s,version=version+1
+                    WHERE sender_account_id=%s AND version=%s
+                      AND pts<=%s AND qts<=%s AND state_date<=%s
+                    """,
+                    (pts,qts,state_date,account_id,version,pts,qts,state_date),
+                )
+                changed = cur.rowcount == 1
+            conn.commit()
+        return changed
+
+    def record_telegram_publication_mappings(
+        self, sender_account_id: int, target_peer_id: int,
+        pairs: list[tuple[int, int]],
+    ) -> None:
+        """Persist exact Telegram mappings, including updates before receipts."""
+        from app.telegram_publication import publication_pairs
+
+        validated = publication_pairs([p[0] for p in pairs], [p[1] for p in pairs])
+        if not validated or validated != pairs:
+            raise ValueError("Invalid scheduled-publication mapping")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                # Serialize exact evidence against the same peer's finalizer.
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                            (f"publication:{sender_account_id}:{target_peer_id}",))
+                # All items in an update are committed together.
+                cur.executemany(
+                    """
+                    INSERT INTO telegram_publication_mappings
+                        (sender_account_id, target_peer_id, scheduled_id, published_id)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (sender_account_id, target_peer_id, scheduled_id, published_id)
+                    DO NOTHING
+                    """,
+                    [(sender_account_id, target_peer_id, old, new) for old, new in sorted(validated)],
+                )
+            conn.commit()
+
+    def get_telegram_publication_mapping(
+        self, sender_account_id: int, target_peer_id: int, scheduled_id: int,
+    ) -> int | None:
+        """Fail closed on contradictory evidence in either ID namespace."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT m.published_id
+                    FROM telegram_publication_mappings m
+                    WHERE m.sender_account_id = %s AND m.target_peer_id = %s
+                      AND m.scheduled_id = %s
+                      AND NOT EXISTS (
+                        SELECT 1 FROM telegram_publication_mappings other
+                        WHERE other.sender_account_id = m.sender_account_id
+                          AND other.target_peer_id = m.target_peer_id
+                          AND (
+                            (other.scheduled_id = m.scheduled_id AND other.published_id <> m.published_id)
+                            OR (other.published_id = m.published_id AND other.scheduled_id <> m.scheduled_id)
+                          )
+                      )
+                    """,
+                    (sender_account_id, target_peer_id, scheduled_id),
+                )
+                row = cur.fetchone()
+                return int(row["published_id"]) if row else None
+
+    def get_telegram_publication_mappings(
+        self, sender_account_id: int, target_peer_id: int, scheduled_ids: list[int],
+    ) -> list[int]:
+        """Read all conflict-free mappings from one database snapshot."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT m.scheduled_id,m.published_id
+                    FROM telegram_publication_mappings m
+                    WHERE m.sender_account_id=%s AND m.target_peer_id=%s
+                      AND m.scheduled_id=ANY(%s)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM telegram_publication_mappings x
+                          WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
+                            AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
+                              OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
+                      )
+                    """,(sender_account_id,target_peer_id,scheduled_ids),
+                )
+                rows = {r["scheduled_id"]:r["published_id"] for r in cur.fetchall()}
+                return [rows[mid] for mid in scheduled_ids] if all(mid in rows for mid in scheduled_ids) else []
+
+    def register_publication_receipt(
+        self, *, key: str, delivery_ids: list[int], rule_id: int,
+        account_id: int, peer_id: int, thread_id: int | None,
+        source_channel: str, source_message_ids: list[int], scheduled_ids: list[int],
+        pending_mask: list[bool] | None = None,
+    ) -> bool:
+        """Register an ordered MTProto receipt and reserve each scheduled ID once."""
+        from app.telegram_publication import publication_candidate_mask, publication_pairs
+
+        mask = publication_candidate_mask(scheduled_ids,pending_mask)
+
+        if (account_id <= 0 or peer_id == 0 or not 1 <= len(delivery_ids) <= 10
+                or not publication_pairs(delivery_ids, source_message_ids)
+                or len(delivery_ids) != len(scheduled_ids) or not mask):
+            return False
+        pending_ids = [mid for mid,flag in zip(scheduled_ids,mask) if flag]
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT target_id,target_thread_id,source_id,source_thread_id,tenant_id FROM routing WHERE id=%s FOR UPDATE",
+                    (rule_id,),
+                )
+                rule = cur.fetchone()
+                if (not rule or str(rule["target_id"]) != str(peer_id)
+                        or rule["target_thread_id"] != thread_id
+                        or str(rule["source_id"]) != source_channel):
+                    return False
+                cur.execute(
+                    """
+                    SELECT delivery_id,operation_kind,source_message_ids_json,created_at
+                    FROM delivery_attempts
+                    WHERE idempotency_key=%s AND rule_id=%s AND target_id=%s
+                      AND status IN ('sending','accepted') FOR UPDATE
+                    """,
+                    (key, rule_id, str(peer_id)),
+                )
+                attempt = cur.fetchone()
+                if not attempt:
+                    return False
+                kind = attempt["operation_kind"]
+                recorded = _safe_json_loads(attempt["source_message_ids_json"], [])
+                if kind == "album":
+                    # Historical album ledger uses delivery IDs rather than source IDs.
+                    # Verify both cardinality and actual source membership below.
+                    if (int(attempt["delivery_id"]) not in [0, *delivery_ids]
+                            or sorted(recorded) not in [sorted(delivery_ids), sorted(source_message_ids)]):
+                        return False
+                elif (kind not in {"single", "video_send"} or len(delivery_ids) != 1
+                      or attempt["delivery_id"] != delivery_ids[0] or recorded != source_message_ids):
+                    return False
+                cur.execute(
+                    """
+                    SELECT d.id,p.message_id,p.media_group_id
+                    FROM deliveries d JOIN posts p ON p.id=d.post_id
+                    WHERE d.id=ANY(%s) AND d.rule_id=%s AND d.status IN ('pending','processing')
+                      AND p.source_channel=%s AND p.source_thread_id IS NOT DISTINCT FROM %s
+                    ORDER BY d.id FOR UPDATE OF d
+                    """,
+                    (delivery_ids, rule_id, source_channel, rule["source_thread_id"]),
+                )
+                rows = cur.fetchall()
+                if {r["id"]: r["message_id"] for r in rows} != dict(zip(delivery_ids, source_message_ids)):
+                    return False
+                if kind == "album":
+                    groups = {r["media_group_id"] for r in rows}
+                    if len(groups) != 1 or not next(iter(groups)):
+                        return False
+                cur.execute(
+                    """
+                    INSERT INTO telegram_publication_receipts
+                    (idempotency_key,rule_id,tenant_id,sender_account_id,target_peer_id,
+                     target_thread_id,source_channel,source_thread_id,delivery_ids,source_message_ids,
+                     scheduled_ids,pending_mask,send_started_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT DO NOTHING RETURNING idempotency_key
+                    """,
+                    (key, rule_id, rule["tenant_id"] or 1, account_id, peer_id, thread_id,
+                     source_channel, rule["source_thread_id"], delivery_ids, source_message_ids,
+                     scheduled_ids, mask, attempt["created_at"]),
+                )
+                if not cur.fetchone():
+                    # A repeated identical registration may follow a lost commit response.
+                    cur.execute(
+                        """SELECT 1 FROM telegram_publication_receipts
+                           WHERE idempotency_key=%s AND rule_id=%s AND tenant_id=%s
+                             AND sender_account_id=%s AND target_peer_id=%s
+                             AND target_thread_id IS NOT DISTINCT FROM %s
+                             AND source_channel=%s AND source_thread_id IS NOT DISTINCT FROM %s
+                             AND delivery_ids=%s::bigint[] AND source_message_ids=%s::bigint[]
+                             AND scheduled_ids=%s::bigint[] AND pending_mask=%s::boolean[] AND expired_at IS NULL""",
+                        (key,rule_id,rule['tenant_id'] or 1,account_id,peer_id,thread_id,
+                         source_channel,rule['source_thread_id'],delivery_ids,source_message_ids,scheduled_ids,mask),
+                    )
+                    return cur.fetchone() is not None
+                cur.execute(
+                    """
+                    INSERT INTO telegram_publication_claims
+                    (sender_account_id,target_peer_id,scheduled_id,idempotency_key)
+                    SELECT %s,%s,member.scheduled_id,%s
+                    FROM unnest(%s::bigint[]) AS member(scheduled_id)
+                    ORDER BY member.scheduled_id
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (account_id,peer_id,key,pending_ids),
+                )
+                if cur.rowcount != len(pending_ids):
+                    conn.rollback()
+                    return False
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts SET status='accepted', telegram_method='mtproto_pending_publication',
+                        sent_message_ids_json='[]'::jsonb,error_text=NULL,updated_at=NOW()
+                    WHERE idempotency_key=%s
+                    """,
+                    (key,),
+                )
+            conn.commit()
+        return True
+
+    def get_publication_receipt(self, key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *, deadline_at<=NOW() AS expired,
+                        reaction_updated_at<NOW()-INTERVAL '15 minutes' AS dispatch_stale
+                    FROM telegram_publication_receipts WHERE idempotency_key=%s
+                    """,
+                    (key,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row is not None else None
+
+    def has_unfinished_publication_reaction(self, delivery_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1 FROM telegram_publication_receipts r
+                    JOIN delivery_attempts a ON a.idempotency_key=r.idempotency_key
+                    WHERE r.delivery_ids @> ARRAY[%s]::bigint[] AND r.published_ids IS NOT NULL
+                      AND r.reaction_state IN ('pending','dispatching') AND a.status='verified'
+                    LIMIT 1
+                    """,
+                    (delivery_id,),
+                )
+                return cur.fetchone() is not None
+
+    def finalize_publication_receipt(self, key: str, published_ids: list[int], *, expected_started_at: datetime | None = None) -> bool:
+        """Commit all mapped IDs, the attempt, and post-send intent atomically."""
+        from app.telegram_publication import publication_pairs
+
+        receipt = self.get_publication_receipt(key)
+        if not receipt or not publication_pairs(published_ids,published_ids) or (expected_started_at is not None and receipt["send_started_at"] != expected_started_at):
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT target_id,target_thread_id,source_id,source_thread_id,tenant_id FROM routing WHERE id=%s FOR UPDATE",
+                    (receipt["rule_id"],),
+                )
+                rule = cur.fetchone()
+                if not rule:
+                    return False
+                cur.execute(
+                    """
+                    SELECT id FROM delivery_attempts WHERE idempotency_key=%s AND rule_id=%s
+                      AND status='accepted' AND telegram_method='mtproto_pending_publication'
+                    FOR UPDATE
+                    """,
+                    (key,receipt["rule_id"]),
+                )
+                if not cur.fetchone():
+                    return False
+                cur.execute("SELECT *,deadline_at<=clock_timestamp() AS expired FROM telegram_publication_receipts WHERE idempotency_key=%s FOR UPDATE",(key,))
+                pending = cur.fetchone()
+                if not pending or pending["published_ids"] is not None or pending["expired_at"] is not None or pending["expired"]:
+                    return False
+                if pending["send_started_at"] != receipt["send_started_at"] or pending["rule_id"] != receipt["rule_id"]:
+                    return False
+                receipt = pending
+                if len(receipt["scheduled_ids"]) != len(published_ids):
+                    return False
+                if (not rule or str(rule["target_id"]) != str(receipt["target_peer_id"])
+                        or rule["target_thread_id"] != receipt["target_thread_id"]
+                        or str(rule["source_id"]) != receipt["source_channel"]
+                        or rule["source_thread_id"] != receipt["source_thread_id"]
+                        or (rule["tenant_id"] or 1) != receipt["tenant_id"]):
+                    return False
+                if str(receipt["target_peer_id"]) == receipt["source_channel"] and set(published_ids) & set(receipt["source_message_ids"]):
+                    return False
+                # Serialize with inbox writes for the same peer before checking
+                # every mapping. A conflicting event already recorded blocks promotion.
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                            (f'publication:{receipt["sender_account_id"]}:{receipt["target_peer_id"]}',))
+                for scheduled_id,published_id,flag in zip(receipt["scheduled_ids"],published_ids,receipt["pending_mask"]):
+                    if not flag:
+                        if scheduled_id != published_id:
+                            return False
+                        continue
+                    cur.execute(
+                        """
+                        SELECT m.published_id FROM telegram_publication_mappings m
+                        WHERE m.sender_account_id=%s AND m.target_peer_id=%s
+                          AND m.scheduled_id=%s AND m.published_id=%s
+                          AND NOT EXISTS (
+                              SELECT 1 FROM telegram_publication_mappings x
+                              WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
+                                AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
+                                  OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
+                          )
+                        """,
+                        (receipt["sender_account_id"],receipt["target_peer_id"],scheduled_id,published_id),
+                    )
+                    if not cur.fetchone():
+                        return False
+                # Lock the complete delivery vector before the final deadline check.
+                cur.execute(
+                    "SELECT id FROM deliveries WHERE rule_id=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
+                    (receipt["rule_id"], receipt["delivery_ids"]),
+                )
+                if [row["id"] for row in cur.fetchall()] != sorted(receipt["delivery_ids"]):
+                    return False
+                # NOW() is fixed at transaction start; locks above may have
+                # delayed this transaction beyond the publication deadline.
+                cur.execute("SELECT clock_timestamp() >= %s AS expired",(receipt["deadline_at"],))
+                if cur.fetchone()["expired"]:
+                    return False
+                ids = _json_dumps(published_ids)
+                now = utc_now_iso()
+                for delivery_id,source_id,published_id in sorted(zip(receipt["delivery_ids"],receipt["source_message_ids"],published_ids)):
+                    cur.execute(
+                        """
+                        UPDATE deliveries d SET status='sent',sent_at=%s,error_text=NULL,
+                            sent_message_id=%s,sent_message_ids_json=%s::jsonb,
+                            target_id_snapshot=%s,delivery_method='mtproto_scheduled_mapping'
+                        FROM posts p
+                        WHERE d.id=%s AND d.rule_id=%s AND d.status IN ('pending','processing')
+                          AND p.id=d.post_id AND p.message_id=%s AND p.source_channel=%s
+                          AND p.source_thread_id IS NOT DISTINCT FROM %s
+                        """,
+                        (now,published_id,ids,str(receipt["target_peer_id"]),delivery_id,
+                         receipt["rule_id"],source_id,receipt["source_channel"],receipt["source_thread_id"]),
+                    )
+                    if cur.rowcount != 1:
+                        conn.rollback()
+                        return False
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts SET status='verified',sent_message_ids_json=%s::jsonb,
+                        error_text=NULL,updated_at=NOW() WHERE idempotency_key=%s
+                    """,
+                    (ids,key),
+                )
+                cur.execute("UPDATE telegram_publication_receipts SET published_ids=%s WHERE idempotency_key=%s",(published_ids,key))
+                cur.execute("UPDATE routing SET last_sent_at=%s WHERE id=%s",(now,receipt["rule_id"]))
+            conn.commit()
+        return True
+
+    def expire_publication_receipt(self, key: str, reason: str, *, expected_started_at: datetime | None = None) -> bool:
+        """Retain the accepted attempt and atomically end an unresolved receipt."""
+        receipt = self.get_publication_receipt(key)
+        if not receipt or (expected_started_at is not None and receipt['send_started_at'] != expected_started_at):
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM delivery_attempts WHERE idempotency_key=%s AND status='accepted' FOR UPDATE",(key,))
+                if not cur.fetchone():
+                    return False
+                cur.execute(
+                    """
+                    UPDATE telegram_publication_receipts SET expired_at=NOW()
+                    WHERE idempotency_key=%s AND published_ids IS NULL AND expired_at IS NULL
+                      AND send_started_at=%s AND deadline_at<=NOW() RETURNING delivery_ids
+                    """,
+                    (key,receipt['send_started_at']),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return False
+                cur.execute(
+                    """
+                    UPDATE deliveries SET status='faulty',error_text=%s,attempt_count=attempt_count+1
+                    WHERE id=ANY(%s) AND rule_id=%s AND status IN ('pending','processing')
+                    """,
+                    (reason[:1000],row["delivery_ids"],receipt["rule_id"]),
+                )
+            conn.commit()
+        return True
+
+    def claim_publication_reaction(self, key: str, published_ids: list[int], *, expected_started_at: datetime) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE telegram_publication_receipts r
+                    SET reaction_state='dispatching',reaction_updated_at=NOW()
+                    WHERE r.idempotency_key=%s AND r.published_ids=%s::bigint[]
+                      AND r.send_started_at=%s AND r.reaction_state='pending'
+                      AND EXISTS (SELECT 1 FROM delivery_attempts a WHERE a.idempotency_key=r.idempotency_key
+                                  AND a.status='verified' AND a.sent_message_ids_json=to_jsonb(r.published_ids))
+                      AND NOT EXISTS (
+                          SELECT 1 FROM unnest(r.delivery_ids,r.published_ids) AS pair(delivery_id,published_id)
+                          WHERE NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.id=pair.delivery_id
+                            AND d.status='sent' AND d.sent_message_id=pair.published_id
+                            AND d.target_id_snapshot=r.target_peer_id::text)
+                      )
+                    """,
+                    (key,published_ids,expected_started_at),
+                )
+                claimed = cur.rowcount == 1
+            conn.commit()
+        return claimed
+
+    def finish_publication_reaction(self, key: str, state: str, result: dict[str, Any], *, expected_started_at: datetime, expected_reaction_updated_at: datetime | None = None) -> None:
+        if state not in {"done","uncertain"} and not (state == "pending" and result.get("reason") == "enqueue_failed"):
+            raise ValueError("Invalid reaction outcome")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE telegram_publication_receipts
+                    SET reaction_state=%s,reaction_result=%s::jsonb,reaction_updated_at=NOW()
+                    WHERE idempotency_key=%s AND send_started_at=%s AND reaction_state='dispatching'
+                      AND (%s::timestamptz IS NULL OR reaction_updated_at=%s::timestamptz)
+                    """,
+                    (state,_json_dumps(result),key,expected_started_at,expected_reaction_updated_at,expected_reaction_updated_at),
+                )
+            conn.commit()
+
+    def get_delivery_attempt_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM delivery_attempts WHERE idempotency_key = %s", (str(idempotency_key or ""),))
+                return cur.fetchone()
+
+    def create_delivery_attempt(self, *, delivery_id: int, rule_id: int, tenant_id: int, job_id: int | None, idempotency_key: str, operation_kind: str, status: str, telegram_method: str | None = None, target_id: str | None = None, source_message_ids: list[int] | None = None, sent_message_ids: list[int] | None = None, error_text: str | None = None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO delivery_attempts(
+                        delivery_id, rule_id, tenant_id, job_id, idempotency_key, operation_kind, status, telegram_method, target_id,
+                        source_message_ids_json, sent_message_ids_json, error_text, created_at, updated_at
+                    )
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, NOW(), NOW())
+                    ON CONFLICT(idempotency_key) DO NOTHING
+                    RETURNING id
+                    """,
+                    (delivery_id, rule_id, tenant_id, job_id, str(idempotency_key), str(operation_kind), str(status), telegram_method, target_id, _json_dumps(source_message_ids), _json_dumps(sent_message_ids), (error_text or None)),
+                )
+                row = cur.fetchone()
+                if row:
+                    conn.commit()
+                    return int(row["id"])
+                cur.execute("SELECT id FROM delivery_attempts WHERE idempotency_key = %s", (str(idempotency_key),))
+                existing = cur.fetchone()
+            conn.commit()
+            return int(existing["id"]) if existing else None
+
+    def mark_delivery_attempt_sending(self, idempotency_key: str, *, job_id: int | None = None, telegram_method: str | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts
+                    SET status = 'sending', job_id = COALESCE(%s, job_id), telegram_method = COALESCE(%s, telegram_method), updated_at = NOW()
+                    WHERE idempotency_key = %s
+                      AND status IN ('created', 'failed_before_send')
+                    """,
+                    (job_id, telegram_method, str(idempotency_key)),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+            return updated
+
+    def mark_delivery_attempt_accepted(self, idempotency_key: str, *, sent_message_ids: list[int], telegram_method: str | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts
+                    SET status = 'accepted', sent_message_ids_json = %s::jsonb, telegram_method = COALESCE(%s, telegram_method), updated_at = NOW(), error_text = NULL
+                    WHERE idempotency_key = %s
+                      AND status IN ('sending', 'accepted')
+                      AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication'
+                    """,
+                    (_json_dumps([int(x) for x in (sent_message_ids or [])]), telegram_method, str(idempotency_key)),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+            return updated
+
+    def mark_delivery_attempt_verified(self, idempotency_key: str, *, sent_message_ids: list[int]) -> bool:
+        """Promote a target-confirmed delivery; never overwrite a verified id with a raw candidate."""
+        ids = [int(x) for x in sent_message_ids if int(x) > 0]
+        if not ids:
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts
+                    SET status = 'verified', sent_message_ids_json = %s::jsonb, error_text = NULL, updated_at = NOW()
+                    WHERE idempotency_key = %s
+                      AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication'
+                      AND (
+                          status = 'accepted'
+                          OR (status = 'verified' AND sent_message_ids_json = %s::jsonb)
+                      )
+                    """,
+                    (_json_dumps(ids), str(idempotency_key), _json_dumps(ids)),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+            return updated
+
+    def get_pending_album_ledger_candidates(self, rule_id: int) -> list[dict[str, Any]]:
+        """Read-only candidates; never infer success from accepted ledger alone."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT d.id AS delivery_id, d.status AS delivery_status,
+                           p.message_id, p.source_channel, p.source_thread_id,
+                           p.media_group_id, r.target_id, r.target_thread_id,
+                           a.id AS attempt_id, a.idempotency_key, a.status AS attempt_status,
+                           a.sent_message_ids_json
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
+                    JOIN delivery_attempts a ON a.idempotency_key =
+                        ('rule:' || r.id::text || ':target:' || r.target_id
+                         || ':media_group:' || p.media_group_id || ':album')
+                    WHERE d.rule_id = %s AND d.status = 'pending'
+                      AND r.mode = 'repost'
+                      AND p.media_group_id IS NOT NULL
+                      AND a.operation_kind = 'album'
+                      AND a.status IN ('accepted', 'verified')
+                    ORDER BY p.id, p.message_id
+                    """,
+                    (int(rule_id),),
+                )
+                return list(cur.fetchall())
+
+    def reconcile_confirmed_album_ledger(
+        self, *, rule_id: int, attempt_id: int, source_channel: str,
+        source_thread_id: int | None, media_group_id: str,
+        source_message_ids: list[int], target_message_ids: list[int],
+    ) -> int:
+        """Atomically promote one *externally verified* complete album.
+
+        Telegram reading and media/caption checks happen before this call.
+        All DB state and ownership are rechecked under row locks. Never
+        modifies processing/leased jobs, and never resends a Telegram post.
+        """
+        from app.delivery_idempotency import build_delivery_idempotency_key
+
+        source_ids = [int(x) for x in source_message_ids]
+        target_ids = [int(x) for x in target_message_ids]
+        if (not source_ids or len(source_ids) != len(target_ids)
+                or len(set(source_ids)) != len(source_ids)
+                or len(set(target_ids)) != len(target_ids)
+                or any(x <= 0 for x in source_ids + target_ids)):
+            raise ValueError("Invalid/partial album IDs")
+        if source_ids != sorted(source_ids) or target_ids != sorted(target_ids):
+            raise ValueError("Album IDs must be in source/target order")
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT target_id, mode, tenant_id FROM routing WHERE id = %s FOR UPDATE",
+                    (int(rule_id),),
+                )
+                rule = cur.fetchone()
+                if not rule or str(rule["mode"]) != "repost":
+                    raise RuntimeError("Rule missing or not in repost mode")
+                target_id = str(rule["target_id"])
+                key = build_delivery_idempotency_key(
+                    operation_kind="album", rule_id=rule_id,
+                    target_id=target_id, media_group_id=media_group_id,
+                )
+                cur.execute(
+                    """
+                    SELECT id, status, operation_kind, target_id, idempotency_key,
+                           delivery_id, source_message_ids_json, sent_message_ids_json
+                    FROM delivery_attempts WHERE id = %s FOR UPDATE
+                    """,
+                    (int(attempt_id),),
+                )
+                attempt = cur.fetchone()
+                if not attempt or attempt["idempotency_key"] != key:
+                    raise RuntimeError("Attempt key changed; reconciliation aborted")
+                if (attempt["status"] not in ("accepted", "verified")
+                        or attempt["operation_kind"] != "album"
+                        or str(attempt["target_id"]) != target_id):
+                    raise RuntimeError("Attempt is not a recoverable album")
+                expected = _safe_json_loads(attempt["sent_message_ids_json"], [])
+                if expected != target_ids:
+                    raise RuntimeError("Accepted Telegram IDs changed; reconciliation aborted")
+
+                cur.execute(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM jobs
+                        WHERE payload_json->>'rule_id' = %s
+                          AND status IN ('pending', 'leased', 'processing', 'retry')
+                    ) AS busy
+                    """,
+                    (str(rule_id),),
+                )
+                if cur.fetchone()["busy"]:
+                    raise RuntimeError("Rule has a live job; no ledger recovery while sending")
+                cur.execute(
+                    """
+                    SELECT d.id, d.status, p.message_id
+                    FROM deliveries d JOIN posts p ON p.id = d.post_id
+                    WHERE d.rule_id = %s
+                      AND p.source_channel = %s
+                      AND p.source_thread_id IS NOT DISTINCT FROM %s
+                      AND p.media_group_id = %s
+                    ORDER BY p.message_id
+                    FOR UPDATE OF d
+                    """,
+                    (int(rule_id), str(source_channel), source_thread_id, str(media_group_id)),
+                )
+                rows = cur.fetchall()
+                if ([int(x["message_id"]) for x in rows] != source_ids
+                        or any(x["status"] != "pending" for x in rows)):
+                    raise RuntimeError("Album changed or partially processed; no mutation")
+
+                delivery_ids = [int(x["id"]) for x in rows]
+                original_delivery_id = int(attempt.get("delivery_id") or 0)
+                original_ids = _safe_json_loads(attempt.get("source_message_ids_json"), [])
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts
+                    SET status = 'verified', delivery_id = %s,
+                        source_message_ids_json = %s::jsonb,
+                        updated_at = NOW(), error_text = NULL
+                    WHERE id = %s
+                      AND status IN ('accepted', 'verified')
+                    """,
+                    (delivery_ids[0], _json_dumps(delivery_ids), int(attempt_id)),
+                )
+                if cur.rowcount != 1:
+                    raise RuntimeError("Attempt promotion lost a race")
+                for did, tid in zip(delivery_ids, target_ids):
+                    cur.execute(
+                        """
+                        UPDATE deliveries
+                        SET status = 'sent', sent_at = NOW(), error_text = NULL,
+                            sent_message_id = %s, sent_message_ids_json = %s::jsonb,
+                            target_id_snapshot = %s,
+                            delivery_method = 'reconciled_verified_album_ledger'
+                        WHERE id = %s AND status = 'pending'
+                        """,
+                        (int(tid), _json_dumps(target_ids), target_id, int(did)),
+                    )
+                    if cur.rowcount != 1:
+                        raise RuntimeError("Album row changed concurrently; rolled back")
+                # Retain old->new delivery-ID provenance in the *same* commit.
+                cur.execute(
+                    """
+                    INSERT INTO audit_log (
+                        created_at, event_type, rule_id, delivery_id,
+                        source_id, source_thread_id, target_id, status,
+                        old_value_json, new_value_json, extra_json, tenant_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        utc_now_iso(), "album_ledger_reconciled", int(rule_id),
+                        delivery_ids[0], str(source_channel), source_thread_id,
+                        target_id, "verified",
+                        _json_dumps({
+                            "attempt_id": int(attempt_id),
+                            "old_delivery_id": original_delivery_id,
+                            "old_delivery_ids": original_ids,
+                        }),
+                        _json_dumps({
+                            "new_delivery_ids": delivery_ids,
+                            "target_message_ids": target_ids,
+                        }),
+                        _json_dumps({"media_group_id": str(media_group_id),
+                                     "verification": "telegram_group_media_caption"}),
+                        int(rule.get("tenant_id") or 1),
+                    ),
+                )
+            conn.commit()
+        return len(delivery_ids)
+
+    def mark_delivery_attempt_failed(self, idempotency_key: str, *, status: str, error_text: str) -> bool:
+        normalized = str(status or "")
+        if normalized not in {"failed_before_send", "failed_after_send"}:
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts
+                    SET status = %s, error_text = %s, updated_at = NOW()
+                    WHERE idempotency_key = %s
+                      AND status NOT IN ('accepted', 'verified')
+                      AND (status <> 'failed_after_send' OR %s = 'failed_after_send')
+                    """,
+                    (normalized, (error_text or "")[:1000], str(idempotency_key), normalized),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+            return updated
+
+    def mark_delivery_sent(self, delivery_id: int):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'sent',
+                        sent_at = %s,
+                        error_text = NULL
+                    WHERE id = %s
+                    """,
+                    (utc_now_iso(), delivery_id),
+                )
+            conn.commit()
+
+    def mark_many_deliveries_sent(self, delivery_ids):
+        if not delivery_ids:
+            return
+
+        now_iso = utc_now_iso()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    UPDATE deliveries
+                    SET status = 'sent',
+                        sent_at = %s,
+                        error_text = NULL
+                    WHERE id = %s
+                    """,
+                    [(now_iso, int(d)) for d in delivery_ids],
+                )
+            conn.commit()
+
+    def mark_delivery_faulty(self, delivery_id: int, error_text: str):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'faulty',
+                        error_text = %s,
+                        attempt_count = attempt_count + 1
+                    WHERE id = %s
+                    """,
+                    ((error_text or "")[:1000], delivery_id),
+                )
+            conn.commit()
+
+    def mark_delivery_faulty_if_attempt_unverified(
+        self, delivery_id: int, idempotency_key: str, error_text: str
+    ) -> bool:
+        """Fenced failure: a second worker cannot downgrade a verified/sent delivery.
+
+        Serialize on the attempt row before checking its state, so a concurrent
+        verified transition cannot race a stale confirm-failure write.
+        """
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication' FOR UPDATE",
+                    (str(idempotency_key),),
+                )
+                attempt = cur.fetchone()
+                if not attempt or str(attempt.get("status") or "") not in {"sending", "accepted", "failed_after_send"}:
+                    return False
+                cur.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'faulty', error_text = %s, attempt_count = attempt_count + 1
+                    WHERE id = %s AND status NOT IN ('sent', 'faulty')
+                    """,
+                    ((error_text or "")[:1000], int(delivery_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def finalize_orphaned_repost_attempt(
+        self, *, idempotency_key: str, job_id: int, worker_id: str, rule_id: int,
+        delivery_ids: list[int], error_text: str,
+    ) -> int:
+        """Terminal, fenced manual review when no other live repost job owns the write.
+
+        Never re-send on an unknown response. The row lock orders this
+        transition against mark_delivery_attempt_verified.
+        """
+        ids = [int(x) for x in delivery_ids if int(x) > 0]
+        if not ids:
+            return 0
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                # Serialize with job lease recovery/finalization. The caller
+                # must still own this exact processing job, not merely its ID.
+                cur.execute(
+                    "SELECT status, locked_by FROM jobs WHERE id = %s FOR UPDATE",
+                    (int(job_id),),
+                )
+                current_job = cur.fetchone()
+                if not current_job or current_job.get("status") != "processing" or current_job.get("locked_by") != str(worker_id):
+                    return 0
+                cur.execute(
+                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication' FOR UPDATE",
+                    (str(idempotency_key),),
+                )
+                attempt = cur.fetchone()
+                if not attempt or str(attempt.get("status") or "") not in {"sending", "accepted", "failed_after_send"}:
+                    return 0
+
+                # Another worker may still be sending or verifying this
+                # same rule/delivery. Never mark its live work as faulty.
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM jobs j
+                        WHERE j.id <> %s
+                          AND (
+                              (j.status = 'leased' AND j.lease_until > NOW())
+                              OR (j.status = 'processing' AND j.updated_at > NOW() - INTERVAL '60 seconds')
+                          )
+                          AND j.job_type IN ('repost_single', 'repost_album')
+                          AND j.payload_json->>'rule_id' = %s
+                          AND (
+                              j.payload_json->>'delivery_id' = ANY(%s)
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM jsonb_array_elements_text(
+                                      CASE WHEN jsonb_typeof(j.payload_json->'delivery_ids') = 'array'
+                                           THEN j.payload_json->'delivery_ids'
+                                           ELSE '[]'::jsonb END
+                                  ) AS member(id)
+                                  WHERE member.id = ANY(%s)
+                              )
+                          )
+                    ) AS has_live_owner
+                    """,
+                    (int(job_id), str(rule_id), [str(x) for x in ids], [str(x) for x in ids]),
+                )
+                owner = cur.fetchone()
+                if owner and bool(owner.get("has_live_owner")):
+                    return 0
+
+                cur.execute(
+                    """
+                    UPDATE deliveries
+                    SET status='faulty',
+                        error_text=%s,
+                        attempt_count=attempt_count+1
+                    WHERE id = ANY(%s)
+                      AND rule_id=%s
+                      AND status='processing'
+                    """,
+                    ((error_text or "")[:1000], ids, int(rule_id)),
+                )
+                marked = int(cur.rowcount or 0)
+                if marked:
+                    cur.execute(
+                        """
+                        UPDATE delivery_attempts
+                        SET status='failed_after_send', error_text=%s, updated_at=NOW()
+                        WHERE idempotency_key=%s AND status IN ('sending', 'accepted', 'failed_after_send')
+                        """,
+                        ((error_text or "")[:1000], str(idempotency_key)),
+                    )
+            conn.commit()
+            return marked
+
+    def mark_delivery_pending(self, delivery_id: int):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'pending'
+                    WHERE id = %s
+                    """,
+                    (delivery_id,),
+                )
+            conn.commit()
+
+    def backfill_deliveries_all(self) -> int:
+        total = 0
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, source_id, source_thread_id FROM routing")
+                rules = cur.fetchall()
+
+            for rule in rules:
+                total += self._backfill_deliveries_for_rule_conn(
+                    conn,
+                    int(rule["id"]),
+                    str(rule["source_id"]),
+                    rule["source_thread_id"],
+                )
+            conn.commit()
+        return total
+
+    def reset_all_deliveries(self):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'pending',
+                        error_text = NULL,
+                        sent_at = NULL
+                    WHERE status IN ('processing', 'sent', 'faulty')
+                    """
+                )
+                changed = int(cur.rowcount or 0)
+
+                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'faulty'")
+                faulty_row = cur.fetchone()
+                faulty = int(faulty_row["cnt"] or 0) if faulty_row else 0
+
+            conn.commit()
+            return changed, faulty
+
+    def reset_source_deliveries(self, source_id: str, source_thread_id: int | None = None):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if source_thread_id is None:
+                    cur.execute(
+                        """
+                        UPDATE deliveries
+                        SET status = 'pending',
+                            error_text = NULL,
+                            sent_at = NULL
+                        WHERE post_id IN (
+                            SELECT id
+                            FROM posts
+                            WHERE source_channel = %s
+                              AND source_thread_id IS NULL
+                        )
+                        """,
+                        (str(source_id),),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE deliveries
+                        SET status = 'pending',
+                            error_text = NULL,
+                            sent_at = NULL
+                        WHERE post_id IN (
+                            SELECT id
+                            FROM posts
+                            WHERE source_channel = %s
+                              AND source_thread_id = %s
+                        )
+                        """,
+                        (str(source_id), source_thread_id),
+                    )
+                changed = int(cur.rowcount or 0)
+            conn.commit()
+            return changed
+
+    def reset_queue_for_source(self, source_id: str, source_thread_id: int | None = None) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if source_thread_id is None:
+                    cur.execute(
+                        """
+                        UPDATE deliveries
+                        SET status = 'pending',
+                            error_text = NULL,
+                            attempt_count = 0,
+                            sent_at = NULL
+                        WHERE post_id IN (
+                            SELECT id
+                            FROM posts
+                            WHERE source_channel = %s
+                              AND source_thread_id IS NULL
+                        )
+                          AND status = 'sent'
+                        """,
+                        (str(source_id),),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE deliveries
+                        SET status = 'pending',
+                            error_text = NULL,
+                            attempt_count = 0,
+                            sent_at = NULL
+                        WHERE post_id IN (
+                            SELECT id
+                            FROM posts
+                            WHERE source_channel = %s
+                              AND source_thread_id = %s
+                        )
+                          AND status = 'sent'
+                        """,
+                        (str(source_id), source_thread_id),
+                    )
+                changed = int(cur.rowcount or 0)
+            conn.commit()
+            return changed
+
+    def reset_all_queue(self) -> tuple[int, int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'faulty'")
+                faulty_row = cur.fetchone()
+                faulty = int(faulty_row["cnt"] or 0) if faulty_row else 0
+
+                cur.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'pending',
+                        error_text = NULL,
+                        attempt_count = 0,
+                        sent_at = NULL
+                    WHERE status = 'sent'
+                    """
+                )
+                changed = int(cur.rowcount or 0)
+            conn.commit()
+            return changed, faulty
+
+    # =========================================================
+    # STATS / DIAGNOSTICS
+    # =========================================================
+
+    def get_queue_stats(self):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS cnt FROM posts")
+                posts = int(cur.fetchone()["cnt"])
+
+                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries")
+                deliveries = int(cur.fetchone()["cnt"])
+
+                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'pending'")
+                pending = int(cur.fetchone()["cnt"])
+
+                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'processing'")
+                processing = int(cur.fetchone()["cnt"])
+
+                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'sent'")
+                sent = int(cur.fetchone()["cnt"])
+
+                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'faulty'")
+                faulty = int(cur.fetchone()["cnt"])
+
+                cur.execute("SELECT COUNT(*) AS cnt FROM routing")
+                rules = int(cur.fetchone()["cnt"])
+
+                cur.execute("SELECT COUNT(*) AS cnt FROM routing WHERE is_active = TRUE")
+                active_rules = int(cur.fetchone()["cnt"])
+
+        return {
+            "posts": posts,
+            "deliveries": deliveries,
+            "pending": pending,
+            "processing": processing,
+            "sent": sent,
+            "faulty": faulty,
+            "rules": rules,
+            "active_rules": active_rules,
+        }
+
+    def count_uncleared_faulty_deliveries(self) -> int:
+        """Count delivery IDs still visible in the admin faulty-delivery list."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
+                    WHERE d.status = 'faulty'
+                      AND (d.error_text IS NULL OR (
+                          d.error_text NOT LIKE 'Self-loop:%'
+                          AND d.error_text <> 'self_target_echo'
+                      ))
+                      AND NOT EXISTS (
+                          SELECT 1 FROM audit_log cleared
+                          WHERE cleared.delivery_id = d.id
+                            AND cleared.event_type = 'faulty_log_cleared'
+                      )
+                    """
+                )
+                return int(cur.fetchone()["cnt"])
+
+    def get_faulty_deliveries(self, limit: int = 20):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        d.id,
+                        d.rule_id,
+                        d.post_id,
+                        d.status,
+                        d.error_text,
+                        d.attempt_count,
+                        d.created_at,
+                        d.sent_at,
+
+                        p.message_id,
+                        p.source_channel,
+                        p.source_thread_id,
+                        p.media_group_id,
+                        p.content_json,
+
+                        r.target_id,
+                        r.target_thread_id,
+                        COALESCE(r.tenant_id, d.tenant_id, 1) AS tenant_id,
+
+                        s.title AS source_title,
+                        t.title AS target_title,
+
+                        (
+                            SELECT COUNT(*)
+                            FROM deliveries d2
+                            WHERE d2.rule_id = d.rule_id
+                              AND d2.error_text = d.error_text
+                              AND d2.status = 'faulty'
+                        ) AS same_error_count,
+
+                        (
+                            SELECT a.created_at
+                            FROM audit_log a
+                            WHERE a.delivery_id = d.id
+                              AND a.status IN ('faulty', 'failed')
+                            ORDER BY a.id DESC
+                            LIMIT 1
+                        ) AS fault_created_at
+
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
+                    LEFT JOIN channels s
+                      ON s.channel_id = r.source_id
+                     AND COALESCE(s.tenant_id, 1) = COALESCE(r.tenant_id, d.tenant_id, 1)
+                     AND ((s.thread_id IS NULL AND r.source_thread_id IS NULL) OR s.thread_id = r.source_thread_id)
+                     AND s.channel_type = 'source'
+                    LEFT JOIN channels t
+                      ON t.channel_id = r.target_id
+                     AND COALESCE(t.tenant_id, 1) = COALESCE(r.tenant_id, d.tenant_id, 1)
+                     AND ((t.thread_id IS NULL AND r.target_thread_id IS NULL) OR t.thread_id = r.target_thread_id)
+                     AND t.channel_type = 'target'
+                    WHERE d.status = 'faulty'
+                      AND (d.error_text IS NULL OR (
+                          d.error_text NOT LIKE 'Self-loop:%%'
+                          AND d.error_text <> 'self_target_echo'
+                      ))
+                      AND NOT EXISTS (
+                          SELECT 1 FROM audit_log cleared
+                          WHERE cleared.delivery_id = d.id
+                            AND cleared.event_type = 'faulty_log_cleared'
+                      )
+                    ORDER BY d.id DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+                return cur.fetchall()
+
+    def get_channels_for_tenant(self, tenant_id: int, channel_type: str | None = None):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if channel_type:
+                    cur.execute(
+                        """
+                        SELECT channel_id, thread_id, title, channel_type
+                        FROM channels
+                        WHERE channel_type = %s
+                          AND is_active = TRUE
+                          AND COALESCE(tenant_id, 1) = %s
+                        ORDER BY added_date
+                        """,
+                        (channel_type, int(tenant_id)),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT channel_id, thread_id, title, channel_type
+                        FROM channels
+                        WHERE is_active = TRUE
+                          AND COALESCE(tenant_id, 1) = %s
+                        ORDER BY channel_type, added_date
+                        """,
+                        (int(tenant_id),),
+                    )
+                return cur.fetchall()
+
+    def remove_channel_for_tenant(
+        self,
+        tenant_id: int,
+        channel_id: str,
+        thread_id: int | None,
+        channel_type: str | None = None,
+    ) -> bool:
+        channel_id = str(channel_id)
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                params: list[Any] = [channel_id, int(tenant_id)]
+                q = "DELETE FROM channels WHERE channel_id = %s AND COALESCE(tenant_id, 1) = %s"
+
+                if thread_id is None:
+                    q += " AND thread_id IS NULL"
+                else:
+                    q += " AND thread_id = %s"
+                    params.append(thread_id)
+
+                if channel_type:
+                    q += " AND channel_type = %s"
+                    params.append(channel_type)
+
+                cur.execute(q, tuple(params))
+                removed = cur.rowcount > 0
+                if not removed:
+                    conn.commit()
+                    return False
+
+                if thread_id is None:
+                    cur.execute(
+                        """
+                        DELETE FROM routing
+                        WHERE COALESCE(tenant_id, 1) = %s
+                          AND ((source_id = %s AND source_thread_id IS NULL)
+                            OR (target_id = %s AND target_thread_id IS NULL))
+                        """,
+                        (int(tenant_id), channel_id, channel_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        DELETE FROM routing
+                        WHERE COALESCE(tenant_id, 1) = %s
+                          AND ((source_id = %s AND source_thread_id = %s)
+                            OR (target_id = %s AND target_thread_id = %s))
+                        """,
+                        (int(tenant_id), channel_id, thread_id, channel_id, thread_id),
+                    )
+
+                if channel_type in (None, "source"):
+                    if thread_id is None:
+                        cur.execute(
+                            """
+                            DELETE FROM posts
+                            WHERE source_channel = %s
+                              AND source_thread_id IS NULL
+                              AND NOT EXISTS (
+                                SELECT 1
+                                FROM channels c
+                                WHERE c.channel_type = 'source'
+                                  AND c.channel_id = posts.source_channel
+                                  AND c.thread_id IS NULL
+                                  AND c.is_active = TRUE
+                              )
+                            """,
+                            (channel_id,),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            DELETE FROM posts
+                            WHERE source_channel = %s
+                              AND source_thread_id = %s
+                              AND NOT EXISTS (
+                                SELECT 1
+                                FROM channels c
+                                WHERE c.channel_type = 'source'
+                                  AND c.channel_id = posts.source_channel
+                                  AND c.thread_id = posts.source_thread_id
+                                  AND c.is_active = TRUE
+                              )
+                            """,
+                            (channel_id, thread_id),
+                        )
+
+                cur.execute(
+                    """
+                    DELETE FROM deliveries d
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM routing r
+                        WHERE r.id = d.rule_id
+                    )
+                    """
+                )
+
+            conn.commit()
+            return True
+
+    def get_processing_album_for_rule(
+        self,
+        rule_id: int,
+        source_channel: str,
+        source_thread_id: int | None,
+        media_group_id: str,
+    ):
+        return self.get_album_pending_for_rule(
+            rule_id=rule_id,
+            source_channel=source_channel,
+            source_thread_id=source_thread_id,
+            media_group_id=media_group_id,
+        )
+
+    # =========================================================
+    # JOB QUEUE
+    # =========================================================
+
+    def create_job(
+        self,
+        job_type: str,
+        payload: dict[str, Any],
+        queue: str,
+        priority: int = 100,
+        run_at: str | None = None,
+        dedup_key: str | None = None,
+    ) -> int | None:
+        queue_name = (queue or "default").strip().lower()
+        if queue_name not in {"light", "heavy"}:
+            queue_name = "default"
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if dedup_key:
+                    cur.execute(
+                        """
+                        SELECT id
+                        FROM jobs
+                        WHERE dedup_key = %s
+                          AND status IN ('pending', 'leased', 'processing', 'retry')
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (dedup_key,),
+                    )
+                    existing = cur.fetchone()
+                    if existing:
+                        conn.commit()
+                        return None
+
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO jobs(job_type, payload_json, dedup_key, status, priority, queue, run_at, created_at, updated_at)
+                        VALUES(%s, %s::jsonb, %s, 'pending', %s, %s, COALESCE(%s::timestamptz, NOW()), NOW(), NOW())
+                        RETURNING id
+                        """,
+                        (job_type, _json_dumps(payload) or "{}", dedup_key, int(priority), queue_name, run_at),
+                    )
+                    row = cur.fetchone()
+                except Exception as exc:
+                    if "duplicate key value violates unique constraint" not in str(exc).lower():
+                        raise
+                    conn.rollback()
+                    logger.info("Scheduler пропустил дубль задачи по dedup_key=%s", dedup_key)
+                    return None
+            conn.commit()
+            return int(row["id"]) if row else None
+
+    def get_active_job_by_dedup_key(self, dedup_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE dedup_key = %s
+                      AND status IN ('pending', 'leased', 'processing', 'retry')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (dedup_key,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            if not row:
+                return None
+            item = dict(row)
+            item["payload_json"] = _safe_json_loads(item.get("payload_json"), {})
+            return item
+
+    def lease_jobs(self, queue: str, worker_id: str, limit: int = 1, lease_seconds: int = 30) -> list[dict]:
+        queue_name = (queue or "").strip().lower()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH picked AS (
+                        SELECT id
+                        FROM jobs
+                        WHERE queue = %s
+                          AND status IN ('pending', 'retry')
+                          AND run_at <= NOW()
+                          AND (lease_until IS NULL OR lease_until < NOW())
+                        ORDER BY priority ASC, run_at ASC, created_at ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT %s
+                    )
+                    UPDATE jobs j
+                    SET status = 'leased',
+                        locked_by = %s,
+                        lease_until = NOW() + make_interval(secs => %s),
+                        updated_at = NOW()
+                    FROM picked
+                    WHERE j.id = picked.id
+                    RETURNING j.*
+                    """,
+                    (queue_name, max(1, int(limit)), worker_id, max(1, int(lease_seconds))),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return [dict(r) for r in rows]
+
+    def lease_jobs_for_tenant(
+        self,
+        tenant_id: int,
+        queue: str,
+        worker_id: str,
+        limit: int = 1,
+        lease_seconds: int = 30,
+    ) -> list[dict]:
+        queue_name = (queue or "").strip().lower()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH picked AS (
+                        SELECT j.id
+                        FROM jobs j
+                        WHERE j.queue = %s
+                          AND {_JOB_TENANT_SQL} = %s
+                          AND j.status IN ('pending', 'retry')
+                          AND j.run_at <= NOW()
+                          AND (j.lease_until IS NULL OR j.lease_until < NOW())
+                        ORDER BY j.priority ASC, j.run_at ASC, j.created_at ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT %s
+                    )
+                    UPDATE jobs j
+                    SET status = 'leased',
+                        locked_by = %s,
+                        lease_until = NOW() + make_interval(secs => %s),
+                        updated_at = NOW()
+                    FROM picked
+                    WHERE j.id = picked.id
+                    RETURNING j.*
+                    """,
+                    (
+                        queue_name,
+                        int(tenant_id),
+                        max(1, int(limit)),
+                        worker_id,
+                        max(1, int(lease_seconds)),
+                    ),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return [dict(r) for r in rows]
+
+    def lease_fair_jobs(self, queue: str, worker_id: str, limit: int = 1, lease_seconds: int = 30) -> list[dict]:
+        queue_name = (queue or "").strip().lower()
+        target_limit = max(1, int(limit))
+        fair_service = TenantFairnessService(self)
+        leased: list[dict] = []
+        picked_tenant_ids: set[int] = set()
+
+        for _ in range(target_limit):
+            pending_map = self.get_tenant_job_counts(queue=queue_name)
+            if not pending_map:
+                break
+
+            processing_map = self.get_tenant_processing_counts(queue=queue_name)
+            retry_map = self.get_tenant_retry_counts(queue=queue_name)
+            oldest_map = self.get_tenant_oldest_pending_ages(queue=queue_name)
+            candidates: list[tuple[float, int]] = []
+
+            for tenant_id_raw, pending_count in pending_map.items():
+                tenant_id = int(tenant_id_raw)
+                if int(pending_count) <= 0:
+                    continue
+                processing = int(processing_map.get(tenant_id) or 0)
+                retry = int(retry_map.get(tenant_id) or 0)
+                oldest_age = int(oldest_map.get(tenant_id) or 0)
+                score = fair_service.compute_fairness_score(
+                    tenant_id=tenant_id,
+                    pending=int(pending_count),
+                    processing=processing,
+                    retry=retry,
+                    oldest_pending_age_sec=oldest_age,
+                )
+                if tenant_id in picked_tenant_ids:
+                    score -= 20.0
+                candidates.append((score, tenant_id))
+
+            if not candidates:
+                break
+
+            candidates.sort(key=lambda item: (-item[0], item[1]))
+            selected_tenant = int(candidates[0][1])
+            batch = self.lease_jobs_for_tenant(
+                selected_tenant,
+                queue_name,
+                worker_id,
+                limit=1,
+                lease_seconds=lease_seconds,
+            )
+            if not batch:
+                # tenant мог быть перехвачен конкурентным worker; пробуем следующий слот
+                continue
+            leased.extend(batch)
+            picked_tenant_ids.add(selected_tenant)
+
+        return leased
+
+    def mark_job_processing(self, job_id: int, worker_id: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'processing',
+                        updated_at = NOW()
+                    WHERE id = %s
+                      AND status = 'leased'
+                      AND locked_by = %s
+                    """,
+                    (int(job_id), worker_id),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+            return ok
+
+    def heartbeat_job_processing(self, job_id: int, worker_id: str) -> bool:
+        """Refresh liveness only for the execution that still owns the processing job."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                       SET updated_at = NOW()
+                     WHERE id = %s AND status = 'processing' AND locked_by = %s
+                    """,
+                    (int(job_id), str(worker_id)),
+                )
+                owned = cur.rowcount > 0
+            conn.commit()
+        return owned
+
+    def finalize_owned_job(
+        self,
+        job_id: int,
+        worker_id: str,
+        action: str,
+        error_text: str = "",
+        delay_seconds: int = 0,
+    ) -> bool:
+        """Fence stale tasks: an earlier execution must not overwrite the new owner's status."""
+        if action == "complete":
+            sql = """
+                UPDATE jobs SET status = 'done', lease_until = NULL, locked_by = NULL,
+                                error_text = NULL, updated_at = NOW()
+                 WHERE id = %s AND status = 'processing' AND locked_by = %s
+            """
+            params = (int(job_id), str(worker_id))
+        elif action in {"retry", "defer"}:
+            sql = """
+                UPDATE jobs SET status = 'retry', attempts = attempts + %s,
+                                lease_until = NULL, locked_by = NULL,
+                                run_at = NOW() + make_interval(secs => %s),
+                                error_text = %s, updated_at = NOW()
+                 WHERE id = %s AND status = 'processing' AND locked_by = %s
+            """
+            params = (
+                1 if action == "retry" else 0, max(1, int(delay_seconds)),
+                (error_text or "")[:1000], int(job_id), str(worker_id),
+            )
+        elif action == "fail":
+            sql = """
+                UPDATE jobs SET status = 'failed', attempts = attempts + 1,
+                                lease_until = NULL, locked_by = NULL,
+                                error_text = %s, updated_at = NOW()
+                 WHERE id = %s AND status = 'processing' AND locked_by = %s
+            """
+            params = ((error_text or "")[:1000], int(job_id), str(worker_id))
+        else:
+            raise ValueError(f"Unsupported owned job action: {action}")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
+
+    def complete_job(self, job_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'done',
+                        lease_until = NULL,
+                        locked_by = NULL,
+                        error_text = NULL,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (int(job_id),),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+            return ok
+
+    def retry_job(self, job_id: int, error_text: str, delay_seconds: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'retry',
+                        attempts = attempts + 1,
+                        lease_until = NULL,
+                        locked_by = NULL,
+                        run_at = NOW() + make_interval(secs => %s),
+                        error_text = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (max(1, int(delay_seconds)), (error_text or "")[:1000], int(job_id)),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+            return ok
+
+    def defer_job(self, job_id: int, error_text: str, delay_seconds: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'retry',
+                        lease_until = NULL,
+                        locked_by = NULL,
+                        run_at = NOW() + make_interval(secs => %s),
+                        error_text = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (max(1, int(delay_seconds)), (error_text or "")[:1000], int(job_id)),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+            return ok
+
+    def fail_job(self, job_id: int, error_text: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'failed',
+                        attempts = attempts + 1,
+                        lease_until = NULL,
+                        locked_by = NULL,
+                        error_text = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    ((error_text or "")[:1000], int(job_id)),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+            return ok
+
+    def get_job(self, job_id: int) -> dict | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (int(job_id),),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            if not row:
+                return None
+            item = dict(row)
+            item["payload_json"] = _safe_json_loads(item.get("payload_json"), {})
+            return item
+
+    def get_job_status_counts(self) -> dict[str, int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT status, COUNT(*) AS cnt
+                    FROM jobs
+                    GROUP BY status
+                    """
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+
+        counts = {status: 0 for status in ("pending", "leased", "processing", "retry", "failed", "done")}
+        for row in rows:
+            status = str(row.get("status") or "")
+            if status in counts:
+                counts[status] = int(row.get("cnt") or 0)
+        return counts
+
+    def get_tenant_job_counts(self, queue: str | None = None) -> dict[int, int]:
+        queue_name = str(queue or "").strip().lower()
+        use_queue_filter = queue_name in {"light", "heavy"}
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        {_JOB_TENANT_SQL} AS tenant_id,
+                        COUNT(*) AS cnt
+                    FROM jobs j
+                    WHERE j.status IN ('pending', 'retry')
+                      AND (%s = FALSE OR j.queue = %s)
+                    GROUP BY {_JOB_TENANT_SQL}
+                    """,
+                    (use_queue_filter, queue_name),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return {int(row["tenant_id"]): int(row.get("cnt") or 0) for row in rows}
+
+    def get_tenant_oldest_pending_ages(self, queue: str | None = None) -> dict[int, int]:
+        queue_name = str(queue or "").strip().lower()
+        use_queue_filter = queue_name in {"light", "heavy"}
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        {_JOB_TENANT_SQL} AS tenant_id,
+                        EXTRACT(EPOCH FROM (NOW() - MIN(j.created_at)))::BIGINT AS age_sec
+                    FROM jobs j
+                    WHERE j.status IN ('pending', 'retry')
+                      AND (%s = FALSE OR j.queue = %s)
+                    GROUP BY {_JOB_TENANT_SQL}
+                    """,
+                    (use_queue_filter, queue_name),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return {int(row["tenant_id"]): max(int(row.get("age_sec") or 0), 0) for row in rows}
+
+    def get_tenant_processing_counts(self, queue: str | None = None) -> dict[int, int]:
+        queue_name = str(queue or "").strip().lower()
+        use_queue_filter = queue_name in {"light", "heavy"}
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        {_JOB_TENANT_SQL} AS tenant_id,
+                        COUNT(*) AS cnt
+                    FROM jobs j
+                    WHERE j.status IN ('leased', 'processing')
+                      AND (%s = FALSE OR j.queue = %s)
+                    GROUP BY {_JOB_TENANT_SQL}
+                    """,
+                    (use_queue_filter, queue_name),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return {int(row["tenant_id"]): int(row.get("cnt") or 0) for row in rows}
+
+    def get_tenant_retry_counts(self, queue: str | None = None) -> dict[int, int]:
+        queue_name = str(queue or "").strip().lower()
+        use_queue_filter = queue_name in {"light", "heavy"}
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        {_JOB_TENANT_SQL} AS tenant_id,
+                        COUNT(*) AS cnt
+                    FROM jobs j
+                    WHERE j.status = 'retry'
+                      AND (%s = FALSE OR j.queue = %s)
+                    GROUP BY {_JOB_TENANT_SQL}
+                    """,
+                    (use_queue_filter, queue_name),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return {int(row["tenant_id"]): int(row.get("cnt") or 0) for row in rows}
+
+    def get_tenant_throughput_snapshot(self, *, window_minutes: int = 15, queue: str | None = None) -> dict[int, int]:
+        queue_name = str(queue or "").strip().lower()
+        use_queue_filter = queue_name in {"light", "heavy"}
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        {_JOB_TENANT_SQL} AS tenant_id,
+                        COUNT(*) AS cnt
+                    FROM jobs j
+                    WHERE j.status = 'done'
+                      AND j.updated_at >= NOW() - make_interval(mins => %s)
+                      AND (%s = FALSE OR j.queue = %s)
+                    GROUP BY {_JOB_TENANT_SQL}
+                    """,
+                    (max(1, int(window_minutes)), use_queue_filter, queue_name),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return {int(row["tenant_id"]): int(row.get("cnt") or 0) for row in rows}
+
+    def get_video_stage_job_counts(self) -> dict[str, dict[str, int]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT job_type, status, COUNT(*) AS cnt
+                    FROM jobs
+                    WHERE job_type IN ('video_download', 'video_process', 'video_send', 'video_delivery')
+                    GROUP BY job_type, status
+                    """
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+
+        status_keys = ("pending", "leased", "processing", "retry", "failed", "done")
+        result = {
+            "video_download": {k: 0 for k in status_keys},
+            "video_process": {k: 0 for k in status_keys},
+            "video_send": {k: 0 for k in status_keys},
+            "video_delivery": {k: 0 for k in status_keys},
+        }
+        for row in rows:
+            job_type = str(row.get("job_type") or "")
+            status = str(row.get("status") or "")
+            if job_type in result and status in result[job_type]:
+                result[job_type][status] = int(row.get("cnt") or 0)
+        return result
+
+    def get_recoverable_summary_for_tenant(self, tenant_id: int) -> dict[str, Any]:
+        return self.usage_repo.get_recoverable_summary_for_tenant(tenant_id=tenant_id)
+
+    def recover_blocked_jobs_for_tenant(self, tenant_id: int) -> int:
+        return self.usage_repo.recover_blocked_jobs_for_tenant(tenant_id=tenant_id)
+
+    def recover_pending_deliveries_for_tenant(self, tenant_id: int) -> int:
+        return self.usage_repo.recover_pending_deliveries_for_tenant(tenant_id=tenant_id)
+
+    def get_recent_limit_events_for_tenant(self, tenant_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        return self.usage_repo.get_recent_limit_events_for_tenant(tenant_id=tenant_id, limit=limit)
+
+    def get_job_queue_counts(self) -> dict[str, int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        queue,
+                        status,
+                        COUNT(*) AS cnt
+                    FROM jobs
+                    GROUP BY queue, status
+                    """
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+
+        result = {
+            "light_pending": 0,
+            "light_processing": 0,
+            "light_retry": 0,
+            "heavy_pending": 0,
+            "heavy_processing": 0,
+            "heavy_retry": 0,
+        }
+        for row in rows:
+            queue = str(row.get("queue") or "").strip().lower()
+            status = str(row.get("status") or "").strip().lower()
+            if queue not in {"light", "heavy"}:
+                continue
+            key = f"{queue}_{status}"
+            if key in result:
+                result[key] = int(row.get("cnt") or 0)
+        return result
+
+    def get_oldest_pending_job_ages(self) -> dict[str, int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        queue,
+                        EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::BIGINT AS age_sec
+                    FROM jobs
+                    WHERE status = 'pending'
+                    GROUP BY queue
+                    """
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+
+        result = {"light": 0, "heavy": 0}
+        for row in rows:
+            queue = str(row.get("queue") or "").strip().lower()
+            if queue not in result:
+                continue
+            result[queue] = max(int(row.get("age_sec") or 0), 0)
+        return result
+
+    def get_expired_leased_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE status = 'leased'
+                      AND lease_until IS NOT NULL
+                      AND lease_until < NOW()
+                    ORDER BY lease_until ASC
+                    LIMIT %s
+                    """,
+                    (max(1, int(limit)),),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return [dict(r) for r in rows]
+
+    def requeue_expired_leases(self, delay_seconds: int = 15) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'retry',
+                        attempts = attempts + 1,
+                        run_at = NOW() + make_interval(secs => %s),
+                        locked_by = NULL,
+                        lease_until = NULL,
+                        error_text = 'Истёк lease задачи, задача возвращена в очередь',
+                        updated_at = NOW()
+                    WHERE status = 'leased'
+                      AND lease_until IS NOT NULL
+                      AND lease_until < NOW()
+                    """,
+                    (max(1, int(delay_seconds)),),
+                )
+                count = cur.rowcount or 0
+            conn.commit()
+        return int(count)
+
+    def get_stuck_processing_jobs(self, stuck_seconds: int = 600, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE status = 'processing'
+                      AND updated_at < NOW() - make_interval(secs => %s)
+                    ORDER BY updated_at ASC
+                    LIMIT %s
+                    """,
+                    (max(1, int(stuck_seconds)), max(1, int(limit))),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return [dict(r) for r in rows]
+
+    def requeue_stuck_processing_jobs(self, stuck_seconds: int = 600, delay_seconds: int = 15) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'retry',
+                        attempts = attempts + 1,
+                        run_at = NOW() + make_interval(secs => %s),
+                        locked_by = NULL,
+                        lease_until = NULL,
+                        error_text = 'Watchdog: задача зависла в processing и возвращена в retry',
+                        updated_at = NOW()
+                    WHERE status = 'processing'
+                      AND updated_at < NOW() - make_interval(secs => %s)
+                    """,
+                    (max(1, int(delay_seconds)), max(1, int(stuck_seconds))),
+                )
+                count = cur.rowcount or 0
+            conn.commit()
+        return int(count)
+
+    def get_delivery(self, delivery_id: int):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        d.id,
+                        d.rule_id,
+                        d.post_id,
+                        d.status,
+                        d.error_text,
+                        d.attempt_count,
+                        d.created_at,
+                        d.sent_at,
+
+                        p.message_id,
+                        p.source_channel,
+                        p.source_thread_id,
+                        p.media_group_id,
+                        p.content_json,
+
+                        r.target_id,
+                        r.target_thread_id,
+
+                        s.title AS source_title,
+                        t.title AS target_title
+
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
+                    LEFT JOIN channels s
+                      ON s.channel_id = r.source_id
+                     AND ((s.thread_id IS NULL AND r.source_thread_id IS NULL) OR s.thread_id = r.source_thread_id)
+                     AND s.channel_type = 'source'
+                    LEFT JOIN channels t
+                      ON t.channel_id = r.target_id
+                     AND ((t.thread_id IS NULL AND r.target_thread_id IS NULL) OR t.thread_id = r.target_thread_id)
+                     AND t.channel_type = 'target'
+                    WHERE d.id = %s
+                    LIMIT 1
+                    """,
+                    (delivery_id,),
+                )
+                return cur.fetchone()
+
+    def clear_faulty_delivery_log(self, delivery_id: int, admin_id: int | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, rule_id, post_id, status, error_text
+                    FROM deliveries d
+                    WHERE d.id = %s
+                      AND d.status = 'faulty'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM audit_log cleared
+                          WHERE cleared.delivery_id = d.id
+                            AND cleared.event_type = 'faulty_log_cleared'
+                      )
+                    LIMIT 1
+                    """,
+                    (delivery_id,),
+                )
+                row = cur.fetchone()
+
+                if not row:
+                    conn.commit()
+                    return False
+
+                now_iso = utc_now_iso()
+
+                cur.execute(
+                    """
+                    INSERT INTO audit_log(
+                        created_at,
+                        event_type,
+                        rule_id,
+                        delivery_id,
+                        post_id,
+                        admin_id,
+                        status,
+                        error_text,
+                        extra_json
+                    )
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        now_iso,
+                        "faulty_log_cleared",
+                        row["rule_id"],
+                        row["id"],
+                        row["post_id"],
+                        admin_id,
+                        "cleared",
+                        row["error_text"],
+                        _json_dumps({"action": "clear_faulty_delivery_log"}),
+                    ),
+                )
+
+                # This is an acknowledgement, not a delivery state change.
+                # Keep the send/attempt ledger for safe incident reconciliation.
+            conn.commit()
+            return True
+
+    def get_faulty_delivery_by_id(self, delivery_id: int):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        d.id,
+                        d.rule_id,
+                        d.post_id,
+                        d.status,
+                        d.error_text,
+                        d.attempt_count,
+                        d.created_at,
+                        d.sent_at,
+
+                        p.message_id,
+                        p.source_channel,
+                        p.source_thread_id,
+                        p.media_group_id,
+                        p.content_json,
+
+                        r.target_id,
+                        r.target_thread_id,
+
+                        s.title AS source_title,
+                        t.title AS target_title
+
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
+                    LEFT JOIN channels s
+                      ON s.channel_id = r.source_id
+                     AND ((s.thread_id IS NULL AND r.source_thread_id IS NULL) OR s.thread_id = r.source_thread_id)
+                     AND s.channel_type = 'source'
+                    LEFT JOIN channels t
+                      ON t.channel_id = r.target_id
+                     AND ((t.thread_id IS NULL AND r.target_thread_id IS NULL) OR t.thread_id = r.target_thread_id)
+                     AND t.channel_type = 'target'
+                    WHERE d.id = %s
+                    LIMIT 1
+                    """,
+                    (delivery_id,),
+                )
+                return cur.fetchone()
+
+    def get_rule_stats(self):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, fixed_times_json
+                    FROM routing
+                    WHERE schedule_mode = 'fixed'
+                    AND is_active = TRUE
+                    AND next_run_at IS NULL
+                    """
+                )
+                fixed_rows = cur.fetchall()
+
+                for fixed_row in fixed_rows:
+                    fixed_times = _safe_json_loads(fixed_row.get("fixed_times_json"), [])
+                    fixed_times = normalize_fixed_times(fixed_times)
+                    if not fixed_times:
+                        continue
+
+                    next_run_iso = get_next_fixed_run_utc(fixed_times)
+
+                    cur.execute(
+                        """
+                        UPDATE routing
+                        SET next_run_at = %s
+                        WHERE id = %s
+                        """,
+                        (next_run_iso, int(fixed_row["id"])),
+                    )
+
+            conn.commit()
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        r.id,
+                        r.source_id,
+                        r.source_thread_id,
+                        r.target_id,
+                        r.target_thread_id,
+                        r.interval,
+                        r.schedule_mode,
+                        r.fixed_times_json,
+                        r.mode,
+
+                        r.video_trim_seconds,
+                        r.video_clip_duration_seconds,
+                        r.video_add_intro,
+                        r.video_intro_horizontal,
+                        r.video_intro_vertical,
+                        r.video_intro_horizontal_id,
+                        r.video_intro_vertical_id,
+                        r.video_caption,
+                        r.video_caption_entities_json,
+
+                        r.is_active,
+                        CAST(r.next_run_at AS TEXT) AS next_run_at,
+                        s.title AS source_title,
+                        t.title AS target_title,
+                        COALESCE(SUM(CASE WHEN d.status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+                        COALESCE(SUM(CASE WHEN d.status = 'processing' THEN 1 ELSE 0 END), 0) AS processing,
+                        COALESCE(SUM(CASE WHEN d.status = 'sent' THEN 1 ELSE 0 END), 0) AS sent,
+                        COALESCE(SUM(CASE WHEN d.status = 'faulty' THEN 1 ELSE 0 END), 0) AS faulty
+                    FROM routing r
+                    LEFT JOIN deliveries d ON d.rule_id = r.id
+                    LEFT JOIN channels s
+                    ON s.channel_id = r.source_id
+                    AND ((s.thread_id IS NULL AND r.source_thread_id IS NULL) OR s.thread_id = r.source_thread_id)
+                    AND s.channel_type = 'source'
+                    LEFT JOIN channels t
+                    ON t.channel_id = r.target_id
+                    AND ((t.thread_id IS NULL AND r.target_thread_id IS NULL) OR t.thread_id = r.target_thread_id)
+                    AND t.channel_type = 'target'
+                    GROUP BY
+                        r.id,
+                        r.source_id,
+                        r.source_thread_id,
+                        r.target_id,
+                        r.target_thread_id,
+                        r.interval,
+                        r.schedule_mode,
+                        r.fixed_times_json,
+                        r.mode,
+                        r.video_trim_seconds,
+                        r.video_clip_duration_seconds,
+                        r.video_add_intro,
+                        r.video_intro_horizontal,
+                        r.video_intro_vertical,
+                        r.video_intro_horizontal_id,
+                        r.video_intro_vertical_id,
+                        r.video_caption,
+                        r.video_caption_entities_json,
+                        r.is_active,
+                        r.next_run_at,
+                        s.title,
+                        t.title,
+                        r.created_date
+                    ORDER BY r.created_date, r.id
+                    """
+                )
+                return cur.fetchall()
+
+
+    def get_delivery_observability_rule_metrics(self) -> list[DeliveryRuleMetrics]:
+        """Return read-only delivery diagnostics metrics grouped by rule."""
+        from app.delivery_observability import DeliveryRuleMetrics, sanitize_diagnostic_text
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        r.id AS rule_id,
+                        r.source_id AS source_id,
+                        r.target_id AS target_id,
+                        COALESCE(COUNT(d.id) FILTER (WHERE d.status = 'pending'), 0) AS pending_count,
+                        COALESCE(COUNT(d.id) FILTER (WHERE d.status = 'processing'), 0) AS processing_count,
+                        COALESCE(COUNT(d.id) FILTER (WHERE d.status = 'sent'), 0) AS sent_count,
+                        COALESCE(COUNT(d.id) FILTER (WHERE d.status = 'faulty'), 0) AS faulty_count,
+                        0 AS deferred_count,
+                        COALESCE(COUNT(d.id) FILTER (
+                            WHERE d.status = 'faulty'
+                              AND d.error_text IS NOT NULL
+                              AND (
+                                  d.error_text ILIKE '%%retryafter%%'
+                                  OR d.error_text ILIKE '%%retry after%%'
+                                  OR d.error_text ILIKE '%%rate limit%%'
+                                  OR d.error_text ILIKE '%%too many requests%%'
+                              )
+                        ), 0) AS rate_limited_count,
+                        EXTRACT(EPOCH FROM (NOW() - MIN(d.created_at::timestamptz) FILTER (WHERE d.status = 'pending'))) AS oldest_pending_age_seconds,
+                        EXTRACT(EPOCH FROM (NOW() - MIN(processing_clock.processing_job_created_at) FILTER (WHERE d.status = 'processing'))) AS oldest_processing_age_seconds,
+                        EXTRACT(EPOCH FROM (r.next_run_at::timestamptz - NOW())) AS next_run_in_seconds,
+                        last_fault.error_text AS last_error_text
+                    FROM routing r
+                    LEFT JOIN deliveries d ON d.rule_id = r.id
+                    LEFT JOIN LATERAL (
+                        SELECT MIN(j.created_at) AS processing_job_created_at
+                        FROM jobs j
+                        WHERE d.status = 'processing'
+                          AND j.status IN ('pending', 'leased', 'processing', 'retry')
+                          AND (
+                              (
+                                  (j.payload_json ->> 'delivery_id') ~ '^[0-9]+$'
+                                  AND (j.payload_json ->> 'delivery_id')::bigint = d.id
+                              )
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM jsonb_array_elements_text(COALESCE(j.payload_json -> 'delivery_ids', '[]'::jsonb)) AS delivery_ids(value)
+                                  WHERE delivery_ids.value ~ '^[0-9]+$'
+                                    AND delivery_ids.value::bigint = d.id
+                              )
+                          )
+                    ) AS processing_clock ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT fd.error_text
+                        FROM deliveries fd
+                        WHERE fd.rule_id = r.id
+                          AND fd.status = 'faulty'
+                          AND fd.error_text IS NOT NULL
+                        ORDER BY fd.id DESC
+                        LIMIT 1
+                    ) AS last_fault ON TRUE
+                    GROUP BY r.id, r.source_id, r.target_id, r.next_run_at, last_fault.error_text
+                    ORDER BY r.id
+                    """
+                )
+                rows = cur.fetchall()
+
+        metrics: list[DeliveryRuleMetrics] = []
+        for row in rows:
+            last_error_text = sanitize_diagnostic_text(row.get("last_error_text"), max_length=500)
+            last_error_type = None
+            if last_error_text:
+                last_error_type = sanitize_diagnostic_text(last_error_text.split(":", 1)[0], max_length=120)
+            metrics.append(
+                DeliveryRuleMetrics(
+                    rule_id=row.get("rule_id"),
+                    source_id=row.get("source_id"),
+                    target_id=row.get("target_id"),
+                    pending_count=int(row.get("pending_count") or 0),
+                    processing_count=int(row.get("processing_count") or 0),
+                    sent_count=int(row.get("sent_count") or 0),
+                    faulty_count=int(row.get("faulty_count") or 0),
+                    deferred_count=int(row.get("deferred_count") or 0),
+                    rate_limited_count=int(row.get("rate_limited_count") or 0),
+                    oldest_pending_age_seconds=row.get("oldest_pending_age_seconds"),
+                    oldest_processing_age_seconds=row.get("oldest_processing_age_seconds"),
+                    next_run_in_seconds=row.get("next_run_in_seconds"),
+                    last_error_type=last_error_type,
+                    last_error_text=last_error_text,
+                )
+            )
+        return metrics
+
+    def get_rule_card_snapshot(self, rule_id: int) -> dict[str, Any] | None:
+        """
+        Быстрый snapshot для карточки одного правила.
+
+        Что делает:
+        - читает только одно правило
+        - одним отдельным запросом читает deliveries/posts только этого правила
+        - ОДИН раз собирает logical items
+        - возвращает уже готовые данные для build_rule_card_text()
+
+        Это основной SaaS-путь для rule_card / rule_refresh.
+        """
+        try:
+            rule = self.get_rule(rule_id)
+            if not rule:
+                logger.warning("get_rule_card_snapshot: правило не найдено, rule_id=%s", rule_id)
+                return None
+
+            mode = (getattr(rule, "mode", "repost") or "repost").strip().lower()
+
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT
+                            d.id AS delivery_id,
+                            d.status,
+                            d.sent_at,
+                            d.error_text,
+                            d.attempt_count,
+                            p.id AS post_id,
+                            p.message_id,
+                            p.source_channel,
+                            p.source_thread_id,
+                            p.media_group_id,
+                            p.content_json,
+                            p.created_at
+                        FROM deliveries d
+                        JOIN posts p ON p.id = d.post_id
+                        WHERE d.rule_id = %s
+                        ORDER BY p.id ASC
+                        """,
+                        (rule_id,),
+                    )
+                    rows = cur.fetchall()
+
+            logical_items = self._build_rule_logical_items_from_rows(
+                rule_id=rule_id,
+                rows=rows,
+                mode=mode,
+            )
+            logical_summary = self._summarize_rule_logical_items(logical_items)
+
+            physical_pending = 0
+            physical_processing = 0
+            physical_sent = 0
+            physical_faulty = 0
+
+            for row in rows:
+                status = str(row["status"] or "").strip().lower()
+                if status == "pending":
+                    physical_pending += 1
+                elif status == "processing":
+                    physical_processing += 1
+                elif status == "sent":
+                    physical_sent += 1
+                elif status == "faulty":
+                    physical_faulty += 1
+
+            logical_total = logical_summary["total"]
+            logical_completed = logical_summary["completed"]
+            logical_pending = logical_summary["pending"]
+            logical_processing = logical_summary["processing"]
+            logical_faulty = logical_summary["faulty"]
+            logical_current_position = logical_summary["current_position"]
+
+            active_top_time_pause = self.get_active_campaign_top_time_pause_for_target(
+                target_id=str(rule.target_id),
+                target_thread_id=rule.target_thread_id,
+            ) if rule.target_id else None
+
+            snapshot = {
+                "id": rule.id,
+                "source_id": rule.source_id,
+                "source_thread_id": rule.source_thread_id,
+                "target_id": rule.target_id,
+                "target_thread_id": rule.target_thread_id,
+                "interval": rule.interval,
+                "schedule_mode": rule.schedule_mode,
+                "fixed_times_json": rule.fixed_times_json,
+                "mode": rule.mode,
+                "video_trim_seconds": rule.video_trim_seconds,
+                "video_clip_duration_seconds": getattr(rule, "video_clip_duration_seconds", 118),
+                "video_add_intro": rule.video_add_intro,
+                "video_intro_horizontal": rule.video_intro_horizontal,
+                "video_intro_vertical": rule.video_intro_vertical,
+                "video_intro_horizontal_id": rule.video_intro_horizontal_id,
+                "video_intro_vertical_id": rule.video_intro_vertical_id,
+                "video_caption": rule.video_caption,
+                "video_caption_entities_json": rule.video_caption_entities_json,
+                "repost_caption": rule.repost_caption,
+                "repost_caption_enabled": rule.repost_caption_enabled,
+                "repost_caption_delivery_mode": rule.repost_caption_delivery_mode,
+                "caption_delivery_mode": getattr(rule, "caption_delivery_mode", "auto"),
+                "video_caption_delivery_mode": getattr(rule, "video_caption_delivery_mode", "copy_first"),
+                "is_active": bool(rule.is_active),
+                "next_run_at": rule.next_run_at,
+                "last_sent_at": rule.last_sent_at,
+                "source_title": rule.source_title,
+                "target_title": rule.target_title,
+                "pending": physical_pending,
+                "processing": physical_processing,
+                "sent": physical_sent,
+                "faulty": physical_faulty,
+                "logical_pending": logical_pending,
+                "logical_processing": logical_processing,
+                "logical_completed": logical_completed,
+                "logical_faulty": logical_faulty,
+                "logical_total": logical_total,
+                "logical_current_position": logical_current_position,
+                "active_top_time_pause": active_top_time_pause,
+                "top_time_pause_ends_at": (active_top_time_pause or {}).get("ends_at"),
+            }
+
+            logger.info(
+                "get_rule_card_snapshot: rule_id=%s, mode=%s, raw_rows=%s, logical_total=%s, logical_pending=%s, logical_processing=%s, logical_completed=%s, logical_faulty=%s, logical_current_position=%s",
+                rule_id,
+                mode,
+                len(rows),
+                logical_total,
+                logical_pending,
+                logical_processing,
+                logical_completed,
+                logical_faulty,
+                logical_current_position,
+            )
+
+            return snapshot
+
+        except Exception as exc:
+            logger.exception(
+                "get_rule_card_snapshot: авария snapshot rule_id=%s error=%s",
+                rule_id,
+                exc,
+            )
+            return None
+
+    def _summarize_rule_logical_items(self, logical_items) -> dict[str, Any]:
+        """
+        Единая сводка по logical items для snapshot/position.
+        """
+        items = list(logical_items or [])
+        total = len(items)
+        completed = sum(1 for item in items if item.get("is_done"))
+        processing = sum(
+            1
+            for item in items
+            if (not item.get("is_done")) and int(item.get("processing_count") or 0) > 0
+        )
+        faulty = sum(
+            1
+            for item in items
+            if (not item.get("is_done"))
+            and int(item.get("processing_count") or 0) <= 0
+            and int(item.get("pending_count") or 0) <= 0
+            and int(item.get("faulty_count") or 0) > 0
+        )
+        pending = max(total - completed - processing - faulty, 0)
+
+        current_position = None
+        for item in items:
+            if not item.get("is_done"):
+                current_position = int(item["position"])
+                break
+
+        if current_position is None and total > 0:
+            current_position = total
+
+        return {
+            "total": total,
+            "completed": completed,
+            "pending": pending,
+            "processing": processing,
+            "faulty": faulty,
+            "current_position": current_position,
+        }
+
+    def get_rule_faulty_count(self, rule_id: int) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM deliveries
+                    WHERE rule_id = %s
+                      AND status = 'faulty'
+                    """,
+                    (rule_id,),
+                )
+                row = cur.fetchone()
+        return int(row["cnt"] or 0) if row else 0
+
+    def get_next_scheduled_rule(self):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        r.id,
+                        CAST(r.next_run_at AS TEXT) AS next_run_at,
+                        r.interval,
+                        r.schedule_mode,
+                        r.fixed_times_json,
+                        r.is_active,
+                        r.source_id,
+                        r.source_thread_id,
+                        r.target_id,
+                        r.target_thread_id,
+                        s.title AS source_title,
+                        t.title AS target_title
+                    FROM routing r
+                    LEFT JOIN channels s
+                      ON s.channel_id = r.source_id
+                     AND ((s.thread_id IS NULL AND r.source_thread_id IS NULL) OR s.thread_id = r.source_thread_id)
+                     AND s.channel_type = 'source'
+                    LEFT JOIN channels t
+                      ON t.channel_id = r.target_id
+                     AND ((t.thread_id IS NULL AND r.target_thread_id IS NULL) OR t.thread_id = r.target_thread_id)
+                     AND t.channel_type = 'target'
+                    WHERE r.is_active = TRUE
+                      AND r.next_run_at IS NOT NULL
+                      AND EXISTS (
+                          SELECT 1
+                          FROM deliveries d
+                          WHERE d.rule_id = r.id
+                            AND d.status = 'pending'
+                      )
+                    ORDER BY r.next_run_at ASC
+                    LIMIT 1
+                    """
+                )
+                return cur.fetchone()
+
+    def _build_rule_logical_items_from_rows(
+        self,
+        rule_id: int,
+        rows,
+        mode: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Единый builder логических элементов для правила.
+
+        ВАЖНО:
+        - repost:
+            * альбом = 1 логический элемент
+            * одиночный пост = 1 логический элемент
+        - video:
+            * каждое видео = 1 логический элемент
+            * альбомы не схлопываются
+            * не-видео элементы исключаются
+
+        Ожидает rows с полями:
+            delivery_id
+            status
+            post_id
+            message_id
+            source_channel
+            source_thread_id
+            media_group_id
+            content_json
+            created_at (желательно, но не обязательно)
+            sent_at    (желательно, но не обязательно)
+
+        Возвращает список logical items в стабильном порядке.
+        """
+        items: list[dict[str, Any]] = []
+
+        normalized_mode = (mode or "repost").strip().lower()
+        if normalized_mode not in ("repost", "video"):
+            logger.warning(
+                "_build_rule_logical_items_from_rows: неизвестный mode='%s' у rule_id=%s, fallback -> repost",
+                normalized_mode,
+                rule_id,
+            )
+            normalized_mode = "repost"
+
+        try:
+            raw_rows = list(rows or [])
+            if not raw_rows:
+                logger.info(
+                    "_build_rule_logical_items_from_rows: пустой набор rows, rule_id=%s, mode=%s",
+                    rule_id,
+                    normalized_mode,
+                )
+                return []
+
+            # =========================================================
+            # VIDEO-РЕЖИМ
+            # =========================================================
+            if normalized_mode == "video":
+                skipped_non_video = 0
+                broken_content_json = 0
+
+                for row in raw_rows:
+                    try:
+                        content = _safe_json_loads(row["content_json"], {})
+                    except Exception:
+                        content = {}
+                        broken_content_json += 1
+
+                    media_kind = str(content.get("media_kind") or "text").strip().lower()
+                    if media_kind != "video":
+                        skipped_non_video += 1
+                        continue
+
+                    status = str(row["status"] or "").strip().lower()
+
+                    items.append(
+                        {
+                            "kind": "video_single",
+                            "position": len(items) + 1,
+                            "rule_id": rule_id,
+                            "mode": normalized_mode,
+                            "source_channel": row["source_channel"],
+                            "source_thread_id": row["source_thread_id"],
+                            "media_group_id": row["media_group_id"],
+                            "delivery_ids": [int(row["delivery_id"])],
+                            "post_ids": [int(row["post_id"])],
+                            "message_ids": [int(row["message_id"])],
+                            "first_post_id": int(row["post_id"]),
+                            "first_message_id": int(row["message_id"]),
+                            "content_json": row["content_json"],
+                            "created_at": row["created_at"] if "created_at" in row.keys() else None,
+                            "sent_at": row["sent_at"] if "sent_at" in row.keys() else None,
+                            "count": 1,
+                            "statuses": [status],
+                            "pending_count": 1 if status == "pending" else 0,
+                            "processing_count": 1 if status == "processing" else 0,
+                            "sent_count": 1 if status == "sent" else 0,
+                            "faulty_count": 1 if status == "faulty" else 0,
+                            "is_done": status == "sent",
+                        }
+                    )
+
+                logger.info(
+                    "_build_rule_logical_items_from_rows: built video items, rule_id=%s, raw_rows=%s, items=%s, skipped_non_video=%s, broken_content_json=%s",
+                    rule_id,
+                    len(raw_rows),
+                    len(items),
+                    skipped_non_video,
+                    broken_content_json,
+                )
+                return items
+
+            # =========================================================
+            # REPOST-РЕЖИМ
+            # =========================================================
+            groups: dict[str, dict[str, Any]] = {}
+            order_keys: list[str] = []
+
+            for row in raw_rows:
+                media_group_id = row["media_group_id"]
+
+                if media_group_id:
+                    group_key = f"album::{row['source_channel']}::{row['source_thread_id']}::{media_group_id}"
+                    kind = "album"
+                else:
+                    group_key = f"single::{int(row['post_id'])}"
+                    kind = "single"
+
+                if group_key not in groups:
+                    groups[group_key] = {
+                        "kind": kind,
+                        "rule_id": rule_id,
+                        "mode": normalized_mode,
+                        "source_channel": row["source_channel"],
+                        "source_thread_id": row["source_thread_id"],
+                        "media_group_id": media_group_id,
+                        "delivery_ids": [],
+                        "post_ids": [],
+                        "message_ids": [],
+                        "first_post_id": int(row["post_id"]),
+                        "first_message_id": int(row["message_id"]),
+                        "content_json": row["content_json"],
+                        "created_at": row["created_at"] if "created_at" in row.keys() else None,
+                        "sent_at": row["sent_at"] if "sent_at" in row.keys() else None,
+                        "statuses": [],
+                        "pending_count": 0,
+                        "processing_count": 0,
+                        "sent_count": 0,
+                        "faulty_count": 0,
+                    }
+                    order_keys.append(group_key)
+
+                item = groups[group_key]
+
+                delivery_id = int(row["delivery_id"])
+                post_id = int(row["post_id"])
+                message_id = int(row["message_id"])
+                status = str(row["status"] or "").strip().lower()
+
+                item["delivery_ids"].append(delivery_id)
+                item["post_ids"].append(post_id)
+                item["message_ids"].append(message_id)
+                item["statuses"].append(status)
+
+                if status == "pending":
+                    item["pending_count"] += 1
+                elif status == "processing":
+                    item["processing_count"] += 1
+                elif status == "sent":
+                    item["sent_count"] += 1
+                elif status == "faulty":
+                    item["faulty_count"] += 1
+
+            for group_key in order_keys:
+                item = groups[group_key]
+                item["count"] = len(item["delivery_ids"])
+                item["is_done"] = item["count"] > 0 and item["sent_count"] == item["count"]
+                item["position"] = len(items) + 1
+                items.append(item)
+
+            logger.info(
+                "_build_rule_logical_items_from_rows: built repost items, rule_id=%s, raw_rows=%s, items=%s",
+                rule_id,
+                len(raw_rows),
+                len(items),
+            )
+            return items
+
+        except Exception as exc:
+            logger.exception(
+                "_build_rule_logical_items_from_rows: авария сборки logical items, rule_id=%s, mode=%s, error=%s",
+                rule_id,
+                normalized_mode,
+                exc,
+            )
+            return []
+
+    # =========================================================
+    # QUEUE LOGICAL VIEW
+    # =========================================================
+
+    def _get_rule_pending_logical_items_conn(self, conn, rule_id: int, mode: str) -> list[dict[str, Any]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    d.id AS delivery_id,
+                    d.status,
+                    d.sent_at,
+                    p.id AS post_id,
+                    p.message_id,
+                    p.source_channel,
+                    p.source_thread_id,
+                    p.media_group_id,
+                    p.content_json,
+                    p.created_at
+                FROM deliveries d
+                JOIN posts p ON p.id = d.post_id
+                WHERE d.rule_id = %s
+                AND d.status = 'pending'
+                ORDER BY p.id ASC
+                """,
+                (rule_id,),
+            )
+            rows = cur.fetchall()
+
+        return self._build_rule_logical_items_from_rows(rule_id=rule_id, rows=rows, mode=mode)
+
+    def get_rule_queue_logical_items(self, rule_id: int) -> list[dict[str, Any]]:
+        """
+        Возвращает логическую очередь правила.
+
+        ВАЖНО:
+        - использует единый builder
+        - считает только pending-элементы
+        - repost/video обрабатываются единообразно
+        """
+        try:
+            rule = self.get_rule(rule_id)
+            if not rule:
+                logger.warning(
+                    "get_rule_queue_logical_items: правило не найдено, rule_id=%s",
+                    rule_id,
+                )
+                return []
+
+            mode = (getattr(rule, "mode", "repost") or "repost").strip().lower()
+
+            with self.connect() as conn:
+                items = self._get_rule_pending_logical_items_conn(conn, rule_id, mode)
+
+            logger.info(
+                "get_rule_queue_logical_items: rule_id=%s, mode=%s, logical_items=%s",
+                rule_id,
+                mode,
+                len(items),
+            )
+            return items
+
+        except Exception as exc:
+            logger.exception(
+                "get_rule_queue_logical_items: авария расчёта очереди, rule_id=%s, error=%s",
+                rule_id,
+                exc,
+            )
+            return []
+
+    def get_rule_queue_item_by_position(self, rule_id: int, position: int) -> dict[str, Any] | None:
+        items = self.get_rule_queue_logical_items(rule_id)
+        if not items:
+            return None
+
+        position = max(1, min(position, len(items)))
+        return items[position - 1]
+
+    def get_rule_queue_item_shifted(
+        self,
+        rule_id: int,
+        current_position: int,
+        shift: int,
+    ) -> dict[str, Any] | None:
+        items = self.get_rule_queue_logical_items(rule_id)
+        if not items:
+            return None
+
+        new_position = current_position + shift
+        new_position = max(1, min(new_position, len(items)))
+        return items[new_position - 1]
+
+    def set_rule_start_from_position(
+        self,
+        rule_id: int,
+        position: int,
+    ) -> dict[str, Any] | None:
+        """
+        Сдвигает точку старта по ЛОГИЧЕСКОЙ очереди правила.
+
+        ВАЖНО:
+        - использует тот же builder, что и queue/position/card
+        - работает только по pending logical items
+        - для repost альбом считается одним элементом
+        - для video каждое видео считается отдельным элементом
+        """
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT mode FROM routing WHERE id=%s AND rescan_owner_token IS NULL FOR UPDATE", (rule_id,))
+                    rule = cur.fetchone()
+                    if not rule:
+                        return None
+                    items = self._get_rule_pending_logical_items_conn(conn, rule_id, rule['mode'])
+                    if not items:
+                        logger.warning(
+                            "set_rule_start_from_position: логическая очередь пуста, rule_id=%s",
+                            rule_id,
+                        )
+                        return None
+
+                    position = max(1, min(position, len(items)))
+                    selected = items[position - 1]
+
+                    ids_to_mark_sent: list[int] = []
+                    for item in items:
+                        if int(item["position"]) >= position:
+                            break
+                        ids_to_mark_sent.extend(int(delivery_id) for delivery_id in item["delivery_ids"])
+
+                    now_iso = utc_now_iso()
+                    if ids_to_mark_sent:
+                        cur.executemany(
+                            """
+                            UPDATE deliveries
+                            SET status = 'sent',
+                                sent_at = %s,
+                                error_text = NULL
+                            WHERE id = %s AND status='pending'
+                            """,
+                            [(now_iso, delivery_id) for delivery_id in ids_to_mark_sent],
+                        )
+
+                    cur.execute(
+                        """
+                        UPDATE routing
+                        SET next_run_at = %s
+                        WHERE id = %s
+                        """,
+                        (now_iso, rule_id),
+                    )
+
+                    cur.execute(
+                        """
+                        INSERT INTO audit_log(
+                            created_at,
+                            event_type,
+                            rule_id,
+                            post_id,
+                            status,
+                            new_value_json,
+                            extra_json
+                        )
+                        VALUES(%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            now_iso,
+                            "rule_start_position_changed",
+                            rule_id,
+                            selected["first_post_id"],
+                            "pending",
+                            _json_dumps(
+                                {
+                                    "position": selected["position"],
+                                    "kind": selected["kind"],
+                                    "mode": selected.get("mode"),
+                                    "first_post_id": selected["first_post_id"],
+                                    "first_message_id": selected["first_message_id"],
+                                    "delivery_ids": selected["delivery_ids"],
+                                    "count": selected.get("count"),
+                                }
+                            ),
+                            _json_dumps(
+                                {
+                                    "skipped_delivery_ids": ids_to_mark_sent,
+                                    "skipped_logical_items_count": max(position - 1, 0),
+                                }
+                            ),
+                        ),
+                    )
+
+                conn.commit()
+
+            logger.info(
+                "set_rule_start_from_position: rule_id=%s, selected_position=%s, selected_kind=%s, skipped_delivery_ids=%s",
+                rule_id,
+                selected["position"],
+                selected["kind"],
+                len(ids_to_mark_sent),
+            )
+            return selected
+
+        except Exception as exc:
+            logger.exception(
+                "set_rule_start_from_position: авария смены точки старта, rule_id=%s, position=%s, error=%s",
+                rule_id,
+                position,
+                exc,
+            )
+            return None
+
+    def get_rule_position_info(self, rule_id: int) -> dict[str, Any]:
+        """
+        Возвращает информацию о логической позиции правила.
+
+        Логика полностью синхронизирована с get_rule_queue_logical_items()
+        через единый builder.
+
+        Возвращает:
+        {
+            "total": int,
+            "current_position": int | None,
+            "completed": int,
+        }
+        """
+        empty_result = {
+            "total": 0,
+            "current_position": None,
+            "completed": 0,
+        }
+
+        try:
+            rule = self.get_rule(rule_id)
+            if not rule:
+                logger.warning(
+                    "get_rule_position_info: правило не найдено, rule_id=%s",
+                    rule_id,
+                )
+                return empty_result
+
+            mode = (getattr(rule, "mode", "repost") or "repost").strip().lower()
+
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT
+                            d.id AS delivery_id,
+                            d.status,
+                            d.sent_at,
+                            p.id AS post_id,
+                            p.message_id,
+                            p.source_channel,
+                            p.source_thread_id,
+                            p.media_group_id,
+                            p.content_json,
+                            p.created_at
+                        FROM deliveries d
+                        JOIN posts p ON p.id = d.post_id
+                        WHERE d.rule_id = %s
+                        ORDER BY p.id ASC
+                        """,
+                        (rule_id,),
+                    )
+                    rows = cur.fetchall()
+
+            if not rows:
+                logger.info(
+                    "get_rule_position_info: у правила нет deliveries, rule_id=%s, mode=%s",
+                    rule_id,
+                    mode,
+                )
+                return empty_result
+
+            logical_items = self._build_rule_logical_items_from_rows(
+                rule_id=rule_id,
+                rows=rows,
+                mode=mode,
+            )
+            logical_summary = self._summarize_rule_logical_items(logical_items)
+
+            total = logical_summary["total"]
+            if total <= 0:
+                logger.info(
+                    "get_rule_position_info: после builder очередь пуста, rule_id=%s, mode=%s, raw_rows=%s",
+                    rule_id,
+                    mode,
+                    len(rows),
+                )
+                return empty_result
+
+            completed = logical_summary["completed"]
+            current_position = logical_summary["current_position"]
+
+            result = {
+                "total": total,
+                "current_position": current_position,
+                "completed": completed,
+            }
+
+            logger.info(
+                "get_rule_position_info: rule_id=%s, mode=%s, raw_rows=%s, total=%s, completed=%s, current_position=%s",
+                rule_id,
+                mode,
+                len(rows),
+                total,
+                completed,
+                current_position,
+            )
+            return result
+
+        except Exception as exc:
+            logger.exception(
+                "get_rule_position_info: авария расчёта позиции, rule_id=%s, error=%s",
+                rule_id,
+                exc,
+            )
+            return empty_result
+
+    # =========================================================
+    # AUDIT
+    # =========================================================
+
+    def create_tenant(self, owner_admin_id: int, name: str) -> int | None:
+        return self.tenant_repo.create_tenant(owner_admin_id=owner_admin_id, name=name)
+
+    def get_tenant_by_admin(self, admin_id: int) -> dict[str, Any] | None:
+        return self.tenant_repo.get_tenant_by_admin(admin_id=admin_id)
+
+    def get_default_tenant(self) -> dict[str, Any] | None:
+        return self.tenant_repo.get_default_tenant()
+
+    def get_tenant_by_id(self, tenant_id: int) -> dict[str, Any] | None:
+        return self.tenant_repo.get_tenant_by_id(tenant_id=tenant_id)
+
+    def set_tenant_active(self, tenant_id: int, is_active: bool) -> bool:
+        return self.tenant_repo.set_tenant_active(tenant_id=tenant_id, is_active=is_active)
+
+    def add_tenant_user(self, tenant_id: int, telegram_id: int, role: str) -> bool:
+        return self.tenant_repo.add_tenant_user(tenant_id=tenant_id, telegram_id=telegram_id, role=role)
+
+    def get_tenant_user_role(self, tenant_id: int, telegram_id: int) -> str | None:
+        return self.tenant_repo.get_tenant_user_role(tenant_id=tenant_id, telegram_id=telegram_id)
+
+    def get_plan_by_name(self, plan_name: str) -> dict[str, Any] | None:
+        return self.subscription_repo.get_plan_by_name(plan_name=plan_name)
+
+    def assign_subscription(self, tenant_id: int, plan_id: int, *, status: str = "active", expires_at: str | None = None) -> int | None:
+        return self.subscription_repo.assign_subscription(tenant_id=tenant_id, plan_id=plan_id, status=status, expires_at=expires_at)
+
+    def get_active_subscription(self, tenant_id: int) -> dict[str, Any] | None:
+        return self.subscription_repo.get_active_subscription(tenant_id=tenant_id)
+
+    def get_latest_subscription(self, tenant_id: int) -> dict[str, Any] | None:
+        return self.subscription_repo.get_latest_subscription(tenant_id=tenant_id)
+
+    def get_subscription_by_id(self, subscription_id: int) -> dict[str, Any] | None:
+        return self.subscription_repo.get_subscription_by_id(subscription_id=subscription_id)
+
+    def expire_subscription(self, tenant_id: int) -> bool:
+        return self.subscription_repo.expire_subscription(tenant_id=tenant_id)
+
+    def set_subscription_status(self, subscription_id: int, new_status: str) -> bool:
+        return self.subscription_repo.set_subscription_status(subscription_id=subscription_id, new_status=new_status)
+
+    def set_subscription_grace_window(self, subscription_id: int, grace_started_at: str, grace_ends_at: str) -> bool:
+        return self.subscription_repo.set_subscription_grace_window(
+            subscription_id=subscription_id,
+            grace_started_at=grace_started_at,
+            grace_ends_at=grace_ends_at,
+        )
+
+    def set_subscription_pending_plan(self, subscription_id: int, pending_plan_id: int) -> bool:
+        return self.subscription_repo.set_subscription_pending_plan(subscription_id=subscription_id, pending_plan_id=pending_plan_id)
+
+    def replace_subscription_plan(self, subscription_id: int, plan_id: int) -> bool:
+        return self.subscription_repo.replace_subscription_plan(subscription_id=subscription_id, plan_id=plan_id)
+
+    def bump_usage(self, tenant_id: int, *, jobs_delta: int = 0, video_delta: int = 0, storage_delta_mb: int = 0, api_calls_delta: int = 0) -> None:
+        self.usage_repo.bump_usage(
+            tenant_id=tenant_id,
+            jobs_delta=jobs_delta,
+            video_delta=video_delta,
+            storage_delta_mb=storage_delta_mb,
+            api_calls_delta=api_calls_delta,
+        )
+
+    def get_usage_for_date(self, tenant_id: int, day: str) -> dict[str, Any]:
+        return self.usage_repo.get_usage_for_date(tenant_id=tenant_id, day=day)
+
+    def get_usage_for_period(self, tenant_id: int, date_from: str, date_to: str) -> dict[str, Any]:
+        return self.usage_repo.get_usage_for_period(tenant_id=tenant_id, date_from=date_from, date_to=date_to)
+
+    def build_billing_usage_data(self, tenant_id: int, period_start: str, period_end: str) -> dict[str, Any]:
+        return self.usage_repo.build_billing_usage_data(tenant_id=tenant_id, period_start=period_start, period_end=period_end)
+
+    def reset_usage_for_day(self, day: str) -> int:
+        return self.usage_repo.reset_usage_for_day(day=day)
+
+    def add_subscription_history(
+        self,
+        *,
+        tenant_id: int,
+        old_plan_id: int | None,
+        new_plan_id: int | None,
+        old_status: str | None,
+        new_status: str | None,
+        changed_by: str,
+        reason: str,
+        effective_from: str | None,
+        effective_to: str | None = None,
+    ) -> int | None:
+        return self.subscription_repo.add_subscription_history(
+            tenant_id=tenant_id,
+            old_plan_id=old_plan_id,
+            new_plan_id=new_plan_id,
+            old_status=old_status,
+            new_status=new_status,
+            changed_by=changed_by,
+            reason=reason,
+            effective_from=effective_from,
+            effective_to=effective_to,
+        )
+
+    def get_subscription_history(self, tenant_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        return self.subscription_repo.get_subscription_history(tenant_id=tenant_id, limit=limit)
+
+    def get_subscriptions_due_for_billing(self, due_before: str, limit: int = 100) -> list[dict[str, Any]]:
+        return self.subscription_repo.get_subscriptions_due_for_billing(due_before=due_before, limit=limit)
+
+    def update_billing_period(self, subscription_id: int, period_start: str, period_end: str) -> bool:
+        return self.subscription_repo.update_billing_period(
+            subscription_id=subscription_id,
+            period_start=period_start,
+            period_end=period_end,
+        )
+
+    def create_billing_event(
+        self,
+        tenant_id: int,
+        event_type: str,
+        *,
+        event_source: str | None = None,
+        amount: float | None = None,
+        currency: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> int | None:
+        return self.billing_repo.create_billing_event(
+            tenant_id=tenant_id,
+            event_type=event_type,
+            event_source=event_source,
+            amount=amount,
+            currency=currency,
+            metadata=metadata,
+        )
+
+    def get_billing_events(self, tenant_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        return self.billing_repo.get_billing_events(tenant_id=tenant_id, limit=limit)
+
+    def get_billing_exchange_rates(self) -> dict[str, float]:
+        return self.billing_repo.get_billing_exchange_rates()
+
+    def set_billing_exchange_rate(self, *, currency: str, new_value: float, admin_id: int | None = None) -> bool:
+        return self.billing_repo.set_billing_exchange_rate(currency=currency, new_value=new_value, admin_id=admin_id)
+
+    def get_billing_usd_prices(self) -> dict[str, dict[int, float]]:
+        return self.billing_repo.get_billing_usd_prices()
+
+    def set_billing_usd_price(self, *, tariff_code: str, period_months: int, new_price: float, admin_id: int | None = None) -> bool:
+        return self.billing_repo.set_billing_usd_price(
+            tariff_code=tariff_code,
+            period_months=period_months,
+            new_price=new_price,
+            admin_id=admin_id,
+        )
+
+    def get_billing_fixed_prices(self, kind: str) -> dict[str, dict[int, dict[str, Any]]]:
+        return self.billing_repo.get_billing_fixed_prices(kind)
+
+    def set_billing_fixed_price(self, *, kind: str, tariff_code: str, period_months: int, value: Any, admin_id: int | None = None) -> bool:
+        return self.billing_repo.set_billing_fixed_price(
+            kind=kind,
+            tariff_code=tariff_code,
+            period_months=period_months,
+            value=value,
+            admin_id=admin_id,
+        )
+
+    def create_invoice(
+        self,
+        *,
+        tenant_id: int,
+        subscription_id: int,
+        period_start: str,
+        period_end: str,
+        status: str,
+        currency: str,
+        due_at: str | None,
+    ) -> int | None:
+        return self.billing_repo.create_invoice(
+            tenant_id=tenant_id,
+            subscription_id=subscription_id,
+            period_start=period_start,
+            period_end=period_end,
+            status=status,
+            currency=currency,
+            due_at=due_at,
+        )
+
+    def add_invoice_item(
+        self,
+        invoice_id: int,
+        *,
+        item_type: str,
+        description: str,
+        quantity: int,
+        unit_price: float,
+        amount: float,
+        metadata: dict[str, Any] | None = None,
+    ) -> int | None:
+        return self.billing_repo.add_invoice_item(
+            invoice_id=invoice_id,
+            item_type=item_type,
+            description=description,
+            quantity=quantity,
+            unit_price=unit_price,
+            amount=amount,
+            metadata=metadata,
+        )
+
+    def recalculate_invoice_totals(self, invoice_id: int) -> bool:
+        return self.billing_repo.recalculate_invoice_totals(invoice_id=invoice_id)
+
+    def set_invoice_status(
+        self,
+        invoice_id: int,
+        status: str,
+        *,
+        updated_at: str | None = None,
+        paid_at: str | None = None,
+        external_reference: str | None = None,
+    ) -> bool:
+        return self.billing_repo.set_invoice_status(
+            invoice_id=invoice_id,
+            status=status,
+            updated_at=updated_at,
+            paid_at=paid_at,
+            external_reference=external_reference,
+        )
+
+    def get_invoice(self, invoice_id: int) -> dict[str, Any] | None:
+        return self.billing_repo.get_invoice(invoice_id=invoice_id)
+
+    def get_last_invoice(self, tenant_id: int) -> dict[str, Any] | None:
+        return self.billing_repo.get_last_invoice(tenant_id=tenant_id)
+
+    def list_invoices_for_tenant(self, tenant_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        return self.billing_repo.list_invoices_for_tenant(tenant_id=tenant_id, limit=limit)
+
+    def count_open_invoices(self, tenant_id: int) -> int:
+        return self.billing_repo.count_open_invoices(tenant_id=tenant_id)
+
+    def get_invoice_for_period(self, tenant_id: int, period_start: str, period_end: str) -> dict[str, Any] | None:
+        return self.billing_repo.get_invoice_for_period(
+            tenant_id=tenant_id,
+            period_start=period_start,
+            period_end=period_end,
+        )
+
+    def list_invoice_items(self, invoice_id: int) -> list[dict[str, Any]]:
+        return self.billing_repo.list_invoice_items(invoice_id=invoice_id)
+
+    def count_invoices_by_status(self, status: str) -> int:
+        return self.billing_repo.count_invoices_by_status(status=status)
+
+    def get_billing_periods_due(self, now_iso: str) -> int:
+        return self.billing_repo.get_billing_periods_due(now_iso=now_iso)
+
+    def count_tenants_with_overage_current_period(self) -> int:
+        return self.billing_repo.count_tenants_with_overage_current_period()
+
+    def create_payment_intent(
+        self,
+        *,
+        tenant_id: int,
+        invoice_id: int,
+        provider: str,
+        status: str,
+        amount: float,
+        currency: str,
+        expires_at: str | None = None,
+    ) -> int | None:
+        return self.payment_repo.create_payment_intent(
+            tenant_id=tenant_id,
+            invoice_id=invoice_id,
+            provider=provider,
+            status=status,
+            amount=amount,
+            currency=currency,
+            expires_at=expires_at,
+        )
+
+    def get_payment_intent(self, payment_intent_id: int) -> dict[str, Any] | None:
+        return self.payment_repo.get_payment_intent(payment_intent_id=payment_intent_id)
+
+    def get_payment_intent_by_invoice(self, invoice_id: int) -> dict[str, Any] | None:
+        return self.payment_repo.get_payment_intent_by_invoice(invoice_id=invoice_id)
+
+    def get_active_payment_intent_for_invoice_provider(self, invoice_id: int, provider: str) -> dict[str, Any] | None:
+        return self.payment_repo.get_active_payment_intent_for_invoice_provider(invoice_id=invoice_id, provider=provider)
+
+    def get_active_manual_payment_intent_for_invoice(self, invoice_id: int) -> dict[str, Any] | None:
+        return self.payment_repo.get_active_manual_payment_intent_for_invoice(invoice_id=invoice_id)
+
+    def get_payment_intent_by_external_id(self, external_payment_id: str) -> dict[str, Any] | None:
+        return self.payment_repo.get_payment_intent_by_external_id(external_payment_id=external_payment_id)
+
+    def update_payment_intent_status(self, payment_intent_id: int, status: str, *, error_text: str | None = None) -> bool:
+        return self.payment_repo.update_payment_intent_status(payment_intent_id=payment_intent_id, status=status, error_text=error_text)
+
+    def attach_checkout_url(self, payment_intent_id: int, checkout_url: str, *, external_payment_id: str | None = None) -> bool:
+        return self.payment_repo.attach_checkout_url(
+            payment_intent_id=payment_intent_id,
+            checkout_url=checkout_url,
+            external_payment_id=external_payment_id,
+        )
+
+    def attach_provider_payload(self, payment_intent_id: int, payload: dict[str, Any]) -> bool:
+        return self.payment_repo.attach_provider_payload(payment_intent_id=payment_intent_id, payload=payload)
+
+    def attach_external_payment_id(self, payment_intent_id: int, external_payment_id: str) -> bool:
+        return self.payment_repo.attach_external_payment_id(payment_intent_id=payment_intent_id, external_payment_id=external_payment_id)
+
+    def mark_payment_paid(self, payment_intent_id: int, *, confirmation_payload: dict[str, Any] | None = None) -> bool:
+        return self.payment_repo.mark_payment_paid(payment_intent_id=payment_intent_id, confirmation_payload=confirmation_payload)
+
+    def mark_payment_failed(self, payment_intent_id: int, error_text: str, *, payload: dict[str, Any] | None = None) -> bool:
+        return self.payment_repo.mark_payment_failed(payment_intent_id=payment_intent_id, error_text=error_text, payload=payload)
+
+    def list_payment_intents_for_tenant(self, tenant_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        return self.payment_repo.list_payment_intents_for_tenant(tenant_id=tenant_id, limit=limit)
+
+    def attach_confirmation_payload(self, payment_intent_id: int, payload: dict[str, Any]) -> bool:
+        return self.payment_repo.attach_confirmation_payload(payment_intent_id=payment_intent_id, payload=payload)
+
+    def count_rules_for_tenant(self, tenant_id: int) -> int:
+        return self.usage_repo.count_rules_for_tenant(tenant_id=tenant_id)
+
+    def get_rule_tenant_id(self, rule_id: int) -> int:
+        return self.usage_repo.get_rule_tenant_id(rule_id=rule_id)
+
+    def get_saas_health_snapshot(self) -> dict[str, Any]:
+        return self.usage_repo.get_saas_health_snapshot()
+
+    def log_event(
+        self,
+        event_type: str,
+        rule_id: int | None = None,
+        delivery_id: int | None = None,
+        post_id: int | None = None,
+        admin_id: int | None = None,
+        source_id: str | None = None,
+        source_thread_id: int | None = None,
+        target_id: str | None = None,
+        target_thread_id: int | None = None,
+        status: str | None = None,
+        error_text: str | None = None,
+        old_value: dict[str, Any] | None = None,
+        new_value: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+        tenant_id: int | None = None,
+    ) -> None:
+        resolved_tenant_id = tenant_id
+        if resolved_tenant_id is None and rule_id is not None:
+            resolved_tenant_id = self.get_rule_tenant_id(int(rule_id))
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO audit_log(
+                        created_at,
+                        event_type,
+                        rule_id,
+                        delivery_id,
+                        post_id,
+                        admin_id,
+                        source_id,
+                        source_thread_id,
+                        target_id,
+                        target_thread_id,
+                        status,
+                        error_text,
+                        old_value_json,
+                        new_value_json,
+                        extra_json,
+                        tenant_id
+                    )
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        utc_now_iso(),
+                        event_type,
+                        rule_id,
+                        delivery_id,
+                        post_id,
+                        admin_id,
+                        str(source_id) if source_id is not None else None,
+                        source_thread_id,
+                        str(target_id) if target_id is not None else None,
+                        target_thread_id,
+                        status,
+                        (error_text[:1000] if error_text else None),
+                        _json_dumps(old_value),
+                        _json_dumps(new_value),
+                        _json_dumps(extra),
+                        resolved_tenant_id,
+                    ),
+                )
+            conn.commit()
+
+    def get_audit_for_rule(self, rule_id: int, limit: int = 50):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM audit_log
+                    WHERE rule_id = %s
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (rule_id, limit),
+                )
+                return cur.fetchall()
+
+    def get_audit_for_delivery(self, delivery_id: int, limit: int = 50):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM audit_log
+                    WHERE delivery_id = %s
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (delivery_id, limit),
+                )
+                return cur.fetchall()
+
+    def get_recent_audit(self, limit: int = 100):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM audit_log
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+                return cur.fetchall()
+
+    def get_recent_video_audit(self, limit: int = 200):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM audit_log
+                    WHERE event_type LIKE 'video_%%'
+                       OR COALESCE((extra_json::jsonb ->> 'mode'), '') = 'video'
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+                return cur.fetchall()
+
+    def get_video_audit_for_delivery(self, delivery_id: int, limit: int = 100):
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM audit_log
+                    WHERE delivery_id = %s
+                      AND (
+                        event_type LIKE 'video_%%'
+                        OR COALESCE((extra_json::jsonb ->> 'mode'), '') = 'video'
+                      )
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (delivery_id, limit),
+                )
+                return cur.fetchall()
+
+    def log_rule_change(
+        self,
+        event_type: str,
+        rule_id: int,
+        admin_id: int,
+        old_value: dict[str, Any] | None = None,
+        new_value: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        rule = self.get_rule(rule_id)
+
+        self.log_event(
+            event_type=event_type,
+            rule_id=rule_id,
+            admin_id=admin_id,
+            source_id=rule.source_id if rule else None,
+            source_thread_id=rule.source_thread_id if rule else None,
+            target_id=rule.target_id if rule else None,
+            target_thread_id=rule.target_thread_id if rule else None,
+            old_value=old_value,
+            new_value=new_value,
+            extra=extra,
+        )
+
+    def log_delivery_event(
+        self,
+        event_type: str,
+        delivery_id: int,
+        rule_id: int | None = None,
+        post_id: int | None = None,
+        status: str | None = None,
+        error_text: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        source_id = None
+        source_thread_id = None
+        target_id = None
+        target_thread_id = None
+
+        if rule_id is not None:
+            rule = self.get_rule(rule_id)
+            if rule:
+                source_id = rule.source_id
+                source_thread_id = rule.source_thread_id
+                target_id = rule.target_id
+                target_thread_id = rule.target_thread_id
+
+        self.log_event(
+            event_type=event_type,
+            rule_id=rule_id,
+            delivery_id=delivery_id,
+            post_id=post_id,
+            source_id=source_id,
+            source_thread_id=source_thread_id,
+            target_id=target_id,
+            target_thread_id=target_thread_id,
+            status=status,
+            error_text=error_text,
+            extra=extra,
+        )
+
+    def log_video_event(
+        self,
+        event_type: str,
+        rule_id: int,
+        delivery_id: int | None = None,
+        post_id: int | None = None,
+        status: str | None = None,
+        error_text: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if extra is None:
+            extra = {}
+        extra["mode"] = "video"
+
+        self.log_delivery_event(
+            event_type=event_type,
+            delivery_id=delivery_id,
+            rule_id=rule_id,
+            post_id=post_id,
+            status=status,
+            error_text=error_text,
+            extra=extra,
+        )
+
+    # =========================================================
+    # PROBLEMS
+    # =========================================================
+
+    def register_problem(
+        self,
+        problem_key: str,
+        problem_type: str,
+        rule_id: int | None = None,
+        delivery_id: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now_iso = utc_now_iso()
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM problem_state
+                    WHERE problem_key = %s
+                    LIMIT 1
+                    """,
+                    (problem_key,),
+                )
+                row = cur.fetchone()
+
+                if row:
+                    cur.execute(
+                        """
+                        UPDATE problem_state
+                        SET last_seen_at = %s,
+                            hit_count = hit_count + 1,
+                            is_active = TRUE
+                        WHERE problem_key = %s
+                        """,
+                        (now_iso, problem_key),
+                    )
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM problem_state
+                        WHERE problem_key = %s
+                        LIMIT 1
+                        """,
+                        (problem_key,),
+                    )
+                    updated = cur.fetchone()
+                    conn.commit()
+                    return dict(updated)
+
+                cur.execute(
+                    """
+                    INSERT INTO problem_state(
+                        problem_key,
+                        problem_type,
+                        rule_id,
+                        delivery_id,
+                        first_seen_at,
+                        last_seen_at,
+                        last_notified_at,
+                        hit_count,
+                        is_active,
+                        is_muted,
+                        extra_json
+                    )
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        problem_key,
+                        problem_type,
+                        rule_id,
+                        delivery_id,
+                        now_iso,
+                        now_iso,
+                        None,
+                        1,
+                        True,
+                        False,
+                        _json_dumps(extra),
+                    ),
+                )
+
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM problem_state
+                    WHERE problem_key = %s
+                    LIMIT 1
+                    """,
+                    (problem_key,),
+                )
+                created = cur.fetchone()
+            conn.commit()
+            return dict(created)
+
+    def mark_problem_notified(self, problem_key: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE problem_state
+                    SET last_notified_at = %s
+                    WHERE problem_key = %s
+                    """,
+                    (utc_now_iso(), problem_key),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def resolve_problem(self, problem_key: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE problem_state
+                    SET is_active = FALSE
+                    WHERE problem_key = %s
+                    """,
+                    (problem_key,),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def mute_problem(self, problem_key: str, muted: bool = True) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE problem_state
+                    SET is_muted = %s
+                    WHERE problem_key = %s
+                    """,
+                    (bool(muted), problem_key),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def get_problem_state(self, problem_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM problem_state
+                    WHERE problem_key = %s
+                    LIMIT 1
+                    """,
+                    (problem_key,),
+                )
+                row = cur.fetchone()
+
+        return dict(row) if row else None
+
+    def update_runtime_heartbeat(self, role: str) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO runtime_heartbeat (role, last_seen_at)
+                    VALUES (%s, NOW())
+                    ON CONFLICT (role) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at
+                    """,
+                    (str(role),),
+                )
+            conn.commit()
+
+    def get_runtime_heartbeats(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role, last_seen_at
+                    FROM runtime_heartbeat
+                    """
+                )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def count_recent_errors(self, minutes: int = 5) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM deliveries
+                    WHERE status = 'faulty'
+                      AND CAST(created_at AS timestamptz) >= NOW() - (%s * INTERVAL '1 minute')
+
+                    """,
+                    (max(int(minutes), 1),),
+                )
+                row = cur.fetchone()
+        return int(row["cnt"] if row else 0)
+
+
+    def create_saved_post(self, *, rule_id: int | None, title: str | None, content: dict[str, Any], source_chat_id: str | None, source_message_id: int | None, source_media_group_id: str | None, created_by: int | None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO saved_posts(rule_id,title,content_json,source_chat_id,source_message_id,source_media_group_id,created_by)
+                    VALUES (%s,%s,%s::jsonb,%s,%s,%s,%s)
+                    RETURNING id
+                """, (rule_id, title, json.dumps(content, ensure_ascii=False), source_chat_id, source_message_id, source_media_group_id, created_by))
+                row = cur.fetchone()
+                return int(row["id"]) if row else None
+
+    def get_saved_post(self, saved_post_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM saved_posts WHERE id=%s AND archived_at IS NULL", (int(saved_post_id),))
+                return cur.fetchone()
+
+    def list_saved_posts(self, *, rule_id: int | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if rule_id is None:
+                    cur.execute("SELECT * FROM saved_posts WHERE archived_at IS NULL AND status='ready' ORDER BY created_at DESC LIMIT %s", (int(limit),))
+                else:
+                    cur.execute("SELECT * FROM saved_posts WHERE archived_at IS NULL AND status='ready' AND rule_id=%s ORDER BY created_at DESC LIMIT %s", (int(rule_id), int(limit)))
+                return cur.fetchall() or []
+
+    def update_saved_post_content(self, saved_post_id: int, *, title: str | None, content: dict[str, Any]) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE saved_posts SET title=%s, content_json=%s::jsonb, updated_at=NOW() WHERE id=%s", (title, json.dumps(content, ensure_ascii=False), int(saved_post_id)))
+                return cur.rowcount > 0
+
+    def archive_saved_post(self, saved_post_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE saved_posts SET archived_at=NOW(), status='archived', updated_at=NOW() WHERE id=%s", (int(saved_post_id),))
+                return cur.rowcount > 0
+
+
+    def get_rule_repost_campaign_top_time_settings(self, rule_id: int) -> dict[str, Any]:
+        default = {"rule_id": int(rule_id), "enabled": False, "seconds": 0}
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT id, repost_campaign_top_time_enabled, repost_campaign_top_time_seconds
+                        FROM routing
+                        WHERE id = %s
+                        LIMIT 1
+                        """,
+                        (int(rule_id),),
+                    )
+                    row = cur.fetchone()
+            if not row:
+                return default
+            data = dict(row)
+            return {
+                "rule_id": int(data.get("id") or rule_id),
+                "enabled": bool(data.get("repost_campaign_top_time_enabled") or False),
+                "seconds": int(data.get("repost_campaign_top_time_seconds") or 0),
+            }
+        except Exception as exc:
+            logger.exception("REPOST_CAMPAIGN_TOP_TIME_SETTINGS_GET_FAILED | rule_id=%s | error=%s", rule_id, exc)
+            return default
+
+    def set_rule_repost_campaign_top_time_settings(
+        self,
+        rule_id: int,
+        *,
+        enabled: bool,
+        seconds: int,
+        actor_id: int | None = None,
+    ) -> bool:
+        allowed_seconds = {900, 1800, 3600, 7200, 10800, 21600, 43200}
+        normalized_enabled = bool(enabled)
+        normalized_seconds = int(seconds or 0)
+        if not normalized_enabled:
+            normalized_seconds = 0
+        elif normalized_seconds not in allowed_seconds:
+            normalized_seconds = 7200
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET
+                        repost_campaign_top_time_enabled = %s,
+                        repost_campaign_top_time_seconds = %s
+                    WHERE id = %s
+                    """,
+                    (normalized_enabled, normalized_seconds, int(rule_id)),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+            return updated
+
+    def get_campaign_invite_link_settings(self, rule_id: int) -> dict[str, Any]:
+        default = _default_campaign_invite_link_settings(rule_id)
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM campaign_invite_link_settings
+                    WHERE rule_id = %s
+                    LIMIT 1
+                    """,
+                    (int(rule_id),),
+                )
+                row = cur.fetchone()
+        if not row:
+            return default
+
+        data = dict(row)
+        result = {**default, **data}
+        result["rule_id"] = int(result.get("rule_id") or rule_id)
+        result["enabled"] = bool(result.get("enabled"))
+        result["per_target_links_enabled"] = bool(result.get("per_target_links_enabled"))
+        result["preview_required"] = bool(result.get("preview_required"))
+        return result
+
+    def set_campaign_invite_link_settings(
+        self,
+        rule_id: int,
+        *,
+        enabled: bool | None = None,
+        destination_chat_id: str | None = None,
+        destination_chat_title: str | None = None,
+        link_mode: str | None = None,
+        injection_mode: str | None = None,
+        append_template: str | None = None,
+        per_target_links_enabled: bool | None = None,
+        preview_required: bool | None = None,
+        actor_id: int | None = None,
+    ) -> bool:
+        if link_mode is not None and link_mode not in CAMPAIGN_INVITE_LINK_ALLOWED_LINK_MODES:
+            return False
+        if injection_mode is not None and injection_mode not in CAMPAIGN_INVITE_LINK_ALLOWED_INJECTION_MODES:
+            return False
+
+        reset_preview = any(
+            value is not None
+            for value in (destination_chat_id, destination_chat_title, link_mode, injection_mode, append_template)
+        )
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_invite_link_settings(rule_id)
+                    VALUES (%s)
+                    ON CONFLICT (rule_id) DO NOTHING
+                    """,
+                    (int(rule_id),),
+                )
+                cur.execute(
+                    """
+                    UPDATE campaign_invite_link_settings
+                    SET
+                        enabled = COALESCE(%s, enabled),
+                        destination_chat_id = COALESCE(%s, destination_chat_id),
+                        destination_chat_title = COALESCE(%s, destination_chat_title),
+                        link_mode = COALESCE(%s, link_mode),
+                        injection_mode = COALESCE(%s, injection_mode),
+                        append_template = COALESCE(%s, append_template),
+                        per_target_links_enabled = COALESCE(%s, per_target_links_enabled),
+                        preview_required = COALESCE(%s, preview_required),
+                        preview_checked_at = CASE WHEN %s THEN NULL ELSE preview_checked_at END,
+                        preview_checked_by = CASE WHEN %s THEN NULL ELSE preview_checked_by END,
+                        updated_at = NOW()
+                    WHERE rule_id = %s
+                    """,
+                    (
+                        enabled,
+                        destination_chat_id,
+                        destination_chat_title,
+                        link_mode,
+                        injection_mode,
+                        append_template,
+                        per_target_links_enabled,
+                        preview_required,
+                        reset_preview,
+                        reset_preview,
+                        int(rule_id),
+                    ),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
+
+    def mark_campaign_invite_link_preview_checked(
+        self,
+        rule_id: int,
+        *,
+        actor_id: int | None = None,
+        checked_at: datetime | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_invite_link_settings(rule_id, preview_checked_at, preview_checked_by)
+                    VALUES (%s, COALESCE(%s, NOW()), %s)
+                    ON CONFLICT (rule_id) DO UPDATE SET
+                        preview_checked_at = COALESCE(EXCLUDED.preview_checked_at, NOW()),
+                        preview_checked_by = EXCLUDED.preview_checked_by,
+                        updated_at = NOW()
+                    """,
+                    (int(rule_id), checked_at, actor_id),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
+
+    def create_campaign_invite_link_record(
+        self,
+        *,
+        rule_id: int,
+        destination_chat_id: str,
+        invite_link: str,
+        invite_link_hash: str,
+        link_mode: str,
+        creates_join_request: bool,
+        destination_chat_title: str | None = None,
+        campaign_run_id: int | None = None,
+        campaign_run_message_id: int | None = None,
+        saved_post_id: int | None = None,
+        ad_target_id: str | None = None,
+        ad_target_thread_id: int | None = None,
+        ad_target_title: str | None = None,
+        invite_link_name: str | None = None,
+        telegram_payload_json: dict | None = None,
+        created_by: int | None = None,
+        status: str = "active",
+    ) -> int | None:
+        if link_mode not in CAMPAIGN_INVITE_LINK_ALLOWED_LINK_MODES:
+            return None
+        if status not in CAMPAIGN_INVITE_LINK_ALLOWED_STATUSES:
+            return None
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_invite_links(
+                        rule_id, campaign_run_id, campaign_run_message_id, saved_post_id,
+                        destination_chat_id, destination_chat_title, ad_target_id, ad_target_thread_id,
+                        ad_target_title, link_mode, invite_link, invite_link_name, invite_link_hash,
+                        creates_join_request, status, created_by, telegram_payload_json
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    ON CONFLICT (invite_link_hash) DO UPDATE SET invite_link_hash = EXCLUDED.invite_link_hash
+                    RETURNING id
+                    """,
+                    (
+                        int(rule_id), campaign_run_id, campaign_run_message_id, saved_post_id,
+                        str(destination_chat_id), destination_chat_title, ad_target_id, ad_target_thread_id,
+                        ad_target_title, link_mode, invite_link, invite_link_name, invite_link_hash,
+                        bool(creates_join_request), status, created_by, _json_dumps(telegram_payload_json or {}),
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return int(row["id"]) if row else None
+
+    def get_campaign_invite_link(self, invite_link_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_invite_links WHERE id = %s LIMIT 1", (int(invite_link_id),))
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_campaign_invite_link_by_hash(self, invite_link_hash: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_invite_links WHERE invite_link_hash = %s LIMIT 1", (invite_link_hash,))
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def list_campaign_invite_links_for_rule(
+        self,
+        rule_id: int,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit or 50), 100))
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if statuses is None:
+                    cur.execute(
+                        """
+                        SELECT * FROM campaign_invite_links
+                        WHERE rule_id = %s
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT %s
+                        """,
+                        (int(rule_id), safe_limit),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT * FROM campaign_invite_links
+                        WHERE rule_id = %s AND status = ANY(%s)
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT %s
+                        """,
+                        (int(rule_id), list(statuses), safe_limit),
+                    )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def archive_campaign_invite_link(self, invite_link_id: int, *, actor_id: int | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_invite_links
+                    SET status = 'archived', archived_at = NOW(), updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (int(invite_link_id),),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+        return updated
+
+    def mark_campaign_invite_link_revoked(
+        self,
+        invite_link_id: int,
+        *,
+        revoked_at: datetime | None = None,
+        telegram_payload_json: dict | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if telegram_payload_json is None:
+                    cur.execute(
+                        """
+                        UPDATE campaign_invite_links
+                        SET status = 'revoked', revoked_at = COALESCE(%s, NOW()), updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (revoked_at, int(invite_link_id)),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE campaign_invite_links
+                        SET status = 'revoked', revoked_at = COALESCE(%s, NOW()), updated_at = NOW(),
+                            telegram_payload_json = %s::jsonb
+                        WHERE id = %s
+                        """,
+                        (revoked_at, _json_dumps(telegram_payload_json), int(invite_link_id)),
+                    )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+        return updated
+
+    def bind_campaign_invite_link_to_run_message(
+        self,
+        invite_link_id: int,
+        *,
+        campaign_run_message_id: int,
+        campaign_run_id: int,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_invite_links
+                    SET campaign_run_message_id = %s, campaign_run_id = %s, updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (int(campaign_run_message_id), int(campaign_run_id), int(invite_link_id)),
+                )
+                updated = int(cur.rowcount or 0) > 0
+            conn.commit()
+        return updated
+
+    def get_latest_campaign_invite_link_event_for_user(
+        self,
+        *,
+        destination_chat_id: str,
+        telegram_user_id_hash: str,
+        event_types: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if event_types is None:
+                    cur.execute(
+                        """
+                        SELECT
+                            id, invite_link_id, rule_id, campaign_run_id, campaign_run_message_id,
+                            destination_chat_id, ad_target_id, ad_target_thread_id, event_type,
+                            telegram_user_id_hash, event_at
+                        FROM campaign_invite_link_events
+                        WHERE destination_chat_id = %s AND telegram_user_id_hash = %s
+                        ORDER BY event_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (str(destination_chat_id), telegram_user_id_hash),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT
+                            id, invite_link_id, rule_id, campaign_run_id, campaign_run_message_id,
+                            destination_chat_id, ad_target_id, ad_target_thread_id, event_type,
+                            telegram_user_id_hash, event_at
+                        FROM campaign_invite_link_events
+                        WHERE destination_chat_id = %s
+                          AND telegram_user_id_hash = %s
+                          AND event_type = ANY(%s)
+                        ORDER BY event_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (str(destination_chat_id), telegram_user_id_hash, list(event_types)),
+                    )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def create_campaign_invite_link_event(
+        self,
+        *,
+        invite_link_id: int,
+        rule_id: int,
+        destination_chat_id: str,
+        event_type: str,
+        telegram_user_id_hash: str,
+        campaign_run_id: int | None = None,
+        campaign_run_message_id: int | None = None,
+        ad_target_id: str | None = None,
+        ad_target_thread_id: int | None = None,
+        telegram_update_id: int | None = None,
+        telegram_user_payload_json: dict | None = None,
+        raw_update_json: dict | None = None,
+        event_at: datetime | None = None,
+    ) -> int | None:
+        if event_type not in CAMPAIGN_INVITE_LINK_ALLOWED_EVENT_TYPES:
+            return None
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_invite_link_events(
+                        invite_link_id, rule_id, campaign_run_id, campaign_run_message_id,
+                        destination_chat_id, ad_target_id, ad_target_thread_id, event_type,
+                        telegram_user_id_hash, telegram_user_payload_json, telegram_update_id,
+                        event_at, raw_update_json
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, COALESCE(%s, NOW()), %s::jsonb)
+                    ON CONFLICT (invite_link_id, event_type, telegram_user_id_hash) DO UPDATE
+                    SET telegram_user_id_hash = EXCLUDED.telegram_user_id_hash
+                    RETURNING id
+                    """,
+                    (
+                        int(invite_link_id), int(rule_id), campaign_run_id, campaign_run_message_id,
+                        str(destination_chat_id), ad_target_id, ad_target_thread_id, event_type,
+                        telegram_user_id_hash, _json_dumps(telegram_user_payload_json or {}), telegram_update_id,
+                        event_at, _json_dumps(raw_update_json or {}),
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return int(row["id"]) if row else None
+
+    def get_campaign_invite_link_stats_for_rule(self, rule_id: int) -> dict[str, Any]:
+        result = {
+            "rule_id": int(rule_id),
+            "links_total": 0,
+            "links_active": 0,
+            "join_requests_total": 0,
+            "joins_total": 0,
+            "left_total": 0,
+            "kicked_total": 0,
+            "unknown_total": 0,
+            "unique_users_total": 0,
+        }
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS links_total,
+                        COUNT(*) FILTER (WHERE status = 'active') AS links_active
+                    FROM campaign_invite_links
+                    WHERE rule_id = %s
+                    """,
+                    (int(rule_id),),
+                )
+                link_row = cur.fetchone() or {}
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE event_type = 'join_request_created') AS join_requests_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_joined') AS joins_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_left') AS left_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_kicked') AS kicked_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_unknown') AS unknown_total,
+                        COUNT(DISTINCT telegram_user_id_hash) AS unique_users_total
+                    FROM campaign_invite_link_events
+                    WHERE rule_id = %s
+                    """,
+                    (int(rule_id),),
+                )
+                event_row = cur.fetchone() or {}
+        for key in result:
+            if key in link_row:
+                result[key] = int(link_row.get(key) or 0)
+            if key in event_row:
+                result[key] = int(event_row.get(key) or 0)
+        return result
+
+
+    def get_campaign_invite_link_stats(self, invite_link_id: int) -> dict[str, Any]:
+        result = {
+            "invite_link_id": int(invite_link_id),
+            "join_requests_total": 0,
+            "joins_total": 0,
+            "left_total": 0,
+            "kicked_total": 0,
+            "unknown_total": 0,
+            "unique_users_total": 0,
+        }
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE event_type = 'join_request_created') AS join_requests_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_joined') AS joins_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_left') AS left_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_kicked') AS kicked_total,
+                        COUNT(*) FILTER (WHERE event_type = 'member_unknown') AS unknown_total,
+                        COUNT(DISTINCT telegram_user_id_hash) AS unique_users_total
+                    FROM campaign_invite_link_events
+                    WHERE invite_link_id = %s
+                    """,
+                    (int(invite_link_id),),
+                )
+                row = cur.fetchone() or {}
+        for key in result:
+            if key in row:
+                result[key] = int(row.get(key) or 0)
+        return result
+
+    def get_rule_repost_campaign_clean_channel_settings(self, rule_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, repost_campaign_clean_channel_enabled
+                    FROM routing
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (int(rule_id),),
+                )
+                row = cur.fetchone()
+
+        if not row:
+            return {
+                "ok": False,
+                "rule_id": int(rule_id),
+                "enabled": True,
+                "error_text": "Правило не найдено",
+            }
+
+        data = dict(row)
+        raw_enabled = data.get("repost_campaign_clean_channel_enabled")
+        return {
+            "ok": True,
+            "rule_id": int(data.get("id") or rule_id),
+            "enabled": bool(raw_enabled if raw_enabled is not None else True),
+        }
+
+    def set_rule_repost_campaign_clean_channel_enabled(
+        self,
+        rule_id: int,
+        enabled: bool,
+        actor_id: int | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE routing
+                    SET repost_campaign_clean_channel_enabled = %s
+                    WHERE id = %s
+                    """,
+                    (bool(enabled), int(rule_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
+
+    def set_rule_repost_campaign_saved_post(self, rule_id: int, saved_post_id: int | None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE routing SET repost_campaign_saved_post_id=%s WHERE id=%s", (saved_post_id, int(rule_id)))
+                return cur.rowcount > 0
+
+    def create_campaign_run(self, *, rule_id: int, saved_post_id: int, run_type: str, status: str, show_seconds: int, started_by: int | None, render_mode: str | None = None, targets_total: int = 0, scheduled_post_id: int | None = None, top_time_enabled_snapshot: bool = False, top_time_seconds_snapshot: int = 0) -> int | None:
+        top_time = normalize_repost_campaign_top_time_settings(
+            enabled=bool(top_time_enabled_snapshot),
+            seconds=int(top_time_seconds_snapshot or 0),
+        )
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_runs(tenant_id, rule_id, saved_post_id, run_type, status, render_mode, show_seconds, targets_total, started_by, scheduled_post_id, top_time_enabled_snapshot, top_time_seconds_snapshot)
+                    VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (int(rule_id), int(saved_post_id), str(run_type), str(status), render_mode, int(show_seconds), int(targets_total), started_by, scheduled_post_id, bool(top_time["enabled"]), int(top_time["seconds"])),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return int(row["id"]) if row else None
+
+    def create_campaign_scheduled_launch(self, *, rule_id: int, saved_post_id: int, show_seconds: int, scheduled_at: str, timezone_offset_minutes: int = 180, timezone_label: str = "UTC+3", created_by: int | None = None, preview: dict[str, Any] | None = None, top_time_enabled_snapshot: bool = False, top_time_seconds_snapshot: int = 0) -> int | None:
+        top_time = normalize_repost_campaign_top_time_settings(
+            enabled=bool(top_time_enabled_snapshot),
+            seconds=int(top_time_seconds_snapshot or 0),
+        )
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT id FROM campaign_scheduled_launches WHERE rule_id=%s AND saved_post_id=%s AND scheduled_at=%s AND created_by IS NOT DISTINCT FROM %s AND status='scheduled' ORDER BY id DESC LIMIT 1""", (int(rule_id), int(saved_post_id), scheduled_at, created_by))
+                row = cur.fetchone()
+                if row:
+                    return int(row['id'])
+                cur.execute("""INSERT INTO campaign_scheduled_launches(tenant_id,rule_id,saved_post_id,show_seconds,scheduled_at,timezone_offset_minutes,timezone_label,status,created_by,preview_json,top_time_enabled_snapshot,top_time_seconds_snapshot) VALUES (1,%s,%s,%s,%s,%s,%s,'scheduled',%s,%s::jsonb,%s,%s) RETURNING id""", (int(rule_id), int(saved_post_id), int(show_seconds), scheduled_at, int(timezone_offset_minutes), str(timezone_label), created_by, _json_dumps(preview), bool(top_time["enabled"]), int(top_time["seconds"])))
+                row = cur.fetchone()
+            conn.commit()
+            return int(row['id']) if row else None
+
+    def _normalize_campaign_scheduled_launch_row(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        d = dict(row)
+        d["preview_json"] = _safe_json_loads(d.get("preview_json"), {})
+        d["clean_channel_policy_json"] = _safe_json_loads(d.get("clean_channel_policy_json"), None)
+        return d
+
+    def get_campaign_scheduled_launch(self, scheduled_launch_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_scheduled_launches WHERE id=%s", (int(scheduled_launch_id),))
+                return self._normalize_campaign_scheduled_launch_row(cur.fetchone())
+
+    def list_rule_campaign_scheduled_launches(self, rule_id: int, *, statuses: list[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if statuses:
+                    cur.execute("SELECT * FROM campaign_scheduled_launches WHERE rule_id=%s AND status = ANY(%s) ORDER BY scheduled_at DESC, id DESC LIMIT %s", (int(rule_id), statuses, int(limit)))
+                else:
+                    cur.execute("SELECT * FROM campaign_scheduled_launches WHERE rule_id=%s ORDER BY scheduled_at DESC, id DESC LIMIT %s", (int(rule_id), int(limit)))
+                return [self._normalize_campaign_scheduled_launch_row(r) for r in (cur.fetchall() or [])]
+
+    def list_due_campaign_scheduled_launches(self, *, now_iso: str, limit: int = 10) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM campaign_scheduled_launches
+                    WHERE (status = 'scheduled' AND scheduled_at <= %s)
+                       OR (status = 'waiting_clean_channel'
+                           AND COALESCE(clean_channel_next_retry_at, scheduled_at) <= %s
+                           AND campaign_run_id IS NULL)
+                    ORDER BY COALESCE(clean_channel_next_retry_at, scheduled_at) ASC, id ASC
+                    LIMIT %s
+                    """,
+                    (now_iso, now_iso, int(limit)),
+                )
+                return [self._normalize_campaign_scheduled_launch_row(r) for r in (cur.fetchall() or [])]
+
+    def claim_due_campaign_scheduled_launches(self, *, now_iso: str, worker_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH picked AS (
+                        SELECT id
+                        FROM campaign_scheduled_launches
+                        WHERE (status = 'scheduled' AND scheduled_at <= %s)
+                           OR (status = 'waiting_clean_channel'
+                               AND COALESCE(clean_channel_next_retry_at, scheduled_at) <= %s
+                               AND campaign_run_id IS NULL)
+                        ORDER BY COALESCE(clean_channel_next_retry_at, scheduled_at) ASC, id ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT %s
+                    )
+                    UPDATE campaign_scheduled_launches s
+                    SET status = 'processing', locked_at = NOW(), locked_by = %s, updated_at = NOW()
+                    FROM picked
+                    WHERE s.id = picked.id
+                    RETURNING s.*
+                    """,
+                    (now_iso, now_iso, int(limit), worker_id),
+                )
+                rows = [self._normalize_campaign_scheduled_launch_row(r) for r in (cur.fetchall() or [])]
+            conn.commit()
+            return rows
+
+    def set_campaign_scheduled_launch_campaign_run_id(self, scheduled_launch_id: int, campaign_run_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_launches SET campaign_run_id=%s, updated_at=NOW() WHERE id=%s AND status='processing'", (int(campaign_run_id), int(scheduled_launch_id)))
+                ok=cur.rowcount>0
+            conn.commit(); return ok
+
+    def mark_campaign_scheduled_launch_launched(self, scheduled_launch_id: int, *, campaign_run_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_launches SET status='launched', campaign_run_id=%s, launched_at=NOW(), locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE id=%s AND status='processing'", (int(campaign_run_id), int(scheduled_launch_id)))
+                ok=cur.rowcount>0
+            conn.commit(); return ok
+
+    def mark_campaign_scheduled_launch_failed(self, scheduled_launch_id: int, *, error_text: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_launches SET status='failed', failed_at=NOW(), error_text=%s, locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE id=%s AND status IN ('processing','scheduled')", (error_text, int(scheduled_launch_id)))
+                ok=cur.rowcount>0
+            conn.commit(); return ok
+
+    def mark_campaign_scheduled_launch_needs_review(self, scheduled_launch_id: int, *, error_text: str, campaign_run_id: int | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_launches SET status='needs_review', failed_at=NOW(), error_text=%s, campaign_run_id=COALESCE(%s, campaign_run_id), locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE id=%s AND status='processing'", (error_text, campaign_run_id, int(scheduled_launch_id)))
+                ok=cur.rowcount>0
+            conn.commit(); return ok
+
+    def _clean_channel_wait_reason(self, reason: str | None) -> str:
+        safe_reason = (reason or "").strip()
+        if not safe_reason or "Traceback" in safe_reason or "Traceback (most recent call last)" in safe_reason:
+            return "Чистый канал занят активной рекламой"
+        return safe_reason[:500]
+
+    def mark_campaign_scheduled_launch_waiting_clean_channel(
+        self,
+        scheduled_launch_id: int,
+        *,
+        next_retry_at: str,
+        reason: str | None = None,
+        policy_snapshot: dict[str, Any] | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_scheduled_launches
+                    SET status = 'waiting_clean_channel',
+                        clean_channel_next_retry_at = %s,
+                        clean_channel_wait_attempt_count = COALESCE(clean_channel_wait_attempt_count, 0) + 1,
+                        clean_channel_last_wait_at = NOW(),
+                        clean_channel_last_reason = %s,
+                        clean_channel_policy_json = %s::jsonb,
+                        updated_at = NOW(),
+                        locked_at = NULL,
+                        locked_by = NULL
+                    WHERE id = %s
+                      AND status IN ('scheduled', 'processing', 'waiting_clean_channel')
+                      AND campaign_run_id IS NULL
+                    RETURNING id
+                    """,
+                    (
+                        next_retry_at,
+                        self._clean_channel_wait_reason(reason),
+                        _json_dumps(policy_snapshot),
+                        int(scheduled_launch_id),
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return bool(row)
+
+    def mark_campaign_scheduled_launch_scheduled_again(
+        self,
+        scheduled_launch_id: int,
+        *,
+        next_retry_at: str | None = None,
+        reason: str | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_scheduled_launches
+                    SET status = 'scheduled',
+                        clean_channel_next_retry_at = %s,
+                        clean_channel_last_reason = %s,
+                        updated_at = NOW(),
+                        locked_at = NULL,
+                        locked_by = NULL
+                    WHERE id = %s
+                      AND status = 'waiting_clean_channel'
+                      AND campaign_run_id IS NULL
+                    RETURNING id
+                    """,
+                    (next_retry_at, self._clean_channel_wait_reason(reason) if reason is not None else None, int(scheduled_launch_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return bool(row)
+
+    def cancel_campaign_scheduled_launch(self, scheduled_launch_id: int, *, cancelled_by: int | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_launches SET status='cancelled', cancelled_at=NOW(), cancelled_by=%s, updated_at=NOW() WHERE id=%s AND status IN ('scheduled','waiting_clean_channel')", (cancelled_by, int(scheduled_launch_id)))
+                ok=cur.rowcount>0
+            conn.commit(); return ok
+
+    def reset_stuck_campaign_scheduled_launches(self, *, stuck_seconds: int = 300) -> dict[str, int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_launches SET status='scheduled', locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE status='processing' AND campaign_run_id IS NULL AND locked_at < NOW() - (%s * INTERVAL '1 second')", (int(stuck_seconds),))
+                requeued=int(cur.rowcount)
+                cur.execute("UPDATE campaign_scheduled_launches SET status='needs_review', error_text=COALESCE(error_text, 'Запуск завис после создания campaign_run'), locked_at=NULL, locked_by=NULL, updated_at=NOW() WHERE status='processing' AND campaign_run_id IS NOT NULL AND locked_at < NOW() - (%s * INTERVAL '1 second')", (int(stuck_seconds),))
+                needs_review=int(cur.rowcount)
+            conn.commit()
+        if requeued: logger.info("CAMPAIGN_SCHEDULE_STUCK_RESET count=%s", requeued)
+        if needs_review: logger.warning("CAMPAIGN_SCHEDULE_NEEDS_REVIEW | reason=stale_processing_with_campaign_run | count=%s", needs_review)
+        return {"requeued": requeued, "needs_review": needs_review}
+
+    def _normalize_campaign_scheduled_post_row(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        d = dict(row)
+        d["post_snapshot_json"] = _safe_json_loads(d.get("post_snapshot_json"), {})
+        d["readiness_snapshot_json"] = _safe_json_loads(d.get("readiness_snapshot_json"), {})
+        d["preview_json"] = _safe_json_loads(d.get("preview_json"), {})
+        d["metadata_json"] = _safe_json_loads(d.get("metadata_json"), {})
+        return d
+
+
+    def create_campaign_scheduled_post_draft(self, *, rule_id: int, tenant_id: int = 1, created_by: int | None = None, title: str | None = None, metadata: dict[str, Any] | None = None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO campaign_scheduled_posts(tenant_id, rule_id, created_by, title, metadata_json) VALUES (%s,%s,%s,%s,%s::jsonb) RETURNING id", (int(tenant_id), int(rule_id), created_by, title, _json_dumps(metadata)))
+                row = cur.fetchone()
+            conn.commit()
+        if row: logger.info("VIP_SCHEDULED_POST_DRAFT_CREATED id=%s rule_id=%s", row['id'], rule_id)
+        return int(row['id']) if row else None
+
+    def get_campaign_scheduled_post(self, scheduled_post_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_scheduled_posts WHERE id=%s", (int(scheduled_post_id),))
+                return self._normalize_campaign_scheduled_post_row(cur.fetchone())
+
+    def update_campaign_scheduled_post(self, scheduled_post_id: int, **kwargs) -> bool:
+        mapping={"saved_post_id":"saved_post_id=%s","title":"title=%s","show_seconds":"show_seconds=%s","scheduled_at":"scheduled_at=%s","timezone_offset_minutes":"timezone_offset_minutes=%s","timezone_label":"timezone_label=%s","status":"status=%s","targets_total":"targets_total=%s","targets_ready":"targets_ready=%s","targets_with_warnings":"targets_with_warnings=%s","targets_blocked":"targets_blocked=%s","error_text":"error_text=%s","post_snapshot":"post_snapshot_json=%s::jsonb","readiness_snapshot":"readiness_snapshot_json=%s::jsonb","preview":"preview_json=%s::jsonb","metadata":"metadata_json=%s::jsonb"}
+        set_parts=[]; params=[]
+        for k,sql in mapping.items():
+            if k in kwargs and kwargs[k] is not None:
+                set_parts.append(sql); params.append(_json_dumps(kwargs[k]) if k in {"post_snapshot","readiness_snapshot","preview","metadata"} else kwargs[k])
+        if not set_parts: return False
+        set_parts.append("updated_at=NOW()"); params.append(int(scheduled_post_id))
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE campaign_scheduled_posts SET {', '.join(set_parts)} WHERE id=%s", tuple(params)); ok=cur.rowcount>0
+            conn.commit()
+        if ok: logger.info("VIP_SCHEDULED_POST_UPDATED id=%s", scheduled_post_id)
+        return ok
+
+    def list_campaign_scheduled_posts(self, *, rule_id: int, statuses: list[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if statuses: cur.execute("SELECT * FROM campaign_scheduled_posts WHERE rule_id=%s AND status = ANY(%s) ORDER BY scheduled_at DESC NULLS LAST, id DESC LIMIT %s", (int(rule_id), statuses, int(limit)))
+                else: cur.execute("SELECT * FROM campaign_scheduled_posts WHERE rule_id=%s ORDER BY scheduled_at DESC NULLS LAST, id DESC LIMIT %s", (int(rule_id), int(limit)))
+                return [self._normalize_campaign_scheduled_post_row(r) for r in (cur.fetchall() or [])]
+
+    def list_campaign_scheduled_posts_for_tenant(self, *, tenant_id: int, statuses: list[str] | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if statuses: cur.execute("SELECT * FROM campaign_scheduled_posts WHERE tenant_id=%s AND status = ANY(%s) ORDER BY scheduled_at DESC NULLS LAST, id DESC LIMIT %s", (int(tenant_id), statuses, int(limit)))
+                else: cur.execute("SELECT * FROM campaign_scheduled_posts WHERE tenant_id=%s ORDER BY scheduled_at DESC NULLS LAST, id DESC LIMIT %s", (int(tenant_id), int(limit)))
+                return [self._normalize_campaign_scheduled_post_row(r) for r in (cur.fetchall() or [])]
+
+
+    def replace_campaign_scheduled_post_targets(self, *, scheduled_post_id: int, rule_id: int, targets: list[dict[str, Any]]) -> int:
+        active = 0
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM campaign_scheduled_post_targets WHERE scheduled_post_id=%s", (int(scheduled_post_id),))
+                for t in targets:
+                    cur.execute("""INSERT INTO campaign_scheduled_post_targets(scheduled_post_id, rule_id, target_kind, target_id, target_thread_id, target_title, is_active, metadata_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb) ON CONFLICT (scheduled_post_id, target_id, COALESCE(target_thread_id, -1)) DO UPDATE SET target_title=EXCLUDED.target_title, is_active=EXCLUDED.is_active, updated_at=NOW()""",
+                    (int(scheduled_post_id), int(rule_id), t.get('target_kind','extra'), str(t.get('target_id')), t.get('target_thread_id'), t.get('target_title'), bool(t.get('is_active', True)), _json_dumps(t.get('metadata'))))
+                    if bool(t.get('is_active', True)): active += 1
+                cur.execute("UPDATE campaign_scheduled_posts SET targets_total=%s, updated_at=NOW() WHERE id=%s", (int(active), int(scheduled_post_id)))
+            conn.commit()
+        logger.info("VIP_SCHEDULED_POST_TARGETS_REPLACED id=%s active=%s", scheduled_post_id, active)
+        return active
+
+    def list_campaign_scheduled_post_targets(self, scheduled_post_id: int, *, active_only: bool = True) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_scheduled_post_targets WHERE scheduled_post_id=%s" + (" AND is_active=TRUE" if active_only else "") + " ORDER BY id ASC", (int(scheduled_post_id),))
+                rows=[dict(r) for r in (cur.fetchall() or [])]
+                for r in rows: r['metadata_json']=_safe_json_loads(r.get('metadata_json'), {})
+                return rows
+
+    def update_campaign_scheduled_post_target_check_result(
+        self,
+        target_row_id: int,
+        *,
+        can_publish: bool | None = None,
+        can_delete: bool | None = None,
+        publish_status: str | None = None,
+        delete_status: str | None = None,
+        publish_error_text: str | None = None,
+        delete_error_text: str | None = None,
+        check_source: str | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_scheduled_post_targets
+                    SET can_publish=%s,
+                        can_delete=%s,
+                        publish_status=%s,
+                        delete_status=%s,
+                        publish_error_text=%s,
+                        delete_error_text=%s,
+                        check_source=%s,
+                        checked_at=NOW(),
+                        updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (
+                        can_publish,
+                        can_delete,
+                        publish_status,
+                        delete_status,
+                        publish_error_text,
+                        delete_error_text,
+                        check_source,
+                        int(target_row_id),
+                    ),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+        return ok
+    def log_campaign_scheduled_post_check(self, *, scheduled_post_id: int, rule_id: int, target_id: str, target_thread_id: int | None, check_type: str, status: str, target_row_id: int | None = None, source: str | None = None, error_text: str | None = None, details: dict[str, Any] | None = None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO campaign_scheduled_post_checks(scheduled_post_id,target_row_id,rule_id,target_id,target_thread_id,check_type,status,source,error_text,details_json) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb) RETURNING id", (int(scheduled_post_id), target_row_id, int(rule_id), target_id, target_thread_id, check_type, status, source, error_text, _json_dumps(details)))
+                row=cur.fetchone()
+            conn.commit(); return int(row['id']) if row else None
+    def list_campaign_scheduled_post_checks(self, scheduled_post_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_scheduled_post_checks WHERE scheduled_post_id=%s ORDER BY checked_at DESC, id DESC LIMIT %s", (int(scheduled_post_id), int(limit)))
+                rows=[dict(r) for r in (cur.fetchall() or [])]
+                for r in rows: r['details_json']=_safe_json_loads(r.get('details_json'), {})
+                return rows
+
+    def log_campaign_scheduled_post_event(self, *, scheduled_post_id: int, rule_id: int, event_type: str, status_from: str | None = None, status_to: str | None = None, actor_id: int | None = None, worker_id: str | None = None, message: str | None = None, error_text: str | None = None, extra: dict[str, Any] | None = None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO campaign_scheduled_post_events(scheduled_post_id,rule_id,event_type,status_from,status_to,actor_id,worker_id,message,error_text,extra_json) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb) RETURNING id", (int(scheduled_post_id), int(rule_id), event_type, status_from, status_to, actor_id, worker_id, message, error_text, _json_dumps(extra)))
+                row=cur.fetchone()
+            conn.commit(); return int(row['id']) if row else None
+    def list_campaign_scheduled_post_events(self, scheduled_post_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_scheduled_post_events WHERE scheduled_post_id=%s ORDER BY created_at DESC, id DESC LIMIT %s", (int(scheduled_post_id), int(limit)))
+                rows=[dict(r) for r in (cur.fetchall() or [])]
+                for r in rows: r['extra_json']=_safe_json_loads(r.get('extra_json'), {})
+                return rows
+
+    def schedule_campaign_scheduled_post(self, scheduled_post_id: int, *, scheduled_by: int | None = None) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='scheduled', scheduled_by=%s, scheduled_at_created=NOW(), updated_at=NOW()", (scheduled_by,), "status IN ('draft','ready')", "VIP_SCHEDULED_POST_SCHEDULED")
+    def cancel_campaign_scheduled_post(self, scheduled_post_id: int, *, cancelled_by: int | None = None, reason: str | None = None) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='cancelled', cancelled_at=NOW(), cancelled_by=%s, cancel_reason=%s, updated_at=NOW()", (cancelled_by, reason), "status IN ('draft','ready','scheduled')", "VIP_SCHEDULED_POST_CANCELLED")
+    def mark_campaign_scheduled_post_launched(self, scheduled_post_id: int, *, campaign_run_id: int) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='launched', campaign_run_id=%s, launched_at=NOW(), updated_at=NOW()", (int(campaign_run_id),), "status='processing'", "VIP_SCHEDULED_POST_MARKED_LAUNCHED")
+    def mark_campaign_scheduled_post_failed(self, scheduled_post_id: int, *, error_text: str, campaign_run_id: int | None = None) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='failed', failed_at=NOW(), error_text=%s, campaign_run_id=COALESCE(%s, campaign_run_id), locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (error_text, campaign_run_id), "status IN ('scheduled','processing')", "VIP_SCHEDULED_POST_MARKED_FAILED")
+    def mark_campaign_scheduled_post_needs_review(self, scheduled_post_id: int, *, error_text: str, campaign_run_id: int | None = None) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='needs_review', failed_at=NOW(), error_text=%s, campaign_run_id=COALESCE(%s, campaign_run_id), locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (error_text, campaign_run_id), "status='processing'", "VIP_SCHEDULED_POST_NEEDS_REVIEW")
+    def set_campaign_scheduled_post_campaign_run_id(self, scheduled_post_id: int, campaign_run_id: int) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "campaign_run_id=%s, updated_at=NOW()", (int(campaign_run_id),), "status='processing' AND campaign_run_id IS NULL", "VIP_SCHEDULED_POST_RUN_ID_SET")
+    def mark_campaign_scheduled_post_processing(self, scheduled_post_id: int, *, actor_id: int | None = None) -> bool:
+        lock_owner = f"send-now:{actor_id}" if actor_id is not None else "send-now"
+        return self._update_campaign_scheduled_post_status(
+            scheduled_post_id,
+            "status='processing', locked_by=%s, locked_at=NOW(), lock_until=NOW() + INTERVAL '5 minutes', updated_at=NOW()",
+            (lock_owner,),
+            "status IN ('draft','ready','scheduled') AND campaign_run_id IS NULL",
+            "VIP_SCHEDULED_POST_MARKED_PROCESSING",
+        )
+    def reset_campaign_scheduled_post_after_send_now_failure(self, scheduled_post_id: int, *, status: str, error_text: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_scheduled_posts
+                    SET status=%s,
+                        error_text=%s,
+                        locked_by=NULL,
+                        locked_at=NULL,
+                        lock_until=NULL,
+                        updated_at=NOW()
+                    WHERE id=%s
+                      AND status='processing'
+                      AND campaign_run_id IS NULL
+                    """,
+                    (status, error_text, int(scheduled_post_id)),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+        if ok:
+            logger.info("VIP_SCHEDULED_POST_RESET_AFTER_SEND_NOW_FAILURE id=%s", scheduled_post_id)
+        return ok
+    def delay_campaign_scheduled_post_retry(self, scheduled_post_id: int, *, next_retry_at: str, error_text: str | None = None) -> bool:
+        return self._update_campaign_scheduled_post_status(scheduled_post_id, "status='scheduled', attempt_count=attempt_count+1, next_retry_at=%s, error_text=%s, locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW()", (next_retry_at, error_text), "status='processing'", None)
+    def _update_campaign_scheduled_post_status(self, scheduled_post_id: int, set_sql: str, params: tuple[Any, ...], where_sql: str, log_code: str | None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE campaign_scheduled_posts SET {set_sql} WHERE id=%s AND {where_sql}", (*params, int(scheduled_post_id))); ok=cur.rowcount>0
+            conn.commit()
+        if ok and log_code: logger.info("%s id=%s", log_code, scheduled_post_id)
+        return ok
+
+    def delay_campaign_scheduled_post_until(self, scheduled_post_id: int, *, next_retry_at: str, error_text: str | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_scheduled_posts
+                    SET status='scheduled',
+                        next_retry_at=%s,
+                        error_text=%s,
+                        locked_by=NULL,
+                        locked_at=NULL,
+                        lock_until=NULL,
+                        updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (next_retry_at, error_text, int(scheduled_post_id)),
+                )
+                ok = cur.rowcount > 0
+            conn.commit()
+        return ok
+
+    def claim_due_campaign_scheduled_posts(self, *, now_iso: str, worker_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""WITH picked AS (SELECT id FROM campaign_scheduled_posts WHERE status='scheduled' AND campaign_run_id IS NULL AND scheduled_at IS NOT NULL AND COALESCE(next_retry_at, scheduled_at) <= %s ORDER BY COALESCE(next_retry_at, scheduled_at) ASC, scheduled_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT %s) UPDATE campaign_scheduled_posts p SET status='processing', locked_by=%s, locked_at=NOW(), lock_until=NOW() + INTERVAL '5 minutes', updated_at=NOW() FROM picked WHERE p.id = picked.id RETURNING p.*""", (now_iso, int(limit), worker_id))
+                rows=[self._normalize_campaign_scheduled_post_row(r) for r in (cur.fetchall() or [])]
+            conn.commit()
+        if rows: logger.info("VIP_SCHEDULED_POST_CLAIMED count=%s worker=%s", len(rows), worker_id)
+        return rows
+    def reset_stuck_campaign_scheduled_posts(self, *, stuck_seconds: int = 300) -> dict[str, int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_scheduled_posts SET status='scheduled', locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW() WHERE status='processing' AND campaign_run_id IS NULL AND (lock_until < NOW() OR locked_at < NOW() - (%s * INTERVAL '1 second'))", (int(stuck_seconds),)); requeued=int(cur.rowcount)
+                cur.execute("UPDATE campaign_scheduled_posts SET status='needs_review', error_text=COALESCE(error_text, 'Запуск завис после создания campaign_run'), locked_by=NULL, locked_at=NULL, lock_until=NULL, updated_at=NOW() WHERE status='processing' AND campaign_run_id IS NOT NULL AND (lock_until < NOW() OR locked_at < NOW() - (%s * INTERVAL '1 second'))", (int(stuck_seconds),)); needs_review=int(cur.rowcount)
+            conn.commit()
+        if requeued: logger.info("VIP_SCHEDULED_POST_STUCK_RESET count=%s", requeued)
+        if needs_review: logger.warning("VIP_SCHEDULED_POST_NEEDS_REVIEW | reason=stale_processing_with_campaign_run | count=%s", needs_review)
+        return {"requeued": requeued, "needs_review": needs_review}
+
+    def _normalize_repost_campaign_launch_job_row(self, row) -> dict[str, Any] | None:
+        if not row:
+            return None
+        item = dict(row)
+        item["payload_json"] = _safe_json_loads(item.get("payload_json"), {})
+        item["result_json"] = _safe_json_loads(item.get("result_json"), None)
+        return item
+
+    def create_repost_campaign_launch_job(
+        self,
+        *,
+        rule_id: int,
+        admin_id: int | None,
+        progress_chat_id: int | str | None,
+        progress_message_id: int | None,
+        payload_json: dict[str, Any] | None = None,
+        max_attempts: int = 3,
+    ) -> dict[str, Any]:
+        existing = self.get_active_repost_campaign_launch_job_for_rule(rule_id)
+        if existing:
+            return existing
+        payload = dict(payload_json or {})
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO repost_campaign_launch_jobs(
+                            rule_id, admin_id, status, payload_json, progress_chat_id,
+                            progress_message_id, max_attempts, created_at, updated_at
+                        )
+                        VALUES(%s, %s, 'pending', %s::jsonb, %s, %s, %s, NOW(), NOW())
+                        RETURNING *
+                        """,
+                        (
+                            int(rule_id),
+                            admin_id,
+                            _json_dumps(payload),
+                            str(progress_chat_id) if progress_chat_id is not None else None,
+                            progress_message_id,
+                            max(1, int(max_attempts)),
+                        ),
+                    )
+                    row = cur.fetchone()
+                    conn.commit()
+                    return self._normalize_repost_campaign_launch_job_row(row) or {}
+                except Exception as exc:
+                    if "duplicate key value violates unique constraint" not in str(exc).lower():
+                        raise
+                    conn.rollback()
+        existing = self.get_active_repost_campaign_launch_job_for_rule(rule_id)
+        if existing:
+            return existing
+        raise RuntimeError("Не удалось создать durable job запуска рекламной кампании")
+
+    def get_active_repost_campaign_launch_job_for_rule(self, rule_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM repost_campaign_launch_jobs
+                    WHERE rule_id=%s AND status IN ('pending','processing')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (int(rule_id),),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def get_repost_campaign_launch_job(self, job_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM repost_campaign_launch_jobs WHERE id=%s", (int(job_id),))
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def get_due_repost_campaign_launch_jobs(self, limit: int = 5) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM repost_campaign_launch_jobs
+                    WHERE status='pending'
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT %s
+                    """,
+                    (max(1, int(limit)),),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return [self._normalize_repost_campaign_launch_job_row(r) or {} for r in rows]
+
+    def lease_repost_campaign_launch_job(self, job_id: int, worker_id: str, lock_ttl_seconds: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='processing',
+                        locked_by=%s,
+                        locked_until=NOW() + make_interval(secs => %s),
+                        attempts=attempts + 1,
+                        started_at=COALESCE(started_at, NOW()),
+                        updated_at=NOW()
+                    WHERE id=%s
+                      AND status='pending'
+                    RETURNING *
+                    """,
+                    (worker_id, max(1, int(lock_ttl_seconds)), int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def mark_repost_campaign_launch_job_processing(self, job_id: int, *, worker_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='processing', locked_by=%s, started_at=COALESCE(started_at, NOW()), updated_at=NOW()
+                    WHERE id=%s AND status='processing'
+                    RETURNING *
+                    """,
+                    (worker_id, int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def set_repost_campaign_launch_job_campaign_run_id(self, job_id: int, campaign_run_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET campaign_run_id=%s, updated_at=NOW()
+                    WHERE id=%s AND status='processing'
+                    RETURNING *
+                    """,
+                    (int(campaign_run_id), int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def mark_repost_campaign_launch_job_sent(self, job_id: int, *, campaign_run_id: int | None, result_json: dict[str, Any] | None) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='sent', campaign_run_id=%s, result_json=%s::jsonb, locked_by=NULL, locked_until=NULL, updated_at=NOW(), finished_at=NOW()
+                    WHERE id=%s AND status='processing'
+                    RETURNING *
+                    """,
+                    (campaign_run_id, _json_dumps(result_json or {}), int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def mark_repost_campaign_launch_job_failed(self, job_id: int, *, last_error: str, result_json: dict[str, Any] | None = None, retryable: bool = False) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status = CASE WHEN %s AND campaign_run_id IS NULL AND attempts < max_attempts THEN 'pending' ELSE 'failed' END,
+                        last_error=%s,
+                        result_json=COALESCE(%s::jsonb, result_json),
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        updated_at=NOW(),
+                        finished_at=CASE WHEN %s AND campaign_run_id IS NULL AND attempts < max_attempts THEN finished_at ELSE NOW() END
+                    WHERE id=%s AND status='processing'
+                    RETURNING *
+                    """,
+                    (bool(retryable), last_error, _json_dumps(result_json) if result_json is not None else None, bool(retryable), int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def mark_repost_campaign_launch_job_needs_review(self, job_id: int, *, last_error: str, campaign_run_id: int | None = None, result_json: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='needs_review',
+                        last_error=%s,
+                        campaign_run_id=COALESCE(%s, campaign_run_id),
+                        result_json=COALESCE(%s::jsonb, result_json),
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        updated_at=NOW(),
+                        finished_at=NOW()
+                    WHERE id=%s AND status IN ('pending','processing')
+                    RETURNING *
+                    """,
+                    (last_error, campaign_run_id, _json_dumps(result_json) if result_json is not None else None, int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def mark_repost_campaign_launch_job_cancelled(self, job_id: int, *, reason: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='cancelled', last_error=%s, locked_by=NULL, locked_until=NULL, updated_at=NOW(), finished_at=NOW()
+                    WHERE id=%s AND status IN ('pending','processing')
+                    RETURNING *
+                    """,
+                    (reason, int(job_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return self._normalize_repost_campaign_launch_job_row(row)
+
+    def recover_stale_repost_campaign_launch_jobs(self, *, worker_id: str | None = None) -> dict[str, int]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='needs_review',
+                        last_error='Состояние запуска неизвестно после рестарта',
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        updated_at=NOW(),
+                        finished_at=NOW()
+                    WHERE status='processing'
+                      AND locked_until IS NOT NULL
+                      AND locked_until < NOW()
+                      AND campaign_run_id IS NOT NULL
+                    """
+                )
+                needs_review = int(cur.rowcount or 0)
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='failed',
+                        last_error=COALESCE(last_error, 'Превышено число попыток запуска кампании'),
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        updated_at=NOW(),
+                        finished_at=NOW()
+                    WHERE status='processing'
+                      AND locked_until IS NOT NULL
+                      AND locked_until < NOW()
+                      AND campaign_run_id IS NULL
+                      AND attempts >= max_attempts
+                    """
+                )
+                failed = int(cur.rowcount or 0)
+                cur.execute(
+                    """
+                    UPDATE repost_campaign_launch_jobs
+                    SET status='pending',
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        updated_at=NOW()
+                    WHERE status='processing'
+                      AND locked_until IS NOT NULL
+                      AND locked_until < NOW()
+                      AND campaign_run_id IS NULL
+                      AND attempts < max_attempts
+                    """
+                )
+                requeued = int(cur.rowcount or 0)
+            conn.commit()
+        return {"requeued": requeued, "needs_review": needs_review, "failed": failed}
+
+    def update_campaign_run_status(self, run_id: int, *, status: str, render_mode: str | None = None, targets_success: int | None = None, targets_failed: int | None = None, error_text: str | None = None, report: dict[str, Any] | None = None, finish: bool = False) -> bool:
+        set_parts = ["status=%s", "updated_at=NOW()"]
+        params: list[Any] = [str(status)]
+        if render_mode is not None:
+            set_parts.append("render_mode=%s")
+            params.append(render_mode)
+        if targets_success is not None:
+            set_parts.append("targets_success=%s")
+            params.append(int(targets_success))
+        if targets_failed is not None:
+            set_parts.append("targets_failed=%s")
+            params.append(int(targets_failed))
+        if error_text is not None:
+            set_parts.append("error_text=%s")
+            params.append(error_text)
+        if report is not None:
+            set_parts.append("report_json=%s::jsonb")
+            params.append(_json_dumps(report))
+        if finish:
+            set_parts.append("finished_at=NOW()")
+        params.append(int(run_id))
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE campaign_runs SET {', '.join(set_parts)} WHERE id=%s", tuple(params))
+            conn.commit()
+            return True
+
+    def create_campaign_run_message(self, *, run_id: int, rule_id: int, saved_post_id: int, target_kind: str, target_id: str, target_thread_id: int | None = None, target_title: str | None = None, show_seconds: int = 0, delete_after_at: str | None = None) -> int | None:
+        delete_status = "pending" if delete_after_at else "none"
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO campaign_run_messages(run_id, rule_id, saved_post_id, target_kind, target_id, target_thread_id, target_title, show_seconds, delete_after_at, delete_status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                    """,
+                    (int(run_id), int(rule_id), int(saved_post_id), str(target_kind), str(target_id), target_thread_id, target_title, int(show_seconds), delete_after_at, delete_status),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return int(row["id"]) if row else None
+
+    def mark_campaign_run_message_sending(self, message_id: int, *, render_mode: str | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_run_messages SET send_status='sending', render_mode=%s, updated_at=NOW() WHERE id=%s", (render_mode, int(message_id)))
+            conn.commit()
+            return True
+
+    def mark_campaign_run_message_sent(self, message_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None = None, render_mode: str | None = None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaign_run_messages SET send_status='sent', sent_message_id=%s, sent_message_ids_json=%s::jsonb, render_mode=%s, sent_at=NOW(), updated_at=NOW() WHERE id=%s", (sent_message_id, _json_dumps(sent_message_ids), render_mode, int(message_id)))
+            conn.commit()
+            return True
+
+    def mark_campaign_run_message_failed(
+        self,
+        message_id: int,
+        *,
+        error_text: str,
+        render_mode: str | None = None,
+        delete_status: str | None = "failed",
+        delete_error_text: str | None = None,
+    ) -> bool:
+        safe_delete_status = str(delete_status or "failed")
+        if safe_delete_status not in {"none", "pending", "processing", "deleted", "failed"}:
+            safe_delete_status = "failed"
+        safe_delete_error_text = delete_error_text
+        if delete_status is None and not safe_delete_error_text:
+            safe_delete_error_text = "ID публикации не подтверждён. Автоматическое удаление невозможно, требуется ручная проверка."
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET send_status='failed',
+                        send_error_text=%s,
+                        render_mode=%s,
+                        delete_status=%s,
+                        delete_error_text=%s,
+                        updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (error_text, render_mode, safe_delete_status, safe_delete_error_text, int(message_id)),
+                )
+            conn.commit()
+            return True
+
+    def create_campaign_top_time_pause(
+        self,
+        *,
+        rule_id: int,
+        campaign_run_id: int,
+        campaign_run_message_id: int,
+        target_id: str,
+        target_thread_id: int | None,
+        target_title: str | None,
+        starts_at: str,
+        ends_at: str,
+    ) -> int | None:
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO campaign_top_time_pauses (
+                            rule_id, campaign_run_id, campaign_run_message_id, target_id,
+                            target_thread_id, target_title, starts_at, ends_at, status
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active')
+                        ON CONFLICT (campaign_run_message_id)
+                        DO UPDATE SET campaign_run_message_id = EXCLUDED.campaign_run_message_id
+                        RETURNING id
+                        """,
+                        (
+                            int(rule_id), int(campaign_run_id), int(campaign_run_message_id),
+                            str(target_id), target_thread_id, target_title, starts_at, ends_at,
+                        ),
+                    )
+                    row = cur.fetchone()
+                conn.commit()
+                return int(row["id"]) if row else None
+        except Exception:
+            logger.exception("Failed to create campaign top-time pause")
+            return None
+
+    def get_campaign_top_time_pause(self, pause_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_top_time_pauses WHERE id = %s LIMIT 1", (int(pause_id),))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def get_campaign_top_time_pause_by_run_message(self, campaign_run_message_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_top_time_pauses WHERE campaign_run_message_id=%s LIMIT 1", (int(campaign_run_message_id),))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def list_active_campaign_top_time_pauses_for_rule(self, rule_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM campaign_top_time_pauses
+                    WHERE rule_id = %s
+                      AND status = 'active'
+                      AND ends_at > NOW()
+                    ORDER BY ends_at ASC, id ASC
+                    LIMIT %s
+                    """,
+                    (int(rule_id), int(limit)),
+                )
+                return [dict(row) for row in (cur.fetchall() or [])]
+
+    def list_campaign_top_time_pauses_for_run(self, campaign_run_id: int, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM campaign_top_time_pauses
+                    WHERE campaign_run_id = %s
+                    ORDER BY
+                        CASE status
+                            WHEN 'active' THEN 0
+                            WHEN 'completed' THEN 1
+                            WHEN 'cancelled' THEN 2
+                            ELSE 3
+                        END,
+                        ends_at DESC,
+                        id DESC
+                    LIMIT %s
+                    """,
+                    (int(campaign_run_id), int(limit)),
+                )
+                return [dict(row) for row in (cur.fetchall() or [])]
+
+    def get_active_campaign_top_time_pause_for_target(
+        self,
+        *,
+        target_id: str,
+        target_thread_id: int | None = None,
+        at_iso: str | None = None,
+    ) -> dict[str, Any] | None:
+        at_expr = at_iso or datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if target_thread_id is None:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM campaign_top_time_pauses
+                        WHERE target_id = %s
+                          AND target_thread_id IS NULL
+                          AND status = 'active'
+                          AND starts_at <= %s::timestamptz
+                          AND ends_at > %s::timestamptz
+                        ORDER BY ends_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (str(target_id), at_expr, at_expr),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM campaign_top_time_pauses
+                        WHERE target_id = %s
+                          AND target_thread_id = %s
+                          AND status = 'active'
+                          AND starts_at <= %s::timestamptz
+                          AND ends_at > %s::timestamptz
+                        ORDER BY ends_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (str(target_id), int(target_thread_id), at_expr, at_expr),
+                    )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def cancel_campaign_top_time_pause(
+        self,
+        pause_id: int,
+        *,
+        cancelled_at: str | None = None,
+        cancel_reason: str | None = None,
+        actor_id: int | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_top_time_pauses
+                    SET
+                        status = 'cancelled',
+                        cancelled_at = COALESCE(%s::timestamptz, NOW()),
+                        updated_at = NOW(),
+                        cancel_reason = COALESCE(%s, 'manual_admin_cancel')
+                    WHERE id = %s
+                      AND status = 'active'
+                    RETURNING id
+                    """,
+                    (cancelled_at, cancel_reason, int(pause_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return bool(row)
+
+
+    def mark_expired_campaign_top_time_pauses_completed(
+        self,
+        *,
+        now_iso: str | None = None,
+        limit: int = 500,
+    ) -> int:
+        safe_limit = max(1, min(int(limit or 500), 5000))
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH due AS (
+                        SELECT id
+                        FROM campaign_top_time_pauses
+                        WHERE status = 'active'
+                          AND ends_at <= COALESCE(%s::timestamptz, NOW())
+                        ORDER BY ends_at ASC, id ASC
+                        LIMIT %s
+                    )
+                    UPDATE campaign_top_time_pauses p
+                    SET status = 'completed',
+                        completed_at = COALESCE(%s::timestamptz, NOW()),
+                        updated_at = NOW()
+                    FROM due
+                    WHERE p.id = due.id
+                    RETURNING p.id
+                    """,
+                    (now_iso, safe_limit, now_iso),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+            return len(rows)
+
+    def get_campaign_run(self, run_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_runs WHERE id=%s", (int(run_id),))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def get_campaign_run_message(self, message_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM campaign_run_messages
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (int(message_id),),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def list_campaign_runs_for_rule(self, rule_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_runs WHERE rule_id=%s ORDER BY created_at DESC LIMIT %s", (int(rule_id), int(limit)))
+                return [dict(row) for row in (cur.fetchall() or [])]
+
+    def list_campaign_run_messages(self, run_id: int) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM campaign_run_messages WHERE run_id=%s ORDER BY id ASC", (int(run_id),))
+                return [dict(row) for row in (cur.fetchall() or [])]
+
+    def resolve_campaign_run_delete_failures(
+        self,
+        *,
+        run_id: int,
+        rule_id: int,
+        actor_id: int | None = None,
+        reason: str | None = None,
+    ) -> dict[str, int]:
+        _ = actor_id, reason
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET delete_status = 'deleted',
+                        deleted_at = NOW(),
+                        delete_error_text = '[manual_resolved_orphaned_target] ' || COALESCE(delete_error_text, ''),
+                        updated_at = NOW()
+                    WHERE run_id = %s
+                      AND rule_id = %s
+                      AND send_status = 'sent'
+                      AND delete_status = 'failed'
+                    """,
+                    (int(run_id), int(rule_id)),
+                )
+                resolved = int(cur.rowcount or 0)
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE delete_status = 'pending') AS remaining_pending,
+                        COUNT(*) FILTER (WHERE delete_status = 'processing') AS remaining_processing,
+                        COUNT(*) FILTER (WHERE delete_status = 'failed') AS remaining_failed
+                    FROM campaign_run_messages
+                    WHERE run_id = %s
+                      AND rule_id = %s
+                      AND send_status = 'sent'
+                    """,
+                    (int(run_id), int(rule_id)),
+                )
+                row = dict(cur.fetchone() or {})
+            conn.commit()
+        return {
+            "resolved": resolved,
+            "remaining_pending": int(row.get("remaining_pending") or 0),
+            "remaining_processing": int(row.get("remaining_processing") or 0),
+            "remaining_failed": int(row.get("remaining_failed") or 0),
+        }
+
+    def list_active_campaign_placements_for_rule(
+        self,
+        rule_id: int,
+        *,
+        limit: int = 20,
+        basic_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        where_parts = [
+            "r.rule_id = %s",
+            "m.send_status = 'sent'",
+            "m.delete_status IN ('pending', 'processing', 'failed')",
+        ]
+        params: list[Any] = [int(rule_id)]
+        if basic_only:
+            where_parts.append("r.scheduled_post_id IS NULL")
+            where_parts.append("r.run_type IN ('manual', 'scheduled')")
+        params.append(int(limit))
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        r.id AS run_id,
+                        r.rule_id,
+                        r.saved_post_id,
+                        r.run_type,
+                        r.status AS run_status,
+                        r.scheduled_post_id,
+                        r.created_at,
+                        r.started_at,
+                        r.finished_at,
+                        r.targets_total,
+                        r.targets_success,
+                        r.targets_failed,
+                        COUNT(m.id) FILTER (WHERE m.send_status = 'sent') AS sent,
+                        COUNT(m.id) FILTER (WHERE m.delete_status = 'pending') AS delete_pending,
+                        COUNT(m.id) FILTER (WHERE m.delete_status = 'processing') AS delete_processing,
+                        COUNT(m.id) FILTER (WHERE m.delete_status = 'failed') AS delete_failed,
+                        MIN(m.delete_after_at) AS delete_after_at_min,
+                        MAX(m.delete_after_at) AS delete_after_at_max,
+                        MAX(m.sent_at) AS last_sent_at
+                    FROM campaign_runs r
+                    JOIN campaign_run_messages m ON m.run_id = r.id
+                    WHERE {' AND '.join(where_parts)}
+                    GROUP BY r.id
+                    ORDER BY
+                        CASE
+                            WHEN COUNT(m.id) FILTER (WHERE m.delete_status = 'failed') > 0 THEN 0
+                            ELSE 1
+                        END ASC,
+                        MIN(m.delete_after_at) ASC NULLS LAST,
+                        r.id DESC
+                    LIMIT %s
+                    """,
+                    tuple(params),
+                )
+                rows = [dict(row) for row in (cur.fetchall() or [])]
+
+        for row in rows:
+            delete_pending = int(row.get("delete_pending") or 0)
+            delete_processing = int(row.get("delete_processing") or 0)
+            delete_failed = int(row.get("delete_failed") or 0)
+            active_count = delete_pending + delete_processing
+            if delete_failed > 0 and active_count > 0:
+                placement_status = "mixed"
+            elif delete_failed > 0:
+                placement_status = "delete_problem"
+            elif active_count > 0:
+                placement_status = "active"
+            else:
+                placement_status = "clean"
+            row["sent"] = int(row.get("sent") or 0)
+            row["active_messages_total"] = row["sent"]
+            row["delete_pending"] = delete_pending
+            row["delete_processing"] = delete_processing
+            row["delete_failed"] = delete_failed
+            row["placement_status"] = placement_status
+
+        return rows
+
+    def get_active_campaign_placements_summary_for_rule(
+        self,
+        rule_id: int,
+        *,
+        basic_only: bool = True,
+    ) -> dict[str, Any]:
+        where_parts = [
+            "r.rule_id = %s",
+            "m.send_status = 'sent'",
+            "m.delete_status IN ('pending', 'processing', 'failed')",
+        ]
+        params: list[Any] = [int(rule_id)]
+        if basic_only:
+            where_parts.append("r.scheduled_post_id IS NULL")
+            where_parts.append("r.run_type IN ('manual', 'scheduled')")
+
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH placements AS (
+                        SELECT
+                            r.id AS run_id,
+                            COUNT(m.id) FILTER (WHERE m.delete_status = 'pending') AS delete_pending,
+                            COUNT(m.id) FILTER (WHERE m.delete_status = 'processing') AS delete_processing,
+                            COUNT(m.id) FILTER (WHERE m.delete_status = 'failed') AS delete_failed
+                        FROM campaign_runs r
+                        JOIN campaign_run_messages m ON m.run_id = r.id
+                        WHERE {' AND '.join(where_parts)}
+                        GROUP BY r.id
+                    )
+                    SELECT
+                        COUNT(*) AS placements_total,
+                        COUNT(*) FILTER (WHERE delete_pending + delete_processing > 0) AS active_total,
+                        COUNT(*) FILTER (WHERE delete_failed > 0) AS delete_problem_total,
+                        COUNT(*) FILTER (WHERE delete_failed > 0 AND delete_pending + delete_processing > 0) AS mixed_total,
+                        COALESCE(SUM(delete_pending), 0) AS delete_pending_total,
+                        COALESCE(SUM(delete_processing), 0) AS delete_processing_total,
+                        COALESCE(SUM(delete_failed), 0) AS delete_failed_total
+                    FROM placements
+                    """,
+                    tuple(params),
+                )
+                row = dict(cur.fetchone() or {})
+
+        return {
+            "rule_id": int(rule_id),
+            "basic_only": bool(basic_only),
+            "placements_total": int(row.get("placements_total") or 0),
+            "active_total": int(row.get("active_total") or 0),
+            "delete_problem_total": int(row.get("delete_problem_total") or 0),
+            "mixed_total": int(row.get("mixed_total") or 0),
+            "delete_pending_total": int(row.get("delete_pending_total") or 0),
+            "delete_processing_total": int(row.get("delete_processing_total") or 0),
+            "delete_failed_total": int(row.get("delete_failed_total") or 0),
+        }
+
+    def claim_due_campaign_run_messages_for_delete(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH due AS (
+                        SELECT id
+                        FROM campaign_run_messages
+                        WHERE send_status = 'sent'
+                          AND delete_status = 'pending'
+                          AND delete_after_at IS NOT NULL
+                          AND delete_after_at <= NOW()
+                          AND sent_message_id IS NOT NULL
+                          AND NOT (
+                            views_final_status = 'failed'
+                            AND views_final_next_retry_at IS NOT NULL
+                            AND views_final_next_retry_at > NOW()
+                          )
+                        ORDER BY delete_after_at ASC, id ASC
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE campaign_run_messages m
+                    SET delete_status = 'processing',
+                        delete_attempt_count = COALESCE(delete_attempt_count, 0) + 1,
+                        updated_at = NOW()
+                    FROM due
+                    WHERE m.id = due.id
+                    RETURNING m.*
+                    """,
+                    (int(limit),),
+                )
+                rows = [dict(row) for row in (cur.fetchall() or [])]
+            conn.commit()
+            return rows
+
+    def mark_campaign_run_message_views_processing(self, message_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET views_final_status = 'processing',
+                        views_final_attempt_count = COALESCE(views_final_attempt_count, 0) + 1,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (int(message_id),),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def mark_campaign_run_message_views_collected(self, message_id: int, *, views_count: int, collected_at: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET views_final_count = %s,
+                        views_final_status = 'collected',
+                        views_final_collected_at = %s,
+                        views_final_error_text = NULL,
+                        views_final_next_retry_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (int(views_count), collected_at, int(message_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def mark_campaign_run_message_views_unavailable(self, message_id: int, *, error_text: str | None, collected_at: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET views_final_count = 0,
+                        views_final_status = 'unavailable',
+                        views_final_collected_at = %s,
+                        views_final_error_text = %s,
+                        views_final_next_retry_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (collected_at, error_text, int(message_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def mark_campaign_run_message_views_failed(self, message_id: int, *, error_text: str, next_retry_at: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET views_final_status = 'failed',
+                        views_final_error_text = %s,
+                        views_final_next_retry_at = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (error_text, next_retry_at, int(message_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def mark_campaign_run_message_deleted(self, message_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET delete_status = 'deleted',
+                        deleted_at = NOW(),
+                        delete_error_text = NULL,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (int(message_id),),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def mark_campaign_run_message_delete_failed(self, message_id: int, *, error_text: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET delete_status = 'failed',
+                        delete_error_text = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (error_text, int(message_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+
+    def reset_stuck_campaign_delete_processing(self, *, stuck_seconds: int = 300) -> int:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_run_messages
+                    SET delete_status = 'pending',
+                        updated_at = NOW()
+                    WHERE delete_status = 'processing'
+                      AND updated_at <= NOW() - (%s * INTERVAL '1 second')
+                    """,
+                    (int(stuck_seconds),),
+                )
+                count = int(cur.rowcount)
+            conn.commit()
+            return count
+
+    def update_rule_repost_campaign_settings(self, rule_id: int, *, enabled: bool, show_seconds: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE routing SET repost_campaign_enabled=%s, repost_campaign_show_seconds=%s WHERE id=%s", (bool(enabled), int(show_seconds), int(rule_id)))
+            conn.commit()
+            return True
+
+    def get_rule_repost_campaign_summary(self, rule_id: int) -> dict[str, Any]:
+        default = {
+            "enabled": False,
+            "show_seconds": 0,
+            "top_time_enabled": False,
+            "top_time_seconds": 0,
+            "targets_total": 0,
+            "targets_active": 0,
+            "targets_ready": 0,
+            "targets_with_errors": 0,
+        }
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT
+                            COALESCE(repost_campaign_enabled, FALSE) AS enabled,
+                            COALESCE(repost_campaign_show_seconds, 0) AS show_seconds,
+                            COALESCE(repost_campaign_top_time_enabled, FALSE) AS top_time_enabled,
+                            COALESCE(repost_campaign_top_time_seconds, 0) AS top_time_seconds
+                        FROM routing
+                        WHERE id = %s
+                        LIMIT 1
+                        """,
+                        (int(rule_id),),
+                    )
+                    rule_row = cur.fetchone()
+                    if not rule_row:
+                        return default
+                    cur.execute(
+                        """
+                        SELECT
+                            COUNT(*) AS targets_total,
+                            COUNT(*) FILTER (WHERE is_active = TRUE) AS targets_active,
+                            COUNT(*) FILTER (
+                                WHERE is_active = TRUE
+                                  AND COALESCE(can_post, TRUE) = TRUE
+                                  AND COALESCE(can_delete, TRUE) = TRUE
+                                  AND (last_check_error IS NULL OR last_check_error = '')
+                            ) AS targets_ready,
+                            COUNT(*) FILTER (
+                                WHERE is_active = TRUE
+                                  AND (
+                                      COALESCE(can_post, TRUE) = FALSE
+                                      OR COALESCE(can_delete, TRUE) = FALSE
+                                      OR (last_check_error IS NOT NULL AND last_check_error <> '')
+                                  )
+                            ) AS targets_with_errors
+                        FROM rule_repost_campaign_targets
+                        WHERE rule_id = %s
+                        """,
+                        (int(rule_id),),
+                    )
+                    targets_row = cur.fetchone() or {}
+            return {
+                "enabled": bool(rule_row["enabled"]),
+                "show_seconds": int(rule_row["show_seconds"] or 0),
+                "top_time_enabled": bool(rule_row.get("top_time_enabled")),
+                "top_time_seconds": int(rule_row.get("top_time_seconds") or 0),
+                "targets_total": int(targets_row.get("targets_total") or 0),
+                "targets_active": int(targets_row.get("targets_active") or 0),
+                "targets_ready": int(targets_row.get("targets_ready") or 0),
+                "targets_with_errors": int(targets_row.get("targets_with_errors") or 0),
+            }
+        except Exception as exc:
+            logger.exception(
+                "REPOST_CAMPAIGN_SUMMARY_FAILED | rule_id=%s | error=%s",
+                rule_id,
+                exc,
+            )
+            return default
+
+    def add_rule_repost_campaign_target(self, *, rule_id: int, target_id: str, target_thread_id: int | None, title: str | None, created_by: int | None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO rule_repost_campaign_targets(rule_id,target_id,target_thread_id,title,created_by) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (rule_id,target_id,COALESCE(target_thread_id,-1)) DO NOTHING RETURNING id""", (int(rule_id), str(target_id), target_thread_id, title, created_by))
+                row=cur.fetchone()
+            conn.commit(); return int(row['id']) if row else None
+
+    def list_rule_repost_campaign_targets(self, rule_id: int, *, active_only: bool = False) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if active_only: cur.execute("SELECT * FROM rule_repost_campaign_targets WHERE rule_id=%s AND is_active=TRUE ORDER BY id", (int(rule_id),))
+                else: cur.execute("SELECT * FROM rule_repost_campaign_targets WHERE rule_id=%s ORDER BY id", (int(rule_id),))
+                return [dict(x) for x in cur.fetchall() or []]
+
+    def remove_rule_repost_campaign_target(self, row_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM rule_repost_campaign_targets
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (int(row_id),),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return row is not None
+
+    def set_rule_repost_campaign_target_active(self, row_id: int, is_active: bool) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE rule_repost_campaign_targets
+                    SET is_active = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (bool(is_active), int(row_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return row is not None
+
+    def update_rule_repost_campaign_target_check_result(
+        self,
+        row_id: int,
+        *,
+        title: str | None = None,
+        last_check_error: str | None = None,
+        can_post: bool | None = None,
+        can_delete: bool | None = None,
+        publish_status: str | None = None,
+        delete_permission_status: str | None = None,
+        publish_error_text: str | None = None,
+        delete_error_text: str | None = None,
+        check_source: str | None = None,
+        check_status_json: dict | None = None,
+    ) -> bool:
+        _ = check_status_json
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE rule_repost_campaign_targets
+                    SET title = COALESCE(%s, title),
+                        can_post = %s,
+                        can_delete = %s,
+                        publish_status = %s,
+                        delete_permission_status = %s,
+                        publish_error_text = %s,
+                        delete_error_text = %s,
+                        check_source = %s,
+                        last_check_at = NOW(),
+                        last_check_error = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (title, can_post, can_delete, publish_status, delete_permission_status, publish_error_text, delete_error_text, check_source, last_check_error, int(row_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return row is not None
+
+    def create_delivery_campaign_copy(self, *, delivery_id: int, rule_id: int, target_id: str, target_thread_id: int | None, target_title: str | None) -> int | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO delivery_campaign_copies(delivery_id,rule_id,target_id,target_thread_id,target_title) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (delivery_id,target_id,COALESCE(target_thread_id,-1)) DO NOTHING RETURNING id""", (int(delivery_id), int(rule_id), str(target_id), target_thread_id, target_title))
+                row=cur.fetchone()
+            conn.commit(); return int(row['id']) if row else None
+
+    def get_delivery_campaign_copy(self, copy_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT *, COALESCE(sent_message_ids_json, '[]'::jsonb) AS sent_message_ids_json FROM delivery_campaign_copies WHERE id=%s", (int(copy_id),)); r=cur.fetchone()
+                if not r: return None
+                d=dict(r); d['sent_message_ids']=_safe_json_loads(d.get('sent_message_ids_json'), [])
+                return d
+
+    def mark_delivery_campaign_copy_processing(self, copy_id: int) -> bool:
+        return self._update_copy_status(copy_id, 'send_status', 'processing')
+
+    def mark_delivery_campaign_copy_sent(self, copy_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None, delivery_method: str | None, delete_after_at: str | None) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE delivery_campaign_copies SET send_status='sent', sent_at=NOW(), sent_message_id=%s, sent_message_ids_json=%s, delivery_method=%s, delete_after_at=%s, delete_status='scheduled', updated_at=NOW() WHERE id=%s", (sent_message_id, _json_dumps(sent_message_ids or []), delivery_method, delete_after_at, int(copy_id)))
+            conn.commit(); return True
+
+    def _update_copy_status(self, copy_id: int, field: str, value: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE delivery_campaign_copies SET {field}=%s, updated_at=NOW() WHERE id=%s", (value, int(copy_id)))
+            conn.commit(); return True
+
+    def mark_delivery_campaign_copy_send_failed(self, copy_id: int, error_text: str) -> bool: return self._update_copy_status(copy_id,'send_status','failed')
+    def mark_delivery_campaign_copy_delete_processing(self, copy_id: int) -> bool: return self._update_copy_status(copy_id,'delete_status','processing')
+    def mark_delivery_campaign_copy_deleted(self, copy_id: int) -> bool: return self._update_copy_status(copy_id,'delete_status','deleted')
+    def mark_delivery_campaign_copy_delete_failed(self, copy_id: int, error_text: str) -> bool: return self._update_copy_status(copy_id,'delete_status','failed')
+    def mark_delivery_campaign_copy_delete_skipped(self, copy_id: int, reason: str) -> bool: return self._update_copy_status(copy_id,'delete_status','skipped')
+
                 AND (d.id IS NULL OR (
                     d.rule_id=a.rule_id AND d.status='sent'
                     AND d.sent_message_id>0

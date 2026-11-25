@@ -426,6 +426,43 @@ def test_rescan_legacy_video_history_431_and_atomic_rebuild(repo, monkeypatch):
     repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner, queue_rebuilt=True)
 
 
+@pytest.mark.parametrize(("raw_ids", "allowed"), [
+    ("[651]", True),
+    ("[651, null]", False),
+    ("[651, 652]", False),
+    ("null", False),
+    ('{"id": 651}', False),
+])
+def test_fresh_replay_legacy_video_accepts_only_one_numeric_id(repo, raw_ids, allowed):
+    """Malformed historical send IDs must fail closed without mutating the attempt."""
+    _, rule_id, deliveries, _, _, target = seed(repo, uuid4().int % 10**12)
+    delivery_id = deliveries[0]
+    key = f"delivery:{delivery_id}:target:{target}:video_send:v1"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE deliveries SET status='sent', sent_message_id=651,
+                   target_id_snapshot=%s WHERE id=%s""",
+                (target, delivery_id),
+            )
+            cur.execute(
+                """UPDATE delivery_attempts SET idempotency_key=%s,
+                   operation_kind='video_send', status='accepted',
+                   telegram_method='video_send', target_id=%s,
+                   sent_message_ids_json=%s::jsonb, error_text=NULL,
+                   updated_at=TIMESTAMPTZ '2026-11-21 10:00:00+00'
+                   WHERE rule_id=%s""",
+                (key, target, raw_ids, rule_id),
+            )
+    if allowed:
+        was_active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
+        repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner)
+    else:
+        with pytest.raises(RuntimeError, match="неизвестным результатом"):
+            repo.begin_rule_rescan(rule_id, fresh=True)
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "accepted"
+
+
 def test_rescan_durable_video_intent_cannot_be_archived_as_legacy(repo):
     _, rule_id, deliveries, _, _, target = seed(repo, 132)
     key=f"delivery:{deliveries[0]}:target:{target}:video_send:v1"
