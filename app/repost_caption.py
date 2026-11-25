@@ -13,6 +13,8 @@ from .delivery_content_helpers import normalize_caption_entities
 def get_repost_caption_override(rule: Any) -> dict[str, Any] | None:
     if (getattr(rule, "mode", "repost") or "repost") != "repost":
         return None
+    if getattr(rule, "repost_caption_delivery_mode", None) == "ai":
+        return None  # AI is prepared per photo; never use the static sample as its caption.
     if not bool(getattr(rule, "repost_caption_enabled", False)):
         return None
     caption = str(getattr(rule, "repost_caption", None) or "")

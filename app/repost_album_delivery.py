@@ -8,6 +8,7 @@ from .runtime_utils import run_db
 from .transport_policy import TransportRateLimited
 from .send_intent import PublicationWriteUnavailable
 from .repost_caption import get_repost_caption_override, caption_override_content
+from .ai_repost_caption import ai_mode, prepare_caption
 
 
 logger = logging.getLogger("forwarder")
@@ -71,6 +72,17 @@ class RepostAlbumDelivery:
             )
 
         source_messages = None
+        ai_photo_album = False
+        if ai_mode(rule):
+            source_messages = await owner._fetch_album_messages(source_channel, message_ids)
+            if not source_messages or [int(m.id) for m in source_messages] != message_ids:
+                return False
+            ai_photo_album = all(getattr(m, "photo", None) for m in source_messages)
+            if ai_photo_album:
+                custom_caption = await prepare_caption(owner, rule, source_messages, idempotency_key)
+                use_copy_first = False
+                requires_builder = True
+                caption_mode = "ai"
         first_source_caption = None
         final_error_text = None
         attempts_debug: list[dict] = []
@@ -102,7 +114,7 @@ class RepostAlbumDelivery:
         # PREVIEW / caption text for verify
         # =========================================================
         try:
-            fetched_preview = await owner._fetch_album_messages(source_channel, message_ids)
+            fetched_preview = source_messages or await owner._fetch_album_messages(source_channel, message_ids)
             if fetched_preview:
                 source_messages = fetched_preview
                 first_source_caption = owner._get_album_primary_text(
@@ -983,6 +995,9 @@ class RepostAlbumDelivery:
             for delivery_id in delivery_ids:
                 await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
             return False
+
+        if ai_photo_album:
+            return False  # No split-album or alternate-transport fallback for AI.
 
         if is_self_loop:
             logger.warning(

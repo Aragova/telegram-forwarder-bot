@@ -183,6 +183,9 @@ class SenderReuploadHelpers:
                 logger.warning("REUPLOAD_ALBUM | TELETHON_UNCERTAIN | no_botapi_fallback=True")
                 return telethon_result
 
+            if (caption_override or {}).get("ai_premium_only"):
+                return telethon_result
+
             caption_index = 0 if caption_override is not None else None
             caption_text = str(caption_override["text"]) if caption_override is not None else None
             caption_entities = None
@@ -395,6 +398,9 @@ class SenderReuploadHelpers:
                 logger.warning("REUPLOAD_MESSAGE | TELETHON_TEXT_UNCERTAIN | no_botapi_fallback=True")
                 return telethon_outcome
 
+            if (caption_override or {}).get("ai_premium_only"):
+                return telethon_outcome
+
             html_text = raw_text if caption_override is not None else _sender_primitives._prepare_html_text(raw_text)
             bot_entities = _sender_primitives._telethon_entities_to_bot(raw_entities) if caption_override is not None else None
             if html_text:
@@ -447,6 +453,9 @@ class SenderReuploadHelpers:
                 return TelethonSendOutcome(True, True, True, int(telethon_outcome), [int(telethon_outcome)], resolution_method="legacy_telethon_helper")
             if getattr(telethon_outcome, "transport_attempted", False) or getattr(telethon_outcome, "transport_accepted", False):
                 logger.warning("REUPLOAD_MESSAGE | TELETHON_FILE_UNCERTAIN | no_botapi_fallback=True")
+                return telethon_outcome
+
+            if (caption_override or {}).get("ai_premium_only"):
                 return telethon_outcome
 
             html_text = raw_text if caption_override is not None else _sender_primitives._prepare_html_text(raw_text)
