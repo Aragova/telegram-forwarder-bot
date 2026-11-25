@@ -121,3 +121,38 @@ def test_full_processing_preserves_short_vfr_source(tmp_path, processor):
         assert source.is_file()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_failed_processing_cleans_temp_files_but_preserves_retry_source(
+    tmp_path, processor, monkeypatch, cancelled,
+):
+    source = tmp_path / "source.mp4"
+    _source(source, "30000/1001", vfr=True)
+
+    async def fail_normalize(_input, output, *_args, **_kwargs):
+        # Simulate a partial encoder output before validation fails/cancellation.
+        from pathlib import Path
+        Path(output).write_bytes(b"partial")
+        if cancelled:
+            raise asyncio.CancelledError
+        return False
+
+    monkeypatch.setattr(processor, "normalize_video", fail_normalize)
+    async def run():
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError):
+                await processor.build_processed_video(input_file_path=str(source))
+        else:
+            assert not await processor.build_processed_video(input_file_path=str(source))
+        assert source.is_file()
+        assert list(tmp_path.iterdir()) == [source]
+        assert all(key == str(source) for key in processor.video_info_cache)
+    asyncio.run(run())
+
+
+def test_fps_match_handles_unknown_rate_and_average():
+    match = VideoProcessor._matches_target_fps
+    assert match({"fps": None, "fps_normalized": 30, "fps_avg": 30}, 30)
+    assert not match({"fps": 30, "fps_avg": 15}, 30)
+    assert not match({"fps": 25, "fps_rate_known": False}, 25)

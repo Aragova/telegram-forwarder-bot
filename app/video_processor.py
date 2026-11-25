@@ -5,6 +5,7 @@ import asyncio
 import json
 import math
 from fractions import Fraction
+from uuid import uuid4
 from pathlib import Path
 import logging
 from datetime import datetime, timezone
@@ -412,7 +413,9 @@ class VideoProcessor:
     def _matches_target_fps(info, target_fps):
         # Preserve the existing 29.97/30 and 23.976/24 equivalence for
         # passthrough, but do not confuse a nominal VFR rate with its average.
-        nominal = info.get("fps", info.get("fps_normalized"))
+        nominal = info.get("fps")
+        if nominal is None:
+            nominal = info.get("fps_normalized")
         average = info.get("fps_avg")
         return (
             info.get("fps_rate_known", True)
@@ -1119,7 +1122,7 @@ class VideoProcessor:
         return config_duration
 
     async def create_intro_matching_video(self, source_path, profile, duration, stage_logger=None):
-        output_path = os.path.join(self.temp_dir, f"intro_matched_{int(time.time())}.mp4")
+        output_path = os.path.join(self.temp_dir, f"intro_matched_{uuid4().hex}.mp4")
         is_image = self._is_intro_image(source_path)
         
         vf = self._build_video_filter(profile['target_width'], profile['target_height'], profile['target_fps'])
@@ -1155,17 +1158,23 @@ class VideoProcessor:
             intro_timeout,
         )
 
-        result = await self.run_ffmpeg_with_progress(
-            cmd,
-            "Создание заставки",
-            timeout=intro_timeout,
-            total_duration_estimate=duration,
-            stage_logger=stage_logger,
-        )
-        if result and os.path.exists(output_path):
-            logger.info(f"   ✅ Заставка создана: {os.path.getsize(output_path) / (1024 * 1024):.1f} MB")
-            return output_path
-        return None
+        keep_output = False
+        try:
+            result = await self.run_ffmpeg_with_progress(
+                cmd,
+                "Создание заставки",
+                timeout=intro_timeout,
+                total_duration_estimate=duration,
+                stage_logger=stage_logger,
+            )
+            if result and os.path.isfile(output_path):
+                logger.info(f"   ✅ Заставка создана: {os.path.getsize(output_path) / (1024 * 1024):.1f} MB")
+                keep_output = True
+                return output_path
+            return None
+        finally:
+            if not keep_output:
+                self._remove_failed_video_artifacts([output_path])
 
     async def create_thumbnail_fast(self, video_path, thumbnail_path, stage_logger=None):
         if not video_path or not os.path.isfile(video_path):
@@ -1670,6 +1679,18 @@ class VideoProcessor:
 
     # ==================== MAIN PROCESS ====================
 
+    def _remove_failed_video_artifacts(self, paths, *, preserve_path=None):
+        """Release only this invocation's files; borrowed sources belong to the job."""
+        for path in paths:
+            if not path or path == preserve_path:
+                continue
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                logger.warning("VIDEO_TEMP_CLEANUP_FAILED | path=%s", path, exc_info=True)
+            finally:
+                self.video_info_cache.pop(path, None)
+
     async def process_video(
         self,
         video_file_id,
@@ -1795,8 +1816,8 @@ class VideoProcessor:
             )
             return False
 
-        timestamp = int(time.time())
-        base_name = f"video_{timestamp}_{video_file_id[:8] if video_file_id else 'local'}"
+        # Unique per invocation, including parallel worker processes and retries.
+        base_name = f"video_{uuid4().hex}_{video_file_id[:8] if video_file_id else 'local'}"
 
         input_path = input_file_path or os.path.join(self.temp_dir, f"input_{base_name}.mp4")
         clipped_main_path = os.path.join(self.temp_dir, f"clipped_{base_name}.mp4")
@@ -1807,6 +1828,7 @@ class VideoProcessor:
 
         files_to_delete = [input_path, clipped_main_path, final_output, normalized_main_path, thumbnail_path]
         sent_msg = None
+        keep_outputs = False
 
         try:
             bot = context.bot if hasattr(context, 'bot') else self.bot
@@ -2141,8 +2163,8 @@ class VideoProcessor:
                     if intro_result and os.path.exists(intro_result):
                         intro_processed_path = intro_result
                         intro_created = True
-                        intro_info = await self.get_video_info(intro_processed_path)
                         files_to_delete.append(intro_processed_path)
+                        intro_info = await self.get_video_info(intro_processed_path)
                         logger.info(f"   📦 Размер заставки: {intro_info['file_size'] / (1024 * 1024):.1f} MB")
 
                         self._stage_completed(
@@ -2337,6 +2359,7 @@ class VideoProcessor:
             )
 
             if send_output:
+                keep_outputs = True  # Deferred cleanup already scheduled.
                 return sent_msg
 
             artifact_payload = {
@@ -2355,6 +2378,7 @@ class VideoProcessor:
                 },
                 "cleanup_paths": [p for p in files_to_delete if p and p != final_output],
             }
+            keep_outputs = True  # The send stage now owns these artifacts.
             return artifact_payload
 
         except Exception as e:
@@ -2373,14 +2397,6 @@ class VideoProcessor:
                 },
             )
 
-            for fp in files_to_delete:
-                try:
-                    if fp and os.path.isfile(fp):
-                        os.remove(fp)
-                    if fp in self.video_info_cache:
-                        del self.video_info_cache[fp]
-                except:
-                    pass
             if sent_msg is not None and sent_msg is not False:
                 # Cleanup/diagnostics failed after the send returned; retain
                 # its evidence instead of reporting a retryable pipeline failure.
@@ -2390,6 +2406,11 @@ class VideoProcessor:
                 # Preserve definite send rejection/preflight classification.
                 raise
             return False
+        finally:
+            if not keep_outputs:
+                self._remove_failed_video_artifacts(
+                    files_to_delete, preserve_path=input_path if input_file_path else None,
+                )
 
     async def shutdown(self):
         logger.info("🛑 Завершение работы VideoProcessor...")
