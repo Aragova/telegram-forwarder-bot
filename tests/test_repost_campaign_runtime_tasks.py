@@ -261,3 +261,15 @@ def test_campaign_shutdown_keeps_ownership_when_drain_cannot_finish(monkeypatch)
         assert manager._tasks == []
 
     asyncio.run(_run())
+
+
+def test_campaign_delete_confirmation_handles_missing_or_null_message_rows():
+    from app.repost_campaign_ui import build_repost_campaign_run_delete_failures_resolve_confirm_view
+
+    for messages in (None, [None], [None, {"publication_review_required": False, "delete_status": "failed"}]):
+        message, keyboard = build_repost_campaign_run_delete_failures_resolve_confirm_view(
+            rule_id=1, run_id=2, details={"messages": messages, "summary": {}}
+        )
+        assert "Снять проблему удаления" in message
+        assert "без подтверждённых ID" not in message
+        assert keyboard is not None
