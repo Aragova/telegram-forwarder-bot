@@ -146,7 +146,11 @@ class SenderFetchDownloadHelpers:
         try:
             logger.info("📥 Начинаю скачивание исходного видео...")
 
-            file_path = await self._read_client().download_media(
+            client = self._read_client()
+            if client is None:
+                logger.warning("Telethon клиент недоступен для скачивания медиа")
+                return None
+            file_path = await client.download_media(
                 message,
                 file=str(download_target_path),
                 progress_callback=progress_callback,
