@@ -61,7 +61,7 @@ async def _execute(repo, *, delivery_ids=None):
     service.db = repo
 
     async def fake_deliver_album(*_args, **_kwargs):
-        repo.attempt = {"status": "verified", "sent_message_ids_json": [501, 502]}
+        repo.attempt = {"status": "verified", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
         return True
 
     service._deliver_album = fake_deliver_album
@@ -95,7 +95,7 @@ def test_repost_album_success_marks_all_deliveries_sent():
 
 def test_repost_album_cache_hit_marks_all_deliveries_sent():
     repo = FakeAlbumRepo()
-    repo.attempt = {"status": "verified", "sent_message_ids_json": [501, 502]}
+    repo.attempt = {"status": "verified", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
 
     ok = asyncio.run(_execute(repo, delivery_ids=[1, 2]))
 
@@ -114,7 +114,7 @@ def test_repost_album_no_false_success_if_mark_sent_fails():
 
 def test_repost_album_accepted_cache_does_not_fake_success_or_resend():
     repo = FakeAlbumRepo()
-    repo.attempt = {"status": "accepted", "sent_message_ids_json": [501, 502]}
+    repo.attempt = {"status": "accepted", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
 
     result = asyncio.run(_execute(repo, delivery_ids=[1, 2]))
 
@@ -127,7 +127,7 @@ def test_repost_album_accepted_cache_does_not_fake_success_or_resend():
 
 def test_repost_album_accepted_cache_is_read_only_reconciled_when_messages_exist():
     repo = FakeAlbumRepo()
-    repo.attempt = {"status": "accepted", "sent_message_ids_json": [501, 502]}
+    repo.attempt = {"status": "accepted", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
     repo.verification_result = {"ok": True, "sent_message_ids": [501, 502]}
 
     ok = asyncio.run(_execute(repo, delivery_ids=[1, 2]))
@@ -140,7 +140,7 @@ def test_repost_album_accepted_cache_is_read_only_reconciled_when_messages_exist
 
 def test_repost_album_accepted_cache_does_not_recover_partial_copy():
     repo = FakeAlbumRepo()
-    repo.attempt = {"status": "accepted", "sent_message_ids_json": [501]}
+    repo.attempt = {"status": "accepted", "sent_message_ids_json": [501], "source_message_ids_json": [1, 2]}
     repo.verification_result = {"ok": True, "sent_message_ids": [501]}
 
     result = asyncio.run(_execute(repo, delivery_ids=[1, 2]))
