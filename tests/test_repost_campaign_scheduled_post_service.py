@@ -101,6 +101,16 @@ class FakeRepo:
             return False
         row["campaign_run_id"] = campaign_run_id
         return True
+    def claim_campaign_scheduled_post_snapshot(self, scheduled_post_id, *, actor_id=None):
+        if not self.mark_campaign_scheduled_post_processing(scheduled_post_id, actor_id=actor_id):
+            return None
+        # Mirrors the repository's atomic parent-row/target-vector claim.
+        row = dict(self.posts[scheduled_post_id])
+        row["targets_snapshot"] = [
+            dict(item) for item in self.post_targets.get(scheduled_post_id, [])
+        ]
+        return row
+
     def mark_campaign_scheduled_post_processing(self, scheduled_post_id, *, actor_id=None):
         row=self.posts.get(scheduled_post_id)
         if not row or row.get("campaign_run_id") is not None or row.get("status") not in {"draft","ready","scheduled"}:
