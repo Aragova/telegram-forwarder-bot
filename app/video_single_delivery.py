@@ -347,28 +347,30 @@ class VideoSingleDelivery:
                 "ok": False, "retryable": True, "accepted": False,
                 "rejected_before_send": True, "error_text": str(exc),
             }
-        except (TelegramRetryAfter, FloodWaitError, TransportRateLimited) as exc:
+        except TransportRateLimited as exc:
             if publication_returned:
                 return await post_send_failure(exc)
-            # A definite Bot API flood-control rejection happens before the
-            # video is posted; never finalize as accepted or faulty, and let
-            # the worker retry only after the required delay.
-            if isinstance(exc, TransportRateLimited):
-                delay = max(1, exc.retry_after_seconds)
-            else:
-                delay = max(1, int(exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after))
+            # An unaccepted source read/download must reach the worker's
+            # defer path without consuming the last retry attempt.
             logger.warning(
-                "VIDEO_LEGACY_RATE_LIMITED | rule_id=%s | delivery_id=%s | retry_after=%s",
+                "VIDEO_LEGACY_RATE_LIMITED | rule_id=%s | delivery_id=%s | retry_after=%s | action=defer",
+                rule.id, delivery_id, exc.retry_after_seconds,
+            )
+            raise
+        except (TelegramRetryAfter, FloodWaitError) as exc:
+            if publication_returned:
+                return await post_send_failure(exc)
+            delay = max(1, int(exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after))
+            logger.warning(
+                "VIDEO_LEGACY_RATE_LIMITED | rule_id=%s | delivery_id=%s | retry_after=%s | action=defer",
                 rule.id, delivery_id, delay,
             )
-            return {
-                "ok": False,
-                "retryable": True,
-                "accepted": False,
-                "rejected_before_send": True,
-                "retry_after_seconds": delay,
-                "error_text": f"{type(exc).__name__}: retry_after={delay}",
-            }
+            raise TransportRateLimited(
+                retry_after_seconds=delay,
+                backend="telethon" if isinstance(exc, FloodWaitError) else "bot",
+                op_name="video_delivery",
+                key=str(source_channel if isinstance(exc, FloodWaitError) else target_id),
+            ) from exc
         except Exception as exc:
             if publication_returned:
                 return await post_send_failure(exc)
