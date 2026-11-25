@@ -117,7 +117,18 @@ def prepare_publication_inbox(client: Any, repository: Any):
 
     client.publication_inbox_ready = asyncio.get_running_loop().create_future()
 
-    buffer = deque(maxlen=1024)
+    from pathlib import Path
+    from .publication_mapping_spool import PublicationMappingSpool
+
+    # Persist beside the Telethon SQLiteSession, which survives service restarts.
+    session_file = getattr(getattr(client, "session", None), "filename", None)
+    spool = (
+        PublicationMappingSpool(Path(session_file).with_suffix(".publication-mappings.sqlite"))
+        if session_file else None
+    )
+    # Test/injected clients without a session use an in-memory buffer only.
+    buffer = deque()
+    emergency = deque()
     inbox: PublicationInbox | None = None
     candidate: PublicationInbox | None = None
     buffer_overflow = False
@@ -127,10 +138,29 @@ def prepare_publication_inbox(client: Any, repository: Any):
 
     async def flush_live() -> None:
         async with live_lock:
-            while buffer and candidate is not None:
-                peer, old, new = buffer[0]
+            if candidate is None:
+                return
+            if spool is not None:
+                # ACK SQLite only after PostgreSQL commits the exact pair.
+                # Replaying a committed-but-unacked pair is idempotent.
+                while True:
+                    entries = await asyncio.to_thread(spool.pending, 128)
+                    if not entries:
+                        break
+                    for row_id, peer, old, new in entries:
+                        await candidate.record(peer, old, new)
+                        await asyncio.to_thread(spool.acknowledge, row_id)
+                # All durable entries already include the in-memory buffer.
+                buffer.clear()
+            while emergency:
+                peer, old, new = emergency[0]
                 await candidate.record(peer, old, new)
-                buffer.popleft()
+                emergency.popleft()
+            if spool is None:
+                while buffer:
+                    peer, old, new = buffer[0]
+                    await candidate.record(peer, old, new)
+                    buffer.popleft()
 
     def schedule_retry(delay: float) -> None:
         nonlocal retry_task
@@ -157,7 +187,17 @@ def prepare_publication_inbox(client: Any, repository: Any):
             if not pairs:
                 return
             old,new = map(list,zip(*pairs))
-            if len(buffer) == buffer.maxlen:
+            if spool is not None:
+                try:
+                    await asyncio.to_thread(spool.append, peer, old, new)
+                except Exception:
+                    # Disk failure is not an excuse to reopen Telegram writes.
+                    client.publication_write_blocked = True
+                    buffer_overflow = True
+                    emergency.append((peer, old, new))
+                    logger.exception("TELEGRAM_PUBLICATION_MAPPING_LOCAL_SPOOL_FAILED")
+                    return
+            if len(buffer) >= 1024:
                 buffer_overflow = True
                 client.publication_write_blocked = True
                 overflow_evidence = (peer,old)
@@ -166,6 +206,10 @@ def prepare_publication_inbox(client: Any, repository: Any):
                     persist = getattr(repository,"record_publication_inbox_overflow",None)
                     if callable(persist):
                         await asyncio.to_thread(persist,candidate.sender_account_id,peer,old)
+                # When no SQLite session is available retain the full vector
+                # in memory; with a session, it is already safely on disk.
+                if spool is None:
+                    buffer.append((peer, old, new))
                 return
             buffer.append((peer,old,new))
             if inbox is None or live_lock.locked() or (retry_task is not None and not retry_task.done()):
@@ -256,7 +300,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
                     retry_startup(delay), name="telegram-publication-startup-retry",
                 )
                 return
-            if buffer:
+            if buffer or emergency:
                 # A live event arrived during checkpoint initialization.
                 await drain_startup()
                 return
