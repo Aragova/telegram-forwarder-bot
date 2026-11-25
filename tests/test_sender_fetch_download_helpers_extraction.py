@@ -291,3 +291,86 @@ def test_download_video_source_exception_smoke(monkeypatch, tmp_path):
     failed_event = owner.logged_events[-1]
     assert "download boom" in failed_event["error_text"]
     assert failed_event["extra"]["stage"] == "download"
+
+
+def test_source_fetch_rate_limit_is_not_a_missing_message():
+    import pytest
+    from telethon.errors import FloodWaitError
+    from app.sender_fetch_download_helpers import SenderFetchDownloadHelpers
+    from app.transport_policy import TransportRateLimited
+
+    for exc in (
+        FloodWaitError(request=None, capture=7),
+        TransportRateLimited(retry_after_seconds=7, backend="telethon", op_name="get_messages", key="source"),
+    ):
+        telethon = FakeGetMessagesTelethon(exc=exc)
+        with pytest.raises(TransportRateLimited) as error:
+            asyncio.run(SenderFetchDownloadHelpers(_owner(telethon)).fetch_message("source", 55))
+        assert error.value.retry_after_seconds == 7
+
+
+def test_source_download_rate_limit_removes_partial_file_without_failure_event(monkeypatch, tmp_path):
+    import pytest
+    from telethon.errors import FloodWaitError
+    from app.sender_fetch_download_helpers import SenderFetchDownloadHelpers, settings
+    from app.transport_policy import TransportRateLimited
+
+    class LimitedDownload:
+        async def download_media(self, message, file, progress_callback):
+            Path(file).write_bytes(b"partial")
+            raise FloodWaitError(request=None, capture=9)
+
+    monkeypatch.setattr(settings, "base_dir_raw", str(tmp_path))
+    monkeypatch.setattr(settings, "media_cache_dir", "cache")
+    owner = _owner(LimitedDownload())
+    with pytest.raises(TransportRateLimited) as error:
+        asyncio.run(SenderFetchDownloadHelpers(owner).download_video_source(
+            SimpleNamespace(id=55), delivery_id=1, rule_id=2, source_channel="source",
+        ))
+    assert error.value.retry_after_seconds == 9
+    assert not list(settings.media_cache_path.iterdir())
+    assert not owner.logged_events
+
+
+def test_source_fetch_and_download_use_read_client_when_writer_is_unavailable(monkeypatch, tmp_path):
+    from app.sender_fetch_download_helpers import SenderFetchDownloadHelpers, settings
+
+    class Reader(FakeGetMessagesTelethon):
+        async def download_media(self, message, file, progress_callback):
+            Path(file).write_bytes(b"video")
+            return file
+
+    reader = Reader()
+    owner = _owner(None)
+    owner.telethon_read = reader
+    helper = SenderFetchDownloadHelpers(owner)
+    assert asyncio.run(helper.fetch_message("source", 55)) == {"ok": True}
+    monkeypatch.setattr(settings, "base_dir_raw", str(tmp_path))
+    monkeypatch.setattr(settings, "media_cache_dir", "cache")
+    path = asyncio.run(helper.download_video_source(SimpleNamespace(id=55)))
+    assert path.read_bytes() == b"video"
+
+
+def test_source_read_helper_handles_owner_without_writer_attribute():
+    from app.sender_fetch_download_helpers import SenderFetchDownloadHelpers
+
+    reader = FakeGetMessagesTelethon()
+    owner = SimpleNamespace(telethon_read=reader)
+    result = asyncio.run(SenderFetchDownloadHelpers(owner).fetch_message("source", 55))
+    assert result == {"ok": True}
+    assert reader.calls == [("source", 55)]
+
+
+def test_source_download_without_reader_logs_explicit_warning_and_skips_rpc(monkeypatch, tmp_path, caplog):
+    from app.sender_fetch_download_helpers import SenderFetchDownloadHelpers, settings
+
+    monkeypatch.setattr(settings, "base_dir_raw", str(tmp_path))
+    monkeypatch.setattr(settings, "media_cache_dir", "cache")
+    owner = _owner(None)
+    with caplog.at_level(logging.WARNING, logger="forwarder"):
+        result = asyncio.run(
+            SenderFetchDownloadHelpers(owner).download_video_source(SimpleNamespace(id=55))
+        )
+    assert result is None
+    assert "Telethon клиент недоступен для скачивания медиа" in caplog.text
+    assert not list(settings.media_cache_path.iterdir())

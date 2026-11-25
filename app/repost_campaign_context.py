@@ -8,6 +8,8 @@ from app.repost_campaign_runtime_service import RepostCampaignRuntimeService
 from app.repost_campaign_scheduled_post_service import RepostCampaignScheduledPostService
 from app.repost_campaign_target_check_service import RepostCampaignTargetCheckService
 from app.saved_post_renderer import SavedPostRenderer
+from app.transport import wrap_bot
+from app.transport_policy import build_sender_bot_policy
 
 
 @dataclass(frozen=True)
@@ -37,7 +39,7 @@ def build_repost_campaign_runtime(ctx: RepostCampaignHandlersContext) -> RepostC
     telethon_client = ctx.get_telethon_client()
 
     renderer = SavedPostRenderer(
-        bot=bot,
+        bot=wrap_bot(bot, label="campaign.handlers.bot", policy=build_sender_bot_policy()),
         telethon_client=telethon_client,
         temp_dir=getattr(ctx.settings, "temp_dir", "media/temp"),
         logger_=ctx.logger,

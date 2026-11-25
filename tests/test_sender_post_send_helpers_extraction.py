@@ -208,8 +208,8 @@ def test_confirm_target_delivery_message_ids_no_get_messages(caplog):
 
     result = asyncio.run(helper.confirm_target_delivery_message_ids(rule_id=1, delivery_id=2, source_channel="s", target_id="t", source_message_ids=[3], candidate_sent_message_ids=["40", "bad", 41], method="m"))
 
-    assert result == [40, 41]
-    assert "DELIVERY_TARGET_CONFIRM_SKIPPED_NO_GET_MESSAGES" in caplog.text
+    assert result == []
+    assert "DELIVERY_TARGET_CONFIRM_UNVERIFIED_NO_GET_MESSAGES" in caplog.text
 
 
 def test_confirm_target_delivery_message_ids_no_candidates(caplog):
@@ -282,3 +282,39 @@ def test_run_post_send_step_safe_exception_is_non_fatal(caplog):
 
     assert result == {"ok": False, "error": "boom"}
     assert "POST_SEND_STEP_FAILED_NON_FATAL" in caplog.text
+
+
+def test_target_confirmation_fails_closed_without_telegram_reader():
+    import asyncio
+    from types import SimpleNamespace
+    from app.sender_post_send_helpers import SenderPostSendHelpers
+
+    helper = SenderPostSendHelpers(SimpleNamespace(telethon=None, telethon_read=None))
+    result = asyncio.run(helper.confirm_target_delivery_message_ids(
+        rule_id=1, delivery_id=2, source_channel="source", target_id="-10010",
+        source_message_ids=[10, 11], candidate_sent_message_ids=[100, 101],
+        method="copy_album",
+    ))
+    assert result == []
+
+
+def test_target_confirmation_uses_available_read_client_for_real_validation():
+    from datetime import datetime, timezone
+    from app.sender_post_send_helpers import SenderPostSendHelpers
+
+    calls = []
+
+    class Reader:
+        async def get_messages(self, entity, ids):
+            calls.append((entity, ids))
+            return SimpleNamespace(id=ids, date=datetime.now(timezone.utc))
+
+    owner = SimpleNamespace(telethon=SimpleNamespace(), telethon_read=Reader())
+    helper = SenderPostSendHelpers(owner)
+    result = asyncio.run(helper.confirm_target_delivery_message_ids(
+        rule_id=1, delivery_id=2, source_channel="source", target_id="-10010",
+        source_message_ids=[10, 11], candidate_sent_message_ids=[101],
+        method="copy_album",
+    ))
+    assert result == [101]
+    assert calls == [(-10010, 101)]

@@ -357,3 +357,40 @@ def test_top_time_snapshot_source_guard_does_not_add_pause_or_worker_guard():
         assert "target_top_pause" not in source
         assert "top_time_pause" not in source
         assert "next_run_at = pause" not in source
+
+
+def test_scheduled_launch_stop_signal_during_reset_prevents_new_claim():
+    repo = FR()
+    stop = asyncio.Event()
+
+    def reset_then_stop(**kwargs):
+        stop.set()
+        return {"requeued": 0, "needs_review": 0}
+
+    def forbidden_claim(**kwargs):
+        raise AssertionError("new launch claimed after shutdown signal")
+
+    repo.reset_stuck_campaign_scheduled_launches = reset_then_stop
+    repo.claim_due_campaign_scheduled_launches = forbidden_claim
+    service = RepostCampaignScheduleService(repo=repo, campaign_runtime=RT())
+    result = asyncio.run(service.process_due_scheduled_launches(worker_id="w", stop_event=stop))
+    assert result == {"claimed": 0}
+
+
+def test_scheduled_launch_loop_propagates_stop_event_to_claim_boundary():
+    import logging
+    from app.repost_campaign_schedule_service import run_repost_campaign_scheduled_launch_loop
+
+    stop = asyncio.Event()
+
+    class Probe:
+        logger = logging.getLogger("test.scheduled_launch.stop")
+
+        async def process_due_scheduled_launches(self, *, worker_id, stop_event=None):
+            assert stop_event is stop
+            stop.set()
+            return {"claimed": 0}
+
+    asyncio.run(run_repost_campaign_scheduled_launch_loop(
+        runtime=Probe(), stop_event=stop, interval_seconds=0.01, worker_id="w"
+    ))

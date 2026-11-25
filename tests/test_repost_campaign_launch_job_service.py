@@ -497,3 +497,27 @@ def test_source_guards_keep_force_plumbing_out_of_schedule_layers():
         "waiting_clean_channel",
     ):
         assert forbidden not in scheduled_post_source
+
+
+def test_campaign_stop_does_not_lease_more_jobs_from_current_batch():
+    async def _run():
+        repo, runtime, service = make_service()
+        service.enqueue_manual_launch(rule_id=4, admin_id=10, progress_chat_id=None, progress_message_id=None)
+        service.enqueue_manual_launch(rule_id=5, admin_id=10, progress_chat_id=None, progress_message_id=None)
+        stop_event = asyncio.Event()
+        original_run = service.run_once
+        processed = []
+
+        async def after_first_job(*, job, worker_id):
+            await original_run(job=job, worker_id=worker_id)
+            processed.append(job["id"])
+            stop_event.set()
+
+        service.run_once = after_first_job
+        count = await service.process_due_jobs(worker_id="w1", limit=5, stop_event=stop_event)
+        assert count == 1
+        assert len(processed) == 1
+        assert len([j for j in repo.jobs.values() if j["status"] == "pending"]) == 1
+        assert await service.process_due_jobs(worker_id="w1", stop_event=stop_event) == 0
+
+    asyncio.run(_run())

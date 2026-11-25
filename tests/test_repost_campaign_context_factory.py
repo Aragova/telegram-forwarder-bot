@@ -34,7 +34,8 @@ def test_build_repost_campaign_runtime_factory_constructs_services():
     runtime = build_repost_campaign_runtime(ctx)
 
     assert runtime.repo is ctx.db
-    assert runtime.renderer.bot is fake_bot
+    assert runtime.renderer.bot.raw is fake_bot
+    assert runtime.renderer.bot._is_transport_proxy is True
     assert runtime.renderer.telethon_client is fake_telethon
     assert runtime.deleter.bot is fake_bot
     assert runtime.target_checker.telethon_client is fake_telethon

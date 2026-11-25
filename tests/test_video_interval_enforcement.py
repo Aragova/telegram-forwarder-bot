@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.scheduler_runtime import scheduler_tick
 from app.sender import SenderService
@@ -136,6 +137,11 @@ class _VideoProcessorStub:
 def _build_sender(repo: _Repo) -> SenderService:
     sender = SenderService(bot=object(), telethon_client=object(), reaction_clients=[], db=repo)
     sender.video_processor = _VideoProcessorStub()
+
+    async def get_published_message(entity, ids):
+        return SimpleNamespace(id=ids, date=datetime.now(timezone.utc))
+
+    sender.telethon = SimpleNamespace(get_messages=get_published_message)
 
     async def _skip_reactions(*args, **kwargs):
         return None

@@ -75,6 +75,7 @@ class SenderPostSendHelpers:
         sent_message_id: int | None,
         delivery_id: int | None = None,
         max_age_seconds: int = 300,
+        read_client=None,
     ) -> int | None:
         from .reaction_delivery import ReactionDelivery
 
@@ -86,6 +87,7 @@ class SenderPostSendHelpers:
             sent_message_id=sent_message_id,
             delivery_id=delivery_id,
             max_age_seconds=max_age_seconds,
+            read_client=read_client,
         )
 
     async def validate_sent_message_ids_for_delivery(
@@ -99,6 +101,7 @@ class SenderPostSendHelpers:
         candidate_sent_message_ids: list[int],
         method: str,
         max_age_seconds: int = 300,
+        read_client=None,
     ) -> list[int]:
         normalized_candidates: list[int] = []
         for value in candidate_sent_message_ids or []:
@@ -127,6 +130,7 @@ class SenderPostSendHelpers:
                     sent_message_id=candidate_id,
                     delivery_id=delivery_id,
                     max_age_seconds=max_age_seconds,
+                    **({"read_client": read_client} if read_client is not None else {}),
                 )
             except Exception as exc:
                 logger.warning(
@@ -195,16 +199,23 @@ class SenderPostSendHelpers:
             normalized_candidates,
         )
 
-        if not hasattr(self.owner.telethon, "get_messages"):
+        reader = next((
+            client for client in (
+                getattr(self.owner, "telethon_read", None),
+                getattr(self.owner, "telethon", None),
+            )
+            if callable(getattr(client, "get_messages", None))
+        ), None)
+        if reader is None:
             logger.warning(
-                "DELIVERY_TARGET_CONFIRM_SKIPPED_NO_GET_MESSAGES | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s",
+                "DELIVERY_TARGET_CONFIRM_UNVERIFIED_NO_GET_MESSAGES | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s",
                 rule_id,
                 delivery_id,
                 method,
                 target_id,
                 normalized_candidates,
             )
-            return normalized_candidates
+            return []
 
         if not normalized_candidates:
             logger.warning(
@@ -222,6 +233,7 @@ class SenderPostSendHelpers:
             candidate_sent_message_ids=normalized_candidates,
             method=method,
             max_age_seconds=max_age_seconds,
+            read_client=reader,
         )
 
         if not valid_ids:

@@ -8769,9 +8769,18 @@ async def _shutdown_runtime(
         await asyncio.gather(channel_title_sync_task, return_exceptions=True)
         channel_title_sync_task = None
 
+    campaign_drain_complete = True
     if repost_campaign_runtime_tasks is not None:
-        await repost_campaign_runtime_tasks.stop()
-        repost_campaign_runtime_tasks = None
+        try:
+            await repost_campaign_runtime_tasks.stop()
+        except Exception:
+            # Keep Telegram clients alive while campaign tasks still own RPCs.
+            campaign_drain_complete = False
+            logger.exception(
+                "REPOST_CAMPAIGN_SHUTDOWN_INCOMPLETE | keeping Telegram clients open"
+            )
+        else:
+            repost_campaign_runtime_tasks = None
 
     if scheduler_runtime_task and not scheduler_runtime_task.done():
         scheduler_runtime_task.cancel()
@@ -8791,7 +8800,7 @@ async def _shutdown_runtime(
     if sender_service is not None:
         await sender_service.video_processor.shutdown()
 
-    if close_telegram_clients and telethon_client:
+    if close_telegram_clients and campaign_drain_complete and telethon_client:
         try:
             raw_telethon = getattr(telethon_client, "raw", telethon_client)
             await raw_telethon.disconnect()
@@ -8799,7 +8808,7 @@ async def _shutdown_runtime(
             logger.warning("Ошибка при закрытии Telethon: %s", exc)
         telethon_client = None
 
-    if close_telegram_clients:
+    if close_telegram_clients and campaign_drain_complete:
         for reactor in reaction_clients:
             try:
                 raw_client = getattr(reactor.client, "raw", reactor.client)
@@ -8810,12 +8819,14 @@ async def _shutdown_runtime(
         sender_service = None
         runtime_context = None
 
-    if close_bot_session and bot:
+    if close_bot_session and campaign_drain_complete and bot:
         try:
             await bot.session.close()
         except Exception as exc:
             logger.warning("Ошибка при закрытии Bot session: %s", exc)
         bot = None
+
+    return campaign_drain_complete
 
 
 async def _run_scheduler_role_loop() -> None:
@@ -8851,6 +8862,8 @@ async def _start_bot_role() -> None:
         bot,
         polling_timeout=30,
         handle_as_tasks=True,
+        # Campaign tasks must finish before the shared Bot API session closes.
+        close_bot_session=False,
     )
 
 
@@ -9098,13 +9111,20 @@ async def main(role: str = "all"):
         )
     finally:
         logger.info("SHUTDOWN | Остановка роли %s", normalized_role)
-        await _shutdown_runtime(
+        shutdown_complete = await _shutdown_runtime(
             stop_workers_runtime=(normalized_role in {"worker", "all"}),
             close_dashboard_tasks=(normalized_role in {"bot", "all"}),
             close_telegram_clients=(normalized_role in {"bot", "worker", "all"}),
             close_bot_session=(normalized_role in {"bot", "worker", "all"}),
         )
-        logger.info("SHUTDOWN | Роль %s остановлена", normalized_role)
+        if shutdown_complete:
+            logger.info("SHUTDOWN | Роль %s остановлена", normalized_role)
+        else:
+            logger.error(
+                "SHUTDOWN | Роль %s остановлена частично: фоновые задачи кампании "
+                "не завершены, Telegram-клиенты оставлены открытыми",
+                normalized_role,
+            )
 
 
 def _parse_args() -> argparse.Namespace:

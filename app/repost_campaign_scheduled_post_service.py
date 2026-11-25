@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.runtime_utils import run_db
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -434,13 +435,15 @@ class RepostCampaignScheduledPostService:
             "active_delete_after_text": runtime_readiness.get("active_delete_after_text"),
         }
 
-    async def process_due_posts(self, *, worker_id: str, limit: int = 5) -> dict[str, Any]:
+    async def process_due_posts(self, *, worker_id: str, limit: int = 5, stop_event: asyncio.Event | None = None) -> dict[str, Any]:
         def _retry_seconds(attempt_count: int) -> int:
             return min(VIP_SCHEDULED_POST_RETRY_BASE_SECONDS * (2 ** max(0, attempt_count)), VIP_SCHEDULED_POST_RETRY_MAX_SECONDS)
 
         reset_result = await run_db(self.repo.reset_stuck_campaign_scheduled_posts, stuck_seconds=VIP_SCHEDULED_POST_STUCK_SECONDS)
         if isinstance(reset_result, dict) and int(reset_result.get("needs_review") or 0) > 0:
             self.logger.warning("VIP_SCHEDULED_POST_NEEDS_REVIEW | reason=stale_processing_with_campaign_run | count=%s", reset_result.get("needs_review"))
+        if stop_event is not None and stop_event.is_set():
+            return {"claimed": 0}
         claimed = await run_db(self.repo.claim_due_campaign_scheduled_posts, now_iso=scheduled_post_now_utc().isoformat(), worker_id=worker_id, limit=limit)
         if claimed:
             self.logger.info("VIP_SCHEDULED_POST_DUE_CLAIMED | worker_id=%s | count=%s", worker_id, len(claimed))
@@ -535,7 +538,13 @@ async def run_repost_campaign_scheduled_post_loop(*, runtime: RepostCampaignSche
         if stop_event is not None and stop_event.is_set():
             return
         try:
-            await runtime.process_due_posts(worker_id=wid)
+            await runtime.process_due_posts(worker_id=wid, stop_event=stop_event)
         except Exception as exc:
             runtime.logger.exception("VIP_SCHEDULED_POST_LOOP_ERROR | worker_id=%s | error=%s", wid, exc)
-        await asyncio.sleep(interval_seconds)
+        if stop_event is None:
+            await asyncio.sleep(interval_seconds)
+        else:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=max(0.01, interval_seconds))
+            except asyncio.TimeoutError:
+                pass
