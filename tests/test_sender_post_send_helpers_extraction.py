@@ -208,8 +208,8 @@ def test_confirm_target_delivery_message_ids_no_get_messages(caplog):
 
     result = asyncio.run(helper.confirm_target_delivery_message_ids(rule_id=1, delivery_id=2, source_channel="s", target_id="t", source_message_ids=[3], candidate_sent_message_ids=["40", "bad", 41], method="m"))
 
-    assert result == [40, 41]
-    assert "DELIVERY_TARGET_CONFIRM_SKIPPED_NO_GET_MESSAGES" in caplog.text
+    assert result == []
+    assert "DELIVERY_TARGET_CONFIRM_UNVERIFIED_NO_GET_MESSAGES" in caplog.text
 
 
 def test_confirm_target_delivery_message_ids_no_candidates(caplog):
