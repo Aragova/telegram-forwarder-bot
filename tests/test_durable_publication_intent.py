@@ -253,7 +253,7 @@ def test_mtproto_last_moment_inbox_failure_fences_alternate_send():
         client.publication_inbox = object()
         client.publication_write_blocked = False
 
-        async def block_after_identity(*_args, **_kwargs):
+        def block_after_identity(*_args, **_kwargs):
             client.publication_write_blocked = True
             return [100]
 
