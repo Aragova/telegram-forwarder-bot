@@ -514,10 +514,10 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     if not can_enqueue:
         logger.warning("Worker блокирует выполнение job #%s tenant_id=%s: %s", job_id, tenant_id, enqueue_reason)
         if hasattr(repo, "create_billing_event"):
-            sub = subscription_service.get_active_subscription(int(tenant_id)) or {}
-            usage_today = usage_service.get_today_usage(int(tenant_id)) or {}
+            sub = await asyncio.to_thread(subscription_service.get_active_subscription, int(tenant_id)) or {}
+            usage_today = await asyncio.to_thread(usage_service.get_today_usage, int(tenant_id)) or {}
             event_type = "subscription_blocked_action" if str(enqueue_reason or "").strip().lower() == "подписка неактивна" else "limit_job_blocked"
-            repo.create_billing_event(
+            await asyncio.to_thread(repo.create_billing_event,
                 int(tenant_id),
                 event_type,
                 event_source="worker_runtime",
@@ -540,9 +540,9 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         if not can_video:
             logger.warning("Видео не обработано: лимит тарифа tenant_id=%s reason=%s", tenant_id, video_reason or "unknown")
             if hasattr(repo, "create_billing_event"):
-                sub = subscription_service.get_active_subscription(int(tenant_id)) or {}
-                usage_today = usage_service.get_today_usage(int(tenant_id)) or {}
-                repo.create_billing_event(
+                sub = await asyncio.to_thread(subscription_service.get_active_subscription, int(tenant_id)) or {}
+                usage_today = await asyncio.to_thread(usage_service.get_today_usage, int(tenant_id)) or {}
+                await asyncio.to_thread(repo.create_billing_event,
                     int(tenant_id),
                     "limit_video_blocked",
                     event_source="worker_runtime",
@@ -590,6 +590,25 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     )
     result: dict[str, Any] | None = None
     try:
+        # Late publication mappings may identify an already queued self-loop
+        # echo. Suppress exact echoes before entering any Telegram RPC.
+        if not reconcile_only and job_type in {"repost_single", "repost_album", "video_delivery", "video_send"}:
+            echo_guard = getattr(repo, "quarantine_queued_self_target_echo_deliveries", None)
+            ids = _extract_delivery_ids_from_payload(payload)
+            if callable(echo_guard) and ids:
+                echoes = await asyncio.to_thread(
+                    echo_guard, int(payload.get("rule_id") or 0), ids,
+                )
+                if echoes:
+                    logger.warning(
+                        "SELF_LOOP_ECHO_FENCED_BEFORE_SEND | rule=%s | job=%s | echoes=%s",
+                        payload.get("rule_id"), job_id, echoes,
+                    )
+                    await _finish_owned_job(
+                        repo, "complete", job_id, worker_id,
+                        finalization_started=finalization_started,
+                    )
+                    return True
         if not reconcile_only and job_type in {"repost_single", "repost_album", "repost_campaign_send_copy", "repost_campaign_delete_copy", "video_delivery", "video_send"}:
             guarded = await asyncio.to_thread(
                 _complete_job_if_delivery_already_sent,
