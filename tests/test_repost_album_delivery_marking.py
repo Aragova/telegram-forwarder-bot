@@ -25,15 +25,24 @@ class FakeAlbumRepo:
         self.fail_mark = False
         self.faulty = []
         self.promoted = []
+        self.rpc_members = []
         self.verification_result = {"ok": False, "sent_message_ids": []}
 
     def get_delivery_attempt_by_idempotency_key(self, key):
         return self.attempt_by_key.get(key)
 
-    def create_delivery_attempt(self, **_kwargs):
+    def create_delivery_attempt(self, **kwargs):
+        self.attempt_by_key.setdefault(kwargs["idempotency_key"], {
+            "status": kwargs["status"],
+            "source_message_ids_json": list(kwargs["source_message_ids"]),
+        })
         return 1
 
-    def mark_delivery_attempt_sending(self, *_args, **_kwargs):
+    def mark_delivery_attempt_sending(self, key, **_kwargs):
+        attempt = self.attempt_by_key[key]
+        if attempt["status"] not in {"created", "failed_before_send"}:
+            return False
+        attempt["status"] = "sending"
         return True
 
     def mark_delivery_faulty(self, delivery_id, error_text):
@@ -68,8 +77,11 @@ async def _execute(repo, *, delivery_ids=None):
     service = SenderService.__new__(SenderService)
     service.db = repo
 
-    async def fake_deliver_album(*_args, **_kwargs):
-        repo.attempt_by_key[_kwargs["idempotency_key"]] = {"status": "verified", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
+    async def fake_deliver_album(_rule, rows, *_args, **kwargs):
+        repo.rpc_members.append([row["delivery_id"] for row in rows])
+        repo.attempt_by_key[kwargs["idempotency_key"]].update(
+            status="verified", sent_message_ids_json=[501, 502],
+        )
         return True
 
     service._deliver_album = fake_deliver_album
@@ -236,3 +248,52 @@ def test_accepted_album_cache_rejects_wrong_verified_id_set(verified_ids):
     assert result["ok"] is False
     assert result["manual_review_required"] is True
     assert repo.promoted == [] and repo.marked == []
+
+
+@pytest.mark.parametrize("status", ["created", "failed_before_send"])
+@pytest.mark.parametrize("ledger_order", [[1, 2], [2, 1]])
+def test_album_retry_uses_persisted_order_for_send_and_verified_cache(status, ledger_order):
+    repo = FakeAlbumRepo()
+    key = _album_key([1, 2])
+    repo.attempt_by_key[key] = {
+        "status": status, "source_message_ids_json": ledger_order,
+    }
+    retry_order = list(reversed(ledger_order))
+    assert asyncio.run(_execute(repo, delivery_ids=retry_order)) is True
+    expected = dict(zip(ledger_order, [501, 502]))
+    assert repo.rpc_members == [ledger_order]
+    assert {member: row["sent_message_id"] for member, row in repo.marked} == expected
+    repo.marked.clear()
+    assert asyncio.run(_execute(repo, delivery_ids=retry_order)) is True
+    assert repo.rpc_members == [ledger_order]
+    assert {member: row["sent_message_id"] for member, row in repo.marked} == expected
+
+
+@pytest.mark.parametrize("members", [None, [1, 1], [1, 3], [True, 2]])
+def test_album_retry_rejects_invalid_persisted_vector_before_rpc(members):
+    repo = FakeAlbumRepo()
+    repo.attempt_by_key[_album_key([1, 2])] = {
+        "status": "failed_before_send", "source_message_ids_json": members,
+    }
+    result = asyncio.run(_execute(repo, delivery_ids=[2, 1]))
+    assert result["ok"] is False
+    assert result["retryable"] is False
+    assert repo.rpc_members == [] and repo.marked == []
+
+
+@pytest.mark.parametrize("returned", [[501, 502], [501, 999], [501, 501]])
+def test_album_verification_preserves_transport_order_and_requires_exact_ids(returned):
+    from unittest.mock import AsyncMock
+    from app.sender_telethon_helpers import SenderTelethonHelpers
+
+    telethon = SimpleNamespace(get_messages=AsyncMock(return_value=[
+        SimpleNamespace(id=message_id, grouped_id=7) for message_id in returned
+    ]))
+    result = asyncio.run(SenderTelethonHelpers(SimpleNamespace(telethon=telethon)).verify_album_delivery(
+        target_id="-100123", expected_count=2, sent_message_ids=[502, 501],
+    ))
+    if returned == [501, 502]:
+        assert result["ok"] is True
+        assert result["sent_message_ids"] == [502, 501]
+    else:
+        assert result["ok"] is False

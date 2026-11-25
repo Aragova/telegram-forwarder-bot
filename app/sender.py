@@ -1655,6 +1655,27 @@ class SenderService:
         logger.info("DELIVERY_ATTEMPT_SENDING | operation=album | key=%s | delivery_id=%s", idempotency_key, delivery_id)
         intent = PublicationIntent(self.db, idempotency_key)
         try:
+            # INSERT ON CONFLICT preserves the original vector. Re-read it
+            # after acquiring the send right, including a concurrent insert
+            # between the initial lookup and creation. Never infer its order
+            # from the retried job or the membership fingerprint.
+            claimed_attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
+            claimed_members = claimed_attempt.get("source_message_ids_json") if isinstance(claimed_attempt, dict) else None
+            if isinstance(claimed_members, str):
+                try:
+                    claimed_members = json.loads(claimed_members)
+                except (TypeError, ValueError):
+                    claimed_members = None
+            if (not isinstance(claimed_members, list)
+                    or len(claimed_members) != len(album_delivery_ids)
+                    or any(type(member_id) is not int for member_id in claimed_members)
+                    or len(set(claimed_members)) != len(claimed_members)
+                    or set(claimed_members) != set(album_delivery_ids)):
+                error = "album_cache_member_provenance_unavailable_no_resend"
+                await run_db(self.db.mark_delivery_attempt_failed, idempotency_key,
+                             status="failed_before_send", error_text=error)
+                return _terminal_non_retryable_result(error)
+            album_delivery_ids = list(claimed_members)
             rule = await run_db(self.db.get_rule, int(rule_id))
             if not rule:
                 raise RuntimeError(f"Правило #{rule_id} не найдено для repost_album")

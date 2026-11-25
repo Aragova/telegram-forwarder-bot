@@ -896,7 +896,10 @@ class SenderTelethonHelpers:
             fetched_list = [m for m in fetched_list if m]
             actual_ids = sorted(int(m.id) for m in fetched_list)
 
-            if len(actual_ids) != len(sent_message_ids):
+            requested_ids = [int(message_id) for message_id in sent_message_ids]
+            if (len(actual_ids) != len(requested_ids)
+                    or len(set(requested_ids)) != len(requested_ids)
+                    or set(actual_ids) != set(requested_ids)):
                 return {
                     "ok": False,
                     "error_text": "verify_album_sent_ids_not_found",
@@ -944,7 +947,8 @@ class SenderTelethonHelpers:
                 "grouped_id": grouped_id,
                 "count": len(actual_ids),
                 "first_message_id": min(actual_ids),
-                "sent_message_ids": actual_ids,
+                # Verification proves membership, not a new association.
+                "sent_message_ids": requested_ids,
             }
 
         except Exception as exc:
