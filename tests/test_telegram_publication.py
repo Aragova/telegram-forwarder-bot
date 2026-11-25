@@ -1101,3 +1101,106 @@ def test_journal_io_waits_for_thread_completion_on_cancellation():
             await task
         assert finished.is_set()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("postgres_fails", [False, True])
+def test_cancelled_emergency_handler_waiting_for_journal_lock_retains_evidence(
+    monkeypatch, tmp_path, postgres_fails,
+):
+    import threading
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as module
+
+    class BrokenSpool:
+        def __init__(self, _path):
+            pass
+
+        def pending(self, _limit=128):
+            return []
+
+        def append(self, *_args):
+            raise OSError("SQLite unavailable")
+
+    monkeypatch.setattr(module, "PublicationMappingSpool", BrokenSpool)
+
+    async def scenario():
+        started, release = threading.Event(), threading.Event()
+        saved = set()
+        db_up = not postgres_fails
+
+        def record(_account, _peer, pairs):
+            if (41, 141) in pairs and not started.is_set():
+                started.set()
+                assert release.wait(5)
+            if not db_up:
+                raise OSError("PostgreSQL unavailable")
+            saved.update(pairs)
+
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(record_telegram_publication_mappings=record)
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        journal = module.PublicationFallbackJournal(
+            tmp_path / "sender.publication-mappings.fallback.jsonl"
+        )
+        peer = types.PeerChannel(99)
+
+        def event(old):
+            return types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[old], sent_messages=[old + 100],
+            )
+
+        async def wait_until(predicate):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+        first = asyncio.create_task(client.handler(event(41)))
+        second = None
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            second = asyncio.create_task(client.handler(event(42)))
+            await asyncio.wait_for(
+                wait_until(lambda: client.publication_evidence_unpersisted), 5,
+            )
+            assert not second.done()
+            second.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await second
+            assert client.publication_evidence_unpersisted
+            release.set()
+            await asyncio.wait_for(first, 5)
+            if postgres_fails:
+                # The retry must persist the cancelled handler's vector
+                # to the fallback journal while PostgreSQL is still down.
+                async def wait_for_journal():
+                    while not any(
+                        old == [42] and new == [142]
+                        for _, old, new in await asyncio.to_thread(journal.pending)
+                    ):
+                        await asyncio.sleep(0.01)
+
+                await asyncio.wait_for(wait_for_journal(), 5)
+                db_up = True
+            await asyncio.wait_for(client.flush_publication_inbox(), 5)
+            assert saved == {(41, 141), (42, 142)}
+            assert not client.publication_evidence_unpersisted
+        finally:
+            release.set()
+            tasks = [first] + ([second] if second is not None else [])
+            tasks += [
+                task for task in asyncio.all_tasks()
+                if task.get_name() == "telegram-publication-persist-retry"
+            ]
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+

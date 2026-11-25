@@ -165,6 +165,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
     # Test/injected clients without a session use an in-memory buffer only.
     buffer = deque()
     emergency = deque()
+    volatile_emergency = set()
     inbox: PublicationInbox | None = None
     candidate: PublicationInbox | None = None
     buffer_overflow = False
@@ -173,6 +174,28 @@ def prepare_publication_inbox(client: Any, repository: Any):
     live_lock = asyncio.Lock()
     spool_generation = 0
     retry_task: asyncio.Task | None = None
+
+    def evidence_key(row):
+        peer, old, new = row
+        return peer, tuple(old), tuple(new)
+
+    def mark_emergency_durable(row) -> None:
+        volatile_emergency.discard(evidence_key(row))
+        client.publication_evidence_unpersisted = bool(volatile_emergency)
+
+    async def persist_emergency_journal(row) -> None:
+        # A concurrent drain may already have committed this exact vector.
+        if journal is None or evidence_key(row) not in volatile_emergency:
+            return
+        try:
+            await _journal_io(journal.append, *row)
+        except Exception:
+            logger.critical(
+                "PUBLICATION_EVIDENCE_VOLATILE | sqlite_and_fallback_write_failed | action=block_shutdown",
+                exc_info=True,
+            )
+        else:
+            mark_emergency_durable(row)
 
     async def flush_live() -> None:
         nonlocal incident_persisted
@@ -226,6 +249,11 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 # memory entries are safe to replay.
                 if journal is not None:
                     async with journal_lock:
+                        # A cancelled handler may have queued evidence before
+                        # obtaining this lock. Retry disk persistence even when
+                        # PostgreSQL is still unavailable.
+                        for row in list(emergency):
+                            await persist_emergency_journal(row)
                         journal_failure: Exception | None = None
                         persist_incident = getattr(
                             repository, "record_publication_inbox_overflow", None
@@ -268,12 +296,14 @@ def prepare_publication_inbox(client: Any, repository: Any):
                             # These in-memory duplicates were already
                             # acknowledged in PostgreSQL by the journal pass.
                             for row in journal_rows:
+                                mark_emergency_durable(row)
                                 try:
                                     emergency.remove(row)
                                 except ValueError:
                                     pass
                         while emergency:
-                            peer, old, new = emergency[0]
+                            row = emergency[0]
+                            peer, old, new = row
                             await candidate.record(peer, old, new)
                             if not incident_persisted and callable(persist_incident):
                                 await asyncio.to_thread(
@@ -281,7 +311,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
                                 )
                                 incident_persisted = True
                             emergency.popleft()
-                        client.publication_evidence_unpersisted = False
+                            mark_emergency_durable(row)
                         if journal_failure is not None:
                             raise journal_failure
                 else:
@@ -349,23 +379,20 @@ def prepare_publication_inbox(client: Any, repository: Any):
                     client.publication_write_blocked = True
                     buffer_overflow = True
                     overflow_evidence = (peer, old)
+                    # Retain the vector and fence shutdown before any
+                    # cancellable lock acquisition or disk operation.
+                    row = (peer, old, new)
+                    emergency.append(row)
+                    volatile_emergency.add(evidence_key(row))
+                    client.publication_evidence_unpersisted = True
                     if journal is not None:
-                        async with journal_lock:
-                            emergency.append((peer, old, new))
-                            previously_volatile = client.publication_evidence_unpersisted
-                            client.publication_evidence_unpersisted = True
-                            try:
-                                await _journal_io(journal.append, peer, old, new)
-                                client.publication_evidence_unpersisted = previously_volatile
-                            except Exception:
-                                client.publication_evidence_unpersisted = True
-                                logger.critical(
-                                    "PUBLICATION_EVIDENCE_VOLATILE | sqlite_and_fallback_write_failed | action=block_shutdown",
-                                    exc_info=True,
-                                )
-                    else:
-                        client.publication_evidence_unpersisted = True
-                        emergency.append((peer, old, new))
+                        try:
+                            async with journal_lock:
+                                await persist_emergency_journal(row)
+                        except asyncio.CancelledError:
+                            if candidate is not None:
+                                schedule_retry(0.25)
+                            raise
                     logger.exception("TELEGRAM_PUBLICATION_MAPPING_LOCAL_SPOOL_FAILED")
                     # Preserve evidence in memory and attempt PostgreSQL
                     # immediately. A disk failure must not strand the only
