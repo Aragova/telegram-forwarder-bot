@@ -357,11 +357,14 @@ def test_startup_overflow_keeps_live_evidence_without_enabling_writer(monkeypatc
             await bind()
         assert client.publication_inbox_ready.done()
         assert not hasattr(client, "publication_inbox")
-        assert len(saved) == 1024
+        # Overflow must never drop a publication mapping, even in the
+        # non-session test fallback that has no durable SQLite spool.
+        assert len(saved) == 1025
         await client.handler(types.UpdateDeleteScheduledMessages(
             peer=peer, messages=[1026], sent_messages=[3026],
         ))
-        assert len(saved) == 1025
+        await client.flush_publication_inbox()
+        assert len(saved) == 1026
         assert saved[-1] == (1026, 3026)
 
     asyncio.run(scenario())
@@ -385,7 +388,7 @@ def test_difference_total_limit_does_not_discard_recoverable_page(server_unavail
             chats=[], users=[], intermediate_state=state,
         )
         too_long = types.updates.DifferenceTooLong(pts=20000)
-        responses = [too_long, too_long, state] if server_unavailable else [too_long, page]
+        responses = [too_long, too_long, too_long] if server_unavailable else [too_long, page]
         client = AsyncMock(side_effect=responses)
         inbox = SimpleNamespace(repository=object(), sender_account_id=7,
                                 record=AsyncMock(return_value=True))
@@ -398,11 +401,13 @@ def test_difference_total_limit_does_not_discard_recoverable_page(server_unavail
         assert requests[1].pts == requests[0].pts == 1
         assert requests[1].pts_limit == 1000
         if server_unavailable:
-            assert isinstance(requests[2], functions.updates.GetStateRequest)
+            assert isinstance(requests[2], functions.updates.GetDifferenceRequest)
+            assert requests[2].pts == 20000
             inbox.record.assert_not_awaited()
+            recovery._advance.assert_not_awaited()
         else:
             assert len(requests) == 2
             inbox.record.assert_awaited_once()
-        recovery._advance.assert_awaited_once_with(cursor, 20000, 0, date)
+            recovery._advance.assert_awaited_once_with(cursor, 20000, 0, date)
 
     asyncio.run(scenario())
