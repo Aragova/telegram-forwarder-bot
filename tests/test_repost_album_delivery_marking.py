@@ -73,7 +73,7 @@ class FakeAlbumRepo:
             self.marked.append((delivery_id, {}))
 
 
-async def _execute(repo, *, delivery_ids=None):
+async def _execute(repo, *, delivery_ids=None, pre_send_echo_guard=None):
     service = SenderService.__new__(SenderService)
     service.db = repo
 
@@ -101,6 +101,7 @@ async def _execute(repo, *, delivery_ids=None):
         target_id="dst",
         target_thread_id=None,
         delivery_ids=delivery_ids or [1, 2],
+        pre_send_echo_guard=pre_send_echo_guard,
     )
 
 
@@ -309,3 +310,20 @@ def test_copy_messages_sorts_request_but_preserves_ledger_mapping(monkeypatch):
     result = asyncio.run(helper.copy_album_via_bot("-1001", "-1002", [102, 101], None))
     assert list(bot.await_args.args[0].message_ids) == [101, 102]
     assert result["sent_message_ids"] == [502, 501]
+
+
+@pytest.mark.parametrize("echoes", [[1, 2], None, []])
+def test_late_album_echo_guard_blocks_rpc(echoes):
+    repo = FakeAlbumRepo()
+
+    async def guard(members):
+        assert members == [1, 2]
+        return echoes
+
+    result = asyncio.run(_execute(repo, pre_send_echo_guard=guard))
+    if echoes is None or echoes:
+        assert result["self_loop_echo_fenced"] is True
+        assert not repo.rpc_members and not repo.marked
+    else:
+        assert result is True
+        assert repo.rpc_members == [[1, 2]]

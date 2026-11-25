@@ -646,7 +646,19 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             result = delivery_result.to_dict()
             ok = delivery_result.ok
         elif job_type == "repost_album":
-            raw_result = await sender_service.execute_repost_album_from_job(**payload)
+            async def pre_send_echo_guard(member_ids):
+                return await asyncio.to_thread(
+                    echo_guard, int(payload.get("rule_id") or 0), member_ids,
+                    job_id=job_id, worker_id=worker_id,
+                )
+
+            album_payload = dict(payload)
+            if callable(echo_guard):
+                album_payload["pre_send_echo_guard"] = pre_send_echo_guard
+            raw_result = await sender_service.execute_repost_album_from_job(**album_payload)
+            if isinstance(raw_result, dict) and raw_result.get("self_loop_echo_fenced"):
+                await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
+                return True
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
             ok = delivery_result.ok

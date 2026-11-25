@@ -233,6 +233,7 @@ def test_startup_retries_failed_writes_after_bind_timeout_without_new_update(mon
             if len(attempts) <= 3:
                 raise RuntimeError("temporary database outage")
             saved.append((old[0], new[0]))
+            return True
             if len(saved) == 2:
                 complete.set()
             return True

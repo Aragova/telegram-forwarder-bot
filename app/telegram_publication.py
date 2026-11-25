@@ -184,7 +184,8 @@ def prepare_publication_inbox(client: Any, repository: Any):
         client.publication_evidence_unpersisted = bool(volatile_emergency)
 
     def retain_emergency(row) -> None:
-        nonlocal buffer_overflow, overflow_evidence
+        nonlocal buffer_overflow, overflow_evidence, incident_persisted
+        incident_persisted = False
         client.publication_write_blocked = True
         buffer_overflow = True
         overflow_evidence = (row[0], row[1])
@@ -233,7 +234,8 @@ def prepare_publication_inbox(client: Any, repository: Any):
                                     continue
                                 break
                             for row_id, peer, old, new in entries:
-                                await candidate.record(peer, old, new)
+                                if not await candidate.record(peer, old, new):
+                                    raise RuntimeError("Publication inbox rejected mapping")
                                 try:
                                     await asyncio.to_thread(spool.acknowledge, row_id)
                                 except Exception:
@@ -282,7 +284,8 @@ def prepare_publication_inbox(client: Any, repository: Any):
                             journal_rows = []
                             logger.exception("PUBLICATION_FALLBACK_JOURNAL_READ_FAILED")
                         for peer, old, new in journal_rows:
-                            await candidate.record(peer, old, new)
+                            if not await candidate.record(peer, old, new):
+                                raise RuntimeError("Publication inbox rejected mapping")
                         if journal_rows:
                             # A journal from the previous process proves
                             # SQLite became unavailable. Keep sending fenced
@@ -313,7 +316,8 @@ def prepare_publication_inbox(client: Any, repository: Any):
                         while emergency:
                             row = emergency[0]
                             peer, old, new = row
-                            await candidate.record(peer, old, new)
+                            if not await candidate.record(peer, old, new):
+                                raise RuntimeError("Publication inbox rejected mapping")
                             if not incident_persisted and callable(persist_incident):
                                 await asyncio.to_thread(
                                     persist_incident, candidate.sender_account_id, peer, old
@@ -326,7 +330,8 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 else:
                     while emergency:
                         peer, old, new = emergency[0]
-                        await candidate.record(peer, old, new)
+                        if not await candidate.record(peer, old, new):
+                            raise RuntimeError("Publication inbox rejected mapping")
                         emergency.popleft()
                 if spool_failure is not None:
                     raise spool_failure
@@ -338,7 +343,8 @@ def prepare_publication_inbox(client: Any, repository: Any):
                             incident_persisted = True
                     while buffer:
                         peer, old, new = buffer[0]
-                        await candidate.record(peer, old, new)
+                        if not await candidate.record(peer, old, new):
+                            raise RuntimeError("Publication inbox rejected mapping")
                         buffer.popleft()
                     client.publication_evidence_unpersisted = False
                 # An append that completed while emergency persistence was
@@ -509,6 +515,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 persist_incident = getattr(repository,"record_publication_inbox_overflow",None)
                 if (buffer_overflow and not incident_persisted
                         and overflow_evidence is not None and callable(persist_incident)):
+                    client.publication_write_blocked = True
                     await asyncio.to_thread(persist_incident,candidate.sender_account_id,*overflow_evidence)
                 if callable(read_incident):
                     incident = await asyncio.to_thread(read_incident,candidate.sender_account_id)

@@ -7205,8 +7205,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 or len(set(target_ids)) != len(target_ids)
                 or any(x <= 0 for x in source_ids + target_ids)):
             raise ValueError("Invalid/partial album IDs")
-        if source_ids != sorted(source_ids) or target_ids != sorted(target_ids):
-            raise ValueError("Album IDs must be in source/target order")
+        if source_ids != sorted(source_ids):
+            raise ValueError("Album IDs must be in source order")
 
         with self.connect() as conn:
             with conn.cursor() as cur:

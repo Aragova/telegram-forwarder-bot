@@ -1498,6 +1498,7 @@ class SenderService:
         schedule_mode: str = "interval",
         job_type: str | None = None,
         delivery_ids: list[int] | None = None,
+        pre_send_echo_guard=None,
     ) -> bool:
         normalized_schedule_mode = str(schedule_mode or "interval")
         normalized_mode = str(mode or "repost")
@@ -1714,6 +1715,13 @@ class SenderService:
                 raise RuntimeError("Album rows have duplicate delivery IDs")
             album_rows = [rows_by_delivery[member_id] for member_id in album_delivery_ids]
 
+            if pre_send_echo_guard is not None:
+                echoes = await pre_send_echo_guard(album_delivery_ids)
+                if echoes is None or echoes:
+                    error = "self_loop_album_echo_fenced_before_send"
+                    await run_db(self.db.mark_delivery_attempt_failed, idempotency_key,
+                                 status="failed_before_send", error_text=error)
+                    return {"ok": False, "retryable": False, "self_loop_echo_fenced": True}
             with publication_scope(intent):
                 ok = await self._deliver_album(
                     rule,

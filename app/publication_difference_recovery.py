@@ -42,8 +42,15 @@ class PublicationDifferenceRecovery:
             self.repository.get_publication_recovery_cursor, self.sender_account_id,
         )
         if cursor is not None:
-            await self._read_page(cursor)
-            return
+            for _ in range(_MAX_PAGES):
+                if not await self._read_page(cursor):
+                    return
+                cursor = await asyncio.to_thread(
+                    self.repository.get_publication_recovery_cursor, self.sender_account_id,
+                )
+                if cursor is None:
+                    raise RuntimeError("Publication recovery cursor disappeared")
+            raise RuntimeError("Publication recovery requires another startup pass")
         state = await self._rpc(functions.updates.GetStateRequest())
         await asyncio.to_thread(
             self.repository.initialize_publication_recovery_cursor,
@@ -128,7 +135,9 @@ class PublicationDifferenceRecovery:
             raise RuntimeError("Unknown Telegram difference response")
         await self._persist_pairs(difference.other_updates)
         advanced = await self._advance(cursor, state.pts, state.qts, state.date)
-        return advanced and more
+        if not advanced:
+            raise RuntimeError("Publication recovery cursor changed concurrently")
+        return more
 
     async def recover(self) -> None:
         """One bounded replay pass per account, on demand from reconciliation."""
