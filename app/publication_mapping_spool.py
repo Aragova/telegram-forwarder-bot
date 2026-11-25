@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 
@@ -39,7 +40,7 @@ class PublicationMappingSpool:
     def append(self, peer: int, scheduled: list[int], published: list[int]) -> None:
         if len(scheduled) != len(published) or not scheduled:
             raise ValueError("Expected complete publication mapping pairs")
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute(
                 """INSERT INTO pending_publication_mappings(
                        peer_id, scheduled_json, published_json
@@ -52,7 +53,7 @@ class PublicationMappingSpool:
             )
 
     def pending(self, limit: int = 128) -> list[tuple[int, int, list[int], list[int]]]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 """SELECT id,peer_id,scheduled_json,published_json
                    FROM pending_publication_mappings ORDER BY id LIMIT ?""",
@@ -64,7 +65,7 @@ class PublicationMappingSpool:
         ]
 
     def acknowledge(self, row_id: int) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute(
                 "DELETE FROM pending_publication_mappings WHERE id=?",
                 (int(row_id),),
