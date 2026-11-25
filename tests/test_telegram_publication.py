@@ -572,3 +572,59 @@ def test_emergency_mapping_reaches_postgres_when_sqlite_append_and_pending_fail(
         assert client.publication_write_blocked is True
 
     asyncio.run(scenario())
+
+
+def test_transient_postgres_failure_retries_durable_spool_without_permanent_write_lock(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as spool_module
+
+    class MemorySpool:
+        instance = None
+
+        def __init__(self, _path):
+            MemorySpool.instance = self
+            self.rows = []
+            self.next_id = 0
+
+        def append(self, peer, old, new):
+            self.next_id += 1
+            self.rows.append((self.next_id, peer, old, new))
+
+        def pending(self, _limit=128):
+            return self.rows[:]
+
+        def acknowledge(self, row_id):
+            self.rows = [row for row in self.rows if row[0] != row_id]
+
+    monkeypatch.setattr(spool_module, "PublicationMappingSpool", MemorySpool)
+
+    async def scenario():
+        calls = []
+        persisted = []
+
+        def record(_account, _peer, pairs):
+            calls.append(list(pairs))
+            if len(calls) == 1:
+                raise OSError("temporary PostgreSQL outage")
+            persisted.extend(pairs)
+
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(record_telegram_publication_mappings=record)
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[33], sent_messages=[133],
+        ))
+        await asyncio.sleep(0.45)
+        assert len(calls) == 2
+        assert persisted == [(33, 133)]
+        assert MemorySpool.instance.rows == []
+        assert not getattr(client, "publication_write_blocked", False)
+
+    asyncio.run(scenario())
