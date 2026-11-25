@@ -122,3 +122,15 @@ def test_all_role_keeps_bot_session_open_until_after_worker_drain():
     shutdown_end = source.index("async def _run_scheduler_role_loop()", shutdown_start)
     shutdown = source[shutdown_start:shutdown_end]
     assert shutdown.index("await stop_job_workers_runtime()") < shutdown.index("await bot.session.close()")
+
+
+
+def test_shutdown_drains_publication_before_cancelling_retries():
+    from pathlib import Path
+    source = Path("bot.py").read_text(encoding="utf-8")
+    shutdown = source[
+        source.index("async def _shutdown_runtime("):
+        source.index("async def _run_scheduler_role_loop()")
+    ]
+    assert shutdown.index("await asyncio.wait_for(flush_publication()") < shutdown.index("await stop_background_tasks()")
+    assert "publication_evidence_unpersisted" in shutdown
