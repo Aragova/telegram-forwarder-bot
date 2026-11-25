@@ -4637,7 +4637,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         rule = cur.fetchone()
         if (rule is None or rule["is_active"] or not owner_token
                 or rule["rescan_owner_token"] != owner_token):
-            raise RescanBlocked("Для начала заново нужно владеть остановленным пересканированием")
+            raise RescanBlocked("Для фиксации изменений необходимо владеть остановленным процессом пересканирования")
         if expected_scope is not None and expected_scope != (
             str(rule["source_id"]), rule["source_thread_id"],
             str(rule["target_id"]), rule["target_thread_id"], rule["mode"],
