@@ -425,6 +425,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             rescan_owner_token TEXT NULL,
             rescan_started_at TIMESTAMPTZ NULL,
             rescan_queue_built BOOLEAN NOT NULL DEFAULT FALSE,
+            rescan_confirmation_token TEXT NULL,
+            rescan_confirmation_actor BIGINT NULL,
+            rescan_confirmation_until TIMESTAMPTZ NULL,
             next_run_at TEXT NULL,
             last_sent_at TEXT NULL,
 
@@ -852,6 +855,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_owner_token TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_started_at TIMESTAMPTZ NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_queue_built BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_confirmation_token TEXT NULL;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_confirmation_actor BIGINT NULL;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_confirmation_until TIMESTAMPTZ NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'repost';
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_trim_seconds BIGINT DEFAULT 120;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_clip_duration_seconds INTEGER DEFAULT 118;
@@ -4511,6 +4517,45 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 f"У старых отправок нет точной привязки к источнику: {blocked['unresolved']}; "
                 f"первая попытка: {blocked.get('first_attempt_id')}. Требуется ручная проверка."
             )
+
+    def issue_rule_rescan_confirmation(self, rule_id: int, actor_id: int, token: str) -> bool:
+        """Replace any old confirmation; bind it to a rule and its requesting actor."""
+        if not token or len(token) > 32 or not actor_id:
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE routing
+                       SET rescan_confirmation_token=%s, rescan_confirmation_actor=%s,
+                           rescan_confirmation_until=NOW() + INTERVAL '15 minutes'
+                       WHERE id=%s AND rescan_owner_token IS NULL
+                       RETURNING id""",
+                    (str(token), int(actor_id), int(rule_id)),
+                )
+                issued = cur.fetchone() is not None
+            conn.commit()
+        return issued
+
+    def consume_rule_rescan_confirmation(self, rule_id: int, actor_id: int, token: str) -> bool:
+        """Atomic one-shot confirmation even across workers or restarts."""
+        if not token or not actor_id:
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE routing
+                       SET rescan_confirmation_token=NULL, rescan_confirmation_actor=NULL,
+                           rescan_confirmation_until=NULL
+                       WHERE id=%s AND rescan_confirmation_token=%s
+                         AND rescan_confirmation_actor=%s
+                         AND rescan_confirmation_until>NOW()
+                         AND rescan_owner_token IS NULL
+                       RETURNING id""",
+                    (int(rule_id), str(token), int(actor_id)),
+                )
+                consumed = cur.fetchone() is not None
+            conn.commit()
+        return consumed
 
     def begin_rule_rescan(self, rule_id: int, *, fresh: bool = False) -> tuple[bool, str]:
         """Acquire a PostgreSQL-backed exclusive rescan owner before parsing.

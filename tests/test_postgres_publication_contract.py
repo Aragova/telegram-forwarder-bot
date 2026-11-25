@@ -463,6 +463,38 @@ def test_fresh_replay_legacy_video_accepts_only_one_numeric_id(repo, raw_ids, al
     assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "accepted"
 
 
+
+
+def test_rule_rescan_confirmation_one_time_per_actor(repo):
+    _, rule_id, _, _, _, _ = seed(repo, uuid4().int % 10**12)
+    assert repo.issue_rule_rescan_confirmation(rule_id, 321, "first")
+    assert not repo.consume_rule_rescan_confirmation(rule_id, 999, "first")
+    assert not repo.consume_rule_rescan_confirmation(rule_id, 321, "wrong")
+    assert repo.consume_rule_rescan_confirmation(rule_id, 321, "first")
+    assert not repo.consume_rule_rescan_confirmation(rule_id, 321, "first")
+
+    assert repo.issue_rule_rescan_confirmation(rule_id, 321, "stale")
+    assert repo.issue_rule_rescan_confirmation(rule_id, 321, "current")
+    assert not repo.consume_rule_rescan_confirmation(rule_id, 321, "stale")
+    assert repo.consume_rule_rescan_confirmation(rule_id, 321, "current")
+
+    assert repo.issue_rule_rescan_confirmation(rule_id, 321, "expired")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE routing SET rescan_confirmation_until=NOW()-INTERVAL '1 second' WHERE id=%s",
+                (rule_id,),
+            )
+    assert not repo.consume_rule_rescan_confirmation(rule_id, 321, "expired")
+
+    assert repo.issue_rule_rescan_confirmation(rule_id, 321, "locked")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET rescan_owner_token='busy' WHERE id=%s", (rule_id,))
+    assert not repo.consume_rule_rescan_confirmation(rule_id, 321, "locked")
+    assert not repo.issue_rule_rescan_confirmation(rule_id, 321, "replaced")
+
+
 def test_rescan_durable_video_intent_cannot_be_archived_as_legacy(repo):
     _, rule_id, deliveries, _, _, target = seed(repo, 132)
     key=f"delivery:{deliveries[0]}:target:{target}:video_send:v1"

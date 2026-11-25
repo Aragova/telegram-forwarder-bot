@@ -5,6 +5,7 @@ import asyncio
 import argparse
 import json
 import re
+import secrets
 import time
 from html import escape
 from dataclasses import dataclass
@@ -6827,34 +6828,61 @@ async def handle_rescan_rule_fresh(callback: CallbackQuery):
         return
     if not await ensure_rule_callback_access(callback, rule_id):
         return
+    actor_id = callback.from_user.id if callback.from_user else None
+    if actor_id is None:
+        await answer_callback_safe(callback, "Не удалось определить пользователя", show_alert=True)
+        return
+    token = secrets.token_urlsafe(12)
+    if not await run_db(db.issue_rule_rescan_confirmation, rule_id, actor_id, token):
+        await answer_callback_safe(callback, "Пересканирование уже выполняется", show_alert=True)
+        return
     await answer_callback_safe_once(callback)
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            f"🆕 Начать заново: правило #{rule_id}\n\n"
-            "Очередь будет построена с начала. Ранее опубликованные посты "
-            "могут быть опубликованы повторно. Старые принятые видео "
-            "сохранятся в истории без отметки о проверке. "
-            "Незавершённые отправки по-прежнему блокируют сброс."
-        ),
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Подтвердить новый цикл", callback_data=f"rescan_rule_fresh_confirm:{rule_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rescan_rule_menu:{rule_id}")],
-        ]),
+    text = (
+        f"🆕 Начать заново: правило #{rule_id}\n\n"
+        "Очередь будет построена с начала. Ранее опубликованные посты "
+        "могут быть опубликованы повторно. Старые принятые видео "
+        "сохранятся в истории без отметки о проверке. "
+        "Незавершённые отправки по-прежнему блокируют сброс."
     )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить новый цикл",
+                              callback_data=f"rescan_rule_fresh_confirm:{rule_id}:{token}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rescan_rule_menu:{rule_id}")],
+    ])
+    edited = bool(callback.message) and await edit_message_text_safe(
+        message=callback.message, text=text, reply_markup=keyboard,
+    )
+    if not edited:
+        await send_message_safe(
+            chat_id=callback.message.chat.id if callback.message else actor_id,
+            text=text, reply_markup=keyboard,
+        )
 
 
 @dp.callback_query(lambda c: (c.data or "").startswith("rescan_rule_fresh_confirm:"))
 async def handle_rescan_rule_fresh_confirm(callback: CallbackQuery):
     try:
-        rule_id = int((callback.data or "").split(":")[1])
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        parts = (callback.data or "").split(":")
+        if len(parts) != 3 or not parts[2]:
+            raise ValueError("missing confirmation token")
+        rule_id = int(parts[1])
+        token = parts[2]
+    except (TypeError, ValueError, IndexError):
+        await answer_callback_safe(callback, "Подтверждение устарело. Откройте новый цикл заново.", show_alert=True)
         return
     if not await ensure_rule_callback_access(callback, rule_id):
         return
-
+    actor_id = callback.from_user.id if callback.from_user else None
+    if actor_id is None or not await run_db(
+        db.consume_rule_rescan_confirmation, rule_id, actor_id, token,
+    ):
+        await answer_callback_safe(
+            callback, "Подтверждение уже использовано или истекло. Откройте новый цикл.", show_alert=True,
+        )
+        return
     await answer_callback_safe_once(callback)
+    if callback.message is None:
+        return
 
     task_key = _rule_ui_task_key("rescan", rule_id)
     started = _schedule_rule_ui_task(

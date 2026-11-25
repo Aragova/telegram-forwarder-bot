@@ -637,3 +637,20 @@ def test_fresh_preflight_rejects_unknown_before_owner_is_acquired():
         repo.begin_rule_rescan(214, fresh=True)
     assert cursor.owner is None and cursor.active
     assert conn.commits == 0
+
+
+def test_fresh_replay_requires_one_time_db_confirmation():
+    code = Path("bot.py").read_text(encoding="utf-8")
+    fresh = code.split("async def handle_rescan_rule_fresh(callback: CallbackQuery):", 1)[1].split(
+        "async def handle_rescan_rule_fresh_confirm(callback: CallbackQuery):", 1
+    )[0]
+    confirm = code.split("async def handle_rescan_rule_fresh_confirm(callback: CallbackQuery):", 1)[1].split(
+        "async def handle_rescan_rule_keep(callback: CallbackQuery):", 1
+    )[0]
+    assert "issue_rule_rescan_confirmation" in fresh
+    assert "if not edited:" in fresh and "send_message_safe(" in fresh
+    assert "consume_rule_rescan_confirmation" in confirm
+    assert confirm.index("ensure_rule_callback_access") < confirm.index("consume_rule_rescan_confirmation")
+    assert confirm.index("consume_rule_rescan_confirmation") < confirm.index("_schedule_rule_ui_task")
+
+
