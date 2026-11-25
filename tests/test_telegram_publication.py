@@ -525,3 +525,50 @@ def test_sqlite_spool_failure_persists_to_postgres_without_next_update(monkeypat
         assert client.publication_write_blocked is True
 
     asyncio.run(scenario())
+
+
+def test_emergency_mapping_reaches_postgres_when_sqlite_append_and_pending_fail(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as spool_module
+
+    class BrokenSpool:
+        instance = None
+
+        def __init__(self, _path):
+            BrokenSpool.instance = self
+            self.read_failed = False
+
+        def pending(self, _limit=128):
+            if self.read_failed:
+                raise OSError("SQLite corruption prevents pending read")
+            return []
+
+        def append(self, *_args):
+            raise OSError("SQLite corruption prevents append")
+
+    monkeypatch.setattr(spool_module, "PublicationMappingSpool", BrokenSpool)
+
+    async def scenario():
+        recorded = []
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=lambda _account, _peer, pairs: recorded.extend(pairs),
+        )
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        BrokenSpool.instance.read_failed = True
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[21], sent_messages=[121],
+        ))
+        # One update, both SQLite operations failed. The mapping is still
+        # persisted directly, before any retry or future Telegram update.
+        assert recorded == [(21, 121)]
+        assert client.publication_write_blocked is True
+
+    asyncio.run(scenario())
