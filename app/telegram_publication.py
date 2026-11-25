@@ -242,21 +242,24 @@ def prepare_publication_inbox(client: Any, repository: Any):
                                 logger.exception("TELEGRAM_PUBLICATION_MAPPING_EMERGENCY_PERSIST_FAILED")
                                 schedule_retry(0.25)
                     return
-            if len(buffer) >= 1024:
+            if len(buffer) >= 1024 and spool is None:
+                # No durable spool: overflow is a real evidence-loss risk and
+                # requires an operator incident. Retain the vector even here.
                 buffer_overflow = True
                 client.publication_write_blocked = True
-                overflow_evidence = (peer,old)
-                logger.error("TELEGRAM_PUBLICATION_MAPPING_BUFFER_FULL | bound=%s | peer=%s | scheduled_ids=%s", inbox is not None,peer,old)
+                overflow_evidence = (peer, old)
+                logger.error("TELEGRAM_PUBLICATION_MAPPING_BUFFER_FULL | bound=%s | peer=%s | scheduled_ids=%s", inbox is not None, peer, old)
                 if candidate is not None:
-                    persist = getattr(repository,"record_publication_inbox_overflow",None)
+                    persist = getattr(repository, "record_publication_inbox_overflow", None)
                     if callable(persist):
-                        await asyncio.to_thread(persist,candidate.sender_account_id,peer,old)
-                # When no SQLite session is available retain the full vector
-                # in memory; with a session, it is already safely on disk.
-                if spool is None:
-                    buffer.append((peer, old, new))
+                        await asyncio.to_thread(persist, candidate.sender_account_id, peer, old)
+                buffer.append((peer, old, new))
                 return
-            buffer.append((peer,old,new))
+            # When SQLite is healthy the mapping is durable already. Bound
+            # the in-memory wakeup cache, but do not manufacture an incident
+            # or lock MTProto writes merely because PostgreSQL is slow.
+            if len(buffer) < 1024:
+                buffer.append((peer, old, new))
             if inbox is None or live_lock.locked() or (retry_task is not None and not retry_task.done()):
                 return
             try:
