@@ -18,6 +18,7 @@ from app.repository_models import (
     utc_now_iso,
 )
 from app.postgres_client import PostgresClient
+from app.rescan_safety import RescanBlocked
 from app.repository import RepositoryProtocol
 from app.rule_folders_repository import RuleFoldersRepositoryMixin
 from app.repost_campaign_top_time import normalize_repost_campaign_top_time_settings
@@ -4394,7 +4395,70 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 row = cur.fetchone()
         return int(row["max_message_id"] or 0) if row else 0
 
-    def begin_rule_rescan(self, rule_id: int) -> tuple[bool, str]:
+    def _assert_rule_replay_safe(self, cur, rule_id: int) -> None:
+        """Allow explicitly confirmed replay of historical accepted video records.
+
+        Candidate IDs are not proof of publication. Legacy rows are archived
+        without promotion to verified, only when no modern receipt/intent or
+        unfinished delivery exists. Age is an eligibility guard, not proof.
+        """
+        cur.execute(
+            """
+            SELECT COUNT(*) AS unresolved, MIN(a.id) AS first_attempt_id
+            FROM delivery_attempts a
+            JOIN routing r ON r.id=a.rule_id
+            LEFT JOIN deliveries d ON d.id=a.delivery_id
+            WHERE a.rule_id=%s
+              AND a.status IN ('sending','accepted','failed_after_send')
+              AND a.idempotency_key NOT LIKE '%%:rescan:%%'
+              AND a.idempotency_key NOT LIKE 'archived:%%'
+              AND NOT COALESCE((
+                a.status='accepted'
+                AND a.operation_kind='video_send'
+                AND a.telegram_method='video_send'
+                AND a.error_text IS NULL
+                AND a.updated_at < NOW()-INTERVAL '24 hours'
+                AND a.target_id=r.target_id
+                AND a.tenant_id=COALESCE(r.tenant_id,1)
+                AND a.idempotency_key=('delivery:' || a.delivery_id::text
+                    || ':target:' || a.target_id || ':video_send:v1')
+                AND jsonb_typeof(a.sent_message_ids_json)='array'
+                AND jsonb_typeof(a.sent_message_ids_json->0)='number'
+                AND a.sent_message_ids_json->>0 ~ '^[1-9][0-9]*$'
+                AND a.sent_message_ids_json->1 IS NULL
+                AND (d.id IS NULL OR (
+                    d.rule_id=a.rule_id AND d.status='sent'
+                    AND d.sent_message_id>0
+                    AND a.sent_message_ids_json=jsonb_build_array(d.sent_message_id)
+                    AND COALESCE(d.target_id_snapshot,a.target_id)=a.target_id
+                ))
+                AND NOT EXISTS (
+                    SELECT 1 FROM mtproto_send_intents i WHERE i.attempt_id=a.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM telegram_publication_receipts pr
+                    WHERE pr.idempotency_key=a.idempotency_key
+                )
+              ), FALSE)
+            """, (int(rule_id),),
+        )
+        blocked = cur.fetchone()
+        if blocked["unresolved"]:
+            raise RescanBlocked(
+                "Есть отправка с неизвестным результатом; "
+                f"записей: {blocked['unresolved']}, "
+                f"первая попытка: {blocked.get('first_attempt_id')}. "
+                "Требуется ручная проверка."
+            )
+        cur.execute(
+            """SELECT idempotency_key FROM telegram_publication_receipts
+                WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching'))
+                ORDER BY idempotency_key LIMIT 1""", (int(rule_id),),
+        )
+        if cur.fetchone():
+            raise RescanBlocked("Есть незавершённая публикация или реакция; повтор запрещён")
+
+    def begin_rule_rescan(self, rule_id: int, *, fresh: bool = False) -> tuple[bool, str]:
         """Acquire a PostgreSQL-backed exclusive rescan owner before parsing.
 
         Ownership survives individual DB transactions and excludes independent
@@ -4434,6 +4498,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         "У правила есть незавершённые доставки или задачи; "
                         "пересканирование отложено во избежание дубликатов"
                     )
+                if fresh:
+                    self._assert_rule_replay_safe(cur, rule_id)
                 cur.execute(
                     """
                     UPDATE routing
@@ -4473,7 +4539,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     )
             conn.commit()
 
-    def reset_rule_history_for_replay(self, rule_id: int, *, owner_token: str) -> tuple[int, int]:
+    def reset_rule_history_for_replay(
+        self, rule_id: int, *, owner_token: str,
+        allowed_message_ids: set[int], include_newer_than_message_id: int,
+    ) -> tuple[int, int, int]:
         """Explicit 'start over': archive old attempt keys, then reset only this rule.
 
         Retain original attempt rows and Telegram receipts for audit. A new
@@ -4483,7 +4552,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT is_active, rescan_owner_token FROM routing WHERE id = %s FOR UPDATE",
+                    "SELECT is_active, rescan_owner_token, source_id, source_thread_id FROM routing WHERE id = %s FOR UPDATE",
                     (int(rule_id),),
                 )
                 rule = cur.fetchone()
@@ -4509,29 +4578,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if cur.fetchone()["busy"]:
                     raise RuntimeError("Остались активные задачи; архивирование отменено")
 
-                # Never archive an attempt whose publication outcome is unknown.
-                # Explicit replay may proceed only after authoritative reconciliation.
-                cur.execute(
-                    """
-                    SELECT EXISTS(
-                        SELECT 1 FROM delivery_attempts
-                        WHERE rule_id=%s
-                          AND status IN ('sending','accepted','failed_after_send')
-                          AND idempotency_key NOT LIKE '%%:rescan:%%'
-                          AND idempotency_key NOT LIKE 'archived:%%'
-                    ) AS unresolved
-                    """,
-                    (int(rule_id),),
-                )
-                if cur.fetchone()["unresolved"]:
-                    raise RuntimeError(
-                        "Есть отправка с неизвестным результатом; требуется ручная проверка"
-                    )
-
-                cur.execute("""SELECT 1 FROM telegram_publication_receipts
-                    WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""", (int(rule_id),))
-                if cur.fetchone():
-                    raise RuntimeError("Есть незавершённая публикация или реакция")
+                self._assert_rule_replay_safe(cur, rule_id)
                 cur.execute("""
                     UPDATE telegram_publication_receipts r
                     SET idempotency_key=r.idempotency_key || ':rescan:' || a.id::text
@@ -4556,8 +4603,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 archived = int(cur.rowcount or 0)
                 cur.execute("DELETE FROM deliveries WHERE rule_id = %s", (int(rule_id),))
                 deleted = int(cur.rowcount or 0)
+                rebuilt = self._backfill_deliveries_for_rule_conn(
+                    conn, int(rule_id), str(rule["source_id"]), rule["source_thread_id"],
+                    allowed_message_ids=allowed_message_ids,
+                    include_newer_than_message_id=include_newer_than_message_id,
+                )
             conn.commit()
-        return archived, deleted
+        return archived, deleted, rebuilt
 
     def clear_rule_deliveries(self, rule_id: int) -> int:
         with self.connect() as conn:
@@ -4740,6 +4792,25 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         WHERE d.post_id = p.id
                           AND d.rule_id = %s
                           AND d.status = 'pending'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM delivery_attempts a
+                          LEFT JOIN deliveries ad ON ad.id=a.delivery_id
+                          LEFT JOIN posts ap ON ap.id=ad.post_id
+                          WHERE a.rule_id=d.rule_id
+                            AND a.status IN ('sending','accepted','verified','failed_after_send')
+                            AND a.idempotency_key NOT LIKE '%%:rescan:%%'
+                            AND a.idempotency_key NOT LIKE 'archived:%%'
+                            AND (a.delivery_id=d.id
+                                OR a.source_message_ids_json @> jsonb_build_array(p.message_id)
+                                OR (p.media_group_id IS NOT NULL AND ap.media_group_id=p.media_group_id
+                                    AND ap.source_channel=p.source_channel
+                                    AND ap.source_thread_id IS NOT DISTINCT FROM p.source_thread_id))
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM telegram_publication_receipts pr
+                          WHERE pr.rule_id=d.rule_id AND pr.published_ids IS NULL
+                            AND (d.id=ANY(pr.delivery_ids) OR p.message_id=ANY(pr.source_message_ids))
+                      )
                           AND p.source_channel = %s
                           AND p.source_thread_id IS NULL
                           AND p.message_id < %s
@@ -4754,6 +4825,25 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         WHERE d.post_id = p.id
                           AND d.rule_id = %s
                           AND d.status = 'pending'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM delivery_attempts a
+                          LEFT JOIN deliveries ad ON ad.id=a.delivery_id
+                          LEFT JOIN posts ap ON ap.id=ad.post_id
+                          WHERE a.rule_id=d.rule_id
+                            AND a.status IN ('sending','accepted','verified','failed_after_send')
+                            AND a.idempotency_key NOT LIKE '%%:rescan:%%'
+                            AND a.idempotency_key NOT LIKE 'archived:%%'
+                            AND (a.delivery_id=d.id
+                                OR a.source_message_ids_json @> jsonb_build_array(p.message_id)
+                                OR (p.media_group_id IS NOT NULL AND ap.media_group_id=p.media_group_id
+                                    AND ap.source_channel=p.source_channel
+                                    AND ap.source_thread_id IS NOT DISTINCT FROM p.source_thread_id))
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM telegram_publication_receipts pr
+                          WHERE pr.rule_id=d.rule_id AND pr.published_ids IS NULL
+                            AND (d.id=ANY(pr.delivery_ids) OR p.message_id=ANY(pr.source_message_ids))
+                      )
                           AND p.source_channel = %s
                           AND p.source_thread_id = %s
                           AND p.message_id < %s
@@ -4780,6 +4870,25 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     WHERE d.post_id = p.id
                       AND d.rule_id = %s
                       AND d.status = 'pending'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM delivery_attempts a
+                          LEFT JOIN deliveries ad ON ad.id=a.delivery_id
+                          LEFT JOIN posts ap ON ap.id=ad.post_id
+                          WHERE a.rule_id=d.rule_id
+                            AND a.status IN ('sending','accepted','verified','failed_after_send')
+                            AND a.idempotency_key NOT LIKE '%%:rescan:%%'
+                            AND a.idempotency_key NOT LIKE 'archived:%%'
+                            AND (a.delivery_id=d.id
+                                OR a.source_message_ids_json @> jsonb_build_array(p.message_id)
+                                OR (p.media_group_id IS NOT NULL AND ap.media_group_id=p.media_group_id
+                                    AND ap.source_channel=p.source_channel
+                                    AND ap.source_thread_id IS NOT DISTINCT FROM p.source_thread_id))
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM telegram_publication_receipts pr
+                          WHERE pr.rule_id=d.rule_id AND pr.published_ids IS NULL
+                            AND (d.id=ANY(pr.delivery_ids) OR p.message_id=ANY(pr.source_message_ids))
+                      )
                       AND p.source_channel = %s
                       AND p.source_thread_id IS NOT DISTINCT FROM %s
                       AND NOT (p.message_id = ANY(%s::bigint[]))

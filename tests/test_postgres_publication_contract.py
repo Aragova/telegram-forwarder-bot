@@ -122,7 +122,7 @@ def test_rescan_preserves_uncertain_attempt(status):
                                      job_id=None, idempotency_key=key,
                                      operation_kind="single", status=status)
         with pytest.raises(RuntimeError, match="неизвестным результатом"):
-            repo.reset_rule_history_for_replay(rule_id, owner_token=owner)
+            repo.reset_rule_history_for_replay(rule_id, owner_token=owner, allowed_message_ids=set(), include_newer_than_message_id=0)
         assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == status
     finally:
         repo.client.close_all_connections()
@@ -382,4 +382,61 @@ def test_faulty_counter_and_clear_preserve_pending_publication_evidence(repo):
     assert repo.count_uncleared_faulty_deliveries() == baseline
     assert not set(deliveries).intersection(row["id"] for row in repo.get_faulty_deliveries(limit=10000))
     with pytest.raises(RuntimeError, match="неизвестным результатом"):
-        repo.reset_rule_history_for_replay(rule_id, owner_token="audit-124")
+        repo.reset_rule_history_for_replay(rule_id, owner_token="audit-124", allowed_message_ids=set(), include_newer_than_message_id=0)
+
+
+def test_rescan_legacy_video_history_431_and_atomic_rebuild(repo, monkeypatch):
+    _, rule_id, deliveries, source_ids, _, target = seed(repo, 131)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE rule_id=%s", (rule_id,))
+            cur.execute("UPDATE routing SET mode='video',is_active=TRUE WHERE id=%s", (rule_id,))
+            cur.execute("UPDATE deliveries SET status='sent',sent_message_id=651,target_id_snapshot=%s WHERE id=%s", (target, deliveries[0]))
+            cur.execute(
+                """INSERT INTO delivery_attempts
+                   (delivery_id,rule_id,tenant_id,idempotency_key,operation_kind,status,telegram_method,
+                    target_id,source_message_ids_json,sent_message_ids_json,created_at,updated_at)
+                   SELECT n,%s,1,'delivery:'||n::text||':target:'||%s||':video_send:v1',
+                          'video_send','accepted','video_send',%s,'[1001]'::jsonb,
+                          jsonb_build_array(651),NOW()-INTERVAL '3 days',NOW()-INTERVAL '3 days'
+                   FROM unnest(%s::bigint[]) AS members(n)""",
+                (rule_id,target,target,[deliveries[0]]+list(range(9000001,9000431))),
+            )
+    was_active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
+    assert was_active
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise RuntimeError("rebuild failed")
+        patch.setattr(repo, "_backfill_deliveries_for_rule_conn", fail)
+        with pytest.raises(RuntimeError, match="rebuild failed"):
+            repo.reset_rule_history_for_replay(rule_id, owner_token=owner,
+                allowed_message_ids=set(source_ids), include_newer_than_message_id=max(source_ids))
+    assert repo.get_delivery(deliveries[0])["status"]=="sent"
+    archived, deleted, rebuilt = repo.reset_rule_history_for_replay(rule_id, owner_token=owner,
+        allowed_message_ids=set(source_ids), include_newer_than_message_id=max(source_ids))
+    assert (archived, deleted, rebuilt)==(431,1,1)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM delivery_attempts WHERE rule_id=%s AND status='accepted' AND idempotency_key LIKE %s", (rule_id,"%:rescan:%"))
+            assert cur.fetchone()["n"]==431
+            cur.execute("SELECT id,status FROM deliveries WHERE rule_id=%s", (rule_id,))
+            row=cur.fetchone()
+            assert row["status"]=="pending" and row["id"]!=deliveries[0]
+    repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner, queue_rebuilt=True)
+
+
+def test_rescan_durable_video_intent_cannot_be_archived_as_legacy(repo):
+    _, rule_id, deliveries, _, _, target = seed(repo, 132)
+    key=f"delivery:{deliveries[0]}:target:{target}:video_send:v1"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE deliveries SET status='sent',sent_message_id=651 WHERE id=%s", (deliveries[0],))
+            cur.execute("UPDATE delivery_attempts SET idempotency_key=%s,operation_kind='video_send',telegram_method='video_send' WHERE rule_id=%s", (key,rule_id))
+    repo.get_or_create_mtproto_random_ids(key,0,"legacy-test",1)
+    assert repo.mark_delivery_attempt_accepted(key,sent_message_ids=[651],telegram_method="video_send")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE delivery_attempts SET updated_at=NOW()-INTERVAL '3 days' WHERE rule_id=%s", (rule_id,))
+    with pytest.raises(RuntimeError, match="неизвестным результатом"):
+        repo.begin_rule_rescan(rule_id, fresh=True)
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"]=="accepted"

@@ -307,8 +307,8 @@ class RescanCursor:
         q = " ".join(str(sql).split())
         self.sql.append(q)
         self.rowcount = 1
-        if q.startswith("SELECT is_active, rescan_owner_token FROM routing"):
-            self.result = {"is_active": self.active, "rescan_owner_token": self.owner}
+        if q.startswith("SELECT is_active, rescan_owner_token"):
+            self.result = {"is_active": self.active, "rescan_owner_token": self.owner, "source_id": "-100123", "source_thread_id": None}
         elif "AS busy" in q:
             self.result = {"busy": self.busy}
         elif "AS unresolved" in q:
@@ -341,6 +341,7 @@ def _rescan_repo(*, active=True, busy=False, owner=None, unresolved=False):
         yield conn
 
     repo.connect = connect
+    repo._backfill_deliveries_for_rule_conn = lambda *args, **kwargs: 17
     return repo, cursor, conn
 
 
@@ -368,7 +369,7 @@ def test_rescan_second_owner_rejected_across_modes():
 
 def test_explicit_replay_archives_attempts_with_matching_owner():
     repo, cursor, conn = _rescan_repo(active=False, owner="valid")
-    assert repo.reset_rule_history_for_replay(214, owner_token="valid") == (12, 33)
+    assert repo.reset_rule_history_for_replay(214, owner_token="valid", allowed_message_ids={101}, include_newer_than_message_id=101) == (12, 33, 17)
     assert conn.commits == 1
     assert any("UPDATE delivery_attempts SET idempotency_key" in q for q in cursor.sql)
     assert any("DELETE FROM deliveries WHERE rule_id = %s" in q for q in cursor.sql)
@@ -378,7 +379,7 @@ def test_explicit_replay_archives_attempts_with_matching_owner():
 def test_replay_refuses_unresolved_publications():
     repo, cursor, conn = _rescan_repo(active=False, owner="valid", unresolved=True)
     with pytest.raises(RuntimeError):
-        repo.reset_rule_history_for_replay(214, owner_token="valid")
+        repo.reset_rule_history_for_replay(214, owner_token="valid", allowed_message_ids={101}, include_newer_than_message_id=101)
     assert conn.commits == 0
     assert not any("UPDATE delivery_attempts" in q or "DELETE FROM deliveries" in q for q in cursor.sql)
 
@@ -387,7 +388,7 @@ def test_replay_refuses_unresolved_publications():
 def test_replay_refuses_active_or_wrong_owner(active, token):
     repo, cursor, conn = _rescan_repo(active=active, owner="valid")
     with pytest.raises(RuntimeError, match="владеть остановленным"):
-        repo.reset_rule_history_for_replay(214, owner_token=token)
+        repo.reset_rule_history_for_replay(214, owner_token=token, allowed_message_ids={101}, include_newer_than_message_id=101)
     assert conn.commits == 0
 
 
@@ -589,3 +590,11 @@ def test_scan_high_water_is_captured_inside_owner_finally_scope():
         )
         assert "include_newer_than_message_id=scan_start_max_message_id" in block
     assert "scan_start_max_message_id=scan_start_max_message_id" in source
+
+
+def test_fresh_preflight_rejects_unknown_before_owner_is_acquired():
+    repo, cursor, conn = _rescan_repo(unresolved=True)
+    with pytest.raises(RuntimeError, match="неизвестным результатом"):
+        repo.begin_rule_rescan(214, fresh=True)
+    assert cursor.owner is None and cursor.active
+    assert conn.commits == 0

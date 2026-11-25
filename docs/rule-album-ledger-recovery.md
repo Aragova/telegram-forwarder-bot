@@ -98,3 +98,7 @@ always includes posts above this boundary even if they were not present in the
 historical scan result. Rows that arrive after the iteration but before the
 rebuild therefore remain eligible. All of this happens without deleting shared
 source posts or loosening the idempotency checks on previously sent albums.
+
+
+## Regression #213 — explicit replay of historical accepted video attempts
+Before #507 video sends could remain accepted even with a stored candidate ID. Earlier full rescans removed delivery rows while retaining attempt history. #527 blocked every such attempt. The new explicit confirmation authorizes a new replay cycle, not verification of old video. Eligibility: accepted legacy video_send, older than 24h, error-free, matching rule/tenant/target and exact delivery-based key, exactly one positive numeric candidate ID, no durable MTProto intent or receipt, and no original delivery or a matching sent delivery. Age is not evidence of publication. Other uncertain attempts remain fenced. Archive retains original status and IDs. Preflight runs under the routing lock before parsing and again at commit. Archive/delete/rebuild share one transaction. Keep-position pruning retains attempted delivery evidence. Explicit replay may intentionally duplicate historical content.

@@ -36,6 +36,7 @@ from app.repository_models import utc_now_iso
 from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
 from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view, _button as rule_ui_button
 from app.repository import RepositoryProtocol
+from app.rescan_safety import RescanBlocked
 from app.repository_factory import create_repository
 from app.transport import wrap_bot, wrap_telethon_client
 from app.transport_policy import (
@@ -506,7 +507,7 @@ async def _run_rescan_rule_fresh_job(
 
         # A persisted owner token fences concurrent scans in every worker.
         # This includes the entire Telegram parse, DB replay, and resume phase.
-        was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
+        was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id, fresh=True)
         replay_committed = False
         successful = False
         try:
@@ -528,16 +529,13 @@ async def _run_rescan_rule_fresh_job(
                 )
             # Old accepted receipts stay in the audit ledger, but do not
             # count toward a user's intentional new replay cycle.
-            archived_attempts, old_deliveries = await run_db(
+            archived_attempts, old_deliveries, rebuilt_count = await run_db(
                 db.reset_rule_history_for_replay, rule_id,
                 owner_token=owner_token,
-            )
-            replay_committed = True
-            rebuilt_count = await run_db(
-                db.backfill_rule, rule_id,
                 allowed_message_ids=seen_message_ids,
                 include_newer_than_message_id=scan_start_max_message_id,
             )
+            replay_committed = True
             invalidate_preview_cache(rule_id)
             await run_db(scheduler_service.set_next_run, rule_id, utc_now_iso())
             successful = True
@@ -610,7 +608,10 @@ async def _run_rescan_rule_fresh_job(
                 )
 
     except Exception as exc:
-        logger.exception("Ошибка полного перескана правила %s: %s", rule_id, exc)
+        if isinstance(exc, RescanBlocked):
+            logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
+        else:
+            logger.exception("Ошибка полного перескана правила %s: %s", rule_id, exc)
 
         await _show_rule_processing_screen(
             chat_id=chat_id,
@@ -6802,7 +6803,7 @@ async def handle_rescan_rule_menu(callback: CallbackQuery):
                 f"Источник: {source_name}\n\n"
                 f"Выбери режим:\n"
                 f"• ♻️ Сохранить позицию — пересканировать источник и попытаться сохранить текущую точку старта\n"
-                f"• 🆕 Начать заново — полностью обновить источник и очередь правила с начала"
+                f"• 🆕 Начать заново — новый цикл; ранее отправленные посты могут быть опубликованы повторно"
             ),
             reply_markup=build_rescan_rule_keyboard(rule_id),
         )
@@ -6814,6 +6815,32 @@ async def handle_rescan_rule_menu(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("rescan_rule_fresh:"))
 async def handle_rescan_rule_fresh(callback: CallbackQuery):
+    try:
+        rule_id = int(callback.data.split(":")[1])
+    except (TypeError, ValueError, IndexError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    await answer_callback_safe_once(callback)
+    await edit_message_text_safe(
+        message=callback.message,
+        text=(
+            f"🆕 Начать заново: правило #{rule_id}\n\n"
+            "Очередь будет построена с начала. Ранее опубликованные посты "
+            "могут быть опубликованы повторно. Старые принятые видео "
+            "сохранятся в истории без отметки о проверке. "
+            "Незавершённые отправки по-прежнему блокируют сброс."
+        ),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить новый цикл", callback_data=f"rescan_rule_fresh_confirm:{rule_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rescan_rule_menu:{rule_id}")],
+        ]),
+    )
+
+
+@dp.callback_query(lambda c: c.data.startswith("rescan_rule_fresh_confirm:"))
+async def handle_rescan_rule_fresh_confirm(callback: CallbackQuery):
     try:
         rule_id = int(callback.data.split(":")[1])
     except Exception:
