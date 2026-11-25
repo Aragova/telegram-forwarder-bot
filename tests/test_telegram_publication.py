@@ -851,9 +851,13 @@ def test_spool_append_failure_retains_incident_evidence_even_if_postgres_fails(m
 
     async def scenario():
         incidents = []
+        recorded = []
+        db_up = False
         class Repository:
-            def record_telegram_publication_mappings(self, *_args):
-                raise ConnectionError("PostgreSQL offline")
+            def record_telegram_publication_mappings(self, account, peer, pairs):
+                if not db_up:
+                    raise ConnectionError("PostgreSQL offline")
+                recorded.extend(pairs)
 
             def record_publication_inbox_overflow(self, account, peer, ids):
                 incidents.append((account, peer, list(ids)))
@@ -871,8 +875,14 @@ def test_spool_append_failure_retains_incident_evidence_even_if_postgres_fails(m
             peer=peer, messages=[28], sent_messages=[128],
         ))
         assert client.publication_write_blocked is True
-        # The actual incident is still recorded after PostgreSQL recovers.
-        # No new Telegram update or send is required.
-        return incidents
+        db_up = True
+        with pytest.raises(RuntimeError, match="overflow"):
+            await bind()
+        # Startup may not reopen sends after disk evidence fails;
+        # it must commit an incident that survives this process.
+        assert recorded == [(28, 128)]
+        assert len(incidents) == 1
+        assert incidents[0][0] == 7
+        assert incidents[0][2] == [28]
 
-    assert asyncio.run(scenario()) == []
+    asyncio.run(scenario())
