@@ -195,16 +195,17 @@ class SenderPostSendHelpers:
             normalized_candidates,
         )
 
-        if not hasattr(self.owner.telethon, "get_messages"):
+        reader = getattr(self.owner, "telethon", None) or getattr(self.owner, "telethon_read", None)
+        if not callable(getattr(reader, "get_messages", None)):
             logger.warning(
-                "DELIVERY_TARGET_CONFIRM_SKIPPED_NO_GET_MESSAGES | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s",
+                "DELIVERY_TARGET_CONFIRM_UNVERIFIED_NO_GET_MESSAGES | rule_id=%s | delivery_id=%s | method=%s | target_id=%s | candidate_sent_message_ids=%s",
                 rule_id,
                 delivery_id,
                 method,
                 target_id,
                 normalized_candidates,
             )
-            return normalized_candidates
+            return []
 
         if not normalized_candidates:
             logger.warning(
