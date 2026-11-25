@@ -80,20 +80,24 @@ class FakeLaunchJobRepo:
         job["locked_by"] = worker_id
         return self._copy(job)
 
-    def set_repost_campaign_launch_job_campaign_run_id(self, job_id, campaign_run_id):
+    def set_repost_campaign_launch_job_campaign_run_id(self, job_id, campaign_run_id, *, worker_id):
         job = self.jobs.get(int(job_id))
-        if not job or job["status"] != "processing":
+        if not job or job["status"] != "processing" or job["locked_by"] != worker_id or job["locked_until"] == "expired":
             return None
         job["campaign_run_id"] = int(campaign_run_id)
         return self._copy(job)
 
-    def mark_repost_campaign_launch_job_sent(self, job_id, *, campaign_run_id, result_json):
+    def mark_repost_campaign_launch_job_sent(self, job_id, *, campaign_run_id, result_json, worker_id):
         job = self.jobs[int(job_id)]
+        if job.get('locked_by') != worker_id or job.get('locked_until') == 'expired' or job['status'] != 'processing':
+            return None
         job.update(status="sent", campaign_run_id=campaign_run_id, result_json=result_json, locked_by=None, locked_until=None)
         return self._copy(job)
 
-    def mark_repost_campaign_launch_job_failed(self, job_id, *, last_error, result_json=None, retryable=False):
+    def mark_repost_campaign_launch_job_failed(self, job_id, *, last_error, result_json=None, retryable=False, worker_id):
         job = self.jobs[int(job_id)]
+        if job.get('locked_by') != worker_id or job.get('locked_until') == 'expired' or job['status'] != 'processing':
+            return None
         job["last_error"] = last_error
         if result_json is not None:
             job["result_json"] = result_json
@@ -102,8 +106,10 @@ class FakeLaunchJobRepo:
         job["status"] = "pending" if retryable and job["campaign_run_id"] is None and job["attempts"] < job["max_attempts"] else "failed"
         return self._copy(job)
 
-    def mark_repost_campaign_launch_job_needs_review(self, job_id, *, last_error, campaign_run_id=None, result_json=None):
+    def mark_repost_campaign_launch_job_needs_review(self, job_id, *, last_error, campaign_run_id=None, result_json=None, worker_id):
         job = self.jobs[int(job_id)]
+        if job.get('locked_by') != worker_id or job.get('locked_until') == 'expired' or job['status'] != 'processing':
+            return None
         update = {
             "status": "needs_review",
             "last_error": last_error,
@@ -521,3 +527,34 @@ def test_campaign_stop_does_not_lease_more_jobs_from_current_batch():
         assert await service.process_due_jobs(worker_id="w1", stop_event=stop_event) == 0
 
     asyncio.run(_run())
+
+
+def test_stale_campaign_worker_cannot_mutate_reclaimed_launch_job():
+    async def scenario():
+        repo, runtime, service = make_service()
+        job = service.enqueue_manual_launch(
+            rule_id=4, admin_id=10, progress_chat_id=None, progress_message_id=None,
+        ).job
+        first = repo.lease_repost_campaign_launch_job(job["id"], "old-worker", 60)
+        repo.jobs[job["id"]]["locked_until"] = "expired"
+        await service.recover_stale_jobs(worker_id="new-worker")
+        second = repo.lease_repost_campaign_launch_job(job["id"], "new-worker", 60)
+        assert second and second["locked_by"] == "new-worker"
+        assert repo.set_repost_campaign_launch_job_campaign_run_id(
+            job["id"], 123, worker_id="old-worker",
+        ) is None
+        assert repo.mark_repost_campaign_launch_job_sent(
+            job["id"], campaign_run_id=123, result_json={"ok": True},
+            worker_id="old-worker",
+        ) is None
+        assert repo.mark_repost_campaign_launch_job_failed(
+            job["id"], last_error="stale", worker_id="old-worker",
+        ) is None
+        assert repo.mark_repost_campaign_launch_job_needs_review(
+            job["id"], last_error="stale", worker_id="old-worker",
+        ) is None
+        assert repo.jobs[job["id"]]["status"] == "processing"
+        assert repo.jobs[job["id"]]["campaign_run_id"] is None
+        assert repo.jobs[job["id"]]["locked_by"] == "new-worker"
+
+    asyncio.run(scenario())
