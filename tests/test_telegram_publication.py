@@ -993,3 +993,54 @@ def test_irrecoverable_difference_records_durable_incident_without_advancing_cur
         assert client.publication_write_blocked is True
         recovery._advance.assert_not_awaited()
     asyncio.run(scenario())
+
+
+
+def test_corrupt_fallback_journal_cannot_strand_new_emergency_mapping(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as module
+
+    class FailedSpool:
+        def __init__(self, _path):
+            pass
+        def pending(self, _limit=128):
+            return []
+        def append(self, *_args):
+            raise OSError("SQLite unavailable")
+
+    def partial_append(self, *_args):
+        self.path.write_bytes(b'{"incomplete":')
+        raise OSError("Journal write interrupted")
+
+    monkeypatch.setattr(module, "PublicationMappingSpool", FailedSpool)
+    monkeypatch.setattr(module.PublicationFallbackJournal, "append", partial_append)
+
+    async def scenario():
+        saved, incidents = [], []
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+        async def get_me():
+            return SimpleNamespace(id=7)
+        client.get_me = get_me
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=lambda account, peer, pairs: saved.extend(pairs),
+            record_publication_inbox_overflow=lambda account, peer, ids: incidents.append((account, peer, ids)),
+        )
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[55], sent_messages=[155],
+        ))
+        assert saved == [(55, 155)]
+        assert len(incidents) == 1 and incidents[0][2] == [55]
+        assert client.publication_write_blocked is True
+        assert client.publication_evidence_unpersisted is False
+        journal = tmp_path / "sender.publication-mappings.fallback.jsonl"
+        assert journal.read_bytes() == b'{"incomplete":'
+        tasks = [task for task in asyncio.all_tasks()
+                 if task.get_name() == "telegram-publication-persist-retry"]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())

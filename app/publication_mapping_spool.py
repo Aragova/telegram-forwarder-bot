@@ -99,6 +99,13 @@ class PublicationFallbackJournal:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
+        # The newly created journal name must survive a power loss as well
+        # as its contents. The session directory is the durability boundary.
+        dirfd = os.open(str(self.path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
 
     def pending(self) -> list[tuple[int, list[int], list[int]]]:
         if not self.path.exists():

@@ -200,7 +200,20 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 # memory entries are safe to replay.
                 if journal is not None:
                     async with journal_lock:
-                        journal_rows = await asyncio.to_thread(journal.pending)
+                        journal_failure: Exception | None = None
+                        persist_incident = getattr(
+                            repository, "record_publication_inbox_overflow", None
+                        )
+                        try:
+                            journal_rows = await asyncio.to_thread(journal.pending)
+                        except Exception as exc:
+                            # Corruption in the fallback file must not strand
+                            # newer emergency evidence in process memory.
+                            # Keep the file intact for operator recovery.
+                            client.publication_write_blocked = True
+                            journal_failure = exc
+                            journal_rows = []
+                            logger.exception("PUBLICATION_FALLBACK_JOURNAL_READ_FAILED")
                         for peer, old, new in journal_rows:
                             await candidate.record(peer, old, new)
                         if journal_rows:
@@ -209,9 +222,6 @@ def prepare_publication_inbox(client: Any, repository: Any):
                             # until an operator acknowledges the persisted
                             # incident, even after PostgreSQL replays records.
                             client.publication_write_blocked = True
-                            persist_incident = getattr(
-                                repository, "record_publication_inbox_overflow", None
-                            )
                             if callable(persist_incident):
                                 first_peer, first_old, _ = journal_rows[0]
                                 await asyncio.to_thread(
@@ -219,7 +229,11 @@ def prepare_publication_inbox(client: Any, repository: Any):
                                     candidate.sender_account_id, first_peer, first_old,
                                 )
                                 incident_persisted = True
-                            await asyncio.to_thread(journal.clear)
+                            try:
+                                await asyncio.to_thread(journal.clear)
+                            except Exception as exc:
+                                journal_failure = exc
+                                logger.exception("PUBLICATION_FALLBACK_JOURNAL_CLEAR_FAILED")
                             # These in-memory duplicates were already
                             # acknowledged in PostgreSQL by the journal pass.
                             for row in journal_rows:
@@ -230,8 +244,15 @@ def prepare_publication_inbox(client: Any, repository: Any):
                         while emergency:
                             peer, old, new = emergency[0]
                             await candidate.record(peer, old, new)
+                            if not incident_persisted and callable(persist_incident):
+                                await asyncio.to_thread(
+                                    persist_incident, candidate.sender_account_id, peer, old
+                                )
+                                incident_persisted = True
                             emergency.popleft()
                         client.publication_evidence_unpersisted = False
+                        if journal_failure is not None:
+                            raise journal_failure
                 else:
                     while emergency:
                         peer, old, new = emergency[0]
