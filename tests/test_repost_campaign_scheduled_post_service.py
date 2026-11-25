@@ -879,4 +879,4 @@ def test_send_now_concurrent_target_removal_restores_editable_draft():
     assert repo.posts[sid]["status"] == "draft"
     assert not repo.posts[sid].get("campaign_run_id")
     assert repo.needs_review_calls == []
-    assert service.update_draft_show_seconds(scheduled_post_id=sid, show_seconds=120).ok
+    assert service.update_draft_show_seconds(scheduled_post_id=sid, show_seconds=60).ok
