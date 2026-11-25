@@ -83,18 +83,11 @@ class PublicationDifferenceRecovery:
             # This is a *read* cursor only until its page has been persisted.
             # Never persist an advanced checkpoint from GetState/TooLong:
             # doing so can erase the only chance of recovering an exact pair.
-            server_pts = getattr(difference, "pts", None)
-            if type(server_pts) is int and server_pts > int(cursor["pts"]):
-                difference = await self._rpc(functions.updates.GetDifferenceRequest(
-                    pts=server_pts, qts=cursor["qts"], date=cursor["state_date"],
-                    pts_limit=1000,
-                ))
-            if isinstance(difference, types.updates.DifferenceTooLong):
-                logger.warning(
-                    "PUBLICATION_DIFFERENCE_RANGE_UNAVAILABLE | account=%s | checkpoint_not_advanced",
-                    self.sender_account_id,
-                )
-                return False
+            logger.warning(
+                "PUBLICATION_DIFFERENCE_RANGE_UNAVAILABLE | account=%s | checkpoint_not_advanced",
+                self.sender_account_id,
+            )
+            return False
         if isinstance(difference, types.updates.DifferenceEmpty):
             await self._advance(cursor, cursor["pts"], cursor["qts"], difference.date)
             return False
