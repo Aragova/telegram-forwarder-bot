@@ -3776,6 +3776,22 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if (not owned or owned["status"] != "processing"
                         or owned["locked_by"] != str(worker_id)):
                     return []
+                # The previous execution may have committed quarantine but
+                # crashed before completing the job. That durable fault still
+                # blocks every video/repost stage, even if the rule changed.
+                # Do not reset sibling rows: a new job may already own them.
+                cur.execute(
+                    """SELECT id FROM deliveries
+                       WHERE id=ANY(%s) AND rule_id=%s AND status='faulty'
+                         AND lower(error_text) IN (
+                             'self-loop: confirmed publication echo', 'self_target_echo'
+                         )
+                       ORDER BY id FOR UPDATE""",
+                    (identifiers, int(rule_id)),
+                )
+                quarantined = [int(row["id"]) for row in cur.fetchall() or []]
+                if quarantined:
+                    return quarantined
                 cur.execute(
                     """SELECT d.id, p.source_channel, p.source_thread_id, p.message_id
                        FROM deliveries d

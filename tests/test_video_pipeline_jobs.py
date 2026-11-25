@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from app.job_service import (
     JOB_TYPE_VIDEO_DELIVERY,
     JOB_TYPE_VIDEO_DOWNLOAD,
@@ -471,3 +473,26 @@ def test_caption_contract_payload_survives_to_send_job() -> None:
 def test_self_loop_guard_covers_video_download_and_video_process_source():
     source = Path("app/worker_runtime.py").read_text()
     assert 'job_type in {"repost_single", "repost_album", "video_download", "video_process", "video_delivery", "video_send"}' in source
+
+
+@pytest.mark.parametrize("job_type", [JOB_TYPE_VIDEO_DOWNLOAD, JOB_TYPE_VIDEO_PROCESS, JOB_TYPE_VIDEO_DELIVERY, JOB_TYPE_VIDEO_SEND])
+def test_retry_after_echo_quarantine_never_reaches_video_executor(job_type):
+    repo = _Repo()
+    sender = _Sender()
+    job_id = repo.create_job(job_type, {"rule_id": 2, "delivery_id": 20,
+        "message_id": 200, "source_channel": "src", "target_id": "dst"}, "heavy")
+    def quarantine(*_args, **_kwargs):
+        repo.deliveries[20].update(status="faulty", error_text="Self-loop: confirmed publication echo")
+        return [20]
+    repo.quarantine_queued_self_target_echo_deliveries = quarantine
+    original_complete = repo.complete_job
+    def fail_once(current_job_id):
+        repo.complete_job = original_complete
+        raise RuntimeError("completion interrupted after quarantine")
+    repo.complete_job = fail_once
+    asyncio.run(_run_one_job(repo, sender, "heavy-1", "heavy"))
+    assert repo.jobs[job_id]["status"] == "retry"
+    assert repo.deliveries[20]["status"] == "faulty"
+    asyncio.run(_run_one_job(repo, sender, "heavy-2", "heavy"))
+    assert repo.jobs[job_id]["status"] == "done"
+    assert sender.download_calls == sender.process_calls == sender.send_calls == sender.legacy_calls == 0

@@ -978,3 +978,27 @@ def test_stale_album_release_retires_old_job_before_new_group_claim(repo):
     assert [repo.get_delivery(i)["status"] for i in ids] == ["processing"] * 3
     assert release("current", old_ids) is None
     assert [repo.get_delivery(i)["status"] for i in ids] == ["processing"] * 3
+
+
+@pytest.mark.parametrize("job_type", ["video_download", "video_process", "video_delivery", "video_send", "repost_single", "repost_album"])
+def test_previously_quarantined_echo_still_fences_retried_job(repo, job_type):
+    suffix = uuid4().int % 10**12
+    _, rule_id, ids, _, source, _ = seed(repo, suffix, count=2)
+    echo_id, sibling = ids
+    members = ids if job_type == "repost_album" else [echo_id]
+    payload = {"rule_id": rule_id, "delivery_id": echo_id, "delivery_ids": members}
+    job_id = repo.create_job(job_type, payload, "light")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET target_id=%s WHERE id=%s", (source, rule_id))
+            cur.execute("UPDATE deliveries SET status='faulty',error_text='Self-loop: confirmed publication echo' WHERE id=%s", (echo_id,))
+            cur.execute("UPDATE jobs SET status='processing',locked_by='retried' WHERE id=%s", (job_id,))
+    def guard():
+        return repo.quarantine_queued_self_target_echo_deliveries(
+            rule_id, members, job_id=job_id, worker_id="retried")
+    # A crash after the original quarantine must not make the echo eligible.
+    assert guard() == [echo_id]
+    assert guard() == [echo_id]
+    assert repo.get_delivery(echo_id)["status"] == "faulty"
+    # Previously released unrelated album members may now be owned by a new job.
+    assert repo.get_delivery(sibling)["status"] == "processing"
