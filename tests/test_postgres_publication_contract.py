@@ -1,4 +1,5 @@
 """Real PostgreSQL contract; CI creates a dedicated disposable database."""
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
@@ -690,3 +691,58 @@ def test_keep_prune_before_position_preserves_post_after_snapshot(repo):
             row = cur.fetchone()
     assert row is not None and row["status"] == "pending"
     repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner, queue_rebuilt=True)
+
+
+@pytest.mark.parametrize("extra_type", ["text", "jsonb"])
+@pytest.mark.parametrize("self_loop", [False, True])
+def test_rescan_snapshot_accepts_both_production_and_ci_audit_schemas(
+    repo, extra_type, self_loop,
+):
+    """The real VM uses JSONB while the repository init DDL creates TEXT.
+
+    A TEMP shadow table reproduces the exact production SQL type without
+    changing the shared disposable CI database or masking other tests.
+    The non-self-loop case must still parse correctly with zero selected rows.
+    """
+    _, rule_id, delivery_ids, source_ids, source, target = seed(
+        repo, uuid4().int % 10**12,
+    )
+    mid = source_ids[0] + 41000
+    album_ids = [mid + 1, mid + 2]
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            if self_loop:
+                cur.execute("UPDATE routing SET target_id=source_id WHERE id=%s", (rule_id,))
+            cur.execute(
+                """UPDATE deliveries SET status='sent',sent_message_id=%s,
+                   sent_message_ids_json=%s::jsonb,target_id_snapshot=%s WHERE id=%s""",
+                (mid, json.dumps(album_ids), source if self_loop else target, delivery_ids[0]),
+            )
+        conn.commit()
+
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            # The session-local table shadows audit_log only for this call.
+            cur.execute(
+                "CREATE TEMP TABLE audit_log (LIKE public.audit_log INCLUDING ALL) ON COMMIT DROP"
+            )
+            if extra_type == "jsonb":
+                cur.execute(
+                    "ALTER TABLE pg_temp.audit_log ALTER COLUMN extra_json "
+                    "TYPE jsonb USING extra_json::jsonb"
+                )
+            repo._snapshot_rescan_echo_ids(cur, rule_id)
+            cur.execute(
+                """SELECT pg_typeof(extra_json)::text AS stored_type,extra_json
+                   FROM pg_temp.audit_log
+                   WHERE event_type='rule_rescan_echo_snapshot' AND rule_id=%s""",
+                (rule_id,),
+            )
+            rows = cur.fetchall()
+            assert len(rows) == int(self_loop)
+            if self_loop:
+                assert rows[0]["stored_type"] == extra_type
+                stored = rows[0]["extra_json"]
+                payload = json.loads(stored) if isinstance(stored, str) else stored
+                assert set(payload["sent_message_ids"]) == {mid, *album_ids}
+        conn.commit()
