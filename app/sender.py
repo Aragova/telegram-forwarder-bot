@@ -1280,6 +1280,34 @@ class SenderService:
             normalized_mode,
             normalized_schedule_mode,
         )
+        # A previous worker can quarantine a confirmed self-loop echo and
+        # crash before completing its job. That delivery must never reach a
+        # new Telegram RPC merely because no attempt was created.
+        async def check_quarantined_echo() -> dict | bool | None:
+            lookup = getattr(self.db, "get_delivery", None)
+            if not callable(lookup):
+                return None
+            row = await run_db(lookup, int(delivery_id))
+            if not isinstance(row, dict):
+                return None
+            status = str(row.get("status") or "").lower()
+            reason = str(row.get("error_text") or "").lower()
+            if status == "sent":
+                return True
+            if status == "faulty" and (
+                "self-loop: confirmed publication echo" in reason
+                or "self_loop" in reason
+            ):
+                return {
+                    "ok": False, "retryable": False, "accepted": False,
+                    "manual_review_required": True, "non_retryable": True,
+                    "error_text": "self_loop_echo_delivery_already_quarantined",
+                }
+            return None
+
+        early_echo = await check_quarantined_echo()
+        if early_echo is not None:
+            return early_echo
         idempotency_key = build_delivery_idempotency_key(operation_kind="single", delivery_id=int(delivery_id), target_id=str(target_id))
         from .single_publication_reconciliation import reconcile_pending_publication
         pending_result = await reconcile_pending_publication(self, idempotency_key)
@@ -1377,6 +1405,16 @@ class SenderService:
             rule = await run_db(self.db.get_rule, int(rule_id))
             if not rule:
                 raise RuntimeError(f"Правило #{rule_id} не найдено для repost_single")
+            # A competing recovery may have fenced this delivery during
+            # identity persistence. Recheck immediately before the transport.
+            late_echo = await check_quarantined_echo()
+            if late_echo is not None:
+                await run_db(
+                    self.db.mark_delivery_attempt_failed, idempotency_key,
+                    status="failed_before_send",
+                    error_text="self_loop_echo_delivery_already_quarantined",
+                )
+                return late_echo
             with publication_scope(intent):
                 ok = await self._deliver_single(
                     rule,
