@@ -481,7 +481,7 @@ def test_stale_pending_prune_is_rule_scoped():
     assert "DELETE FROM deliveries d" in query
     assert "d.rule_id = %s" in query and "d.status = 'pending'" in query
     assert "p.source_thread_id IS NOT DISTINCT FROM %s" in query
-    assert params == (214, "-100123", None, None, None, None, [101, 103], 103)
+    assert params == (214, "-100123", None, None, None, None, None, None, [101, 103], 103)
     assert "p.message_id <= %s" in query
 
 
