@@ -165,3 +165,64 @@ def test_transport_rate_limited_logs_video_event() -> None:
     assert event["post_id"] == 987
     assert event["extra"]["retry_after_seconds"] == 6402
     assert event["extra"]["delay_seconds"] >= 6412
+
+
+def test_legacy_video_source_floodwait_defers_on_last_attempt() -> None:
+    from types import SimpleNamespace
+    from telethon.errors import FloodWaitError
+    from app.sender_fetch_download_helpers import SenderFetchDownloadHelpers
+    from app.video_single_delivery import VideoSingleDelivery
+
+    repo = _RateLimitRepo()
+
+    class Reader:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_messages(self, entity, ids):
+            self.calls += 1
+            raise FloodWaitError(request=None, capture=7)
+
+    reader = Reader()
+
+    class LegacyVideoSender:
+        async def execute_video_delivery_from_job(self, **payload):
+            owner = SimpleNamespace(
+                telethon_read=reader,
+                telethon=None,
+                _get_post_id_by_delivery_sync=repo.get_post_id_by_delivery,
+                _log_video_event_sync=repo.log_video_event,
+            )
+            owner._fetch_message = lambda source, message_id: (
+                SenderFetchDownloadHelpers(owner).fetch_message(source, message_id)
+            )
+            return await VideoSingleDelivery(owner).deliver(
+                SimpleNamespace(id=payload["rule_id"]),
+                payload["delivery_id"],
+                payload["message_id"],
+                payload["source_channel"],
+                payload["target_id"],
+                payload.get("target_thread_id"),
+            )
+
+    result = asyncio.run(_process_job(
+        repo,
+        LegacyVideoSender(),
+        "worker-1",
+        "heavy",
+        _job(job_type="video_delivery", attempts=2, max_attempts=3, payload={
+            "delivery_id": 123, "rule_id": 45, "message_id": 55,
+            "source_channel": "@source", "target_id": "-100123",
+        }),
+        policy=_policy(),
+        state=_InFlightState(),
+    ))
+
+    assert result is True
+    assert reader.calls == 1
+    assert len(repo.defer_calls) == 1
+    assert repo.defer_calls[0][2] >= 17
+    assert repo.retry_calls == []
+    assert repo.fail_calls == []
+    assert repo.faulty_calls == []
+    assert any(e["event_type"] == "transport_rate_limited" for e in repo.video_events)
