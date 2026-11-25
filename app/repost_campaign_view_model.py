@@ -277,7 +277,9 @@ def build_campaign_run_item_view(run: dict, *, index: int | None = None) -> dict
 
 
 def build_campaign_run_message_view(message: dict, *, index: int | None = None) -> dict:
-    status_text = format_campaign_send_status_text(message.get("send_status"))
+    review_required = bool(message.get("publication_review_required")) or message.get("send_status")=="sending"
+    status_text = ("⚠️ ID не подтверждены; повтор запрещён" if review_required
+                   else format_campaign_send_status_text(message.get("send_status")))
     kind_text = format_campaign_target_kind_text(message.get("target_kind"))
     send_error = format_campaign_error_text(message.get("send_error_text"))
     sent_id = message.get("sent_message_id")
@@ -285,6 +287,7 @@ def build_campaign_run_message_view(message: dict, *, index: int | None = None) 
     delete_status = (message.get("delete_status") or "").strip().lower()
     can_delete_now = (
         (message.get("send_status") or "").strip().lower() == "sent"
+        and not review_required
         and sent_id is not None
         and delete_status in {"pending", "failed", "processing"}
     )

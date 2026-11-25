@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from .runtime_utils import run_db
+from .send_intent import PublicationIntent, publication_scope, _definite_rejection
+from .telegram_publication import botapi_publication_ids
+from .transport_policy import TransportRateLimited
+
+def _unverified_copy():
+    return {"ok":False,"accepted":True,"retryable":False,"manual_review_required":True,
+            "error_text":"Telegram мог принять копию; ID не подтверждён. Повтор запрещён."}
 
 
 class SenderCampaignCopyHelpers:
@@ -12,22 +19,43 @@ class SenderCampaignCopyHelpers:
         if not copy_row:
             return {"ok": False, "retryable": False, "error_text": "Копия кампании не найдена"}
         if str(copy_row.get("send_status") or "") == "sent":
+            if copy_row.get("delete_status")=="scheduled" and copy_row.get("delete_after_at"):
+                from app.job_service import enqueue_repost_campaign_delete_copy
+                await run_db(enqueue_repost_campaign_delete_copy,self.owner.db,int(copy_id),run_at=copy_row["delete_after_at"])
             return {"ok": True, "already_sent": True}
+        if copy_row.get("send_status") in {"processing","unverified"}:
+            return _unverified_copy()
         delivery = await run_db(self.owner.db.get_delivery, int(copy_row.get("delivery_id") or 0))
         if not delivery:
             await run_db(self.owner.db.mark_delivery_campaign_copy_send_failed, int(copy_id), "Delivery не найден")
             return {"ok": False, "retryable": False, "error_text": "Delivery не найден"}
         if str(delivery.get("delivery_method") or "") == "album":
             return {"ok": False, "retryable": False, "error_text": "Кампании для альбомов пока не поддерживаются в MVP"}
-        await run_db(self.owner.db.mark_delivery_campaign_copy_processing, int(copy_id))
-        sent = await self.owner.bot.copy_message(chat_id=str(copy_row.get("target_id")), from_chat_id=str(delivery.get("source_channel")), message_id=int(delivery.get("message_id")))
-        sent_ids = [int(sent.message_id)] if getattr(sent, "message_id", None) else []
         rule = await run_db(self.owner.db.get_rule, int(copy_row.get("rule_id") or 0))
         show_seconds = int(getattr(rule, "repost_campaign_show_seconds", 0) or 0)
+        if not await run_db(self.owner.db.mark_delivery_campaign_copy_processing,int(copy_id)):
+            return _unverified_copy()
+        topic = copy_row.get("target_thread_id")
+        try:
+            with publication_scope(PublicationIntent(self.owner.db,str(copy_id),kind="campaign_copy")):
+                sent = await self.owner.bot.copy_message(chat_id=str(copy_row.get("target_id")),
+                    from_chat_id=str(delivery.get("source_channel")),message_id=int(delivery.get("message_id")),
+                    **({"message_thread_id":topic} if topic is not None else {}))
+        except Exception as exc:
+            if isinstance(exc, TransportRateLimited) or _definite_rejection(exc):
+                await run_db(self.owner.db.mark_delivery_campaign_copy_send_failed,int(copy_id),"rejected:"+str(exc))
+                raise
+            await run_db(self.owner.db.mark_delivery_campaign_copy_unverified,int(copy_id),"copy_rpc_outcome_unknown")
+            return _unverified_copy()
+        sent_ids = botapi_publication_ids(sent,1)
+        if not sent_ids:
+            await run_db(self.owner.db.mark_delivery_campaign_copy_unverified,int(copy_id),"botapi_accepted_without_published_id")
+            return _unverified_copy()
         from app.repost_campaign_service import build_campaign_delete_after_iso
         from app.job_service import enqueue_repost_campaign_delete_copy
         delete_after_at = build_campaign_delete_after_iso(show_seconds)
-        await run_db(self.owner.db.mark_delivery_campaign_copy_sent, int(copy_id), sent_message_id=(sent_ids[0] if sent_ids else None), sent_message_ids=sent_ids, delivery_method="copy_single", delete_after_at=delete_after_at)
+        if not await run_db(self.owner.db.mark_delivery_campaign_copy_sent, int(copy_id), sent_message_id=sent_ids[0], sent_message_ids=sent_ids, delivery_method="copy_single", delete_after_at=delete_after_at):
+            return _unverified_copy()
         await run_db(enqueue_repost_campaign_delete_copy, self.owner.db, int(copy_id), run_at=delete_after_at)
         return {"ok": True, "copy_id": int(copy_id), "sent_message_ids": sent_ids}
 

@@ -634,11 +634,15 @@ class RepositoryProtocol(Protocol):
         show_seconds: int = 0,
         delete_after_at: str | None = None,
     ) -> int | None: ...
+    def mark_campaign_run_message_failed_before_send(
+        self, message_id: int, *, error_text: str,
+    ) -> bool: ...
     def mark_campaign_run_message_sending(
         self,
         message_id: int,
         *,
         render_mode: str | None = None,
+        canonical_target_id: int | None = None,
     ) -> bool: ...
     def mark_campaign_run_message_sent(
         self,
@@ -709,6 +713,8 @@ class RepositoryProtocol(Protocol):
         render_mode: str | None = None,
         delete_status: str | None = "failed",
         delete_error_text: str | None = None,
+        accepted_unverified: bool = False,
+        raw_message_ids: list[int] | None = None,
     ) -> bool: ...
     def get_campaign_run(self, run_id: int) -> dict[str, Any] | None: ...
     def get_campaign_run_message(self, message_id: int) -> dict[str, Any] | None: ...

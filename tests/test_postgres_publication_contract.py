@@ -746,3 +746,171 @@ def test_rescan_snapshot_accepts_both_production_and_ci_audit_schemas(
                 payload = json.loads(stored) if isinstance(stored, str) else stored
                 assert set(payload["sent_message_ids"]) == {mid, *album_ids}
         conn.commit()
+
+
+def test_campaign_send_claim_and_intent_are_durable(repo):
+    _, rule_id, _, _, _, target = seed(repo, uuid4().int % 10**12)
+    run = repo.create_campaign_run(rule_id=rule_id,saved_post_id=123,run_type="manual",status="sending",show_seconds=60,targets_total=1,started_by=None)
+    def placement(run_id):
+        return repo.create_campaign_run_message(run_id=run_id,rule_id=rule_id,saved_post_id=123,
+            target_kind="main",target_id=str(target),show_seconds=60,delete_after_at="2020-01-01T00:00:00+00:00")
+    mid = placement(run)
+    other_run = repo.create_campaign_run(rule_id=rule_id,saved_post_id=123,run_type="manual",status="sending",show_seconds=60,targets_total=1,started_by=None)
+    other = placement(other_run)
+    assert repo.mark_campaign_run_message_sending(mid)
+    assert not repo.mark_campaign_run_message_sending(mid)
+    assert not repo.mark_campaign_run_message_sending(other)
+    ids = repo.get_or_create_campaign_mtproto_random_ids(str(mid),0,"identity",2)
+    assert repo.get_or_create_campaign_mtproto_random_ids(str(mid),0,"identity",2)==ids
+    assert repo.mark_campaign_run_message_failed(mid,error_text="unknown",accepted_unverified=True)
+    assert not repo.mark_campaign_run_message_sending(other)
+    assert not repo.mark_campaign_run_message_sent(mid,sent_message_id=1)
+
+
+def test_campaign_receipt_exact_mapping_and_atomic_timers(repo):
+    from datetime import datetime, timedelta, timezone
+    _, rule_id, _, _, _, target = seed(repo, uuid4().int % 10**12)
+    run = repo.create_campaign_run(rule_id=rule_id,saved_post_id=124,run_type="manual",
+        status="sending",show_seconds=60,started_by=None,targets_total=1,
+        top_time_enabled_snapshot=True,top_time_seconds_snapshot=7200)
+    mid = repo.create_campaign_run_message(run_id=run,rule_id=rule_id,saved_post_id=124,
+        target_kind="main",target_id=str(target),show_seconds=60,delete_after_at="2020-01-01T00:00:00+00:00")
+    assert repo.mark_campaign_run_message_sending(mid)
+    account = uuid4().int % 10**12 + 1
+    now = datetime.now(timezone.utc)
+    receipt = {"ids":[11,12],"mask":[True,False],"peer_id":int(target),"thread_id":None,
+        "account_id":account,"started_at":(now-timedelta(minutes=2)).isoformat(),"method":"telethon_source"}
+    assert repo.record_campaign_publication_receipt(mid,receipt)
+    assert repo.mark_campaign_run_message_failed(mid,error_text="pending",accepted_unverified=True)
+    assert not repo.mark_campaign_run_message_sent(mid,sent_message_id=11)
+    repo.update_campaign_run_status(run,status="failed",targets_failed=1,finish=True)
+    assert not repo.confirm_campaign_publication(mid,receipt=receipt,published_ids=[22,12],published_at=now)
+    repo.record_telegram_publication_mappings(account,int(target),[(11,22)])
+    assert not repo.confirm_campaign_publication(mid,receipt=receipt,published_ids=[22,99],published_at=now)
+    assert repo.confirm_campaign_publication(mid,receipt=receipt,published_ids=[22,12],published_at=now)
+    assert not repo.confirm_campaign_publication(mid,receipt=receipt,published_ids=[22,12],published_at=now)
+    row=repo.get_campaign_run_message(mid)
+    assert row["send_status"]=="sent" and row["sent_message_ids_json"]==[22,12]
+    assert row["sent_at"]==now
+    assert row["delete_after_at"]==now+timedelta(seconds=60)
+    assert repo.get_campaign_run(run)["status"]=="sent"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT starts_at,ends_at FROM campaign_top_time_pauses WHERE campaign_run_message_id=%s",(mid,))
+            pause=cur.fetchone()
+            assert pause and pause["starts_at"]==now and pause["ends_at"]==now+timedelta(seconds=7200)
+
+
+def test_campaign_manual_review_keeps_old_placement_nonreplayable(repo):
+    from datetime import datetime, timedelta, timezone
+    _, rule_id, _, _, _, target=seed(repo,uuid4().int%10**12)
+    run=repo.create_campaign_run(rule_id=rule_id,saved_post_id=125,run_type="manual",
+        status="sending",show_seconds=60,started_by=None,targets_total=1)
+    mid=repo.create_campaign_run_message(run_id=run,rule_id=rule_id,saved_post_id=125,
+        target_kind="main",target_id=target,show_seconds=60)
+    assert repo.mark_campaign_run_message_sending(mid)
+    stamp=datetime.now(timezone.utc)-timedelta(minutes=20)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE WHERE id=%s",(rule_id,))
+            cur.execute("UPDATE campaign_run_messages SET updated_at=%s WHERE id=%s",(stamp,mid))
+    assert not repo.acknowledge_interrupted_campaign_send(mid,expected_updated_at=stamp+timedelta(seconds=1),operator="test",note="inspected")
+    assert repo.acknowledge_interrupted_campaign_send(mid,expected_updated_at=stamp,operator="test",note="inspected")
+    assert repo.get_campaign_run_message(mid)["publication_manual_review"]["operator"]=="test"
+    assert not repo.mark_campaign_run_message_sending(mid)
+
+
+def test_inbox_incident_survives_new_connection_and_requires_explicit_review(repo):
+    from datetime import timedelta
+    account = uuid4().int % 10**12 + 1
+    repo.record_publication_inbox_overflow(account,-100123,[7,8])
+    other = PostgresRepository()
+    try:
+        incident = other.get_publication_inbox_incident(account)
+        assert incident["last_scheduled_ids"] == [7,8]
+        assert incident["acknowledged_at"] is None
+        stamp = incident["blocked_at"]
+        assert not other.acknowledge_publication_inbox_incident(account,expected_blocked_at=stamp-timedelta(seconds=1),note="reviewed")
+        assert other.acknowledge_publication_inbox_incident(account,expected_blocked_at=stamp,note="reviewed")
+        assert repo.get_publication_inbox_incident(account)["acknowledged_at"] is not None
+        repo.record_publication_inbox_overflow(account,-100123,[9])
+        assert other.get_publication_inbox_incident(account)["acknowledged_at"] is None
+    finally:
+        other.client.close_all_connections()
+
+
+def test_campaign_scheduled_id_cannot_be_claimed_by_two_placements_or_delivery(repo):
+    from datetime import datetime, timezone
+    key, rule_id, delivery_ids, source_ids, source, target = seed(repo, uuid4().int % 10**12)
+    account = uuid4().int % 10**12 + 1
+    receipt = {"ids":[411],"mask":[True],"peer_id":int(target),"thread_id":None,
+        "account_id":account,"started_at":datetime.now(timezone.utc).isoformat(),"method":"telethon_source"}
+    def placement(post):
+        run = repo.create_campaign_run(rule_id=rule_id,saved_post_id=post,run_type="manual",
+            status="sending",show_seconds=60,started_by=None,targets_total=1)
+        mid = repo.create_campaign_run_message(run_id=run,rule_id=rule_id,saved_post_id=post,
+            target_kind="main",target_id=target,show_seconds=60)
+        assert repo.mark_campaign_run_message_sending(mid)
+        return mid
+    first, second = placement(901), placement(902)
+    assert repo.record_campaign_publication_receipt(first,receipt)
+    assert not repo.record_campaign_publication_receipt(second,receipt)
+    assert not repo.register_publication_receipt(key=key,delivery_ids=delivery_ids,rule_id=rule_id,
+        account_id=account,peer_id=int(target),thread_id=None,source_channel=source,
+        source_message_ids=source_ids,scheduled_ids=[411])
+    assert repo.register_publication_receipt(key=key,delivery_ids=delivery_ids,rule_id=rule_id,
+        account_id=account,peer_id=int(target),thread_id=None,source_channel=source,
+        source_message_ids=source_ids,scheduled_ids=[412])
+    assert not repo.record_campaign_publication_receipt(second,{**receipt,"ids":[412]})
+    assert repo.get_campaign_run_message(second)["publication_receipt"] is None
+
+
+@pytest.mark.parametrize("initial_status", ["pending", "sending", "sent", "failed"])
+def test_campaign_definite_pre_rpc_failure_is_atomic_and_does_not_touch_claims(repo, initial_status):
+    _, rule_id, _, _, _, target = seed(repo, uuid4().int % 10**12)
+    run = repo.create_campaign_run(
+        rule_id=rule_id, saved_post_id=991, run_type="manual", status="sending",
+        show_seconds=60, targets_total=1, started_by=None,
+    )
+    mid = repo.create_campaign_run_message(
+        run_id=run, rule_id=rule_id, saved_post_id=991, target_kind="main",
+        target_id=f"@missing_{initial_status}_{uuid4().hex[:10]}",
+        show_seconds=60, delete_after_at="2026-12-01T00:00:00+00:00",
+    )
+    assert mid is not None
+    if initial_status != "pending":
+        assert repo.mark_campaign_run_message_sending(mid)
+        if initial_status == "sent":
+            assert repo.mark_campaign_run_message_sent(
+                mid, sent_message_id=10001, render_mode="bot_api",
+            )
+        elif initial_status == "failed":
+            assert repo.mark_campaign_run_message_failed(
+                mid, error_text="prior failure", render_mode="bot_api",
+            )
+    before = repo.get_campaign_run_message(mid)
+    changed = repo.mark_campaign_run_message_failed_before_send(
+        mid, error_text="recipient resolution rejected",
+    )
+    assert changed is (initial_status == "pending")
+    after = repo.get_campaign_run_message(mid)
+    if initial_status == "pending":
+        assert after["send_status"] == "failed"
+        assert after["render_mode"] == "target_resolution_failed"
+        assert after["send_error_text"] == "recipient resolution rejected"
+        assert after["delete_status"] == "none"
+        assert after["delete_after_at"] is None
+        assert after["sent_message_id"] is None
+    else:
+        assert after["send_status"] == before["send_status"]
+        assert after["render_mode"] == before["render_mode"]
+        assert after["send_error_text"] == before["send_error_text"]
+        assert after["delete_after_at"] == before["delete_after_at"]
+        assert after["sent_message_id"] == before["sent_message_id"]
+    assert after["publication_review_required"] == before["publication_review_required"]
+    # The result must be committed, not only visible within the current connection.
+    reader = PostgresRepository()
+    try:
+        assert reader.get_campaign_run_message(mid)["send_status"] == after["send_status"]
+    finally:
+        reader.client.close_all_connections()
