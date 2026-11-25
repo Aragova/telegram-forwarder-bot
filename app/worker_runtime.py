@@ -604,10 +604,15 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                         "SELF_LOOP_ECHO_FENCED_BEFORE_SEND | rule=%s | job=%s | echoes=%s",
                         payload.get("rule_id"), job_id, echoes,
                     )
-                    await _finish_owned_job(
+                    completed = await _finish_owned_job(
                         repo, "complete", job_id, worker_id,
                         finalization_started=finalization_started,
                     )
+                    if completed and job_type in {"video_delivery", "video_send"}:
+                        try:
+                            cleanup_video_artifacts(payload, mode="success")
+                        except Exception:
+                            logger.exception("SELF_LOOP_ECHO_VIDEO_CLEANUP_FAILED | job=%s", job_id)
                     return True
         if not reconcile_only and job_type in {"repost_single", "repost_album", "repost_campaign_send_copy", "repost_campaign_delete_copy", "video_delivery", "video_send"}:
             guarded = await asyncio.to_thread(
