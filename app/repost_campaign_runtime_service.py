@@ -88,7 +88,27 @@ class RepostCampaignRuntimeService:
         self.logger = logger_ or logging.getLogger("forwarder")
 
     async def _send_claimed(self, message_id, target_id, thread_id, content):
-        if not await run_db(self.repo.mark_campaign_run_message_sending,message_id,render_mode=None):
+        claim_kwargs = {"render_mode": None}
+        if str(target_id).startswith("@"):
+            # Resolve via the selected sender before claiming/sending; never trust
+            # a peer ID extracted only from an unverified send response.
+            try:
+                if self.renderer.detect_render_method(content) == "telethon_builder":
+                    from telethon import utils
+                    entity = await self.telethon_client.get_entity(target_id)
+                    canonical = utils.get_peer_id(entity)
+                else:
+                    chat = await self.renderer.bot.get_chat(target_id)
+                    canonical = chat.id
+                if type(canonical) is not int or canonical == 0:
+                    raise ValueError("Invalid resolved Telegram peer")
+            except Exception:
+                self.logger.exception("CAMPAIGN_TARGET_RESOLUTION_FAILED | target=%s", target_id)
+                return SavedPostRenderResult(False,"blocked",str(content.get("kind") or "text"),
+                    error_text="Не удалось установить точный ID получателя до отправки")
+            claim_kwargs["canonical_target_id"] = canonical
+            target_id = canonical
+        if not await run_db(self.repo.mark_campaign_run_message_sending,message_id,**claim_kwargs):
             return SavedPostRenderResult(False,"blocked",str(content.get("kind") or "text"),
                 error_text="Предыдущая публикация не подтверждена или уже обрабатывается")
         intent = PublicationIntent(self.repo,str(message_id),kind="campaign",target_thread_id=thread_id)

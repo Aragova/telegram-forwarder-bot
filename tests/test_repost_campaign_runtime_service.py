@@ -1906,3 +1906,21 @@ def test_resolve_delete_failures_keeps_still_active_when_pending_left():
 
     assert result.ok is True
     assert result.extra["still_active"] is True
+
+
+def test_campaign_resolves_username_before_claiming_and_sending():
+    repo = _FakeRepo()
+    renderer = _FakeRenderer(SavedPostRenderResult(True,"bot_api","text",message_id=17))
+    renderer.detect_render_method = lambda content: "bot_api"
+
+    class Bot:
+        async def get_chat(self, target):
+            assert target == "@campaign"
+            return SimpleNamespace(id=-100123)
+
+    renderer.bot = Bot()
+    runtime = RepostCampaignRuntimeService(repo=repo,renderer=renderer)
+    result = asyncio.run(runtime._send_claimed(7,"@campaign",None,{"kind":"text"}))
+    assert result.ok
+    assert repo.mark_campaign_run_message_sending_calls[-1][1]["canonical_target_id"] == -100123
+    assert renderer.calls[-1]["chat_id"] == -100123

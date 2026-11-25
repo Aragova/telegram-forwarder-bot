@@ -11710,7 +11710,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
             return int(row["id"]) if row else None
 
-    def mark_campaign_run_message_sending(self, message_id: int, *, render_mode: str | None = None) -> bool:
+    def mark_campaign_run_message_sending(self, message_id: int, *, render_mode: str | None = None,
+                                         canonical_target_id: int | None = None) -> bool:
         """Claim exactly once; unresolved placements fence subsequent launches."""
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -11718,22 +11719,28 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 row = cur.fetchone()
                 if not row:
                     return False
-                lock_key = f"campaign:{row['rule_id']}:{row['saved_post_id']}:{row['target_id']}:{row['target_thread_id']}"
+                # Canonicalize aliases before the first write; subsequent delete and
+                # receipt reconciliation must not resolve a mutable username again.
+                original_target = row["target_id"]
+                target = str(canonical_target_id) if canonical_target_id is not None else original_target
+                if canonical_target_id is not None and (type(canonical_target_id) is not int or canonical_target_id == 0):
+                    return False
+                lock_key = f"campaign:{row['rule_id']}:{row['saved_post_id']}:{target}:{row['target_thread_id']}"
                 cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (lock_key,))
                 cur.execute("""
-                    UPDATE campaign_run_messages m SET send_status='sending',render_mode=%s,updated_at=NOW()
-                    WHERE m.id=%s AND m.send_status='pending'
+                    UPDATE campaign_run_messages m SET send_status='sending',render_mode=%s,target_id=%s,updated_at=NOW()
+                    WHERE m.id=%s AND m.send_status='pending' AND m.target_id=%s
                       AND NOT EXISTS (
                         SELECT 1 FROM campaign_run_messages p
                         WHERE p.id<>m.id AND p.rule_id=m.rule_id AND p.saved_post_id=m.saved_post_id
-                          AND p.target_id=m.target_id AND p.target_thread_id IS NOT DISTINCT FROM m.target_thread_id
+                          AND p.target_id IN (%s,%s) AND p.target_thread_id IS NOT DISTINCT FROM m.target_thread_id
                           AND (p.send_status='sending' OR p.publication_review_required
                             OR (p.send_status='failed' AND p.render_mode LIKE '%%_unverified'
                                 AND p.publication_manual_review IS NULL)
                             OR (p.send_status='sent' AND p.sent_at >=
                                 (SELECT started_at FROM campaign_runs WHERE id=m.run_id)))
                       )
-                    """, (render_mode,int(message_id)))
+                    """, (render_mode,target,int(message_id),original_target,target,original_target))
                 if cur.rowcount == 1:
                     return True
                 cur.execute("""

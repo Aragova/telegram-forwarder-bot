@@ -639,6 +639,7 @@ class RepositoryProtocol(Protocol):
         message_id: int,
         *,
         render_mode: str | None = None,
+        canonical_target_id: int | None = None,
     ) -> bool: ...
     def mark_campaign_run_message_sent(
         self,
