@@ -83,8 +83,11 @@ class PublicationDifferenceRecovery:
             # The server still cannot provide the range. Rebaseline for future
             # sends, without treating old receipts as confirmed.
             logger.warning("PUBLICATION_DIFFERENCE_RANGE_UNAVAILABLE | account=%s", self.sender_account_id)
-            state = await self._rpc(functions.updates.GetStateRequest())
-            await self._advance(cursor, state.pts, state.qts, state.date)
+            # Do not jump to the later GetState; that would skip updates
+            # before the new checkpoint. Keep unresolved receipts quarantined.
+            server_pts = getattr(difference, "pts", None)
+            if type(server_pts) is int and server_pts > int(cursor["pts"]):
+                await self._advance(cursor, server_pts, cursor["qts"], cursor["state_date"])
             return False
         if isinstance(difference, types.updates.DifferenceEmpty):
             await self._advance(cursor, cursor["pts"], cursor["qts"], difference.date)
