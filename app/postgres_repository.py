@@ -182,6 +182,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             repost_caption_entities_json=data.get("repost_caption_entities_json"),
             repost_caption_enabled=bool(data.get("repost_caption_enabled", False)),
             repost_caption_delivery_mode=data.get("repost_caption_delivery_mode") or "copy_first",
+            repost_ai_config_json=data.get("repost_ai_config_json"),
             caption_delivery_mode=data.get("caption_delivery_mode", "auto"),
             video_caption_delivery_mode=data.get("video_caption_delivery_mode", "copy_first"),
             repost_campaign_enabled=bool(data.get("repost_campaign_enabled") or False),
@@ -531,6 +532,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             UNIQUE(idempotency_key)
         );
 
+        ALTER TABLE delivery_attempts ADD COLUMN IF NOT EXISTS ai_caption_json JSONB NULL;
+
         CREATE TABLE IF NOT EXISTS telegram_transport_cooldowns (
             scope_key TEXT PRIMARY KEY,
             blocked_until TIMESTAMPTZ NOT NULL
@@ -878,6 +881,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_caption_entities_json TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_caption_enabled BOOLEAN NOT NULL DEFAULT FALSE;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_caption_delivery_mode TEXT NOT NULL DEFAULT 'copy_first';
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS repost_ai_config_json TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS caption_delivery_mode TEXT NOT NULL DEFAULT 'auto';
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS video_caption_delivery_mode TEXT NOT NULL DEFAULT 'copy_first';
         ALTER TABLE routing ALTER COLUMN video_caption_delivery_mode SET DEFAULT 'copy_first';
@@ -5507,7 +5511,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
     def update_rule_repost_caption_delivery_mode(self, rule_id: int, mode: str) -> bool:
         normalized = str(mode or "").strip().lower()
-        if normalized not in ("copy_first", "builder_first"):
+        if normalized not in ("copy_first", "builder_first", "ai"):
             return False
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -5521,6 +5525,33 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 updated = cur.rowcount == 1
             conn.commit()
         return updated
+
+    def update_rule_repost_ai_config(self, rule_id: int, expected: str | None, config: dict) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE routing SET repost_ai_config_json = %s
+                       WHERE id = %s AND mode = 'repost'
+                         AND repost_ai_config_json IS NOT DISTINCT FROM %s""",
+                    (_json_dumps(config), int(rule_id), expected),
+                )
+                updated = cur.rowcount == 1
+            conn.commit()
+        return updated
+
+    def freeze_repost_ai_caption(self, key: str, rule_id: int, caption: dict) -> dict | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE delivery_attempts
+                       SET ai_caption_json = COALESCE(ai_caption_json, %s::jsonb)
+                       WHERE idempotency_key = %s AND rule_id = %s AND status = 'sending'
+                       RETURNING ai_caption_json""",
+                    (_json_dumps(caption), key, int(rule_id)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return row["ai_caption_json"] if row else None
 
     def update_rule_video_caption(
         self,

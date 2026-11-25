@@ -158,6 +158,8 @@ class Rule:
     repost_campaign_show_seconds: int = 0
     repost_campaign_saved_post_id: int | None = None
 
+    repost_ai_config_json: str | None = None
+
     def fixed_times(self) -> list[str]:
         raw = self.fixed_times_json
 

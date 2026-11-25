@@ -33,6 +33,9 @@ from aiogram.types import (
 )
 
 from app.config import settings
+from app.ai_repost_caption import (ai_mode, available as ai_caption_available, config_for as ai_config_for,
+                                   update_config as update_ai_config, generate_caption as generate_ai_caption,
+                                   emoji_palette as ai_emoji_palette, MAX_PHOTO_BYTES)
 from app.repository_models import utc_now_iso
 from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
 from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view, _button as rule_ui_button
@@ -1379,6 +1382,19 @@ def build_repost_caption_menu_text(rule_id: int) -> str:
     rule = db.get_rule(rule_id)
     if not rule:
         return "❌ Правило не найдено"
+    if ai_mode(rule):
+        config = ai_config_for(rule)
+        state = "🟢 Готова" if ai_caption_available() else "🔴 AI недоступен"
+        return (
+            "✨ <b>AI-подпись репостов</b>\n\n"
+            f"{state} · 💎 Telethon\n"
+            "Только фотографии и фотоальбомы.\n"
+            f"Часовой пояс: {escape(config['timezone'])}\n"
+            f"Контекст: {'задан' if config['context'] else 'по умолчанию'}\n"
+            f"Обязательные элементы: {len(config['mandatory']) + len(config['links'])}\n"
+            f"Premium emoji в образце: {len(ai_emoji_palette(rule))}\n\n"
+            "Для отключения выберите другой режим. Фото передаются AI-провайдеру."
+        )
     has_caption = bool(str(getattr(rule, "repost_caption", None) or "").strip())
     enabled = bool(getattr(rule, "repost_caption_enabled", False)) and has_caption
     caption_status = "✅ Задана" if has_caption else "— Не задана"
@@ -1398,6 +1414,16 @@ def build_repost_caption_menu_text(rule_id: int) -> str:
 
 def build_repost_caption_menu_keyboard(rule_id: int) -> InlineKeyboardMarkup:
     rule = db.get_rule(rule_id)
+    if ai_mode(rule):
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🧠 Контекст AI", callback_data=f"ai_caption_edit:context:{rule_id}")],
+            [InlineKeyboardButton(text="🔗 Обязательные элементы", callback_data=f"ai_caption_edit:elements:{rule_id}")],
+            [InlineKeyboardButton(text="🕒 Часовой пояс", callback_data=f"ai_caption_edit:timezone:{rule_id}")],
+            [InlineKeyboardButton(text="🎨 Образец Premium Emoji", callback_data=f"repost_caption_edit:{rule_id}")],
+            [InlineKeyboardButton(text="🧪 Тест фото", callback_data=f"ai_caption_edit:preview:{rule_id}")],
+            [InlineKeyboardButton(text="🎛 Режим подписи", callback_data=f"repost_caption_mode_menu:{rule_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rule_card:{rule_id}")],
+        ])
     has_caption = bool(str(getattr(rule, "repost_caption", None) or "").strip())
     enabled = has_caption and bool(getattr(rule, "repost_caption_enabled", False))
     rows = [
@@ -1426,8 +1452,9 @@ def build_repost_caption_mode_menu_text(rule_id: int) -> str:
     return (
         "🎛 <b>Режим подписи репоста</b>\n\n"
         "⚡ <b>Обычный</b> — текст и обычные смайлики.\n"
-        "💎 <b>Премиум</b> — жирный текст, ссылки и premium emoji.\n\n"
-        f"Текущий режим: {mode}"
+        "💎 <b>Премиум</b> — жирный текст, ссылки и premium emoji.\n"
+        "✨ <b>AI-подпись</b> — фото, время суток и заданные элементы через Telethon.\n\n"
+        f"Текущий режим: {'✨ AI-подпись' if ai_mode(rule) else mode}"
     )
 
 
@@ -1435,6 +1462,7 @@ def build_repost_caption_mode_keyboard(rule_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚡ Обычный", callback_data=f"set_repost_caption_mode_copy_first:{rule_id}")],
         [InlineKeyboardButton(text="💎 Премиум", callback_data=f"set_repost_caption_mode_builder_first:{rule_id}")],
+        [InlineKeyboardButton(text="✨ AI-подпись", callback_data=f"set_repost_caption_mode_ai:{rule_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"repost_caption_menu:{rule_id}")],
     ])
 
@@ -5801,7 +5829,7 @@ async def handle_repost_caption_menu(callback: CallbackQuery):
     if not await ensure_rule_callback_access(callback, rule_id):
         return
     state = user_states.get(callback.from_user.id, {})
-    if state.get("action") == "repost_caption" and state.get("rule_id") == rule_id:
+    if state.get("action") in {"repost_caption", "repost_ai_input", "repost_ai_preview"} and state.get("rule_id") == rule_id:
         reset_user_state(callback.from_user.id)
     rule = await run_db(db.get_rule, rule_id)
     if not rule or (getattr(rule, "mode", "repost") or "repost") != "repost":
@@ -5814,6 +5842,70 @@ async def handle_repost_caption_menu(callback: CallbackQuery):
         parse_mode="HTML",
     )
     await answer_callback_safe_once(callback, "Открыто" if edited else "Уже открыто")
+
+
+@dp.callback_query(lambda c: c.data.startswith("ai_caption_edit:"))
+async def handle_ai_caption_edit(callback: CallbackQuery):
+    try:
+        _, field, raw_id = callback.data.split(":")
+        rule_id = int(raw_id)
+    except (ValueError, AttributeError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not _is_admin_user(callback.from_user.id) or not await ensure_rule_callback_access(callback, rule_id):
+        await answer_callback_safe_once(callback, "Нет доступа", show_alert=True)
+        return
+    rule = await run_db(db.get_rule, rule_id)
+    prompts = {
+        "context": "Опишите тематику и стиль канала (до 700 символов, без ссылок).",
+        "elements": "Одна строка — обязательная фраза или название | https://t.me/ссылка. До 8 элементов. Минус удаляет все.",
+        "timezone": "Введите часовой пояс IANA, например Europe/Moscow.",
+        "preview": "Отправьте обычное фото для теста. Оно будет передано AI-провайдеру. В канал ничего не публикуется.",
+    }
+    if not rule or not ai_mode(rule) or field not in prompts:
+        await answer_callback_safe_once(callback, "Режим недоступен", show_alert=True)
+        return
+    edited = await edit_message_text_safe(
+        message=callback.message, text=prompts[field],
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⬅️ Назад", callback_data=f"repost_caption_menu:{rule_id}")
+        ]]),
+    )
+    if edited:
+        user_states[callback.from_user.id] = {
+            "action": "repost_ai_preview" if field == "preview" else "repost_ai_input",
+            "field": field, "rule_id": rule_id,
+            "expected": getattr(rule, "repost_ai_config_json", None),
+        }
+    await answer_callback_safe_once(callback)
+
+
+@dp.message(lambda m: m.chat.type == "private" and m.from_user is not None and m.photo
+            and user_states.get(m.from_user.id, {}).get("action") == "repost_ai_preview")
+async def handle_ai_caption_preview(message: Message):
+    from io import BytesIO
+
+    uid = message.from_user.id
+    state = user_states.get(uid, {})
+    rule = await run_db(db.get_rule, int(state["rule_id"]))
+    if not _is_admin_user(uid) or not rule or not ai_mode(rule):
+        reset_user_state(uid)
+        return
+    eligible = [photo for photo in message.photo if photo.file_size and photo.file_size <= MAX_PHOTO_BYTES]
+    if not eligible:
+        await reply_message_safe(message, "Фото слишком большое")
+        return
+    try:
+        buffer = BytesIO()
+        await bot.download(eligible[-1], destination=buffer)
+        result = await generate_ai_caption(rule, [buffer.getvalue()])
+    except Exception:
+        await reply_message_safe(message, "AI не смог подготовить подпись. Проверьте настройки и фото.")
+        return
+    if user_states.get(uid) is not state:
+        return
+    reset_user_state(uid)
+    await reply_message_safe(message, "Предпросмотр (без отправки в канал и Premium-оформления):\n\n" + result["text"])
 
 
 @dp.callback_query(lambda c: c.data.startswith("repost_caption_edit:"))
@@ -5952,8 +6044,11 @@ async def handle_repost_caption_mode_select(callback: CallbackQuery):
     except (ValueError, AttributeError):
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
-    if mode not in {"copy_first", "builder_first"}:
+    if mode not in {"copy_first", "builder_first", "ai"}:
         await answer_callback_safe(callback, "Неизвестный режим", show_alert=True)
+        return
+    if mode == "ai" and (not _is_admin_user(callback.from_user.id) or not ai_caption_available()):
+        await answer_callback_safe(callback, "AI доступен только администратору при включённом провайдере", show_alert=True)
         return
     if not await ensure_rule_callback_access(callback, rule_id):
         return
@@ -7443,6 +7538,29 @@ async def handle_stateful_private_inputs(message: Message):
     # =========================================================
     # Подпись репоста: та же схема редактирования, что у видеоредактора.
     # =========================================================
+    if action == "repost_ai_input":
+        rule_id = int(state["rule_id"])
+        rule = await run_db(db.get_rule, rule_id)
+        if not _is_admin_user(user_id) or not rule or not ai_mode(rule):
+            reset_user_state(user_id)
+            return
+        try:
+            config = update_ai_config(ai_config_for(rule), state["field"], message.text or "")
+        except ValueError as exc:
+            await reply_message_safe(message, str(exc))
+            return
+        if not await run_db(db.update_rule_repost_ai_config, rule_id, state["expected"], config):
+            reset_user_state(user_id)
+            await reply_message_safe(message, "Настройки изменились. Откройте меню заново.")
+            return
+        reset_user_state(user_id)
+        invalidate_rule_card_cache(rule_id)
+        await send_message_safe(
+            chat_id=message.chat.id, text=await run_db(build_repost_caption_menu_text, rule_id),
+            parse_mode="HTML", reply_markup=await run_db(build_repost_caption_menu_keyboard, rule_id),
+        )
+        return
+
     if action == "repost_caption":
         rule_id = int(state["rule_id"])
         # Preserve leading whitespace: Telegram entities use UTF-16 offsets

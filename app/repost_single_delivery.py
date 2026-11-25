@@ -7,6 +7,7 @@ from .delivery_idempotency import normalize_valid_sent_message_ids
 from .send_intent import PublicationWriteUnavailable
 from .transport_policy import TransportRateLimited
 from .repost_caption import get_repost_caption_override, caption_override_content
+from .ai_repost_caption import ai_mode, prepare_caption
 from .sender_primitives import (
     DEBUG_FORCE_DISABLE_BOTAPI_FALLBACK, _prepare_html_text,
     _telethon_entities_to_bot, _is_link_preview_only,
@@ -63,8 +64,19 @@ class RepostSingleDelivery:
             )
 
         live_message_for_builder = None
+        ai_photo = False
+        if ai_mode(rule):
+            live_message_for_builder = await owner._fetch_message(source_channel, message_id)
+            if not live_message_for_builder:
+                return False
+            ai_photo = bool(getattr(live_message_for_builder, "photo", None))
+            if ai_photo:
+                custom_caption = await prepare_caption(owner, rule, [live_message_for_builder], idempotency_key)
+                use_copy_first = False
+                requires_builder = True
+                caption_mode = "ai"
         if use_copy_first and caption_mode == "auto":
-            live_message = await owner._fetch_message(source_channel, message_id)
+            live_message = live_message_for_builder or await owner._fetch_message(source_channel, message_id)
             if live_message:
                 live_content = owner._content_from_message_or_post(
                     message=live_message,
@@ -691,6 +703,9 @@ class RepostSingleDelivery:
             else:
                 await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
             return False
+
+        if ai_photo:
+            return False  # Never downgrade AI premium delivery to text or Bot API.
 
         if is_self_loop:
             logger.warning(
