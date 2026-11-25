@@ -262,3 +262,32 @@ def test_delete_copy_non_retryable_failure():
     assert result["ok"] is False
     assert result["retryable"] is False
     assert "Forbidden" in result["error_text"]
+
+
+def test_copy_zero_id_is_never_replayed():
+    db=FakeDb(copy_row={"send_status":"pending","delivery_id":1,"rule_id":2,"target_id":"-1001"},
+              delivery={"source_channel":"-1002","message_id":3})
+    bot=FakeBot(copy_message_id=0)
+    helper=_helper(SimpleNamespace(db=db,bot=bot))
+    result=asyncio.run(helper.execute_send_copy_from_job(copy_id=9))
+    assert not result["ok"] and result["accepted"] and not result["retryable"]
+    assert any(call[0]=="mark_delivery_campaign_copy_unverified" for call in db.calls)
+    db.copy_row["send_status"]="unverified"
+    again=asyncio.run(helper.execute_send_copy_from_job(copy_id=9))
+    assert not again["ok"] and len(bot.copy_message_calls)==1
+
+
+def test_copy_shared_cooldown_remains_retryable():
+    from app.transport_policy import TransportRateLimited
+
+    class LimitedBot(FakeBot):
+        async def copy_message(self, **kwargs):
+            raise TransportRateLimited(retry_after_seconds=15,backend="bot",op_name="copy_message",key="bot:1")
+
+    db=FakeDb(copy_row={"send_status":"pending","delivery_id":1,"rule_id":2,"target_id":"-1001"},
+              delivery={"source_channel":"-1002","message_id":3})
+    helper=_helper(SimpleNamespace(db=db,bot=LimitedBot()))
+    with pytest.raises(TransportRateLimited):
+        asyncio.run(helper.execute_send_copy_from_job(copy_id=9))
+    assert any(call[0]=="mark_delivery_campaign_copy_send_failed" and call[2].startswith("rejected:") for call in db.calls)
+    assert not any(call[0]=="mark_delivery_campaign_copy_unverified" for call in db.calls)

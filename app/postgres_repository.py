@@ -12602,7 +12602,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def mark_delivery_campaign_copy_processing(self, copy_id: int) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE delivery_campaign_copies SET send_status='processing',updated_at=NOW() WHERE id=%s AND send_status IN ('pending','failed')", (int(copy_id),))
+                cur.execute("UPDATE delivery_campaign_copies SET send_status='processing',updated_at=NOW() WHERE id=%s AND (send_status='pending' OR (send_status='failed' AND send_error_text LIKE 'rejected:%%'))", (int(copy_id),))
                 return cur.rowcount == 1
 
     def mark_delivery_campaign_copy_unverified(self, copy_id: int, reason: str) -> bool:
@@ -12612,6 +12612,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 return cur.rowcount == 1
 
     def mark_delivery_campaign_copy_sent(self, copy_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None, delivery_method: str | None, delete_after_at: str | None) -> bool:
+        from app.telegram_publication import publication_pairs
+        if not sent_message_ids or not publication_pairs(sent_message_ids,sent_message_ids) or sent_message_id!=sent_message_ids[0]:
+            return False
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE delivery_campaign_copies SET send_status='sent', sent_at=NOW(), sent_message_id=%s, sent_message_ids_json=%s::jsonb, delivery_method=%s, delete_after_at=%s, delete_status='scheduled', updated_at=NOW() WHERE id=%s AND send_status='processing'", (sent_message_id, _json_dumps(sent_message_ids or []), delivery_method, delete_after_at, int(copy_id)))
@@ -12622,6 +12625,22 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(f"UPDATE delivery_campaign_copies SET {field}=%s, updated_at=NOW() WHERE id=%s", (value, int(copy_id)))
             conn.commit(); return True
+
+    def list_campaign_copies_missing_delete_job(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT c.id,c.delete_after_at FROM delivery_campaign_copies c
+                    WHERE c.send_status='sent' AND c.delete_status='scheduled'
+                      AND c.sent_message_id>0 AND c.delete_after_at IS NOT NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM jobs j WHERE j.job_type='repost_campaign_delete_copy'
+                          AND j.payload_json->>'copy_id'=c.id::text
+                          AND j.status IN ('pending','leased','processing','retry','failed')
+                      )
+                    ORDER BY c.delete_after_at,c.id LIMIT %s
+                    """, (max(1,min(limit,100)),))
+                return [dict(row) for row in cur.fetchall()]
 
     def mark_delivery_campaign_copy_send_failed(self, copy_id: int, error_text: str) -> bool:
         with self.connect() as conn:

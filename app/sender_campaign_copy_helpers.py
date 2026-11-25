@@ -3,6 +3,7 @@ from __future__ import annotations
 from .runtime_utils import run_db
 from .send_intent import PublicationIntent, publication_scope, _definite_rejection
 from .telegram_publication import botapi_publication_ids
+from .transport_policy import TransportRateLimited
 
 def _unverified_copy():
     return {"ok":False,"accepted":True,"retryable":False,"manual_review_required":True,
@@ -18,6 +19,9 @@ class SenderCampaignCopyHelpers:
         if not copy_row:
             return {"ok": False, "retryable": False, "error_text": "Копия кампании не найдена"}
         if str(copy_row.get("send_status") or "") == "sent":
+            if copy_row.get("delete_status")=="scheduled" and copy_row.get("delete_after_at"):
+                from app.job_service import enqueue_repost_campaign_delete_copy
+                await run_db(enqueue_repost_campaign_delete_copy,self.owner.db,int(copy_id),run_at=copy_row["delete_after_at"])
             return {"ok": True, "already_sent": True}
         if copy_row.get("send_status") in {"processing","unverified"}:
             return _unverified_copy()
@@ -38,8 +42,8 @@ class SenderCampaignCopyHelpers:
                     from_chat_id=str(delivery.get("source_channel")),message_id=int(delivery.get("message_id")),
                     **({"message_thread_id":topic} if topic is not None else {}))
         except Exception as exc:
-            if _definite_rejection(exc):
-                await run_db(self.owner.db.mark_delivery_campaign_copy_send_failed,int(copy_id),str(exc))
+            if isinstance(exc, TransportRateLimited) or _definite_rejection(exc):
+                await run_db(self.owner.db.mark_delivery_campaign_copy_send_failed,int(copy_id),"rejected:"+str(exc))
                 raise
             await run_db(self.owner.db.mark_delivery_campaign_copy_unverified,int(copy_id),"copy_rpc_outcome_unknown")
             return _unverified_copy()

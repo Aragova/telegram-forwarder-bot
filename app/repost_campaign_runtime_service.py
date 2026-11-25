@@ -456,7 +456,7 @@ class RepostCampaignRuntimeService:
         return {"ok": True, "rule_id": rule_id, "checked": len(items), "passed": passed, "failed": failed, "items": items}
 
     async def preview_saved_post(self, *, rule_id: int, admin_chat_id: int | str, reply_markup=None) -> RepostCampaignActionResult:
-        loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="preview_saved_post")
+        loaded = await run_db(self._get_repost_rule_and_saved_post,rule_id=rule_id, action="preview_saved_post")
         if isinstance(loaded, RepostCampaignActionResult):
             return loaded
 
@@ -504,7 +504,7 @@ class RepostCampaignRuntimeService:
         reply_markup: Any | None = None,
     ) -> RepostCampaignActionResult:
         _ = admin_chat_id, reply_markup
-        loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="preview_saved_post_in_main_target")
+        loaded = await run_db(self._get_repost_rule_and_saved_post,rule_id=rule_id, action="preview_saved_post_in_main_target")
         if isinstance(loaded, RepostCampaignActionResult):
             return loaded
 
@@ -630,7 +630,7 @@ class RepostCampaignRuntimeService:
             )
 
     async def test_send_saved_post_to_main_target(self, *, rule_id: int, admin_id: int | None = None) -> RepostCampaignActionResult:
-        loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="test_send_saved_post")
+        loaded = await run_db(self._get_repost_rule_and_saved_post,rule_id=rule_id, action="test_send_saved_post")
         if isinstance(loaded, RepostCampaignActionResult):
             return loaded
 
@@ -866,7 +866,7 @@ class RepostCampaignRuntimeService:
     ) -> RepostCampaignActionResult:
         manual_launch_policy: dict[str, Any] | None = None
         if run_type == "manual":
-            manual_launch_policy = self.build_manual_launch_policy_state(
+            manual_launch_policy = await run_db(self.build_manual_launch_policy_state,
                 rule_id=rule_id,
                 force_ignore_clean_channel=force_ignore_clean_channel,
             )
@@ -954,7 +954,7 @@ class RepostCampaignRuntimeService:
                     delete_problem_total,
                 )
         else:
-            readiness = self.build_campaign_launch_readiness(rule_id=rule_id)
+            readiness = await run_db(self.build_campaign_launch_readiness,rule_id=rule_id)
 
         if run_type != "manual" and not ignore_active_placement_block and (readiness.get("active_placement") or int(readiness.get("delete_failed") or 0) > 0):
             return RepostCampaignActionResult(
@@ -982,7 +982,7 @@ class RepostCampaignRuntimeService:
                     "warnings": readiness.get("warnings") or [],
                 },
             )
-        loaded = self._get_repost_rule_and_saved_post(rule_id=rule_id, action="launch_campaign")
+        loaded = await run_db(self._get_repost_rule_and_saved_post,rule_id=rule_id, action="launch_campaign")
         if isinstance(loaded, RepostCampaignActionResult):
             return loaded
         rule, saved_post = loaded
@@ -1100,7 +1100,7 @@ class RepostCampaignRuntimeService:
                 success_count += 1
                 has_confirmed_sent_ids = bool(render_result.message_id or album_ids)
                 if has_confirmed_sent_ids:
-                    pause_info = self._create_top_time_pause_after_successful_send(
+                    pause_info = await run_db(self._create_top_time_pause_after_successful_send,
                         run_id=int(run_id),
                         rule_id=int(rule_id),
                         run_message_id=int(run_message_id),
@@ -1884,6 +1884,11 @@ class RepostCampaignRuntimeService:
         if self.deleter is None:
             return {"ok": False, "claimed": 0, "deleted": 0, "failed": 0, "error_text": "Delete service недоступен"}
         await self.recover_campaign_publications()
+        from app.job_service import enqueue_repost_campaign_delete_copy
+        list_missing = getattr(self.repo,"list_campaign_copies_missing_delete_job",None)
+        if callable(list_missing):
+            for row in await run_db(list_missing):
+                await run_db(enqueue_repost_campaign_delete_copy,self.repo,row["id"],run_at=row["delete_after_at"])
         reset_count = await run_db(self.repo.reset_stuck_campaign_delete_processing, stuck_seconds=300)
         rows = await run_db(self.repo.claim_due_campaign_run_messages_for_delete, limit=limit)
         if not rows:
