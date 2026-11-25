@@ -576,3 +576,78 @@ def test_keep_prune_preserves_stable_album_attempt_with_zero_anchor(repo):
         before_message_id=max(source_ids)+1)==(0,0,0,2)
     assert all(repo.get_delivery(d)["status"]=="faulty" for d in deliveries)
     repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
+
+
+def test_keep_quarantines_single_orphan_absent_from_snapshot(repo):
+    _, rule_id, deliveries, source_ids, _, _ = seed(repo, uuid4().int % 10**12)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE delivery_attempts SET delivery_id=90000000001,status='accepted',
+                   source_message_ids_json=jsonb_build_array(%s)
+                   WHERE rule_id=%s""", (source_ids[0], rule_id),
+            )
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+    active, owner = repo.begin_rule_rescan(rule_id)
+    _, _, _, quarantined = repo.rebuild_rule_keep_position(
+        rule_id, owner_token=owner, allowed_message_ids=set(),
+        include_newer_than_message_id=max(source_ids), before_message_id=None,
+    )
+    assert quarantined == 1
+    assert repo.get_delivery(deliveries[0])["status"] == "faulty"
+    repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner, queue_rebuilt=True)
+
+
+def test_keep_quarantines_missing_album_member_even_if_anchor_exists(repo):
+    _, rule_id, deliveries, source_ids, _, target = seed(repo, uuid4().int % 10**12, count=2)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE delivery_attempts SET status='accepted',
+                   idempotency_key=%s WHERE rule_id=%s""",
+                (f"rule:{rule_id}:target:{target}:media_group:group-{str(target)[7:]}:album", rule_id),
+            )
+            cur.execute("UPDATE deliveries SET status='faulty' WHERE id=%s", (deliveries[0],))
+            cur.execute("DELETE FROM deliveries WHERE id=%s", (deliveries[1],))
+    active, owner = repo.begin_rule_rescan(rule_id)
+    _, _, _, quarantined = repo.rebuild_rule_keep_position(
+        rule_id, owner_token=owner, allowed_message_ids=set(source_ids),
+        include_newer_than_message_id=max(source_ids), before_message_id=None,
+    )
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT d.status FROM deliveries d JOIN posts p ON p.id=d.post_id
+                   WHERE d.rule_id=%s AND p.message_id=%s""", (rule_id, source_ids[1]),
+            )
+            row = cur.fetchone()
+    assert row is not None and row["status"] == "faulty"
+    assert quarantined >= 1
+    repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner, queue_rebuilt=True)
+
+
+def test_keep_prune_before_position_preserves_post_after_snapshot(repo):
+    _, rule_id, deliveries, source_ids, source, _ = seed(repo, uuid4().int % 10**12)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE rule_id=%s", (rule_id,))
+            cur.execute("UPDATE deliveries SET status='sent' WHERE rule_id=%s", (rule_id,))
+            cur.execute(
+                """INSERT INTO posts(message_id,source_channel,content_json,created_at)
+                   VALUES(2001,%s,'{}','2026-11-21') RETURNING id""", (source,),
+            )
+            new_post_id = cur.fetchone()["id"]
+    active, owner = repo.begin_rule_rescan(rule_id)
+    repo.rebuild_rule_keep_position(
+        rule_id, owner_token=owner, allowed_message_ids={2001},
+        include_newer_than_message_id=max(source_ids), before_message_id=3000,
+    )
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM deliveries WHERE rule_id=%s AND post_id=%s",
+                (rule_id, new_post_id),
+            )
+            row = cur.fetchone()
+    assert row is not None and row["status"] == "pending"
+    repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner, queue_rebuilt=True)

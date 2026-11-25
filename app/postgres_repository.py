@@ -4873,6 +4873,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         self, conn, rule_id: int, source_channel: str, source_thread_id: int | None,
         *, seen_message_ids: set[int] | None = None, scan_start_max_message_id: int = 0,
         before_message_id: int | None = None,
+        before_snapshot_max_message_id: int | None = None,
     ) -> int:
         with conn.cursor() as cur:
             cur.execute(
@@ -4891,6 +4892,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         AND a.idempotency_key NOT LIKE '%%:rescan:%%'
                         AND a.idempotency_key NOT LIKE 'archived:%%'
                         AND (a.delivery_id=d.id
+                            OR (a.operation_kind IN ('single','video_send')
+                                AND a.source_message_ids_json @> jsonb_build_array(p.message_id))
                             OR (a.operation_kind='album' AND p.media_group_id IS NOT NULL AND (
                                 a.idempotency_key=('rule:'||a.rule_id::text||':target:'||a.target_id
                                     ||':media_group:'||p.media_group_id||':album')
@@ -4905,14 +4908,17 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         AND pr.published_ids IS NULL
                   )
                   AND (
-                      (%s::bigint IS NOT NULL AND p.message_id < %s::bigint)
+                      (%s::bigint IS NOT NULL AND p.message_id < %s::bigint
+                          AND (%s::bigint IS NULL OR p.message_id <= %s::bigint))
                       OR (%s::bigint IS NULL AND NOT (p.message_id = ANY(%s::bigint[]))
                           AND p.message_id <= %s)
                   )
                 """,
                 (int(rule_id), str(source_channel), source_thread_id,
-                 before_message_id,before_message_id,before_message_id,
-                 sorted(seen_message_ids or set()),int(scan_start_max_message_id)),
+                 before_message_id, before_message_id,
+                 before_snapshot_max_message_id, before_snapshot_max_message_id,
+                 before_message_id, sorted(seen_message_ids or set()),
+                 int(scan_start_max_message_id)),
             )
             return int(cur.rowcount or 0)
 
@@ -4964,7 +4970,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                                 AND a.idempotency_key=('rule:'||a.rule_id::text||':target:'||a.target_id
                                     ||':media_group:'||member.media_group_id||':album'))
                           )
-                          AND NOT EXISTS (SELECT 1 FROM deliveries old WHERE old.id=a.delivery_id AND old.rule_id=a.rule_id)
+                          AND (a.operation_kind='album' OR NOT EXISTS (
+                              SELECT 1 FROM deliveries old
+                              WHERE old.id=a.delivery_id AND old.rule_id=a.rule_id
+                                AND old.post_id=member.id
+                          ))
                     )
                     OR EXISTS (
                         SELECT 1 FROM telegram_publication_receipts pr
@@ -5001,6 +5011,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
                 before = 0 if before_message_id is None else self._prune_rule_pending_conn(
                     conn, rule_id, source, thread, before_message_id=before_message_id,
+                    before_snapshot_max_message_id=include_newer_than_message_id,
                 )
                 quarantined = self._quarantine_rescan_orphans(cur, rule_id)
                 cur.execute("UPDATE routing SET rescan_queue_built=TRUE WHERE id=%s", (rule_id,))

@@ -277,6 +277,45 @@ def test_normal_parser_does_not_require_extra_repository_keyword():
     assert db.seen == 1
 
 
+
+def test_history_batch_cancellation_waits_for_database_thread():
+    import asyncio
+    import threading
+
+    from app.parser import _save_history_batch
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    class BlockingDB:
+        def save_post_batch(self, _batch):
+            started.set()
+            try:
+                if not release.wait(timeout=5):
+                    raise TimeoutError("test write was never released")
+                return 1
+            finally:
+                finished.set()
+
+    async def scenario():
+        task = asyncio.create_task(
+            _save_history_batch(BlockingDB(), [(101,)], preserve_existing_deliveries=False)
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set()
+
+    asyncio.run(scenario())
+
+
 def test_rescan_batch_refresh_skips_recreating_old_delivery_rows():
     source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
     code = source.split("def save_post_batch(", 1)[1].split(

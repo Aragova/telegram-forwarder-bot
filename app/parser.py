@@ -203,9 +203,28 @@ def message_to_content_dict(message):
     return content
 
 async def _save_history_batch(db, batch, *, preserve_existing_deliveries: bool):
+    """Do not release the rescan owner while an off-thread DB write is still running."""
     if preserve_existing_deliveries:
-        return await asyncio.to_thread(db.save_post_batch, batch, preserve_existing_deliveries=True)
-    return await asyncio.to_thread(db.save_post_batch, batch)
+        write = asyncio.create_task(
+            asyncio.to_thread(db.save_post_batch, batch, preserve_existing_deliveries=True)
+        )
+    else:
+        write = asyncio.create_task(asyncio.to_thread(db.save_post_batch, batch))
+    try:
+        return await asyncio.shield(write)
+    except asyncio.CancelledError:
+        # shield() alone does not delay the caller's finally/owner release.
+        while not write.done():
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                continue
+        if not write.cancelled():
+            try:
+                write.result()
+            except Exception:
+                logger.exception("History DB write failed while cancelling rescan")
+        raise
 
 
 async def parse_channel_history(
