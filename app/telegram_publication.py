@@ -70,9 +70,10 @@ def verified_published_message(
     if thread_id is not None:
         reply = getattr(message, "reply_to", None)
         top = getattr(reply, "reply_to_top_id", None) or getattr(reply, "top_msg_id", None)
-        if top is None:
+        # General-topic replies may target an ordinary message, without
+        # a top-topic ID. Never mistake reply_to_msg_id for a topic ID.
+        if thread_id != 1 and top is None:
             top = getattr(reply, "reply_to_msg_id", None)
-        # Telegram General topic (id=1) has no topic reply header.
         expected_top = None if thread_id == 1 else thread_id
         if top != expected_top:
             return False
@@ -241,6 +242,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
                     # Disk failure is not an excuse to reopen Telegram writes.
                     client.publication_write_blocked = True
                     buffer_overflow = True
+                    overflow_evidence = (peer, old)
                     emergency.append((peer, old, new))
                     logger.exception("TELEGRAM_PUBLICATION_MAPPING_LOCAL_SPOOL_FAILED")
                     # Preserve evidence in memory and attempt PostgreSQL
