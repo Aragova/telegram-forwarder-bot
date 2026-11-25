@@ -628,3 +628,46 @@ def test_transient_postgres_failure_retries_durable_spool_without_permanent_writ
         assert not getattr(client, "publication_write_blocked", False)
 
     asyncio.run(scenario())
+
+
+def test_durable_sqlite_spool_over_1024_does_not_falsely_block_publication(tmp_path):
+    """A full memory cache is not evidence loss when every pair is in SQLite."""
+    from telethon import types
+    from app.telegram_publication import prepare_publication_inbox
+
+    async def scenario():
+        state = {"db_up": False}
+        persisted = []
+        incidents = []
+
+        def record(_account, _peer, pairs):
+            if not state["db_up"]:
+                raise OSError("temporary PostgreSQL outage")
+            persisted.extend(pairs)
+
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=record,
+            record_publication_inbox_overflow=lambda *args: incidents.append(args),
+        )
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        await prepare_publication_inbox(client, repo)()
+        peer = types.PeerChannel(99)
+        for old in range(1, 1026):
+            await client.handler(types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[old], sent_messages=[old + 5000],
+            ))
+        assert not getattr(client, "publication_write_blocked", False)
+        assert incidents == []
+
+        state["db_up"] = True
+        await client.flush_publication_inbox()
+        assert persisted == [(old, old + 5000) for old in range(1, 1026)]
+        assert not getattr(client, "publication_write_blocked", False)
+
+    asyncio.run(scenario())
