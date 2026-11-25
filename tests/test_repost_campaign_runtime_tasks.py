@@ -273,3 +273,26 @@ def test_campaign_delete_confirmation_handles_missing_or_null_message_rows():
         assert "Снять проблему удаления" in message
         assert "без подтверждённых ID" not in message
         assert keyboard is not None
+
+
+def test_bot_polling_preserves_session_until_campaign_shutdown():
+    import ast
+    from pathlib import Path
+
+    source = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    role = next(
+        node for node in source.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_start_bot_role"
+    )
+    polling_calls = [
+        node for node in ast.walk(role)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "start_polling"
+    ]
+    assert len(polling_calls) == 1
+    session_options = [
+        kw.value for kw in polling_calls[0].keywords if kw.arg == "close_bot_session"
+    ]
+    assert len(session_options) == 1
+    assert isinstance(session_options[0], ast.Constant)
+    assert session_options[0].value is False
