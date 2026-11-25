@@ -85,11 +85,17 @@ class RepostCampaignLaunchJobService:
         )
         return RepostCampaignLaunchJobEnqueueResult(job=job, created=True)
 
-    async def process_due_jobs(self, *, worker_id: str, limit: int = 5) -> int:
+    async def process_due_jobs(self, *, worker_id: str, limit: int = 5, stop_event: asyncio.Event | None = None) -> int:
+        if stop_event is not None and stop_event.is_set():
+            return 0
         await self.recover_stale_jobs(worker_id=worker_id)
+        if stop_event is not None and stop_event.is_set():
+            return 0
         jobs = await run_db(self.repo.get_due_repost_campaign_launch_jobs, limit=max(1, int(limit)))
         processed = 0
         for job in jobs:
+            if stop_event is not None and stop_event.is_set():
+                break
             leased = await run_db(self.repo.lease_repost_campaign_launch_job,
                 int(job["id"]),
                 worker_id=worker_id,
@@ -298,7 +304,7 @@ async def run_repost_campaign_launch_job_loop(
     await service.recover_stale_jobs(worker_id=worker_id)
     while not (stop_event and stop_event.is_set()):
         try:
-            await service.process_due_jobs(worker_id=worker_id, limit=batch_limit)
+            await service.process_due_jobs(worker_id=worker_id, limit=batch_limit, stop_event=stop_event)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
