@@ -3,7 +3,8 @@ language: ru-RU
 reviews:
   profile: assertive
   auto_review:
-    enabled: true
+    # Ручное полное ревью только после стабилизации PR.
+    enabled: false
     drafts: false
   path_instructions:
     - path: "**/*.py"
