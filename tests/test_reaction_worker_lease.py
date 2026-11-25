@@ -37,3 +37,33 @@ def test_lease_loss_cancels_reaction_processing(monkeypatch):
         assert cancelled.is_set()
 
     asyncio.run(scenario())
+
+
+def test_external_worker_cancellation_propagates_and_drains_child(monkeypatch):
+    async def scenario():
+        db = Mock()
+        db.lease_due_reaction_job.return_value = {"id": 1}
+        worker = ReactionWorker(db=db, worker_id="worker")
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def process(*args):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        monkeypatch.setattr(worker, "_process_leased", process)
+        task = asyncio.create_task(worker.process_once())
+        await asyncio.wait_for(started.wait(), timeout=3)
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=3)
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("worker cancellation was swallowed")
+        assert stopped.is_set()
+
+    asyncio.run(scenario())

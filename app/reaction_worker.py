@@ -60,11 +60,14 @@ class ReactionWorker:
 
         heartbeat_task = asyncio.create_task(heartbeat())
         try:
-            await processing
-        except asyncio.CancelledError:
-            if asyncio.current_task().cancelling():
-                raise
-            logger.warning("REACTION_LEASE_LOST | job_id=%s", job_id)
+            # wait() does not propagate parent cancellation into the child.
+            # A cancelled child means lease loss; cancellation of the parent
+            # always propagates through this try/finally, including on Python 3.10.
+            await asyncio.wait({processing})
+            if processing.cancelled():
+                logger.warning("REACTION_LEASE_LOST | job_id=%s", job_id)
+            else:
+                processing.result()
         finally:
             heartbeat_task.cancel()
             if not processing.done():

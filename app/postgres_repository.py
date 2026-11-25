@@ -6233,13 +6233,16 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                          source_channel,rule['source_thread_id'],delivery_ids,source_message_ids,scheduled_ids,mask),
                     )
                     return cur.fetchone() is not None
-                cur.executemany(
+                cur.execute(
                     """
                     INSERT INTO telegram_publication_claims
                     (sender_account_id,target_peer_id,scheduled_id,idempotency_key)
-                    VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING
+                    SELECT %s,%s,member.scheduled_id,%s
+                    FROM unnest(%s::bigint[]) AS member(scheduled_id)
+                    ORDER BY member.scheduled_id
+                    ON CONFLICT DO NOTHING
                     """,
-                    [(account_id,peer_id,mid,key) for mid in sorted(pending_ids)],
+                    (account_id,peer_id,key,pending_ids),
                 )
                 if cur.rowcount != len(pending_ids):
                     conn.rollback()

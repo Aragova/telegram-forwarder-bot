@@ -320,3 +320,33 @@ def test_stage2_reaction_enqueue_is_atomic_and_one_shot(repo):
     assert repo.enqueue_reaction_job(**args)
     assert repo.enqueue_reaction_job(**args) is None
     assert repo.get_publication_receipt(key)["reaction_state"] == "done"
+
+
+def test_stage2_multiple_scheduled_claims_are_all_or_nothing(repo):
+    seeded = seed(repo, 116, count=3)
+    key, _, _, _, _, target = seeded
+    assert register(repo, seeded, [80, 81, 82])
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT scheduled_id FROM telegram_publication_claims WHERE idempotency_key=%s ORDER BY scheduled_id",
+                (key,),
+            )
+            assert [row["scheduled_id"] for row in cur.fetchall()] == [80, 81, 82]
+
+    other_key, other_rule, deliveries, source_ids, source, _ = seed(repo, 117, count=2)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET target_id=%s WHERE id=%s", (target, other_rule))
+            cur.execute("UPDATE delivery_attempts SET target_id=%s WHERE idempotency_key=%s", (target, other_key))
+    other = (other_key, other_rule, deliveries, source_ids, source, target)
+    assert not register(repo, other, [79, 81])
+    assert repo.get_publication_receipt(other_key) is None
+    assert repo.get_delivery_attempt_by_idempotency_key(other_key)["status"] == "sending"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM telegram_publication_claims WHERE idempotency_key=%s", (other_key,))
+            assert cur.fetchone() is None
+
+    repo.record_telegram_publication_mappings(123, int(target), [(80, 180), (81, 181), (82, 182)])
+    assert repo.finalize_publication_receipt(key, [180, 181, 182])
