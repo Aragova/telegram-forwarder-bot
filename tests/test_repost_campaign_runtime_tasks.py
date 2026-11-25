@@ -296,3 +296,97 @@ def test_bot_polling_preserves_session_until_campaign_shutdown():
     assert len(session_options) == 1
     assert isinstance(session_options[0], ast.Constant)
     assert session_options[0].value is False
+
+
+def test_incomplete_campaign_drain_continues_cleanup_without_closing_telegram_clients():
+    import ast
+    from pathlib import Path
+
+    parsed = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    fn = next(
+        n for n in parsed.body
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_shutdown_runtime"
+    )
+    events = []
+
+    async def fail_drain():
+        events.append("campaign_stop")
+        raise RuntimeError("in-flight Telegram RPC")
+
+    async def record(name):
+        events.append(name)
+
+    campaign = SimpleNamespace(stop=fail_drain)
+    raw_telethon = SimpleNamespace(disconnect=lambda: record("telethon_disconnect"))
+    reactor = SimpleNamespace(client=SimpleNamespace(disconnect=lambda: record("reaction_disconnect")), session_name="r")
+    raw_bot = SimpleNamespace(session=SimpleNamespace(close=lambda: record("bot_session_close")))
+    ctx = {
+        "__name__": "test.shutdown",
+        "asyncio": asyncio, "logger": logging.getLogger("test.shutdown.drain"),
+        "stop_background_tasks": lambda: record("background_cleanup"),
+        "stop_job_workers_runtime": lambda: record("workers_cleanup"),
+        "stop_all_workers": lambda: record("all_workers_cleanup"),
+        "dashboard_tasks": {},
+        "channel_title_sync_task": None,
+        "repost_campaign_runtime_tasks": campaign,
+        "scheduler_runtime_task": None,
+        "job_watchdog_task": None,
+        "reaction_worker_task": None,
+        "sender_service": SimpleNamespace(video_processor=SimpleNamespace(
+            shutdown=lambda: record("processor_cleanup"),
+        )),
+        "telethon_client": raw_telethon,
+        "reaction_clients": [reactor],
+        "bot": raw_bot,
+        "runtime_context": SimpleNamespace(),
+    }
+    module = ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[]))
+    exec(compile(module, "bot.py", "exec"), ctx)
+    result = asyncio.run(ctx["_shutdown_runtime"](
+        stop_workers_runtime=False, close_dashboard_tasks=True,
+        close_telegram_clients=True, close_bot_session=True,
+    ))
+    assert result is False
+    assert "background_cleanup" in events and "processor_cleanup" in events
+    assert "telethon_disconnect" not in events
+    assert "reaction_disconnect" not in events
+    assert "bot_session_close" not in events
+    assert ctx["repost_campaign_runtime_tasks"] is campaign
+    assert ctx["telethon_client"] is raw_telethon
+    assert ctx["bot"] is raw_bot
+
+
+def test_main_preserves_original_role_error_when_shutdown_is_incomplete():
+    import ast
+    from pathlib import Path
+
+    parsed = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    fn = next(
+        n for n in parsed.body
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "main"
+    )
+
+    async def role_failure(*args, **kwargs):
+        raise ValueError("original role error")
+
+    async def incomplete_shutdown(**kwargs):
+        return False
+
+    ctx = {
+        "__name__": "test.main_shutdown",
+        "normalize_runtime_role": lambda role: role,
+        "logger": logging.getLogger("test.main_shutdown"),
+        "run_preflight_checks": lambda *args, **kwargs: SimpleNamespace(messages=[]),
+        "PreflightError": RuntimeError,
+        "settings": SimpleNamespace(),
+        "run_runtime_role": role_failure,
+        "_start_bot_role": lambda: None,
+        "_start_scheduler_role": lambda: None,
+        "_start_worker_role": lambda: None,
+        "_start_all_role": lambda: None,
+        "_shutdown_runtime": incomplete_shutdown,
+    }
+    module = ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[]))
+    exec(compile(module, "bot.py", "exec"), ctx)
+    with pytest.raises(ValueError, match="original role error"):
+        asyncio.run(ctx["main"]("bot"))
