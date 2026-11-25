@@ -129,3 +129,34 @@ def test_billing_db_access_offloaded_from_async_worker():
     assert "await asyncio.to_thread(repo.create_billing_event," in source
     assert "await asyncio.to_thread(subscription_service.get_active_subscription," in source
     assert "await asyncio.to_thread(usage_service.get_today_usage," in source
+
+
+def test_empty_botapi_album_result_is_an_uncertain_transport_not_a_retry(tmp_path):
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+
+    async def scenario():
+        media = tmp_path / "image.png"
+        media.write_bytes(b"test")
+        bot = SimpleNamespace(send_media_group=AsyncMock(return_value=[]))
+        telethon = SimpleNamespace(download_media=AsyncMock(return_value=str(media)))
+        owner = SimpleNamespace(
+            bot=bot, telethon=telethon,
+            _send_album_via_telethon=AsyncMock(return_value={
+                "ok": False, "transport_attempted": False,
+                "transport_accepted": False, "sent_message_ids": [],
+                "error_text": "Telethon unavailable",
+            }),
+            _content_from_message_or_post=lambda **_kw: {"text": "", "entities": []},
+            _build_text_and_entities_from_content=lambda _content: ("", []),
+        )
+        result = await SenderReuploadHelpers(owner).reupload_album(
+            messages=[SimpleNamespace(id=1), SimpleNamespace(id=2)],
+            target_id=-100123, target_thread_id=None,
+        )
+        assert not result["ok"]
+        assert result["transport_attempted"] is True
+        assert result["manual_review_required"] is True
+        assert result["non_retryable"] is True
+        bot.send_media_group.assert_awaited_once()
+
+    asyncio.run(scenario())
