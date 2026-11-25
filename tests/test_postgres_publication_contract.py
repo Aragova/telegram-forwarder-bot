@@ -772,7 +772,7 @@ def test_campaign_receipt_exact_mapping_and_atomic_timers(repo):
     _, rule_id, _, _, _, target = seed(repo, uuid4().int % 10**12)
     run = repo.create_campaign_run(rule_id=rule_id,saved_post_id=124,run_type="manual",
         status="sending",show_seconds=60,started_by=None,targets_total=1,
-        top_time_enabled_snapshot=True,top_time_seconds_snapshot=120)
+        top_time_enabled_snapshot=True,top_time_seconds_snapshot=7200)
     mid = repo.create_campaign_run_message(run_id=run,rule_id=rule_id,saved_post_id=124,
         target_kind="main",target_id=str(target),show_seconds=60,delete_after_at="2020-01-01T00:00:00+00:00")
     assert repo.mark_campaign_run_message_sending(mid)
@@ -798,7 +798,7 @@ def test_campaign_receipt_exact_mapping_and_atomic_timers(repo):
         with conn.cursor() as cur:
             cur.execute("SELECT starts_at,ends_at FROM campaign_top_time_pauses WHERE campaign_run_message_id=%s",(mid,))
             pause=cur.fetchone()
-            assert pause and pause["starts_at"]==now and pause["ends_at"]==now+timedelta(seconds=120)
+            assert pause and pause["starts_at"]==now and pause["ends_at"]==now+timedelta(seconds=7200)
 
 
 def test_campaign_manual_review_keeps_old_placement_nonreplayable(repo):
@@ -818,3 +818,22 @@ def test_campaign_manual_review_keeps_old_placement_nonreplayable(repo):
     assert repo.acknowledge_interrupted_campaign_send(mid,expected_updated_at=stamp,operator="test",note="inspected")
     assert repo.get_campaign_run_message(mid)["publication_manual_review"]["operator"]=="test"
     assert not repo.mark_campaign_run_message_sending(mid)
+
+
+def test_inbox_incident_survives_new_connection_and_requires_explicit_review(repo):
+    from datetime import timedelta
+    account = uuid4().int % 10**12 + 1
+    repo.record_publication_inbox_overflow(account,-100123,[7,8])
+    other = PostgresRepository()
+    try:
+        incident = other.get_publication_inbox_incident(account)
+        assert incident["last_scheduled_ids"] == [7,8]
+        assert incident["acknowledged_at"] is None
+        stamp = incident["blocked_at"]
+        assert not other.acknowledge_publication_inbox_incident(account,expected_blocked_at=stamp-timedelta(seconds=1),note="reviewed")
+        assert other.acknowledge_publication_inbox_incident(account,expected_blocked_at=stamp,note="reviewed")
+        assert repo.get_publication_inbox_incident(account)["acknowledged_at"] is not None
+        repo.record_publication_inbox_overflow(account,-100123,[9])
+        assert other.get_publication_inbox_incident(account)["acknowledged_at"] is None
+    finally:
+        other.client.close_all_connections()
