@@ -194,12 +194,14 @@ def test_campaign_delete_failure_resolution_warns_about_unverified_placements():
         rule_id=1, run_id=2,
         details={
             "summary": {"delete_pending": 0, "delete_processing": 0},
-            "messages": [{"accepted_unverified": True, "delete_status": "failed"}],
+            "messages": [{"publication_review_required": True, "delete_status": "failed", "send_status": "failed"}],
         },
     )
     assert "без подтверждённых ID" in text
     assert "вручную проверьте" in text
     assert "Публикации в Telegram удаляться не будут" in text
+    assert "не разблокирует неподтверждённые отправки" in text
+    assert "снимет блокировку проблемных размещений" not in text
 
 
 def test_campaign_background_renderer_uses_existing_bot_transport_guard():
@@ -212,3 +214,50 @@ def test_campaign_background_renderer_uses_existing_bot_transport_guard():
     assert runtime.renderer.bot.raw is raw_bot
     assert runtime.renderer.bot._is_transport_proxy is True
     assert runtime.deleter.bot is raw_bot
+
+
+def test_campaign_shutdown_keeps_ownership_when_drain_cannot_finish(monkeypatch):
+    async def _run():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        started = []
+
+        async def fake_loop(*, stop_event=None, **kwargs):
+            started.append(True)
+            entered.set()
+            await release.wait()
+            await stop_event.wait()
+
+        async def incomplete_drain(*, tasks, stop_event, timeout_sec, logger):
+            stop_event.set()  # An in-flight Telegram RPC did not finish.
+
+        for name in (
+            "run_repost_campaign_delete_loop",
+            "run_repost_campaign_scheduled_launch_loop",
+            "run_repost_campaign_scheduled_post_loop",
+            "run_repost_campaign_launch_job_loop",
+        ):
+            monkeypatch.setattr("app.repost_campaign_runtime_tasks." + name, fake_loop)
+        monkeypatch.setattr("app.repost_campaign_runtime_tasks.drain_job_workers", incomplete_drain)
+
+        manager = RepostCampaignRuntimeTasks(
+            repo=SimpleNamespace(), bot=SimpleNamespace(),
+            settings=SimpleNamespace(temp_dir="media/temp"),
+        )
+        manager.start()
+        await entered.wait()
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match="нельзя закрывать"):
+            await manager.stop(timeout_sec=0.01)
+        assert manager.is_running()
+        assert len(manager._tasks) == 4
+        manager.start()
+        assert len(started) == 4
+        assert manager._stop_event.is_set()
+        release.set()
+        await asyncio.gather(*manager._tasks)
+        assert not manager.is_running()
+        await manager.stop()
+        assert manager._tasks == []
+
+    asyncio.run(_run())
