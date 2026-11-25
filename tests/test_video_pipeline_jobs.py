@@ -465,3 +465,9 @@ def test_caption_contract_payload_survives_to_send_job() -> None:
     payload = send_jobs[0]["payload_json"]
     assert payload["caption_delivery_mode"] == "builder_first"
     assert payload["caption_entities_json"] is not None
+
+
+
+def test_self_loop_guard_covers_video_download_and_video_process_source():
+    source = Path("app/worker_runtime.py").read_text()
+    assert 'job_type in {"repost_single", "repost_album", "video_download", "video_process", "video_delivery", "video_send"}' in source
