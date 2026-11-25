@@ -3753,7 +3753,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             )
             return cur.fetchone() is not None
 
-    def quarantine_queued_self_target_echo_deliveries(self, rule_id: int, delivery_ids: list[int]) -> list[int]:
+    def quarantine_queued_self_target_echo_deliveries(
+        self, rule_id: int, delivery_ids: list[int], *, job_id: int, worker_id: str,
+    ) -> list[int]:
         """Recheck authoritative self-loop outputs immediately before an RPC.
 
         Reject the exact echoes and return unrelated album members to pending;
@@ -3764,6 +3766,16 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             return []
         with self.connect() as conn:
             with conn.cursor() as cur:
+                # A stale worker must not modify deliveries now leased to
+                # another worker. Lock the job row before touching any member.
+                cur.execute(
+                    "SELECT status, locked_by FROM jobs WHERE id=%s FOR UPDATE",
+                    (int(job_id),),
+                )
+                owned = cur.fetchone()
+                if (not owned or owned["status"] != "processing"
+                        or owned["locked_by"] != str(worker_id)):
+                    return []
                 cur.execute(
                     """SELECT d.id, p.source_channel, p.source_thread_id, p.message_id
                        FROM deliveries d
@@ -3804,6 +3816,45 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     )
             conn.commit()
         return sorted(echoes)
+
+    def release_stale_album_job_members(
+        self, *, job_id: int, worker_id: str, rule_id: int,
+        delivery_ids: list[int], idempotency_key: str,
+    ) -> int:
+        """Release only this worker's pre-RPC stale album members for regrouping.
+
+        An uncertain or accepted send must never be made eligible for replay.
+        """
+        ids = sorted({int(i) for i in delivery_ids if int(i) > 0})
+        if not ids:
+            return 0
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, locked_by FROM jobs WHERE id=%s FOR UPDATE",
+                    (int(job_id),),
+                )
+                job = cur.fetchone()
+                if (not job or job["status"] != "processing"
+                        or job["locked_by"] != str(worker_id)):
+                    return 0
+                cur.execute(
+                    "SELECT status FROM delivery_attempts WHERE idempotency_key=%s FOR UPDATE",
+                    (str(idempotency_key),),
+                )
+                attempt = cur.fetchone()
+                if not attempt or attempt["status"] != "failed_before_send":
+                    return 0
+                cur.execute(
+                    """UPDATE deliveries
+                       SET status='pending', error_text=NULL
+                       WHERE rule_id=%s AND id=ANY(%s) AND status='processing'
+                       RETURNING id""",
+                    (int(rule_id), ids),
+                )
+                count = len(cur.fetchall() or [])
+            conn.commit()
+        return count
 
     def _log_self_target_echo_delivery_skipped(
         self,
