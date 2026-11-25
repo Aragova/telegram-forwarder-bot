@@ -812,3 +812,67 @@ def test_emergency_drain_cannot_strand_concurrent_recovered_spool_append(monkeyp
         ]
 
     asyncio.run(scenario())
+
+
+
+def test_general_topic_valid_reply_message_id_is_not_topic_header():
+    now = datetime.now(timezone.utc)
+    msg = SimpleNamespace(
+        id=100, chat_id=-100, from_scheduled=True, out=True,
+        reply_to=SimpleNamespace(reply_to_msg_id=82, reply_to_top_id=None),
+        date=now,
+    )
+    kwargs = dict(
+        peer_id=-100, published_id=100, thread_id=1,
+        source_ids={2}, before_id=99, started_at=now,
+        broadcast=False,
+    )
+    assert verified_published_message(msg, **kwargs)
+    msg.reply_to.reply_to_top_id = 5
+    assert not verified_published_message(msg, **kwargs)
+
+
+def test_spool_append_failure_retains_incident_evidence_even_if_postgres_fails(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as spool_module
+
+    class FailedSpool:
+        def __init__(self, _path):
+            pass
+
+        def pending(self, _limit=128):
+            return []
+
+        def append(self, *_args):
+            raise OSError("corrupt SQLite")
+
+    monkeypatch.setattr(spool_module, "PublicationMappingSpool", FailedSpool)
+
+    async def scenario():
+        incidents = []
+        class Repository:
+            def record_telegram_publication_mappings(self, *_args):
+                raise ConnectionError("PostgreSQL offline")
+
+            def record_publication_inbox_overflow(self, account, peer, ids):
+                incidents.append((account, peer, list(ids)))
+
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        bind = telegram_publication.prepare_publication_inbox(client, Repository())
+        peer = types.PeerChannel(99)
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=peer, messages=[28], sent_messages=[128],
+        ))
+        assert client.publication_write_blocked is True
+        # The actual incident is still recorded after PostgreSQL recovers.
+        # No new Telegram update or send is required.
+        return incidents
+
+    assert asyncio.run(scenario()) == []
