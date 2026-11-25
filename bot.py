@@ -297,6 +297,8 @@ def _rule_ui_task_key(kind: str, rule_id: int) -> str:
 def _schedule_rule_ui_task(task_key: str, coro) -> bool:
     existing = rule_ui_tasks.get(task_key)
     if existing and not existing.done():
+        if asyncio.iscoroutine(coro):
+            coro.close()
         return False
 
     task = asyncio.create_task(coro)
@@ -309,6 +311,8 @@ def _schedule_rule_ui_task(task_key: str, coro) -> bool:
 
         try:
             done_task.result()
+        except asyncio.CancelledError:
+            pass
         except Exception as exc:
             logger.exception("Фоновая UI-задача %s завершилась с ошибкой: %s", task_key, exc)
 
@@ -507,6 +511,10 @@ async def _run_rescan_rule_fresh_job(
 
         # A persisted owner token fences concurrent scans in every worker.
         # This includes the entire Telegram parse, DB replay, and resume phase.
+        await _show_rule_processing_screen(
+            chat_id=chat_id, message_id=message_id,
+            text=f"🔄 Пересканирование правила #{rule_id}\n\nРежим: начать заново\nПроверка и пересборка очереди.",
+        )
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id, fresh=True)
         replay_committed = False
         successful = False
@@ -642,6 +650,10 @@ async def _run_rescan_rule_keep_job(
             )
             return
 
+        await _show_rule_processing_screen(
+            chat_id=chat_id, message_id=message_id,
+            text=f"🔄 Пересканирование правила #{rule_id}\n\nРежим: сохранить позицию\nПроверка и пересборка очереди.",
+        )
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
         scan_complete = False
         try:
@@ -6806,10 +6818,10 @@ async def handle_rescan_rule_menu(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
-@dp.callback_query(lambda c: c.data.startswith("rescan_rule_fresh:"))
+@dp.callback_query(lambda c: (c.data or "").startswith("rescan_rule_fresh:"))
 async def handle_rescan_rule_fresh(callback: CallbackQuery):
     try:
-        rule_id = int(callback.data.split(":")[1])
+        rule_id = int((callback.data or "").split(":")[1])
     except (TypeError, ValueError, IndexError):
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
@@ -6832,10 +6844,10 @@ async def handle_rescan_rule_fresh(callback: CallbackQuery):
     )
 
 
-@dp.callback_query(lambda c: c.data.startswith("rescan_rule_fresh_confirm:"))
+@dp.callback_query(lambda c: (c.data or "").startswith("rescan_rule_fresh_confirm:"))
 async def handle_rescan_rule_fresh_confirm(callback: CallbackQuery):
     try:
-        rule_id = int(callback.data.split(":")[1])
+        rule_id = int((callback.data or "").split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
@@ -6844,7 +6856,7 @@ async def handle_rescan_rule_fresh_confirm(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
-    task_key = _rule_ui_task_key("rescan_fresh", rule_id)
+    task_key = _rule_ui_task_key("rescan", rule_id)
     started = _schedule_rule_ui_task(
         task_key,
         _run_rescan_rule_fresh_job(
@@ -6862,21 +6874,11 @@ async def handle_rescan_rule_fresh_confirm(callback: CallbackQuery):
         )
         return
 
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            f"🔄 Пересканирование правила #{rule_id}\n\n"
-            f"Режим: начать заново\n"
-            f"Идёт парсинг источника и пересборка очереди.\n"
-            f"Это может занять время."
-        ),
-        reply_markup=None,
-    )
 
-@dp.callback_query(lambda c: c.data.startswith("rescan_rule_keep:"))
+@dp.callback_query(lambda c: (c.data or "").startswith("rescan_rule_keep:"))
 async def handle_rescan_rule_keep(callback: CallbackQuery):
     try:
-        rule_id = int(callback.data.split(":")[1])
+        rule_id = int((callback.data or "").split(":")[1])
     except Exception:
         await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
         return
@@ -6885,7 +6887,7 @@ async def handle_rescan_rule_keep(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
-    task_key = _rule_ui_task_key("rescan_keep", rule_id)
+    task_key = _rule_ui_task_key("rescan", rule_id)
     started = _schedule_rule_ui_task(
         task_key,
         _run_rescan_rule_keep_job(
@@ -6903,16 +6905,6 @@ async def handle_rescan_rule_keep(callback: CallbackQuery):
         )
         return
 
-    await edit_message_text_safe(
-        message=callback.message,
-        text=(
-            f"🔄 Пересканирование правила #{rule_id}\n\n"
-            f"Режим: сохранить позицию\n"
-            f"Идёт парсинг источника и пересборка очереди.\n"
-            f"Это может занять время."
-        ),
-        reply_markup=None,
-    )
 
 @dp.callback_query(lambda c: c.data.startswith("change_interval:") or c.data.startswith("user_rule_interval:"))
 async def handle_change_interval_callback(callback: CallbackQuery):

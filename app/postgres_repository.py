@@ -2739,7 +2739,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
             with self.connect() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT id FROM routing WHERE id=%s FOR UPDATE", (rule_id,))
+                    cur.execute("SELECT id FROM routing WHERE id=%s AND rescan_owner_token IS NULL FOR UPDATE", (rule_id,))
                     if not cur.fetchone():
                         return None
                     cur.execute("""SELECT 1 FROM telegram_publication_receipts
@@ -3927,6 +3927,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         )
                     row = cur.fetchone()
                     if not row:
+                        if preserve_existing_deliveries:
+                            raise RuntimeError("Не удалось сохранить сообщение при пересканировании")
                         continue
 
                     post_id = int(row["id"])
@@ -4514,9 +4516,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
                 rule = cur.fetchone()
                 if rule is None:
-                    raise RuntimeError(f"Правило #{rule_id} не найдено")
+                    raise RescanBlocked(f"Правило #{rule_id} не найдено")
                 if rule["rescan_owner_token"] is not None:
-                    raise RuntimeError(
+                    raise RescanBlocked(
                         "Пересканирование этого правила уже выполняется. "
                         "Повторный запуск запрещён до завершения текущего."
                     )
@@ -4534,7 +4536,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (int(rule_id), str(rule_id)),
                 )
                 if cur.fetchone()["busy"]:
-                    raise RuntimeError(
+                    raise RescanBlocked(
                         "У правила есть незавершённые доставки или задачи; "
                         "пересканирование отложено во избежание дубликатов"
                     )
@@ -4552,7 +4554,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (owner_token, int(rule_id)),
                 )
                 if cur.rowcount != 1:
-                    raise RuntimeError("Другое пересканирование получило блокировку")
+                    raise RescanBlocked("Другое пересканирование получило блокировку")
             conn.commit()
         return bool(rule["is_active"]), owner_token
 
@@ -4692,7 +4694,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def clear_rule_deliveries(self, rule_id: int) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT id FROM routing WHERE id=%s FOR UPDATE", (rule_id,))
+                cur.execute("SELECT id FROM routing WHERE id=%s AND rescan_owner_token IS NULL FOR UPDATE", (rule_id,))
+                if not cur.fetchone():
+                    raise RescanBlocked("Правило недоступно или пересканируется")
                 cur.execute("""SELECT 1 FROM telegram_publication_receipts
                     WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""", (rule_id,))
                 if cur.fetchone():
@@ -4924,14 +4928,32 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         cur.execute(
             """
             UPDATE deliveries d SET status='faulty',error_text='historical_attempt_unverified_no_resend'
-            FROM posts p
-            WHERE d.rule_id=%s AND d.post_id=p.id AND d.status='pending'
+            FROM posts p, routing r
+            WHERE d.rule_id=%s AND r.id=d.rule_id AND d.post_id=p.id AND d.status='pending'
               AND EXISTS (
-                SELECT 1 FROM delivery_attempts a
-                WHERE a.rule_id=d.rule_id AND a.status IN ('sending','accepted','verified','failed_after_send')
-                  AND a.idempotency_key NOT LIKE '%%:rescan:%%' AND a.idempotency_key NOT LIKE 'archived:%%'
-                  AND a.source_message_ids_json @> jsonb_build_array(p.message_id)
-                  AND NOT EXISTS (SELECT 1 FROM deliveries old WHERE old.id=a.delivery_id AND old.rule_id=a.rule_id)
+                SELECT 1 FROM posts member
+                WHERE member.source_channel=p.source_channel
+                  AND member.source_thread_id IS NOT DISTINCT FROM p.source_thread_id
+                  AND (member.id=p.id OR (r.mode='repost' AND p.media_group_id IS NOT NULL
+                       AND member.media_group_id=p.media_group_id))
+                  AND (
+                    EXISTS (
+                        SELECT 1 FROM delivery_attempts a
+                        WHERE a.rule_id=d.rule_id AND a.status IN ('sending','accepted','verified','failed_after_send')
+                          AND a.idempotency_key NOT LIKE '%%:rescan:%%' AND a.idempotency_key NOT LIKE 'archived:%%'
+                          AND a.source_message_ids_json @> jsonb_build_array(member.message_id)
+                          AND NOT EXISTS (SELECT 1 FROM deliveries old WHERE old.id=a.delivery_id AND old.rule_id=a.rule_id)
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM telegram_publication_receipts pr
+                        WHERE pr.rule_id=d.rule_id AND pr.source_channel=p.source_channel
+                          AND pr.source_thread_id IS NOT DISTINCT FROM p.source_thread_id
+                          AND pr.idempotency_key NOT LIKE '%%:rescan:%%' AND pr.idempotency_key NOT LIKE 'archived:%%'
+                          AND member.message_id=ANY(pr.source_message_ids)
+                          AND NOT EXISTS (SELECT 1 FROM deliveries old WHERE old.id=ANY(pr.delivery_ids)
+                              AND old.rule_id=d.rule_id AND old.post_id=member.id)
+                    )
+                  )
               )
             """, (int(rule_id),),
         )
@@ -9011,6 +9033,33 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     # QUEUE LOGICAL VIEW
     # =========================================================
 
+    def _get_rule_pending_logical_items_conn(self, conn, rule_id: int, mode: str) -> list[dict[str, Any]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    d.id AS delivery_id,
+                    d.status,
+                    d.sent_at,
+                    p.id AS post_id,
+                    p.message_id,
+                    p.source_channel,
+                    p.source_thread_id,
+                    p.media_group_id,
+                    p.content_json,
+                    p.created_at
+                FROM deliveries d
+                JOIN posts p ON p.id = d.post_id
+                WHERE d.rule_id = %s
+                AND d.status = 'pending'
+                ORDER BY p.id ASC
+                """,
+                (rule_id,),
+            )
+            rows = cur.fetchall()
+
+        return self._build_rule_logical_items_from_rows(rule_id=rule_id, rows=rows, mode=mode)
+
     def get_rule_queue_logical_items(self, rule_id: int) -> list[dict[str, Any]]:
         """
         Возвращает логическую очередь правила.
@@ -9032,41 +9081,12 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             mode = (getattr(rule, "mode", "repost") or "repost").strip().lower()
 
             with self.connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT
-                            d.id AS delivery_id,
-                            d.status,
-                            d.sent_at,
-                            p.id AS post_id,
-                            p.message_id,
-                            p.source_channel,
-                            p.source_thread_id,
-                            p.media_group_id,
-                            p.content_json,
-                            p.created_at
-                        FROM deliveries d
-                        JOIN posts p ON p.id = d.post_id
-                        WHERE d.rule_id = %s
-                        AND d.status = 'pending'
-                        ORDER BY p.id ASC
-                        """,
-                        (rule_id,),
-                    )
-                    rows = cur.fetchall()
-
-            items = self._build_rule_logical_items_from_rows(
-                rule_id=rule_id,
-                rows=rows,
-                mode=mode,
-            )
+                items = self._get_rule_pending_logical_items_conn(conn, rule_id, mode)
 
             logger.info(
-                "get_rule_queue_logical_items: rule_id=%s, mode=%s, raw_rows=%s, logical_items=%s",
+                "get_rule_queue_logical_items: rule_id=%s, mode=%s, logical_items=%s",
                 rule_id,
                 mode,
-                len(rows),
                 len(items),
             )
             return items
@@ -9116,27 +9136,30 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         - для video каждое видео считается отдельным элементом
         """
         try:
-            items = self.get_rule_queue_logical_items(rule_id)
-            if not items:
-                logger.warning(
-                    "set_rule_start_from_position: логическая очередь пуста, rule_id=%s",
-                    rule_id,
-                )
-                return None
-
-            position = max(1, min(position, len(items)))
-            selected = items[position - 1]
-
-            ids_to_mark_sent: list[int] = []
-            for item in items:
-                if int(item["position"]) >= position:
-                    break
-                ids_to_mark_sent.extend(int(delivery_id) for delivery_id in item["delivery_ids"])
-
-            now_iso = utc_now_iso()
-
             with self.connect() as conn:
                 with conn.cursor() as cur:
+                    cur.execute("SELECT mode FROM routing WHERE id=%s AND rescan_owner_token IS NULL FOR UPDATE", (rule_id,))
+                    rule = cur.fetchone()
+                    if not rule:
+                        return None
+                    items = self._get_rule_pending_logical_items_conn(conn, rule_id, rule['mode'])
+                    if not items:
+                        logger.warning(
+                            "set_rule_start_from_position: логическая очередь пуста, rule_id=%s",
+                            rule_id,
+                        )
+                        return None
+
+                    position = max(1, min(position, len(items)))
+                    selected = items[position - 1]
+
+                    ids_to_mark_sent: list[int] = []
+                    for item in items:
+                        if int(item["position"]) >= position:
+                            break
+                        ids_to_mark_sent.extend(int(delivery_id) for delivery_id in item["delivery_ids"])
+
+                    now_iso = utc_now_iso()
                     if ids_to_mark_sent:
                         cur.executemany(
                             """
@@ -9144,7 +9167,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             SET status = 'sent',
                                 sent_at = %s,
                                 error_text = NULL
-                            WHERE id = %s
+                            WHERE id = %s AND status='pending'
                             """,
                             [(now_iso, delivery_id) for delivery_id in ids_to_mark_sent],
                         )

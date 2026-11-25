@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -201,9 +202,9 @@ def message_to_content_dict(message):
 
     return content
 
-def _save_history_batch(db, batch, *, preserve_existing_deliveries: bool):
+async def _save_history_batch(db, batch, *, preserve_existing_deliveries: bool):
     if preserve_existing_deliveries:
-        return db.save_post_batch(batch, preserve_existing_deliveries=True)
+        return await asyncio.to_thread(db.save_post_batch, batch, preserve_existing_deliveries=True)
     return db.save_post_batch(batch)
 
 
@@ -273,7 +274,7 @@ async def parse_channel_history(
 
         if len(batch) >= 100:
             try:
-                saved += _save_history_batch(
+                saved += await _save_history_batch(
                     db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
                 )
             except Exception as exc:
@@ -289,7 +290,7 @@ async def parse_channel_history(
 
     if batch:
         try:
-            saved += _save_history_batch(
+            saved += await _save_history_batch(
                     db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
                 )
         except Exception as exc:
@@ -389,7 +390,7 @@ async def parse_group_history(
 
         if len(batch) >= 100:
             try:
-                saved += _save_history_batch(
+                saved += await _save_history_batch(
                     db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
                 )
             except Exception as exc:
@@ -406,7 +407,7 @@ async def parse_group_history(
 
     if batch:
         try:
-            saved += _save_history_batch(
+            saved += await _save_history_batch(
                     db, batch, preserve_existing_deliveries=preserve_existing_deliveries,
                 )
         except Exception as exc:
