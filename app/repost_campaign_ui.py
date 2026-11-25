@@ -2501,8 +2501,10 @@ def build_repost_campaign_run_delete_failures_resolve_confirm_view(*, rule_id: i
         "Публикации в Telegram удаляться не будут.",
     ]
     if any(
-        row.get("publication_review_required") and row.get("delete_status") == "failed"
-        for row in (details or {}).get("messages", [])
+        isinstance(row, dict)
+        and row.get("publication_review_required")
+        and row.get("delete_status") == "failed"
+        for row in ((details or {}).get("messages") or [])
     ):
         lines.extend([
             "",
