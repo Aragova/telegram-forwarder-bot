@@ -436,13 +436,15 @@ class RepostCampaignScheduleService:
         ok = self.repo.cancel_campaign_scheduled_launch(scheduled_launch_id, cancelled_by=cancelled_by)
         return RepostCampaignActionResult(ok=ok, action="cancel_scheduled_launch", rule_id=int(row.get("rule_id") or 0))
 
-    async def process_due_scheduled_launches(self, *, worker_id: str, limit: int = 5) -> dict:
+    async def process_due_scheduled_launches(self, *, worker_id: str, limit: int = 5, stop_event: asyncio.Event | None = None) -> dict:
         reset_result = await run_db(self.repo.reset_stuck_campaign_scheduled_launches, stuck_seconds=CAMPAIGN_SCHEDULE_STUCK_SECONDS)
         if isinstance(reset_result, dict) and reset_result.get("needs_review"):
             self.logger.warning(
                 "CAMPAIGN_SCHEDULE_NEEDS_REVIEW | reason=stale_processing_with_campaign_run | count=%s",
                 reset_result.get("needs_review"),
             )
+        if stop_event is not None and stop_event.is_set():
+            return {"claimed": 0}
         claimed = await run_db(self.repo.claim_due_campaign_scheduled_launches, now_iso=campaign_schedule_now_utc().isoformat(), worker_id=worker_id, limit=limit)
 
         for row in claimed:
@@ -630,7 +632,7 @@ async def run_repost_campaign_scheduled_launch_loop(
 
     while not (stop_event and stop_event.is_set()):
         try:
-            await runtime.process_due_scheduled_launches(worker_id=resolved_worker_id)
+            await runtime.process_due_scheduled_launches(worker_id=resolved_worker_id, stop_event=stop_event)
         except Exception:
             logger.exception("REPOST_CAMPAIGN_SCHEDULE_LOOP_FAILED | worker_id=%s", resolved_worker_id)
         if stop_event is None:
