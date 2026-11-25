@@ -3,6 +3,9 @@ import shutil
 import time
 import asyncio
 import json
+import math
+from fractions import Fraction
+from uuid import uuid4
 from pathlib import Path
 import logging
 from datetime import datetime, timezone
@@ -397,6 +400,37 @@ class VideoProcessor:
         except (ValueError, TypeError):
             return 30
 
+    @staticmethod
+    def _parse_frame_rate(raw):
+        """A missing or invalid ffprobe rate is not a measured frame rate."""
+        try:
+            value = float(Fraction(str(raw)))
+        except (ValueError, ZeroDivisionError, OverflowError):
+            return None
+        return value if math.isfinite(value) and value > 0 else None
+
+    @staticmethod
+    def _matches_target_fps(info, target_fps):
+        if not info:
+            return False
+        # Preserve the existing 29.97/30 and 23.976/24 equivalence for
+        # passthrough, but do not confuse a nominal VFR rate with its average.
+        nominal = info.get("fps")
+        if nominal is None:
+            nominal = info.get("fps_normalized")
+        average = info.get("fps_avg")
+        return (
+            info.get("fps_rate_known", True)
+            and nominal is not None
+            and abs(nominal - target_fps) <= 0.5
+            and (average is None or abs(average - target_fps) <= 0.5)
+        )
+
+    @staticmethod
+    def _cfr_output_args(target_fps):
+        # Explicit OUTPUT options: r_frame_rate is only a nominal estimate.
+        return ["-r", str(target_fps), "-fps_mode", "cfr"]
+
     # ==================== PROFILE ====================
 
     def _get_processing_profile(self, video_info):
@@ -650,17 +684,11 @@ class VideoProcessor:
                 logger.error("❌ Видеопоток не найден")
                 return None
 
-            # FPS
-            fps_parts = video_stream.get('r_frame_rate', '25/1').split('/')
-            fps = 25
-            try:
-                if len(fps_parts) == 2:
-                    numerator = float(fps_parts[0])
-                    denominator = float(fps_parts[1])
-                    if denominator != 0:
-                        fps = numerator / denominator
-            except:
-                pass
+            # Keep the existing nominal-rate profile policy. The average
+            # is additional evidence for VFR and the fallback for unknown r_frame_rate.
+            nominal_fps = self._parse_frame_rate(video_stream.get("r_frame_rate"))
+            average_fps = self._parse_frame_rate(video_stream.get("avg_frame_rate"))
+            fps = nominal_fps or average_fps or 25
 
             format_info = info.get('format', {})
             duration = float(format_info.get('duration', 0))
@@ -686,6 +714,8 @@ class VideoProcessor:
                 'width': int(video_stream.get('width', 0)),
                 'height': int(video_stream.get('height', 0)),
                 'fps': round(fps, 3),
+                'fps_avg': round(average_fps, 3) if average_fps is not None else None,
+                'fps_rate_known': nominal_fps is not None or average_fps is not None,
                 'fps_normalized': self._normalize_fps(fps),
                 'duration': duration,
                 'has_audio': audio_stream is not None,
@@ -931,13 +961,15 @@ class VideoProcessor:
         logger.info(f"   🔄 Нормализация под {profile['target_width']}x{profile['target_height']} @ {profile['target_fps']}fps")
         
         input_info = await self.get_video_info(input_path, use_cache=False)
-        
+        if not input_info:
+            return False
+
         vf = self._build_video_filter(
             profile['target_width'], profile['target_height'], profile['target_fps'],
             rotate_filter,
             original_width=input_info['width'],
             original_height=input_info['height'],
-            original_fps=input_info['fps_normalized'],
+            original_fps=None,  # Explicit fps filter even if nominal FPS matches.
             original_pix_fmt=input_info.get('pix_fmt')
         )
         
@@ -947,6 +979,7 @@ class VideoProcessor:
             cmd += ["-vf", vf]
         
         cmd += [
+            *self._cfr_output_args(profile["target_fps"]),
             *self._build_video_encode_args("veryfast", 26),
             *self._build_audio_encode_args(has_audio, input_info),
             "-movflags", "+faststart",
@@ -968,8 +1001,11 @@ class VideoProcessor:
                 if info['width'] != profile['target_width'] or info['height'] != profile['target_height']:
                     logger.warning(f"   ⚠️ Размер не совпадает: {info['width']}x{info['height']} != {profile['target_width']}x{profile['target_height']}")
                     return False
-                if info['fps_normalized'] != profile['target_fps']:
-                    logger.warning(f"   ⚠️ FPS не совпадает: {info['fps_normalized']} != {profile['target_fps']}")
+                if not self._matches_target_fps(info, profile["target_fps"]):
+                    logger.warning(
+                        "FPS не совпадает: nominal=%s average=%s target=%s",
+                        info["fps"], info.get("fps_avg"), profile["target_fps"],
+                    )
                     return False
                 logger.info(f"   ✅ Нормализация успешна: {info['width']}x{info['height']} @ {info['fps_normalized']}fps")
                 return True
@@ -985,7 +1021,7 @@ class VideoProcessor:
             video_info.get('rotate_filter'),
             original_width=video_info['width'],
             original_height=video_info['height'],
-            original_fps=video_info['fps_normalized'],
+            original_fps=None,
             original_pix_fmt=video_info.get('pix_fmt')
         )
         
@@ -996,7 +1032,7 @@ class VideoProcessor:
             cmd += ["-vf", vf]
         
         cmd += [
-            "-fps_mode", "cfr",
+            *self._cfr_output_args(profile["target_fps"]),
             *self._build_video_encode_args("veryfast", 26),
             *self._build_audio_encode_args(video_info['has_audio'], video_info),
             "-movflags", "+faststart",
@@ -1088,7 +1124,7 @@ class VideoProcessor:
         return config_duration
 
     async def create_intro_matching_video(self, source_path, profile, duration, stage_logger=None):
-        output_path = os.path.join(self.temp_dir, f"intro_matched_{int(time.time())}.mp4")
+        output_path = os.path.join(self.temp_dir, f"intro_matched_{uuid4().hex}.mp4")
         is_image = self._is_intro_image(source_path)
         
         vf = self._build_video_filter(profile['target_width'], profile['target_height'], profile['target_fps'])
@@ -1098,6 +1134,7 @@ class VideoProcessor:
             cmd = [
                 "ffmpeg", "-loop", "1", "-i", source_path,
                 "-vf", vf,
+                *self._cfr_output_args(profile["target_fps"]),
                 *self._build_video_encode_args("veryfast", 26),
                 "-an", "-t", str(duration),
                 "-movflags", "+faststart",
@@ -1108,6 +1145,7 @@ class VideoProcessor:
             cmd = [
                 "ffmpeg", "-i", source_path,
                 "-vf", vf,
+                *self._cfr_output_args(profile["target_fps"]),
                 *self._build_video_encode_args("veryfast", 26),
                 "-an",
                 "-movflags", "+faststart",
@@ -1122,17 +1160,23 @@ class VideoProcessor:
             intro_timeout,
         )
 
-        result = await self.run_ffmpeg_with_progress(
-            cmd,
-            "Создание заставки",
-            timeout=intro_timeout,
-            total_duration_estimate=duration,
-            stage_logger=stage_logger,
-        )
-        if result and os.path.exists(output_path):
-            logger.info(f"   ✅ Заставка создана: {os.path.getsize(output_path) / (1024 * 1024):.1f} MB")
-            return output_path
-        return None
+        keep_output = False
+        try:
+            result = await self.run_ffmpeg_with_progress(
+                cmd,
+                "Создание заставки",
+                timeout=intro_timeout,
+                total_duration_estimate=duration,
+                stage_logger=stage_logger,
+            )
+            if result and os.path.isfile(output_path):
+                logger.info(f"   ✅ Заставка создана: {os.path.getsize(output_path) / (1024 * 1024):.1f} MB")
+                keep_output = True
+                return output_path
+            return None
+        finally:
+            if not keep_output:
+                self._remove_failed_video_artifacts([output_path])
 
     async def create_thumbnail_fast(self, video_path, thumbnail_path, stage_logger=None):
         if not video_path or not os.path.isfile(video_path):
@@ -1189,14 +1233,17 @@ class VideoProcessor:
 
         intro_info = await self.get_video_info(intro_path, use_cache=False)
         main_info = await self.get_video_info(main_path, use_cache=False)
-        intro_duration = intro_info['duration'] if intro_info else 5
+        if not intro_info or not main_info:
+            logger.error("VIDEO_CONCAT_PROBE_FAILED | missing intro or main metadata")
+            return False
+        intro_duration = intro_info['duration']
 
         # ✅ ИСПРАВЛЕНО: добавлена проверка pix_fmt
         intro_needs_normalize = (
             intro_info and (
                 intro_info['width'] != w or
                 intro_info['height'] != h or
-                intro_info['fps_normalized'] != fps or
+                not self._matches_target_fps(intro_info, fps) or
                 intro_info.get('sar', '1:1') != '1:1' or
                 intro_info.get('pix_fmt', 'yuv420p') != 'yuv420p'
             )
@@ -1207,7 +1254,7 @@ class VideoProcessor:
             main_info and (
                 main_info['width'] != w or
                 main_info['height'] != h or
-                main_info['fps_normalized'] != fps or
+                not self._matches_target_fps(main_info, fps) or
                 main_info.get('sar', '1:1') != '1:1' or
                 main_info.get('pix_fmt', 'yuv420p') != 'yuv420p'
             )
@@ -1217,7 +1264,7 @@ class VideoProcessor:
             vf_intro = self._build_video_filter(w, h, fps,
                                                 original_width=intro_info['width'],
                                                 original_height=intro_info['height'],
-                                                original_fps=intro_info['fps_normalized'],
+                                                original_fps=None,
                                                 original_pix_fmt=intro_info.get('pix_fmt'))
         else:
             vf_intro = "null"
@@ -1226,7 +1273,7 @@ class VideoProcessor:
             vf_main = self._build_video_filter(w, h, fps,
                                                original_width=main_info['width'],
                                                original_height=main_info['height'],
-                                               original_fps=main_info['fps_normalized'],
+                                               original_fps=None,
                                                original_pix_fmt=main_info.get('pix_fmt'))
         else:
             vf_main = "null"
@@ -1247,6 +1294,7 @@ class VideoProcessor:
                 "ffmpeg", "-y", "-i", intro_path, "-i", main_path,
                 "-filter_complex", filter_complex,
                 "-map", "[outv]", "-map", "[outa]",
+                *self._cfr_output_args(fps),
                 *self._build_video_encode_args("veryfast", 26),
                 *self._build_audio_encode_args(True, main_info),
                 "-movflags", "+faststart", output_path
@@ -1256,6 +1304,7 @@ class VideoProcessor:
                 "ffmpeg", "-y", "-i", intro_path, "-i", main_path,
                 "-filter_complex", filter_complex,
                 "-map", "[outv]",
+                *self._cfr_output_args(fps),
                 *self._build_video_encode_args("veryfast", 26),
                 "-an",
                 "-movflags", "+faststart", output_path
@@ -1272,8 +1321,10 @@ class VideoProcessor:
         if result and os.path.exists(output_path):
             logger.info(f"   ✅ Склейка завершена, размер: {os.path.getsize(output_path) / (1024 * 1024):.1f} MB")
             result_info = await self.get_video_info(output_path, use_cache=False)
-            if result_info:
-                logger.info(f"   🔍 Проверка: {result_info['width']}x{result_info['height']} @ {result_info['fps']:.2f} fps, аудио: {'✅' if result_info['has_audio'] else '❌'}")
+            if not result_info or not self._matches_target_fps(result_info, fps):
+                logger.error("VIDEO_CONCAT_FPS_MISMATCH | target=%s", fps)
+                return False
+            logger.info(f"   🔍 Проверка: {result_info['width']}x{result_info['height']} @ {result_info['fps']:.2f} fps, аудио: {'✅' if result_info['has_audio'] else '❌'}")
             return True
         return False
 
@@ -1633,6 +1684,18 @@ class VideoProcessor:
 
     # ==================== MAIN PROCESS ====================
 
+    def _remove_failed_video_artifacts(self, paths, *, preserve_path=None):
+        """Release only this invocation's files; borrowed sources belong to the job."""
+        for path in paths:
+            if not path or path == preserve_path:
+                continue
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                logger.warning("VIDEO_TEMP_CLEANUP_FAILED | path=%s", path, exc_info=True)
+            finally:
+                self.video_info_cache.pop(path, None)
+
     async def process_video(
         self,
         video_file_id,
@@ -1758,8 +1821,8 @@ class VideoProcessor:
             )
             return False
 
-        timestamp = int(time.time())
-        base_name = f"video_{timestamp}_{video_file_id[:8] if video_file_id else 'local'}"
+        # Unique per invocation, including parallel worker processes and retries.
+        base_name = f"video_{uuid4().hex}_{video_file_id[:8] if video_file_id else 'local'}"
 
         input_path = input_file_path or os.path.join(self.temp_dir, f"input_{base_name}.mp4")
         clipped_main_path = os.path.join(self.temp_dir, f"clipped_{base_name}.mp4")
@@ -1770,6 +1833,7 @@ class VideoProcessor:
 
         files_to_delete = [input_path, clipped_main_path, final_output, normalized_main_path, thumbnail_path]
         sent_msg = None
+        keep_outputs = False
 
         try:
             bot = context.bot if hasattr(context, 'bot') else self.bot
@@ -1913,6 +1977,9 @@ class VideoProcessor:
                 if success:
                     logger.info("VIDEO_CLIP_CUT_OK | start=%s | duration=%s", exact_start, exact_duration)
                     clipped_info = await self.get_video_info(clipped_main_path, use_cache=False)
+                    if not clipped_info:
+                        self._stage_failed(stage_logger, "trim", error_text="Не удалось проверить обрезанное видео")
+                        return False
 
                     self._stage_completed(
                         stage_logger,
@@ -1924,7 +1991,7 @@ class VideoProcessor:
                     needs_normalize = (
                         clipped_info['width'] != profile['target_width'] or
                         clipped_info['height'] != profile['target_height'] or
-                        clipped_info['fps_normalized'] != profile['target_fps'] or
+                        not self._matches_target_fps(clipped_info, profile['target_fps']) or
                         clipped_info.get('sar', '1:1') != '1:1' or
                         clipped_info.get('pix_fmt', 'yuv420p') != 'yuv420p'
                     )
@@ -1950,6 +2017,7 @@ class VideoProcessor:
                             stage_logger=stage_logger,
                         ):
                             os.replace(normalized_main_path, clipped_main_path)
+                            self.video_info_cache.pop(clipped_main_path, None)
 
                             self._stage_completed(
                                 stage_logger,
@@ -1992,10 +2060,13 @@ class VideoProcessor:
                 logger.info("VIDEO_CLIP_SKIP_SOURCE_SHORTER | source_duration=%s | requested_clip=%s | action=use_full_source", source_duration, requested_clip)
                 shutil.copy2(input_path, clipped_main_path)
                 clipped_info = await self.get_video_info(clipped_main_path, use_cache=False)
+                if not clipped_info:
+                    self._stage_failed(stage_logger, "probe", error_text="Не удалось проверить копию исходного видео")
+                    return False
                 needs_normalize = (
                     clipped_info['width'] != profile['target_width'] or
                     clipped_info['height'] != profile['target_height'] or
-                    clipped_info['fps_normalized'] != profile['target_fps'] or
+                    not self._matches_target_fps(clipped_info, profile['target_fps']) or
                     clipped_info.get('sar', '1:1') != '1:1' or
                     clipped_info.get('pix_fmt', 'yuv420p') != 'yuv420p'
                 )
@@ -2021,6 +2092,7 @@ class VideoProcessor:
                         stage_logger=stage_logger,
                     ):
                         os.replace(normalized_main_path, clipped_main_path)
+                        self.video_info_cache.pop(clipped_main_path, None)
 
                         self._stage_completed(
                             stage_logger,
@@ -2048,6 +2120,9 @@ class VideoProcessor:
                         return False
 
             clipped_info = await self.get_video_info(clipped_main_path)
+            if not clipped_info:
+                self._stage_failed(stage_logger, "probe", error_text="Не удалось проверить обработанное видео")
+                return False
             logger.info(f"   📦 Размер: {clipped_info['file_size'] / (1024 * 1024):.1f} MB")
 
             # INTRO
@@ -2102,8 +2177,11 @@ class VideoProcessor:
                     if intro_result and os.path.exists(intro_result):
                         intro_processed_path = intro_result
                         intro_created = True
-                        intro_info = await self.get_video_info(intro_processed_path)
                         files_to_delete.append(intro_processed_path)
+                        intro_info = await self.get_video_info(intro_processed_path)
+                        if not intro_info:
+                            self._stage_failed(stage_logger, "intro", error_text="Не удалось проверить подготовленную заставку")
+                            return False
                         logger.info(f"   📦 Размер заставки: {intro_info['file_size'] / (1024 * 1024):.1f} MB")
 
                         self._stage_completed(
@@ -2235,6 +2313,13 @@ class VideoProcessor:
                     logger.error(f"❌ Финальный файл не соответствует downscale: {final_info['width']}x{final_info['height']} > {profile['target_width']}x{profile['target_height']}")
                     return False
 
+            if not self._matches_target_fps(final_info, profile["target_fps"]):
+                logger.error(
+                    "VIDEO_FINAL_FPS_MISMATCH | nominal=%s average=%s target=%s",
+                    final_info["fps"], final_info.get("fps_avg"), profile["target_fps"],
+                )
+                return False
+
             if video_info['has_audio'] != final_info['has_audio']:
                 logger.warning(f"⚠️ Аудио не соответствует: исходное {video_info['has_audio']}, финал {final_info['has_audio']}")
 
@@ -2291,6 +2376,7 @@ class VideoProcessor:
             )
 
             if send_output:
+                keep_outputs = True  # Deferred cleanup already scheduled.
                 return sent_msg
 
             artifact_payload = {
@@ -2309,6 +2395,7 @@ class VideoProcessor:
                 },
                 "cleanup_paths": [p for p in files_to_delete if p and p != final_output],
             }
+            keep_outputs = True  # The send stage now owns these artifacts.
             return artifact_payload
 
         except Exception as e:
@@ -2327,14 +2414,6 @@ class VideoProcessor:
                 },
             )
 
-            for fp in files_to_delete:
-                try:
-                    if fp and os.path.isfile(fp):
-                        os.remove(fp)
-                    if fp in self.video_info_cache:
-                        del self.video_info_cache[fp]
-                except:
-                    pass
             if sent_msg is not None and sent_msg is not False:
                 # Cleanup/diagnostics failed after the send returned; retain
                 # its evidence instead of reporting a retryable pipeline failure.
@@ -2344,6 +2423,11 @@ class VideoProcessor:
                 # Preserve definite send rejection/preflight classification.
                 raise
             return False
+        finally:
+            if not keep_outputs:
+                self._remove_failed_video_artifacts(
+                    files_to_delete, preserve_path=input_path if input_file_path else None,
+                )
 
     async def shutdown(self):
         logger.info("🛑 Завершение работы VideoProcessor...")

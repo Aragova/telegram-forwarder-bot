@@ -110,10 +110,10 @@ def test_video_intro_ffmpeg_command_does_not_trim_video_intro(tmp_path, monkeypa
     processor = _processor(tmp_path, monkeypatch)
     source_path = tmp_path / "intro.mp4"
     source_path.write_bytes(b"video")
-    output_path = tmp_path / "temp" / "intro_matched_123.mp4"
+    output_path = tmp_path / "temp" / "intro_matched_test.mp4"
     captured = {}
 
-    monkeypatch.setattr(video_processor_module.time, "time", lambda: 123)
+    monkeypatch.setattr(video_processor_module, "uuid4", lambda: SimpleNamespace(hex="test"))
 
     async def fake_run_ffmpeg(cmd, *_args, **kwargs):
         captured["cmd"] = cmd
@@ -140,10 +140,10 @@ def test_video_intro_timeout_depends_on_intro_duration(tmp_path, monkeypatch):
     processor = _processor(tmp_path, monkeypatch)
     source_path = tmp_path / "intro.mp4"
     source_path.write_bytes(b"video")
-    output_path = tmp_path / "temp" / "intro_matched_123.mp4"
+    output_path = tmp_path / "temp" / "intro_matched_test.mp4"
     captured = {}
 
-    monkeypatch.setattr(video_processor_module.time, "time", lambda: 123)
+    monkeypatch.setattr(video_processor_module, "uuid4", lambda: SimpleNamespace(hex="test"))
 
     async def fake_run_ffmpeg(cmd, *_args, **kwargs):
         captured["cmd"] = cmd
@@ -170,10 +170,10 @@ def test_image_intro_ffmpeg_command_keeps_intro_duration_trim(tmp_path, monkeypa
     processor = _processor(tmp_path, monkeypatch)
     source_path = tmp_path / "intro.png"
     source_path.write_bytes(b"image")
-    output_path = tmp_path / "temp" / "intro_matched_123.mp4"
+    output_path = tmp_path / "temp" / "intro_matched_test.mp4"
     captured = {}
 
-    monkeypatch.setattr(video_processor_module.time, "time", lambda: 123)
+    monkeypatch.setattr(video_processor_module, "uuid4", lambda: SimpleNamespace(hex="test"))
 
     async def fake_run_ffmpeg(cmd, *_args, **_kwargs):
         captured["cmd"] = cmd
