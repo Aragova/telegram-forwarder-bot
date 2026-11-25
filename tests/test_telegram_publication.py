@@ -388,7 +388,7 @@ def test_difference_total_limit_does_not_discard_recoverable_page(server_unavail
             chats=[], users=[], intermediate_state=state,
         )
         too_long = types.updates.DifferenceTooLong(pts=20000)
-        responses = [too_long, too_long, too_long] if server_unavailable else [too_long, page]
+        responses = [too_long, too_long] if server_unavailable else [too_long, page]
         client = AsyncMock(side_effect=responses)
         inbox = SimpleNamespace(repository=object(), sender_account_id=7,
                                 record=AsyncMock(return_value=True))
@@ -401,13 +401,127 @@ def test_difference_total_limit_does_not_discard_recoverable_page(server_unavail
         assert requests[1].pts == requests[0].pts == 1
         assert requests[1].pts_limit == 1000
         if server_unavailable:
-            assert isinstance(requests[2], functions.updates.GetDifferenceRequest)
-            assert requests[2].pts == 20000
+            # No third call from the server's newer pts: it could skip
+            # exact scheduled-to-published mappings between checkpoints.
+            assert len(requests) == 2
             inbox.record.assert_not_awaited()
             recovery._advance.assert_not_awaited()
         else:
             assert len(requests) == 2
             inbox.record.assert_awaited_once()
             recovery._advance.assert_awaited_once_with(cursor, 20000, 0, date)
+
+    asyncio.run(scenario())
+
+
+def test_spool_append_during_empty_drain_is_not_stranded(monkeypatch, tmp_path):
+    """An append while the last pending() read is suspended must cause a new read."""
+    import threading
+    from telethon import types
+    from app import telegram_publication
+
+    class ControlledSpool:
+        instance = None
+
+        def __init__(self, _path):
+            ControlledSpool.instance = self
+            self.rows = []
+            self.next_id = 0
+            self.armed = False
+            self.stall_once = True
+            self.empty_read = threading.Event()
+            self.release_read = threading.Event()
+
+        def append(self, peer, old, new):
+            self.next_id += 1
+            self.rows.append((self.next_id, peer, old, new))
+
+        def pending(self, _limit=128):
+            snapshot = self.rows[:]
+            if self.armed and not snapshot and self.stall_once:
+                self.stall_once = False
+                self.empty_read.set()
+                assert self.release_read.wait(5)
+                return snapshot
+            return snapshot
+
+        def acknowledge(self, row_id):
+            self.rows = [row for row in self.rows if row[0] != row_id]
+
+    monkeypatch.setattr(telegram_publication, "PublicationInbox", PublicationInbox)
+    monkeypatch.setattr(
+        __import__("app.publication_mapping_spool", fromlist=["PublicationMappingSpool"]),
+        "PublicationMappingSpool", ControlledSpool,
+    )
+
+    async def scenario():
+        recorded = []
+
+        def record(account, peer, pairs):
+            recorded.extend(pairs)
+
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(record_telegram_publication_mappings=record)
+        bind = telegram_publication.prepare_publication_inbox(client, repo)
+        await bind()
+        spool = ControlledSpool.instance
+        spool.armed = True
+        peer = types.PeerChannel(99)
+        first = asyncio.create_task(client.handler(types.UpdateDeleteScheduledMessages(
+            peer=peer, messages=[10], sent_messages=[110],
+        )))
+        try:
+            assert await asyncio.to_thread(spool.empty_read.wait, 5)
+            await client.handler(types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[11], sent_messages=[111],
+            ))
+        finally:
+            spool.release_read.set()
+        await asyncio.wait_for(first, 5)
+        assert recorded == [(10, 110), (11, 111)]
+        assert spool.rows == []
+
+    asyncio.run(scenario())
+
+
+def test_sqlite_spool_failure_persists_to_postgres_without_next_update(monkeypatch, tmp_path):
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as spool_module
+
+    class BrokenSpool:
+        def __init__(self, _path):
+            pass
+
+        def pending(self, _limit=128):
+            return []
+
+        def append(self, *_args):
+            raise OSError("disk full")
+
+    monkeypatch.setattr(spool_module, "PublicationMappingSpool", BrokenSpool)
+
+    async def scenario():
+        saved = []
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(record_telegram_publication_mappings=lambda account, peer, pairs: saved.extend(pairs))
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[12], sent_messages=[112],
+        ))
+        assert saved == [(12, 112)]
+        assert client.publication_write_blocked is True
 
     asyncio.run(scenario())
