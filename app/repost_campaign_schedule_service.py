@@ -633,4 +633,10 @@ async def run_repost_campaign_scheduled_launch_loop(
             await runtime.process_due_scheduled_launches(worker_id=resolved_worker_id)
         except Exception:
             logger.exception("REPOST_CAMPAIGN_SCHEDULE_LOOP_FAILED | worker_id=%s", resolved_worker_id)
-        await asyncio.sleep(interval_seconds)
+        if stop_event is None:
+            await asyncio.sleep(interval_seconds)
+        else:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=max(0.01, interval_seconds))
+            except asyncio.TimeoutError:
+                pass
