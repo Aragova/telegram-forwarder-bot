@@ -119,7 +119,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
     client.publication_inbox_ready = asyncio.get_running_loop().create_future()
 
     from pathlib import Path
-    from .publication_mapping_spool import PublicationMappingSpool
+    from .publication_mapping_spool import PublicationMappingSpool, PublicationFallbackJournal
 
     # Persist beside the Telethon SQLiteSession, which survives service restarts.
     session_file = getattr(getattr(client, "session", None), "filename", None)
@@ -127,6 +127,15 @@ def prepare_publication_inbox(client: Any, repository: Any):
         PublicationMappingSpool(Path(session_file).with_suffix(".publication-mappings.sqlite"))
         if session_file else None
     )
+    # On a SQLite failure, preserve evidence in a separate fsynced journal
+    # before attempting PostgreSQL. Replay it during the next bind/restart.
+    journal = (
+        PublicationFallbackJournal(
+            Path(session_file).with_suffix(".publication-mappings.fallback.jsonl")
+        ) if session_file else None
+    )
+    journal_lock = asyncio.Lock()
+    client.publication_evidence_unpersisted = False
     # Test/injected clients without a session use an in-memory buffer only.
     buffer = deque()
     emergency = deque()
@@ -182,13 +191,28 @@ def prepare_publication_inbox(client: Any, repository: Any):
                             client.publication_write_blocked = True
                         logger.exception("TELEGRAM_PUBLICATION_MAPPING_DRAIN_FAILED")
                 generation_after_spool = spool_generation
-                # The SQLite file might be corrupt or inaccessible for reads too.
-                # Never let a failed pending()/acknowledge() strand emergency
-                # evidence when PostgreSQL is still available.
-                while emergency:
-                    peer, old, new = emergency[0]
-                    await candidate.record(peer, old, new)
-                    emergency.popleft()
+                # Every SQLite append failure was also written to a fsynced
+                # fallback journal. Replay it under the append lock, including
+                # records left by a previous process after a crash/shutdown.
+                # PostgreSQL inserts are idempotent, so duplicate emergency
+                # memory entries are safe to replay.
+                if journal is not None:
+                    async with journal_lock:
+                        journal_rows = await asyncio.to_thread(journal.pending)
+                        for peer, old, new in journal_rows:
+                            await candidate.record(peer, old, new)
+                        if journal_rows:
+                            await asyncio.to_thread(journal.clear)
+                        while emergency:
+                            peer, old, new = emergency[0]
+                            await candidate.record(peer, old, new)
+                            emergency.popleft()
+                        client.publication_evidence_unpersisted = False
+                else:
+                    while emergency:
+                        peer, old, new = emergency[0]
+                        await candidate.record(peer, old, new)
+                        emergency.popleft()
                 if spool_failure is not None:
                     raise spool_failure
                 if spool is None:
@@ -243,7 +267,20 @@ def prepare_publication_inbox(client: Any, repository: Any):
                     client.publication_write_blocked = True
                     buffer_overflow = True
                     overflow_evidence = (peer, old)
-                    emergency.append((peer, old, new))
+                    if journal is not None:
+                        async with journal_lock:
+                            try:
+                                await asyncio.to_thread(journal.append, peer, old, new)
+                            except Exception:
+                                client.publication_evidence_unpersisted = True
+                                logger.critical(
+                                    "PUBLICATION_EVIDENCE_VOLATILE | sqlite_and_fallback_write_failed | action=block_shutdown",
+                                    exc_info=True,
+                                )
+                            emergency.append((peer, old, new))
+                    else:
+                        client.publication_evidence_unpersisted = True
+                        emergency.append((peer, old, new))
                     logger.exception("TELEGRAM_PUBLICATION_MAPPING_LOCAL_SPOOL_FAILED")
                     # Preserve evidence in memory and attempt PostgreSQL
                     # immediately. A disk failure must not strand the only
