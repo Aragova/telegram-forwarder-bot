@@ -642,6 +642,9 @@ def _run_album_delivery_with_entities(entities):
         def mark_many_deliveries_sent(self, delivery_ids):
             events.append(("mark_many", tuple(delivery_ids)))
 
+        def mark_delivery_sent_with_target_message(self, delivery_id, **kwargs):
+            events.append(("mark_one", delivery_id, kwargs["sent_message_id"]))
+
     class RuntimeOwner(SenderService):
         def __init__(self):
             self.db = RuntimeRepo()
@@ -750,6 +753,10 @@ def test_album_without_custom_emoji_keeps_copy_first():
     assert owner.copy_calls == 1
     assert owner.reupload_calls == 0
     assert ("final_success", "copy_album_verified") in events
+    assert [event for event in events if event[0] == "mark_one"] == [
+        ("mark_one", 1, 501), ("mark_one", 2, 502),
+    ]
+    assert not [event for event in events if event[0] == "mark_many"]
 
 
 def test_album_content_entities_preserve_custom_emoji():
