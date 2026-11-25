@@ -183,6 +183,15 @@ def prepare_publication_inbox(client: Any, repository: Any):
         volatile_emergency.discard(evidence_key(row))
         client.publication_evidence_unpersisted = bool(volatile_emergency)
 
+    def retain_emergency(row) -> None:
+        nonlocal buffer_overflow, overflow_evidence
+        client.publication_write_blocked = True
+        buffer_overflow = True
+        overflow_evidence = (row[0], row[1])
+        emergency.append(row)
+        volatile_emergency.add(evidence_key(row))
+        client.publication_evidence_unpersisted = True
+
     async def persist_emergency_journal(row) -> None:
         # A concurrent drain may already have committed this exact vector.
         if journal is None or evidence_key(row) not in volatile_emergency:
@@ -371,28 +380,30 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 return
             old,new = map(list,zip(*pairs))
             if spool is not None:
+                row = (peer, old, new)
+                # Until the SQLite write has settled, the only copy may
+                # still be in this handler. Fence shutdown before the await.
+                volatile_emergency.add(evidence_key(row))
+                client.publication_evidence_unpersisted = True
+                append_task = asyncio.create_task(asyncio.to_thread(spool.append, *row))
                 try:
-                    await asyncio.to_thread(spool.append, peer, old, new)
-                    spool_generation += 1
+                    await _await_journal_task(append_task)
+                except asyncio.CancelledError:
+                    # The filesystem thread may have succeeded despite
+                    # cancellation. Do not create a false disk incident.
+                    if (append_task.done() and not append_task.cancelled()
+                            and append_task.exception() is None):
+                        spool_generation += 1
+                        mark_emergency_durable(row)
+                    else:
+                        retain_emergency(row)
+                    raise
                 except Exception:
-                    # Disk failure is not an excuse to reopen Telegram writes.
-                    client.publication_write_blocked = True
-                    buffer_overflow = True
-                    overflow_evidence = (peer, old)
-                    # Retain the vector and fence shutdown before any
-                    # cancellable lock acquisition or disk operation.
-                    row = (peer, old, new)
-                    emergency.append(row)
-                    volatile_emergency.add(evidence_key(row))
-                    client.publication_evidence_unpersisted = True
+                    # Retain evidence before acquiring the fallback lock.
+                    retain_emergency(row)
                     if journal is not None:
-                        try:
-                            async with journal_lock:
-                                await persist_emergency_journal(row)
-                        except asyncio.CancelledError:
-                            if candidate is not None:
-                                schedule_retry(0.25)
-                            raise
+                        async with journal_lock:
+                            await persist_emergency_journal(row)
                     logger.exception("TELEGRAM_PUBLICATION_MAPPING_LOCAL_SPOOL_FAILED")
                     # Preserve evidence in memory and attempt PostgreSQL
                     # immediately. A disk failure must not strand the only
@@ -407,6 +418,9 @@ def prepare_publication_inbox(client: Any, repository: Any):
                                 logger.exception("TELEGRAM_PUBLICATION_MAPPING_EMERGENCY_PERSIST_FAILED")
                                 schedule_retry(0.25)
                     return
+                else:
+                    spool_generation += 1
+                    mark_emergency_durable(row)
             if len(buffer) >= 1024 and spool is None:
                 # No durable spool: overflow is a real evidence-loss risk and
                 # requires an operator incident. Retain the vector even here.
@@ -431,6 +445,12 @@ def prepare_publication_inbox(client: Any, repository: Any):
             except Exception:
                 logger.exception("TELEGRAM_PUBLICATION_MAPPING_PERSIST_FAILED")
                 schedule_retry(0.25)
+        except asyncio.CancelledError:
+            # Even a cancelled direct drain or a completed SQLite write
+            # must have another opportunity to reach PostgreSQL.
+            if candidate is not None:
+                schedule_retry(0.25)
+            raise
         except Exception:
             logger.exception("TELEGRAM_PUBLICATION_MAPPING_HANDLE_FAILED")
 

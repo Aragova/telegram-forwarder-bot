@@ -1204,3 +1204,66 @@ def test_cancelled_emergency_handler_waiting_for_journal_lock_retains_evidence(
 
     asyncio.run(scenario())
 
+
+
+@pytest.mark.parametrize("sqlite_fails", [False, True])
+def test_cancelled_initial_sqlite_append_keeps_exact_mapping(monkeypatch, tmp_path, sqlite_fails):
+    import threading
+    from telethon import types
+    from app import telegram_publication
+    from app.publication_mapping_spool import PublicationMappingSpool
+
+    started, release = threading.Event(), threading.Event()
+    original_append = PublicationMappingSpool.append
+
+    def blocked_append(self, *args):
+        started.set()
+        assert release.wait(5)
+        if sqlite_fails:
+            raise OSError("SQLite write failed")
+        return original_append(self, *args)
+
+    monkeypatch.setattr(PublicationMappingSpool, "append", blocked_append)
+
+    async def scenario():
+        saved = set()
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=lambda _account, _peer, pairs: saved.update(pairs),
+        )
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        task = asyncio.create_task(client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[51], sent_messages=[151],
+        )))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            assert client.publication_evidence_unpersisted
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+            await asyncio.wait_for(client.flush_publication_inbox(), 5)
+            assert saved == {(51, 151)}
+            assert not client.publication_evidence_unpersisted
+            assert bool(getattr(client, "publication_write_blocked", False)) is sqlite_fails
+        finally:
+            release.set()
+            tasks = [task] + [
+                item for item in asyncio.all_tasks()
+                if item.get_name() == "telegram-publication-persist-retry"
+            ]
+            for item in tasks:
+                if not item.done():
+                    item.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
