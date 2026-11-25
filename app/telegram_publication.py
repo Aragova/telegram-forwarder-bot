@@ -143,11 +143,13 @@ def prepare_publication_inbox(client: Any, repository: Any):
     candidate: PublicationInbox | None = None
     buffer_overflow = False
     overflow_evidence = None
+    incident_persisted = False
     live_lock = asyncio.Lock()
     spool_generation = 0
     retry_task: asyncio.Task | None = None
 
     async def flush_live() -> None:
+        nonlocal incident_persisted
         async with live_lock:
             if candidate is None:
                 return
@@ -216,6 +218,7 @@ def prepare_publication_inbox(client: Any, repository: Any):
                                     persist_incident,
                                     candidate.sender_account_id, first_peer, first_old,
                                 )
+                                incident_persisted = True
                             await asyncio.to_thread(journal.clear)
                             # These in-memory duplicates were already
                             # acknowledged in PostgreSQL by the journal pass.
@@ -397,7 +400,8 @@ def prepare_publication_inbox(client: Any, repository: Any):
                 await flush_live()
                 read_incident = getattr(repository,"get_publication_inbox_incident",None)
                 persist_incident = getattr(repository,"record_publication_inbox_overflow",None)
-                if buffer_overflow and overflow_evidence is not None and callable(persist_incident):
+                if (buffer_overflow and not incident_persisted
+                        and overflow_evidence is not None and callable(persist_incident)):
                     await asyncio.to_thread(persist_incident,candidate.sender_account_id,*overflow_evidence)
                 if callable(read_incident):
                     incident = await asyncio.to_thread(read_incident,candidate.sender_account_id)
