@@ -4,11 +4,18 @@ from types import SimpleNamespace
 import pytest
 
 from app.sender import SenderService
+from app.delivery_idempotency import build_delivery_idempotency_key
+
+
+def _album_key(delivery_ids=None):
+    return build_delivery_idempotency_key(
+        operation_kind="album", rule_id=111, target_id="dst",
+        media_group_id="album-1", source_message_ids=delivery_ids,
+    )
 
 
 class FakeAlbumRepo:
     def __init__(self):
-        self.attempt = None
         self.attempt_by_key = {}
         self.marked = []
         self.rows = [
@@ -21,9 +28,7 @@ class FakeAlbumRepo:
         self.verification_result = {"ok": False, "sent_message_ids": []}
 
     def get_delivery_attempt_by_idempotency_key(self, key):
-        if self.attempt_by_key:
-            return self.attempt_by_key.get(key)
-        return self.attempt
+        return self.attempt_by_key.get(key)
 
     def create_delivery_attempt(self, **_kwargs):
         return 1
@@ -64,7 +69,7 @@ async def _execute(repo, *, delivery_ids=None):
     service.db = repo
 
     async def fake_deliver_album(*_args, **_kwargs):
-        repo.attempt = {"status": "verified", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
+        repo.attempt_by_key[_kwargs["idempotency_key"]] = {"status": "verified", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
         return True
 
     service._deliver_album = fake_deliver_album
@@ -98,7 +103,7 @@ def test_repost_album_success_marks_all_deliveries_sent():
 
 def test_repost_album_cache_hit_marks_all_deliveries_sent():
     repo = FakeAlbumRepo()
-    repo.attempt = {"status": "verified", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
+    repo.attempt_by_key[_album_key([1, 2])] = {"status": "verified", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
 
     ok = asyncio.run(_execute(repo, delivery_ids=[1, 2]))
 
@@ -117,7 +122,7 @@ def test_repost_album_no_false_success_if_mark_sent_fails():
 
 def test_repost_album_accepted_cache_does_not_fake_success_or_resend():
     repo = FakeAlbumRepo()
-    repo.attempt = {"status": "accepted", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
+    repo.attempt_by_key[_album_key([1, 2])] = {"status": "accepted", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
 
     result = asyncio.run(_execute(repo, delivery_ids=[1, 2]))
 
@@ -130,7 +135,7 @@ def test_repost_album_accepted_cache_does_not_fake_success_or_resend():
 
 def test_repost_album_accepted_cache_is_read_only_reconciled_when_messages_exist():
     repo = FakeAlbumRepo()
-    repo.attempt = {"status": "accepted", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
+    repo.attempt_by_key[_album_key([1, 2])] = {"status": "accepted", "sent_message_ids_json": [501, 502], "source_message_ids_json": [1, 2]}
     repo.verification_result = {"ok": True, "sent_message_ids": [501, 502]}
 
     ok = asyncio.run(_execute(repo, delivery_ids=[1, 2]))
@@ -143,7 +148,7 @@ def test_repost_album_accepted_cache_is_read_only_reconciled_when_messages_exist
 
 def test_repost_album_accepted_cache_does_not_recover_partial_copy():
     repo = FakeAlbumRepo()
-    repo.attempt = {"status": "accepted", "sent_message_ids_json": [501], "source_message_ids_json": [1, 2]}
+    repo.attempt_by_key[_album_key([1, 2])] = {"status": "accepted", "sent_message_ids_json": [501], "source_message_ids_json": [1, 2]}
     repo.verification_result = {"ok": True, "sent_message_ids": [501]}
 
     result = asyncio.run(_execute(repo, delivery_ids=[1, 2]))
@@ -155,13 +160,14 @@ def test_repost_album_accepted_cache_does_not_recover_partial_copy():
 
 def test_verified_legacy_album_cache_preserves_member_target_id_association_when_reordered():
     repo = FakeAlbumRepo()
-    repo.attempt = {
+    repo.attempt_by_key[_album_key()] = {
         "status": "verified",
         "sent_message_ids_json": [501, 502],
         "source_message_ids_json": [1, 2],
     }
     result = asyncio.run(_execute(repo, delivery_ids=[2, 1]))
     assert result is True
+    assert set(repo.attempt_by_key) == {_album_key()}
     assert repo.marked[0][0] == 2
     assert repo.marked[0][1]["sent_message_id"] == 502
     assert repo.marked[1][0] == 1
@@ -169,13 +175,8 @@ def test_verified_legacy_album_cache_preserves_member_target_id_association_when
 
 
 def test_modern_album_cache_is_looked_up_by_member_fingerprint_key_only():
-    from app.delivery_idempotency import build_delivery_idempotency_key
-
     repo = FakeAlbumRepo()
-    key = build_delivery_idempotency_key(
-        operation_kind="album", rule_id=111, target_id="dst",
-        media_group_id="album-1", source_message_ids=[1, 2],
-    )
+    key = _album_key([1, 2])
     repo.attempt_by_key[key] = {
         "status": "verified",
         "sent_message_ids_json": [501, 502],
