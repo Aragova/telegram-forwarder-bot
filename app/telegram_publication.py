@@ -202,7 +202,28 @@ def prepare_publication_inbox(client: Any, repository: Any):
                         for peer, old, new in journal_rows:
                             await candidate.record(peer, old, new)
                         if journal_rows:
+                            # A journal from the previous process proves
+                            # SQLite became unavailable. Keep sending fenced
+                            # until an operator acknowledges the persisted
+                            # incident, even after PostgreSQL replays records.
+                            client.publication_write_blocked = True
+                            persist_incident = getattr(
+                                repository, "record_publication_inbox_overflow", None
+                            )
+                            if callable(persist_incident):
+                                first_peer, first_old, _ = journal_rows[0]
+                                await asyncio.to_thread(
+                                    persist_incident,
+                                    candidate.sender_account_id, first_peer, first_old,
+                                )
                             await asyncio.to_thread(journal.clear)
+                            # These in-memory duplicates were already
+                            # acknowledged in PostgreSQL by the journal pass.
+                            for row in journal_rows:
+                                try:
+                                    emergency.remove(row)
+                                except ValueError:
+                                    pass
                         while emergency:
                             peer, old, new = emergency[0]
                             await candidate.record(peer, old, new)
