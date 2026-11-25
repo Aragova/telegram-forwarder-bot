@@ -26,7 +26,7 @@ class ReactionDelivery:
 
     # ReactionRuntimeResolver emits REACTION_ACCOUNT_SELECTION; tenant executor emits TENANT_REACTION_DONE.
 
-    async def _validate_reaction_target_message(self, *, rule_id: int | None, source_channel: str, target_id: str, source_message_ids: list[int], sent_message_id: int | None, delivery_id: int | None = None, max_age_seconds: int = 300) -> int | None:
+    async def _validate_reaction_target_message(self, *, rule_id: int | None, source_channel: str, target_id: str, source_message_ids: list[int], sent_message_id: int | None, delivery_id: int | None = None, max_age_seconds: int = 300, read_client=None) -> int | None:
         owner = self.owner
         self._last_reaction_validation_reason = None
         logger.info("REACTION_TARGET_VALIDATE_START | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, source_message_ids)
@@ -35,7 +35,11 @@ class ReactionDelivery:
             logger.warning("REACTION_SKIPPED_INVALID_TARGET_MESSAGE | rule_id=%s | delivery_id=%s | source_channel=%s | target_id=%s | sent_message_id=%s | source_message_ids=%s", rule_id, delivery_id, source_channel, target_id, sent_message_id, source_message_ids)
             return None
         entity = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
-        msg = await owner.telethon.get_messages(entity, ids=int(sent_message_id))
+        client = read_client if read_client is not None else getattr(owner, "telethon", None)
+        if not callable(getattr(client, "get_messages", None)):
+            self._last_reaction_validation_reason = "reader_unavailable"
+            return None
+        msg = await client.get_messages(entity, ids=int(sent_message_id))
         if not msg:
             self._last_reaction_validation_reason = "target_not_found"
             logger.warning("REACTION_SKIPPED_TARGET_MESSAGE_NOT_FOUND | rule_id=%s | delivery_id=%s | target_id=%s | sent_message_id=%s", rule_id, delivery_id, target_id, sent_message_id)
