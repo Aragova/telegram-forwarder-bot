@@ -205,7 +205,7 @@ def message_to_content_dict(message):
 async def _save_history_batch(db, batch, *, preserve_existing_deliveries: bool):
     if preserve_existing_deliveries:
         return await asyncio.to_thread(db.save_post_batch, batch, preserve_existing_deliveries=True)
-    return db.save_post_batch(batch)
+    return await asyncio.to_thread(db.save_post_batch, batch)
 
 
 async def parse_channel_history(
