@@ -225,14 +225,14 @@ def test_accepted_album_cache_keeps_original_member_mapping_after_sorted_verific
     repo = FakeAlbumRepo()
     key = _album_key() if legacy else _album_key([1, 2])
     repo.attempt_by_key[key] = {
-        "status": "accepted", "sent_message_ids_json": [501, 502],
+        "status": "accepted", "sent_message_ids_json": [502, 501],
         "source_message_ids_json": [1, 2],
     }
     # Telegram verification reports IDs sorted, not in current job order.
     repo.verification_result = {"ok": True, "sent_message_ids": [501, 502]}
     assert asyncio.run(_execute(repo, delivery_ids=[2, 1])) is True
-    assert repo.promoted == [(key, [501, 502])]
-    assert [(delivery_id, row["sent_message_id"]) for delivery_id, row in repo.marked] == [(2, 502), (1, 501)]
+    assert repo.promoted == [(key, [502, 501])]
+    assert [(delivery_id, row["sent_message_id"]) for delivery_id, row in repo.marked] == [(2, 501), (1, 502)]
 
 
 @pytest.mark.parametrize("verified_ids", [[501, 999], [501, 501], []])

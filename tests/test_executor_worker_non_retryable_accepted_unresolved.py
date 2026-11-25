@@ -326,3 +326,15 @@ def test_existing_current_receipt_has_priority_over_legacy_lookup():
     repo = SimpleNamespace(get_publication_receipt=lookup)
     assert asyncio.run(existing_publication_key_for_job(repo, "repost_album", payload, 1)) == modern
     lookup.assert_called_once_with(modern)
+
+
+@pytest.mark.parametrize("job_type", ["repost_single", "repost_album"])
+def test_worker_lost_echo_guard_ownership_never_sends(job_type):
+    repo = _WorkerRepo()
+    repo.quarantine_queued_self_target_echo_deliveries = Mock(return_value=None)
+    sender = _WorkerSender({"ok": True})
+    job = {"id": 16, "job_type": job_type, "payload_json": {"rule_id": 1,
+           "delivery_id": 1, "delivery_ids": [1, 2]}, "attempts": 0, "max_attempts": 3}
+    assert asyncio.run(_process_job(repo, sender, "w", "light", job, policy=POLICY, state=_InFlightState()))
+    assert sender.calls == 0
+    assert not repo.complete_calls and not repo.fail_calls and not repo.retry_calls

@@ -1792,7 +1792,10 @@ class RepostCampaignRuntimeService:
                 ok=False, action="delete_campaign_run_message_now", rule_id=rule_id,
                 error_text="Публикация ещё отправляется; нельзя отметить её удалённой.",
             )
-        if message.get("publication_review_required"):
+        if (message.get("publication_review_required")
+                or (str(message.get("send_status") or "").lower() == "failed"
+                    and str(message.get("render_mode") or "").endswith("_unverified")
+                    and message.get("publication_manual_review") is None)):
             return RepostCampaignActionResult(
                 ok=False, action="delete_campaign_run_message_now", rule_id=rule_id,
                 error_text="ID публикации не подтверждены; требуется ручная сверка.",

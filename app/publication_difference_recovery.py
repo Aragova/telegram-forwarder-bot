@@ -91,6 +91,21 @@ class PublicationDifferenceRecovery:
             # original cursor, block new MTProto publication and record a
             # durable incident; pretending that another 30s retry is progress
             # would leave later mappings silently unresolved.
+            # An acknowledged identical gap must not manufacture a new
+            # incident or re-fence a restarted sender. Never clear an
+            # existing block here; it may represent another storage failure.
+            read_incident = getattr(self.repository, "get_publication_inbox_incident", None)
+            if callable(read_incident):
+                try:
+                    incident = await asyncio.to_thread(read_incident, self.sender_account_id)
+                except Exception:
+                    self.client.publication_write_blocked = True
+                    raise
+                if (isinstance(incident, dict)
+                        and incident.get("last_peer_id") == 0
+                        and incident.get("last_scheduled_ids") == [int(cursor["pts"])]
+                        and incident.get("acknowledged_at") is not None):
+                    return False
             self.client.publication_write_blocked = True
             persist_incident = getattr(self.repository, "record_publication_inbox_overflow", None)
             if callable(persist_incident):

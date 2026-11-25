@@ -598,6 +598,9 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                     echo_guard, int(payload.get("rule_id") or 0), ids,
                     job_id=job_id, worker_id=worker_id,
                 )
+                if echoes is None:
+                    logger.warning("JOB_FENCED_STALE_ECHO_GUARD | job_id=%s", job_id)
+                    return True
                 if echoes:
                     logger.warning(
                         "SELF_LOOP_ECHO_FENCED_BEFORE_SEND | rule=%s | job=%s | echoes=%s",

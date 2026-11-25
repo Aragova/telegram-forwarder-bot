@@ -3755,7 +3755,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
     def quarantine_queued_self_target_echo_deliveries(
         self, rule_id: int, delivery_ids: list[int], *, job_id: int, worker_id: str,
-    ) -> list[int]:
+    ) -> list[int] | None:
         """Recheck authoritative self-loop outputs immediately before an RPC.
 
         Reject the exact echoes and return unrelated album members to pending;
@@ -3775,7 +3775,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 owned = cur.fetchone()
                 if (not owned or owned["status"] != "processing"
                         or owned["locked_by"] != str(worker_id)):
-                    return []
+                    return None
                 # The previous execution may have committed quarantine but
                 # crashed before completing the job. That durable fault still
                 # blocks every video/repost stage, even if the rule changed.
@@ -6486,6 +6486,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     ON CONFLICT(sender_account_id) DO UPDATE SET blocked_at=NOW(),
                         last_peer_id=EXCLUDED.last_peer_id,last_scheduled_ids=EXCLUDED.last_scheduled_ids,
                         acknowledged_at=NULL,review_note=NULL
+                    WHERE EXCLUDED.last_peer_id <> 0
+                       OR telegram_publication_inbox_incidents.last_peer_id IS DISTINCT FROM EXCLUDED.last_peer_id
+                       OR telegram_publication_inbox_incidents.last_scheduled_ids IS DISTINCT FROM EXCLUDED.last_scheduled_ids
                     """,(account_id,peer_id,scheduled_ids))
 
     def get_publication_inbox_incident(self, account_id: int) -> dict[str, Any] | None:
@@ -7296,7 +7299,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     WHERE id = %s
                       AND status IN ('accepted', 'verified')
                     """,
-                    (delivery_ids[0], _json_dumps(delivery_ids), int(attempt_id)),
+                    (
+                        delivery_ids[0] if attempt["idempotency_key"] == key else original_delivery_id,
+                        _json_dumps(delivery_ids if attempt["idempotency_key"] == key else original_ids),
+                        int(attempt_id),
+                    ),
                 )
                 if cur.rowcount != 1:
                     raise RuntimeError("Attempt promotion lost a race")
@@ -12848,7 +12855,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                       AND NOT publication_review_required
                       AND ((%s AND send_status='sent')
                            OR (NOT %s AND send_status IN ('pending','failed','skipped')
-                               AND publication_receipt IS NULL))
+                               AND publication_receipt IS NULL
+                               AND NOT (send_status='failed'
+                                   AND COALESCE(render_mode,'') LIKE '%%_unverified'
+                                   AND publication_manual_review IS NULL)))
                     """,
                     (int(message_id), bool(expected_sent), bool(expected_sent)),
                 )

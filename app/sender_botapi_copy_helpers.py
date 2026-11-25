@@ -105,23 +105,29 @@ class SenderBotApiCopyHelpers:
                 "error_text": "Bot API copy_album принудительно отключён",
             }
 
+        original_ids = list(message_ids)
+        sorted_ids = sorted(original_ids)
         rpc_returned = False
         try:
             sent_messages = await self.owner.bot(
                 CopyMessages(
                     chat_id=target_id,
                     from_chat_id=source_channel,
-                    message_ids=message_ids,
+                    message_ids=sorted_ids,
                     message_thread_id=target_thread_id,
                 )
             )
 
             rpc_returned = True
             if sent_messages and len(sent_messages) > 0:
+                sent_ids = [int(m.message_id) for m in sent_messages]
+                if len(sent_ids) == len(sorted_ids) and len(set(sorted_ids)) == len(sorted_ids):
+                    by_source = dict(zip(sorted_ids, sent_ids))
+                    sent_ids = [by_source[source_id] for source_id in original_ids]
                 return {
                     "ok": True,
-                    "sent_message_id": sent_messages[0].message_id,
-                    "sent_message_ids": [int(m.message_id) for m in sent_messages],
+                    "sent_message_id": sent_ids[0],
+                    "sent_message_ids": sent_ids,
                     "sent_count": len(sent_messages),
                     "error_text": None,
                 }

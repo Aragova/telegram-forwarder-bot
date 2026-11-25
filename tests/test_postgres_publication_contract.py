@@ -936,6 +936,11 @@ def test_campaign_cancel_before_send_and_delete_after_send_are_disjoint(repo):
     assert repo.mark_campaign_run_message_sent(sent, sent_message_id=4321)
     assert not repo.mark_campaign_run_message_deleted(sent, expected_sent=False)
     assert repo.mark_campaign_run_message_deleted(sent)
+    unresolved = placement(903)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE campaign_run_messages SET send_status='failed', render_mode='copy_album_unverified' WHERE id=%s", (unresolved,))
+    assert not repo.mark_campaign_run_message_deleted(unresolved, expected_sent=False)
 
 
 
@@ -997,8 +1002,22 @@ def test_previously_quarantined_echo_still_fences_retried_job(repo, job_type):
         return repo.quarantine_queued_self_target_echo_deliveries(
             rule_id, members, job_id=job_id, worker_id="retried")
     # A crash after the original quarantine must not make the echo eligible.
+    assert repo.quarantine_queued_self_target_echo_deliveries(
+        rule_id, members, job_id=job_id, worker_id="stale") is None
     assert guard() == [echo_id]
     assert guard() == [echo_id]
     assert repo.get_delivery(echo_id)["status"] == "faulty"
     # Previously released unrelated album members may now be owned by a new job.
     assert repo.get_delivery(sibling)["status"] == "processing"
+
+
+def test_same_difference_gap_preserves_acknowledgement(repo):
+    account = uuid4().int % 10**12 + 1
+    repo.record_publication_inbox_overflow(account, 0, [42])
+    incident = repo.get_publication_inbox_incident(account)
+    assert repo.acknowledge_publication_inbox_incident(account, expected_blocked_at=incident["blocked_at"], note="reviewed")
+    repo.record_publication_inbox_overflow(account, 0, [42])
+    same = repo.get_publication_inbox_incident(account)
+    assert same["blocked_at"] == incident["blocked_at"] and same["acknowledged_at"] is not None
+    repo.record_publication_inbox_overflow(account, 0, [43])
+    assert repo.get_publication_inbox_incident(account)["acknowledged_at"] is None

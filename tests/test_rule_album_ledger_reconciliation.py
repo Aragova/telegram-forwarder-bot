@@ -692,3 +692,22 @@ def test_album_recovery_sql_recognizes_modern_keys_without_archived_attempts():
     assert ":album:members:" in orphan_sql
     assert "a.idempotency_key NOT LIKE '%%:rescan:%%'" in candidate_sql
     assert "a.idempotency_key NOT LIKE '%%:rescan:%%'" in orphan_sql
+
+
+def test_fingerprinted_album_reconciliation_keeps_original_member_vector():
+    import json
+    from app.delivery_idempotency import build_delivery_idempotency_key
+    repo, cursor, conn = _repository()
+    original = cursor.execute
+    def execute(sql, args=None):
+        original(sql, args)
+        if "FROM delivery_attempts WHERE id =" in str(sql):
+            cursor.result["delivery_id"] = 11
+            cursor.result["source_message_ids_json"] = [11, 12, 13]
+            cursor.result["idempotency_key"] = build_delivery_idempotency_key(
+                operation_kind="album", rule_id=214, target_id="-100456",
+                media_group_id="album-a", source_message_ids=[11, 12, 13])
+    cursor.execute = execute
+    assert _apply(repo) == 3 and conn.commits == 1
+    args = next(args for query, args in cursor.executed if "UPDATE delivery_attempts SET status = 'verified'" in query)
+    assert args[0] == 11 and json.loads(args[1]) == [11, 12, 13]
