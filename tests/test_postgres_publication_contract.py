@@ -936,3 +936,45 @@ def test_campaign_cancel_before_send_and_delete_after_send_are_disjoint(repo):
     assert repo.mark_campaign_run_message_sent(sent, sent_message_id=4321)
     assert not repo.mark_campaign_run_message_deleted(sent, expected_sent=False)
     assert repo.mark_campaign_run_message_deleted(sent)
+
+
+
+def test_stale_album_release_retires_old_job_before_new_group_claim(repo):
+    from app.delivery_idempotency import build_delivery_idempotency_key
+
+    suffix = uuid4().int % 10**12
+    seed_key, rule_id, ids, _, source, target = seed(repo, suffix, count=3)
+    assert repo.mark_delivery_attempt_failed(seed_key, status="failed_before_send", error_text="test setup")
+    old_ids = ids[:2]
+    payload = {"rule_id": rule_id, "delivery_id": old_ids[0], "delivery_ids": old_ids}
+    job_id = repo.create_job("repost_album", payload, "light")
+    key = build_delivery_idempotency_key(operation_kind="album", rule_id=rule_id,
+        target_id=target, media_group_id=f"group-{suffix}", source_message_ids=old_ids)
+    assert repo.create_delivery_attempt(delivery_id=old_ids[0], rule_id=rule_id,
+        tenant_id=1, job_id=job_id, idempotency_key=key, operation_kind="album",
+        status="created", target_id=target, source_message_ids=old_ids)
+    assert repo.mark_delivery_attempt_sending(key)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE jobs SET status='processing',locked_by='current' WHERE id=%s", (job_id,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE id=%s", (ids[2],))
+            cur.execute("UPDATE routing SET is_active=TRUE, mode='repost', next_run_at=NULL WHERE id=%s", (rule_id,))
+    def release(worker, members):
+        return repo.release_stale_album_job_members(job_id=job_id, worker_id=worker,
+            rule_id=rule_id, delivery_ids=members, idempotency_key=key)
+    assert release("current", old_ids) is None  # sending is not safe to release
+    assert repo.mark_delivery_attempt_failed(key, status="failed_before_send", error_text="membership changed")
+    assert release("stale", old_ids) is None
+    assert release("current", ids) is None
+    assert [repo.get_delivery(i)["status"] for i in ids] == ["processing", "processing", "pending"]
+    assert release("current", old_ids) == 2
+    assert [repo.get_delivery(i)["status"] for i in ids] == ["pending"] * 3
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, locked_by FROM jobs WHERE id=%s", (job_id,))
+            assert cur.fetchone() == {"status": "failed", "locked_by": None}
+    new_job = repo.take_due_delivery_and_create_job(rule_id, "2027-01-01T00:00:00+00:00")
+    assert new_job["status"] == "created" and new_job["job_id"] != job_id
+    assert [repo.get_delivery(i)["status"] for i in ids] == ["processing"] * 3
+    assert release("current", old_ids) is None
+    assert [repo.get_delivery(i)["status"] for i in ids] == ["processing"] * 3

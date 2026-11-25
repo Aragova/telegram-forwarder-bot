@@ -743,26 +743,32 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             # exact failed-before-send attempt, let the scheduler regroup
             # the album from the authoritative logical queue.
             release = getattr(repo, "release_stale_album_job_members", None)
+            released = None
             if callable(release):
-                released = await asyncio.to_thread(
-                    release, job_id=job_id, worker_id=worker_id,
-                    rule_id=int(payload.get("rule_id") or 0),
-                    delivery_ids=_extract_delivery_ids_from_payload(payload),
-                    idempotency_key=str(result.get("idempotency_key") or ""),
-                )
-                logger.warning(
-                    "ALBUM_STALE_PAYLOAD_RELEASED | job_id=%s | members=%s | count=%s",
-                    job_id, payload.get("delivery_ids"), released,
-                )
-            else:
-                # Do not falsely terminate a job while its delivery rows
-                # remain processing on a repository with no safe release API.
+                finalization_started.set()
+                try:
+                    released = await asyncio.to_thread(
+                        release, job_id=job_id, worker_id=worker_id,
+                        rule_id=int(payload.get("rule_id") or 0),
+                        delivery_ids=_extract_delivery_ids_from_payload(payload),
+                        idempotency_key=str(result.get("idempotency_key") or ""),
+                    )
+                except Exception:
+                    logger.exception("ALBUM_STALE_PAYLOAD_RELEASE_FAILED | job_id=%s", job_id)
+            if released is None:
+                # A failed/vetoed release must not abandon processing rows.
+                # CAS also rejects an owner whose transaction already committed.
                 await _finish_owned_job(
                     repo, "defer", job_id, worker_id,
                     "Альбом изменился; безопасный сброс недоступен", 60,
                     finalization_started=finalization_started,
                 )
-                return True
+            else:
+                logger.warning(
+                    "ALBUM_STALE_PAYLOAD_RELEASED | job_id=%s | members=%s | count=%s",
+                    job_id, payload.get("delivery_ids"), released,
+                )
+            return True
 
         if result is not None:
             result_retryable = bool(result.get("retryable", True))

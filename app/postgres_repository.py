@@ -3820,31 +3820,42 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def release_stale_album_job_members(
         self, *, job_id: int, worker_id: str, rule_id: int,
         delivery_ids: list[int], idempotency_key: str,
-    ) -> int:
-        """Release only this worker's pre-RPC stale album members for regrouping.
+    ) -> int | None:
+        """Atomically retire an obsolete pre-RPC job and release its own members.
 
-        An uncertain or accepted send must never be made eligible for replay.
+        None means ownership or the durable no-send evidence was not proven.
+        A successful zero count is valid when all members were already released.
         """
         ids = sorted({int(i) for i in delivery_ids if int(i) > 0})
         if not ids:
-            return 0
+            return None
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT status, locked_by FROM jobs WHERE id=%s FOR UPDATE",
+                    "SELECT status, locked_by, job_type, payload_json FROM jobs WHERE id=%s FOR UPDATE",
                     (int(job_id),),
                 )
                 job = cur.fetchone()
                 if (not job or job["status"] != "processing"
-                        or job["locked_by"] != str(worker_id)):
-                    return 0
+                        or job["locked_by"] != str(worker_id)
+                        or job["job_type"] != "repost_album"):
+                    return None
+                payload = _safe_json_loads(job["payload_json"], {})
+                if (not isinstance(payload, dict)
+                        or payload.get("rule_id") != int(rule_id)
+                        or sorted(payload.get("delivery_ids") or []) != ids):
+                    return None
                 cur.execute(
-                    "SELECT status FROM delivery_attempts WHERE idempotency_key=%s FOR UPDATE",
+                    """SELECT status, rule_id, operation_kind, source_message_ids_json
+                       FROM delivery_attempts WHERE idempotency_key=%s FOR UPDATE""",
                     (str(idempotency_key),),
                 )
                 attempt = cur.fetchone()
-                if not attempt or attempt["status"] != "failed_before_send":
-                    return 0
+                if (not attempt or attempt["status"] != "failed_before_send"
+                        or attempt["rule_id"] != int(rule_id)
+                        or attempt["operation_kind"] != "album"
+                        or sorted(_safe_json_loads(attempt["source_message_ids_json"], []) or []) != ids):
+                    return None
                 cur.execute(
                     """UPDATE deliveries
                        SET status='pending', error_text=NULL
@@ -3853,6 +3864,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (int(rule_id), ids),
                 )
                 count = len(cur.fetchall() or [])
+                # A crash must not leave an active obsolete job alongside a
+                # new job that has already claimed the released deliveries.
+                cur.execute(
+                    """UPDATE jobs SET status='failed', attempts=attempts+1,
+                       lease_until=NULL, locked_by=NULL,
+                       error_text='album_membership_changed_pre_send_manual_review',
+                       updated_at=NOW() WHERE id=%s""",
+                    (int(job_id),),
+                )
             conn.commit()
         return count
 
