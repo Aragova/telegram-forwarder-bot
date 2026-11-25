@@ -18,6 +18,8 @@ pytestmark = pytest.mark.skipif(
 def processor(tmp_path):
     result = VideoProcessor(bot=object())
     result.temp_dir = str(tmp_path)
+    result.intros_dir = str(tmp_path)
+    result.min_free_space_gb = 0
     result.target_fps = 30
     return result
 
@@ -96,3 +98,26 @@ def test_accurate_cut_and_intro_concat_real_ffmpeg(tmp_path, processor):
     ("15/1", 15), ("0/0", None), ("N/A", None), (None, None), ("-1/1", None)])
 def test_ffprobe_rate_parser(raw, expected):
     assert VideoProcessor._parse_frame_rate(raw) == expected
+
+
+def test_full_processing_preserves_short_vfr_source(tmp_path, processor):
+    """Exercise the rule #213 build-only path, not just isolated commands."""
+    source = tmp_path / "source.mp4"
+    _source(source, "30000/1001", vfr=True)
+
+    async def run():
+        before = await processor.get_video_info(str(source), use_cache=False)
+        artifact = await processor.build_processed_video(
+            input_file_path=str(source), clip_duration_seconds=118,
+        )
+        assert artifact
+        assert artifact["trim_applied"] is False
+        assert artifact["processing_summary"]["target_fps"] == 30
+        final = await processor.get_video_info(
+            artifact["processed_video_path"], use_cache=False,
+        )
+        assert final["fps"] == 30 and final["fps_avg"] == 30
+        assert abs(final["duration"] - before["duration"]) < 0.2
+        assert source.is_file()
+
+    asyncio.run(run())

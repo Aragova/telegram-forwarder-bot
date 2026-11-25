@@ -1987,6 +1987,7 @@ class VideoProcessor:
                             stage_logger=stage_logger,
                         ):
                             os.replace(normalized_main_path, clipped_main_path)
+                            self.video_info_cache.pop(clipped_main_path, None)
 
                             self._stage_completed(
                                 stage_logger,
@@ -2058,6 +2059,7 @@ class VideoProcessor:
                         stage_logger=stage_logger,
                     ):
                         os.replace(normalized_main_path, clipped_main_path)
+                        self.video_info_cache.pop(clipped_main_path, None)
 
                         self._stage_completed(
                             stage_logger,

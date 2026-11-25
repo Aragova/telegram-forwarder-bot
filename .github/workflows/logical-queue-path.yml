@@ -37,8 +37,10 @@ jobs:
       - name: Compile project
         run: python -m compileall app bot.py support_bot.py tests
 
-      - name: Verify FFmpeg integration test dependencies
+      - name: Install FFmpeg integration test dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
           ffmpeg -version
           ffprobe -version
 
