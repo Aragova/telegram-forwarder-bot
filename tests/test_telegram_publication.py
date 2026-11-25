@@ -730,3 +730,85 @@ def test_sqlite_outage_coalesces_101_emergency_retries_into_one_task(monkeypatch
         await asyncio.gather(*active_retries(), return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+
+def test_emergency_drain_cannot_strand_concurrent_recovered_spool_append(monkeypatch, tmp_path):
+    """SQLite recovers while emergency PostgreSQL write is awaiting: both mappings drain."""
+    from telethon import types
+    from app import telegram_publication
+    import app.publication_mapping_spool as spool_module
+
+    class RecoveringSpool:
+        instance = None
+
+        def __init__(self, _path):
+            RecoveringSpool.instance = self
+            self.first_append_fails = True
+            self.rows = []
+            self.sequence = 0
+
+        def pending(self, _limit=128):
+            return self.rows[:]
+
+        def append(self, peer, old, new):
+            if self.first_append_fails:
+                self.first_append_fails = False
+                raise OSError("SQLite append temporarily unavailable")
+            self.sequence += 1
+            self.rows.append((self.sequence, peer, old, new))
+
+        def acknowledge(self, row_id):
+            self.rows = [row for row in self.rows if row[0] != row_id]
+
+    monkeypatch.setattr(spool_module, "PublicationMappingSpool", RecoveringSpool)
+
+    async def scenario():
+        persisted = []
+        emergency_started = asyncio.Event()
+        allow_emergency = asyncio.Event()
+        original_record = telegram_publication.PublicationInbox.record
+
+        async def pause_emergency_record(self, peer, old, new):
+            if old == [11]:
+                emergency_started.set()
+                await allow_emergency.wait()
+            return await original_record(self, peer, old, new)
+
+        monkeypatch.setattr(
+            telegram_publication.PublicationInbox, "record", pause_emergency_record,
+        )
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=lambda _account, _peer, pairs: persisted.extend(pairs),
+        )
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        peer = types.PeerChannel(99)
+        first = asyncio.create_task(client.handler(types.UpdateDeleteScheduledMessages(
+            peer=peer, messages=[11], sent_messages=[111],
+        )))
+        try:
+            await asyncio.wait_for(emergency_started.wait(), 5)
+            # This append occurs after the last empty spool.pending() read,
+            # but before the first emergency mapping reaches PostgreSQL.
+            await client.handler(types.UpdateDeleteScheduledMessages(
+                peer=peer, messages=[12], sent_messages=[112],
+            ))
+            assert RecoveringSpool.instance.rows
+        finally:
+            allow_emergency.set()
+        await asyncio.wait_for(first, 5)
+        assert persisted == [(11, 111), (12, 112)]
+        assert RecoveringSpool.instance.rows == []
+        assert not [
+            task for task in asyncio.all_tasks()
+            if task.get_name() == "telegram-publication-persist-retry" and not task.done()
+        ]
+
+    asyncio.run(scenario())
