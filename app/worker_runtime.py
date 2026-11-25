@@ -598,6 +598,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             if callable(echo_guard) and ids:
                 echoes = await asyncio.to_thread(
                     echo_guard, int(payload.get("rule_id") or 0), ids,
+                    job_id=job_id, worker_id=worker_id,
                 )
                 if echoes:
                     logger.warning(
@@ -736,6 +737,32 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             await _finish_owned_job(repo, "fail", job_id, worker_id, f"Неподдерживаемый job_type: {job_type}", finalization_started=finalization_started)
             logger.warning("JOB FAILED | %s завершил задачу #%s с ошибкой: неподдерживаемый тип", worker_id, job_id)
             return True
+
+        if isinstance(result, dict) and result.get("album_membership_changed_pre_send"):
+            # No send RPC was invoked. After checking job ownership and the
+            # exact failed-before-send attempt, let the scheduler regroup
+            # the album from the authoritative logical queue.
+            release = getattr(repo, "release_stale_album_job_members", None)
+            if callable(release):
+                released = await asyncio.to_thread(
+                    release, job_id=job_id, worker_id=worker_id,
+                    rule_id=int(payload.get("rule_id") or 0),
+                    delivery_ids=_extract_delivery_ids_from_payload(payload),
+                    idempotency_key=str(result.get("idempotency_key") or ""),
+                )
+                logger.warning(
+                    "ALBUM_STALE_PAYLOAD_RELEASED | job_id=%s | members=%s | count=%s",
+                    job_id, payload.get("delivery_ids"), released,
+                )
+            else:
+                # Do not falsely terminate a job while its delivery rows
+                # remain processing on a repository with no safe release API.
+                await _finish_owned_job(
+                    repo, "defer", job_id, worker_id,
+                    "Альбом изменился; безопасный сброс недоступен", 60,
+                    finalization_started=finalization_started,
+                )
+                return True
 
         if result is not None:
             result_retryable = bool(result.get("retryable", True))
