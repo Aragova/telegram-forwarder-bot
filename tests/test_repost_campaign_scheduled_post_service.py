@@ -807,3 +807,52 @@ def test_vip_post_loop_propagates_stop_event_to_claim_boundary():
     asyncio.run(run_repost_campaign_scheduled_post_loop(
         runtime=Probe(), stop_event=stop, interval_seconds=0.01, worker_id="w"
     ))
+
+
+def test_rejected_draft_update_never_reports_success_or_logs_edit(monkeypatch):
+    from unittest.mock import Mock
+
+    service, repo = make_service()
+    sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.saved_posts[7] = {"id": 7, "title": "ad", "content_json": {"kind": "text"}}
+    baseline = len(repo.events[sid])
+    original = repo.update_campaign_scheduled_post
+    repo.update_campaign_scheduled_post = Mock(return_value=False)
+
+    rejected = [
+        service.update_draft_saved_post(scheduled_post_id=sid, saved_post_id=7),
+        service.update_draft_show_seconds(scheduled_post_id=sid, show_seconds=60),
+        service.update_draft_scheduled_at(
+            scheduled_post_id=sid,
+            scheduled_at_utc=datetime.now(timezone.utc) + timedelta(minutes=5),
+        ),
+    ]
+    assert all(not result.ok for result in rejected)
+    assert len(repo.events[sid]) == baseline
+    repo.update_campaign_scheduled_post = original
+
+
+def test_concurrent_campaign_claim_rejects_target_edit_without_crashing(monkeypatch):
+    from unittest.mock import Mock
+
+    service, repo = make_service()
+    sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.current_targets = [{"id": 12, "target_id": "-300"}]
+    repo.replace_campaign_scheduled_post_targets = Mock(
+        side_effect=ValueError("Запланированный пост больше нельзя редактировать"),
+    )
+    snapshot = service.update_draft_targets_from_current_campaign(scheduled_post_id=sid)
+    manual = service.add_manual_target(scheduled_post_id=sid, target_id="-300")
+    assert not snapshot.ok
+    assert not manual.ok
+    assert not any(
+        entry["event_type"] in {"targets_snapshot_saved", "manual_target_added"}
+        for entry in repo.events[sid]
+    )
+
+
+def test_campaign_run_id_alone_fences_draft_edit():
+    service, repo = make_service()
+    sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.posts[sid]["campaign_run_id"] = 88
+    assert not service.update_draft_show_seconds(scheduled_post_id=sid, show_seconds=60).ok
