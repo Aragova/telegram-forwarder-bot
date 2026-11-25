@@ -509,7 +509,7 @@ def test_scheduled_post_loop_runs_process_due_posts_and_stops():
             import logging
             self.calls=0
             self.logger=logging.getLogger('t')
-        async def process_due_posts(self, worker_id):
+        async def process_due_posts(self, worker_id, stop_event=None):
             self.calls += 1
     runtime=R(); stop=asyncio.Event()
     async def _run():
@@ -758,3 +758,42 @@ def test_vip_scheduled_post_service_source_guard_no_failed_after_run_id_result()
     assert forbidden not in source
     forbidden_send_now = "elif run_id:\n            self.repo.mark_campaign_scheduled_post_failed"
     assert forbidden_send_now not in source
+
+
+def test_vip_post_stop_signal_during_reset_prevents_new_claim():
+    import asyncio
+    repo = FakeRepo()
+    stop = asyncio.Event()
+
+    def reset_then_stop(**kwargs):
+        stop.set()
+        return {"needs_review": 0}
+
+    def forbidden_claim(**kwargs):
+        raise AssertionError("new VIP post claimed after shutdown signal")
+
+    repo.reset_stuck_campaign_scheduled_posts = reset_then_stop
+    repo.claim_due_campaign_scheduled_posts = forbidden_claim
+    service = RepostCampaignScheduledPostService(repo=repo, campaign_runtime=FakeCampaignRuntime())
+    result = asyncio.run(service.process_due_posts(worker_id="w", stop_event=stop))
+    assert result == {"claimed": 0}
+
+
+def test_vip_post_loop_propagates_stop_event_to_claim_boundary():
+    import asyncio
+    import logging
+    from app.repost_campaign_scheduled_post_service import run_repost_campaign_scheduled_post_loop
+
+    stop = asyncio.Event()
+
+    class Probe:
+        logger = logging.getLogger("test.vip_post.stop")
+
+        async def process_due_posts(self, *, worker_id, stop_event=None):
+            assert stop_event is stop
+            stop.set()
+            return {"claimed": 0}
+
+    asyncio.run(run_repost_campaign_scheduled_post_loop(
+        runtime=Probe(), stop_event=stop, interval_seconds=0.01, worker_id="w"
+    ))
