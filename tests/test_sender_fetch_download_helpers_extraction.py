@@ -359,3 +359,18 @@ def test_source_read_helper_handles_owner_without_writer_attribute():
     result = asyncio.run(SenderFetchDownloadHelpers(owner).fetch_message("source", 55))
     assert result == {"ok": True}
     assert reader.calls == [("source", 55)]
+
+
+def test_source_download_without_reader_logs_explicit_warning_and_skips_rpc(monkeypatch, tmp_path, caplog):
+    from app.sender_fetch_download_helpers import SenderFetchDownloadHelpers, settings
+
+    monkeypatch.setattr(settings, "base_dir_raw", str(tmp_path))
+    monkeypatch.setattr(settings, "media_cache_dir", "cache")
+    owner = _owner(None)
+    with caplog.at_level(logging.WARNING, logger="forwarder"):
+        result = asyncio.run(
+            SenderFetchDownloadHelpers(owner).download_video_source(SimpleNamespace(id=55))
+        )
+    assert result is None
+    assert "Telethon клиент недоступен для скачивания медиа" in caplog.text
+    assert not list(settings.media_cache_path.iterdir())
