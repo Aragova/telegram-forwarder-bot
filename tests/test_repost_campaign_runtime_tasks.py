@@ -22,15 +22,12 @@ def test_bot_does_not_start_repost_campaign_loops_directly():
 def test_repost_campaign_runtime_tasks_start_is_idempotent_and_stop_cancels(monkeypatch):
     async def _run():
         started = []
-        cancelled = []
+        stopped = []
 
-        async def fake_loop(*, runtime=None, service=None, interval_seconds=0, batch_limit=None, worker_id=None):
+        async def fake_loop(*, runtime=None, service=None, interval_seconds=0, batch_limit=None, worker_id=None, stop_event=None):
             started.append((runtime or service, interval_seconds, batch_limit, worker_id))
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                cancelled.append(worker_id or "delete")
-                raise
+            await stop_event.wait()
+            stopped.append(worker_id or "delete")
 
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_delete_loop", fake_loop)
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_scheduled_launch_loop", fake_loop)
@@ -60,7 +57,7 @@ def test_repost_campaign_runtime_tasks_start_is_idempotent_and_stop_cancels(monk
         await manager.stop()
         assert not manager.is_running()
         assert manager._tasks == []
-        assert len(cancelled) == 4
+        assert len(stopped) == 4
 
     asyncio.run(_run())
 
@@ -71,7 +68,7 @@ def test_repost_campaign_runtime_tasks_logs_task_exception(monkeypatch, caplog):
             raise RuntimeError("boom")
 
         async def waiting_loop(**kwargs):
-            await asyncio.Event().wait()
+            await kwargs["stop_event"].wait()
 
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_delete_loop", failing_loop)
         monkeypatch.setattr("app.repost_campaign_runtime_tasks.run_repost_campaign_scheduled_launch_loop", waiting_loop)
@@ -150,3 +147,56 @@ def test_repost_campaign_runtime_tasks_start_cleans_up_partial_tasks_on_failure(
         assert "start failed" in caplog.text
 
     asyncio.run(_run())
+
+
+def test_campaign_shutdown_waits_for_inflight_rpc_without_cancelling(monkeypatch):
+    async def _run():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        completed = []
+
+        async def fake_loop(*, stop_event=None, **kwargs):
+            entered.set()
+            await release.wait()
+            completed.append(True)
+            await stop_event.wait()
+
+        for loop in (
+            "run_repost_campaign_delete_loop",
+            "run_repost_campaign_scheduled_launch_loop",
+            "run_repost_campaign_scheduled_post_loop",
+            "run_repost_campaign_launch_job_loop",
+        ):
+            monkeypatch.setattr("app.repost_campaign_runtime_tasks." + loop, fake_loop)
+
+        manager = RepostCampaignRuntimeTasks(
+            repo=SimpleNamespace(), bot=SimpleNamespace(),
+            settings=SimpleNamespace(temp_dir="media/temp"),
+        )
+        manager.start()
+        await entered.wait()
+        await asyncio.sleep(0)
+        stopping = asyncio.create_task(manager.stop(timeout_sec=1.0))
+        await asyncio.sleep(0)
+        assert not stopping.done()
+        release.set()
+        await stopping
+        assert len(completed) == 4
+        assert not manager.is_running()
+
+    asyncio.run(_run())
+
+
+def test_campaign_delete_failure_resolution_warns_about_unverified_placements():
+    from app.repost_campaign_ui import build_repost_campaign_run_delete_failures_resolve_confirm_view
+
+    text, _ = build_repost_campaign_run_delete_failures_resolve_confirm_view(
+        rule_id=1, run_id=2,
+        details={
+            "summary": {"delete_pending": 0, "delete_processing": 0},
+            "messages": [{"accepted_unverified": True, "delete_status": "failed"}],
+        },
+    )
+    assert "без подтверждённых ID" in text
+    assert "вручную проверьте" in text
+    assert "Публикации в Telegram удаляться не будут" in text
