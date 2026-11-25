@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,7 +21,16 @@ def build_delivery_idempotency_key(*, operation_kind: str, delivery_id: int | No
         return f"delivery:{int(delivery_id or 0)}:target:{target}:single"
     if kind == "album":
         if media_group_id:
-            return f"rule:{int(rule_id or 0)}:target:{target}:media_group:{media_group_id}:album"
+            legacy = f"rule:{int(rule_id or 0)}:target:{target}:media_group:{media_group_id}:album"
+            # The group ID alone does not identify an immutable set of
+            # deliveries. A late member must not reuse the old receipt.
+            members = sorted(int(i) for i in (source_message_ids or []))
+            if not members:
+                return legacy  # Historical lookup only; caller cannot send.
+            fingerprint = hashlib.sha256(
+                ",".join(str(i) for i in members).encode("ascii")
+            ).hexdigest()[:24]
+            return f"{legacy}:members:{fingerprint}"
         sorted_ids = ",".join(str(int(x)) for x in sorted(int(x) for x in (source_message_ids or [])))
         return f"rule:{int(rule_id or 0)}:target:{target}:album_sources:{sorted_ids}"
     if kind == "video_send":
