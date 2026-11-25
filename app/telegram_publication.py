@@ -72,7 +72,9 @@ def verified_published_message(
         top = getattr(reply, "reply_to_top_id", None) or getattr(reply, "top_msg_id", None)
         if top is None:
             top = getattr(reply, "reply_to_msg_id", None)
-        if top != thread_id:
+        # Telegram General topic (id=1) has no topic reply header.
+        expected_top = None if thread_id == 1 else thread_id
+        if top != expected_top:
             return False
     return True
 
