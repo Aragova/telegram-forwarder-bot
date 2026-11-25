@@ -82,25 +82,28 @@ def verified_published_message(
     return True
 
 
-async def _journal_io(operation, *args):
-    """Keep the caller's lock until a non-cancellable file operation finishes."""
-    task = asyncio.create_task(asyncio.to_thread(operation, *args))
+async def _await_journal_task(task):
+    """Propagate cancellation only after the shielded filesystem task settles."""
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
-        if not task.cancelled():
-            try:
+        try:
+            if not task.done():
+                # A second cancellation must also wait for the thread; do
+                # not release the caller's journal lock during the write.
+                await _await_journal_task(task)
+            elif not task.cancelled():
                 task.result()
-            except Exception:
-                logger.exception("PUBLICATION_JOURNAL_IO_FAILED_DURING_CANCEL")
-        raise
+        except Exception:
+            logger.exception("PUBLICATION_JOURNAL_IO_FAILED_DURING_CANCEL")
+        finally:
+            raise
+
+
+async def _journal_io(operation, *args):
+    """Keep the caller's lock until a non-cancellable file operation finishes."""
+    task = asyncio.create_task(asyncio.to_thread(operation, *args))
+    return await _await_journal_task(task)
 
 
 class PublicationInbox:

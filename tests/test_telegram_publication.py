@@ -1092,6 +1092,9 @@ def test_journal_io_waits_for_thread_completion_on_cancellation():
             task.cancel()
             await asyncio.sleep(0)
             assert not task.done()
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
         finally:
             release.set()
         with pytest.raises(asyncio.CancelledError):
