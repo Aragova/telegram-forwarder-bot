@@ -83,10 +83,21 @@ class PublicationDifferenceRecovery:
             # This is a *read* cursor only until its page has been persisted.
             # Never persist an advanced checkpoint from GetState/TooLong:
             # doing so can erase the only chance of recovering an exact pair.
-            logger.warning(
-                "PUBLICATION_DIFFERENCE_RANGE_UNAVAILABLE | account=%s | checkpoint_not_advanced",
-                self.sender_account_id,
+            logger.error(
+                "PUBLICATION_DIFFERENCE_RANGE_UNAVAILABLE | account=%s | pts=%s | action=durable_manual_review",
+                self.sender_account_id, cursor["pts"],
             )
+            # This checkpoint cannot be recovered automatically. Keep the
+            # original cursor, block new MTProto publication and record a
+            # durable incident; pretending that another 30s retry is progress
+            # would leave later mappings silently unresolved.
+            self.client.publication_write_blocked = True
+            persist_incident = getattr(self.repository, "record_publication_inbox_overflow", None)
+            if callable(persist_incident):
+                await asyncio.to_thread(
+                    persist_incident, self.sender_account_id, 0,
+                    [int(cursor["pts"])],
+                )
             return False
         if isinstance(difference, types.updates.DifferenceEmpty):
             await self._advance(cursor, cursor["pts"], cursor["qts"], difference.date)
