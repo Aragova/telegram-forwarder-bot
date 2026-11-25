@@ -4484,19 +4484,28 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
               AND a.idempotency_key NOT LIKE '%%:rescan:%%' AND a.idempotency_key NOT LIKE 'archived:%%'
               AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.id=a.delivery_id AND d.rule_id=a.rule_id)
               AND NOT COALESCE((
-                jsonb_typeof(a.source_message_ids_json)='array'
-                AND a.source_message_ids_json <> '[]'::jsonb
-                AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(
-                    CASE WHEN jsonb_typeof(a.source_message_ids_json)='array'
-                         THEN a.source_message_ids_json ELSE '[]'::jsonb END) AS mid(value)
-                    WHERE jsonb_typeof(mid.value)<>'number' OR mid.value::text !~ '^[1-9][0-9]*$')
+                CASE WHEN a.operation_kind='album' THEN
+                    EXISTS (SELECT 1 FROM telegram_publication_receipts pr
+                        WHERE pr.idempotency_key=a.idempotency_key AND pr.rule_id=a.rule_id)
+                    OR (a.target_id IS NOT NULL
+                        AND starts_with(a.idempotency_key,'rule:'||a.rule_id::text||':target:'||a.target_id||':media_group:')
+                        AND right(a.idempotency_key,6)=':album'
+                        AND length(a.idempotency_key)>length('rule:'||a.rule_id::text||':target:'||a.target_id||':media_group::album'))
+                WHEN a.operation_kind IN ('single','video_send') THEN
+                    jsonb_typeof(a.source_message_ids_json)='array'
+                    AND a.source_message_ids_json <> '[]'::jsonb
+                    AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(
+                        CASE WHEN jsonb_typeof(a.source_message_ids_json)='array'
+                             THEN a.source_message_ids_json ELSE '[]'::jsonb END) AS mid(value)
+                        WHERE jsonb_typeof(mid.value)<>'number' OR mid.value::text !~ '^[1-9][0-9]*$')
+                ELSE FALSE END
               ),FALSE)
             """, (int(rule_id),),
         )
         blocked = cur.fetchone()
         if blocked["unresolved"]:
             raise RescanBlocked(
-                f"У старых отправок нет ID источника: {blocked['unresolved']}; "
+                f"У старых отправок нет точной привязки к источнику: {blocked['unresolved']}; "
                 f"первая попытка: {blocked.get('first_attempt_id')}. Требуется ручная проверка."
             )
 
@@ -4941,7 +4950,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         SELECT 1 FROM delivery_attempts a
                         WHERE a.rule_id=d.rule_id AND a.status IN ('sending','accepted','verified','failed_after_send')
                           AND a.idempotency_key NOT LIKE '%%:rescan:%%' AND a.idempotency_key NOT LIKE 'archived:%%'
-                          AND a.source_message_ids_json @> jsonb_build_array(member.message_id)
+                          AND (
+                            (a.operation_kind IN ('single','video_send')
+                             AND a.source_message_ids_json @> jsonb_build_array(member.message_id))
+                            OR (a.operation_kind='album' AND member.media_group_id IS NOT NULL
+                                AND a.idempotency_key=('rule:'||a.rule_id::text||':target:'||a.target_id
+                                    ||':media_group:'||member.media_group_id||':album'))
+                          )
                           AND NOT EXISTS (SELECT 1 FROM deliveries old WHERE old.id=a.delivery_id AND old.rule_id=a.rule_id)
                     )
                     OR EXISTS (

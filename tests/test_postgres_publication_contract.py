@@ -494,14 +494,32 @@ def test_rescan_rejects_route_change_and_manual_clear(repo):
 
 
 def test_keep_quarantines_entire_orphan_album(repo):
-    _, rule_id, deliveries, source_ids, _, _ = seed(repo, 136,count=3)
+    _, rule_id, deliveries, source_ids, source, target = seed(repo, 136,count=3)
+    unrelated_source_id = 9001001  # collides numerically with an old delivery ID
     with repo.connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE delivery_attempts SET delivery_id=9001001,status='accepted',source_message_ids_json=%s::jsonb WHERE rule_id=%s", (str([source_ids[0]]),rule_id))
+            cur.execute("UPDATE delivery_attempts SET idempotency_key=%s,delivery_id=9001001,status='accepted',source_message_ids_json=%s::jsonb WHERE rule_id=%s",
+                (f"rule:{rule_id}:target:{target}:media_group:group-136:album",str([unrelated_source_id]),rule_id))
             cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+            cur.execute("INSERT INTO posts(message_id,source_channel,content_json,created_at) VALUES(%s,%s,'{}','2026-11-21') RETURNING id",(unrelated_source_id,source))
+            post_id=cur.fetchone()["id"]
+            cur.execute("INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id) VALUES(%s,%s,'pending','2026-11-21',1) RETURNING id",(rule_id,post_id))
+            unrelated_delivery_id=cur.fetchone()["id"]
     active, owner = repo.begin_rule_rescan(rule_id)
     assert repo.rebuild_rule_keep_position(rule_id,owner_token=owner,
-        allowed_message_ids=set(source_ids),include_newer_than_message_id=max(source_ids),
+        allowed_message_ids=set(source_ids)|{unrelated_source_id},include_newer_than_message_id=unrelated_source_id,
         before_message_id=None)==(0,0,0,3)
     assert all(repo.get_delivery(d)["status"]=="faulty" for d in deliveries)
+    assert repo.get_delivery(unrelated_delivery_id)["status"]=="pending"
     repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
+
+
+def test_keep_refuses_orphan_album_without_stable_identity(repo):
+    _, rule_id, _, _, _, target = seed(repo,137,count=2)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE delivery_attempts SET idempotency_key=%s,delivery_id=9001002,status='accepted',source_message_ids_json='[9001002,9001003]'::jsonb WHERE rule_id=%s",
+                (f"rule:{rule_id}:target:{target}:album_sources:9001002,9001003",rule_id))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+    with pytest.raises(RuntimeError,match="точной привязки"):
+        repo.begin_rule_rescan(rule_id)

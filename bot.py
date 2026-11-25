@@ -767,7 +767,7 @@ async def _run_rescan_rule_keep_job(
                         f"Очередь пересобрана: {rebuilt_count}\n"
                         f"Исключено удалённых из источника: {removed_stale}\n"
                         f"Убрано pending до нужной точки: {removed_before}\n"
-                f"На ручной проверке без повторной отправки: {quarantined}"
+                        f"На ручной проверке без повторной отправки: {quarantined}"
                     ),
                 )
 
