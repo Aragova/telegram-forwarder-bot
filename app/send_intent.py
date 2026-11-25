@@ -218,6 +218,12 @@ def publication_client_class(base):
             try:
                 if not scoped:
                     return await invoke(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold)
+                if getattr(self, "publication_inbox_required", False) and (
+                    getattr(self, "publication_write_blocked", False)
+                    or getattr(self, "publication_inbox", None) is None
+                ):
+                    intent.blocked = True
+                    raise PublicationWriteUnavailable("MTProto publication evidence unavailable")
                 if len(calls) != 1:
                     intent.blocked = True
                     raise PublicationWriteUnavailable("Batched publication RPC is not supported")

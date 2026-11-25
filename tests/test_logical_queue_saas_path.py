@@ -30,6 +30,14 @@ class _FakeCursor:
         q = " ".join(str(query).split())
         self.execute_calls.append((q, params))
 
+        if "SELECT id FROM routing WHERE id=%s FOR UPDATE" in q:
+            self._fetchone = {"id": params[0]}
+            return
+
+        if "SELECT 1 FROM telegram_publication_receipts" in q:
+            self._fetchone = self.script.get("unfinished_receipt")
+            return
+
         if "FROM deliveries d JOIN posts p ON p.id = d.post_id WHERE d.rule_id = %s ORDER BY p.id ASC" in q:
             self._fetchall = self.script.get("rows", [])
             return
@@ -204,3 +212,8 @@ def test_start_from_position_marks_previous_logical_items_sent():
     assert len(updates) == 1
     assert [x[1] for x in updates[0][1]] == [1, 2, 3]
     assert repo.fake_conn.committed is True
+
+def test_rollback_refuses_unfinished_publication():
+    repo = _RepoForTests(script={"unfinished_receipt": {"exists": 1}})
+    assert repo.rollback_last_delivery(rule_id=30, admin_id=1) is None
+    assert not repo.fake_conn.cursor_obj.executemany_calls

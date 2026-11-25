@@ -63,7 +63,8 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
             telethon_wrap_calls.append({"raw": raw, "label": label, "policy": policy})
             return original_wrap_telethon_client(raw, label=label, policy=policy)
 
-        async def _create_telethon_client():
+        async def _create_telethon_client(*, publication_repository):
+            assert publication_repository is runtime.db
             return raw_telethon_client
 
         async def _create_reaction_clients():

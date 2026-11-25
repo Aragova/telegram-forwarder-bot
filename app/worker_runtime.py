@@ -15,6 +15,7 @@ from typing import Any
 from aiogram.exceptions import TelegramEntityTooLarge
 
 from .delivery_result import normalize_delivery_result
+from .single_publication_reconciliation import publication_key_for_job, reconcile_pending_publication
 from .job_service import (
     enqueue_video_download,
     enqueue_video_delivery_fallback,
@@ -181,6 +182,9 @@ def _complete_job_if_delivery_already_sent(
     if not delivery_ids:
         return False
     if not _delivery_ids_already_sent(repo, delivery_ids):
+        return False
+    pending_reaction = getattr(repo, "has_unfinished_publication_reaction", None)
+    if callable(pending_reaction) and any(pending_reaction(delivery_id) is True for delivery_id in delivery_ids):
         return False
     logger.info("IDEMPOTENCY_GUARD_ALREADY_SENT | job_id=%s | stage=%s | delivery_ids=%s", int(job_id), stage, delivery_ids)
     # Finalization may commit before the DB thread returns. Signal heartbeat
@@ -495,12 +499,18 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     payload = _safe_payload(job)
     payload.pop("job_id", None)
     payload.pop("tenant_id", None)
-    tenant_id = int(payload.get("tenant_id") or getattr(repo, "get_rule_tenant_id", lambda _x: 1)(int(payload.get("rule_id") or 0)) or 1)
+    tenant_id = int(await asyncio.to_thread(
+        getattr(repo, "get_rule_tenant_id", lambda _x: 1), int(payload.get("rule_id") or 0)
+    ) or 1)
     subscription_service = SubscriptionService(repo)
     usage_service = UsageService(repo)
     limit_service = LimitService(repo, subscription_service, usage_service)
 
-    can_enqueue, enqueue_reason = limit_service.can_enqueue_job(tenant_id)
+    publication_key = publication_key_for_job(job_type, payload)
+    receipt_lookup = getattr(repo, "get_publication_receipt", None)
+    receipt = await asyncio.to_thread(receipt_lookup, publication_key) if publication_key and callable(receipt_lookup) else None
+    reconcile_only = isinstance(receipt, dict) and receipt.get("rule_id") == int(payload.get("rule_id") or 0) and receipt.get("tenant_id") == tenant_id
+    can_enqueue, enqueue_reason = (True, None) if reconcile_only else await asyncio.to_thread(limit_service.can_enqueue_job, tenant_id)
     if not can_enqueue:
         logger.warning("Worker блокирует выполнение job #%s tenant_id=%s: %s", job_id, tenant_id, enqueue_reason)
         if hasattr(repo, "create_billing_event"):
@@ -525,8 +535,8 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         await asyncio.to_thread(repo.fail_job, job_id, enqueue_reason or "Подписка неактивна")
         return True
 
-    if str(job_type).startswith("video_"):
-        can_video, video_reason = limit_service.can_process_video(tenant_id)
+    if not reconcile_only and str(job_type).startswith("video_"):
+        can_video, video_reason = await asyncio.to_thread(limit_service.can_process_video, tenant_id)
         if not can_video:
             logger.warning("Видео не обработано: лимит тарифа tenant_id=%s reason=%s", tenant_id, video_reason or "unknown")
             if hasattr(repo, "create_billing_event"):
@@ -580,7 +590,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
     )
     result: dict[str, Any] | None = None
     try:
-        if job_type in {"repost_single", "repost_album", "repost_campaign_send_copy", "repost_campaign_delete_copy", "video_delivery", "video_send"}:
+        if not reconcile_only and job_type in {"repost_single", "repost_album", "repost_campaign_send_copy", "repost_campaign_delete_copy", "video_delivery", "video_send"}:
             guarded = await asyncio.to_thread(
                 _complete_job_if_delivery_already_sent,
                 repo,
@@ -592,7 +602,19 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             )
             if guarded:
                 return True
-        if job_type == "repost_single":
+        if reconcile_only:
+            try:
+                raw_result = await reconcile_pending_publication(sender_service, publication_key)
+            except Exception:
+                logger.exception("JOB_PUBLICATION_RECONCILE_FAILED | job_id=%s", job_id)
+                raw_result = {"ok": False, "accepted": True, "retryable": False, "publication_pending": True}
+            delivery_result = normalize_delivery_result(raw_result or {
+                "ok": False, "retryable": False, "accepted": True,
+                "error_text": "publication_receipt_changed_no_resend",
+            })
+            result = delivery_result.to_dict()
+            ok = delivery_result.ok
+        elif job_type == "repost_single":
             raw_result = await sender_service.execute_repost_single_from_job(**payload)
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
@@ -711,6 +733,10 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                     bool(result.get("fallback_to_legacy")),
                     result.get("sent_message_ids") or [],
                 )
+
+        if isinstance(result, dict) and result.get("publication_pending") is True:
+            await _finish_owned_job(repo, "defer", job_id, worker_id, "", 30, finalization_started=finalization_started)
+            return True
 
         if ok:
             completed = await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
@@ -882,6 +908,15 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         return True
 
     except Exception as exc:
+        if publication_key and callable(receipt_lookup) and not finalization_started.is_set():
+            try:
+                latest = await asyncio.to_thread(receipt_lookup, publication_key)
+            except Exception:
+                latest = None
+                logger.exception("JOB_PUBLICATION_RECEIPT_LOOKUP_FAILED | job_id=%s", job_id)
+            if isinstance(latest, dict) and latest.get("rule_id") == int(payload.get("rule_id") or 0) and latest.get("tenant_id") == tenant_id:
+                await _finish_owned_job(repo, "defer", job_id, worker_id, "", 30, finalization_started=finalization_started)
+                return True
         guarded = await asyncio.to_thread(
             _complete_job_if_delivery_already_sent,
             repo,

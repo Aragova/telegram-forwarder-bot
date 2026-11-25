@@ -372,6 +372,7 @@ class ReactionDelivery:
         delivery_id: int | None = None,
         max_age_seconds: int = 300,
         allow_unverified_self_loop_target: bool = False,
+        publication_intent=None,
     ) -> dict[str, Any]:
         owner = self.owner
         rule_id = int(getattr(rule, "id", 0) or 0)
@@ -493,7 +494,10 @@ class ReactionDelivery:
                     message_id=int(sent_message_id),
                     account_ids=account_ids,
                     max_attempts=3,
+                    **({"publication_intent": publication_intent} if publication_intent is not None else {}),
                 )
+                if publication_intent is not None and job_id is None:
+                    return {"applied": False, "enqueued": False, "reason": "enqueue_failed"}
                 logger.info(
                     "REACTION_JOB_ENQUEUED | tenant_id=%s | rule_id=%s | job_id=%s | target_id=%s | message_id=%s | accounts=%s",
                     plan.tenant_id,

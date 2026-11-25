@@ -695,7 +695,7 @@ class SenderTelethonHelpers:
                     return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=returned_ids, resolution_method="resolver_exception", error_text=str(exc)).to_reupload_album_result(sent_count=len(sent_messages))
                 if not resolved.ok:
                     logger.warning("TELETHON_ALBUM_SEND | ACCEPTED_UNRESOLVED | target=%s | thread=%s | returned_candidate_ids=%s", target_id, target_thread_id, resolved.returned_candidate_ids)
-                    return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=resolved.returned_candidate_ids or [], resolution_method=resolved.resolution_method, error_text=resolved.error_text or "telethon_album_target_id_unresolved").to_reupload_album_result(sent_count=len(sent_messages))
+                    return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=resolved.returned_candidate_ids or [], resolution_method=resolved.resolution_method, error_text=resolved.error_text or "telethon_album_target_id_unresolved", pending_mask=resolved.pending_mask).to_reupload_album_result(sent_count=len(sent_messages))
                 first_id = int(resolved.authoritative_message_id)
                 logger.info(
                     "TELETHON_ALBUM_SEND | OK_ORIGINAL_MEDIA | target=%s | thread=%s | sent_count=%s | returned_candidate_ids=%s | sent_message_ids=%s | first_message_id=%s | resolution_method=%s",
@@ -824,7 +824,7 @@ class SenderTelethonHelpers:
                 return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=returned_ids, resolution_method="resolver_exception", error_text=str(exc)).to_reupload_album_result(sent_count=len(sent_messages))
             if not resolved.ok:
                 logger.warning("TELETHON_ALBUM_SEND | ACCEPTED_UNRESOLVED_FILE_PATH | target=%s | thread=%s | returned_candidate_ids=%s", target_id, target_thread_id, resolved.returned_candidate_ids)
-                return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=resolved.returned_candidate_ids or [], resolution_method=resolved.resolution_method, error_text=resolved.error_text or "telethon_album_target_id_unresolved").to_reupload_album_result(sent_count=len(sent_messages))
+                return TelethonSendOutcome(True, True, False, None, [], returned_candidate_ids=resolved.returned_candidate_ids or [], resolution_method=resolved.resolution_method, error_text=resolved.error_text or "telethon_album_target_id_unresolved", pending_mask=resolved.pending_mask).to_reupload_album_result(sent_count=len(sent_messages))
 
             first_id = int(resolved.authoritative_message_id)
             logger.info(

@@ -541,6 +541,71 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             PRIMARY KEY(attempt_id, ordinal)
         );
 
+        -- MTProto scheduled IDs and published IDs are distinct namespaces.
+        CREATE TABLE IF NOT EXISTS telegram_publication_mappings (
+            sender_account_id BIGINT NOT NULL CHECK(sender_account_id > 0),
+            target_peer_id BIGINT NOT NULL CHECK(target_peer_id <> 0),
+            scheduled_id BIGINT NOT NULL CHECK(scheduled_id > 0),
+            published_id BIGINT NOT NULL CHECK(published_id > 0),
+            first_observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (sender_account_id, target_peer_id, scheduled_id, published_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_telegram_publication_mappings_published
+            ON telegram_publication_mappings(sender_account_id, target_peer_id, published_id);
+
+        -- Independent read-only difference cursor; never advance it before
+        -- the exact publication mappings returned by Telegram are durable.
+        CREATE TABLE IF NOT EXISTS telegram_publication_recovery_cursor (
+            sender_account_id BIGINT PRIMARY KEY CHECK(sender_account_id > 0),
+            pts BIGINT NOT NULL CHECK(pts >= 0),
+            qts BIGINT NOT NULL CHECK(qts >= 0),
+            state_date TIMESTAMPTZ NOT NULL,
+            version BIGINT NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS telegram_publication_receipts (
+            idempotency_key TEXT PRIMARY KEY,
+            rule_id BIGINT NOT NULL,
+            tenant_id BIGINT NOT NULL,
+            sender_account_id BIGINT NOT NULL,
+            target_peer_id BIGINT NOT NULL,
+            target_thread_id BIGINT NULL,
+            source_channel TEXT NOT NULL,
+            source_thread_id BIGINT NULL,
+            delivery_ids BIGINT[] NOT NULL,
+            source_message_ids BIGINT[] NOT NULL,
+            scheduled_ids BIGINT[] NOT NULL,
+            pending_mask BOOLEAN[] NOT NULL,
+            send_started_at TIMESTAMPTZ NOT NULL,
+            deadline_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '24 hours'),
+            published_ids BIGINT[] NULL,
+            expired_at TIMESTAMPTZ NULL,
+            reaction_state TEXT NOT NULL DEFAULT 'pending'
+                CHECK(reaction_state IN ('pending','dispatching','done','uncertain')),
+            reaction_result JSONB NULL,
+            reaction_updated_at TIMESTAMPTZ NULL,
+            CHECK(cardinality(delivery_ids) BETWEEN 1 AND 10),
+            CHECK(cardinality(delivery_ids) = cardinality(source_message_ids)),
+            CHECK(cardinality(delivery_ids) = cardinality(scheduled_ids)),
+            CHECK(cardinality(delivery_ids) = cardinality(pending_mask)),
+            CHECK(published_ids IS NULL OR cardinality(published_ids) = cardinality(delivery_ids))
+        );
+        ALTER TABLE telegram_publication_receipts ADD COLUMN IF NOT EXISTS manual_review JSONB NULL;
+        CREATE INDEX IF NOT EXISTS idx_telegram_publication_receipts_rule
+            ON telegram_publication_receipts(rule_id);
+        CREATE INDEX IF NOT EXISTS idx_telegram_publication_manual_review_rule
+            ON telegram_publication_receipts(rule_id) WHERE manual_review IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_telegram_publication_receipt_deliveries
+            ON telegram_publication_receipts USING GIN(delivery_ids);
+        CREATE TABLE IF NOT EXISTS telegram_publication_claims (
+            sender_account_id BIGINT NOT NULL,
+            target_peer_id BIGINT NOT NULL,
+            scheduled_id BIGINT NOT NULL CHECK(scheduled_id > 0),
+            idempotency_key TEXT NOT NULL REFERENCES telegram_publication_receipts(idempotency_key) ON UPDATE CASCADE,
+            PRIMARY KEY (sender_account_id, target_peer_id, scheduled_id)
+        );
+
+
         CREATE TABLE IF NOT EXISTS jobs(
             id BIGSERIAL PRIMARY KEY,
             job_type TEXT NOT NULL,
@@ -2211,9 +2276,27 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 row = cur.fetchone()
         return dict(row) if row else None
 
-    def enqueue_reaction_job(self, *, tenant_id: int, rule_id: int, target_id: str, message_id: int, account_ids: list[int] | None = None, not_before: str | None = None, max_attempts: int = 3, reaction_payload: dict[str, Any] | None = None, delivery_id: int | None = None, account_id: int | None = None, run_at: str | None = None) -> int | None:
+    def enqueue_reaction_job(self, *, tenant_id: int, rule_id: int, target_id: str, message_id: int, account_ids: list[int] | None = None, not_before: str | None = None, max_attempts: int = 3, reaction_payload: dict[str, Any] | None = None, delivery_id: int | None = None, account_id: int | None = None, run_at: str | None = None, publication_intent: tuple[str, datetime] | None = None) -> int | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                if publication_intent is not None:
+                    key, started_at = publication_intent
+                    try:
+                        peer_id = int(target_id)
+                    except (TypeError, ValueError):
+                        return None
+                    cur.execute(
+                        """
+                        SELECT 1 FROM telegram_publication_receipts
+                        WHERE idempotency_key=%s AND send_started_at=%s
+                          AND reaction_state='dispatching' AND tenant_id=%s AND rule_id=%s
+                          AND target_peer_id=%s AND %s=ANY(published_ids)
+                        FOR UPDATE
+                        """,
+                        (key, started_at, tenant_id, rule_id, peer_id, message_id),
+                    )
+                    if not cur.fetchone():
+                        return None
                 cur.execute(
                     """
                     INSERT INTO reaction_jobs(
@@ -2226,6 +2309,20 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (tenant_id, rule_id, delivery_id, target_id, message_id, account_id, _json_dumps(reaction_payload) or "{}", max_attempts, run_at, _json_dumps(account_ids), not_before),
                 )
                 row = cur.fetchone()
+                if publication_intent is not None:
+                    if not row or row.get("id") is None:
+                        raise RuntimeError("Reaction queue insert returned no ID")
+                    cur.execute(
+                        """
+                        UPDATE telegram_publication_receipts
+                        SET reaction_state='done', reaction_result=%s::jsonb, reaction_updated_at=NOW()
+                        WHERE idempotency_key=%s AND send_started_at=%s AND reaction_state='dispatching'
+                        """,
+                        (_json_dumps({"enqueued": True, "job_id": int(row["id"]), "reason": "job_enqueued"}),
+                         key, started_at),
+                    )
+                    if cur.rowcount != 1:
+                        raise RuntimeError("Publication reaction intent changed")
             conn.commit()
         return int(row["id"]) if row and row.get("id") is not None else None
 
@@ -2234,11 +2331,26 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(
                     """
+                    WITH exhausted AS (
+                        SELECT id FROM reaction_jobs
+                        WHERE attempt_count>=max_attempts AND (status='pending' OR
+                            (status='processing' AND locked_at<NOW()-make_interval(secs=>%s)))
+                        ORDER BY id LIMIT 100 FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE reaction_jobs SET status='failed', locked_by=NULL, locked_at=NULL,
+                        error_text='reaction retry budget exhausted', processed_at=NOW(), updated_at=NOW()
+                    FROM exhausted WHERE reaction_jobs.id=exhausted.id
+                    """,
+                    (int(lock_timeout_seconds),),
+                )
+                cur.execute(
+                    """
                     WITH candidate AS (
                         SELECT id
                         FROM reaction_jobs
                         WHERE (
                             status = 'pending'
+                            AND attempt_count < max_attempts
                             AND (not_before IS NULL OR not_before <= NOW())
                         )
                         OR (
@@ -2266,38 +2378,41 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
         return dict(row) if row else None
 
-    def mark_reaction_job_done(self, *, job_id: int, result: dict) -> None:
+    def heartbeat_reaction_job(self, *, job_id: int, worker_id: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE reaction_jobs SET locked_at=NOW(),updated_at=NOW() WHERE id=%s AND locked_by=%s AND status='processing'", (job_id, worker_id))
+                updated = cur.rowcount == 1
+            conn.commit()
+        return updated
+
+    def mark_reaction_job_done(self, *, job_id: int, worker_id: str, result: dict) -> bool:
+        return self._finish_reaction_job(job_id, worker_id, "done", result, None, None)
+
+    def mark_reaction_job_failed(self, *, job_id: int, worker_id: str, error_text: str, result: dict | None = None, retry_after_seconds: int | None = None) -> bool:
+        return self._finish_reaction_job(job_id, worker_id, "failed", result, error_text, retry_after_seconds)
+
+    def mark_reaction_job_skipped(self, *, job_id: int, worker_id: str, result: dict) -> bool:
+        return self._finish_reaction_job(job_id, worker_id, "skipped", result, None, None)
+
+    def _finish_reaction_job(self, job_id, worker_id, status, result, error, retry_after) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE reaction_jobs SET status='done', processed_at=NOW(), result_json=%s, error_text=NULL, updated_at=NOW() WHERE id=%s",
-                    (_json_dumps(result) or "{}", job_id),
+                    """
+                    UPDATE reaction_jobs SET
+                      status=CASE WHEN %s::integer IS NOT NULL AND attempt_count<max_attempts THEN 'pending' ELSE %s END,
+                      not_before=CASE WHEN %s::integer IS NOT NULL AND attempt_count<max_attempts
+                          THEN NOW()+make_interval(secs=>%s::integer) ELSE NULL END,
+                      processed_at=CASE WHEN %s::integer IS NOT NULL AND attempt_count<max_attempts THEN NULL ELSE NOW() END,
+                      result_json=%s,error_text=%s,locked_by=NULL,locked_at=NULL,updated_at=NOW()
+                    WHERE id=%s AND locked_by=%s AND status='processing'
+                    """,
+                    (retry_after,status,retry_after,retry_after,retry_after,_json_dumps(result),error,job_id,worker_id),
                 )
+                updated = cur.rowcount == 1
             conn.commit()
-
-    def mark_reaction_job_failed(self, *, job_id: int, error_text: str, result: dict | None = None, retry_after_seconds: int | None = None) -> None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                if retry_after_seconds is None:
-                    cur.execute(
-                        "UPDATE reaction_jobs SET status='failed', processed_at=NOW(), result_json=%s, error_text=%s, updated_at=NOW() WHERE id=%s",
-                        (_json_dumps(result), error_text, job_id),
-                    )
-                else:
-                    cur.execute(
-                        "UPDATE reaction_jobs SET status='pending', not_before=NOW() + make_interval(secs => %s), result_json=%s, error_text=%s, updated_at=NOW() WHERE id=%s",
-                        (int(retry_after_seconds), _json_dumps(result), error_text, job_id),
-                    )
-            conn.commit()
-
-    def mark_reaction_job_skipped(self, *, job_id: int, result: dict) -> None:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE reaction_jobs SET status='skipped', processed_at=NOW(), result_json=%s, updated_at=NOW() WHERE id=%s",
-                    (_json_dumps(result) or "{}", job_id),
-                )
-            conn.commit()
+        return updated
 
     def log_reaction_event(self, *, event_type: str, reaction_job_id: int | None = None, tenant_id: int | None = None, rule_id: int | None = None, delivery_id: int | None = None, account_id: int | None = None, status: str | None = None, error_text: str | None = None, extra: dict[str, Any] | list[Any] | None = None) -> int | None:
         with self.connect() as conn:
@@ -2623,6 +2738,14 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
             with self.connect() as conn:
                 with conn.cursor() as cur:
+                    cur.execute("SELECT id FROM routing WHERE id=%s FOR UPDATE", (rule_id,))
+                    if not cur.fetchone():
+                        return None
+                    cur.execute("""SELECT 1 FROM telegram_publication_receipts
+                        WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""",
+                        (rule_id,))
+                    if cur.fetchone():
+                        return None
                     cur.execute(
                         """
                         SELECT
@@ -2743,6 +2866,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         [(delivery_id,) for delivery_id in delivery_ids],
                     )
 
+                    cur.execute(
+                        """
+                        UPDATE telegram_publication_receipts
+                        SET idempotency_key='archived:' || %s || ':' || idempotency_key
+                        WHERE rule_id=%s AND delivery_ids && %s::bigint[]
+                          AND published_ids IS NOT NULL AND idempotency_key NOT LIKE 'archived:%%'
+                        """,
+                        (uuid.uuid4().hex, rule_id, delivery_ids),
+                    )
                     cur.execute(
                         """
                         DELETE FROM delivery_attempts
@@ -3528,7 +3660,43 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             )
             row = cur.fetchone()
 
-        return row is not None
+            if row is not None:
+                return True
+            # Exact mapping may arrive before finalization; archived receipts
+            # remain evidence of this rule's own publications.
+            cur.execute(
+                """
+                SELECT 1 FROM telegram_publication_receipts pr
+                JOIN routing rr ON rr.id=pr.rule_id
+                WHERE pr.rule_id=%s AND pr.source_channel=pr.target_peer_id::text
+                  AND rr.source_id::text=pr.source_channel AND rr.target_id::text=pr.source_channel
+                  AND COALESCE(rr.tenant_id,1)=pr.tenant_id
+                  AND rr.source_thread_id IS NOT DISTINCT FROM pr.source_thread_id
+                  AND rr.target_thread_id IS NOT DISTINCT FROM pr.target_thread_id
+                  AND pr.source_channel=%s AND pr.target_thread_id IS NOT DISTINCT FROM %s
+                  AND pr.source_thread_id IS NOT DISTINCT FROM pr.target_thread_id
+                  AND (%s=ANY(pr.published_ids)
+                    OR EXISTS (
+                        SELECT 1 FROM unnest(pr.scheduled_ids,pr.pending_mask) AS member(mid,pending)
+                        WHERE member.pending IS FALSE AND member.mid=%s
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM telegram_publication_claims c
+                        JOIN telegram_publication_mappings m
+                          ON m.sender_account_id=c.sender_account_id
+                         AND m.target_peer_id=c.target_peer_id AND m.scheduled_id=c.scheduled_id
+                        WHERE c.idempotency_key=pr.idempotency_key AND m.published_id=%s
+                          AND NOT EXISTS (
+                            SELECT 1 FROM telegram_publication_mappings x
+                            WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
+                              AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
+                                OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
+                          )
+                    ))
+                LIMIT 1
+                """, (rule_id,str(source_channel),source_thread_id,message_id,message_id,message_id),
+            )
+            return cur.fetchone() is not None
 
     def _log_self_target_echo_delivery_skipped(
         self,
@@ -4341,6 +4509,38 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if cur.fetchone()["busy"]:
                     raise RuntimeError("Остались активные задачи; архивирование отменено")
 
+                # Never archive an attempt whose publication outcome is unknown.
+                # Explicit replay may proceed only after authoritative reconciliation.
+                cur.execute(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM delivery_attempts
+                        WHERE rule_id=%s
+                          AND status IN ('sending','accepted','failed_after_send')
+                          AND idempotency_key NOT LIKE '%%:rescan:%%'
+                          AND idempotency_key NOT LIKE 'archived:%%'
+                    ) AS unresolved
+                    """,
+                    (int(rule_id),),
+                )
+                if cur.fetchone()["unresolved"]:
+                    raise RuntimeError(
+                        "Есть отправка с неизвестным результатом; требуется ручная проверка"
+                    )
+
+                cur.execute("""SELECT 1 FROM telegram_publication_receipts
+                    WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""", (int(rule_id),))
+                if cur.fetchone():
+                    raise RuntimeError("Есть незавершённая публикация или реакция")
+                cur.execute("""
+                    UPDATE telegram_publication_receipts r
+                    SET idempotency_key=r.idempotency_key || ':rescan:' || a.id::text
+                    FROM delivery_attempts a
+                    WHERE r.rule_id=%s AND a.idempotency_key=r.idempotency_key
+                      AND r.published_ids IS NOT NULL
+                      AND r.idempotency_key NOT LIKE '%%:rescan:%%'
+                    """, (int(rule_id),))
+
                 # Unique suffix incorporates immutable attempt primary key.
                 # Previously archived rows are excluded, including on repeat reset.
                 cur.execute(
@@ -4362,6 +4562,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def clear_rule_deliveries(self, rule_id: int) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT id FROM routing WHERE id=%s FOR UPDATE", (rule_id,))
+                cur.execute("""SELECT 1 FROM telegram_publication_receipts
+                    WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""", (rule_id,))
+                if cur.fetchone():
+                    raise RuntimeError("Есть незавершённая публикация или реакция")
                 cur.execute("DELETE FROM deliveries WHERE rule_id = %s", (rule_id,))
                 count = int(cur.rowcount or 0)
             conn.commit()
@@ -5429,7 +5634,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT mode, schedule_mode, interval
+                    SELECT mode, schedule_mode, interval, target_id, target_thread_id
                     FROM routing
                     WHERE id = %s
                     FOR UPDATE
@@ -5442,6 +5647,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     conn.commit()
                     return None
 
+                destination_lock = f"delivery-target:{rule_row['target_id']}:{rule_row['target_thread_id']}"
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (destination_lock,))
                 rule_mode = (rule_row["mode"] or "repost").strip().lower()
                 schedule_mode = (rule_row["schedule_mode"] or "interval").strip().lower()
                 interval = int(rule_row["interval"] or 0)
@@ -5497,6 +5704,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             FROM deliveries d_target
                             JOIN routing r_target ON r_target.id = d_target.rule_id
                             WHERE d_target.status = 'processing'
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM telegram_publication_receipts pr
+                                  JOIN delivery_attempts pa ON pa.idempotency_key=pr.idempotency_key
+                                  WHERE pr.delivery_ids @> ARRAY[d_target.id]::bigint[]
+                                    AND pr.published_ids IS NULL AND pr.expired_at IS NULL
+                                    AND pa.status='accepted'
+                              )
                               AND r_target.target_id = r.target_id
                               AND (
                                     (r_target.target_thread_id IS NULL AND r.target_thread_id IS NULL)
@@ -5597,6 +5811,34 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     payload["media_group_id"] = media_group_id
                 else:
                     payload["job_type"] = JOB_TYPE_REPOST_SINGLE
+
+                # The source update can be queued before its publication receipt
+                # is mapped. Recheck under the rule/delivery locks before enqueueing.
+                if (str(due_row["source_channel"]) == str(due_row["target_id"])
+                        and due_row["source_thread_id"] == due_row["target_thread_id"]):
+                    cur.execute(
+                        """SELECT d.id, p.message_id FROM deliveries d
+                           JOIN posts p ON p.id=d.post_id WHERE d.id=ANY(%s)""",
+                        (delivery_ids_to_take,),
+                    )
+                    echo_ids = []
+                    for item in cur.fetchall():
+                        if self._is_self_target_echo_post_for_rule_conn(
+                            conn, rule_id=int(rule_id), source_channel=str(due_row["source_channel"]),
+                            source_thread_id=due_row["source_thread_id"], message_id=int(item["message_id"]),
+                        ):
+                            echo_ids.append(int(item["id"]))
+                            self._log_self_target_echo_delivery_skipped(
+                                rule_id=int(rule_id), source_channel=str(due_row["source_channel"]),
+                                source_thread_id=due_row["source_thread_id"], message_id=int(item["message_id"]),
+                            )
+                    if echo_ids:
+                        cur.execute(
+                            """UPDATE deliveries SET status='faulty', error_text='self_target_echo'
+                               WHERE id=ANY(%s) AND status='pending'""", (echo_ids,),
+                        )
+                        conn.commit()
+                        return None
 
                 cur.execute(
                     """
@@ -5777,6 +6019,456 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     raise ValueError("MTProto publication identity mismatch")
                 return list(stored["random_ids"])
 
+    def get_publication_recovery_cursor(self, account_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pts,qts,state_date,version FROM telegram_publication_recovery_cursor WHERE sender_account_id=%s",
+                    (account_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row is not None else None
+
+    def initialize_publication_recovery_cursor(
+        self, account_id: int, pts: int, qts: int, state_date: datetime,
+    ) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO telegram_publication_recovery_cursor(sender_account_id,pts,qts,state_date)
+                    VALUES (%s,%s,%s,%s) ON CONFLICT(sender_account_id) DO NOTHING
+                    """,
+                    (account_id, pts, qts, state_date),
+                )
+            conn.commit()
+
+    def advance_publication_recovery_cursor(
+        self, account_id: int, version: int, pts: int, qts: int, state_date: datetime,
+    ) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE telegram_publication_recovery_cursor
+                    SET pts=%s,qts=%s,state_date=%s,version=version+1
+                    WHERE sender_account_id=%s AND version=%s
+                      AND pts<=%s AND qts<=%s AND state_date<=%s
+                    """,
+                    (pts,qts,state_date,account_id,version,pts,qts,state_date),
+                )
+                changed = cur.rowcount == 1
+            conn.commit()
+        return changed
+
+    def record_telegram_publication_mappings(
+        self, sender_account_id: int, target_peer_id: int,
+        pairs: list[tuple[int, int]],
+    ) -> None:
+        """Persist exact Telegram mappings, including updates before receipts."""
+        from app.telegram_publication import publication_pairs
+
+        validated = publication_pairs([p[0] for p in pairs], [p[1] for p in pairs])
+        if not validated or validated != pairs:
+            raise ValueError("Invalid scheduled-publication mapping")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                # Serialize exact evidence against the same peer's finalizer.
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                            (f"publication:{sender_account_id}:{target_peer_id}",))
+                # All items in an update are committed together.
+                cur.executemany(
+                    """
+                    INSERT INTO telegram_publication_mappings
+                        (sender_account_id, target_peer_id, scheduled_id, published_id)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (sender_account_id, target_peer_id, scheduled_id, published_id)
+                    DO NOTHING
+                    """,
+                    [(sender_account_id, target_peer_id, old, new) for old, new in sorted(validated)],
+                )
+            conn.commit()
+
+    def get_telegram_publication_mapping(
+        self, sender_account_id: int, target_peer_id: int, scheduled_id: int,
+    ) -> int | None:
+        """Fail closed on contradictory evidence in either ID namespace."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT m.published_id
+                    FROM telegram_publication_mappings m
+                    WHERE m.sender_account_id = %s AND m.target_peer_id = %s
+                      AND m.scheduled_id = %s
+                      AND NOT EXISTS (
+                        SELECT 1 FROM telegram_publication_mappings other
+                        WHERE other.sender_account_id = m.sender_account_id
+                          AND other.target_peer_id = m.target_peer_id
+                          AND (
+                            (other.scheduled_id = m.scheduled_id AND other.published_id <> m.published_id)
+                            OR (other.published_id = m.published_id AND other.scheduled_id <> m.scheduled_id)
+                          )
+                      )
+                    """,
+                    (sender_account_id, target_peer_id, scheduled_id),
+                )
+                row = cur.fetchone()
+                return int(row["published_id"]) if row else None
+
+    def get_telegram_publication_mappings(
+        self, sender_account_id: int, target_peer_id: int, scheduled_ids: list[int],
+    ) -> list[int]:
+        """Read all conflict-free mappings from one database snapshot."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT m.scheduled_id,m.published_id
+                    FROM telegram_publication_mappings m
+                    WHERE m.sender_account_id=%s AND m.target_peer_id=%s
+                      AND m.scheduled_id=ANY(%s)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM telegram_publication_mappings x
+                          WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
+                            AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
+                              OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
+                      )
+                    """,(sender_account_id,target_peer_id,scheduled_ids),
+                )
+                rows = {r["scheduled_id"]:r["published_id"] for r in cur.fetchall()}
+                return [rows[mid] for mid in scheduled_ids] if all(mid in rows for mid in scheduled_ids) else []
+
+    def register_publication_receipt(
+        self, *, key: str, delivery_ids: list[int], rule_id: int,
+        account_id: int, peer_id: int, thread_id: int | None,
+        source_channel: str, source_message_ids: list[int], scheduled_ids: list[int],
+        pending_mask: list[bool] | None = None,
+    ) -> bool:
+        """Register an ordered MTProto receipt and reserve each scheduled ID once."""
+        from app.telegram_publication import publication_candidate_mask, publication_pairs
+
+        mask = publication_candidate_mask(scheduled_ids,pending_mask)
+
+        if (account_id <= 0 or peer_id == 0 or not 1 <= len(delivery_ids) <= 10
+                or not publication_pairs(delivery_ids, source_message_ids)
+                or len(delivery_ids) != len(scheduled_ids) or not mask):
+            return False
+        pending_ids = [mid for mid,flag in zip(scheduled_ids,mask) if flag]
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT target_id,target_thread_id,source_id,source_thread_id,tenant_id FROM routing WHERE id=%s FOR UPDATE",
+                    (rule_id,),
+                )
+                rule = cur.fetchone()
+                if (not rule or str(rule["target_id"]) != str(peer_id)
+                        or rule["target_thread_id"] != thread_id
+                        or str(rule["source_id"]) != source_channel):
+                    return False
+                cur.execute(
+                    """
+                    SELECT delivery_id,operation_kind,source_message_ids_json,created_at
+                    FROM delivery_attempts
+                    WHERE idempotency_key=%s AND rule_id=%s AND target_id=%s
+                      AND status IN ('sending','accepted') FOR UPDATE
+                    """,
+                    (key, rule_id, str(peer_id)),
+                )
+                attempt = cur.fetchone()
+                if not attempt:
+                    return False
+                kind = attempt["operation_kind"]
+                recorded = _safe_json_loads(attempt["source_message_ids_json"], [])
+                if kind == "album":
+                    # Historical album ledger uses delivery IDs rather than source IDs.
+                    # Verify both cardinality and actual source membership below.
+                    if (int(attempt["delivery_id"]) not in [0, *delivery_ids]
+                            or sorted(recorded) not in [sorted(delivery_ids), sorted(source_message_ids)]):
+                        return False
+                elif (kind not in {"single", "video_send"} or len(delivery_ids) != 1
+                      or attempt["delivery_id"] != delivery_ids[0] or recorded != source_message_ids):
+                    return False
+                cur.execute(
+                    """
+                    SELECT d.id,p.message_id,p.media_group_id
+                    FROM deliveries d JOIN posts p ON p.id=d.post_id
+                    WHERE d.id=ANY(%s) AND d.rule_id=%s AND d.status IN ('pending','processing')
+                      AND p.source_channel=%s AND p.source_thread_id IS NOT DISTINCT FROM %s
+                    ORDER BY d.id FOR UPDATE OF d
+                    """,
+                    (delivery_ids, rule_id, source_channel, rule["source_thread_id"]),
+                )
+                rows = cur.fetchall()
+                if {r["id"]: r["message_id"] for r in rows} != dict(zip(delivery_ids, source_message_ids)):
+                    return False
+                if kind == "album":
+                    groups = {r["media_group_id"] for r in rows}
+                    if len(groups) != 1 or not next(iter(groups)):
+                        return False
+                cur.execute(
+                    """
+                    INSERT INTO telegram_publication_receipts
+                    (idempotency_key,rule_id,tenant_id,sender_account_id,target_peer_id,
+                     target_thread_id,source_channel,source_thread_id,delivery_ids,source_message_ids,
+                     scheduled_ids,pending_mask,send_started_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT DO NOTHING RETURNING idempotency_key
+                    """,
+                    (key, rule_id, rule["tenant_id"] or 1, account_id, peer_id, thread_id,
+                     source_channel, rule["source_thread_id"], delivery_ids, source_message_ids,
+                     scheduled_ids, mask, attempt["created_at"]),
+                )
+                if not cur.fetchone():
+                    # A repeated identical registration may follow a lost commit response.
+                    cur.execute(
+                        """SELECT 1 FROM telegram_publication_receipts
+                           WHERE idempotency_key=%s AND rule_id=%s AND tenant_id=%s
+                             AND sender_account_id=%s AND target_peer_id=%s
+                             AND target_thread_id IS NOT DISTINCT FROM %s
+                             AND source_channel=%s AND source_thread_id IS NOT DISTINCT FROM %s
+                             AND delivery_ids=%s::bigint[] AND source_message_ids=%s::bigint[]
+                             AND scheduled_ids=%s::bigint[] AND pending_mask=%s::boolean[] AND expired_at IS NULL""",
+                        (key,rule_id,rule['tenant_id'] or 1,account_id,peer_id,thread_id,
+                         source_channel,rule['source_thread_id'],delivery_ids,source_message_ids,scheduled_ids,mask),
+                    )
+                    return cur.fetchone() is not None
+                cur.execute(
+                    """
+                    INSERT INTO telegram_publication_claims
+                    (sender_account_id,target_peer_id,scheduled_id,idempotency_key)
+                    SELECT %s,%s,member.scheduled_id,%s
+                    FROM unnest(%s::bigint[]) AS member(scheduled_id)
+                    ORDER BY member.scheduled_id
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (account_id,peer_id,key,pending_ids),
+                )
+                if cur.rowcount != len(pending_ids):
+                    conn.rollback()
+                    return False
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts SET status='accepted', telegram_method='mtproto_pending_publication',
+                        sent_message_ids_json='[]'::jsonb,error_text=NULL,updated_at=NOW()
+                    WHERE idempotency_key=%s
+                    """,
+                    (key,),
+                )
+            conn.commit()
+        return True
+
+    def get_publication_receipt(self, key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *, deadline_at<=NOW() AS expired,
+                        reaction_updated_at<NOW()-INTERVAL '15 minutes' AS dispatch_stale
+                    FROM telegram_publication_receipts WHERE idempotency_key=%s
+                    """,
+                    (key,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row is not None else None
+
+    def has_unfinished_publication_reaction(self, delivery_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1 FROM telegram_publication_receipts r
+                    JOIN delivery_attempts a ON a.idempotency_key=r.idempotency_key
+                    WHERE r.delivery_ids @> ARRAY[%s]::bigint[] AND r.published_ids IS NOT NULL
+                      AND r.reaction_state IN ('pending','dispatching') AND a.status='verified'
+                    LIMIT 1
+                    """,
+                    (delivery_id,),
+                )
+                return cur.fetchone() is not None
+
+    def finalize_publication_receipt(self, key: str, published_ids: list[int], *, expected_started_at: datetime | None = None) -> bool:
+        """Commit all mapped IDs, the attempt, and post-send intent atomically."""
+        from app.telegram_publication import publication_pairs
+
+        receipt = self.get_publication_receipt(key)
+        if not receipt or not publication_pairs(published_ids,published_ids) or (expected_started_at is not None and receipt["send_started_at"] != expected_started_at):
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT target_id,target_thread_id,source_id,source_thread_id,tenant_id FROM routing WHERE id=%s FOR UPDATE",
+                    (receipt["rule_id"],),
+                )
+                rule = cur.fetchone()
+                if not rule:
+                    return False
+                cur.execute(
+                    """
+                    SELECT id FROM delivery_attempts WHERE idempotency_key=%s AND rule_id=%s
+                      AND status='accepted' AND telegram_method='mtproto_pending_publication'
+                    FOR UPDATE
+                    """,
+                    (key,receipt["rule_id"]),
+                )
+                if not cur.fetchone():
+                    return False
+                cur.execute("SELECT *,deadline_at<=clock_timestamp() AS expired FROM telegram_publication_receipts WHERE idempotency_key=%s FOR UPDATE",(key,))
+                pending = cur.fetchone()
+                if not pending or pending["published_ids"] is not None or pending["expired_at"] is not None or pending["expired"]:
+                    return False
+                if pending["send_started_at"] != receipt["send_started_at"] or pending["rule_id"] != receipt["rule_id"]:
+                    return False
+                receipt = pending
+                if len(receipt["scheduled_ids"]) != len(published_ids):
+                    return False
+                if (not rule or str(rule["target_id"]) != str(receipt["target_peer_id"])
+                        or rule["target_thread_id"] != receipt["target_thread_id"]
+                        or str(rule["source_id"]) != receipt["source_channel"]
+                        or rule["source_thread_id"] != receipt["source_thread_id"]
+                        or (rule["tenant_id"] or 1) != receipt["tenant_id"]):
+                    return False
+                if str(receipt["target_peer_id"]) == receipt["source_channel"] and set(published_ids) & set(receipt["source_message_ids"]):
+                    return False
+                # Serialize with inbox writes for the same peer before checking
+                # every mapping. A conflicting event already recorded blocks promotion.
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                            (f'publication:{receipt["sender_account_id"]}:{receipt["target_peer_id"]}',))
+                for scheduled_id,published_id,flag in zip(receipt["scheduled_ids"],published_ids,receipt["pending_mask"]):
+                    if not flag:
+                        if scheduled_id != published_id:
+                            return False
+                        continue
+                    cur.execute(
+                        """
+                        SELECT m.published_id FROM telegram_publication_mappings m
+                        WHERE m.sender_account_id=%s AND m.target_peer_id=%s
+                          AND m.scheduled_id=%s AND m.published_id=%s
+                          AND NOT EXISTS (
+                              SELECT 1 FROM telegram_publication_mappings x
+                              WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
+                                AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
+                                  OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
+                          )
+                        """,
+                        (receipt["sender_account_id"],receipt["target_peer_id"],scheduled_id,published_id),
+                    )
+                    if not cur.fetchone():
+                        return False
+                # Lock the complete delivery vector before the final deadline check.
+                cur.execute(
+                    "SELECT id FROM deliveries WHERE rule_id=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
+                    (receipt["rule_id"], receipt["delivery_ids"]),
+                )
+                if [row["id"] for row in cur.fetchall()] != sorted(receipt["delivery_ids"]):
+                    return False
+                # NOW() is fixed at transaction start; locks above may have
+                # delayed this transaction beyond the publication deadline.
+                cur.execute("SELECT clock_timestamp() >= %s AS expired",(receipt["deadline_at"],))
+                if cur.fetchone()["expired"]:
+                    return False
+                ids = _json_dumps(published_ids)
+                now = utc_now_iso()
+                for delivery_id,source_id,published_id in sorted(zip(receipt["delivery_ids"],receipt["source_message_ids"],published_ids)):
+                    cur.execute(
+                        """
+                        UPDATE deliveries d SET status='sent',sent_at=%s,error_text=NULL,
+                            sent_message_id=%s,sent_message_ids_json=%s::jsonb,
+                            target_id_snapshot=%s,delivery_method='mtproto_scheduled_mapping'
+                        FROM posts p
+                        WHERE d.id=%s AND d.rule_id=%s AND d.status IN ('pending','processing')
+                          AND p.id=d.post_id AND p.message_id=%s AND p.source_channel=%s
+                          AND p.source_thread_id IS NOT DISTINCT FROM %s
+                        """,
+                        (now,published_id,ids,str(receipt["target_peer_id"]),delivery_id,
+                         receipt["rule_id"],source_id,receipt["source_channel"],receipt["source_thread_id"]),
+                    )
+                    if cur.rowcount != 1:
+                        conn.rollback()
+                        return False
+                cur.execute(
+                    """
+                    UPDATE delivery_attempts SET status='verified',sent_message_ids_json=%s::jsonb,
+                        error_text=NULL,updated_at=NOW() WHERE idempotency_key=%s
+                    """,
+                    (ids,key),
+                )
+                cur.execute("UPDATE telegram_publication_receipts SET published_ids=%s WHERE idempotency_key=%s",(published_ids,key))
+                cur.execute("UPDATE routing SET last_sent_at=%s WHERE id=%s",(now,receipt["rule_id"]))
+            conn.commit()
+        return True
+
+    def expire_publication_receipt(self, key: str, reason: str, *, expected_started_at: datetime | None = None) -> bool:
+        """Retain the accepted attempt and atomically end an unresolved receipt."""
+        receipt = self.get_publication_receipt(key)
+        if not receipt or (expected_started_at is not None and receipt['send_started_at'] != expected_started_at):
+            return False
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM delivery_attempts WHERE idempotency_key=%s AND status='accepted' FOR UPDATE",(key,))
+                if not cur.fetchone():
+                    return False
+                cur.execute(
+                    """
+                    UPDATE telegram_publication_receipts SET expired_at=NOW()
+                    WHERE idempotency_key=%s AND published_ids IS NULL AND expired_at IS NULL
+                      AND send_started_at=%s AND deadline_at<=NOW() RETURNING delivery_ids
+                    """,
+                    (key,receipt['send_started_at']),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return False
+                cur.execute(
+                    """
+                    UPDATE deliveries SET status='faulty',error_text=%s,attempt_count=attempt_count+1
+                    WHERE id=ANY(%s) AND rule_id=%s AND status IN ('pending','processing')
+                    """,
+                    (reason[:1000],row["delivery_ids"],receipt["rule_id"]),
+                )
+            conn.commit()
+        return True
+
+    def claim_publication_reaction(self, key: str, published_ids: list[int], *, expected_started_at: datetime) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE telegram_publication_receipts r
+                    SET reaction_state='dispatching',reaction_updated_at=NOW()
+                    WHERE r.idempotency_key=%s AND r.published_ids=%s::bigint[]
+                      AND r.send_started_at=%s AND r.reaction_state='pending'
+                      AND EXISTS (SELECT 1 FROM delivery_attempts a WHERE a.idempotency_key=r.idempotency_key
+                                  AND a.status='verified' AND a.sent_message_ids_json=to_jsonb(r.published_ids))
+                      AND NOT EXISTS (
+                          SELECT 1 FROM unnest(r.delivery_ids,r.published_ids) AS pair(delivery_id,published_id)
+                          WHERE NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.id=pair.delivery_id
+                            AND d.status='sent' AND d.sent_message_id=pair.published_id
+                            AND d.target_id_snapshot=r.target_peer_id::text)
+                      )
+                    """,
+                    (key,published_ids,expected_started_at),
+                )
+                claimed = cur.rowcount == 1
+            conn.commit()
+        return claimed
+
+    def finish_publication_reaction(self, key: str, state: str, result: dict[str, Any], *, expected_started_at: datetime, expected_reaction_updated_at: datetime | None = None) -> None:
+        if state not in {"done","uncertain"} and not (state == "pending" and result.get("reason") == "enqueue_failed"):
+            raise ValueError("Invalid reaction outcome")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE telegram_publication_receipts
+                    SET reaction_state=%s,reaction_result=%s::jsonb,reaction_updated_at=NOW()
+                    WHERE idempotency_key=%s AND send_started_at=%s AND reaction_state='dispatching'
+                      AND (%s::timestamptz IS NULL OR reaction_updated_at=%s::timestamptz)
+                    """,
+                    (state,_json_dumps(result),key,expected_started_at,expected_reaction_updated_at,expected_reaction_updated_at),
+                )
+            conn.commit()
+
     def get_delivery_attempt_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -5832,6 +6524,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SET status = 'accepted', sent_message_ids_json = %s::jsonb, telegram_method = COALESCE(%s, telegram_method), updated_at = NOW(), error_text = NULL
                     WHERE idempotency_key = %s
                       AND status IN ('sending', 'accepted')
+                      AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication'
                     """,
                     (_json_dumps([int(x) for x in (sent_message_ids or [])]), telegram_method, str(idempotency_key)),
                 )
@@ -5851,6 +6544,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     UPDATE delivery_attempts
                     SET status = 'verified', sent_message_ids_json = %s::jsonb, error_text = NULL, updated_at = NOW()
                     WHERE idempotency_key = %s
+                      AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication'
                       AND (
                           status = 'accepted'
                           OR (status = 'verified' AND sent_message_ids_json = %s::jsonb)
@@ -6116,7 +6810,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s FOR UPDATE",
+                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication' FOR UPDATE",
                     (str(idempotency_key),),
                 )
                 attempt = cur.fetchone()
@@ -6158,7 +6852,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if not current_job or current_job.get("status") != "processing" or current_job.get("locked_by") != str(worker_id):
                     return 0
                 cur.execute(
-                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s FOR UPDATE",
+                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication' FOR UPDATE",
                     (str(idempotency_key),),
                 )
                 attempt = cur.fetchone()

@@ -45,6 +45,10 @@ class VideoSendDelivery:
             delivery_id=int(delivery_id),
             target_id=target_id,
         )
+        from .single_publication_reconciliation import register_pending_single, reconcile_pending_publication
+        pending_result = await reconcile_pending_publication(owner, idempotency_key)
+        if pending_result is not None:
+            return pending_result
         has_attempt_ledger = all(
             hasattr(owner.db, method_name)
             for method_name in (
@@ -236,7 +240,17 @@ class VideoSendDelivery:
             # Unknown result / wrong peer: do not guess the target message id,
             # call reaction handlers, or permit another Telegram send.
             if not sent_msg.authoritative_resolved:
-                candidate_ids = sent_msg.returned_candidate_ids or []
+                if sent_msg.transport_accepted and sent_msg.resolution_method == "video_processing_pending":
+                    if await register_pending_single(
+                        owner, key=idempotency_key, delivery_id=delivery_id, rule_id=rule_id,
+                        target_id=target_id, target_thread_id=payload.get("target_thread_id"),
+                        source_channel=str(payload.get("source_channel") or ""),
+                        source_message_id=source_message_id, scheduled_id=sent_msg.returned_candidate_id,
+                    ):
+                        pending_result = await reconcile_pending_publication(owner, idempotency_key)
+                        return pending_result or {"ok": False, "retryable": False, "accepted": True,
+                                                  "manual_review_required": True, "error_text": "publication_receipt_missing_no_resend"}
+                candidate_ids = [] if sent_msg.resolution_method == "video_processing_pending" else (sent_msg.returned_candidate_ids or [])
                 if has_attempt_ledger:
                     await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=candidate_ids, telegram_method="video_send_unresolved")
                 error = "video_send_accepted_target_id_unresolved_non_retryable"
