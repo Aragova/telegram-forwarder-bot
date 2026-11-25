@@ -95,9 +95,18 @@ class RepostCampaignRuntimeService:
         with publication_scope(intent):
             result = await self.renderer.send(chat_id=target_id,content=content)
         ids = getattr(result,"message_ids",None) or ([result.message_id] if result.kind!="album" else [])
-        if result.ok and (not publication_pairs(ids,ids) or result.message_id!=ids[0]):
+        if result.ok and (not publication_pairs(ids,ids) or result.message_id!=ids[0]
+                          or (result.kind!="album" and len(ids)!=1)):
             return SavedPostRenderResult(False,result.method+"_unverified",result.kind,
                 error_text="ID публикации не подтверждены",accepted=True,manual_review_required=True)
+        if result.ok:
+            saved = await run_db(self.repo.mark_campaign_run_message_sent,message_id,
+                sent_message_id=result.message_id,sent_message_ids=getattr(result,"message_ids",None),
+                render_mode=result.method)
+            if not saved:
+                return SavedPostRenderResult(False,result.method+"_unverified",result.kind,
+                    error_text="Telegram ответил, но ID не сохранены; требуется ручная проверка",
+                    accepted=True,manual_review_required=True,raw_message_ids=ids)
         return result
 
     async def recover_campaign_publications(self, *, limit=30):
@@ -105,11 +114,12 @@ class RepostCampaignRuntimeService:
         inbox = getattr(client,"publication_inbox",None)
         if inbox is None:
             return
-        for row in await run_db(self.repo.list_pending_campaign_publications,limit=limit):
-            receipt = row["publication_receipt"]
-            if receipt["account_id"] != inbox.sender_account_id or str(receipt["peer_id"])!=str(row["target_id"]):
-                continue
+        for row in await run_db(self.repo.list_pending_campaign_publications,account_id=inbox.sender_account_id,limit=limit):
             try:
+                receipt = row["publication_receipt"]
+                if (receipt["account_id"] != inbox.sender_account_id or str(receipt["peer_id"])!=str(row["target_id"])
+                        or receipt["thread_id"]!=row["target_thread_id"]):
+                    continue
                 entity = await client.get_entity(receipt["peer_id"])
                 ids = await TelethonAuthoritativeMessageResolver(client).resolve_scheduled_publications(
                     target_entity=entity,target_id=receipt["peer_id"],scheduled_ids=receipt["ids"],
@@ -133,6 +143,8 @@ class RepostCampaignRuntimeService:
                     published_ids=ids,published_at=published_at)
             except Exception:
                 self.logger.exception("CAMPAIGN_PUBLICATION_RECOVERY_FAILED | id=%s",row["id"])
+            finally:
+                await run_db(self.repo.defer_campaign_publication_check,row["id"])
 
     def _build_top_time_snapshot_from_rule(self, rule) -> dict[str, Any]:
         return normalize_repost_campaign_top_time_settings(
@@ -729,12 +741,6 @@ class RepostCampaignRuntimeService:
                 premium_required=render_result.premium_required,
                 extra={"campaign_run_id": run_id, "campaign_run_message_id": run_message_id},
             )
-        await run_db(self.repo.mark_campaign_run_message_sent ,
-            run_message_id,
-            sent_message_id=render_result.message_id,
-            sent_message_ids=getattr(render_result, "message_ids", None),
-            render_mode=render_result.method,
-        )
         await run_db(self.repo.update_campaign_run_status ,
             run_id,
             status="sent",
@@ -831,7 +837,6 @@ class RepostCampaignRuntimeService:
             render_result = await self._send_claimed(run_message_id,target["target_id"],target["target_thread_id"],content)
             last_render_mode = getattr(render_result, "method", None) or last_render_mode
             if render_result.ok:
-                await run_db(self.repo.mark_campaign_run_message_sent, run_message_id, sent_message_id=render_result.message_id, sent_message_ids=getattr(render_result, "message_ids", None), render_mode=render_result.method)
                 targets_success += 1
             else:
                 delete_status, delete_error_text = _build_failed_campaign_message_delete_fields(getattr(render_result, "method", None))
@@ -1092,12 +1097,6 @@ class RepostCampaignRuntimeService:
             album_ids = list(getattr(render_result, "message_ids", None) or [])
             is_album_without_ids = bool(render_result.ok and render_result.kind == "album" and not album_ids)
             if render_result.ok and not is_album_without_ids:
-                await run_db(self.repo.mark_campaign_run_message_sent ,
-                    run_message_id,
-                    sent_message_id=render_result.message_id,
-                    sent_message_ids=album_ids or getattr(render_result, "message_ids", None),
-                    render_mode=render_result.method,
-                )
                 success_count += 1
                 has_confirmed_sent_ids = bool(render_result.message_id or album_ids)
                 if has_confirmed_sent_ids:

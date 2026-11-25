@@ -1242,6 +1242,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS publication_review_required BOOLEAN NOT NULL DEFAULT FALSE;
         ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS publication_receipt JSONB NULL;
         ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS publication_raw_ids JSONB NULL;
+        ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS publication_next_check_at TIMESTAMPTZ NULL;
+        ALTER TABLE campaign_run_messages ADD COLUMN IF NOT EXISTS publication_manual_review JSONB NULL;
         CREATE INDEX IF NOT EXISTS idx_campaign_publication_review
             ON campaign_run_messages(rule_id, saved_post_id, target_id)
             WHERE send_status='sending' OR publication_review_required;
@@ -11622,10 +11624,20 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         WHERE p.id<>m.id AND p.rule_id=m.rule_id AND p.saved_post_id=m.saved_post_id
                           AND p.target_id=m.target_id AND p.target_thread_id IS NOT DISTINCT FROM m.target_thread_id
                           AND (p.send_status='sending' OR p.publication_review_required
-                            OR (p.send_status='failed' AND p.render_mode LIKE '%%_unverified'))
+                            OR (p.send_status='failed' AND p.render_mode LIKE '%%_unverified'
+                                AND p.publication_manual_review IS NULL)
+                            OR (p.send_status='sent' AND p.sent_at >=
+                                (SELECT started_at FROM campaign_runs WHERE id=m.run_id)))
                       )
                     """, (render_mode,int(message_id)))
-                return cur.rowcount == 1
+                if cur.rowcount == 1:
+                    return True
+                cur.execute("""
+                    UPDATE campaign_run_messages SET send_status='failed',delete_status='none',
+                        send_error_text='Предыдущая публикация не подтверждена или уже обрабатывается',updated_at=NOW()
+                    WHERE id=%s AND send_status='pending'
+                    """, (int(message_id),))
+                return False
 
     def get_or_create_campaign_mtproto_random_ids(self, key: str, ordinal: int,
                                                    fingerprint: str, count: int) -> list[int]:
@@ -11652,6 +11664,16 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 return list(stored["random_ids"])
 
     def record_campaign_publication_receipt(self, message_id: int, receipt: dict[str, Any]) -> bool:
+        from app.telegram_publication import publication_candidate_mask
+        if not publication_candidate_mask(receipt["ids"],receipt["mask"]):
+            return False
+        if type(receipt["account_id"]) is not int or receipt["account_id"]<=0:
+            return False
+        if type(receipt["peer_id"]) is not int or receipt["peer_id"]==0:
+            return False
+        started = datetime.fromisoformat(receipt["started_at"])
+        if started.tzinfo is None:
+            return False
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -11662,7 +11684,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     """, (_json_dumps(receipt),int(message_id),str(receipt["peer_id"]),receipt["thread_id"]))
                 return cur.rowcount == 1
 
-    def list_pending_campaign_publications(self, *, limit: int = 30) -> list[dict[str, Any]]:
+    def list_pending_campaign_publications(self, *, account_id: int, limit: int = 30) -> list[dict[str, Any]]:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -11671,17 +11693,51 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                       AND m.send_status IN ('sending','failed')
                       AND (r.status<>'sending' OR m.updated_at < NOW()-INTERVAL '15 minutes')
                       AND (m.publication_receipt->>'started_at')::timestamptz >= NOW()-INTERVAL '24 hours'
-                    ORDER BY m.updated_at,m.id LIMIT %s
-                    """, (max(1,min(int(limit),100)),))
+                      AND m.publication_receipt->>'account_id'=%s
+                      AND (m.publication_next_check_at IS NULL OR m.publication_next_check_at<=NOW())
+                    ORDER BY m.publication_next_check_at NULLS FIRST,m.id LIMIT %s
+                    """, (str(account_id),max(1,min(int(limit),100))))
                 return [dict(row) for row in cur.fetchall()]
+
+    def defer_campaign_publication_check(self, message_id: int) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE campaign_run_messages SET publication_next_check_at=NOW()+INTERVAL '30 seconds'
+                    WHERE id=%s AND publication_review_required
+                    """, (int(message_id),))
 
     def confirm_campaign_publication(self, message_id: int, *, receipt: dict[str, Any],
                                      published_ids: list[int], published_at: datetime) -> bool:
-        from app.telegram_publication import publication_pairs
-        if not publication_pairs(published_ids,published_ids) or len(published_ids)!=len(receipt["ids"]):
+        from app.telegram_publication import publication_pairs, publication_candidate_mask
+        if (not publication_pairs(published_ids,published_ids) or len(published_ids)!=len(receipt["ids"])
+                or not publication_candidate_mask(receipt["ids"],receipt["mask"])):
+            return False
+        started_at = datetime.fromisoformat(receipt["started_at"])
+        if published_at.tzinfo is None or published_at < started_at.replace(microsecond=0):
             return False
         with self.connect() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                            (f'publication:{receipt["account_id"]}:{receipt["peer_id"]}',))
+                for old,new,pending in zip(receipt["ids"],published_ids,receipt["mask"]):
+                    if not pending:
+                        if old != new:
+                            return False
+                        continue
+                    cur.execute("""
+                        SELECT 1 FROM telegram_publication_mappings m
+                        WHERE m.sender_account_id=%s AND m.target_peer_id=%s
+                          AND m.scheduled_id=%s AND m.published_id=%s
+                          AND NOT EXISTS (
+                            SELECT 1 FROM telegram_publication_mappings x
+                            WHERE x.sender_account_id=m.sender_account_id AND x.target_peer_id=m.target_peer_id
+                              AND ((x.scheduled_id=m.scheduled_id AND x.published_id<>m.published_id)
+                                OR (x.published_id=m.published_id AND x.scheduled_id<>m.scheduled_id))
+                          )
+                        """, (receipt["account_id"],receipt["peer_id"],old,new))
+                    if not cur.fetchone():
+                        return False
                 cur.execute("""
                     UPDATE campaign_run_messages SET send_status='sent',sent_message_id=%s,
                         sent_message_ids_json=%s::jsonb,sent_at=%s,render_mode=%s,
@@ -11692,9 +11748,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         updated_at=NOW()
                     WHERE id=%s AND publication_receipt=%s::jsonb AND publication_review_required
                         AND send_status IN ('sending','failed')
+                        AND target_id=%s AND target_thread_id IS NOT DISTINCT FROM %s
+                        AND clock_timestamp() < (publication_receipt->>'started_at')::timestamptz+INTERVAL '24 hours'
                     RETURNING *
                     """, (published_ids[0],_json_dumps(published_ids),published_at,receipt["method"],
-                          published_at,int(message_id),_json_dumps(receipt)))
+                          published_at,int(message_id),_json_dumps(receipt),str(receipt["peer_id"]),receipt["thread_id"]))
                 row = cur.fetchone()
                 if not row:
                     return False
@@ -11724,7 +11782,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
     def mark_campaign_run_message_sent(self, message_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None = None, render_mode: str | None = None) -> bool:
         from app.telegram_publication import publication_pairs
-        ids = sent_message_ids or [sent_message_id]
+        ids = sent_message_ids if sent_message_ids is not None else [sent_message_id]
         if not publication_pairs(ids,ids) or sent_message_id != ids[0]:
             return False
         with self.connect() as conn:

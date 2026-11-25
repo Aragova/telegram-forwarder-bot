@@ -750,12 +750,12 @@ def test_rescan_snapshot_accepts_both_production_and_ci_audit_schemas(
 
 def test_campaign_send_claim_and_intent_are_durable(repo):
     _, rule_id, _, _, _, target = seed(repo, uuid4().int % 10**12)
-    run = repo.create_campaign_run(rule_id=rule_id,saved_post_id=123,run_type="manual",status="sending",show_seconds=60,targets_total=1)
+    run = repo.create_campaign_run(rule_id=rule_id,saved_post_id=123,run_type="manual",status="sending",show_seconds=60,targets_total=1,started_by=None)
     def placement(run_id):
         return repo.create_campaign_run_message(run_id=run_id,rule_id=rule_id,saved_post_id=123,
             target_kind="main",target_id=str(target),show_seconds=60,delete_after_at="2020-01-01T00:00:00+00:00")
     mid = placement(run)
-    other_run = repo.create_campaign_run(rule_id=rule_id,saved_post_id=123,run_type="manual",status="sending",show_seconds=60,targets_total=1)
+    other_run = repo.create_campaign_run(rule_id=rule_id,saved_post_id=123,run_type="manual",status="sending",show_seconds=60,targets_total=1,started_by=None)
     other = placement(other_run)
     assert repo.mark_campaign_run_message_sending(mid)
     assert not repo.mark_campaign_run_message_sending(mid)
