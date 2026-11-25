@@ -856,3 +856,27 @@ def test_campaign_run_id_alone_fences_draft_edit():
     sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
     repo.posts[sid]["campaign_run_id"] = 88
     assert not service.update_draft_show_seconds(scheduled_post_id=sid, show_seconds=60).ok
+
+
+
+def test_send_now_concurrent_target_removal_restores_editable_draft():
+    import asyncio
+    service, repo = make_service()
+    sid = service.create_draft(rule_id=1).extra["scheduled_post_id"]
+    repo.saved_posts[7] = {"id": 7, "title": "ad", "content_json": {"kind": "text", "text": "ad"}}
+    repo.posts[sid]["saved_post_id"] = 7
+    repo.posts[sid]["show_seconds"] = 60
+    repo.post_targets[sid] = [{"id": 1, "target_id": "-10077", "is_active": True}]
+    original_claim = repo.claim_campaign_scheduled_post_snapshot
+
+    def remove_targets_during_claim(scheduled_post_id, *, actor_id=None):
+        repo.post_targets[scheduled_post_id] = []
+        return original_claim(scheduled_post_id, actor_id=actor_id)
+
+    repo.claim_campaign_scheduled_post_snapshot = remove_targets_during_claim
+    result = asyncio.run(service.send_now(scheduled_post_id=sid))
+    assert not result.ok
+    assert repo.posts[sid]["status"] == "draft"
+    assert not repo.posts[sid].get("campaign_run_id")
+    assert repo.needs_review_calls == []
+    assert service.update_draft_show_seconds(scheduled_post_id=sid, show_seconds=120).ok
