@@ -160,3 +160,36 @@ def test_empty_botapi_album_result_is_an_uncertain_transport_not_a_retry(tmp_pat
         bot.send_media_group.assert_awaited_once()
 
     asyncio.run(scenario())
+
+
+
+def test_manual_campaign_delete_refuses_unverified_failed_or_sent_post():
+    """Never claim a possibly published placement was deleted without evidence."""
+    async def scenario():
+        for status in ("failed", "pending", "sent"):
+            row = {
+                "id": 33, "run_id": 21, "rule_id": 7,
+                "send_status": status, "delete_status": "failed",
+                "publication_review_required": True,
+                "sent_message_id": 333,
+                "target_id": "-100123",
+            }
+            repo = SimpleNamespace(
+                get_campaign_run=Mock(return_value={"id": 21, "rule_id": 7}),
+                get_campaign_run_message=Mock(return_value=row),
+                mark_campaign_run_message_deleted=Mock(),
+            )
+            deleter = SimpleNamespace(delete_message=AsyncMock())
+            service = RepostCampaignRuntimeService.__new__(RepostCampaignRuntimeService)
+            service.repo = repo
+            service.deleter = deleter
+            service.logger = Mock()
+            result = await service.delete_campaign_run_message_now(
+                rule_id=7, run_id=21, run_message_id=33,
+            )
+            assert not result.ok, status
+            assert "ручн" in result.error_text or "не подтвержден" in result.error_text
+            repo.mark_campaign_run_message_deleted.assert_not_called()
+            deleter.delete_message.assert_not_awaited()
+
+    asyncio.run(scenario())
