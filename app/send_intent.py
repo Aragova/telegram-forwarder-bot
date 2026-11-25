@@ -121,7 +121,13 @@ async def observe_publication(call, *, bot_result=False, expected_count=None):
     try:
         result = await call()
     except Exception as exc:
-        if _definite_rejection(exc):
+        if isinstance(exc, PublicationWriteUnavailable):
+            # Preflight failure is a definite no-RPC, but MUST keep the
+            # current intent fenced against alternate transport fallback.
+            intent.possible_write = previous
+            intent.blocked = True
+            intent.uncertain = False
+        elif _definite_rejection(exc):
             intent.possible_write = previous
             intent.blocked = intent.uncertain = False
         raise
