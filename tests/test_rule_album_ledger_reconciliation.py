@@ -718,8 +718,10 @@ def _load_rescan_handler(name, namespace):
     source = Path("bot.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
-    helpers = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
-               and n.name == "_finish_rule_rescan_with_retry"]
+    helpers = [n for n in tree.body
+               if isinstance(n, (ast.AsyncFunctionDef, ast.ClassDef))
+               and n.name in {"_RescanReleaseFailed", "_finish_rule_rescan_with_retry",
+                              "_report_rescan_release_failure"}]
     exec(compile(ast.Module(body=[*helpers, node], type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace[name]
 
