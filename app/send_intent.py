@@ -46,6 +46,19 @@ class PublicationIntent:
 
 _intent: ContextVar[PublicationIntent | None] = ContextVar("publication_intent", default=None)
 _single_rpc: ContextVar[bool] = ContextVar("publication_single_rpc", default=False)
+_diagnostic_rpc: ContextVar[bool] = ContextVar("diagnostic_single_rpc", default=False)
+
+
+@contextmanager
+def diagnostic_rpc_scope():
+    """Disable internal RPC retries/flood sleeps only in this diagnostic task."""
+    if _intent.get() is not None:
+        raise PublicationWriteUnavailable("Diagnostic RPC inside production intent")
+    token = _diagnostic_rpc.set(True)
+    try:
+        yield
+    finally:
+        _diagnostic_rpc.reset(token)
 
 
 @contextmanager
@@ -229,7 +242,8 @@ def publication_client_class(base):
             publications = [(item, _publication_members(item)) for item in calls]
             publications = [(item, members) for item, members in publications if members]
             scoped = intent is not None and bool(publications)
-            token = _single_rpc.set(scoped)
+            diagnostic = _diagnostic_rpc.get()
+            token = _single_rpc.set(scoped or diagnostic)
             try:
                 if not scoped:
                     if publications:
@@ -239,7 +253,7 @@ def publication_client_class(base):
                     if upload:
                         trace["upload_parts_started"] = trace.get("upload_parts_started", 0) + 1
                     try:
-                        result = await invoke(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold)
+                        result = await invoke(request, ordered=ordered, flood_sleep_threshold=0 if diagnostic else flood_sleep_threshold)
                     except Exception as exc:
                         if upload:
                             trace["upload_parts_failed"] = trace.get("upload_parts_failed", 0) + 1
