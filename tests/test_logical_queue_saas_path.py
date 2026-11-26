@@ -38,7 +38,9 @@ class _FakeCursor:
             self._fetchone = self.script.get("unfinished_receipt")
             return
 
-        if "FROM deliveries d JOIN posts p ON p.id = d.post_id WHERE d.rule_id = %s ORDER BY p.id ASC" in q:
+        if ("FROM deliveries d JOIN posts p ON p.id = d.post_id "
+                "JOIN routing r ON r.id = d.rule_id WHERE d.rule_id = %s "
+                "ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC") in q:
             self._fetchall = self.script.get("rows", [])
             return
 
@@ -252,3 +254,26 @@ def test_manual_queue_mutations_refused_during_rescan():
     assert available.rollback_last_delivery(30) is not None
     assert available.set_rule_start_from_position(30, 2) is not None
     assert available.fake_conn.cursor_obj.executemany_calls
+
+
+def test_rollback_uses_latest_album_member_timestamp_not_queue_position():
+    rows = [
+        _mk_row(1, post_id=101, message_id=201, status="sent", media_group_id="album"),
+        _mk_row(2, post_id=102, message_id=202, status="sent", media_group_id="album"),
+        _mk_row(3, post_id=103, message_id=203, status="sent"),
+    ]
+    for row, ts in zip(rows, ["2026-01-01T00:00:00+00:00",
+                              "2026-01-03T00:00:00+00:00",
+                              "2026-01-02T00:00:00+00:00"]):
+        row["sent_at"] = ts
+    current = [
+        {"id": row["delivery_id"], "post_id": row["post_id"], "status": "sent",
+         "sent_at": row["sent_at"], "error_text": None, "attempt_count": 1,
+         "sent_message_id": 9000 + row["delivery_id"], "sent_message_ids_json": "[9001,9002]",
+         "target_id_snapshot": "target-a", "delivery_method": "copy"}
+        for row in rows[:2]
+    ]
+    repo = _RepoForTests(script={"rows": rows, "current_rows": current, "deleted_attempts_count": 2})
+    repo._rule = SimpleNamespace(mode="repost")
+    result = repo.rollback_last_delivery(rule_id=30, admin_id=1)
+    assert result["rolled_back_delivery_ids"] == [1, 2]

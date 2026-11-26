@@ -100,11 +100,38 @@ rebuild therefore remain eligible. All of this happens without deleting shared
 source posts or loosening the idempotency checks on previously sent albums.
 
 
-## Regression #213 — explicit replay of historical accepted video attempts
-Before #507 video sends could remain accepted even with a stored candidate ID. Earlier full rescans removed delivery rows while retaining attempt history. #527 blocked every such attempt. The new explicit confirmation authorizes a new replay cycle, not verification of old video. Eligibility: accepted legacy video_send, updated before the #507 merge (2026-11-22 17:56:18 UTC), error-free, matching rule/tenant/target and exact delivery-based key, exactly one positive numeric candidate ID, no durable MTProto intent or receipt, and no original delivery or a matching sent delivery. Age is not evidence of publication. Other uncertain attempts remain fenced. Archive retains original status and IDs. Preflight runs under the routing lock before parsing and again at commit. Archive/delete/rebuild share one transaction. Keep-position pruning retains attempted delivery evidence. Explicit replay may intentionally duplicate historical content.
+## Historical regression #213 — former accepted-video-only replay policy
+Before #507 video sends could remain accepted even with a stored candidate ID. Earlier full rescans removed delivery rows while retaining attempt history. #527 blocked every such attempt. The then-current explicit confirmation authorized a new replay cycle, not verification of old video. Former eligibility (superseded by Current behavior below): accepted legacy video_send, updated before the #507 merge (2026-11-22 17:56:18 UTC), error-free, matching rule/tenant/target and exact delivery-based key, exactly one positive numeric candidate ID, no durable MTProto intent or receipt, and no original delivery or a matching sent delivery. Age is not evidence of publication. Other uncertain attempts remain fenced. Archive retains original status and IDs. Preflight runs under the routing lock before parsing and again at commit. Archive/delete/rebuild share one transaction. Keep-position pruning retains attempted delivery evidence. Explicit replay may intentionally duplicate historical content.
 
 Both modes fence the route snapshot at commit. Keep-position backfill, pruning and quarantine share a transaction; a recreated delivery with a known orphan attempt is quarantined, not marked sent. Missing source IDs block keep-position before parsing. Fresh replay snapshots existing self-loop echo evidence into a route-scoped audit event before removing old delivery anchors. Successful queue marker and fresh next_run are committed with the rebuilt queue.
 
 Manual rollback, clear and start-position changes must obtain the same routing lock and refuse while a rescan owner holds it. Orphaned album evidence quarantines the whole remaining pending logical album, not just the first member. The history batch writer refuses missing posts and runs outside the asyncio event loop for rescans. Both modes share one UI task key and the worker owns the progress screen.
 
 Album attempt arrays historically contain delivery IDs. Keep-position never interprets them as source message IDs; it resolves albums by their stable media-group key or exact receipt. An orphan with neither is blocked before scanning. A collision between a historical delivery ID and a new Telegram message ID must not quarantine the unrelated new post.
+
+
+## Current behavior: full-source rescan and simple queue restart (#94)
+
+Both modes use the same full-history parser for channels and topics, refresh
+source posts without deleting shared data, and verify cached live arrivals after
+the scan-start high-water mark against Telegram in batches before committing.
+Deleted live candidates are excluded, and a newly committed unchecked candidate
+causes a safe rollback of the restart instead of silently dropping its delivery.
+**Start over** atomically builds a fresh
+queue from observed source IDs, excludes deleted posts and known self-loop
+echoes, allocates new delivery IDs, and archives prior attempt keys without
+rewriting their outcomes. Historical uncertain attempts with both timestamps before the #507 merge
+(2026-11-22 17:56:18 UTC), without MTProto intents or unresolved receipts,
+may be archived without verifying their old outcomes. Modern uncertain sends
+(including Bot API sends without intents), active jobs, and unresolved durable
+publication evidence remain fenced. Age alone never proves publication.
+**Keep position** preserves existing delivery identities and position. After
+a completed rescan, scheduler and logical queue views use Telegram message ID
+order within the source; rules not yet rescanned retain their existing order.
+Rollback selects the completed logical item by its latest member's actual send time,
+not queue position. Confirmed queue changes are audited before attempting owner release.
+If owner release fails after a queue commit, only the fenced release is retried;
+no second rebuild is offered. If the result of the queue commit itself is unknown,
+the owner is retained for manual database verification before another rebuild.
+A complete source scan is required before resetting the queue; its
+duration depends on Telegram and source size.

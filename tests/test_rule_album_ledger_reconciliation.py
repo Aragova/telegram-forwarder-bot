@@ -193,8 +193,9 @@ def test_rescan_never_deletes_shared_source_posts_and_keep_does_not_reset_queue(
     assert "db.clear_rule_deliveries" not in keep + fresh
     assert "clean_start=True" not in keep + fresh
     assert "db.begin_rule_rescan" in keep and "db.begin_rule_rescan" in fresh
-    assert "db.reset_rule_history_for_replay" in fresh
-    assert "db.reset_rule_history_for_replay" not in keep
+    assert "db.restart_rule_queue" in fresh
+    assert "db.restart_rule_queue" not in keep
+    assert "await _scan_rule_source(rule)" in keep and "await _scan_rule_source(rule)" in fresh
     assert "db.mark_rule_messages_sent" not in keep
     assert "db.rebuild_rule_keep_position" in keep
     assert "saved_first_pending_message_id" in keep
@@ -203,12 +204,12 @@ def test_rescan_never_deletes_shared_source_posts_and_keep_does_not_reset_queue(
 
 def test_repository_archives_attempt_keys_instead_of_deleting_history():
     source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
-    fn = source.split("def reset_rule_history_for_replay(", 1)[1].split(
+    fn = source.split("def restart_rule_queue(", 1)[1].split(
         "def clear_rule_deliveries(", 1
     )[0]
     assert "idempotency_key || ':rescan:' || id::text" in fn
     assert "DELETE FROM delivery_attempts" not in fn
-    assert "DELETE FROM deliveries WHERE rule_id = %s" in fn
+    assert "DELETE FROM deliveries WHERE rule_id=%s" in fn
     assert "is_active = FALSE" in source
     assert "UPDATE posts" in source
 
@@ -332,8 +333,11 @@ def test_rescan_batch_refresh_skips_recreating_old_delivery_rows():
     keep = bot.split("async def _run_rescan_rule_keep_job(", 1)[1].split(
         "\n@dataclass(slots=True)", 1
     )[0]
-    assert fresh.count("preserve_existing_deliveries=True") == 2
-    assert keep.count("preserve_existing_deliveries=True") == 2
+    shared = bot.split("async def _scan_rule_source(", 1)[1].split(
+        "async def _run_rescan_rule_fresh_job(", 1
+    )[0]
+    assert shared.count("preserve_existing_deliveries=True") == 2
+    assert "await _scan_rule_source(rule)" in fresh and "await _scan_rule_source(rule)" in keep
 
 
 class RescanCursor:
@@ -346,10 +350,12 @@ class RescanCursor:
         q = " ".join(str(sql).split())
         self.sql.append(q)
         self.rowcount = 1
-        if q.startswith("SELECT is_active, rescan_owner_token"):
-            self.result = {"is_active": self.active, "rescan_owner_token": self.owner, "source_id": "-100123", "source_thread_id": None}
+        if q.startswith(("SELECT is_active, rescan_owner_token", "SELECT rescan_owner_token")):
+            self.result = {"is_active": self.active, "rescan_owner_token": self.owner,
+                           "source_id": "-100123", "source_thread_id": None,
+                           "target_id": "-100456", "target_thread_id": None, "tenant_id": 1, "mode": "repost"}
         elif "AS busy" in q:
-            self.result = {"busy": self.busy}
+            self.result = {"busy": self.unresolved if "FROM mtproto_send_intents" in q else self.busy}
         elif "AS unresolved" in q:
             self.result = {"unresolved": self.unresolved}
         elif "SET is_active = FALSE, rescan_owner_token =" in q:
@@ -363,10 +369,16 @@ class RescanCursor:
             self.rowcount = 12
         elif q.startswith("DELETE FROM deliveries WHERE rule_id"):
             self.rowcount = 33
+            self.result = [{"post_id": i} for i in range(1, 34)]
+        elif q.startswith("INSERT INTO deliveries"):
+            self.rowcount = 2
         else:
             self.result = None
 
     def fetchone(self):
+        return self.result
+
+    def fetchall(self):
         return self.result
 
 
@@ -406,29 +418,33 @@ def test_rescan_second_owner_rejected_across_modes():
     assert cursor.owner is None and cursor.active is True
 
 
-def test_explicit_replay_archives_attempts_with_matching_owner():
-    repo, cursor, conn = _rescan_repo(active=False, owner="valid")
-    assert repo.reset_rule_history_for_replay(214, owner_token="valid", allowed_message_ids={101}, include_newer_than_message_id=101) == (12, 33, 17)
-    assert conn.commits == 1
-    assert any("UPDATE delivery_attempts SET idempotency_key" in q for q in cursor.sql)
-    assert any("DELETE FROM deliveries WHERE rule_id = %s" in q for q in cursor.sql)
+def test_explicit_restart_archives_attempts_using_scanned_posts():
+    repo, cursor, conn = _rescan_repo()
+    active, owner = repo.begin_rule_rescan(214, fresh=True)
+    assert repo.restart_rule_queue(214, owner_token=owner, allowed_message_ids={101, 103},
+                                   include_newer_than_message_id=103) == (12, 33, 2)
+    repo.finish_rule_rescan(214, was_active=active, owner_token=owner, queue_rebuilt=True)
+    assert conn.commits == 3 and cursor.owner is None and cursor.active
+    archive_index = next(i for i, q in enumerate(cursor.sql)
+                         if "UPDATE delivery_attempts SET idempotency_key" in q)
+    delete_index = next(i for i, q in enumerate(cursor.sql)
+                        if "DELETE FROM deliveries WHERE rule_id=%s" in q)
+    insert_index = next(i for i, q in enumerate(cursor.sql) if q.startswith("INSERT INTO deliveries"))
+    assert archive_index < delete_index < insert_index
     assert not any("DELETE FROM posts" in q for q in cursor.sql)
 
 
-def test_replay_refuses_unresolved_publications():
-    repo, cursor, conn = _rescan_repo(active=False, owner="valid", unresolved=True)
-    with pytest.raises(RuntimeError):
-        repo.reset_rule_history_for_replay(214, owner_token="valid", allowed_message_ids={101}, include_newer_than_message_id=101)
+@pytest.mark.parametrize("options,reason", [
+    ({"unresolved": True}, "современная публикация"),
+    ({"busy": True}, "незавершённые доставки или задачи"),
+    ({"owner": "other"}, "уже выполняется"),
+])
+def test_restart_refuses_live_work_or_another_owner(options, reason):
+    repo, cursor, conn = _rescan_repo(**options)
+    with pytest.raises(RuntimeError, match=reason):
+        repo.begin_rule_rescan(214, fresh=True)
     assert conn.commits == 0
     assert not any("UPDATE delivery_attempts" in q or "DELETE FROM deliveries" in q for q in cursor.sql)
-
-
-@pytest.mark.parametrize("active,token", [(True, "valid"), (False, "wrong"), (False, "")])
-def test_replay_refuses_active_or_wrong_owner(active, token):
-    repo, cursor, conn = _rescan_repo(active=active, owner="valid")
-    with pytest.raises(RuntimeError, match="владеть остановленным"):
-        repo.reset_rule_history_for_replay(214, owner_token=token, allowed_message_ids={101}, include_newer_than_message_id=101)
-    assert conn.commits == 0
 
 
 def test_backfill_filters_deleted_source_posts():
@@ -481,7 +497,7 @@ def test_stale_pending_prune_is_rule_scoped():
     assert "DELETE FROM deliveries d" in query
     assert "d.rule_id = %s" in query and "d.status = 'pending'" in query
     assert "p.source_thread_id IS NOT DISTINCT FROM %s" in query
-    assert params == (214, "-100123", None, None, None, None, None, None, [101, 103], 103)
+    assert params == (214, "-100123", None, None, None, None, None, None, [101, 103], 103, [])
     assert "p.message_id <= %s" in query
 
 
@@ -571,12 +587,12 @@ def test_reactivation_does_not_reintroduce_deleted_cached_posts(
 def test_scan_finish_sets_persistent_queue_marker_before_resuming():
     source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
     finish = source.split("def finish_rule_rescan(", 1)[1].split(
-        "def reset_rule_history_for_replay(", 1
+        "def restart_rule_queue(", 1
     )[0]
     assert "rescan_queue_built = rescan_queue_built OR %s" in finish
     assert "WHERE id = %s AND rescan_owner_token = %s" in finish
     bot = Path("bot.py").read_text(encoding="utf-8")
-    assert "queue_rebuilt=successful" in bot
+    assert "db.restart_rule_queue" in bot
     assert "queue_rebuilt=scan_complete" in bot
     assert "rescan_queue_built BOOLEAN NOT NULL DEFAULT FALSE" in source
     activate = source.split("def activate_rule_with_backfill(", 1)[1].split(
@@ -616,27 +632,14 @@ def test_mid_scan_live_arrival_survives_replay_backfill():
     assert conn.cur.inserted == [1, 3, 4]
 
 
-def test_scan_high_water_is_captured_inside_owner_finally_scope():
+def test_scan_high_water_is_captured_inside_keep_owner_finally_scope():
     source = Path("bot.py").read_text(encoding="utf-8")
-    for start, end in [
-        ("async def _run_rescan_rule_fresh_job(", "async def _run_rescan_rule_keep_job("),
-        ("async def _run_rescan_rule_keep_job(", "\n@dataclass(slots=True)"),
-    ]:
-        block = source.split(start, 1)[1].split(end, 1)[0]
-        assert "db.get_rule_scan_start_max_message_id" in block
-        assert block.index("        try:") < block.index(
-            "db.get_rule_scan_start_max_message_id"
-        )
-        assert "include_newer_than_message_id=scan_start_max_message_id" in block
-    assert "include_newer_than_message_id=scan_start_max_message_id" in source
-
-
-def test_fresh_preflight_rejects_unknown_before_owner_is_acquired():
-    repo, cursor, conn = _rescan_repo(unresolved=True)
-    with pytest.raises(RuntimeError, match="неизвестным результатом"):
-        repo.begin_rule_rescan(214, fresh=True)
-    assert cursor.owner is None and cursor.active
-    assert conn.commits == 0
+    block = source.split("async def _run_rescan_rule_keep_job(", 1)[1].split(
+        "\n@dataclass(slots=True)", 1
+    )[0]
+    assert "db.get_rule_scan_start_max_message_id" in block
+    assert block.index("        try:") < block.index("db.get_rule_scan_start_max_message_id")
+    assert "include_newer_than_message_id=scan_start_max_message_id" in block
 
 
 def test_fresh_replay_requires_one_time_db_confirmation():
@@ -711,3 +714,367 @@ def test_fingerprinted_album_reconciliation_keeps_original_member_vector():
     assert _apply(repo) == 3 and conn.commits == 1
     args = next(args for query, args in cursor.executed if "UPDATE delivery_attempts SET status = 'verified'" in query)
     assert args[0] == 11 and json.loads(args[1]) == [11, 12, 13]
+
+
+def _load_rescan_handler(name, namespace):
+    import ast
+
+    source = Path("bot.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+    helpers = [n for n in tree.body
+               if isinstance(n, (ast.AsyncFunctionDef, ast.ClassDef))
+               and n.name in {"_RescanReleaseFailed", "_finish_rule_rescan_with_retry",
+                              "_report_rescan_release_failure", "_complete_rescan_job",
+                              "_report_rescan_unknown", "_write_rescan_audit"}]
+    exec(compile(ast.Module(body=[*helpers, node], type_ignores=[]), "bot.py", "exec"), namespace)
+    return namespace[name]
+
+
+def test_rescan_final_screen_retries_throttled_edit():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    policy = SimpleNamespace(
+        MESSAGE_EDIT_THROTTLE_SECONDS=0,
+        edit_text=AsyncMock(side_effect=[
+            SimpleNamespace(ok=False, reason="message_edit_throttled"),
+            SimpleNamespace(ok=True, reason=None),
+        ]),
+    )
+    send = AsyncMock()
+    handler = _load_rescan_handler("_show_rule_processing_screen", {
+        "asyncio": asyncio, "ui_policy": policy, "send_message_safe": send,
+    })
+    asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
+    assert policy.edit_text.await_count == 2
+    send.assert_not_awaited()
+
+
+def test_rescan_final_screen_uses_send_when_edit_cannot_succeed():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    policy = SimpleNamespace(edit_text=AsyncMock(
+        return_value=SimpleNamespace(ok=False, reason="message_not_found"),
+    ))
+    send = AsyncMock()
+    handler = _load_rescan_handler("_show_rule_processing_screen", {
+        "asyncio": asyncio, "ui_policy": policy, "send_message_safe": send,
+    })
+    asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
+    send.assert_awaited_once_with(chat_id=1, text="Готово", reply_markup=None, parse_mode=None)
+
+
+@pytest.mark.parametrize("release", ["ok", "retry", "failed", "unknown"])
+def test_fresh_restart_reports_success_even_when_card_refresh_fails(release):
+    import asyncio
+    import logging
+    from unittest.mock import AsyncMock, Mock
+
+    from app.rescan_safety import RescanBlocked
+
+    rule = SimpleNamespace(source_id="-100123", source_thread_id=None,
+                           target_id="-100456", target_thread_id=None, mode="repost",
+                           schedule_mode="interval")
+    repo = SimpleNamespace(restart_rule_queue=Mock(
+                               return_value=(240, 525, 530),
+                               side_effect=RuntimeError("lost commit response") if release == "unknown" else None),
+                           log_rule_change=Mock(), get_rule=Mock(return_value=rule),
+                           begin_rule_rescan=Mock(return_value=(True, "owner")),
+                           get_rule_scan_start_max_message_id=Mock(return_value=525),
+                           finish_rule_rescan=Mock(side_effect={
+                               "ok": None,
+                               "retry": [RuntimeError("connection"), None],
+                               "failed": RuntimeError("connection"),
+                               "unknown": None,
+                           }[release]))
+    scan = AsyncMock(return_value=(5, set(range(1, 531))))
+
+    async def run_db(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    show = AsyncMock()
+    sleep = AsyncMock()
+    handler = _load_rescan_handler("_run_rescan_rule_fresh_job", {
+        "asyncio": SimpleNamespace(sleep=sleep),
+        "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
+        "logger": logging.getLogger(__name__),
+        "invalidate_preview_cache": Mock(), "invalidate_rule_card_cache": Mock(),
+        "utc_now_iso": lambda: "2026-11-26T10:00:00Z",
+        "ensure_rule_workers": AsyncMock(),
+        "refresh_rule_card_by_ids": AsyncMock(return_value="failed"),
+        "_show_rule_processing_screen": show, "_scan_rule_source": scan,
+        "_verify_rescan_live_arrivals": AsyncMock(return_value=set()),
+        "build_rescan_rule_keyboard": Mock(return_value="rescan"),
+        "build_rule_card_keyboard": Mock(return_value="card"),
+    })
+    asyncio.run(handler(rule_id=94, chat_id=1, message_id=2, admin_id=3))
+    if release in {"retry", "failed"}:
+        sleep.assert_awaited_once_with(1.0)
+    else:
+        sleep.assert_not_awaited()
+    scan.assert_awaited_once_with(rule)
+    repo.restart_rule_queue.assert_called_once_with(
+        94, owner_token="owner", allowed_message_ids=set(range(1, 531)),
+        include_newer_than_message_id=525, checked_missing_message_ids=set(),
+        expected_scope=("-100123", None, "-100456", None, "repost"),
+    )
+    if release == "unknown":
+        repo.finish_rule_rescan.assert_not_called()
+        repo.log_rule_change.assert_not_called()
+        assert "неизвестен" in show.await_args.kwargs["text"]
+        assert "reply_markup" not in show.await_args.kwargs
+        return
+    repo.log_rule_change.assert_called_once()
+    assert repo.finish_rule_rescan.call_count == (1 if release == "ok" else 2)
+    for call in repo.finish_rule_rescan.call_args_list:
+        assert call.args == (94,)
+        assert call.kwargs == {"was_active": True, "owner_token": "owner", "queue_rebuilt": True}
+    if release == "failed":
+        assert "Очередь перестроена" in show.await_args.kwargs["text"]
+        assert "не запускайте повторно" in show.await_args.kwargs["text"]
+        assert "reply_markup" not in show.await_args.kwargs
+        return
+    assert "очередь начата заново" in show.await_args.kwargs["text"]
+    assert "530" in show.await_args.kwargs["text"]
+    assert show.await_args.kwargs["reply_markup"] == "card"
+
+
+@pytest.mark.parametrize("reason", ["same_message_signature", "message_not_modified"])
+def test_rescan_final_screen_does_not_duplicate_existing_message(reason):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    policy = SimpleNamespace(edit_text=AsyncMock(
+        return_value=SimpleNamespace(ok=False, reason=reason),
+    ))
+    send = AsyncMock()
+    handler = _load_rescan_handler("_show_rule_processing_screen", {
+        "asyncio": asyncio, "ui_policy": policy, "send_message_safe": send,
+    })
+    asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
+    send.assert_not_awaited()
+
+
+def test_rescan_final_screen_handles_missing_ui_result():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    policy = SimpleNamespace(edit_text=AsyncMock(return_value=None))
+    send = AsyncMock()
+    handler = _load_rescan_handler("_show_rule_processing_screen", {
+        "asyncio": asyncio, "ui_policy": policy, "send_message_safe": send,
+    })
+    asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
+    send.assert_awaited_once_with(chat_id=1, text="Готово", reply_markup=None, parse_mode=None)
+
+
+@pytest.mark.parametrize("failure", ["audit", "workers", "card", "release_retry", "release_failed", "unknown"])
+def test_keep_rescan_post_commit_failure_still_reports_success(failure):
+    import asyncio
+    import logging
+    from unittest.mock import AsyncMock, Mock
+
+    from app.rescan_safety import RescanBlocked
+
+    rule = SimpleNamespace(source_id="-100123", source_thread_id=None,
+                           target_id="-100456", target_thread_id=None,
+                           mode="repost", schedule_mode="interval")
+    repo = SimpleNamespace(
+        get_rule=Mock(return_value=rule),
+        begin_rule_rescan=Mock(return_value=(True, "owner")),
+        get_rule_scan_start_max_message_id=Mock(return_value=525),
+        get_rule_next_run_at=Mock(return_value="2026-11-26"),
+        get_rule_first_pending_message_id=Mock(return_value=100),
+        rebuild_rule_keep_position=Mock(
+            return_value=(5, 1, 0, 0),
+            side_effect=RuntimeError("lost commit response") if failure == "unknown" else None),
+        finish_rule_rescan=Mock(side_effect={
+            "release_retry": [RuntimeError("connection"), None],
+            "release_failed": RuntimeError("connection"),
+        }.get(failure)),
+        log_rule_change=Mock(side_effect=RuntimeError("audit") if failure == "audit" else None),
+    )
+
+    async def run_db(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    show = AsyncMock()
+    workers = AsyncMock(side_effect=RuntimeError("workers") if failure == "workers" else None)
+    refresh = AsyncMock(return_value="failed",
+                        side_effect=RuntimeError("card") if failure == "card" else None)
+    sleep = AsyncMock()
+    handler = _load_rescan_handler("_run_rescan_rule_keep_job", {
+        "asyncio": SimpleNamespace(sleep=sleep),
+        "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
+        "logger": logging.getLogger(__name__),
+        "invalidate_preview_cache": Mock(), "invalidate_rule_card_cache": Mock(),
+        "ensure_rule_workers": workers, "refresh_rule_card_by_ids": refresh,
+        "_show_rule_processing_screen": show,
+        "_scan_rule_source": AsyncMock(return_value=(5, {100, 101})),
+        "_verify_rescan_live_arrivals": AsyncMock(return_value=set()),
+        "build_rule_card_keyboard": Mock(return_value="card"),
+        "build_rescan_rule_keyboard": Mock(return_value="rescan"),
+    })
+    asyncio.run(handler(rule_id=94, chat_id=1, message_id=2, admin_id=3))
+    if failure.startswith("release"):
+        sleep.assert_awaited_once_with(1.0)
+    else:
+        sleep.assert_not_awaited()
+    if failure == "unknown":
+        repo.finish_rule_rescan.assert_not_called()
+        repo.log_rule_change.assert_not_called()
+        assert "неизвестен" in show.await_args.kwargs["text"]
+        assert "reply_markup" not in show.await_args.kwargs
+        return
+    repo.log_rule_change.assert_called_once()
+    assert repo.finish_rule_rescan.call_count == (2 if failure.startswith("release") else 1)
+    for call in repo.finish_rule_rescan.call_args_list:
+        assert call.args == (94,)
+        assert call.kwargs == {"was_active": True, "owner_token": "owner", "queue_rebuilt": True}
+    repo.rebuild_rule_keep_position.assert_called_once()
+    if failure == "release_failed":
+        assert "Очередь перестроена" in show.await_args.kwargs["text"]
+        assert "reply_markup" not in show.await_args.kwargs
+        workers.assert_not_awaited()
+        refresh.assert_not_awaited()
+        return
+    workers.assert_awaited_once()
+    refresh.assert_awaited_once()
+    assert "пересканировано с сохранением позиции" in show.await_args.kwargs["text"]
+    assert show.await_args.kwargs["reply_markup"] == "card"
+
+
+@pytest.mark.parametrize("mode", ["fresh", "keep"])
+def test_rescan_missing_rule_does_not_offer_retry(mode):
+    import asyncio
+    import logging
+    from unittest.mock import AsyncMock, Mock
+
+    from app.rescan_safety import RescanBlocked
+
+    repo = SimpleNamespace(get_rule=Mock(return_value=None), begin_rule_rescan=Mock())
+
+    async def run_db(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    show = AsyncMock()
+    handler = _load_rescan_handler(f"_run_rescan_rule_{mode}_job", {
+        "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
+        "logger": logging.getLogger(__name__), "_show_rule_processing_screen": show,
+    })
+    asyncio.run(handler(rule_id=94, chat_id=1, message_id=2, admin_id=3))
+    show.assert_awaited_once_with(chat_id=1, message_id=2, text="❌ Правило #94 не найдено")
+    repo.begin_rule_rescan.assert_not_called()
+
+
+@pytest.mark.parametrize("tenant_id,expected", [(None, 1), (42, 42)])
+def test_restart_preserves_tenant_or_uses_legacy_default(tenant_id, expected):
+    repo, cursor, _ = _rescan_repo()
+    execute = cursor.execute
+    insert_args = []
+
+    def track(sql, args=None):
+        execute(sql, args)
+        if str(sql).startswith("SELECT is_active, rescan_owner_token"):
+            cursor.result["tenant_id"] = tenant_id
+        if "INSERT INTO deliveries" in str(sql):
+            insert_args.append(args)
+
+    cursor.execute = track
+    _, owner = repo.begin_rule_rescan(214, fresh=True)
+    repo.restart_rule_queue(214, owner_token=owner, allowed_message_ids={101},
+                            include_newer_than_message_id=101)
+    assert len(insert_args) == 1
+    assert insert_args[0][2] == expected
+
+
+@pytest.mark.parametrize("reason", ["retry_after", "chat_retry_after_active"])
+def test_rescan_terminal_screen_waits_for_chat_flood_lock(reason):
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+
+    policy = SimpleNamespace(
+        chat_cooldown_left=Mock(return_value=4.0),
+        edit_text=AsyncMock(side_effect=[
+            SimpleNamespace(ok=False, reason=reason),
+            SimpleNamespace(ok=True, reason=None),
+        ]),
+    )
+    sleep = AsyncMock()
+    send = AsyncMock()
+    handler = _load_rescan_handler("_show_rule_processing_screen", {
+        "asyncio": SimpleNamespace(sleep=sleep), "ui_policy": policy,
+        "send_message_safe": send,
+    })
+    asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
+    sleep.assert_awaited_once_with(4.05)
+    policy.chat_cooldown_left.assert_called_once_with(1)
+    send.assert_not_awaited()
+
+
+def test_rescan_terminal_screen_retries_fallback_send_after_flood_lock():
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+
+    policy = SimpleNamespace(
+        chat_cooldown_left=Mock(return_value=4.0),
+        edit_text=AsyncMock(return_value=SimpleNamespace(ok=False, reason="message_not_found")),
+    )
+    sleep = AsyncMock()
+    send = AsyncMock(side_effect=[None, object()])
+    handler = _load_rescan_handler("_show_rule_processing_screen", {
+        "asyncio": SimpleNamespace(sleep=sleep), "ui_policy": policy,
+        "send_message_safe": send,
+    })
+    asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
+    assert send.await_count == 2
+    sleep.assert_awaited_once_with(4.05)
+
+
+def test_rescan_progress_edit_failure_does_not_send_new_message():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    policy = SimpleNamespace(edit_text=AsyncMock(
+        return_value=SimpleNamespace(ok=False, reason="retry_after"),
+    ))
+    sleep = AsyncMock()
+    send = AsyncMock()
+    handler = _load_rescan_handler("_show_rule_processing_screen", {
+        "asyncio": SimpleNamespace(sleep=sleep), "ui_policy": policy,
+        "send_message_safe": send,
+    })
+    asyncio.run(handler(chat_id=1, message_id=2, text="Читаем историю", terminal=False))
+    send.assert_not_awaited()
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.parametrize("wrong_id", [False, True])
+def test_verify_live_candidates_checks_deleted_and_present(wrong_id):
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+
+    async def run_db(fn, *args):
+        return fn(*args)
+
+    client = SimpleNamespace(
+        get_entity=AsyncMock(return_value="peer"),
+        get_messages=AsyncMock(return_value=[
+            None, SimpleNamespace(id=999 if wrong_id else 104),
+        ]),
+    )
+    repo = SimpleNamespace(get_rule_rescan_live_message_ids=Mock(return_value={103, 104}))
+    handler = _load_rescan_handler("_verify_rescan_live_arrivals", {
+        "run_db": run_db, "db": repo, "telethon_client": client,
+    })
+    observed = {101, 103}
+    rule = SimpleNamespace(source_id="-100123")
+    if wrong_id:
+        with pytest.raises(RuntimeError, match="неожиданный ID"):
+            asyncio.run(handler(214, rule, 102, observed))
+    else:
+        assert asyncio.run(handler(214, rule, 102, observed)) == {103}
+        assert observed == {101, 104}
+    client.get_messages.assert_awaited_once_with("peer", ids=[103, 104])

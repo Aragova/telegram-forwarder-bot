@@ -103,28 +103,36 @@ def test_reaction_lease_owner_and_retry_budget():
 
 @pytest.mark.skipif(os.getenv("VIMI_TEST_POSTGRES") != "1", reason="requires disposable PostgreSQL")
 @pytest.mark.parametrize("status", ["sending", "accepted", "failed_after_send"])
-def test_rescan_preserves_uncertain_attempt(status):
+def test_restart_archives_historical_attempt_without_inventing_result(status):
     assert os.getenv("APP_PG_DB") == "vimi_publication_ci"
     repo = PostgresRepository()
     try:
         repo.init()
-        owner = str(uuid4())
         with repo.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO routing(source_id,target_id,created_date,is_active,rescan_owner_token) "
-                    "VALUES(%s,%s,'2026-01-01',FALSE,%s) RETURNING id",
+                    "INSERT INTO routing(source_id,target_id,created_date,is_active) "
+                    "VALUES(%s,%s,'2026-01-01',FALSE) RETURNING id",
                     ("-100123", {"sending": "-100456", "accepted": "-100457",
-                                 "failed_after_send": "-100458"}[status], owner),
+                                 "failed_after_send": "-100458"}[status]),
                 )
                 rule_id = cur.fetchone()["id"]
         key = str(uuid4())
         repo.create_delivery_attempt(delivery_id=1, rule_id=rule_id, tenant_id=1,
                                      job_id=None, idempotency_key=key,
                                      operation_kind="single", status=status)
-        with pytest.raises(RuntimeError, match="неизвестным результатом"):
-            repo.reset_rule_history_for_replay(rule_id, owner_token=owner, allowed_message_ids=set(), include_newer_than_message_id=0)
-        assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == status
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE delivery_attempts SET created_at=TIMESTAMPTZ '2026-11-21',
+                       updated_at=TIMESTAMPTZ '2026-11-21' WHERE idempotency_key=%s""",
+                    (key,),
+                )
+        attempt = repo.get_delivery_attempt_by_idempotency_key(key)
+        assert _restart_from_snapshot(repo, rule_id) == (1, 0, 0)
+        assert repo.get_delivery_attempt_by_idempotency_key(key) is None
+        archived = repo.get_delivery_attempt_by_idempotency_key(f"{key}:rescan:{attempt['id']}")
+        assert archived["status"] == status
     finally:
         repo.client.close_all_connections()
 
@@ -186,6 +194,31 @@ def seed(repository, suffix, count=1):
     key=f"test:{suffix}"
     start_attempt(repository,key,rule_id,delivery_ids,source_ids,target)
     return key,rule_id,delivery_ids,source_ids,source,target
+
+
+def _restart_from_snapshot(repo, rule_id, *, observed=None, high_water=None):
+    """Model a complete Telegram scan before committing the new queue."""
+    was_active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
+    complete = False
+    try:
+        if high_water is None:
+            high_water = repo.get_rule_scan_start_max_message_id(rule_id)
+        if observed is None:
+            with repo.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""SELECT p.message_id FROM deliveries d
+                                   JOIN posts p ON p.id=d.post_id WHERE d.rule_id=%s""",
+                                (rule_id,))
+                    observed = {row["message_id"] for row in cur.fetchall()}
+        result = repo.restart_rule_queue(
+            rule_id, owner_token=owner, allowed_message_ids=observed,
+            include_newer_than_message_id=high_water,
+        )
+        complete = True
+        return result
+    finally:
+        repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner,
+                                queue_rebuilt=complete)
 
 
 def start_attempt(repository,key,rule_id,delivery_ids,source_ids,target):
@@ -382,8 +415,11 @@ def test_faulty_counter_and_clear_preserve_pending_publication_evidence(repo):
             cur.execute("UPDATE routing SET is_active=FALSE,rescan_owner_token='audit-124' WHERE id=%s", (rule_id,))
     assert repo.count_uncleared_faulty_deliveries() == baseline
     assert not set(deliveries).intersection(row["id"] for row in repo.get_faulty_deliveries(limit=10000))
-    with pytest.raises(RuntimeError, match="неизвестным результатом"):
-        repo.reset_rule_history_for_replay(rule_id, owner_token="audit-124", allowed_message_ids=set(), include_newer_than_message_id=0)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET rescan_owner_token=NULL WHERE id=%s", (rule_id,))
+    with pytest.raises(RuntimeError, match="современная публикация"):
+        _restart_from_snapshot(repo, rule_id)
 
 
 def test_rescan_legacy_video_history_431_and_atomic_rebuild(repo, monkeypatch):
@@ -404,18 +440,14 @@ def test_rescan_legacy_video_history_431_and_atomic_rebuild(repo, monkeypatch):
                 (rule_id,target,target,deliveries+list(range(9000001,9000429)),
                  source_ids+list(range(1,429)),[649,650,651]+list(range(1,429))),
             )
-    was_active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
-    assert was_active
     with monkeypatch.context() as patch:
-        def fail(*args, **kwargs):
+        def fail():
             raise RuntimeError("rebuild failed")
-        patch.setattr(repo, "_backfill_deliveries_for_rule_conn", fail)
+        patch.setattr("app.postgres_repository.utc_now_iso", fail)
         with pytest.raises(RuntimeError, match="rebuild failed"):
-            repo.reset_rule_history_for_replay(rule_id, owner_token=owner,
-                allowed_message_ids=set(source_ids), include_newer_than_message_id=max(source_ids))
+            _restart_from_snapshot(repo, rule_id)
     assert all(repo.get_delivery(d)["status"]=="sent" for d in deliveries)
-    archived, deleted, rebuilt = repo.reset_rule_history_for_replay(rule_id, owner_token=owner,
-        allowed_message_ids=set(source_ids), include_newer_than_message_id=max(source_ids))
+    archived, deleted, rebuilt = _restart_from_snapshot(repo, rule_id)
     assert (archived, deleted, rebuilt)==(431,3,3)
     with repo.connect() as conn:
         with conn.cursor() as cur:
@@ -424,22 +456,22 @@ def test_rescan_legacy_video_history_431_and_atomic_rebuild(repo, monkeypatch):
             cur.execute("SELECT id,status FROM deliveries WHERE rule_id=%s", (rule_id,))
             rows=cur.fetchall()
             assert len(rows)==3 and all(row["status"]=="pending" and row["id"] not in deliveries for row in rows)
-    repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner, queue_rebuilt=True)
+    assert repo.get_rule(rule_id).is_active
 
 
-@pytest.mark.parametrize(("raw_ids", "allowed", "has_anchor"), [
-    ("[651]", True, True),
-    ("[651, null]", False, True),
-    ("[651, 652]", False, True),
-    ("null", False, True),
-    ('{"id": 651}', False, True),
-    ("[651]", True, False),
-    ("[651, 652]", False, False),
+@pytest.mark.parametrize(("raw_ids", "has_anchor"), [
+    ("[651]", True),
+    ("[651, null]", True),
+    ("[651, 652]", True),
+    ("null", True),
+    ('{"id": 651}', True),
+    ("[651]", False),
+    ("[651, 652]", False),
 ])
-def test_fresh_replay_legacy_video_accepts_only_one_numeric_id(
-    repo, raw_ids, allowed, has_anchor,
+def test_restart_preserves_historical_ids_without_interpreting_them(
+    repo, raw_ids, has_anchor,
 ):
-    """Malformed historical send IDs must fail closed without mutating the attempt."""
+    """Explicit restart does not claim that any old candidate ID was verified."""
     _, rule_id, deliveries, _, _, target = seed(repo, uuid4().int % 10**12)
     delivery_id = deliveries[0]
     key = f"delivery:{delivery_id}:target:{target}:video_send:v1"
@@ -455,6 +487,7 @@ def test_fresh_replay_legacy_video_accepts_only_one_numeric_id(
                    operation_kind='video_send', status='accepted',
                    telegram_method='video_send', target_id=%s,
                    sent_message_ids_json=%s::jsonb, error_text=NULL,
+                   created_at=TIMESTAMPTZ '2026-11-21 10:00:00+00',
                    updated_at=TIMESTAMPTZ '2026-11-21 10:00:00+00'
                    WHERE rule_id=%s""",
                 (key, target, raw_ids, rule_id),
@@ -462,13 +495,11 @@ def test_fresh_replay_legacy_video_accepts_only_one_numeric_id(
             if not has_anchor:
                 # The attempt ledger is not FK-cascade-linked to deliveries.
                 cur.execute("DELETE FROM deliveries WHERE id=%s", (delivery_id,))
-    if allowed:
-        was_active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
-        repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner)
-    else:
-        with pytest.raises(RuntimeError, match="неизвестным результатом"):
-            repo.begin_rule_rescan(rule_id, fresh=True)
-    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "accepted"
+    attempt = repo.get_delivery_attempt_by_idempotency_key(key)
+    assert _restart_from_snapshot(repo, rule_id) == (1, int(has_anchor), int(has_anchor))
+    archived = repo.get_delivery_attempt_by_idempotency_key(f"{key}:rescan:{attempt['id']}")
+    assert archived["status"] == "accepted"
+    assert archived["sent_message_ids_json"] == attempt["sent_message_ids_json"]
 
 
 
@@ -503,21 +534,26 @@ def test_rule_rescan_confirmation_one_time_per_actor(repo):
     assert not repo.issue_rule_rescan_confirmation(rule_id, 321, "replaced")
 
 
-def test_rescan_durable_video_intent_cannot_be_archived_as_legacy(repo):
-    _, rule_id, deliveries, _, _, target = seed(repo, 132)
+@pytest.mark.parametrize("with_intent", [True, False])
+def test_rescan_durable_video_intent_cannot_be_archived_as_legacy(repo, with_intent):
+    _, rule_id, deliveries, _, _, target = seed(repo, 132 if with_intent else 13201)
     key=f"delivery:{deliveries[0]}:target:{target}:video_send:v1"
     with repo.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE deliveries SET status='sent',sent_message_id=651 WHERE id=%s", (deliveries[0],))
             cur.execute("UPDATE delivery_attempts SET idempotency_key=%s,operation_kind='video_send',telegram_method='video_send' WHERE rule_id=%s", (key,rule_id))
-    repo.get_or_create_mtproto_random_ids(key,0,"legacy-test",1)
+    if with_intent:
+        repo.get_or_create_mtproto_random_ids(key,0,"legacy-test",1)
     assert repo.mark_delivery_attempt_accepted(key,sent_message_ids=[651],telegram_method="video_send")
     with repo.connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE delivery_attempts SET updated_at=TIMESTAMPTZ '2026-11-21 10:00:00+00' WHERE rule_id=%s", (rule_id,))
-    with pytest.raises(RuntimeError, match="неизвестным результатом"):
-        repo.begin_rule_rescan(rule_id, fresh=True)
-    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"]=="accepted"
+            cur.execute("UPDATE delivery_attempts SET created_at=TIMESTAMPTZ '2026-11-21 10:00:00+00', updated_at=TIMESTAMPTZ '2026-11-21 10:00:00+00' WHERE rule_id=%s", (rule_id,))
+    if with_intent:
+        with pytest.raises(RuntimeError, match="современная публикация"):
+            _restart_from_snapshot(repo, rule_id)
+        assert repo.get_delivery_attempt_by_idempotency_key(key)["status"]=="accepted"
+    else:
+        assert _restart_from_snapshot(repo, rule_id)[0] == 1
 
 
 def test_keep_position_quarantines_orphan_without_resending(repo):
@@ -543,14 +579,14 @@ def test_fresh_self_loop_keeps_old_echo_evidence_across_replays(repo):
             cur.execute("UPDATE deliveries SET status='sent',sent_message_id=%s,target_id_snapshot=%s WHERE id=%s", (source_ids[1],source,deliveries[0]))
             cur.execute("UPDATE deliveries SET status='pending' WHERE id=%s", (deliveries[1],))
     for _ in range(2):
-        active, owner = repo.begin_rule_rescan(rule_id,fresh=True)
-        _,_,rebuilt = repo.reset_rule_history_for_replay(rule_id,owner_token=owner,
-            allowed_message_ids=set(source_ids), include_newer_than_message_id=max(source_ids))
+        _,_,rebuilt = _restart_from_snapshot(repo, rule_id)
         assert rebuilt==1
         with repo.connect() as conn:
             assert repo._is_self_target_echo_post_for_rule_conn(conn,rule_id=rule_id,
                 source_channel=source,source_thread_id=None,message_id=source_ids[1])
-        repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
+            with conn.cursor() as cur:
+                assert repo._get_rescan_echo_ids(cur, rule_id) == {source_ids[1]}
+
 
 
 def test_rescan_rejects_route_change_and_manual_clear(repo):
@@ -559,13 +595,15 @@ def test_rescan_rejects_route_change_and_manual_clear(repo):
         with conn.cursor() as cur:
             cur.execute("DELETE FROM delivery_attempts WHERE rule_id=%s", (rule_id,))
             cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
-    active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
+    active, owner = repo.begin_rule_rescan(rule_id)
     with pytest.raises(RuntimeError, match="пересканируется"):
         repo.clear_rule_deliveries(rule_id)
+    with pytest.raises(RuntimeError, match="уже выполняется"):
+        _restart_from_snapshot(repo, rule_id)
     with pytest.raises(RuntimeError, match="изменились"):
-        repo.reset_rule_history_for_replay(rule_id,owner_token=owner,
+        repo.rebuild_rule_keep_position(rule_id,owner_token=owner,
             allowed_message_ids=set(source_ids),include_newer_than_message_id=max(source_ids),
-            expected_scope=(source,None,target,None,"video"))
+            before_message_id=None,expected_scope=(source,None,target,None,"video"))
     assert repo.get_delivery(deliveries[0])["status"]=="pending"
     repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner)
 
@@ -1021,3 +1059,217 @@ def test_same_difference_gap_preserves_acknowledgement(repo):
     assert same["blocked_at"] == incident["blocked_at"] and same["acknowledged_at"] is not None
     repo.record_publication_inbox_overflow(account, 0, [43])
     assert repo.get_publication_inbox_incident(account)["acknowledged_at"] is None
+
+
+def test_restart_rule_94_legacy_240_preserves_queue_and_history(repo):
+    key, rule_id, deliveries, _, source, target = seed(repo, uuid4().int % 10**12, count=5)
+    categories = [
+        ("accepted", "album", "reupload_album", 98),
+        ("sending", "album", "copy_album", 87),
+        ("sending", "single", "copy_single", 27),
+        ("accepted", "single", "reupload_single", 21),
+        ("accepted", "single", "reupload_single", 4),
+        ("failed_after_send", "album", "copy_album", 3),
+    ]
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE routing SET is_active=TRUE WHERE id=%s", (rule_id,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+            cur.execute("UPDATE deliveries SET status='sent',sent_message_id=900 WHERE id=%s", (deliveries[0],))
+            cur.execute("UPDATE deliveries SET status='faulty' WHERE id=%s", (deliveries[1],))
+            for index, (status, kind, method, count) in enumerate(categories):
+                cur.execute(
+                    """INSERT INTO delivery_attempts(
+                           delivery_id,rule_id,tenant_id,idempotency_key,operation_kind,
+                           status,telegram_method,target_id,created_at,updated_at)
+                       SELECT %s,%s,1,%s||':'||n::text,%s,%s,%s,%s,
+                              TIMESTAMPTZ '2026-05-03',TIMESTAMPTZ '2026-11-20'
+                       FROM generate_series(1,%s) n""",
+                    (deliveries[0] if index==4 else -1, rule_id,
+                     f"legacy:{rule_id}:{index}", kind, status, method, target, count),
+                )
+            cur.execute("SELECT post_id FROM deliveries WHERE rule_id=%s ORDER BY post_id", (rule_id,))
+            old_posts = cur.fetchall()
+    assert _restart_from_snapshot(repo, rule_id) == (240, 5, 5)
+    assert _restart_from_snapshot(repo, rule_id) == (0, 5, 5)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT post_id FROM deliveries WHERE rule_id=%s ORDER BY post_id", (rule_id,))
+            assert cur.fetchall() == old_posts
+            cur.execute("SELECT id,status,sent_message_id FROM deliveries WHERE rule_id=%s", (rule_id,))
+            rows = cur.fetchall()
+            assert len(rows)==5 and all(r["status"]=="pending" and r["id"] not in deliveries
+                                        and r["sent_message_id"] is None for r in rows)
+            cur.execute("""SELECT status,COUNT(*) AS n FROM delivery_attempts
+                           WHERE rule_id=%s AND idempotency_key LIKE %s GROUP BY status""",
+                        (rule_id, "%:rescan:%"))
+            assert {r["status"]:r["n"] for r in cur.fetchall()} == {
+                "accepted":123, "sending":114, "failed_after_send":3,
+            }
+            cur.execute("SELECT COUNT(*) AS n FROM posts WHERE source_channel=%s", (source,))
+            assert cur.fetchone()["n"] == 5
+    assert repo.get_rule(rule_id).is_active
+
+
+def test_restart_from_full_snapshot_includes_new_excludes_deleted_and_keeps_live_arrival(repo):
+    key, rule_id, deliveries, source_ids, source, target = seed(
+        repo, uuid4().int % 10**12, count=3,
+    )
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE routing SET is_active=TRUE WHERE id=%s", (rule_id,))
+            cur.execute("UPDATE deliveries SET status='sent' WHERE rule_id=%s", (rule_id,))
+    was_active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
+    high_water = repo.get_rule_scan_start_max_message_id(rule_id)
+    new_ids = [min(source_ids) - 1, high_water + 1, high_water + 2, high_water + 3]
+    try:
+        # A cached message is absent, one newly observed ID lies below the
+        # watermark, and one cached live candidate was deleted remotely.
+        repo.save_post_batch(
+            [(mid, source, None, {"media_kind": "video"}, None) for mid in new_ids],
+            preserve_existing_deliveries=True,
+        )
+        observed = set(source_ids[1:] + new_ids[:3])
+        assert repo.get_rule_rescan_live_message_ids(rule_id, high_water) == set(new_ids[1:])
+        with pytest.raises(RuntimeError, match="появились новые записи"):
+            repo.restart_rule_queue(
+                rule_id, owner_token=owner, allowed_message_ids=observed,
+                include_newer_than_message_id=high_water,
+            )
+        _, _, rebuilt = repo.restart_rule_queue(
+            rule_id, owner_token=owner, allowed_message_ids=observed,
+            include_newer_than_message_id=high_water,
+            checked_missing_message_ids={new_ids[-1]},
+        )
+        assert rebuilt == 5
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT p.message_id,d.status FROM deliveries d
+                               JOIN posts p ON p.id=d.post_id WHERE d.rule_id=%s""",
+                            (rule_id,))
+                assert {r["message_id"]:r["status"] for r in cur.fetchall()} == {
+                    mid:"pending" for mid in source_ids[1:] + new_ids[:3]
+                }
+                cur.execute("SELECT COUNT(*) AS n FROM posts WHERE source_channel=%s", (source,))
+                assert cur.fetchone()["n"] == 7
+    finally:
+        repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner)
+
+
+@pytest.mark.parametrize("status", ["sending", "accepted", "failed_after_send"])
+@pytest.mark.parametrize("old_created", [True, False])
+def test_restart_refuses_modern_bot_api_attempt_without_intent(repo, status, old_created):
+    key, rule_id, deliveries, _, _, _ = seed(repo, uuid4().int % 10**12)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE deliveries SET status='faulty' WHERE rule_id=%s", (rule_id,))
+            cur.execute(
+                """UPDATE delivery_attempts SET status=%s,telegram_method='copy_single',
+                   created_at=CASE WHEN %s THEN TIMESTAMPTZ '2026-11-21'
+                                   ELSE TIMESTAMPTZ '2026-11-22 17:56:18+00' END,
+                   updated_at=TIMESTAMPTZ '2026-11-22 17:56:18+00'
+                   WHERE idempotency_key=%s""",
+                (status, old_created, key),
+            )
+    with pytest.raises(RuntimeError, match="современная публикация"):
+        repo.begin_rule_rescan(rule_id, fresh=True)
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == status
+    assert repo.get_delivery(deliveries[0])["status"] == "faulty"
+    assert repo.get_rule(rule_id).is_active
+
+
+def test_restart_scheduler_and_logical_queue_follow_telegram_message_ids(repo):
+    key, rule_id, deliveries, source_ids, source, _ = seed(repo, uuid4().int % 10**12)
+    high = source_ids[0]
+    low = high - 1
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+    was_active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
+    try:
+        repo.save_post_batch(
+            [(low, source, None, {"media_kind": "text"}, None)],
+            preserve_existing_deliveries=True,
+        )
+        assert repo.restart_rule_queue(
+            rule_id, owner_token=owner, allowed_message_ids={low, high},
+            include_newer_than_message_id=high,
+        )[2] == 2
+    finally:
+        repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner,
+                                queue_rebuilt=True)
+    assert repo.get_rule_first_pending_message_id(rule_id) == low
+    assert [item["first_message_id"] for item in repo.get_rule_queue_logical_items(rule_id)] == [low, high]
+    taken = repo.take_due_delivery_and_create_job(rule_id, "9999-01-01T00:00:00+00:00")
+    assert taken and taken["status"] == "created"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT payload_json FROM jobs WHERE id=%s", (taken["job_id"],))
+            assert int(cur.fetchone()["payload_json"]["message_id"]) == low
+            # Leave no runnable test job in the shared disposable database.
+            cur.execute("DELETE FROM jobs WHERE id=%s", (taken["job_id"],))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE id=%s", (taken["delivery_id"],))
+
+
+def test_rescan_release_repeated_after_lost_commit_response(repo):
+    key, rule_id, _, _, _, _ = seed(repo, uuid4().int % 10**12)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+    active, owner = repo.begin_rule_rescan(rule_id)
+    repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner, queue_rebuilt=True)
+    repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner, queue_rebuilt=True)
+    active2, owner2 = repo.begin_rule_rescan(rule_id)
+    try:
+        with pytest.raises(RuntimeError, match="Владелец"):
+            repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner)
+    finally:
+        repo.finish_rule_rescan(rule_id, was_active=active2, owner_token=owner2)
+
+
+def test_restart_rolls_back_if_unchecked_arrival_commits_between_guard_and_delete(repo, monkeypatch):
+    key, rule_id, deliveries, source_ids, source, _ = seed(repo, uuid4().int % 10**12)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE deliveries SET status='sent' WHERE rule_id=%s", (rule_id,))
+    watermark = max(source_ids)
+    live_id = watermark + 1
+    active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
+    guard = repo._assert_rescan_live_snapshot
+    checks = 0
+
+    def ingest():
+        try:
+            repo.save_post(live_id, source, None, {"media_kind": "text"})
+        finally:
+            repo.client.close_thread_connection()
+
+    def guard_with_arrival(*args):
+        nonlocal checks
+        guard(*args)
+        checks += 1
+        if checks == 1:
+            # Independent committed transaction after the first guard.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(ingest).result(timeout=10)
+
+    monkeypatch.setattr(repo, "_assert_rescan_live_snapshot", guard_with_arrival)
+    try:
+        with pytest.raises(RuntimeError, match="появились новые записи"):
+            repo.restart_rule_queue(
+                rule_id, owner_token=owner, allowed_message_ids=set(source_ids),
+                include_newer_than_message_id=watermark,
+            )
+        assert repo.get_delivery(deliveries[0])["status"] == "sent"
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT d.status FROM deliveries d JOIN posts p ON p.id=d.post_id
+                               WHERE d.rule_id=%s AND p.message_id=%s""", (rule_id, live_id))
+                assert cur.fetchone()["status"] == "pending"
+    finally:
+        repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner)

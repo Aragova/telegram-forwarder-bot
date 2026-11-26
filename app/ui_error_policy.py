@@ -163,6 +163,10 @@ class UIErrorPolicy:
                 round(remaining, 3),
             )
 
+    def chat_cooldown_left(self, chat_id: int | str | None) -> float:
+        """Read the remaining chat flood lock without sending a Telegram request."""
+        return self._chat_cooldown_left(chat_id)
+
     def _chat_cooldown_left(self, chat_id: int | str | None) -> float:
         key = self._chat_key(chat_id)
         if key is None:
