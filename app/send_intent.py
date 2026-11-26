@@ -230,6 +230,8 @@ def publication_client_class(base):
             token = _single_rpc.set(scoped)
             try:
                 if not scoped:
+                    if publications:
+                        await assert_delivery_job_current()
                     return await invoke(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold)
                 _check_fence(intent)
                 if getattr(self, "publication_inbox_required", False) and (

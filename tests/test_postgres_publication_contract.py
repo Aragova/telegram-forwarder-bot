@@ -1401,3 +1401,57 @@ def test_rescan_revokes_active_delivery_jobs_and_rebuilds_while_worker_is_live(r
     assert repo.get_delivery(delivery_id) is None
     assert repo.get_job(job_id)["status"] == "failed"
     assert len(repo.get_rule_queue_logical_items(rule_id)) == 1
+
+
+def test_rescan_archived_unresolved_receipt_does_not_block_manual_rollback(repo):
+    seeded = seed(repo, uuid4().int % 10**12)
+    key, rule_id, delivery_ids, source_ids, _, _ = seeded
+    assert register(repo,seeded,[75001],[True])
+    assert _restart_from_snapshot(repo, rule_id)[2] == 1
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM deliveries WHERE rule_id=%s",(rule_id,))
+            new_id=cur.fetchone()["id"]
+            cur.execute("UPDATE deliveries SET status='sent',sent_at='2026-11-26T12:00:00+00:00' WHERE id=%s",(new_id,))
+            cur.execute("SELECT idempotency_key,expired_at FROM telegram_publication_receipts WHERE rule_id=%s",(rule_id,))
+            archived=cur.fetchone()
+            assert ":rescan:" in archived["idempotency_key"] and archived["expired_at"] is not None
+    assert new_id not in delivery_ids
+    assert repo.rollback_last_delivery(rule_id) is not None
+    assert repo.get_delivery(new_id)["status"] == "pending"
+    assert repo.get_publication_receipt(archived["idempotency_key"]) is not None
+
+
+def test_keep_position_rebuilds_partial_album_and_removes_deleted_sent_member(repo):
+    key, rule_id, deliveries, source_ids, _, _ = seed(repo, uuid4().int % 10**12, count=3)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE deliveries SET status='sent' WHERE id=ANY(%s)",(deliveries[:2],))
+    active, owner = repo.begin_rule_rescan(rule_id)
+    assert repo.rebuild_rule_keep_position(
+        rule_id,owner_token=owner,allowed_message_ids=set(source_ids[1:]),
+        include_newer_than_message_id=max(source_ids),before_message_id=source_ids[0],
+    ) == (2,0,0,0)
+    repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
+    items = repo.get_rule_queue_logical_items(rule_id)
+    assert len(items)==1 and items[0]["message_ids"] == source_ids[1:]
+    assert items[0]["pending_count"]==2
+    assert all(repo.get_delivery(d) is None for d in deliveries)
+
+
+def test_rescan_cancellation_is_rule_and_job_type_scoped(repo):
+    _, rid, delivery_ids, source_ids, _, _ = seed(repo, uuid4().int % 10**12)
+    _, other, other_ids, _, _, _ = seed(repo, uuid4().int % 10**12)
+    delivery_job = repo.create_job("repost_single",{"rule_id":rid,"delivery_id":delivery_ids[0]},"light")
+    cleanup = repo.create_job("repost_campaign_delete_copy",{"rule_id":rid,"copy_id":1},"light")
+    unrelated = repo.create_job("repost_single",{"rule_id":other,"delivery_id":other_ids[0]},"light")
+    active, owner = repo.begin_rule_rescan(rid)
+    assert repo.restart_rule_queue(
+        rid,owner_token=owner,allowed_message_ids=set(source_ids),
+        include_newer_than_message_id=max(source_ids),
+    )[2] == 1
+    repo.finish_rule_rescan(rid,was_active=active,owner_token=owner,queue_rebuilt=True)
+    assert repo.get_job(delivery_job)["status"] == "failed"
+    assert repo.get_job(cleanup)["status"] == "pending"
+    assert repo.get_job(unrelated)["status"] == "pending"
+    assert repo.get_delivery(other_ids[0])["status"] == "processing"

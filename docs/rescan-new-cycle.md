@@ -28,5 +28,7 @@ A parser failure releases the rescan owner but leaves the rule paused; an
 unknown database commit retains the owner for inspection.
 
 Unrelated rules, existing reaction jobs and advertising cleanup are not cancelled.
+Archived receipts do not block manual rollback or clearing the new queue;
+archived attempts remain available even after a rollback of a retained sent item.
 The production DB and server are not changed by this PR. Verify real PostgreSQL
 regressions and all required reviews before merging.

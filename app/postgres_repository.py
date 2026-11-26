@@ -2816,7 +2816,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     if not cur.fetchone():
                         return None
                     cur.execute("""SELECT 1 FROM telegram_publication_receipts
-                        WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""",
+                        WHERE rule_id=%s
+                          AND idempotency_key NOT LIKE '%%:rescan:%%'
+                          AND idempotency_key NOT LIKE 'archived:%%'
+                          AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""",
                         (rule_id,))
                     if cur.fetchone():
                         return None
@@ -2963,6 +2966,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         SET idempotency_key='archived:' || %s || ':' || idempotency_key
                         WHERE rule_id=%s AND delivery_ids && %s::bigint[]
                           AND published_ids IS NOT NULL AND idempotency_key NOT LIKE 'archived:%%'
+                          AND idempotency_key NOT LIKE '%%:rescan:%%'
                         """,
                         (uuid.uuid4().hex, rule_id, delivery_ids),
                     )
@@ -2970,6 +2974,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         """
                         DELETE FROM delivery_attempts
                         WHERE delivery_id = ANY(%s)
+                          AND idempotency_key NOT LIKE '%%:rescan:%%'
+                          AND idempotency_key NOT LIKE 'archived:%%'
                         """,
                         (delivery_ids,),
                     )
@@ -4986,7 +4992,14 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (int(rule_id),),
                 )
                 archived = int(cur.rowcount)
-                observed_ids = sorted(allowed_message_ids)
+                echo_ids = self._get_rescan_echo_ids(cur, rule_id) if self_loop else set()
+                observed_ids = sorted(allowed_message_ids - echo_ids)
+                if echo_ids:
+                    for mid in sorted(allowed_message_ids & echo_ids):
+                        self._log_self_target_echo_delivery_skipped(
+                            rule_id=rule_id,source_channel=str(rule["source_id"]),
+                            source_thread_id=rule["source_thread_id"],message_id=mid,
+                        )
                 preserved_ids: list[int] = []
                 if preserve_sent:
                     # Use the shared logical builder, including newly discovered
@@ -5017,7 +5030,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             # A newly discovered old post before the saved
                             # cursor must not rewind keep-position.
                             skipped_before.update(item["message_ids"])
-                    observed_ids = sorted(allowed_message_ids - skipped_before)
+                    observed_ids = sorted(set(observed_ids) - skipped_before)
                 # Preserve the exact prior delivery state for incident diagnosis,
                 # including failures with no associated attempt ledger.
                 cur.execute(
@@ -5044,46 +5057,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 source = str(rule["source_id"])
                 thread = rule["source_thread_id"]
                 tenant_id = rule["tenant_id"] if rule["tenant_id"] is not None else 1
-                if self_loop:
-                    cur.execute(
-                        """SELECT id,message_id FROM posts
-                           WHERE source_channel=%s AND source_thread_id IS NOT DISTINCT FROM %s
-                             AND message_id=ANY(%s::bigint[])""",
-                        (source, thread, observed_ids),
-                    )
-                    source_rows = cur.fetchall()
-                    echo_ids = self._get_rescan_echo_ids(cur, rule_id)
-                    post_ids = []
-                    for row in source_rows:
-                        mid = int(row["message_id"])
-                        if mid in echo_ids:
-                            self._log_self_target_echo_delivery_skipped(
-                                rule_id=rule_id, source_channel=source,
-                                source_thread_id=thread, message_id=mid,
-                            )
-                        else:
-                            post_ids.append(int(row["id"]))
-                    rebuilt = 0
-                    if post_ids:
-                        cur.execute(
-                            """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
-                               SELECT %s,p.id,'pending',%s,%s FROM posts p
-                               WHERE p.id=ANY(%s::bigint[]) ORDER BY p.message_id,p.id
-                               ON CONFLICT DO NOTHING""",
-                            (int(rule_id), utc_now_iso(), tenant_id, post_ids),
-                        )
-                        rebuilt = int(cur.rowcount)
-                else:
-                    cur.execute(
-                        """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
-                           SELECT %s,p.id,'pending',%s,%s FROM posts p
-                           WHERE p.source_channel=%s AND p.source_thread_id IS NOT DISTINCT FROM %s
-                             AND p.message_id=ANY(%s::bigint[])
-                           ORDER BY p.message_id,p.id ON CONFLICT DO NOTHING""",
-                        (int(rule_id), utc_now_iso(), tenant_id, source, thread,
-                         observed_ids),
-                    )
-                    rebuilt = int(cur.rowcount)
+                cur.execute(
+                    """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
+                       SELECT %s,p.id,'pending',%s,%s FROM posts p
+                       WHERE p.source_channel=%s AND p.source_thread_id IS NOT DISTINCT FROM %s
+                         AND p.message_id=ANY(%s::bigint[])
+                       ORDER BY p.message_id,p.id ON CONFLICT DO NOTHING""",
+                    (int(rule_id), utc_now_iso(), tenant_id, source, thread, observed_ids),
+                )
+                rebuilt = int(cur.rowcount)
                 if preserve_sent:
                     cur.execute("UPDATE routing SET rescan_queue_built=TRUE WHERE id=%s", (int(rule_id),))
                 else:
@@ -5108,7 +5090,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if not cur.fetchone():
                     raise RescanBlocked("Правило недоступно или пересканируется")
                 cur.execute("""SELECT 1 FROM telegram_publication_receipts
-                    WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""", (rule_id,))
+                    WHERE rule_id=%s
+                          AND idempotency_key NOT LIKE '%%:rescan:%%'
+                          AND idempotency_key NOT LIKE 'archived:%%'
+                          AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""", (rule_id,))
                 if cur.fetchone():
                     raise RuntimeError("Есть незавершённая публикация или реакция")
                 cur.execute("DELETE FROM deliveries WHERE rule_id = %s", (rule_id,))
@@ -7343,7 +7328,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT target_id, mode, tenant_id FROM routing WHERE id = %s FOR UPDATE",
+                    "SELECT target_id, mode, tenant_id FROM routing WHERE id = %s AND rescan_owner_token IS NULL FOR UPDATE",
                     (int(rule_id),),
                 )
                 rule = cur.fetchone()
