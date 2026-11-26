@@ -207,7 +207,10 @@ class _ProbeSession:
         if self.count >= MAX_PROBES:
             raise ProbeBudgetExceeded()
         scopes = (f"mtproto:{self.account_id}", f"mtproto:{self.account_id}:{self.chat_id}")
-        remaining = max([await run_db(self.repo.get_transport_cooldown, scope) for scope in scopes])
+        cooldowns = await asyncio.gather(*(run_db(self.repo.get_transport_cooldown, scope) for scope in scopes))
+        # The repository returns zero for an absent row. Unexpected values
+        # fail closed rather than bypassing a potentially active cooldown.
+        remaining = max(cooldowns)
         if remaining > 0:
             raise TransportRateLimited(retry_after_seconds=remaining, backend="telethon",
                                        op_name="emoji_probe", key=scopes[0])
@@ -403,7 +406,12 @@ def format_validation_result(result):
     }
     lines = ["❌ Проверка Premium-эмодзи не пройдена."]
     for issue in result.issues[:10]:
-        prefix = f"ID {issue.document_id}, позиция {issue.offset}: " if issue.document_id else ""
+        parts = []
+        if issue.document_id is not None:
+            parts.append(f"ID {issue.document_id}")
+        if issue.offset is not None:
+            parts.append(f"позиция {issue.offset}")
+        prefix = ", ".join(parts) + ": " if parts else ""
         lines.append(prefix + descriptions.get(issue.reason, "некорректный эмодзи"))
     if len(result.issues) > 10:
         lines.append(f"Ещё замечаний: {len(result.issues) - 10}")
