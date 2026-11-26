@@ -11,7 +11,8 @@ The parser does not wait for any Telegram send or old job to finish.
 
 A revoked job cannot claim a new send attempt, enqueue a subsequent stage,
 change delivery status or update the rule schedule. Publication preflight
-rechecks its lease before each write. An RPC already issued to Telegram cannot
+rechecks its lease before each write using one read-only SQL statement, without
+caching permission or retaining a database lock during network I/O. An RPC already issued to Telegram cannot
 be recalled. A late remote publication may duplicate content in the explicitly
 requested new cycle. Known self-loop echo evidence is retained.
 

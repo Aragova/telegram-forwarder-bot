@@ -178,10 +178,27 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             raise DeliveryJobRevoked("Delivery job lease was revoked")
 
     def assert_current_delivery_job(self) -> None:
-        """Last durable lease check before a non-idempotent Telegram RPC."""
+        """Read the current lease immediately before a non-idempotent RPC.
+
+        Do not lock a routing row for network preflight: the transaction
+        necessarily ends before Telegram I/O. Mutations still take the locks.
+        Never cache permission to send across an explicit cancellation.
+        """
+        scope = current_delivery_job()
+        if scope is None:
+            return
         with self.connect() as conn:
             with conn.cursor() as cur:
-                self._guard_current_delivery_job(cur)
+                cur.execute(
+                    """SELECT 1 FROM routing r JOIN jobs j ON j.id=%s
+                       WHERE r.id=%s AND r.rescan_owner_token IS NULL
+                         AND j.locked_by=%s AND j.status='processing'
+                         AND j.payload_json->>'rule_id'=%s
+                         AND COALESCE(j.payload_json->>'rescan_cancelled','false')<>'true'""",
+                    (scope.job_id,scope.rule_id,scope.worker_id,str(scope.rule_id)),
+                )
+                if cur.fetchone() is None:
+                    raise DeliveryJobRevoked("Delivery job lease was revoked")
 
     def _row_to_rule(self, row) -> Rule:
         data = dict(row)
@@ -5046,15 +5063,27 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         raise RuntimeError("Не удалось собрать логические элементы пересканирования")
                     skipped_before: set[int] = set()
                     for item in items:
+                        message_ids = item["message_ids"]
+                        if not message_ids:
+                            raise RuntimeError("Логический элемент не содержит сообщений")
+                        last_id = max(message_ids)
                         if item["is_done"]:
                             preserved_ids.extend(item["delivery_ids"])
                         elif (before_message_id is not None
-                              and max(item["message_ids"]) < before_message_id
-                              and max(item["message_ids"]) <= include_newer_than_message_id
-                              and not any(item["delivery_ids"])):
-                            # A newly discovered old post before the saved
-                            # cursor must not rewind keep-position.
-                            skipped_before.update(item["message_ids"])
+                              and last_id < before_message_id
+                              and last_id <= include_newer_than_message_id):
+                            # The history parser can already have inserted a
+                            # pending delivery for a newly found older post.
+                            # Do not mistake that row for pre-scan progress.
+                            # Retain only genuinely completed members before
+                            # the cursor; do not rewind to a late old member.
+                            for did, mid, status in zip(
+                                item["delivery_ids"], message_ids, item["statuses"],
+                            ):
+                                if status == "sent":
+                                    preserved_ids.append(did)
+                                else:
+                                    skipped_before.add(mid)
                     excluded_before = len(skipped_before)
                     observed_ids = sorted(set(observed_ids) - skipped_before)
                 # Preserve the exact prior delivery state for incident diagnosis,
@@ -5178,7 +5207,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (int(rule_id),),
                 )
                 items = self._build_rule_logical_items_from_rows(rule_id, cur.fetchall(), rule["mode"])
-        return next((min(item["message_ids"]) for item in items if not item["is_done"]), None)
+        return next((int(item["first_message_id"]) for item in items if not item["is_done"]), None)
 
 
     def get_rule_sent_message_ids(self, rule_id: int) -> list[int]:

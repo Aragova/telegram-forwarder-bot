@@ -1496,3 +1496,53 @@ def test_rescan_cancellation_is_rule_and_job_type_scoped(repo):
     assert repo.get_job(cleanup)["status"] == "pending"
     assert repo.get_job(unrelated)["status"] == "pending"
     assert repo.get_delivery(other_ids[0])["status"] == "processing"
+
+
+def test_keep_position_does_not_rewind_to_old_post_inserted_by_parser(repo):
+    _, rid, delivery_ids, source_ids, source, _ = seed(repo, uuid4().int % 10**12)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s",(rid,))
+    active, owner=repo.begin_rule_rescan(rid)
+    anchor=repo.get_rule_first_pending_message_id(rid)
+    watermark=repo.get_rule_scan_start_max_message_id(rid)
+    earlier=anchor-1
+    # This parser API creates a pending delivery for a newly inserted post.
+    repo.save_post_batch([(earlier,source,None,{"media_kind":"video"},None)],
+                         preserve_existing_deliveries=True)
+    assert repo.rebuild_rule_keep_position(
+        rid,owner_token=owner,allowed_message_ids={earlier,*source_ids},
+        include_newer_than_message_id=watermark,before_message_id=anchor,
+    ) == (1,0,1,0)
+    repo.finish_rule_rescan(rid,was_active=active,owner_token=owner,queue_rebuilt=True)
+    assert [item["first_message_id"] for item in repo.get_rule_queue_logical_items(rid)]==source_ids
+
+
+@pytest.mark.parametrize("extra_type", ["text", "jsonb"])
+def test_rescan_delivery_archive_supports_both_audit_column_types(repo, extra_type):
+    _, rid, deliveries, source_ids, _, _ = seed(repo, uuid4().int % 10**12)
+    active, owner=repo.begin_rule_rescan(rid,fresh=True)
+    try:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("CREATE TEMP TABLE audit_log (LIKE public.audit_log INCLUDING ALL) ON COMMIT PRESERVE ROWS")
+                if extra_type=="jsonb":
+                    cur.execute("ALTER TABLE pg_temp.audit_log ALTER COLUMN extra_json TYPE jsonb USING extra_json::jsonb")
+        assert repo.restart_rule_queue(
+            rid,owner_token=owner,allowed_message_ids=set(source_ids),
+            include_newer_than_message_id=max(source_ids),
+        )[2]==1
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT extra_json,pg_typeof(extra_json)::text AS stored_type
+                               FROM pg_temp.audit_log WHERE rule_id=%s AND event_type='rule_rescan_delivery_archived'""",(rid,))
+                archived=cur.fetchone()
+                assert archived["stored_type"]==extra_type
+                extra=archived["extra_json"]
+                payload=json.loads(extra) if isinstance(extra,str) else extra
+                assert payload["cycle"]==owner and payload["delivery"]["id"]==deliveries[0]
+    finally:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DROP TABLE IF EXISTS pg_temp.audit_log")
+        repo.finish_rule_rescan(rid,was_active=active,owner_token=owner,queue_rebuilt=True)
