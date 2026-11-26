@@ -17,7 +17,6 @@ from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from .bot_api_session import create_bot_api_session
 from .transport_policy import TransportRateLimited
 from .send_intent import PublicationWriteUnavailable
-from .telegram_thumbnail import valid_telegram_thumbnail
 from .subprocess_safety import (
     communicate_safely,
     await_critical_cleanup,
@@ -239,11 +238,8 @@ class VideoProcessor:
             "link_preview": False,
         }
 
-        if thumbnail_path:
-            if valid_telegram_thumbnail(Path(thumbnail_path)):
-                send_kwargs["thumb"] = str(thumbnail_path)
-            else:
-                logger.warning("VIDEO_THUMB_INVALID | transport=telethon | action=omit")
+        if thumbnail_path and os.path.isfile(thumbnail_path):
+            send_kwargs["thumb"] = str(thumbnail_path)
 
         if target_thread_id is not None:
             send_kwargs["comment_to"] = int(target_thread_id)
@@ -256,7 +252,7 @@ class VideoProcessor:
             duration,
             width,
             height,
-            "thumb" in send_kwargs,
+            bool(thumbnail_path and os.path.isfile(thumbnail_path)),
             len(formatting_entities or []),
         )
 
@@ -1206,9 +1202,9 @@ class VideoProcessor:
         cmd = [
             "ffmpeg",
             "-i", video_path,
-            "-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+            "-vf", "scale=640:-1",
             "-vframes", "1",
-            "-q:v", "5",
+            "-q:v", "3",
             "-y", thumbnail_path
         ]
 
@@ -1236,7 +1232,7 @@ class VideoProcessor:
             await self._await_critical_cleanup(cleanup_cancel())
             raise
 
-        if process.returncode == 0 and valid_telegram_thumbnail(Path(thumbnail_path)):
+        if process.returncode == 0 and os.path.isfile(thumbnail_path):
             logger.info(f"   🖼️ Превью создано: {os.path.getsize(thumbnail_path) / 1024:.0f} KB")
 
             return True
@@ -1549,11 +1545,8 @@ class VideoProcessor:
                         "duration": int(duration),
                     }
 
-                    if thumbnail_path:
-                        if valid_telegram_thumbnail(Path(thumbnail_path)):
-                            send_kwargs["thumbnail"] = FSInputFile(thumbnail_path, filename="thumb.jpg")
-                        else:
-                            logger.warning("VIDEO_THUMB_INVALID | transport=bot_api | action=omit")
+                    if thumbnail_path and os.path.isfile(thumbnail_path):
+                        send_kwargs["thumbnail"] = FSInputFile(thumbnail_path, filename="thumb.jpg")
 
                     sent_msg = await bot.send_video(**send_kwargs)
 
