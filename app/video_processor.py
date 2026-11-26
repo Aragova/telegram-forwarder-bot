@@ -17,7 +17,7 @@ from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from .bot_api_session import create_bot_api_session
 from .transport_policy import TransportRateLimited
 from .send_intent import PublicationWriteUnavailable, current_publication_intent
-from .video_send_diagnostics import VIDEO_METADATA_KEYS, artifact_details, record_error
+from .video_send_diagnostics import VIDEO_METADATA_KEYS, artifact_details, decode_artifact, record_error
 from .subprocess_safety import (
     communicate_safely,
     await_critical_cleanup,
@@ -1520,6 +1520,9 @@ class VideoProcessor:
             try:
                 trace["video_artifact"] = await asyncio.to_thread(artifact_details, video_path)
                 trace["thumbnail_artifact"] = await asyncio.to_thread(artifact_details, thumbnail_path, thumbnail=True)
+                if isinstance(exc, DocumentInvalidError):
+                    trace["video_decode"] = await decode_artifact(video_path)
+                    trace["thumbnail_decode"] = await decode_artifact(thumbnail_path, thumbnail=True)
             except Exception:
                 logger.exception("VIDEO_ARTIFACT_DIAGNOSTICS_FAILED")
             logger.warning("VIDEO_SEND_FAILURE_SNAPSHOT | key=%s | details=%s",
