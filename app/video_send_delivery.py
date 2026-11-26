@@ -169,7 +169,8 @@ class VideoSendDelivery:
         intent = PublicationIntent(owner.db, idempotency_key)
         intent.video_diagnostics = {"video_metadata": {key: video_info.get(key) for key in VIDEO_METADATA_KEYS},
                                     "source_message_id": source_message_id, "target_id": target_id,
-                                    "phase": "send_preflight"}
+                                    "phase": "send_preflight",
+                                    "processing": payload.get("processing_diagnostics")}
 
         async def audit_failure(error_text, stage=None):
             await persist_video_failure(owner, intent, delivery_id=delivery_id, rule_id=rule_id,
