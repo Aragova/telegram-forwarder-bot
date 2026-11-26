@@ -268,3 +268,31 @@ def test_mtproto_last_moment_inbox_failure_fences_alternate_send():
         assert client.calls == []
 
     asyncio.run(scenario())
+
+
+def test_mtproto_document_invalid_restores_no_write_fence():
+    from telethon.errors import DocumentInvalidError
+
+    async def scenario():
+        class MediaRejectingClient(RawTelethon):
+            async def __call__(self, request, ordered=False, flood_sleep_threshold=None):
+                self.calls.append(request.random_id)
+                raise DocumentInvalidError(request=request)
+
+        client = publication_client_class(MediaRejectingClient)()
+        intent = PublicationIntent(MemoryRepository(), "invalid-document")
+        request = functions.messages.SendMediaRequest(
+            peer=types.InputPeerChannel(9, 10),
+            media=types.InputMediaUploadedDocument(
+                file=types.InputFile(id=1, parts=1, name="video.mp4", md5_checksum=""),
+                mime_type="video/mp4", attributes=[],
+            ),
+            message="",
+        )
+        with publication_scope(intent), pytest.raises(DocumentInvalidError):
+            await client(request)
+        assert client.calls == [100]
+        assert not intent.possible_write
+        assert not intent.uncertain
+
+    asyncio.run(scenario())
