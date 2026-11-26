@@ -47,7 +47,8 @@ cannot be made atomic with Telegram publication.
   PostgreSQL reserves at most one check per account per 60 seconds and one per
   requesting user/account per 120 seconds across UI processes. Only one check
   may be active for an account; the existing transport cooldown table is reused.
-  Account/peer FloodWait is respected and persisted. Diagnostic RPCs have no
+  Account/peer FloodWait is respected and persisted. Existing cooldowns are
+  checked before upload and immediately before the publication RPC. Diagnostic RPCs have no
   internal Telethon retries or flood sleeps; production task settings are unchanged.
   A queued upload or failed upload-part RPC cannot mark a publication uncertain.
   The uncertainty flag is set only immediately before the actual publication RPC;

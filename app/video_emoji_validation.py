@@ -128,7 +128,7 @@ async def check_documents(client, occurrences):
         attr = attributes.get(item.document_id)
         if attr is None:
             issues.append(EmojiIssue(item.document_id, item.offset, "document_missing"))
-        elif attr.alt.replace("\ufe0f", "") != item.symbol.replace("\ufe0f", ""):
+        elif (attr.alt or "").replace("\ufe0f", "") != item.symbol.replace("\ufe0f", ""):
             issues.append(EmojiIssue(item.document_id, item.offset, "emoji_text_mismatch"))
     return issues
 
@@ -194,6 +194,10 @@ class ProbeBudgetExceeded(RuntimeError):
     pass
 
 
+class _ProbeCooldownActive(TransportRateLimited):
+    """A persisted cooldown, not a new Telegram rate-limit response."""
+
+
 class _ProbeSession:
     def __init__(self, client, target, chat_id, path, fence, repo, account_id):
         self.client = client
@@ -204,18 +208,22 @@ class _ProbeSession:
         self.fence = fence
         self.repo = repo
         self.account_id = account_id
+        self.fence.before_publish = self._check_cooldown
 
-    async def accepts(self, occurrences):
-        if self.count >= MAX_PROBES:
-            raise ProbeBudgetExceeded()
+    async def _check_cooldown(self):
         scopes = (f"mtproto:{self.account_id}", f"mtproto:{self.account_id}:{self.chat_id}")
         cooldowns = await asyncio.gather(*(run_db(self.repo.get_transport_cooldown, scope) for scope in scopes))
         # The repository returns zero for an absent row. Unexpected values
         # fail closed rather than bypassing a potentially active cooldown.
         remaining = max(cooldowns)
         if remaining > 0:
-            raise TransportRateLimited(retry_after_seconds=remaining, backend="telethon",
-                                       op_name="emoji_probe", key=scopes[0])
+            raise _ProbeCooldownActive(retry_after_seconds=remaining, backend="telethon",
+                                       op_name="emoji_probe", key=scopes[cooldowns.index(remaining)])
+
+    async def accepts(self, occurrences):
+        if self.count >= MAX_PROBES:
+            raise ProbeBudgetExceeded()
+        await self._check_cooldown()
         self.count += 1
         marker = f"ViMi emoji check {secrets.token_hex(8)}"
         caption, entities = _synthetic_caption(occurrences, marker)
@@ -317,7 +325,7 @@ class VideoEmojiValidator:
         except (FloodWaitError, SlowModeWaitError, TransportRateLimited) as exc:
             seconds = exc.retry_after_seconds if isinstance(exc, TransportRateLimited) else exc.seconds
             self._next_check = max(self._next_check, time.monotonic() + max(1, seconds))
-            if account_id is not None:
+            if account_id is not None and not isinstance(exc, _ProbeCooldownActive):
                 try:
                     scope = f"mtproto:{account_id}"
                     if isinstance(exc, SlowModeWaitError):

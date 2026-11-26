@@ -372,3 +372,27 @@ def test_diagnostic_rpc_fence_tracks_only_publication_boundary():
         assert client._request_retries == 8
 
     asyncio.run(scenario())
+
+
+def test_diagnostic_preflight_runs_at_publication_boundary_without_fencing_rejection():
+    from app.send_intent import DiagnosticPublicationState, diagnostic_rpc_scope
+
+    async def scenario():
+        client = publication_client_class(RawTelethon)()
+        checks = []
+
+        async def preflight():
+            checks.append(True)
+            raise RuntimeError("cooldown active")
+
+        state = DiagnosticPublicationState(before_publish=preflight)
+        with diagnostic_rpc_scope(state):
+            await client(functions.updates.GetStateRequest())
+            assert not checks
+            with pytest.raises(RuntimeError, match="cooldown active"):
+                await client(_request())
+            assert checks == [True]
+            assert not state.uncertain
+            assert len(client.calls) == 1
+
+    asyncio.run(scenario())

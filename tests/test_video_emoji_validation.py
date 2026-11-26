@@ -641,3 +641,29 @@ def test_manual_check_does_not_overwrite_new_caption_prompt(change_state):
         assert states[7]["action"] == "video_caption"
     else:
         assert len(messages) == 1 and "Правило #1" in messages[0]["text"]
+
+
+@pytest.mark.parametrize("scope", ["mtproto:42", f"mtproto:42:{CHAT}"])
+def test_cooldown_created_during_upload_prevents_publication(monkeypatch, scope):
+    repo = FakeRepo()
+    client = FakeClient([document(1, "💎")])
+    original_send = client.send_file
+
+    async def send_after_cooldown(**kwargs):
+        # Simulate another worker imposing a cooldown while uploading.
+        repo.waits[scope] = 17
+        return await original_send(**kwargs)
+
+    monkeypatch.setattr(client, "send_file", send_after_cooldown)
+    result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
+    assert result.status == "unavailable" and result.issues[0].reason == "flood_wait"
+    assert not client.calls and not repo.inflight and repo.releases == 1
+    assert repo.waits == {scope: 17}
+
+
+def test_missing_document_alt_rejected_without_publication(monkeypatch):
+    client = FakeClient([document(1, None)])
+    result = run_check(monkeypatch, client, "💎", [entity(1, 0)])
+    assert result.status == "invalid"
+    assert result.issues[0].reason == "emoji_text_mismatch"
+    assert not client.calls

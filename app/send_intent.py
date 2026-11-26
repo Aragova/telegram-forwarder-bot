@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -49,6 +50,7 @@ _single_rpc: ContextVar[bool] = ContextVar("publication_single_rpc", default=Fal
 @dataclass
 class DiagnosticPublicationState:
     uncertain: bool = False
+    before_publish: Callable[[], Awaitable[None]] | None = None
 
 
 _diagnostic_rpc: ContextVar[DiagnosticPublicationState | None] = ContextVar(
@@ -76,6 +78,8 @@ async def observe_diagnostic_publication(call):
         raise PublicationWriteUnavailable("Missing diagnostic publication scope")
     if state.uncertain:
         raise PublicationAlreadyAttempted("Previous diagnostic publication needs verification")
+    if state.before_publish is not None:
+        await state.before_publish()
     state.uncertain = True
     try:
         return await call()
