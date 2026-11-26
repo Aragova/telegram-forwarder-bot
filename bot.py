@@ -6081,13 +6081,14 @@ async def handle_video_caption_menu(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
-async def _validate_video_caption_emoji(caption, entities_json):
+async def _validate_video_caption_emoji(caption, entities_json, *, user_id):
     # The sender uses the same account. Its transport wrapper provides the
     # established upload limits; the validation service never runs in a
     # production publication intent.
     client = sender_service.telethon if sender_service is not None else None
     return await video_emoji_validator.validate(
         client, db, settings.video_emoji_validation_chat_id, caption, entities_json,
+        user_id=user_id,
     )
 
 
@@ -6108,6 +6109,7 @@ async def handle_video_caption_validate(callback: CallbackQuery):
     await answer_callback_safe_once(callback)
     result = await _validate_video_caption_emoji(
         rule.video_caption, rule.video_caption_entities_json,
+        user_id=callback.from_user.id if callback.from_user else 0,
     )
     latest = await run_db(db.get_rule, rule_id)
     if latest is None or (
@@ -6256,6 +6258,9 @@ async def handle_rule_card(callback: CallbackQuery):
         return
     state = user_states.get(callback.from_user.id if callback.from_user else 0, {})
     if state.get("state") == "awaiting_video_clip_duration" and state.get("flow") == "rule_video_clip_duration":
+        reset_user_state(callback.from_user.id if callback.from_user else 0)
+
+    if state.get("action") == "video_caption" and state.get("rule_id") == rule_id:
         reset_user_state(callback.from_user.id if callback.from_user else 0)
 
     # отвечаем мгновенно
@@ -7408,7 +7413,8 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
         and not is_reaction_auth_state(user_states, m.from_user.id)
         and not is_reaction_account_reactions_input_state(user_states, m.from_user.id)
         and user_states.get(m.from_user.id, {}).get("action") not in {"admin_billing_rate_input", "admin_billing_usd_price_input", "admin_fixed_price_input"}
-        and (m.text is not None or user_states.get(m.from_user.id, {}).get("state") == "awaiting_repost_campaign_saved_post")
+        and (m.text is not None or user_states.get(m.from_user.id, {}).get("state") == "awaiting_repost_campaign_saved_post"
+             or (m.caption is not None and user_states.get(m.from_user.id, {}).get("action") == "video_caption"))
         and not is_menu_navigation_text(m.text)
         and (m.text or "").strip() not in {"📺 Канал", "👥 Группа с темой", "📤 Источник", "📥 Получатель"}
         and not (m.text or "").startswith("Удалить ")
@@ -7594,12 +7600,14 @@ async def handle_stateful_private_inputs(message: Message):
             return
 
         # Entities refer to the original, untrimmed UTF-16 text.
-        caption = None if text == "-" or not text else (message.text or "")
+        raw_caption = message.text if message.text is not None else (message.caption or "")
+        caption = None if raw_caption.strip() in {"-", ""} else raw_caption
         if caption and len(caption.encode("utf-16-le")) // 2 > 1024:
             await reply_message_safe(message, "❌ Подпись слишком длинная. Максимум 1024 символа Telegram.")
             return
-        entities_json = serialize_message_entities(message.entities) if caption else None
-        validation = await _validate_video_caption_emoji(caption, entities_json)
+        input_entities = message.entities if message.text is not None else message.caption_entities
+        entities_json = serialize_message_entities(input_entities) if caption else None
+        validation = await _validate_video_caption_emoji(caption, entities_json, user_id=user_id)
         if _get_user_state(user_id) is not state:
             return
         if not validation.ok:
@@ -7609,6 +7617,10 @@ async def handle_stateful_private_inputs(message: Message):
             await reply_message_safe(message, "⛔ Нет доступа к этому правилу")
             return
 
+        # Access may have changed while awaiting the live probe. Re-check the
+        # edit session after that access read as well, before the DB write.
+        if _get_user_state(user_id) is not state:
+            return
         result = await run_db(
             _save_video_caption_sync,
             rule_id,
