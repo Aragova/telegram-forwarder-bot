@@ -29,7 +29,7 @@ cannot be made atomic with Telegram publication.
   the previous caption stays unchanged. Ordinary captions and clearing still work.
 - A dedicated button "Проверить Premium-эмодзи" checks an already stored video caption
   without editing it. Existing captions are not silently rewritten or auto-scanned.
-- Validate document IDs, exact UTF-16 substrings and Telegram Custom Emoji alt text.
+- Validate document IDs, UTF-16 substrings and Telegram Custom Emoji alt text (VS16-only differences are tested by the real probe).
 - Use a one-second generated black MP4 with silent audio, and a random diagnostic
   marker plus only the ordinary emoji characters. No source video, original
   caption, links, usernames or user identifiers are sent to the test channel.
@@ -39,12 +39,20 @@ cannot be made atomic with Telegram publication.
   isolate document IDs with bounded group probes; report all original occurrences.
   A failed control, timeout, FloodWait, missing response or probe budget exhaustion
   is inconclusive, never success. No further publication follows an unknown result.
-- Limits: 50 occurrences, 12 probes, 60 seconds total, one check at a time per UI
-  process. FloodWait extends the local validation cooldown. The sender transport
-  wrapper still applies its own policies.
-- If a response or cleanup fails, a synthetic diagnostic message may remain.
-  Operators may remove it manually. Do not attempt to resolve an unknown send by
-  sending another copy.
+- Limits: 50 occurrences, 12 probes per check, a 60-second live-check deadline.
+  PostgreSQL reserves at most one check per account per 60 seconds and one per
+  requesting user/account per 120 seconds across UI processes. Only one check
+  may be active for an account; the existing transport cooldown table is reused.
+  Account/peer FloodWait is respected and persisted. Diagnostic RPCs have no
+  internal Telethon retries or flood sleeps; production task settings are unchanged.
+- An unknown send/verification/deletion result or process crash leaves a durable
+  diagnostic-only fence (scope_key video-emoji:<account_id>:inflight). No new
+  probe is allowed until the operator reconciles the isolated channel.
+  Stop all diagnostic/UI processes, verify there are no outstanding probes,
+  remove only verified synthetic messages if necessary, then delete **only**
+  that exact fence row in telegram_transport_cooldowns. Do not delete normal
+  Telegram cooldown rows or attempt to resolve an unknown send by sending again.
+  Restart the UI normally. Never clear the fence while a check is running.
 - A successful isolated probe is evidence for the parser account and test channel
   at that moment, not a lifetime guarantee for all target channels. Telegram may
   change availability or restrictions afterwards. Runtime publication retains its
