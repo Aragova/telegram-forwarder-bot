@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
-from telethon.errors import FloodWaitError
+from telethon.errors import DocumentInvalidError, FloodWaitError
 
 from .runtime_utils import run_db
 from .send_intent import current_publication_intent
@@ -336,6 +336,11 @@ class VideoSingleDelivery:
             )
             return False
 
+        except DocumentInvalidError as exc:
+            if publication_returned:
+                return await post_send_failure(exc)
+            return {"ok": False, "retryable": False, "accepted": False,
+                    "rejected_before_send": True, "error_text": f"DocumentInvalidError: {exc}"}
         except VideoPreSendError as exc:
             if publication_returned:
                 return await post_send_failure(exc)
