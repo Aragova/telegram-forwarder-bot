@@ -481,16 +481,17 @@ async def _show_rule_processing_screen(
 ) -> None:
     try:
         if ui_policy:
-            await ui_policy.edit_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode,
+            result = await ui_policy.edit_text(
+                chat_id=chat_id, message_id=message_id, text=text,
+                reply_markup=reply_markup, parse_mode=parse_mode,
             )
-            return
+            if result.ok or result.reason == "same_message_signature":
+                return
     except Exception as exc:
         logger.exception("Не удалось показать экран обработки chat_id=%s message_id=%s: %s", chat_id, message_id, exc)
+    # A terminal status must not disappear when the edit limiter suppresses it.
+    await send_message_safe(chat_id=chat_id, text=text,
+                            reply_markup=reply_markup, parse_mode=parse_mode)
 
 
 async def _run_rescan_rule_fresh_job(
@@ -501,137 +502,49 @@ async def _run_rescan_rule_fresh_job(
     admin_id: int,
 ) -> None:
     try:
-        rule = await run_db(db.get_rule, rule_id)
-        if not rule:
-            await _show_rule_processing_screen(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=f"❌ Правило #{rule_id} не найдено",
-            )
-            return
-
-        # A persisted owner token fences concurrent scans in every worker.
-        # This includes the entire Telegram parse, DB replay, and resume phase.
-        await _show_rule_processing_screen(
-            chat_id=chat_id, message_id=message_id,
-            text=f"🔄 Пересканирование правила #{rule_id}\n\nРежим: начать заново\nПроверка и пересборка очереди.",
-        )
-        was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id, fresh=True)
-        replay_committed = False
-        successful = False
-        try:
-            scan_start_max_message_id = await run_db(
-                db.get_rule_scan_start_max_message_id, rule_id,
-            )
-            if rule.source_thread_id is None:
-                parsed_count, seen_message_ids = await parse_channel_history(
-                    telethon_client, db, str(rule.source_id), clean_start=False,
-                    preserve_existing_deliveries=True,
-                    collect_seen_message_ids=True,
-                )
-            else:
-                parsed_count, seen_message_ids = await parse_group_history(
-                    telethon_client, db, str(rule.source_id),
-                    int(rule.source_thread_id), clean_start=False,
-                    preserve_existing_deliveries=True,
-                    collect_seen_message_ids=True,
-                )
-            # Old accepted receipts stay in the audit ledger, but do not
-            # count toward a user's intentional new replay cycle.
-            archived_attempts, old_deliveries, rebuilt_count = await run_db(
-                db.reset_rule_history_for_replay, rule_id,
-                owner_token=owner_token,
-                allowed_message_ids=seen_message_ids,
-                include_newer_than_message_id=scan_start_max_message_id,
-                expected_scope=(str(rule.source_id), rule.source_thread_id,
-                                str(rule.target_id), rule.target_thread_id, rule.mode),
-            )
-            replay_committed = True
-            invalidate_preview_cache(rule_id)
-            successful = True
-        finally:
-            # If replay committed but rebuild failed, leave the rule paused.
-            # For a read/parse failure no destructive reset happened.
-            await run_db(
-                db.finish_rule_rescan, rule_id,
-                was_active=(was_active if successful or not replay_committed else False),
-                owner_token=owner_token, queue_rebuilt=successful,
-            )
-
-        await run_db(
-            db.log_rule_change,
-            event_type="rule_rescanned_fresh",
-            rule_id=rule_id,
-            admin_id=admin_id,
-            old_value=None,
-            new_value={
-                "next_run_at": utc_now_iso(),
-            },
-            extra={
-                "mode": "fresh",
-                "parsed_count": parsed_count,
-                "rebuilt_count": rebuilt_count,
-                "archived_attempts": archived_attempts,
-                "replayed_deliveries": old_deliveries,
-                "source_id": str(rule.source_id),
-                "source_thread_id": rule.source_thread_id,
-            },
-        )
-
-        await ensure_rule_workers()
-
-        invalidate_rule_card_cache(rule_id)
-        refreshed = await refresh_rule_card_by_ids(
-            chat_id=chat_id,
-            message_id=message_id,
-            rule_id=rule_id,
-            prefix_text=(
-                f"✅ Правило #{rule_id} пересканировано заново.\n"
-                f"Новых записей источника: {parsed_count}\n"
-                f"Очередь правила собрана заново: {rebuilt_count}\n"
-                f"Архивировано старых попыток: {archived_attempts}"
-            ),
-        )
-
-        if not refreshed:
-            row = get_rule_stats_row(rule_id)
-            if row:
-                await send_message_safe(
-                    chat_id=chat_id,
-                    text=build_rule_card_text(row),
-                    parse_mode="HTML",
-                    reply_markup=build_rule_card_keyboard(
-                        rule_id,
-                        bool(row["is_active"]),
-                        row["schedule_mode"] or "interval",
-                        row["mode"] or "repost",
-                    ),
-                )
-            else:
-                await send_message_safe(
-                    chat_id=chat_id,
-                    text=(
-                        f"✅ Правило #{rule_id} пересканировано заново.\n"
-                        f"Новых записей источника: {parsed_count}\n"
-                        f"Очередь правила собрана заново: {rebuilt_count}"
-                    ),
-                )
-
+        archived, old_count, rebuilt_count = await run_db(db.restart_rule_queue, rule_id)
     except Exception as exc:
         if isinstance(exc, RescanBlocked):
             logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
         else:
-            logger.exception("Ошибка полного перескана правила %s: %s", rule_id, exc)
-
+            logger.exception("Ошибка перезапуска очереди правила %s", rule_id)
         await _show_rule_processing_screen(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=(
-                f"❌ Не удалось пересканировать правило #{rule_id} заново.\n\n"
-                f"Причина: {str(exc)[:300]}"
-            ),
+            chat_id=chat_id, message_id=message_id,
+            text=f"❌ Не удалось начать заново правило #{rule_id}.\n\nПричина: {str(exc)[:300]}",
             reply_markup=build_rescan_rule_keyboard(rule_id),
         )
+        return
+
+    # The queue transaction is already committed. Audit/UI failure must not
+    # report the restart as failed or invite another destructive retry.
+    invalidate_preview_cache(rule_id)
+    invalidate_rule_card_cache(rule_id)
+    try:
+        await run_db(
+            db.log_rule_change, event_type="rule_rescanned_fresh",
+            rule_id=rule_id, admin_id=admin_id, old_value=None,
+            new_value={"next_run_at": utc_now_iso()},
+            extra={"mode": "fresh", "rebuilt_count": rebuilt_count,
+                   "archived_attempts": archived, "replayed_deliveries": old_count},
+        )
+        await ensure_rule_workers()
+    except Exception:
+        logger.exception("RESTART_POST_COMMIT_FAILED | rule_id=%s", rule_id)
+
+    summary = f"✅ Правило #{rule_id}: очередь начата заново."
+    try:
+        if await refresh_rule_card_by_ids(
+            chat_id=chat_id, message_id=message_id, rule_id=rule_id,
+            prefix_text=summary,
+        ):
+            return
+    except Exception:
+        logger.exception("RESTART_CARD_REFRESH_FAILED | rule_id=%s", rule_id)
+    await _show_rule_processing_screen(
+        chat_id=chat_id, message_id=message_id,
+        text=summary + f"\nЗаписей в новой очереди: {rebuilt_count}",
+        reply_markup=build_rescan_rule_keyboard(rule_id),
+    )
 
 
 async def _run_rescan_rule_keep_job(
@@ -6839,10 +6752,9 @@ async def handle_rescan_rule_fresh(callback: CallbackQuery):
     await answer_callback_safe_once(callback)
     text = (
         f"🆕 Начать заново: правило #{rule_id}\n\n"
-        "Очередь будет построена с начала. Ранее опубликованные посты "
-        "могут быть опубликованы повторно. Старые принятые видео "
-        "сохранятся в истории без отметки о проверке. "
-        "Незавершённые отправки по-прежнему блокируют сброс."
+        "Все посты текущей очереди будут поставлены на отправку с начала. "
+        "Ранее опубликованные посты будут опубликованы повторно. "
+        "Если нужно обновить историю источника, выберите «Сохранить позицию»."
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить новый цикл",
