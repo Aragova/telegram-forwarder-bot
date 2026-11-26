@@ -150,6 +150,7 @@ class _Sender:
             "ok": True,
             "processed_video_path": "/tmp/processed20.mp4",
             "thumbnail_path": "/tmp/thumb20.jpg",
+            "processing_diagnostics": {"source_metadata": {"codec_name": "h264"}, "trim_applied": True},
             "cleanup_paths": ["/tmp/input20.mp4", "/tmp/processed20.mp4", "/tmp/thumb20.jpg"],
             "duration": 10.0,
             "width": 1280,
@@ -207,6 +208,8 @@ def test_video_process_creates_video_send() -> None:
     assert len(send_jobs) == 1
     payload = send_jobs[0]["payload_json"]
     assert payload["processed_video_path"] == "/tmp/processed20.mp4"
+    assert payload["processing_diagnostics"]["source_metadata"]["codec_name"] == "h264"
+    assert payload["processing_diagnostics"]["trim_applied"] is True
     assert payload["thumbnail_path"] == "/tmp/thumb20.jpg"
 
 

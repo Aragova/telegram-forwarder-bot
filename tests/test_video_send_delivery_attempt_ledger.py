@@ -550,3 +550,141 @@ def test_video_send_size_error_is_non_retryable_and_not_accepted(tmp_path: Path)
     assert "TelegramEntityTooLarge" in result["error_text"]
     assert any(call[0] == "failed" for call in repo.calls)
     assert not any(call[0] == "accepted" for call in repo.calls)
+
+
+@pytest.mark.parametrize("possible_write", [False, True])
+def test_document_invalid_is_terminal_rejection_unless_prior_write_possible(tmp_path, possible_write):
+    from telethon.errors import DocumentInvalidError
+    from app.send_intent import current_publication_intent
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+    sends = []
+
+    async def reject(*_args, **_kwargs):
+        sends.append(1)
+        current_publication_intent().possible_write = possible_write
+        raise DocumentInvalidError(request=None)
+
+    service.video_processor.send_with_retry = reject
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"video")
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=79, rule_id=1, target_id="-10079", processed_video_path=str(clip),
+    ))
+    assert sends == [1]
+    assert result["ok"] is False
+    assert result["accepted"] is possible_write
+    assert result["retryable"] is False
+    assert result["fallback_to_legacy"] is False
+    failures = [c[2] for c in repo.calls if c[0] == "failed"]
+    assert failures[0]["status"] == ("failed_after_send" if possible_write else "failed_before_send")
+    assert not any(c[0] in ("accepted", "verified", "mark_delivery_sent") for c in repo.calls)
+    if not possible_write:
+        assert "DocumentInvalidError" in result["error_text"]
+        assert any(c[0] == "faulty" for c in repo.calls)
+
+
+def test_legacy_document_invalid_is_not_retried():
+    repo = FakeRepo()
+    service = _build_service(repo)
+
+    async def reject(*_args, **_kwargs):
+        return {"ok": False, "accepted": False, "retryable": False,
+                "rejected_before_send": True, "error_text": "DocumentInvalidError: invalid"}
+
+    service._deliver_single_video = reject
+    result = asyncio.run(service.execute_video_delivery_from_job(
+        delivery_id=80, rule_id=1, message_id=12, source_channel="@src", target_id="-10080",
+    ))
+    assert result["accepted"] is False
+    assert result["retryable"] is False
+    assert "DocumentInvalidError" in result["error_text"]
+    assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
+    assert not any(c[0] == "accepted" for c in repo.calls)
+
+
+def test_document_invalid_diagnostics_survive_worker_cleanup(tmp_path):
+    from telethon.errors import DocumentInvalidError
+    from app.send_intent import current_publication_intent
+
+    repo = FakeRepo()
+    events = []
+    repo.log_video_event = lambda **kwargs: events.append(kwargs)
+    service = _build_service(repo)
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"video")
+
+    async def reject(*_args, **_kwargs):
+        trace = current_publication_intent().video_diagnostics
+        trace.update({"phase": "telethon_send_file", "rpc_state": "rejected",
+                      "rpc_request": {"method": "SendMediaRequest", "mime_type": "video/mp4"},
+                      "video_artifact": {"bytes": 5}})
+        raise DocumentInvalidError(request=None)
+
+    service.video_processor.send_with_retry = reject
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=81, rule_id=1, target_id="-10081",
+        processed_video_path=str(clip),
+    ))
+    clip.unlink()
+    assert result["accepted"] is False
+    assert result["retryable"] is False
+    assert len(events) == 1
+    event = events[0]
+    assert event["event_type"] == "video_send_diagnostics"
+    assert event["delivery_id"] == 81
+    assert event["extra"]["failure_stage"] == "send_media_rpc"
+    assert event["extra"]["video_artifact"]["bytes"] == 5
+    assert event["extra"]["possible_write"] is False
+
+
+def test_diagnostic_database_error_does_not_change_rejection(tmp_path):
+    from telethon.errors import DocumentInvalidError
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"video")
+
+    def fail_audit(**_kwargs):
+        raise RuntimeError("audit database unavailable")
+
+    async def reject(*_args, **_kwargs):
+        raise DocumentInvalidError(request=None)
+
+    repo.log_video_event = fail_audit
+    service.video_processor.send_with_retry = reject
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=82, rule_id=1, target_id="-10082",
+        processed_video_path=str(clip),
+    ))
+    assert result["accepted"] is False
+    assert result["retryable"] is False
+    assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
+
+
+@pytest.mark.parametrize("schedule_mode", ["interval", "fixed"])
+def test_direct_video_scheduler_does_not_treat_failure_dict_as_success(monkeypatch, schedule_mode):
+    from types import SimpleNamespace
+
+    service = _build_service(FakeRepo())
+    monkeypatch.setattr("app.sender.TopTimeGuardService.build_guard_decision", lambda *_a, **_kw: {})
+    service._take_due_delivery_sync = lambda *_a: {
+        "post_id": 1,
+        "due": {"delivery_id": 1, "source_channel": "@src", "message_id": 2,
+                "media_group_id": None, "target_id": "-1001", "target_thread_id": None,
+                "interval": 60},
+    }
+    touches = []
+    service._touch_rule_after_send_sync = lambda *args: touches.append(args)
+
+    async def reject(*_args):
+        return {"ok": False, "retryable": False, "accepted": False}
+
+    service._deliver_single_video = reject
+    result = asyncio.run(service.process_rule_once(
+        SimpleNamespace(id=1, mode="video", schedule_mode=schedule_mode),
+    ))
+    assert result is False
+    assert bool(touches) is (schedule_mode == "fixed")

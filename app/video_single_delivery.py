@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
-from telethon.errors import FloodWaitError
+from telethon.errors import DocumentInvalidError, FloodWaitError
 
 from .runtime_utils import run_db
 from .send_intent import current_publication_intent
@@ -336,6 +336,23 @@ class VideoSingleDelivery:
             )
             return False
 
+        except DocumentInvalidError as exc:
+            if publication_returned:
+                return await post_send_failure(exc)
+            error_text = f"DocumentInvalidError: {exc}"
+            if current_publication_intent() is None:
+                # The direct scheduler has no attempt ledger or outer worker
+                # to finalize this rejection.
+                await run_db(
+                    owner._finalize_video_failure_sync,
+                    delivery_id=delivery_id, rule_id=rule.id, post_id=post_id,
+                    source_channel=source_channel, target_id=target_id,
+                    target_thread_id=target_thread_id, source_message_id=message_id,
+                    error_text=error_text,
+                )
+                return False
+            return {"ok": False, "retryable": False, "accepted": False,
+                    "rejected_before_send": True, "error_text": error_text}
         except VideoPreSendError as exc:
             if publication_returned:
                 return await post_send_failure(exc)

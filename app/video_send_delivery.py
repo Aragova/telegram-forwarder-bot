@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
-from telethon.errors import FloodWaitError
+from telethon.errors import DocumentInvalidError, FloodWaitError
 
 from .delivery_idempotency import (
     build_delivery_idempotency_key,
@@ -15,6 +15,7 @@ from .runtime_utils import run_db
 from .send_intent import PublicationIntent, publication_scope
 from .telethon_authoritative_resolver import TelethonSendOutcome
 from .video_processor import VideoPreSendError
+from .video_send_diagnostics import VIDEO_METADATA_KEYS, persist_video_failure
 from .transport_policy import TransportRateLimited
 
 logger = logging.getLogger("forwarder")
@@ -166,6 +167,15 @@ class VideoSendDelivery:
                 idempotency_key,
             )
         intent = PublicationIntent(owner.db, idempotency_key)
+        intent.video_diagnostics = {"video_metadata": {key: video_info.get(key) for key in VIDEO_METADATA_KEYS},
+                                    "source_message_id": source_message_id, "target_id": target_id,
+                                    "phase": "send_preflight",
+                                    "processing": payload.get("processing_diagnostics")}
+
+        async def audit_failure(error_text, stage=None):
+            await persist_video_failure(owner, intent, delivery_id=delivery_id, rule_id=rule_id,
+                                        error_text=error_text, stage=stage)
+
         try:
             with publication_scope(intent):
                 sent_msg = await owner.video_processor.send_with_retry(
@@ -179,12 +189,22 @@ class VideoSendDelivery:
                     caption_entities_json=caption_payload["caption_entities_json"],
                     caption_send_mode=caption_payload["selected_mode"],
                 )
-        except (VideoPreSendError, TelegramRetryAfter, FloodWaitError, TransportRateLimited, TelegramEntityTooLarge) as exc:
+        except (VideoPreSendError, TelegramRetryAfter, FloodWaitError, TransportRateLimited,
+                TelegramEntityTooLarge, DocumentInvalidError) as exc:
+            await audit_failure(f"{type(exc).__name__}: {exc}")
             if intent.possible_write:
                 error = "video_send_accepted_target_id_unresolved_non_retryable"
                 if has_attempt_ledger:
                     await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send", error_text=error)
                 return {"ok": False, "accepted": True, "retryable": False, "fallback_to_legacy": False, "error_text": error, "manual_review_required": True}
+            if isinstance(exc, DocumentInvalidError):
+                error_text = f"DocumentInvalidError: {exc}"
+                if has_attempt_ledger:
+                    await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key,
+                                 status="failed_before_send", error_text=error_text)
+                await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+                return {"ok": False, "accepted": False, "retryable": False,
+                        "fallback_to_legacy": False, "error_text": error_text}
             if isinstance(exc, VideoPreSendError):
                 # The Telegram request has not started. This row may safely
                 # transition back to failed_before_send for a worker retry.
@@ -251,6 +271,7 @@ class VideoSendDelivery:
                         return pending_result or {"ok": False, "retryable": False, "accepted": True,
                                                   "manual_review_required": True, "error_text": "publication_receipt_missing_no_resend"}
                 candidate_ids = [] if sent_msg.resolution_method == "video_processing_pending" else (sent_msg.returned_candidate_ids or [])
+                await audit_failure(sent_msg.error_text or "video_send_accepted_target_id_unresolved_non_retryable")
                 if has_attempt_ledger:
                     await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=candidate_ids, telegram_method="video_send_unresolved")
                 error = "video_send_accepted_target_id_unresolved_non_retryable"
@@ -265,6 +286,7 @@ class VideoSendDelivery:
             if has_attempt_ledger:
                 await run_db(owner.db.mark_delivery_attempt_accepted, idempotency_key, sent_message_ids=[], telegram_method="video_send_unknown")
             error = "video_send_response_missing_non_retryable"
+            await audit_failure(error, "response_missing")
             await run_db(owner._mark_delivery_faulty_sync, delivery_id, error)
             return {"ok": False, "retryable": False, "accepted": True, "error_text": error, "manual_review_required": True, "fallback_to_legacy": False}
 
@@ -274,6 +296,7 @@ class VideoSendDelivery:
             logger.info("DELIVERY_ATTEMPT_ACCEPTED | operation_kind=video_send | delivery_id=%s | rule_id=%s | candidate_sent_ids=%s", delivery_id, rule_id, valid_sent_ids)
         if not valid_sent_ids:
             error = "video_send_accepted_without_ids_non_retryable"
+            await audit_failure(error, "response_message_ids")
             await run_db(owner._mark_delivery_faulty_sync, delivery_id, error)
             return {"ok": False, "retryable": False, "accepted": True, "error_text": error, "fallback_to_legacy": False}
         confirm_result = await owner._run_post_send_step_safe(
@@ -299,6 +322,7 @@ class VideoSendDelivery:
         if not sent_message_id:
             error = "video_send_accepted_target_id_unresolved_non_retryable"
             logger.warning("VIDEO_SEND_VERIFY_UNRESOLVED | rule_id=%s | delivery_id=%s | candidate_ids=%s | action=no_resend_manual_review", rule_id, delivery_id, valid_sent_ids)
+            await audit_failure(error, "target_verification")
             await run_db(owner._mark_delivery_faulty_sync, delivery_id, error)
             return {"ok": False, "retryable": False, "accepted": True, "error_text": error, "manual_review_required": True, "fallback_to_legacy": False}
         if has_attempt_ledger and hasattr(owner.db, "mark_delivery_attempt_verified"):
