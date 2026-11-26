@@ -683,7 +683,7 @@ async def _run_rescan_rule_fresh_job(
             }
             await _write_rescan_audit(rule_id, admin_id, audit)
         except RescanBlocked:
-            # Repository preconditions fail before any destructive write.
+            # A repository safety rejection rolls back the transaction.
             commit_pending = False
             raise
         finally:
@@ -717,7 +717,6 @@ async def _run_rescan_rule_fresh_job(
         rule_id=rule_id, rule=rule, was_active=was_active,
         chat_id=chat_id, message_id=message_id,
         summary=summary, fallback_text=summary + f"\nЗаписей в новой очереди: {rebuilt_count}",
-
     )
 
 
@@ -793,7 +792,7 @@ async def _run_rescan_rule_keep_job(
             }
             await _write_rescan_audit(rule_id, admin_id, audit)
         except RescanBlocked:
-            # Repository preconditions fail before any destructive write.
+            # A repository safety rejection rolls back the transaction.
             commit_pending = False
             raise
         finally:
@@ -802,8 +801,6 @@ async def _run_rescan_rule_keep_job(
                     rule_id, was_active=was_active,
                     owner_token=owner_token, queue_rebuilt=scan_complete,
                 )
-
-
     except _RescanReleaseFailed:
         await _report_rescan_release_failure(rule_id=rule_id, chat_id=chat_id,
                                              message_id=message_id, scan_complete=scan_complete)
@@ -840,7 +837,6 @@ async def _run_rescan_rule_keep_job(
         rule_id=rule_id, rule=rule, was_active=was_active,
         chat_id=chat_id, message_id=message_id,
         summary=summary,
-
     )
 
 

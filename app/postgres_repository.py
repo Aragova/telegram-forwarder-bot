@@ -5043,6 +5043,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     "UPDATE routing SET rescan_queue_built=TRUE,next_run_at=%s,last_sent_at=NULL WHERE id=%s",
                     (utc_now_iso(), int(rule_id)),
                 )
+                # Live ingestion can commit without taking the routing lock.
+                # Recheck after the destructive DELETE; if a previously unseen
+                # post arrived before it, roll back rather than lose its delivery.
+                self._assert_rescan_live_snapshot(
+                    cur, rule, include_newer_than_message_id,
+                    allowed_message_ids, checked_missing_message_ids or set(),
+                )
             conn.commit()
         return archived, old_count, rebuilt
 

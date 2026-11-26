@@ -1229,3 +1229,47 @@ def test_rescan_release_repeated_after_lost_commit_response(repo):
             repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner)
     finally:
         repo.finish_rule_rescan(rule_id, was_active=active2, owner_token=owner2)
+
+
+def test_restart_rolls_back_if_unchecked_arrival_commits_between_guard_and_delete(repo, monkeypatch):
+    key, rule_id, deliveries, source_ids, source, _ = seed(repo, uuid4().int % 10**12)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE deliveries SET status='sent' WHERE rule_id=%s", (rule_id,))
+    watermark = max(source_ids)
+    live_id = watermark + 1
+    active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
+    guard = repo._assert_rescan_live_snapshot
+    checks = 0
+
+    def ingest():
+        try:
+            repo.save_post(live_id, source, None, {"media_kind": "text"})
+        finally:
+            repo.client.close_thread_connection()
+
+    def guard_with_arrival(*args):
+        nonlocal checks
+        guard(*args)
+        checks += 1
+        if checks == 1:
+            # Independent committed transaction after the first guard.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(ingest).result(timeout=10)
+
+    monkeypatch.setattr(repo, "_assert_rescan_live_snapshot", guard_with_arrival)
+    try:
+        with pytest.raises(RuntimeError, match="появились новые записи"):
+            repo.restart_rule_queue(
+                rule_id, owner_token=owner, allowed_message_ids=set(source_ids),
+                include_newer_than_message_id=watermark,
+            )
+        assert repo.get_delivery(deliveries[0])["status"] == "sent"
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT d.status FROM deliveries d JOIN posts p ON p.id=d.post_id
+                               WHERE d.rule_id=%s AND p.message_id=%s""", (rule_id, live_id))
+                assert cur.fetchone()["status"] == "pending"
+    finally:
+        repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner)

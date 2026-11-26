@@ -113,8 +113,11 @@ Album attempt arrays historically contain delivery IDs. Keep-position never inte
 ## Current behavior: full-source rescan and simple queue restart (#94)
 
 Both modes use the same full-history parser for channels and topics, refresh
-source posts without deleting shared data, and preserve live arrivals after
-the scan-start high-water mark. **Start over** atomically builds a fresh
+source posts without deleting shared data, and verify cached live arrivals after
+the scan-start high-water mark against Telegram in batches before committing.
+Deleted live candidates are excluded, and a newly committed unchecked candidate
+causes a safe rollback of the restart instead of silently dropping its delivery.
+**Start over** atomically builds a fresh
 queue from observed source IDs, excludes deleted posts and known self-loop
 echoes, allocates new delivery IDs, and archives prior attempt keys without
 rewriting their outcomes. Historical uncertain attempts with both timestamps before the #507 merge
@@ -125,6 +128,10 @@ publication evidence remain fenced. Age alone never proves publication.
 **Keep position** preserves existing delivery identities and position. After
 a completed rescan, scheduler and logical queue views use Telegram message ID
 order within the source; rules not yet rescanned retain their existing order.
+Rollback selects the completed logical item by its latest member's actual send time,
+not queue position. Confirmed queue changes are audited before attempting owner release.
 If owner release fails after a queue commit, only the fenced release is retried;
-no second rebuild is offered. A complete source scan is required before resetting the queue; its
+no second rebuild is offered. If the result of the queue commit itself is unknown,
+the owner is retained for manual database verification before another rebuild.
+A complete source scan is required before resetting the queue; its
 duration depends on Telegram and source size.
