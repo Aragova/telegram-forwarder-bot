@@ -92,7 +92,9 @@ def media_request_details(request):
         "attribute_types": [type(a).__name__ for a in attributes],
         "video_attributes": {key: getattr(video, key, None) for key in
                              ("duration", "w", "h", "supports_streaming", "round_message")} if video else None,
-        "caption_entity_types": [type(e).__name__ for e in (getattr(request, "entities", None) or [])],
+        "caption_entities": [{"type": type(e).__name__, "offset": getattr(e, "offset", None),
+                              "length": getattr(e, "length", None)}
+                             for e in (getattr(request, "entities", None) or [])],
     }
 
 
@@ -113,6 +115,17 @@ async def persist_video_failure(owner, intent, *, delivery_id, rule_id, error_te
     })
     if stage:
         snapshot["failure_stage"] = stage
+    elif snapshot.get("phase") == "telethon_send_file":
+        if snapshot.get("rpc_state") in {"rejected", "exception_unknown", "invoked"}:
+            snapshot["failure_stage"] = "send_media_rpc"
+        elif snapshot.get("rpc_state") == "response_received":
+            snapshot["failure_stage"] = "send_file_after_rpc_response"
+        elif snapshot.get("upload_parts_failed") or snapshot.get("upload_parts_rejected"):
+            snapshot["failure_stage"] = "file_upload"
+        else:
+            snapshot["failure_stage"] = "send_file_before_observed_publication"
+    else:
+        snapshot["failure_stage"] = snapshot.get("phase", "unknown")
     logger.warning("VIDEO_SEND_DIAGNOSTICS | delivery_id=%s | rule_id=%s | error=%s | details=%s",
                    delivery_id, rule_id, error_text, snapshot)
     if not callable(getattr(owner.db, "log_video_event", None)):
