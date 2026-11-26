@@ -515,17 +515,36 @@ async def _show_rule_processing_screen(
             logger.warning("RESCAN_STATUS_NOT_DELIVERED | chat_id=%s | message_id=%s", chat_id, message_id)
 
 
+class _RescanReleaseFailed(RuntimeError):
+    """The scan owner release could not be confirmed."""
+
+
 async def _finish_rule_rescan_with_retry(rule_id: int, *, was_active: bool,
                                          owner_token: str, queue_rebuilt: bool) -> None:
-    # The repository UPDATE is fenced by the exact owner token, including
-    # on retry. Never rerun a queue transaction to recover a failed release.
-    try:
-        await run_db(db.finish_rule_rescan, rule_id, was_active=was_active,
-                     owner_token=owner_token, queue_rebuilt=queue_rebuilt)
-    except Exception:
-        logger.warning("RESCAN_RELEASE_RETRY | rule_id=%s", rule_id, exc_info=True)
-        await run_db(db.finish_rule_rescan, rule_id, was_active=was_active,
-                     owner_token=owner_token, queue_rebuilt=queue_rebuilt)
+    # The repository UPDATE checks the exact owner token on every attempt.
+    for attempt in range(2):
+        try:
+            await run_db(db.finish_rule_rescan, rule_id, was_active=was_active,
+                         owner_token=owner_token, queue_rebuilt=queue_rebuilt)
+            return
+        except Exception as exc:
+            if attempt:
+                raise _RescanReleaseFailed("Не подтверждено снятие блокировки") from exc
+            logger.warning("RESCAN_RELEASE_RETRY | rule_id=%s", rule_id, exc_info=True)
+
+
+async def _report_rescan_release_failure(*, rule_id: int, chat_id: int,
+                                          message_id: int, scan_complete: bool) -> None:
+    logger.exception("RESCAN_RELEASE_FAILED | rule_id=%s | rebuilt=%s", rule_id, scan_complete)
+    invalidate_preview_cache(rule_id)
+    invalidate_rule_card_cache(rule_id)
+    status = "Очередь перестроена." if scan_complete else "Пересканирование прервано."
+    await _show_rule_processing_screen(
+        chat_id=chat_id, message_id=message_id,
+        text=(f"⚠️ Правило #{rule_id}. {status}\n"
+              "Не удалось подтвердить восстановление статуса правила. "
+              "Требуется проверка владельца пересканирования; не запускайте повторно."),
+    )
 
 
 async def _scan_rule_source(rule):
@@ -549,7 +568,6 @@ async def _run_rescan_rule_fresh_job(
     admin_id: int,
 ) -> None:
     scan_complete = False
-    release_failed = False
     try:
         rule = await run_db(db.get_rule, rule_id)
         if not rule:
@@ -576,27 +594,15 @@ async def _run_rescan_rule_fresh_job(
             )
             scan_complete = True
         finally:
-            try:
-                await _finish_rule_rescan_with_retry(
-                    rule_id, was_active=was_active,
-                    owner_token=owner_token, queue_rebuilt=scan_complete,
-                )
-            except Exception:
-                release_failed = True
-                raise
-    except Exception as exc:
-        if release_failed:
-            logger.exception("RESCAN_RELEASE_FAILED | rule_id=%s | rebuilt=%s", rule_id, scan_complete)
-            invalidate_preview_cache(rule_id)
-            invalidate_rule_card_cache(rule_id)
-            status = ("Очередь перестроена." if scan_complete else "Пересканирование прервано.")
-            await _show_rule_processing_screen(
-                chat_id=chat_id, message_id=message_id,
-                text=(f"⚠️ Правило #{rule_id}. {status}\n"
-                      "Не удалось подтвердить восстановление статуса правила. "
-                      "Требуется проверка владельца пересканирования; не запускайте повторно."),
+            await _finish_rule_rescan_with_retry(
+                rule_id, was_active=was_active,
+                owner_token=owner_token, queue_rebuilt=scan_complete,
             )
-            return
+    except _RescanReleaseFailed:
+        await _report_rescan_release_failure(rule_id=rule_id, chat_id=chat_id,
+                                             message_id=message_id, scan_complete=scan_complete)
+        return
+    except Exception as exc:
         if isinstance(exc, RescanBlocked):
             logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
         else:
@@ -656,7 +662,6 @@ async def _run_rescan_rule_keep_job(
     admin_id: int,
 ) -> None:
     scan_complete = False
-    release_failed = False
     try:
         rule = await run_db(db.get_rule, rule_id)
         if not rule:
@@ -697,29 +702,17 @@ async def _run_rescan_rule_keep_job(
             )
             scan_complete = True
         finally:
-            try:
-                await _finish_rule_rescan_with_retry(
-                    rule_id, was_active=was_active,
-                    owner_token=owner_token, queue_rebuilt=scan_complete,
-                )
-            except Exception:
-                release_failed = True
-                raise
-
-
-    except Exception as exc:
-        if release_failed:
-            logger.exception("RESCAN_RELEASE_FAILED | rule_id=%s | rebuilt=%s", rule_id, scan_complete)
-            invalidate_preview_cache(rule_id)
-            invalidate_rule_card_cache(rule_id)
-            status = ("Очередь перестроена." if scan_complete else "Пересканирование прервано.")
-            await _show_rule_processing_screen(
-                chat_id=chat_id, message_id=message_id,
-                text=(f"⚠️ Правило #{rule_id}. {status}\n"
-                      "Не удалось подтвердить восстановление статуса правила. "
-                      "Требуется проверка владельца пересканирования; не запускайте повторно."),
+            await _finish_rule_rescan_with_retry(
+                rule_id, was_active=was_active,
+                owner_token=owner_token, queue_rebuilt=scan_complete,
             )
-            return
+
+
+    except _RescanReleaseFailed:
+        await _report_rescan_release_failure(rule_id=rule_id, chat_id=chat_id,
+                                             message_id=message_id, scan_complete=scan_complete)
+        return
+    except Exception as exc:
         if isinstance(exc, RescanBlocked):
             logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
         else:
