@@ -704,3 +704,78 @@ def test_fingerprinted_album_reconciliation_keeps_original_member_vector():
     assert _apply(repo) == 3 and conn.commits == 1
     args = next(args for query, args in cursor.executed if "UPDATE delivery_attempts SET status = 'verified'" in query)
     assert args[0] == 11 and json.loads(args[1]) == [11, 12, 13]
+
+
+def _load_rescan_handler(name, namespace):
+    import ast
+
+    source = Path("bot.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    return namespace[name]
+
+
+def test_rescan_final_screen_retries_throttled_edit():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    policy = SimpleNamespace(
+        MESSAGE_EDIT_THROTTLE_SECONDS=0,
+        edit_text=AsyncMock(side_effect=[
+            SimpleNamespace(ok=False, reason="message_edit_throttled"),
+            SimpleNamespace(ok=True, reason=None),
+        ]),
+    )
+    send = AsyncMock()
+    handler = _load_rescan_handler("_show_rule_processing_screen", {
+        "asyncio": asyncio, "ui_policy": policy, "send_message_safe": send,
+    })
+    asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
+    assert policy.edit_text.await_count == 2
+    send.assert_not_awaited()
+
+
+def test_rescan_final_screen_uses_send_when_edit_cannot_succeed():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    policy = SimpleNamespace(edit_text=AsyncMock(
+        return_value=SimpleNamespace(ok=False, reason="message_not_found"),
+    ))
+    send = AsyncMock()
+    handler = _load_rescan_handler("_show_rule_processing_screen", {
+        "asyncio": asyncio, "ui_policy": policy, "send_message_safe": send,
+    })
+    asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
+    send.assert_awaited_once_with(chat_id=1, text="Готово", reply_markup=None, parse_mode=None)
+
+
+def test_fresh_restart_reports_success_even_when_card_refresh_fails():
+    import asyncio
+    import logging
+    from unittest.mock import AsyncMock, Mock
+
+    from app.rescan_safety import RescanBlocked
+
+    repo = SimpleNamespace(restart_rule_queue=Mock(return_value=(240, 525, 525)),
+                           log_rule_change=Mock())
+
+    async def run_db(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    show = AsyncMock()
+    handler = _load_rescan_handler("_run_rescan_rule_fresh_job", {
+        "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
+        "logger": logging.getLogger(__name__),
+        "invalidate_preview_cache": Mock(), "invalidate_rule_card_cache": Mock(),
+        "utc_now_iso": lambda: "2026-11-26T10:00:00Z",
+        "ensure_rule_workers": AsyncMock(),
+        "refresh_rule_card_by_ids": AsyncMock(return_value="failed"),
+        "_show_rule_processing_screen": show,
+        "build_rescan_rule_keyboard": Mock(return_value="keyboard"),
+    })
+    asyncio.run(handler(rule_id=94, chat_id=1, message_id=2, admin_id=3))
+    repo.restart_rule_queue.assert_called_once_with(94)
+    assert "очередь начата заново" in show.await_args.kwargs["text"]
+    assert "525" in show.await_args.kwargs["text"]
