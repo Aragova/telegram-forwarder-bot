@@ -7685,7 +7685,10 @@ async def handle_stateful_private_inputs(message: Message):
 
             if _get_user_state(user_id):
                 return
-            await send_message_safe(chat_id=message.chat.id, text=build_video_caption_menu_text(rule_id), parse_mode="HTML", reply_markup=build_video_caption_menu_keyboard(rule_id))
+            menu_text = await run_db(build_video_caption_menu_text, rule_id)
+            if _get_user_state(user_id):
+                return
+            await send_message_safe(chat_id=message.chat.id, text=menu_text, parse_mode="HTML", reply_markup=build_video_caption_menu_keyboard(rule_id))
         else:
             prompt_chat_id, prompt_message_id = _state_prompt_ids(state)
             if prompt_chat_id and prompt_message_id:

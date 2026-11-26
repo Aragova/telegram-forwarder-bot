@@ -386,7 +386,7 @@ def test_issue_without_offset_never_displays_none():
     assert "ID 123:" in text and "None" not in text
 
 
-def _caption_input_handler(save, validate, states, *, with_clear=False):
+def _caption_input_handler(save, validate, states, *, with_clear=False, menu_text=None, send=None):
     # Execute the actual production input-claim and save branches without
     # bootstrapping the bot, Telegram client or unrelated menu handlers.
     import ast
@@ -416,9 +416,9 @@ def _caption_input_handler(save, validate, states, *, with_clear=False):
         "utf16_length": validation.utf16_length, "run_db": run_db,
         "_validate_video_caption_emoji": validate, "_save_video_caption_sync": save,
         "invalidate_rule_card_cache": lambda _rule_id: None,
-        "try_delete_message_safe": noop, "send_message_safe": noop,
+        "try_delete_message_safe": noop, "send_message_safe": send or noop,
         "reply_message_safe": noop, "format_validation_result": validation.format_validation_result,
-        "build_video_caption_menu_text": lambda _rule_id: "menu",
+        "build_video_caption_menu_text": menu_text or (lambda _rule_id: "menu"),
         "build_video_caption_menu_keyboard": lambda _rule_id: None,
         "settings": SimpleNamespace(admin_id=7),
     }
@@ -667,3 +667,37 @@ def test_missing_document_alt_rejected_without_publication(monkeypatch):
     assert result.status == "invalid"
     assert result.issues[0].reason == "emoji_text_mismatch"
     assert not client.calls
+
+
+@pytest.mark.parametrize("new_input", [True, False])
+def test_caption_menu_db_read_does_not_replace_new_input(new_input):
+    async def scenario():
+        states = {7: {"action": "video_caption", "rule_id": 141}}
+        messages = []
+        reads = []
+
+        async def validate(*_args, **_kwargs):
+            return validation.ValidationResult("verified")
+
+        def save(*_args):
+            return {"ok": True}
+
+        async def menu_text(rule_id):
+            reads.append(rule_id)
+            if new_input:
+                states[7] = {"action": "video_caption", "rule_id": 142}
+            return "menu"
+
+        async def send(**kwargs):
+            messages.append(kwargs)
+
+        handle = _caption_input_handler(save, validate, states, menu_text=menu_text, send=send)
+        await handle(_caption_input(100, "caption"))
+        assert reads == [141]
+        if new_input:
+            assert not messages
+            assert states[7]["rule_id"] == 142
+        else:
+            assert len(messages) == 1 and messages[0]["text"] == "menu"
+
+    asyncio.run(scenario())
