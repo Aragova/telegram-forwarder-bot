@@ -1546,3 +1546,42 @@ def test_rescan_delivery_archive_supports_both_audit_column_types(repo, extra_ty
             with conn.cursor() as cur:
                 cur.execute("DROP TABLE IF EXISTS pg_temp.audit_log")
         repo.finish_rule_rescan(rid,was_active=active,owner_token=owner,queue_rebuilt=True)
+
+
+@pytest.mark.skipif(os.getenv("VIMI_TEST_POSTGRES") != "1", reason="requires disposable PostgreSQL")
+def test_emoji_probe_quota_and_fence_across_process_connections():
+    assert os.getenv("APP_PG_DB") == "vimi_publication_ci"
+    repo = PostgresRepository()
+    account = 8745123
+    chat = -1008745123
+    root = f"video-emoji:{account}"
+    try:
+        repo.init()
+
+        def reserve(user):
+            other = PostgresRepository()
+            try:
+                return other.reserve_video_emoji_check(account, user, chat)
+            finally:
+                other.close_all_connections()
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(reserve, [10, 10, 11, 12]))
+        assert results.count("reserved") == 1
+        assert results.count("pending_review") == 3
+        # Unknown result remains fenced for a fresh repository connection.
+        assert reserve(13) == "pending_review"
+        repo.release_video_emoji_check(account)
+        assert reserve(13) == "quota"
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE telegram_transport_cooldowns SET blocked_until=NOW()-interval '1 second' WHERE scope_key=%s", (f"{root}:quota",))
+        winner = [10, 10, 11, 12][results.index("reserved")]
+        assert reserve(winner) == "quota"
+        repo.extend_transport_cooldown(f"mtproto:{account}", 60)
+        assert reserve(13) == "flood_wait"
+    finally:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM telegram_transport_cooldowns WHERE scope_key LIKE %s OR scope_key=%s", (f"{root}:%", f"mtproto:{account}"))
+        repo.close_all_connections()
