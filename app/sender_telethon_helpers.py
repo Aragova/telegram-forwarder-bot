@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import asyncio
 import json
+import struct
 import tempfile
 import threading
 from datetime import datetime, timezone
@@ -13,7 +14,6 @@ from telethon.tl import types as tl_types
 from telethon.errors import BadRequestError, RandomIdDuplicateError
 
 from .send_intent import PublicationWriteUnavailable
-from .telegram_thumbnail import jpeg_dimensions, valid_telegram_thumbnail
 from .transport_policy import TransportRateLimited
 
 from .background_tasks import start_background_task
@@ -24,6 +24,8 @@ from .telethon_authoritative_resolver import TelethonAuthoritativeMessageResolve
 
 logger = logging.getLogger("forwarder")
 
+MAX_TELEGRAM_THUMB_BYTES = 20 * 1024
+MAX_TELEGRAM_THUMB_SIDE = 320
 
 
 def _create_thumb_temp_path(prefix: str) -> Path:
@@ -145,10 +147,49 @@ class SenderTelethonHelpers:
             return None
 
     def _valid_thumb_file(self, path: Path | None) -> bool:
-        return valid_telegram_thumbnail(path)
+        try:
+            if not path or not path.exists() or path.stat().st_size <= 0:
+                return False
+            if path.stat().st_size >= MAX_TELEGRAM_THUMB_BYTES:
+                return False
+            header = path.read_bytes()[:12]
+            if not header.startswith(b"\xff\xd8\xff"):
+                return False
+            width, height = self._jpeg_dimensions(path)
+            return bool(width and height and width <= MAX_TELEGRAM_THUMB_SIDE and height <= MAX_TELEGRAM_THUMB_SIDE)
+        except Exception:
+            return False
 
     def _jpeg_dimensions(self, path: Path) -> tuple[int, int]:
-        return jpeg_dimensions(path)
+        try:
+            data = path.read_bytes()
+            pos = 2
+            while pos + 9 < len(data):
+                if data[pos] != 0xFF:
+                    pos += 1
+                    continue
+                marker = data[pos + 1]
+                pos += 2
+                while marker == 0xFF and pos < len(data):
+                    marker = data[pos]
+                    pos += 1
+                if marker in {0xD8, 0xD9, 0x01} or 0xD0 <= marker <= 0xD7:
+                    continue
+                if pos + 2 > len(data):
+                    break
+                segment_len = struct.unpack(">H", data[pos:pos + 2])[0]
+                if segment_len < 2 or pos + segment_len > len(data):
+                    break
+                if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+                    if segment_len >= 7:
+                        height = struct.unpack(">H", data[pos + 3:pos + 5])[0]
+                        width = struct.unpack(">H", data[pos + 5:pos + 7])[0]
+                        return int(width), int(height)
+                    break
+                pos += segment_len
+            return 0, 0
+        except Exception:
+            return 0, 0
 
     def _select_source_photo_thumb(self, thumbs: list[Any]) -> Any | None:
         photo_thumbs = [
