@@ -45,6 +45,9 @@ cannot be made atomic with Telegram publication.
   may be active for an account; the existing transport cooldown table is reused.
   Account/peer FloodWait is respected and persisted. Diagnostic RPCs have no
   internal Telethon retries or flood sleeps; production task settings are unchanged.
+  A queued upload or failed upload-part RPC cannot mark a publication uncertain.
+  The uncertainty flag is set only immediately before the actual publication RPC;
+  explicit rejection clears it, and successful send requires verified cleanup.
 - An unknown send/verification/deletion result or process crash leaves a durable
   diagnostic-only fence (scope_key video-emoji:<account_id>:inflight). No new
   probe is allowed until the operator reconciles the isolated channel.
