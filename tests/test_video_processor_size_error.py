@@ -174,3 +174,44 @@ def test_telethon_rate_limit_after_send_is_unknown_acceptance_not_rejection(tmp_
     assert not result.authoritative_resolved
     assert result.returned_candidate_ids == [123]
     assert client.calls == 1
+
+
+def test_document_invalid_propagates_without_repeat_and_logs_metadata(tmp_path, caplog):
+    from types import SimpleNamespace
+    from telethon.errors import DocumentInvalidError
+
+    class RejectingTelethon:
+        calls = 0
+
+        async def get_entity(self, _):
+            return SimpleNamespace(broadcast=True, megagroup=False)
+
+        async def get_messages(self, _entity, ids=None, limit=None):
+            return []
+
+        async def send_file(self, **_kwargs):
+            self.calls += 1
+            raise DocumentInvalidError(request=None)
+
+    processor = VideoProcessor.__new__(VideoProcessor)
+    client = RejectingTelethon()
+    processor.telethon = client
+
+    async def video_info(*_args, **_kwargs):
+        return {"width": 720, "height": 1280, "duration": 30, "fps": 30}
+
+    processor.get_video_info = video_info
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"video")
+    thumb = tmp_path / "thumb.jpg"
+    thumb.write_bytes(b"thumb")
+    with pytest.raises(DocumentInvalidError):
+        asyncio.run(processor.send_with_retry(
+            None, destination_channel=-100123, target_thread_id=None,
+            video_path=str(clip), thumbnail_path=str(thumb), caption="private",
+            duration=30, caption_send_mode="premium", max_retries=3,
+        ))
+    assert client.calls == 1
+    assert "VIDEO_DOCUMENT_INVALID" in caplog.text
+    assert "video_bytes=5 | thumb_bytes=5" in caplog.text
+    assert "private" not in caplog.text
