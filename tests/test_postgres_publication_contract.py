@@ -571,6 +571,8 @@ def test_fresh_self_loop_keeps_old_echo_evidence_across_replays(repo):
         with repo.connect() as conn:
             assert repo._is_self_target_echo_post_for_rule_conn(conn,rule_id=rule_id,
                 source_channel=source,source_thread_id=None,message_id=source_ids[1])
+            with conn.cursor() as cur:
+                assert repo._get_rescan_echo_ids(cur, rule_id) == {source_ids[1]}
 
 
 
