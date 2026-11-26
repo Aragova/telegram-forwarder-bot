@@ -1912,6 +1912,15 @@ class SenderService:
             # The transport scope records entry into a publication RPC.
             with publication_scope(intent):
                 outcome = await self._deliver_single_video(rule, int(delivery_id), int(message_id), str(source_channel), str(target_id), target_thread_id)
+            if not (outcome.get("ok") if isinstance(outcome, dict) else outcome) and not (
+                isinstance(outcome, dict) and outcome.get("publication_pending")
+            ):
+                from .video_send_diagnostics import persist_video_failure
+                await persist_video_failure(
+                    self, intent, delivery_id=int(delivery_id), rule_id=int(rule_id),
+                    error_text=str(outcome.get("error_text") or "video_delivery_unsuccessful")
+                    if isinstance(outcome, dict) else "video_delivery_unsuccessful",
+                )
             if isinstance(outcome, dict) and outcome.get("publication_pending"):
                 pending_result = await reconcile_pending_publication(self, idempotency_key)
                 return pending_result or {"ok": False, "accepted": True, "retryable": False,
@@ -1990,6 +1999,9 @@ class SenderService:
                 logger.warning("JOB EXECUTOR | video_delivery | failed | rule_id=%s | delivery_id=%s | error=исполнитель вернул неуспешный результат", rule_id, delivery_id)
             return bool(ok)
         except Exception as exc:
+            from .video_send_diagnostics import persist_video_failure
+            await persist_video_failure(self, intent, delivery_id=int(delivery_id), rule_id=int(rule_id),
+                                        error_text=f"{type(exc).__name__}: {exc}")
             if has_attempt_ledger and acquired:
                 failure_status = "failed_after_send" if publication_possible or intent.possible_write else "failed_before_send"
                 await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status=failure_status, error_text=str(exc))
