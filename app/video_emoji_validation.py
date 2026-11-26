@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 import tempfile
 import time
 from collections import Counter
@@ -21,6 +22,7 @@ from telethon.errors import DocumentInvalidError, FloodWaitError
 from .runtime_utils import run_db
 from .send_intent import current_publication_intent
 from .subprocess_safety import communicate_safely
+from .transport_policy import TransportRateLimited
 
 logger = logging.getLogger("forwarder")
 MAX_OCCURRENCES = 50
@@ -78,7 +80,7 @@ def inspect_caption(caption, raw_entities):
         if not isinstance(item, dict):
             issues.append(EmojiIssue(None, None, "invalid_entities"))
             continue
-        if item.get("type") != "custom_emoji":
+        if str(item.get("type") or "").strip().lower() != "custom_emoji":
             continue
         document_id = None
         offset = None
@@ -89,10 +91,10 @@ def inspect_caption(caption, raw_entities):
             document_id = int(raw_id)
             if not 0 < document_id < 2**63:
                 raise ValueError("invalid document id")
-            offset = item["offset"]
-            length = item["length"]
-            if type(offset) is not int or type(length) is not int:
+            raw_offset, raw_length = item["offset"], item["length"]
+            if any(isinstance(v, bool) or not isinstance(v, (str, int)) for v in (raw_offset, raw_length)):
                 raise ValueError("invalid range")
+            offset, length = int(raw_offset), int(raw_length)
             if offset < 0 or length <= 0 or 2 * (offset + length) > len(encoded):
                 raise ValueError("invalid range")
             symbol = encoded[2 * offset:2 * (offset + length)].decode("utf-16-le")
@@ -144,6 +146,7 @@ async def _private_test_target(client, repo, chat_id):
     target = await client.get_entity(chat_id)
     if (utils.get_peer_id(target) != chat_id or not getattr(target, "broadcast", False)
             or getattr(target, "megagroup", False) or getattr(target, "username", None)
+            or getattr(target, "has_link", False)
             or any(getattr(item, "active", False) for item in (getattr(target, "usernames", None) or []))):
         raise RuntimeError("validation channel must be private and isolated")
     return target
@@ -164,8 +167,8 @@ async def _generate_probe_video(path):
         raise RuntimeError("synthetic video generation failed")
 
 
-def _synthetic_caption(occurrences):
-    text = ""
+def _synthetic_caption(occurrences, marker):
+    text = marker
     entities = []
     for item in occurrences:
         if text:
@@ -200,7 +203,8 @@ class _ProbeSession:
         if self.count >= MAX_PROBES:
             raise ProbeBudgetExceeded()
         self.count += 1
-        caption, entities = _synthetic_caption(occurrences)
+        marker = f"ViMi emoji check {secrets.token_hex(8)}"
+        caption, entities = _synthetic_caption(occurrences, marker)
         try:
             sent = await self.client.send_file(
                 entity=self.target, file=str(self.path), caption=caption,
@@ -219,16 +223,15 @@ class _ProbeSession:
         if type(message_id) is not int or message_id <= 0 or getattr(sent, "chat_id", None) != self.chat_id:
             # No deletion or further probe when the response is ambiguous.
             raise RuntimeError("unverified probe message identity")
-        try:
-            observed = await self.client.get_messages(self.target, ids=message_id)
-            if (getattr(observed, "id", None) != message_id
-                    or getattr(observed, "chat_id", None) != self.chat_id):
-                raise RuntimeError("probe message not verified")
-            return (_emoji_counter(observed.entities) == _emoji_counter(entities)
-                    and (getattr(observed, "message", None) or "") == caption)
-        finally:
-            # Delete only the positively identified diagnostic message.
-            await self.client.delete_messages(self.target, [message_id], revoke=True)
+        observed = await self.client.get_messages(self.target, ids=message_id)
+        if (getattr(observed, "id", None) != message_id
+                or getattr(observed, "chat_id", None) != self.chat_id
+                or getattr(observed, "message", None) != caption):
+            # The unique synthetic text is part of the deletion proof.
+            raise RuntimeError("probe message not verified")
+        accepted = _emoji_counter(observed.entities) == _emoji_counter(entities)
+        await self.client.delete_messages(self.target, [message_id], revoke=True)
+        return accepted
 
     async def isolate(self, occurrences):
         if len(occurrences) == 1:
@@ -271,9 +274,10 @@ class VideoEmojiValidator:
                 return await asyncio.wait_for(
                     self._validate_live(client, repo, chat_id, occurrences), timeout=CHECK_TIMEOUT,
                 )
-            except FloodWaitError as exc:
-                self._next_check = max(self._next_check, time.monotonic() + max(1, exc.seconds))
-                logger.warning("VIDEO_EMOJI_VALIDATION_FLOOD_WAIT | seconds=%s", exc.seconds)
+            except (FloodWaitError, TransportRateLimited) as exc:
+                seconds = exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after_seconds
+                self._next_check = max(self._next_check, time.monotonic() + max(1, seconds))
+                logger.warning("VIDEO_EMOJI_VALIDATION_FLOOD_WAIT | seconds=%s", seconds)
                 return ValidationResult("unavailable", (EmojiIssue(None, None, "flood_wait"),))
             except Exception as exc:
                 logger.warning("VIDEO_EMOJI_VALIDATION_UNAVAILABLE | error_type=%s", type(exc).__name__)
