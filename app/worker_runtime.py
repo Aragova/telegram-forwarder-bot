@@ -706,6 +706,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 next_payload["source_video_path"] = payload.get("source_video_path") or payload.get("video_file_path")
                 next_payload["processed_video_path"] = result.get("processed_video_path")
                 next_payload["thumbnail_path"] = result.get("thumbnail_path")
+                next_payload["processing_diagnostics"] = result.get("processing_diagnostics")
                 next_payload["cleanup_paths"] = result.get("cleanup_paths") or payload.get("cleanup_paths") or []
                 await asyncio.to_thread(enqueue_video_send, repo, next_payload)
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
