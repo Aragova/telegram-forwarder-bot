@@ -18,6 +18,7 @@ from telethon.errors import BadRequestError, ForbiddenError, FloodWaitError, Slo
 from .runtime_utils import run_db
 from .delivery_job_fence import assert_delivery_job_current
 from .transport_policy import TransportRateLimited
+from .video_send_diagnostics import media_request_details, record_error
 
 logger = logging.getLogger("forwarder.transport")
 
@@ -40,6 +41,7 @@ class PublicationIntent:
     uncertain: bool = False
     kind: str = "delivery"
     target_thread_id: int | None = None
+    video_diagnostics: dict[str, Any] | None = None
 
 
 _intent: ContextVar[PublicationIntent | None] = ContextVar("publication_intent", default=None)
@@ -232,7 +234,20 @@ def publication_client_class(base):
                 if not scoped:
                     if publications:
                         await assert_delivery_job_current()
-                    return await invoke(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold)
+                    trace = intent.video_diagnostics if intent is not None else None
+                    upload = trace is not None and type(request).__name__ in {"SaveFilePartRequest", "SaveBigFilePartRequest"}
+                    if upload:
+                        trace["upload_parts_started"] = trace.get("upload_parts_started", 0) + 1
+                    try:
+                        result = await invoke(request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold)
+                    except Exception as exc:
+                        if upload:
+                            trace["upload_parts_failed"] = trace.get("upload_parts_failed", 0) + 1
+                            record_error(trace, exc)
+                        raise
+                    if upload and result is True:
+                        trace["upload_parts_acknowledged"] = trace.get("upload_parts_acknowledged", 0) + 1
+                    return result
                 _check_fence(intent)
                 if getattr(self, "publication_inbox_required", False) and (
                     getattr(self, "publication_write_blocked", False)
@@ -287,7 +302,20 @@ def publication_client_class(base):
                         ):
                             intent.blocked = True
                             raise PublicationWriteUnavailable("MTProto publication inbox no longer writable")
-                        return await invoke(request, ordered=ordered, flood_sleep_threshold=0)
+                        trace = intent.video_diagnostics
+                        if trace is None or not isinstance(item, functions.messages.SendMediaRequest):
+                            return await invoke(request, ordered=ordered, flood_sleep_threshold=0)
+                        trace["rpc_state"] = "invoked"
+                        trace["rpc_request"] = media_request_details(item)
+                        try:
+                            result = await invoke(request, ordered=ordered, flood_sleep_threshold=0)
+                        except Exception as exc:
+                            trace["rpc_state"] = "rejected" if _definite_rejection(exc) else "exception_unknown"
+                            record_error(trace, exc)
+                            raise
+                        trace["rpc_state"] = "response_received"
+                        trace["rpc_response_type"] = type(result).__name__
+                        return result
 
                     return await observe_publication(publish_fenced)
 
