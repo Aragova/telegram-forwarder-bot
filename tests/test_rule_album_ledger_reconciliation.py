@@ -192,10 +192,10 @@ def test_rescan_never_deletes_shared_source_posts_and_keep_does_not_reset_queue(
     )[0]
     assert "db.clear_rule_deliveries" not in keep + fresh
     assert "clean_start=True" not in keep + fresh
-    assert "db.begin_rule_rescan" in keep and "db.begin_rule_rescan" not in fresh
+    assert "db.begin_rule_rescan" in keep and "db.begin_rule_rescan" in fresh
     assert "db.restart_rule_queue" in fresh
     assert "db.restart_rule_queue" not in keep
-    assert "parse_channel_history" not in fresh and "parse_group_history" not in fresh
+    assert "await _scan_rule_source(rule)" in keep and "await _scan_rule_source(rule)" in fresh
     assert "db.mark_rule_messages_sent" not in keep
     assert "db.rebuild_rule_keep_position" in keep
     assert "saved_first_pending_message_id" in keep
@@ -209,7 +209,7 @@ def test_repository_archives_attempt_keys_instead_of_deleting_history():
     )[0]
     assert "idempotency_key || ':rescan:' || id::text" in fn
     assert "DELETE FROM delivery_attempts" not in fn
-    assert "DELETE FROM deliveries WHERE rule_id=%s RETURNING post_id" in fn
+    assert "DELETE FROM deliveries WHERE rule_id=%s" in fn
     assert "is_active = FALSE" in source
     assert "UPDATE posts" in source
 
@@ -333,8 +333,11 @@ def test_rescan_batch_refresh_skips_recreating_old_delivery_rows():
     keep = bot.split("async def _run_rescan_rule_keep_job(", 1)[1].split(
         "\n@dataclass(slots=True)", 1
     )[0]
-    assert "preserve_existing_deliveries=True" not in fresh
-    assert keep.count("preserve_existing_deliveries=True") == 2
+    shared = bot.split("async def _scan_rule_source(", 1)[1].split(
+        "async def _run_rescan_rule_fresh_job(", 1
+    )[0]
+    assert shared.count("preserve_existing_deliveries=True") == 2
+    assert "await _scan_rule_source(rule)" in fresh and "await _scan_rule_source(rule)" in keep
 
 
 class RescanCursor:
@@ -350,7 +353,7 @@ class RescanCursor:
         if q.startswith(("SELECT is_active, rescan_owner_token", "SELECT rescan_owner_token")):
             self.result = {"is_active": self.active, "rescan_owner_token": self.owner,
                            "source_id": "-100123", "source_thread_id": None,
-                           "target_id": "-100456", "target_thread_id": None, "tenant_id": 1}
+                           "target_id": "-100456", "target_thread_id": None, "tenant_id": 1, "mode": "repost"}
         elif "AS busy" in q:
             self.result = {"busy": self.unresolved if "JOIN mtproto_send_intents" in q else self.busy}
         elif "AS unresolved" in q:
@@ -415,24 +418,27 @@ def test_rescan_second_owner_rejected_across_modes():
     assert cursor.owner is None and cursor.active is True
 
 
-def test_explicit_restart_archives_attempts_without_scanning_or_deleting_posts():
+def test_explicit_restart_archives_attempts_using_scanned_posts():
     repo, cursor, conn = _rescan_repo()
-    assert repo.restart_rule_queue(214) == (12, 33, 33)
-    assert conn.commits == 1 and cursor.owner is None and cursor.active
+    active, owner = repo.begin_rule_rescan(214, fresh=True)
+    assert repo.restart_rule_queue(214, owner_token=owner, allowed_message_ids={101, 103},
+                                   include_newer_than_message_id=103) == (12, 33, 33)
+    repo.finish_rule_rescan(214, was_active=active, owner_token=owner, queue_rebuilt=True)
+    assert conn.commits == 3 and cursor.owner is None and cursor.active
     assert any("UPDATE delivery_attempts SET idempotency_key" in q for q in cursor.sql)
-    assert any("DELETE FROM deliveries WHERE rule_id=%s RETURNING post_id" in q for q in cursor.sql)
+    assert any("DELETE FROM deliveries WHERE rule_id=%s" in q for q in cursor.sql)
     assert not any("DELETE FROM posts" in q for q in cursor.sql)
 
 
 @pytest.mark.parametrize("options,reason", [
     ({"unresolved": True}, "современная публикация"),
     ({"busy": True}, "незавершённые задачи"),
-    ({"owner": "other"}, "пересканируется"),
+    ({"owner": "other"}, "уже выполняется"),
 ])
 def test_restart_refuses_live_work_or_another_owner(options, reason):
     repo, cursor, conn = _rescan_repo(**options)
     with pytest.raises(RuntimeError, match=reason):
-        repo.restart_rule_queue(214)
+        repo.begin_rule_rescan(214, fresh=True)
     assert conn.commits == 0
     assert not any("UPDATE delivery_attempts" in q or "DELETE FROM deliveries" in q for q in cursor.sql)
 
@@ -758,8 +764,14 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails():
 
     from app.rescan_safety import RescanBlocked
 
-    repo = SimpleNamespace(restart_rule_queue=Mock(return_value=(240, 525, 525)),
-                           log_rule_change=Mock())
+    rule = SimpleNamespace(source_id="-100123", source_thread_id=None,
+                           target_id="-100456", target_thread_id=None, mode="repost")
+    repo = SimpleNamespace(restart_rule_queue=Mock(return_value=(240, 525, 530)),
+                           log_rule_change=Mock(), get_rule=Mock(return_value=rule),
+                           begin_rule_rescan=Mock(return_value=(True, "owner")),
+                           get_rule_scan_start_max_message_id=Mock(return_value=525),
+                           finish_rule_rescan=Mock())
+    scan = AsyncMock(return_value=(5, set(range(1, 531))))
 
     async def run_db(func, *args, **kwargs):
         return func(*args, **kwargs)
@@ -772,10 +784,15 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails():
         "utc_now_iso": lambda: "2026-11-26T10:00:00Z",
         "ensure_rule_workers": AsyncMock(),
         "refresh_rule_card_by_ids": AsyncMock(return_value="failed"),
-        "_show_rule_processing_screen": show,
+        "_show_rule_processing_screen": show, "_scan_rule_source": scan,
         "build_rescan_rule_keyboard": Mock(return_value="keyboard"),
     })
     asyncio.run(handler(rule_id=94, chat_id=1, message_id=2, admin_id=3))
-    repo.restart_rule_queue.assert_called_once_with(94)
+    scan.assert_awaited_once_with(rule)
+    repo.restart_rule_queue.assert_called_once_with(
+        94, owner_token="owner", allowed_message_ids=set(range(1, 531)),
+        include_newer_than_message_id=525, expected_scope=("-100123", None, "-100456", None, "repost"),
+    )
+    repo.finish_rule_rescan.assert_called_once_with(94, was_active=True, owner_token="owner", queue_rebuilt=True)
     assert "очередь начата заново" in show.await_args.kwargs["text"]
-    assert "525" in show.await_args.kwargs["text"]
+    assert "530" in show.await_args.kwargs["text"]
