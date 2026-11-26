@@ -244,7 +244,7 @@ def test_reupload_message_media_telethon_success_smoke(tmp_path):
     video_path.write_bytes(b"video")
     bot = FakeBot()
     owner = _owner_for_message(bot=bot, telethon=FakeTelethon([video_path]), file_id=789)
-    message = SimpleNamespace(media=object())
+    message = SimpleNamespace(media=object(), video=True)
 
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(message, "dst", 777))
 
@@ -265,7 +265,7 @@ def test_reupload_message_media_botapi_fallback_smoke(tmp_path):
     video_path.write_bytes(b"video")
     bot = FakeBot()
     owner = _owner_for_message(bot=bot, telethon=FakeTelethon([video_path]), file_id=None)
-    message = SimpleNamespace(media=object())
+    message = SimpleNamespace(media=object(), video=True)
 
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(message, "dst", 777))
 
@@ -337,7 +337,7 @@ def test_reupload_message_media_accepted_unresolved_blocks_botapi_fallback(tmp_p
         returned_candidate_ids=[1157], resolution_method="unresolved", error_text="not_found_in_target",
     )
     owner = _owner_for_message(bot=bot, telethon=FakeTelethon([video_path]), file_id=unresolved)
-    message = SimpleNamespace(media=object())
+    message = SimpleNamespace(media=object(), video=True)
 
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(message, "dst", 777))
 
@@ -475,7 +475,7 @@ def test_original_media_document_invalid_custom_caption_never_downloads():
     )
     caption = {"text": "New caption", "entities": []}
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
-        SimpleNamespace(media=object()), "dst", 777, caption_override=caption,
+        SimpleNamespace(media=object(), video=True), "dst", 777, caption_override=caption,
     ))
     assert result.error_text == "repost_original_document_invalid_non_retryable"
     assert owner.telethon.download_media_calls == []

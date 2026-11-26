@@ -37,7 +37,6 @@ logger = logging.getLogger("forwarder")
 POST_SEND_REACTION_TIMEOUT_SEC = 35.0
 
 TERMINAL_NON_RETRYABLE_DELIVERY_REASONS = (
-    "repost_original_document_invalid_non_retryable",
     "telethon_send_attempted_result_unknown_non_retryable",
     "copy_album_uncertain_no_fallback",
     "copy_single_uncertain_no_fallback",
@@ -1444,6 +1443,14 @@ class SenderService:
                 )
             else:
                 delivery_row = await run_db(self.db.get_delivery, int(delivery_id))
+                if (isinstance(delivery_row, dict)
+                        and delivery_row.get("status") == "faulty"
+                        and delivery_row.get("error_text") == "repost_original_document_invalid_non_retryable"
+                        and not intent.possible_write):
+                    error = "repost_original_document_invalid_non_retryable"
+                    await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=error)
+                    return {"ok": False, "retryable": False, "accepted": False,
+                            "transport_accepted": False, "non_retryable": True, "error_text": error}
                 if _is_terminal_non_retryable_delivery(delivery_row):
                     terminal_error = str(delivery_row.get("error_text") or "telethon_send_accepted_target_id_unresolved_non_retryable")
                     await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send", error_text=terminal_error)

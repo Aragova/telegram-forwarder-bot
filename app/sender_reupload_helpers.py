@@ -424,17 +424,19 @@ class SenderReuploadHelpers:
             "is_self_loop": is_self_loop,
             **({"caption_override": caption_override} if caption_override is not None else {}),
         }
-        original = await self.owner._send_file_via_telethon(
-            **send_kwargs, force_document=media_kind == "document",
-        )
-        if isinstance(original, int) and original > 0:
-            return TelethonSendOutcome(True, True, True, int(original), [int(original)], resolution_method="legacy_telethon_helper")
-        if (
-            getattr(original, "transport_attempted", False)
-            or getattr(original, "transport_accepted", False)
-            or getattr(original, "error_text", None) == "repost_original_document_invalid_non_retryable"
-        ):
-            return original
+        reuse_attempted = media_kind in {"video", "image", "document"}
+        if reuse_attempted:
+            original = await self.owner._send_file_via_telethon(
+                **send_kwargs, force_document=media_kind == "document",
+            )
+            if isinstance(original, int) and original > 0:
+                return TelethonSendOutcome(True, True, True, int(original), [int(original)], resolution_method="legacy_telethon_helper")
+            if (
+                getattr(original, "transport_attempted", False)
+                or getattr(original, "transport_accepted", False)
+                or getattr(original, "error_text", None) == "repost_original_document_invalid_non_retryable"
+            ):
+                return original
 
         file_path = await self.owner.telethon.download_media(message, file=str(settings.media_cache_path))
         if not file_path:
@@ -460,7 +462,7 @@ class SenderReuploadHelpers:
                 **send_kwargs,
                 file_path=path,
                 force_document=not (mime.startswith("image/") or mime.startswith("video/")),
-                skip_original=True,
+                skip_original=reuse_attempted,
             )
             if isinstance(telethon_outcome, int) and telethon_outcome > 0:
                 return TelethonSendOutcome(True, True, True, int(telethon_outcome), [int(telethon_outcome)], resolution_method="legacy_telethon_helper")

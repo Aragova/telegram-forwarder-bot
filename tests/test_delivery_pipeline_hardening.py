@@ -86,7 +86,7 @@ def test_media_unknown_mtproto_result_never_falls_through_to_botapi(tmp_path):
         file_outcome=telethon_transport_failed("timeout after send_file"),
     )
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
-        SimpleNamespace(media=object()), "target", None,
+        SimpleNamespace(media=object(), video=True), "target", None,
     ))
     assert result.transport_attempted
     assert bot.calls == []
@@ -281,7 +281,7 @@ def test_missing_download_before_send_does_not_claim_telegram_write():
     bot = FakeBot()
     owner = _owner(bot, video_path=None)
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
-        SimpleNamespace(media=object()), "target", None,
+        SimpleNamespace(media=object(), video=True), "target", None,
     ))
     assert result.transport_attempted is False
     assert result.transport_accepted is False
