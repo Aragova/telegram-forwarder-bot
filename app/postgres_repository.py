@@ -2803,8 +2803,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             p.created_at
                         FROM deliveries d
                         JOIN posts p ON p.id = d.post_id
+                        JOIN routing r ON r.id = d.rule_id
                         WHERE d.rule_id = %s
-                        ORDER BY p.id ASC
+                        ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
                         """,
                         (rule_id,),
                     )
@@ -4873,7 +4874,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         return {int(row["mid"]) for row in cur.fetchall()}
 
     def _assert_restart_safe(self, cur, rule_id: int) -> None:
-        """Only unresolved durable publication evidence blocks a deliberate new cycle."""
+        """Fence modern uncertain sends; only pre-#507 legacy rows may be archived."""
         cur.execute(
             """SELECT EXISTS(
                    SELECT 1 FROM telegram_publication_receipts
@@ -4881,11 +4882,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                        OR reaction_state IN ('pending','dispatching'))
                ) OR EXISTS(
                    SELECT 1 FROM delivery_attempts a
-                   JOIN mtproto_send_intents i ON i.attempt_id=a.id
                    WHERE a.rule_id=%s
                      AND a.status IN ('sending','accepted','failed_after_send')
                      AND a.idempotency_key NOT LIKE '%%:rescan:%%'
                      AND a.idempotency_key NOT LIKE 'archived:%%'
+                     AND (
+                         EXISTS (SELECT 1 FROM mtproto_send_intents i WHERE i.attempt_id=a.id)
+                         OR COALESCE(a.created_at >= TIMESTAMPTZ '2026-11-22 17:56:18+00', TRUE)
+                         OR COALESCE(a.updated_at >= TIMESTAMPTZ '2026-11-22 17:56:18+00', TRUE)
+                     )
                ) AS busy""",
             (int(rule_id), int(rule_id)),
         )
@@ -4956,7 +4961,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         cur.execute(
                             """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
                                SELECT %s,p.id,'pending',%s,%s FROM posts p
-                               WHERE p.id=ANY(%s::bigint[]) ORDER BY p.id
+                               WHERE p.id=ANY(%s::bigint[]) ORDER BY p.message_id,p.id
                                ON CONFLICT DO NOTHING""",
                             (int(rule_id), utc_now_iso(), tenant_id, post_ids),
                         )
@@ -4967,7 +4972,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                            SELECT %s,p.id,'pending',%s,%s FROM posts p
                            WHERE p.source_channel=%s AND p.source_thread_id IS NOT DISTINCT FROM %s
                              AND (p.message_id=ANY(%s::bigint[]) OR p.message_id>%s)
-                           ORDER BY p.id ON CONFLICT DO NOTHING""",
+                           ORDER BY p.message_id,p.id ON CONFLICT DO NOTHING""",
                         (int(rule_id), utc_now_iso(), tenant_id, source, thread,
                          observed_ids, include_newer_than_message_id),
                     )
@@ -5034,9 +5039,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SELECT p.message_id
                     FROM deliveries d
                     JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
                     WHERE d.rule_id = %s
                       AND d.status = 'pending'
-                    ORDER BY p.id ASC
+                    ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
                     LIMIT 1
                     """,
                     (rule_id,),
@@ -5055,9 +5061,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SELECT p.message_id
                     FROM deliveries d
                     JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
                     WHERE d.rule_id = %s
                       AND d.status = 'sent'
-                    ORDER BY p.id ASC
+                    ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
                     """,
                     (rule_id,),
                 )
@@ -5345,8 +5352,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SELECT d.id
                     FROM deliveries d
                     JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
                     WHERE d.rule_id = %s
-                    ORDER BY p.id ASC
+                    ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
                     LIMIT %s
                     """,
                     (rule_id, int(count)),
@@ -5824,7 +5832,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                       AND d.status = 'pending'
                       AND r.is_active = TRUE
                       AND (r.next_run_at IS NULL OR r.next_run_at <= %s)
-                    ORDER BY p.id ASC
+                    ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
                     LIMIT 1
                     """,
                     (rule_id, due_iso),
@@ -5957,7 +5965,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             )
                     )
 
-                    ORDER BY p.id ASC
+                    ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
                     LIMIT 1
                     """,
                     (rule_id, due_iso, rule_mode, rule_mode),
@@ -6226,7 +6234,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                                     OR r_target.target_thread_id = r.target_thread_id
                                   )
                       )
-                    ORDER BY p.id ASC
+                    ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
                     FOR UPDATE OF d SKIP LOCKED
                     LIMIT 1
                     """,
@@ -9110,8 +9118,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             p.created_at
                         FROM deliveries d
                         JOIN posts p ON p.id = d.post_id
+                        JOIN routing r ON r.id = d.rule_id
                         WHERE d.rule_id = %s
-                        ORDER BY p.id ASC
+                        ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
                         """,
                         (rule_id,),
                     )
@@ -9531,9 +9540,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     p.created_at
                 FROM deliveries d
                 JOIN posts p ON p.id = d.post_id
+                JOIN routing r ON r.id = d.rule_id
                 WHERE d.rule_id = %s
                 AND d.status = 'pending'
-                ORDER BY p.id ASC
+                ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
                 """,
                 (rule_id,),
             )
@@ -9769,8 +9779,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             p.created_at
                         FROM deliveries d
                         JOIN posts p ON p.id = d.post_id
+                        JOIN routing r ON r.id = d.rule_id
                         WHERE d.rule_id = %s
-                        ORDER BY p.id ASC
+                        ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
                         """,
                         (rule_id,),
                     )
