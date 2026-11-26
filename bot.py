@@ -485,6 +485,12 @@ async def _show_rule_processing_screen(
                 chat_id=chat_id, message_id=message_id, text=text,
                 reply_markup=reply_markup, parse_mode=parse_mode,
             )
+            if result.reason == "message_edit_throttled":
+                await asyncio.sleep(ui_policy.MESSAGE_EDIT_THROTTLE_SECONDS)
+                result = await ui_policy.edit_text(
+                    chat_id=chat_id, message_id=message_id, text=text,
+                    reply_markup=reply_markup, parse_mode=parse_mode,
+                )
             if result.ok or result.reason == "same_message_signature":
                 return
     except Exception as exc:
@@ -533,10 +539,11 @@ async def _run_rescan_rule_fresh_job(
 
     summary = f"✅ Правило #{rule_id}: очередь начата заново."
     try:
-        if await refresh_rule_card_by_ids(
+        refreshed = await refresh_rule_card_by_ids(
             chat_id=chat_id, message_id=message_id, rule_id=rule_id,
             prefix_text=summary,
-        ):
+        )
+        if refreshed in {"updated", "resent"}:
             return
     except Exception:
         logger.exception("RESTART_CARD_REFRESH_FAILED | rule_id=%s", rule_id)
