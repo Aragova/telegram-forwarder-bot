@@ -108,3 +108,17 @@ Both modes fence the route snapshot at commit. Keep-position backfill, pruning a
 Manual rollback, clear and start-position changes must obtain the same routing lock and refuse while a rescan owner holds it. Orphaned album evidence quarantines the whole remaining pending logical album, not just the first member. The history batch writer refuses missing posts and runs outside the asyncio event loop for rescans. Both modes share one UI task key and the worker owns the progress screen.
 
 Album attempt arrays historically contain delivery IDs. Keep-position never interprets them as source message IDs; it resolves albums by their stable media-group key or exact receipt. An orphan with neither is blocked before scanning. A collision between a historical delivery ID and a new Telegram message ID must not quarantine the unrelated new post.
+
+
+## Superseding behavior: fast explicit restart (#94)
+
+The **Start over** UI now restarts the existing queue directly in PostgreSQL.
+It does not call Telegram, scan the source, inspect historical status/ID
+formats, or acquire a persistent rescan owner. Existing queue membership is
+retained, new delivery IDs are allocated, and old attempt keys are archived
+without rewriting their statuses or candidates. The transaction uses the
+routing lock shared with the scheduler. Active jobs and unresolved durable
+publication evidence still block a reset; known self-loop echoes are excluded.
+**Keep position** remains the history synchronization operation. Use it
+before restart when the source's remote contents have changed. Earlier
+sections describe the old full-scan implementation and its historical fixes.
