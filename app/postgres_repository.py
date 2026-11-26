@@ -4665,7 +4665,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
         return consumed
 
-    def begin_rule_rescan(self, rule_id: int) -> tuple[bool, str]:
+    def begin_rule_rescan(self, rule_id: int, *, fresh: bool = False) -> tuple[bool, str]:
         """Acquire a PostgreSQL-backed exclusive rescan owner before parsing.
 
         Ownership survives individual DB transactions and excludes independent
@@ -4705,7 +4705,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         "У правила есть незавершённые доставки или задачи; "
                         "пересканирование отложено во избежание дубликатов"
                     )
-                self._assert_keep_rescan_safe(cur, rule_id)
+                if fresh:
+                    self._assert_restart_safe(cur, rule_id)
+                else:
+                    self._assert_keep_rescan_safe(cur, rule_id)
                 cur.execute(
                     """
                     UPDATE routing
@@ -4787,7 +4790,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def _lock_rescan_commit(self, cur, rule_id: int, owner_token: str, expected_scope):
         cur.execute(
             "SELECT is_active, rescan_owner_token, source_id, source_thread_id, "
-            "target_id, target_thread_id, mode FROM routing WHERE id = %s FOR UPDATE",
+            "target_id, target_thread_id, mode, tenant_id FROM routing WHERE id = %s FOR UPDATE",
             (int(rule_id),),
         )
         rule = cur.fetchone()
@@ -4810,52 +4813,36 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             raise RescanBlocked("Остались активные задачи; пересканирование отменено")
         return rule
 
-    def restart_rule_queue(self, rule_id: int) -> tuple[int, int, int]:
-        """Start a new publication cycle from the rule's existing queue.
+    def _assert_restart_safe(self, cur, rule_id: int) -> None:
+        """Only unresolved durable publication evidence blocks a deliberate new cycle."""
+        cur.execute(
+            """SELECT EXISTS(
+                   SELECT 1 FROM telegram_publication_receipts
+                   WHERE rule_id=%s AND (published_ids IS NULL
+                       OR reaction_state IN ('pending','dispatching'))
+               ) OR EXISTS(
+                   SELECT 1 FROM delivery_attempts a
+                   JOIN mtproto_send_intents i ON i.attempt_id=a.id
+                   WHERE a.rule_id=%s
+                     AND a.status IN ('sending','accepted','failed_after_send')
+                     AND a.idempotency_key NOT LIKE '%%:rescan:%%'
+                     AND a.idempotency_key NOT LIKE 'archived:%%'
+               ) AS busy""",
+            (int(rule_id), int(rule_id)),
+        )
+        if cur.fetchone()["busy"]:
+            raise RescanBlocked("Есть незавершённая современная публикация; повтор пока небезопасен")
 
-        No Telegram history scan, no historical status inference. Only live
-        work and unresolved durable publication evidence can veto the reset.
-        The routing row serializes this transaction with scheduler claims and
-        other queue mutations. No persistent rescan owner is required.
-        """
+    def restart_rule_queue(
+        self, rule_id: int, *, owner_token: str,
+        allowed_message_ids: set[int], include_newer_than_message_id: int,
+        expected_scope: tuple | None = None,
+    ) -> tuple[int, int, int]:
+        """Atomically restart from the completed Telegram snapshot, not old queue membership."""
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """SELECT rescan_owner_token, source_id, source_thread_id,
-                              target_id, target_thread_id, tenant_id
-                       FROM routing WHERE id=%s FOR UPDATE""",
-                    (int(rule_id),),
-                )
-                rule = cur.fetchone()
-                if not rule or rule["rescan_owner_token"] is not None:
-                    raise RescanBlocked("Правило недоступно или пересканируется")
-                cur.execute(
-                    """SELECT EXISTS(SELECT 1 FROM deliveries
-                           WHERE rule_id=%s AND status='processing')
-                       OR EXISTS(SELECT 1 FROM jobs WHERE payload_json->>'rule_id'=%s
-                           AND status IN ('pending','leased','processing','retry')) AS busy""",
-                    (int(rule_id), str(rule_id)),
-                )
-                if cur.fetchone()["busy"]:
-                    raise RescanBlocked("Есть незавершённые задачи. Повторите после их завершения.")
-                cur.execute(
-                    """SELECT EXISTS(
-                           SELECT 1 FROM telegram_publication_receipts
-                           WHERE rule_id=%s AND (published_ids IS NULL
-                               OR reaction_state IN ('pending','dispatching'))
-                       ) OR EXISTS(
-                           SELECT 1 FROM delivery_attempts a
-                           JOIN mtproto_send_intents i ON i.attempt_id=a.id
-                           WHERE a.rule_id=%s
-                             AND a.status IN ('sending','accepted','failed_after_send')
-                             AND a.idempotency_key NOT LIKE '%%:rescan:%%'
-                             AND a.idempotency_key NOT LIKE 'archived:%%'
-                       ) AS busy""",
-                    (int(rule_id), int(rule_id)),
-                )
-                if cur.fetchone()["busy"]:
-                    raise RescanBlocked("Есть незавершённая современная публикация; повтор пока небезопасен")
-
+                rule = self._lock_rescan_commit(cur, rule_id, owner_token, expected_scope)
+                self._assert_restart_safe(cur, rule_id)
                 self_loop = (
                     str(rule["source_id"]) == str(rule["target_id"])
                     and rule["source_thread_id"] == rule["target_thread_id"]
@@ -4883,38 +4870,45 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (int(rule_id),),
                 )
                 archived = int(cur.rowcount)
-                # New delivery IDs isolate this deliberate replay from old jobs,
-                # idempotency keys and retained receipts. Posts are never removed.
-                cur.execute(
-                    "DELETE FROM deliveries WHERE rule_id=%s RETURNING post_id",
-                    (int(rule_id),),
-                )
-                post_ids = [int(row["post_id"]) for row in cur.fetchall()]
-                old_count = len(post_ids)
-                if self_loop and post_ids:
+                # New delivery IDs isolate this explicit replay from previous jobs.
+                cur.execute("DELETE FROM deliveries WHERE rule_id=%s", (int(rule_id),))
+                old_count = int(cur.rowcount)
+                # The complete scan determines membership. Include live arrivals
+                # recorded after its high-water mark; do not revive deleted posts.
+                source = str(rule["source_id"])
+                thread = rule["source_thread_id"]
+                observed_ids = sorted(allowed_message_ids)
+                if self_loop:
                     cur.execute(
-                        "SELECT id, message_id FROM posts WHERE id=ANY(%s::bigint[])",
-                        (post_ids,),
+                        """SELECT id,message_id FROM posts
+                           WHERE source_channel=%s AND source_thread_id IS NOT DISTINCT FROM %s
+                             AND (message_id=ANY(%s::bigint[]) OR message_id>%s)""",
+                        (source, thread, observed_ids, include_newer_than_message_id),
                     )
                     post_ids = [
                         int(row["id"]) for row in cur.fetchall()
                         if not self._is_self_target_echo_post_for_rule_conn(
-                            conn, rule_id=rule_id, source_channel=str(rule["source_id"]),
-                            source_thread_id=rule["source_thread_id"],
-                            message_id=int(row["message_id"]),
+                            conn, rule_id=rule_id, source_channel=source,
+                            source_thread_id=thread, message_id=int(row["message_id"]),
                         )
                     ]
-                cur.execute(
-                    """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
-                       SELECT %s,p.id,'pending',%s,%s FROM posts p
-                       WHERE p.id=ANY(%s::bigint[])
-                         AND p.source_channel=%s
-                         AND p.source_thread_id IS NOT DISTINCT FROM %s
-                       ORDER BY p.id
-                       ON CONFLICT DO NOTHING""",
-                    (int(rule_id), utc_now_iso(), rule["tenant_id"], post_ids,
-                     str(rule["source_id"]), rule["source_thread_id"]),
-                )
+                    cur.execute(
+                        """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
+                           SELECT %s,p.id,'pending',%s,%s FROM posts p
+                           WHERE p.id=ANY(%s::bigint[]) ORDER BY p.id
+                           ON CONFLICT DO NOTHING""",
+                        (int(rule_id), utc_now_iso(), rule["tenant_id"], post_ids),
+                    )
+                else:
+                    cur.execute(
+                        """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
+                           SELECT %s,p.id,'pending',%s,%s FROM posts p
+                           WHERE p.source_channel=%s AND p.source_thread_id IS NOT DISTINCT FROM %s
+                             AND (p.message_id=ANY(%s::bigint[]) OR p.message_id>%s)
+                           ORDER BY p.id ON CONFLICT DO NOTHING""",
+                        (int(rule_id), utc_now_iso(), rule["tenant_id"], source, thread,
+                         observed_ids, include_newer_than_message_id),
+                    )
                 rebuilt = int(cur.rowcount)
                 cur.execute(
                     "UPDATE routing SET rescan_queue_built=TRUE,next_run_at=%s,last_sent_at=NULL WHERE id=%s",
