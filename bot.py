@@ -778,14 +778,14 @@ async def _run_rescan_rule_keep_job(
             audit = {
                 "event_type": "rule_rescanned_keep_position",
                 "old_value": {
-                    "preserved_delivery_state": True,
+                    "preserved_sent_history": True,
                     "saved_first_pending_message_id": saved_first_pending_message_id,
                     "old_next_run_at": old_next_run_at,
                 },
                 "new_value": {"next_run_at": old_next_run_at},
                 "extra": {
                     "mode": "keep_position", "parsed_count": parsed_count,
-                    "rebuilt_count": rebuilt_count, "preserved_delivery_state": True,
+                    "rebuilt_count": rebuilt_count, "preserved_sent_history": True,
                     "removed_before": removed_before, "removed_stale": removed_stale,
                     "quarantined": quarantined, "source_id": str(rule.source_id),
                     "source_thread_id": rule.source_thread_id,
@@ -829,10 +829,7 @@ async def _run_rescan_rule_keep_job(
     summary = (
         f"✅ Правило #{rule_id} пересканировано с сохранением позиции.\n"
         f"Новых записей источника: {parsed_count}\n"
-        f"Добавлено в очередь: {rebuilt_count}\n"
-        f"Исключено удалённых: {removed_stale}\n"
-        f"Убрано до сохранённой позиции: {removed_before}\n"
-        f"На ручной проверке: {quarantined}"
+        f"Готовых записей в новой очереди: {rebuilt_count}"
     )
     await _complete_rescan_job(
         rule_id=rule_id, rule=rule, was_active=was_active,

@@ -1273,3 +1273,61 @@ def test_restart_rolls_back_if_unchecked_arrival_commits_between_guard_and_delet
                 assert cur.fetchone()["status"] == "pending"
     finally:
         repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner)
+
+    
+def test_keep_rebuild_rule_94_resets_quarantined_rows_and_keeps_sent_history(repo):
+    key, rule_id, delivery_ids, source_ids, source, target = seed(
+        repo, uuid4().int % 10**12,
+    )
+    observed = set()
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("DELETE FROM deliveries WHERE rule_id=%s", (rule_id,))
+            cur.execute("DELETE FROM posts WHERE source_channel=%s", (source,))
+            mid = 1000
+            # 47 completed logical posts = 131 physical rows;
+            # 185 remaining logical posts = 394 physical rows.
+            sizes = [3]*42 + [1]*5 + [3]*104 + [2] + [1]*80
+            for pos, size in enumerate(sizes):
+                for _ in range(size):
+                    mid += 1
+                    observed.add(mid)
+                    cur.execute(
+                        """INSERT INTO posts(message_id,source_channel,content_json,media_group_id,created_at)
+                           VALUES (%s,%s,'{"media_kind":"video"}',%s,'2026-01-01') RETURNING id""",
+                        (mid,source,f"group-{rule_id}-{pos}" if size>1 else None),
+                    )
+                    post_id = cur.fetchone()["id"]
+                    cur.execute(
+                        """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id,error_text)
+                           VALUES (%s,%s,%s,'2026-01-01',1,%s)""",
+                        (rule_id,post_id,"sent" if pos<47 else "faulty",
+                         None if pos<47 else "historical_attempt_unverified_no_resend"),
+                    )
+            cur.execute(
+                """INSERT INTO delivery_attempts(delivery_id,rule_id,tenant_id,idempotency_key,
+                           operation_kind,status,target_id,created_at,updated_at)
+                   SELECT -1,%s,1,%s||n::text,'album',
+                          CASE WHEN n<=98 THEN 'accepted' WHEN n<=237 THEN 'sending'
+                               ELSE 'failed_after_send' END,
+                          %s,NOW(),NOW() FROM generate_series(1,240) n""",
+                (rule_id,f"historical:{rule_id}:",target),
+            )
+    was_active, owner = repo.begin_rule_rescan(rule_id)
+    assert repo.rebuild_rule_keep_position(
+        rule_id, owner_token=owner, allowed_message_ids=observed,
+        include_newer_than_message_id=max(observed), before_message_id=None,
+    ) == (394,0,0,0)
+    repo.finish_rule_rescan(rule_id,was_active=was_active,owner_token=owner,queue_rebuilt=True)
+    assert repo.get_rule_position_info(rule_id)=={
+        "total":232,"completed":47,"current_position":48,
+    }
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status,COUNT(*) AS n FROM deliveries WHERE rule_id=%s GROUP BY status",(rule_id,))
+            assert {r["status"]:r["n"] for r in cur.fetchall()}=={"sent":131,"pending":394}
+            cur.execute("SELECT COUNT(*) AS n FROM delivery_attempts WHERE rule_id=%s AND idempotency_key LIKE %s",(rule_id,"%:rescan:%"))
+            assert cur.fetchone()["n"]==240
+            cur.execute("SELECT COUNT(*) AS n FROM audit_log WHERE rule_id=%s AND event_type='rule_rescan_delivery_archived'",(rule_id,))
+            assert cur.fetchone()["n"]==394

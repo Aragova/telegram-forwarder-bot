@@ -4749,10 +4749,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         "У правила есть незавершённые доставки или задачи; "
                         "пересканирование отложено во избежание дубликатов"
                     )
-                if fresh:
-                    self._assert_restart_safe(cur, rule_id)
-                else:
-                    self._assert_keep_rescan_safe(cur, rule_id)
+                # Explicit rescan replaces the old publication cycle. Historical
+                # attempt outcomes are audit evidence, not a gate on a new cycle.
                 cur.execute(
                     """
                     UPDATE routing
@@ -4953,12 +4951,16 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         allowed_message_ids: set[int], include_newer_than_message_id: int,
         expected_scope: tuple | None = None,
         checked_missing_message_ids: set[int] | None = None,
+        preserve_sent: bool = False,
     ) -> tuple[int, int, int]:
-        """Atomically restart from the completed Telegram snapshot, not old queue membership."""
+        """Replace the publication cycle from a completed source snapshot.
+
+        Keep-position retains proven sent anchors and resets all other deliveries.
+        Both modes archive old ledger keys, regardless of their historical status.
+        """
         with self.connect() as conn:
             with conn.cursor() as cur:
                 rule = self._lock_rescan_commit(cur, rule_id, owner_token, expected_scope)
-                self._assert_restart_safe(cur, rule_id)
                 self._assert_rescan_live_snapshot(
                     cur, rule, include_newer_than_message_id,
                     allowed_message_ids, checked_missing_message_ids or set(),
@@ -4972,14 +4974,30 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
                 cur.execute(
                     """UPDATE telegram_publication_receipts r
-                       SET idempotency_key=r.idempotency_key || ':rescan:' || a.id::text
+                       SET idempotency_key=r.idempotency_key || ':rescan:' || a.id::text,
+                           expired_at=CASE WHEN r.published_ids IS NULL
+                               THEN COALESCE(r.expired_at,NOW()) ELSE r.expired_at END,
+                           reaction_state=CASE WHEN r.reaction_state IN ('pending','dispatching')
+                               THEN 'uncertain' ELSE r.reaction_state END
                        FROM delivery_attempts a
                        WHERE r.rule_id=%s AND a.rule_id=r.rule_id
                          AND a.idempotency_key=r.idempotency_key
-                         AND r.published_ids IS NOT NULL
                          AND r.idempotency_key NOT LIKE '%%:rescan:%%'
                          AND r.idempotency_key NOT LIKE 'archived:%%'""",
                     (int(rule_id),),
+                )
+                # Receipts without an attempt anchor are historical too.
+                cur.execute(
+                    """UPDATE telegram_publication_receipts
+                       SET idempotency_key=idempotency_key || ':rescan:' || %s,
+                           expired_at=CASE WHEN published_ids IS NULL
+                               THEN COALESCE(expired_at,NOW()) ELSE expired_at END,
+                           reaction_state=CASE WHEN reaction_state IN ('pending','dispatching')
+                               THEN 'uncertain' ELSE reaction_state END
+                       WHERE rule_id=%s
+                         AND idempotency_key NOT LIKE '%%:rescan:%%'
+                         AND idempotency_key NOT LIKE 'archived:%%'""",
+                    (str(owner_token), int(rule_id)),
                 )
                 cur.execute(
                     """UPDATE delivery_attempts
@@ -4990,8 +5008,26 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (int(rule_id),),
                 )
                 archived = int(cur.rowcount)
-                # New delivery IDs isolate this explicit replay from previous jobs.
-                cur.execute("DELETE FROM deliveries WHERE rule_id=%s", (int(rule_id),))
+                # Preserve the exact prior delivery state for incident diagnosis,
+                # including failures with no associated attempt ledger.
+                cur.execute(
+                    """INSERT INTO audit_log(created_at,event_type,rule_id,tenant_id,
+                                             delivery_id,post_id,status,error_text,extra_json)
+                       SELECT %s,'rule_rescan_delivery_archived',d.rule_id,
+                              COALESCE(d.tenant_id,1),d.id,d.post_id,d.status,d.error_text,
+                              (jsonb_populate_record(NULL::audit_log,jsonb_build_object(
+                                  'extra_json',jsonb_build_object('cycle',%s,'delivery',to_jsonb(d))
+                              ))).extra_json
+                       FROM deliveries d WHERE d.rule_id=%s
+                         AND (NOT %s OR d.status<>'sent')""",
+                    (utc_now_iso(),str(owner_token),int(rule_id),bool(preserve_sent)),
+                )
+                # New delivery IDs isolate the new queue from old attempts.
+                # Only already completed anchors may remain in keep-position.
+                cur.execute(
+                    "DELETE FROM deliveries WHERE rule_id=%s AND (NOT %s OR status<>'sent')",
+                    (int(rule_id),bool(preserve_sent)),
+                )
                 old_count = int(cur.rowcount)
                 # Only Telegram-observed messages, including verified live
                 # arrivals, belong to the new queue.
@@ -5039,10 +5075,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                          observed_ids),
                     )
                     rebuilt = int(cur.rowcount)
-                cur.execute(
-                    "UPDATE routing SET rescan_queue_built=TRUE,next_run_at=%s,last_sent_at=NULL WHERE id=%s",
-                    (utc_now_iso(), int(rule_id)),
-                )
+                if preserve_sent:
+                    cur.execute("UPDATE routing SET rescan_queue_built=TRUE WHERE id=%s", (int(rule_id),))
+                else:
+                    cur.execute(
+                        "UPDATE routing SET rescan_queue_built=TRUE,next_run_at=%s,last_sent_at=NULL WHERE id=%s",
+                        (utc_now_iso(), int(rule_id)),
+                    )
                 # Live ingestion can commit without taking the routing lock.
                 # Recheck after the destructive DELETE; if a previously unseen
                 # post arrived before it, roll back rather than lose its delivery.
@@ -5357,31 +5396,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         expected_scope: tuple | None = None,
         checked_missing_message_ids: set[int] | None = None,
     ) -> tuple[int, int, int, int]:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                rule = self._lock_rescan_commit(cur, rule_id, owner_token, expected_scope)
-                self._assert_keep_rescan_safe(cur, rule_id)
-                missing = checked_missing_message_ids or set()
-                self._assert_rescan_live_snapshot(
-                    cur, rule, include_newer_than_message_id, allowed_message_ids, missing,
-                )
-                source, thread = str(rule["source_id"]), rule["source_thread_id"]
-                rebuilt = self._backfill_deliveries_for_rule_conn(
-                    conn, rule_id, source, thread, allowed_message_ids=allowed_message_ids,
-                )
-                stale = self._prune_rule_pending_conn(
-                    conn, rule_id, source, thread, seen_message_ids=allowed_message_ids,
-                    scan_start_max_message_id=include_newer_than_message_id,
-                    checked_missing_message_ids=missing,
-                )
-                before = 0 if before_message_id is None else self._prune_rule_pending_conn(
-                    conn, rule_id, source, thread, before_message_id=before_message_id,
-                    before_snapshot_max_message_id=include_newer_than_message_id,
-                )
-                quarantined = self._quarantine_rescan_orphans(cur, rule_id)
-                cur.execute("UPDATE routing SET rescan_queue_built=TRUE WHERE id=%s", (rule_id,))
-            conn.commit()
-        return rebuilt, stale, before, quarantined
+        # The existing sent anchors (including explicitly skipped positions)
+        # define progress. Do not let a pending-only cursor skip faulty items.
+        _, _, rebuilt = self.restart_rule_queue(
+            rule_id, owner_token=owner_token, allowed_message_ids=allowed_message_ids,
+            include_newer_than_message_id=include_newer_than_message_id,
+            expected_scope=expected_scope, checked_missing_message_ids=checked_missing_message_ids,
+            preserve_sent=True,
+        )
+        return rebuilt, 0, 0, 0
 
     def get_rule_next_run_at(self, rule_id: int) -> str | None:
         with self.connect() as conn:
