@@ -812,3 +812,16 @@ def test_rescan_final_screen_does_not_duplicate_existing_message(reason):
     })
     asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
     send.assert_not_awaited()
+
+
+def test_rescan_final_screen_handles_missing_ui_result():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    policy = SimpleNamespace(edit_text=AsyncMock(return_value=None))
+    send = AsyncMock()
+    handler = _load_rescan_handler("_show_rule_processing_screen", {
+        "asyncio": asyncio, "ui_policy": policy, "send_message_safe": send,
+    })
+    asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
+    send.assert_awaited_once_with(chat_id=1, text="Готово", reply_markup=None, parse_mode=None)
