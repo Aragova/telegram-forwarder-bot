@@ -501,11 +501,13 @@ async def _show_rule_processing_screen(
                     break
     except Exception as exc:
         logger.exception("Не удалось показать экран обработки chat_id=%s message_id=%s: %s", chat_id, message_id, exc)
+    if not terminal:
+        return
     # Only terminal screens may wait for a chat flood lock. The database
     # rescan owner is released before we wait for a terminal notification.
     sent = await send_message_safe(chat_id=chat_id, text=text,
                                    reply_markup=reply_markup, parse_mode=parse_mode)
-    if terminal and sent is None and ui_policy:
+    if sent is None and ui_policy:
         remaining = ui_policy.chat_cooldown_left(chat_id)
         if remaining > 0:
             await asyncio.sleep(remaining + 0.05)
@@ -557,6 +559,38 @@ async def _scan_rule_source(rule):
     return await parse_group_history(
         telethon_client, db, str(rule.source_id), int(rule.source_thread_id),
         clean_start=False, preserve_existing_deliveries=True, collect_seen_message_ids=True,
+    )
+
+
+async def _complete_rescan_job(
+    *, rule_id: int, rule, was_active: bool, chat_id: int, message_id: int,
+    admin_id: int, summary: str, audit: dict, fallback_text: str | None = None,
+) -> None:
+    """Post-commit actions cannot turn a completed rescan into a failed reset."""
+    invalidate_preview_cache(rule_id)
+    invalidate_rule_card_cache(rule_id)
+    try:
+        await run_db(db.log_rule_change, rule_id=rule_id, admin_id=admin_id, **audit)
+    except Exception:
+        logger.exception("RESCAN_AUDIT_FAILED | rule_id=%s", rule_id)
+    try:
+        await ensure_rule_workers()
+    except Exception:
+        logger.exception("RESCAN_WORKERS_FAILED | rule_id=%s", rule_id)
+    try:
+        refreshed = await refresh_rule_card_by_ids(
+            chat_id=chat_id, message_id=message_id, rule_id=rule_id,
+            prefix_text=summary,
+        )
+        if refreshed in {"updated", "resent"}:
+            return
+    except Exception:
+        logger.exception("RESCAN_CARD_REFRESH_FAILED | rule_id=%s", rule_id)
+    await _show_rule_processing_screen(
+        chat_id=chat_id, message_id=message_id, text=fallback_text or summary,
+        reply_markup=build_rule_card_keyboard(
+            rule_id, was_active, rule.schedule_mode or "interval", rule.mode or "repost",
+        ),
     )
 
 
@@ -614,43 +648,19 @@ async def _run_rescan_rule_fresh_job(
         )
         return
 
-    # The queue transaction is already committed. Audit/UI failure must not
-    # report the restart as failed or invite another destructive retry.
-    invalidate_preview_cache(rule_id)
-    invalidate_rule_card_cache(rule_id)
-    try:
-        await run_db(
-            db.log_rule_change, event_type="rule_rescanned_fresh",
-            rule_id=rule_id, admin_id=admin_id, old_value=None,
-            new_value={"next_run_at": utc_now_iso()},
-            extra={"mode": "fresh", "rebuilt_count": rebuilt_count,
-                   "archived_attempts": archived, "replayed_deliveries": old_count,
-                   "parsed_count": parsed_count, "seen_message_count": len(seen_message_ids)},
-        )
-    except Exception:
-        logger.exception("RESTART_AUDIT_FAILED | rule_id=%s", rule_id)
-    try:
-        await ensure_rule_workers()
-    except Exception:
-        logger.exception("RESTART_WORKERS_FAILED | rule_id=%s", rule_id)
-
     summary = (f"✅ Правило #{rule_id}: очередь начата заново.\n"
                f"Новых сообщений источника: {parsed_count}")
-    try:
-        refreshed = await refresh_rule_card_by_ids(
-            chat_id=chat_id, message_id=message_id, rule_id=rule_id,
-            prefix_text=summary,
-        )
-        if refreshed in {"updated", "resent"}:
-            return
-    except Exception:
-        logger.exception("RESTART_CARD_REFRESH_FAILED | rule_id=%s", rule_id)
-    await _show_rule_processing_screen(
-        chat_id=chat_id, message_id=message_id,
-        text=summary + f"\nЗаписей в новой очереди: {rebuilt_count}",
-        reply_markup=build_rule_card_keyboard(
-            rule_id, was_active, rule.schedule_mode or "interval", rule.mode or "repost",
-        ),
+    await _complete_rescan_job(
+        rule_id=rule_id, rule=rule, was_active=was_active,
+        chat_id=chat_id, message_id=message_id, admin_id=admin_id,
+        summary=summary, fallback_text=summary + f"\nЗаписей в новой очереди: {rebuilt_count}",
+        audit={
+            "event_type": "rule_rescanned_fresh", "old_value": None,
+            "new_value": {"next_run_at": utc_now_iso()},
+            "extra": {"mode": "fresh", "rebuilt_count": rebuilt_count,
+                      "archived_attempts": archived, "replayed_deliveries": old_count,
+                      "parsed_count": parsed_count, "seen_message_count": len(seen_message_ids)},
+        },
     )
 
 
@@ -729,44 +739,6 @@ async def _run_rescan_rule_keep_job(
         )
         return
 
-    # The queue is committed: audit, worker startup and UI failures are not
-    # a failed rescan and must not prompt another queue reset.
-    invalidate_preview_cache(rule_id)
-    invalidate_rule_card_cache(rule_id)
-    try:
-        await run_db(
-            db.log_rule_change,
-            event_type="rule_rescanned_keep_position",
-            rule_id=rule_id,
-            admin_id=admin_id,
-            old_value={
-                "preserved_delivery_state": True,
-                "saved_first_pending_message_id": saved_first_pending_message_id,
-                "old_next_run_at": old_next_run_at,
-            },
-            new_value={
-                "next_run_at": old_next_run_at,
-            },
-            extra={
-                "mode": "keep_position",
-                "parsed_count": parsed_count,
-                "rebuilt_count": rebuilt_count,
-                "preserved_delivery_state": True,
-                "removed_before": removed_before,
-                "removed_stale": removed_stale,
-                "quarantined": quarantined,
-                "source_id": str(rule.source_id),
-                "source_thread_id": rule.source_thread_id,
-            },
-        )
-
-    except Exception:
-        logger.exception("KEEP_RESCAN_AUDIT_FAILED | rule_id=%s", rule_id)
-    try:
-        await ensure_rule_workers()
-    except Exception:
-        logger.exception("KEEP_RESCAN_WORKERS_FAILED | rule_id=%s", rule_id)
-
     summary = (
         f"✅ Правило #{rule_id} пересканировано с сохранением позиции.\n"
         f"Новых записей источника: {parsed_count}\n"
@@ -775,19 +747,26 @@ async def _run_rescan_rule_keep_job(
         f"Убрано до сохранённой позиции: {removed_before}\n"
         f"На ручной проверке: {quarantined}"
     )
-    try:
-        refreshed = await refresh_rule_card_by_ids(
-            chat_id=chat_id, message_id=message_id, rule_id=rule_id, prefix_text=summary,
-        )
-        if refreshed in {"updated", "resent"}:
-            return
-    except Exception:
-        logger.exception("KEEP_RESCAN_CARD_REFRESH_FAILED | rule_id=%s", rule_id)
-    await _show_rule_processing_screen(
-        chat_id=chat_id, message_id=message_id, text=summary,
-        reply_markup=build_rule_card_keyboard(
-            rule_id, was_active, rule.schedule_mode or "interval", rule.mode or "repost",
-        ),
+    await _complete_rescan_job(
+        rule_id=rule_id, rule=rule, was_active=was_active,
+        chat_id=chat_id, message_id=message_id, admin_id=admin_id,
+        summary=summary,
+        audit={
+            "event_type": "rule_rescanned_keep_position",
+            "old_value": {
+                "preserved_delivery_state": True,
+                "saved_first_pending_message_id": saved_first_pending_message_id,
+                "old_next_run_at": old_next_run_at,
+            },
+            "new_value": {"next_run_at": old_next_run_at},
+            "extra": {
+                "mode": "keep_position", "parsed_count": parsed_count,
+                "rebuilt_count": rebuilt_count, "preserved_delivery_state": True,
+                "removed_before": removed_before, "removed_stale": removed_stale,
+                "quarantined": quarantined, "source_id": str(rule.source_id),
+                "source_thread_id": rule.source_thread_id,
+            },
+        },
     )
 
 
