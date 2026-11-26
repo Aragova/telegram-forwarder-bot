@@ -17,10 +17,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from telethon import functions, types, utils
-from telethon.errors import DocumentInvalidError, FloodWaitError
+from telethon.errors import DocumentInvalidError, FloodWaitError, SlowModeWaitError
 
 from .runtime_utils import run_db
-from .send_intent import current_publication_intent
+from .send_intent import current_publication_intent, diagnostic_rpc_scope
 from .subprocess_safety import communicate_safely
 from .transport_policy import TransportRateLimited
 
@@ -128,7 +128,7 @@ async def check_documents(client, occurrences):
         attr = attributes.get(item.document_id)
         if attr is None:
             issues.append(EmojiIssue(item.document_id, item.offset, "document_missing"))
-        elif attr.alt != item.symbol:
+        elif attr.alt.replace("\ufe0f", "") != item.symbol.replace("\ufe0f", ""):
             issues.append(EmojiIssue(item.document_id, item.offset, "emoji_text_mismatch"))
     return issues
 
@@ -137,7 +137,8 @@ def _registered_chat(repo, chat_id):
     for rule in repo.get_all_rules():
         if str(chat_id) in (str(rule.source_id), str(rule.target_id)):
             return True
-    return any(str(row["channel_id"]) == str(chat_id) for row in repo.get_channels())
+    return any(str(row["channel_id"]) == str(chat_id)
+               for kind in ("source", "target") for row in repo.get_channels(kind))
 
 
 async def _private_test_target(client, repo, chat_id):
@@ -191,20 +192,34 @@ class ProbeBudgetExceeded(RuntimeError):
     pass
 
 
+@dataclass
+class ProbeFence:
+    uncertain: bool = False
+
+
 class _ProbeSession:
-    def __init__(self, client, target, chat_id, path):
+    def __init__(self, client, target, chat_id, path, fence, repo, account_id):
         self.client = client
         self.target = target
         self.chat_id = chat_id
         self.path = path
         self.count = 0
+        self.fence = fence
+        self.repo = repo
+        self.account_id = account_id
 
     async def accepts(self, occurrences):
         if self.count >= MAX_PROBES:
             raise ProbeBudgetExceeded()
+        scopes = (f"mtproto:{self.account_id}", f"mtproto:{self.account_id}:{self.chat_id}")
+        remaining = max([await run_db(self.repo.get_transport_cooldown, scope) for scope in scopes])
+        if remaining > 0:
+            raise TransportRateLimited(retry_after_seconds=remaining, backend="telethon",
+                                       op_name="emoji_probe", key=scopes[0])
         self.count += 1
         marker = f"ViMi emoji check {secrets.token_hex(8)}"
         caption, entities = _synthetic_caption(occurrences, marker)
+        self.fence.uncertain = True
         try:
             sent = await self.client.send_file(
                 entity=self.target, file=str(self.path), caption=caption,
@@ -218,7 +233,12 @@ class _ProbeSession:
             # A rejection in some other RPC is not evidence against an emoji.
             if not isinstance(getattr(exc, "request", None), functions.messages.SendMediaRequest):
                 raise
+            self.fence.uncertain = False
             return False
+        except (FloodWaitError, SlowModeWaitError, TransportRateLimited):
+            # An explicit throttle rejection is not an accepted publication.
+            self.fence.uncertain = False
+            raise
         message_id = getattr(sent, "id", None)
         if type(message_id) is not int or message_id <= 0 or getattr(sent, "chat_id", None) != self.chat_id:
             # No deletion or further probe when the response is ambiguous.
@@ -231,6 +251,7 @@ class _ProbeSession:
             raise RuntimeError("probe message not verified")
         accepted = _emoji_counter(observed.entities) == _emoji_counter(entities)
         await self.client.delete_messages(self.target, [message_id], revoke=True)
+        self.fence.uncertain = False
         return accepted
 
     async def isolate(self, occurrences):
@@ -252,7 +273,7 @@ class VideoEmojiValidator:
         self._lock = asyncio.Lock()
         self._next_check = 0.0
 
-    async def validate(self, client, repo, chat_id, caption, raw_entities):
+    async def validate(self, client, repo, chat_id, caption, raw_entities, *, user_id):
         occurrences, issues = inspect_caption(caption, raw_entities)
         if issues:
             return ValidationResult("invalid", tuple(issues))
@@ -270,23 +291,61 @@ class VideoEmojiValidator:
         if self._lock.locked() or time.monotonic() < self._next_check:
             return ValidationResult("unavailable", (EmojiIssue(None, None, "busy"),))
         async with self._lock:
-            try:
+            if time.monotonic() < self._next_check:
+                return ValidationResult("unavailable", (EmojiIssue(None, None, "busy"),))
+            return await self._run_reserved(client, repo, chat_id, occurrences, user_id)
+
+    async def _run_reserved(self, client, repo, chat_id, occurrences, user_id):
+        account_id = None
+        reserved = False
+        fence = ProbeFence()
+        try:
+            with diagnostic_rpc_scope():
+                me = await asyncio.wait_for(client.get_me(input_peer=True), timeout=10)
+                account_id = getattr(me, "user_id", None)
+                if isinstance(me, types.InputPeerSelf):
+                    account_id = getattr(await asyncio.wait_for(client.get_me(input_peer=False), timeout=10), "id", None)
+                if type(account_id) is not int or account_id <= 0:
+                    raise RuntimeError("diagnostic account identity unavailable")
+                reservation = await run_db(repo.reserve_video_emoji_check, account_id, user_id, chat_id)
+                if reservation != "reserved":
+                    return ValidationResult("unavailable", (EmojiIssue(None, None, reservation),))
+                reserved = True
                 return await asyncio.wait_for(
-                    self._validate_live(client, repo, chat_id, occurrences), timeout=CHECK_TIMEOUT,
+                    self._validate_live(client, repo, chat_id, occurrences, fence, account_id),
+                    timeout=CHECK_TIMEOUT,
                 )
-            except (FloodWaitError, TransportRateLimited) as exc:
-                seconds = exc.seconds if isinstance(exc, FloodWaitError) else exc.retry_after_seconds
-                self._next_check = max(self._next_check, time.monotonic() + max(1, seconds))
-                logger.warning("VIDEO_EMOJI_VALIDATION_FLOOD_WAIT | seconds=%s", seconds)
-                return ValidationResult("unavailable", (EmojiIssue(None, None, "flood_wait"),))
-            except Exception as exc:
-                logger.warning("VIDEO_EMOJI_VALIDATION_UNAVAILABLE | error_type=%s", type(exc).__name__)
-                return ValidationResult("unavailable", (EmojiIssue(None, None, type(exc).__name__),))
-            finally:
-                self._next_check = max(self._next_check, time.monotonic() + MIN_CHECK_INTERVAL)
+        except (FloodWaitError, SlowModeWaitError, TransportRateLimited) as exc:
+            seconds = exc.retry_after_seconds if isinstance(exc, TransportRateLimited) else exc.seconds
+            self._next_check = max(self._next_check, time.monotonic() + max(1, seconds))
+            if account_id is not None:
+                try:
+                    scope = f"mtproto:{account_id}"
+                    if isinstance(exc, SlowModeWaitError):
+                        scope += f":{chat_id}"
+                    await run_db(repo.extend_transport_cooldown, scope, max(1, seconds) + 1)
+                except Exception:
+                    # Do not release the reservation if the shared throttle
+                    # could not be persisted.
+                    fence.uncertain = True
+                    logger.exception("VIDEO_EMOJI_COOLDOWN_PERSIST_FAILED")
+            logger.warning("VIDEO_EMOJI_VALIDATION_FLOOD_WAIT | seconds=%s", seconds)
+            return ValidationResult("unavailable", (EmojiIssue(None, None, "flood_wait"),))
+        except Exception as exc:
+            logger.exception("VIDEO_EMOJI_VALIDATION_UNAVAILABLE | error_type=%s", type(exc).__name__)
+            return ValidationResult("unavailable", (EmojiIssue(None, None, type(exc).__name__),))
+        finally:
+            self._next_check = max(self._next_check, time.monotonic() + MIN_CHECK_INTERVAL)
+            if reserved and not fence.uncertain:
+                try:
+                    await run_db(repo.release_video_emoji_check, account_id)
+                except Exception:
+                    logger.exception("VIDEO_EMOJI_RESERVATION_RELEASE_FAILED")
+            elif reserved:
+                logger.error("VIDEO_EMOJI_PROBE_REVIEW_REQUIRED | account_id=%s | chat_id=%s", account_id, chat_id)
 
     @staticmethod
-    async def _validate_live(client, repo, chat_id, occurrences):
+    async def _validate_live(client, repo, chat_id, occurrences, fence, account_id):
         issues = await check_documents(client, occurrences)
         if issues:
             return ValidationResult("invalid", tuple(issues))
@@ -294,7 +353,7 @@ class VideoEmojiValidator:
         with tempfile.TemporaryDirectory(prefix="vimi-emoji-probe-") as directory:
             path = Path(directory) / "probe.mp4"
             await _generate_probe_video(path)
-            session = _ProbeSession(client, target, chat_id, path)
+            session = _ProbeSession(client, target, chat_id, path, fence, repo, account_id)
             if await session.accepts(occurrences):
                 return ValidationResult("verified")
             # Do not attribute a rejection to an emoji unless the same synthetic
@@ -331,6 +390,8 @@ def format_validation_result(result):
         descriptions = {
             "test_channel_not_configured": "не настроен приватный канал проверки",
             "busy": "проверка занята, повторите немного позже",
+            "quota": "достигнут лимит проверок, повторите через 2 минуты",
+            "pending_review": "предыдущая проверка требует сверки администратором",
             "flood_wait": "Telegram ограничил частоту запросов",
             "control_failed": "не прошла контрольная публикация без эмодзи",
             "ProbeBudgetExceeded": "исчерпан лимит диагностических публикаций",
