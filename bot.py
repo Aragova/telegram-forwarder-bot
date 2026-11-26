@@ -530,7 +530,7 @@ async def _run_rescan_rule_fresh_job(
             scan_start_max_message_id = await run_db(db.get_rule_scan_start_max_message_id, rule_id)
             await _show_rule_processing_screen(
                 chat_id=chat_id, message_id=message_id,
-                text=f"🔄 Пересканирование правила #{rule_id}\\nЧитаем историю источника.",
+                text=f"🔄 Пересканирование правила #{rule_id}\nЧитаем историю источника.",
             )
             parsed_count, seen_message_ids = await _scan_rule_source(rule)
             archived, old_count, rebuilt_count = await run_db(
@@ -573,7 +573,7 @@ async def _run_rescan_rule_fresh_job(
     except Exception:
         logger.exception("RESTART_POST_COMMIT_FAILED | rule_id=%s", rule_id)
 
-    summary = (f"✅ Правило #{rule_id}: очередь начата заново.\\n"
+    summary = (f"✅ Правило #{rule_id}: очередь начата заново.\n"
                f"Новых сообщений источника: {parsed_count}")
     try:
         refreshed = await refresh_rule_card_by_ids(
