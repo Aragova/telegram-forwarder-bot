@@ -378,7 +378,7 @@ def test_issue_without_offset_never_displays_none():
     assert "ID 123:" in text and "None" not in text
 
 
-def _caption_input_handler(save, validate, states):
+def _caption_input_handler(save, validate, states, *, with_clear=False):
     # Execute the actual production input-claim and save branches without
     # bootstrapping the bot, Telegram client or unrelated menu handlers.
     import ast
@@ -424,7 +424,39 @@ def _caption_input_handler(save, validate, states):
     header.body.extend(caption_branches)
     exec(compile(ast.fix_missing_locations(ast.Module(body=[header], type_ignores=[])),
                  "bot.py", "exec"), ns)
-    return ns["handle"]
+    if not with_clear:
+        return ns["handle"]
+
+    # Execute the real clear handler in the same state and lock namespace.
+    clear = next(node for node in source.body
+                 if isinstance(node, ast.AsyncFunctionDef) and node.name == "handle_video_caption_clear")
+    clear.decorator_list = []
+    clear.args.args[0].annotation = None
+
+    async def allowed(*_args):
+        return True
+
+    async def update(rule_id, caption, entities):
+        result = save(rule_id, caption, entities, 7)
+        result = await result if inspect.isawaitable(result) else result
+        return result["ok"]
+
+    ns.update({
+        "ensure_rule_callback_access": allowed,
+        "db": SimpleNamespace(get_rule=lambda _rid: None, update_rule_video_caption=update,
+                              log_rule_change=lambda **_kwargs: None),
+        "answer_callback_safe": noop, "answer_callback_safe_once": noop,
+        "edit_message_text_safe": noop,
+    })
+
+    async def run_db_with_kwargs(func, *args, **kwargs):
+        result = func(*args, **kwargs)
+        return await result if inspect.isawaitable(result) else result
+
+    ns["run_db"] = run_db_with_kwargs
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[clear], type_ignores=[])),
+                 "bot.py", "exec"), ns)
+    return ns["handle"], ns["handle_video_caption_clear"]
 
 
 def _caption_input(mid, text):
@@ -491,5 +523,50 @@ def test_inflight_db_save_cannot_finish_after_newer_input_commit():
         await asyncio.gather(old, new)
         assert writes == ["old", "new"]
         assert 7 not in states
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("save_already_started", [False, True])
+def test_clear_wins_against_pending_caption_validation_or_save(save_already_started):
+    async def scenario():
+        entered, resume = asyncio.Event(), asyncio.Event()
+        writes = []
+        other_rule = {"action": "video_caption", "rule_id": 142}
+        other_flow = {"action": "something_else", "rule_id": 141}
+        states = {7: {"action": "video_caption", "rule_id": 141},
+                  8: {"action": "video_caption", "rule_id": 141},
+                  9: other_rule, 10: other_flow}
+
+        async def validate(*_args, **_kwargs):
+            if not save_already_started:
+                entered.set()
+                await resume.wait()
+            return validation.ValidationResult("verified")
+
+        async def save(_rule, caption, *_args):
+            if caption is not None and save_already_started:
+                entered.set()
+                await resume.wait()
+            writes.append(caption)
+            return {"ok": True}
+
+        handle, clear = _caption_input_handler(save, validate, states, with_clear=True)
+        old = asyncio.create_task(handle(_caption_input(100, "old")))
+        await entered.wait()
+        callback = SimpleNamespace(data="video_caption_clear:141",
+                                   from_user=SimpleNamespace(id=8), message=None)
+        clearing = asyncio.create_task(clear(callback))
+        await asyncio.sleep(0)
+        assert 7 not in states and 8 not in states
+        assert states[9] is other_rule and states[10] is other_flow
+        if save_already_started:
+            assert writes == []
+        else:
+            await clearing
+            assert writes == [None]
+        resume.set()
+        await asyncio.gather(old, clearing)
+        assert writes == (["old", None] if save_already_started else [None])
 
     asyncio.run(scenario())
