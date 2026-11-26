@@ -17,6 +17,9 @@ Set in the service environment (or the project .env):
 VIDEO_EMOJI_VALIDATION_CHAT_ID=-100...
 ```
 
+The service host must have `ffmpeg` available in its `PATH` to generate the
+synthetic probe clip. Check with `ffmpeg -version` in the service environment.
+
 Restart the application normally. The validator refuses registered source/target
 channels and checks their isolation before generating a synthetic clip. The operator
 must keep this channel isolated after setup; a concurrent external registration
