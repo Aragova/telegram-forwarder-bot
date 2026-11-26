@@ -3,24 +3,30 @@
 Incident #94: 181 logical pending posts became faulty (385 physical deliveries)
 because historical ledger evidence was applied to a newly requested rescan.
 
-This branch is a **draft**, not deployable. First increment: use one queue
-rebuild for both modes; retain sent anchors in keep-position, archive historical
-attempts/receipts and replaced deliveries, create new pending delivery IDs,
-preserve the existing full-source snapshot and self-loop checks.
+Both modes pause the rule under the existing routing-row owner lock, retire
+its delivery jobs (including previously failed jobs eligible for billing recovery),
+mark interrupted processing deliveries as faulty, and cancel local worker tasks.
+Remote workers lose their lease; their heartbeat checks every two seconds.
+The parser does not wait for any Telegram send or old job to finish.
 
-## Required before merge
+A revoked job cannot claim a new send attempt, enqueue a subsequent stage,
+change delivery status or update the rule schedule. Publication preflight
+rechecks its lease before each write. An RPC already issued to Telegram cannot
+be recalled. A late remote publication may duplicate content in the explicitly
+requested new cycle. Known self-loop echo evidence is retained.
 
-- Revoke only the selected rule's active delivery jobs at rescan start; leave
-  unrelated campaign cleanup and other rules intact.
-- Add a persistent generation/lease fence at attempt creation, every transport
-  dispatch, downstream stage enqueue, receipt finalization and schedule updates.
-  Local cancellation cannot recall a Telegram RPC already issued.
-- Prevent obsolete jobs from resurrecting via unfenced retry/fail operations.
-- Define fail-closed behavior after cancellation and a failed/incomplete scan.
-- Adapt old regression assertions that required historical quarantine or veto;
-  test both modes, active workers and late callbacks against real PostgreSQL.
-- Verify mixed/partially published albums, deleted source messages and new
-  arrivals, positional semantics, audit storage cost and historical reaction handling.
-- Run required CI, Codex, Gemini and SonarCloud on the final implementation.
+The full source snapshot is required before atomic rebuild. Historical
+attempts and receipts (including uncertain and modern intents) are archived;
+unresolved receipt processing is retired, and original attempt outcomes and
+MTProto identities remain available for audit. The replaced delivery rows are
+recorded in audit_log. Existing confirmed complete logical posts are retained
+in keep-position; incomplete albums are rebuilt as a whole, and newly
+discovered older posts before the saved cursor are excluded rather than
+rewinding it. Newer arrivals remain eligible. Rebuilt rows receive fresh
+delivery IDs and therefore fresh publication keys. No old quarantine is applied.
+A parser failure releases the rescan owner but leaves the rule paused; an
+unknown database commit retains the owner for inspection.
 
-No production repair or deployment is authorized by this draft.
+Unrelated rules, existing reaction jobs and advertising cleanup are not cancelled.
+The production DB and server are not changed by this PR. Verify real PostgreSQL
+regressions and all required reviews before merging.

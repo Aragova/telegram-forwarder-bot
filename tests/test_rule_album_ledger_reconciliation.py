@@ -182,7 +182,7 @@ def test_recovery_refuses_partial_verification_without_opening_transaction():
     assert cursor.executed == []
 
 
-def test_rescan_never_deletes_shared_source_posts_and_keep_does_not_reset_queue():
+def test_rescan_never_deletes_shared_source_posts_and_uses_common_rebuild():
     source = Path("bot.py").read_text(encoding="utf-8")
     keep = source.split("async def _run_rescan_rule_keep_job(", 1)[1].split(
         "\n@dataclass(slots=True)", 1
@@ -360,6 +360,8 @@ class RescanCursor:
             self.result = {"unresolved": self.unresolved}
         elif "SET is_active = FALSE, rescan_owner_token =" in q:
             self.owner, self.active = args[0], False
+        elif q.startswith("UPDATE jobs SET status='failed'"):
+            self.busy = False
         elif "SET is_active = %s, rescan_owner_token = NULL" in q:
             if self.owner != args[3]:
                 self.rowcount = 0
@@ -396,12 +398,12 @@ def _rescan_repo(*, active=True, busy=False, owner=None, unresolved=False):
     return repo, cursor, conn
 
 
-def test_rescan_refuses_jobs_already_in_flight():
+def test_rescan_revokes_jobs_already_in_flight():
     repo, cursor, conn = _rescan_repo(busy=True)
-    with pytest.raises(RuntimeError, match="незавершённые"):
-        repo.begin_rule_rescan(214)
-    assert conn.commits == 0
-    assert cursor.owner is None
+    was_active, owner = repo.begin_rule_rescan(214)
+    assert was_active and cursor.owner == owner
+    assert conn.commits == 1 and not cursor.busy
+    assert any("rescan_cancelled" in q and "UPDATE jobs" in q for q in cursor.sql)
 
 
 def test_rescan_second_owner_rejected_across_modes():
@@ -434,14 +436,9 @@ def test_explicit_restart_archives_attempts_using_scanned_posts():
     assert not any("DELETE FROM posts" in q for q in cursor.sql)
 
 
-@pytest.mark.parametrize("options,reason", [
-    ({"unresolved": True}, "современная публикация"),
-    ({"busy": True}, "незавершённые доставки или задачи"),
-    ({"owner": "other"}, "уже выполняется"),
-])
-def test_restart_refuses_live_work_or_another_owner(options, reason):
-    repo, cursor, conn = _rescan_repo(**options)
-    with pytest.raises(RuntimeError, match=reason):
+def test_restart_refuses_another_owner():
+    repo, cursor, conn = _rescan_repo(owner="other")
+    with pytest.raises(RuntimeError, match="уже выполняется"):
         repo.begin_rule_rescan(214, fresh=True)
     assert conn.commits == 0
     assert not any("UPDATE delivery_attempts" in q or "DELETE FROM deliveries" in q for q in cursor.sql)
@@ -688,13 +685,9 @@ def test_album_recovery_sql_recognizes_modern_keys_without_archived_attempts():
     candidate_sql = source.split("def get_pending_album_ledger_candidates(", 1)[1].split(
         "def reconcile_confirmed_album_ledger(", 1
     )[0]
-    orphan_sql = source.split("def _quarantine_rescan_orphans(", 1)[1].split(
-        "def rebuild_rule_keep_position(", 1
-    )[0]
     assert ":album:members:" in candidate_sql
-    assert ":album:members:" in orphan_sql
     assert "a.idempotency_key NOT LIKE '%%:rescan:%%'" in candidate_sql
-    assert "a.idempotency_key NOT LIKE '%%:rescan:%%'" in orphan_sql
+    assert "def _quarantine_rescan_orphans(" not in source
 
 
 def test_fingerprinted_album_reconciliation_keeps_original_member_vector():
@@ -799,6 +792,7 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails(release):
     handler = _load_rescan_handler("_run_rescan_rule_fresh_job", {
         "asyncio": SimpleNamespace(sleep=sleep),
         "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
+        "cancel_local_rule_delivery_jobs": Mock(),
         "logger": logging.getLogger(__name__),
         "invalidate_preview_cache": Mock(), "invalidate_rule_card_cache": Mock(),
         "utc_now_iso": lambda: "2026-11-26T10:00:00Z",
@@ -908,6 +902,7 @@ def test_keep_rescan_post_commit_failure_still_reports_success(failure):
     handler = _load_rescan_handler("_run_rescan_rule_keep_job", {
         "asyncio": SimpleNamespace(sleep=sleep),
         "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
+        "cancel_local_rule_delivery_jobs": Mock(),
         "logger": logging.getLogger(__name__),
         "invalidate_preview_cache": Mock(), "invalidate_rule_card_cache": Mock(),
         "ensure_rule_workers": workers, "refresh_rule_card_by_ids": refresh,
@@ -962,6 +957,7 @@ def test_rescan_missing_rule_does_not_offer_retry(mode):
     show = AsyncMock()
     handler = _load_rescan_handler(f"_run_rescan_rule_{mode}_job", {
         "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
+        "cancel_local_rule_delivery_jobs": Mock(),
         "logger": logging.getLogger(__name__), "_show_rule_processing_screen": show,
     })
     asyncio.run(handler(rule_id=94, chat_id=1, message_id=2, admin_id=3))

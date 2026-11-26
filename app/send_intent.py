@@ -16,6 +16,7 @@ from telethon import functions, types, utils
 from telethon.errors import BadRequestError, ForbiddenError, FloodWaitError, SlowModeWaitError, RandomIdDuplicateError
 
 from .runtime_utils import run_db
+from .delivery_job_fence import assert_delivery_job_current
 from .transport_policy import TransportRateLimited
 
 logger = logging.getLogger("forwarder.transport")
@@ -112,6 +113,7 @@ async def run_with_cooldown(call, *, account_scope, backend, op_name, peer_scope
 
 
 async def observe_publication(call, *, bot_result=False, expected_count=None):
+    await assert_delivery_job_current()
     intent = _intent.get()
     if intent is None:
         return await call()

@@ -535,7 +535,7 @@ def test_rule_rescan_confirmation_one_time_per_actor(repo):
 
 
 @pytest.mark.parametrize("with_intent", [True, False])
-def test_rescan_durable_video_intent_cannot_be_archived_as_legacy(repo, with_intent):
+def test_rescan_archives_video_intent_without_rewriting_outcome(repo, with_intent):
     _, rule_id, deliveries, _, _, target = seed(repo, 132 if with_intent else 13201)
     key=f"delivery:{deliveries[0]}:target:{target}:video_send:v1"
     with repo.connect() as conn:
@@ -548,15 +548,17 @@ def test_rescan_durable_video_intent_cannot_be_archived_as_legacy(repo, with_int
     with repo.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE delivery_attempts SET created_at=TIMESTAMPTZ '2026-11-21 10:00:00+00', updated_at=TIMESTAMPTZ '2026-11-21 10:00:00+00' WHERE rule_id=%s", (rule_id,))
-    if with_intent:
-        with pytest.raises(RuntimeError, match="современная публикация"):
-            _restart_from_snapshot(repo, rule_id)
-        assert repo.get_delivery_attempt_by_idempotency_key(key)["status"]=="accepted"
-    else:
-        assert _restart_from_snapshot(repo, rule_id)[0] == 1
+    attempt = repo.get_delivery_attempt_by_idempotency_key(key)
+    assert _restart_from_snapshot(repo, rule_id)[0] == 1
+    archived = repo.get_delivery_attempt_by_idempotency_key(f"{key}:rescan:{attempt['id']}")
+    assert archived["status"] == "accepted"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM mtproto_send_intents WHERE attempt_id=%s", (attempt["id"],))
+            assert cur.fetchone()["n"] == int(with_intent)
 
 
-def test_keep_position_quarantines_orphan_without_resending(repo):
+def test_keep_position_replaces_orphan_with_new_pending_delivery(repo):
     _, rule_id, deliveries, source_ids, _, _ = seed(repo, 133)
     with repo.connect() as conn:
         with conn.cursor() as cur:
@@ -565,8 +567,9 @@ def test_keep_position_quarantines_orphan_without_resending(repo):
     active, owner = repo.begin_rule_rescan(rule_id)
     assert repo.rebuild_rule_keep_position(rule_id, owner_token=owner,
         allowed_message_ids=set(source_ids), include_newer_than_message_id=max(source_ids),
-        before_message_id=None)==(0,0,0,1)
-    assert repo.get_delivery(deliveries[0])["status"]=="faulty"
+        before_message_id=None)==(1,0,0,0)
+    assert repo.get_delivery(deliveries[0]) is None
+    assert len(repo.get_rule_queue_logical_items(rule_id)) == 1
     repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
 
 
@@ -608,7 +611,7 @@ def test_rescan_rejects_route_change_and_manual_clear(repo):
     repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner)
 
 
-def test_keep_quarantines_entire_orphan_album(repo):
+def test_keep_rebuilds_entire_orphan_album(repo):
     _, rule_id, deliveries, source_ids, source, target = seed(repo, 136,count=3)
     unrelated_source_id = 9001001  # collides numerically with an old delivery ID
     with repo.connect() as conn:
@@ -623,24 +626,28 @@ def test_keep_quarantines_entire_orphan_album(repo):
     active, owner = repo.begin_rule_rescan(rule_id)
     assert repo.rebuild_rule_keep_position(rule_id,owner_token=owner,
         allowed_message_ids=set(source_ids)|{unrelated_source_id},include_newer_than_message_id=unrelated_source_id,
-        before_message_id=None)==(0,0,0,3)
-    assert all(repo.get_delivery(d)["status"]=="faulty" for d in deliveries)
-    assert repo.get_delivery(unrelated_delivery_id)["status"]=="pending"
+        before_message_id=None)==(4,0,0,0)
+    assert all(repo.get_delivery(d) is None for d in deliveries+[unrelated_delivery_id])
+    assert len(repo.get_rule_queue_logical_items(rule_id)) == 2
     repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
 
 
-def test_keep_refuses_orphan_album_without_stable_identity(repo):
+def test_keep_does_not_block_on_unanchored_historical_album(repo):
     _, rule_id, _, _, _, target = seed(repo,137,count=2)
     with repo.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE delivery_attempts SET idempotency_key=%s,delivery_id=9001002,status='accepted',source_message_ids_json='[9001002,9001003]'::jsonb WHERE rule_id=%s",
                 (f"rule:{rule_id}:target:{target}:album_sources:9001002,9001003",rule_id))
             cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
-    with pytest.raises(RuntimeError,match="точной привязки"):
-        repo.begin_rule_rescan(rule_id)
+    active, owner = repo.begin_rule_rescan(rule_id)
+    assert repo.rebuild_rule_keep_position(
+        rule_id, owner_token=owner, allowed_message_ids={1001,1002},
+        include_newer_than_message_id=1002, before_message_id=None,
+    ) == (2,0,0,0)
+    repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
 
 
-def test_keep_prune_preserves_stable_album_attempt_with_zero_anchor(repo):
+def test_keep_prune_archives_stale_album_without_preserving_deleted_posts(repo):
     _, rule_id, deliveries, source_ids, source, target = seed(repo,138,count=2)
     with repo.connect() as conn:
         with conn.cursor() as cur:
@@ -651,12 +658,12 @@ def test_keep_prune_preserves_stable_album_attempt_with_zero_anchor(repo):
     # Both members are absent from the Telegram snapshot. Evidence still survives.
     assert repo.rebuild_rule_keep_position(rule_id,owner_token=owner,
         allowed_message_ids=set(),include_newer_than_message_id=max(source_ids),
-        before_message_id=max(source_ids)+1)==(0,0,0,2)
-    assert all(repo.get_delivery(d)["status"]=="faulty" for d in deliveries)
+        before_message_id=max(source_ids)+1)==(0,0,0,0)
+    assert all(repo.get_delivery(d) is None for d in deliveries)
     repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
 
 
-def test_keep_quarantines_single_orphan_absent_from_snapshot(repo):
+def test_keep_removes_single_orphan_absent_from_snapshot(repo):
     _, rule_id, deliveries, source_ids, _, _ = seed(repo, uuid4().int % 10**12)
     with repo.connect() as conn:
         with conn.cursor() as cur:
@@ -671,12 +678,12 @@ def test_keep_quarantines_single_orphan_absent_from_snapshot(repo):
         rule_id, owner_token=owner, allowed_message_ids=set(),
         include_newer_than_message_id=max(source_ids), before_message_id=None,
     )
-    assert quarantined == 1
-    assert repo.get_delivery(deliveries[0])["status"] == "faulty"
+    assert quarantined == 0
+    assert repo.get_delivery(deliveries[0]) is None
     repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner, queue_rebuilt=True)
 
 
-def test_keep_quarantines_missing_album_member_even_if_anchor_exists(repo):
+def test_keep_rebuilds_missing_album_member_even_if_anchor_exists(repo):
     _, rule_id, deliveries, source_ids, _, target = seed(repo, uuid4().int % 10**12, count=2)
     with repo.connect() as conn:
         with conn.cursor() as cur:
@@ -699,8 +706,8 @@ def test_keep_quarantines_missing_album_member_even_if_anchor_exists(repo):
                    WHERE d.rule_id=%s AND p.message_id=%s""", (rule_id, source_ids[1]),
             )
             row = cur.fetchone()
-    assert row is not None and row["status"] == "faulty"
-    assert quarantined >= 1
+    assert row is not None and row["status"] == "pending"
+    assert quarantined == 0
     repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner, queue_rebuilt=True)
 
 
@@ -1331,3 +1338,66 @@ def test_keep_rebuild_rule_94_resets_quarantined_rows_and_keeps_sent_history(rep
             assert cur.fetchone()["n"]==240
             cur.execute("SELECT COUNT(*) AS n FROM audit_log WHERE rule_id=%s AND event_type='rule_rescan_delivery_archived'",(rule_id,))
             assert cur.fetchone()["n"]==394
+
+
+@pytest.mark.parametrize("fresh", [True, False])
+def test_rescan_revokes_active_delivery_jobs_and_rebuilds_while_worker_is_live(repo, fresh):
+    import asyncio
+    from app.delivery_job_fence import (
+        DeliveryJobRevoked, enter_delivery_job, leave_delivery_job,
+    )
+    key, rule_id, delivery_ids, source_ids, source, target = seed(
+        repo, uuid4().int % 10**12,
+    )
+    delivery_id = delivery_ids[0]
+    payload = {"rule_id":rule_id,"delivery_id":delivery_id}
+    job_id = repo.create_job("repost_single",payload,"light")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=TRUE WHERE id=%s", (rule_id,))
+            cur.execute("UPDATE jobs SET status='processing',locked_by='stale' WHERE id=%s", (job_id,))
+    async def run():
+        # A second context models the user request while the old worker remains live.
+        ready = asyncio.Event()
+        resume = asyncio.Event()
+        async def old_worker():
+            token = enter_delivery_job(repo, "repost_single", rule_id, job_id, "stale")
+            try:
+                await asyncio.to_thread(repo.assert_current_delivery_job)
+                ready.set()
+                await resume.wait()
+                for mutation in (
+                    lambda: repo.assert_current_delivery_job(),
+                    lambda: repo.touch_rule_after_send(rule_id, 300),
+                    lambda: repo.mark_delivery_sent(delivery_id),
+                    lambda: repo.create_job("video_send",payload,"heavy"),
+                    lambda: repo.mark_delivery_attempt_accepted(key,sent_message_ids=[777]),
+                ):
+                    with pytest.raises(DeliveryJobRevoked):
+                        await asyncio.to_thread(mutation)
+            finally:
+                leave_delivery_job(token)
+        task = asyncio.create_task(old_worker())
+        await ready.wait()
+        try:
+            active, owner = await asyncio.to_thread(repo.begin_rule_rescan, rule_id, fresh=fresh)
+            assert not repo.heartbeat_job_processing(job_id,"stale")
+            assert not repo.retry_job(job_id,"late",1)
+            if fresh:
+                assert repo.restart_rule_queue(
+                    rule_id,owner_token=owner,allowed_message_ids=set(source_ids),
+                    include_newer_than_message_id=max(source_ids),
+                )[2] == 1
+            else:
+                assert repo.rebuild_rule_keep_position(
+                    rule_id,owner_token=owner,allowed_message_ids=set(source_ids),
+                    include_newer_than_message_id=max(source_ids),before_message_id=source_ids[0],
+                ) == (1,0,0,0)
+            repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
+        finally:
+            resume.set()
+            await task
+    asyncio.run(run())
+    assert repo.get_delivery(delivery_id) is None
+    assert repo.get_job(job_id)["status"] == "failed"
+    assert len(repo.get_rule_queue_logical_items(rule_id)) == 1
