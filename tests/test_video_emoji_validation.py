@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from telethon import functions, types
 from telethon.errors import DocumentInvalidError, FloodWaitError
 
