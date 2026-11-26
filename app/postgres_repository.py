@@ -4590,72 +4590,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 row = cur.fetchone()
         return int(row["max_message_id"] or 0) if row else 0
 
-    def _assert_rule_replay_safe(self, cur, rule_id: int) -> None:
-        """Allow explicitly confirmed replay of historical accepted video records.
-
-        Candidate IDs are not proof of publication. Legacy rows are archived
-        without promotion to verified, only when no modern receipt/intent or
-        unfinished delivery exists. The #507 merge cutoff is not proof of send.
-        """
-        cur.execute(
-            """
-            SELECT COUNT(*) AS unresolved, MIN(a.id) AS first_attempt_id
-            FROM delivery_attempts a
-            JOIN routing r ON r.id=a.rule_id
-            LEFT JOIN deliveries d ON d.id=a.delivery_id
-            WHERE a.rule_id=%s
-              AND a.status IN ('sending','accepted','failed_after_send')
-              AND a.idempotency_key NOT LIKE '%%:rescan:%%'
-              AND a.idempotency_key NOT LIKE 'archived:%%'
-              AND NOT COALESCE((
-                a.status='accepted'
-                AND a.operation_kind='video_send'
-                AND a.telegram_method='video_send'
-                AND a.error_text IS NULL
-                AND a.updated_at < TIMESTAMPTZ '2026-11-22 17:56:18+00'
-                AND a.target_id=r.target_id
-                AND a.tenant_id=COALESCE(r.tenant_id,1)
-                AND a.idempotency_key=('delivery:' || a.delivery_id::text
-                    || ':target:' || a.target_id || ':video_send:v1')
-                AND CASE
-                    WHEN jsonb_typeof(a.sent_message_ids_json)='array'
-                    THEN jsonb_array_length(a.sent_message_ids_json)=1
-                    ELSE FALSE
-                END
-                AND jsonb_typeof(a.sent_message_ids_json->0)='number'
-                AND a.sent_message_ids_json->>0 ~ '^[1-9][0-9]*$'
-                AND (d.id IS NULL OR (
-                    d.rule_id=a.rule_id AND d.status='sent'
-                    AND d.sent_message_id>0
-                    AND a.sent_message_ids_json=jsonb_build_array(d.sent_message_id)
-                    AND COALESCE(d.target_id_snapshot,a.target_id)=a.target_id
-                ))
-                AND NOT EXISTS (
-                    SELECT 1 FROM mtproto_send_intents i WHERE i.attempt_id=a.id
-                )
-                AND NOT EXISTS (
-                    SELECT 1 FROM telegram_publication_receipts pr
-                    WHERE pr.idempotency_key=a.idempotency_key
-                )
-              ), FALSE)
-            """, (int(rule_id),),
-        )
-        blocked = cur.fetchone()
-        if blocked["unresolved"]:
-            raise RescanBlocked(
-                "Есть отправка с неизвестным результатом; "
-                f"записей: {blocked['unresolved']}, "
-                f"первая попытка: {blocked.get('first_attempt_id')}. "
-                "Требуется ручная проверка."
-            )
-        cur.execute(
-            """SELECT idempotency_key FROM telegram_publication_receipts
-                WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching'))
-                ORDER BY idempotency_key LIMIT 1""", (int(rule_id),),
-        )
-        if cur.fetchone():
-            raise RescanBlocked("Есть незавершённая публикация или реакция; повтор запрещён")
-
     def _assert_keep_rescan_safe(self, cur, rule_id: int) -> None:
         cur.execute(
             """
@@ -4731,7 +4665,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
         return consumed
 
-    def begin_rule_rescan(self, rule_id: int, *, fresh: bool = False) -> tuple[bool, str]:
+    def begin_rule_rescan(self, rule_id: int) -> tuple[bool, str]:
         """Acquire a PostgreSQL-backed exclusive rescan owner before parsing.
 
         Ownership survives individual DB transactions and excludes independent
@@ -4771,10 +4705,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         "У правила есть незавершённые доставки или задачи; "
                         "пересканирование отложено во избежание дубликатов"
                     )
-                if fresh:
-                    self._assert_rule_replay_safe(cur, rule_id)
-                else:
-                    self._assert_keep_rescan_safe(cur, rule_id)
+                self._assert_keep_rescan_safe(cur, rule_id)
                 cur.execute(
                     """
                     UPDATE routing
@@ -4879,56 +4810,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             raise RescanBlocked("Остались активные задачи; пересканирование отменено")
         return rule
 
-    def reset_rule_history_for_replay(
-        self, rule_id: int, *, owner_token: str,
-        allowed_message_ids: set[int], include_newer_than_message_id: int,
-        expected_scope: tuple | None = None,
-    ) -> tuple[int, int, int]:
-        """Explicit 'start over': archive old attempt keys, then reset only this rule.
-
-        Retain original attempt rows and Telegram receipts for audit. A new
-        replay must use new idempotency keys, otherwise accepted historical
-        writes are incorrectly counted as fresh deliveries.
-        """
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                rule = self._lock_rescan_commit(cur, rule_id, owner_token, expected_scope)
-                self._assert_rule_replay_safe(cur, rule_id)
-                self._snapshot_rescan_echo_ids(cur, rule_id)
-                cur.execute("""
-                    UPDATE telegram_publication_receipts r
-                    SET idempotency_key=r.idempotency_key || ':rescan:' || a.id::text
-                    FROM delivery_attempts a
-                    WHERE r.rule_id=%s AND a.idempotency_key=r.idempotency_key
-                      AND r.published_ids IS NOT NULL
-                      AND r.idempotency_key NOT LIKE '%%:rescan:%%'
-                    """, (int(rule_id),))
-
-                # Unique suffix incorporates immutable attempt primary key.
-                # Previously archived rows are excluded, including on repeat reset.
-                cur.execute(
-                    """
-                    UPDATE delivery_attempts
-                    SET idempotency_key = idempotency_key || ':rescan:' || id::text,
-                        updated_at = NOW()
-                    WHERE rule_id = %s
-                      AND idempotency_key NOT LIKE '%%:rescan:%%'
-                    """,
-                    (int(rule_id),),
-                )
-                archived = int(cur.rowcount or 0)
-                cur.execute("DELETE FROM deliveries WHERE rule_id = %s", (int(rule_id),))
-                deleted = int(cur.rowcount or 0)
-                rebuilt = self._backfill_deliveries_for_rule_conn(
-                    conn, int(rule_id), str(rule["source_id"]), rule["source_thread_id"],
-                    allowed_message_ids=allowed_message_ids,
-                    include_newer_than_message_id=include_newer_than_message_id,
-                )
-                cur.execute("UPDATE routing SET rescan_queue_built=TRUE,next_run_at=%s WHERE id=%s", (utc_now_iso(),rule_id))
-            conn.commit()
-        return archived, deleted, rebuilt
-
-
     def restart_rule_queue(self, rule_id: int) -> tuple[int, int, int]:
         """Start a new publication cycle from the rule's existing queue.
 
@@ -4940,8 +4821,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT is_active, rescan_owner_token, source_id, source_thread_id,
-                              target_id, target_thread_id, mode, tenant_id
+                    """SELECT rescan_owner_token, source_id, source_thread_id,
+                              target_id, target_thread_id, tenant_id
                        FROM routing WHERE id=%s FOR UPDATE""",
                     (int(rule_id),),
                 )
