@@ -1660,6 +1660,10 @@ def test_terminal_document_rejection_cannot_be_reacquired():
             assert repo.mark_delivery_attempt_sending(key)
             assert repo.mark_delivery_attempt_failed(key, status="failed_before_send", error_text=error)
             assert repo.mark_delivery_attempt_sending(key) is can_retry
+            if not can_retry:
+                assert not repo.mark_delivery_attempt_failed(key, status="failed_before_send", error_text="late temporary failure")
+                assert repo.get_delivery_attempt_by_idempotency_key(key)["error_text"] == error
+                assert not repo.mark_delivery_attempt_sending(key)
             with repo.connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))

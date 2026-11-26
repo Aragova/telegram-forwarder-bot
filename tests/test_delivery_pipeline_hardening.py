@@ -355,3 +355,27 @@ def test_custom_caption_document_invalid_is_a_recoverable_reference_rejection():
     assert client.send_count == 1
     assert result.transport_attempted is False
     assert result.error_text == "repost_original_document_invalid"
+
+
+
+def test_document_invalid_after_local_upload_is_a_definite_rejection(tmp_path):
+    from telethon.errors import DocumentInvalidError
+
+    client, sender = _real_telethon_owner()
+
+    async def reject(**kwargs):
+        client.send_count += 1
+        raise DocumentInvalidError(request=None)
+
+    client.send_file = reject
+    path = tmp_path / "media.bin"
+    path.write_bytes(b"data")
+    result = asyncio.run(sender.send_file_via_telethon(
+        target_id="target", target_thread_id=None,
+        message=SimpleNamespace(media=object(), id=10),
+        file_path=path, skip_original=True, force_document=True,
+        caption_override={"text": "new", "entities": []},
+    ))
+    assert client.send_count == 1
+    assert result.transport_attempted is False
+    assert result.error_text == "repost_original_document_invalid_non_retryable"

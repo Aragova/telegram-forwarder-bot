@@ -7617,6 +7617,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     WHERE idempotency_key = %s
                       AND status NOT IN ('accepted', 'verified')
                       AND (status <> 'failed_after_send' OR %s = 'failed_after_send')
+                      AND NOT (status = 'failed_before_send' AND error_text IS NOT DISTINCT FROM 'repost_original_document_invalid_non_retryable')
                     """,
                     (normalized, (error_text or "")[:1000], str(idempotency_key), normalized),
                 )
@@ -7688,11 +7689,18 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             with conn.cursor() as cur:
                 self._guard_current_delivery_job(cur)
                 cur.execute(
-                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication' FOR UPDATE",
+                    "SELECT status, error_text FROM delivery_attempts WHERE idempotency_key = %s AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication' FOR UPDATE",
                     (str(idempotency_key),),
                 )
                 attempt = cur.fetchone()
-                if not attempt or str(attempt.get("status") or "") not in {"sending", "accepted", "failed_after_send"}:
+                if not attempt:
+                    return False
+                terminal_rejection = (
+                    attempt.get("status") == "failed_before_send"
+                    and attempt.get("error_text") == error_text
+                    and error_text == "repost_original_document_invalid_non_retryable"
+                )
+                if not terminal_rejection and str(attempt.get("status") or "") not in {"sending", "accepted", "failed_after_send"}:
                     return False
                 cur.execute(
                     """

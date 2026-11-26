@@ -1331,6 +1331,10 @@ class SenderService:
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
         if attempt_status == "failed_before_send" and attempt.get("error_text") == "repost_original_document_invalid_non_retryable":
+            # Restore a terminal delivery if a scheduler has reopened its row.
+            mark_faulty = getattr(self.db, "mark_delivery_faulty_if_attempt_unverified", None)
+            if callable(mark_faulty):
+                await run_db(mark_faulty, int(delivery_id), idempotency_key, "repost_original_document_invalid_non_retryable")
             return _repost_document_rejected_result()
         if attempt_status == "verified" and cached_ids:
             logger.info("DELIVERY_ATTEMPT_VERIFIED_CACHE_HIT | operation=single | key=%s | delivery_id=%s | sent_message_ids=%s", idempotency_key, delivery_id, cached_ids)
@@ -1592,6 +1596,10 @@ class SenderService:
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
         if attempt_status == "failed_before_send" and attempt.get("error_text") == "repost_original_document_invalid_non_retryable":
+            mark_faulty = getattr(self.db, "mark_delivery_faulty_if_attempt_unverified", None)
+            if callable(mark_faulty):
+                for album_id in album_delivery_ids:
+                    await run_db(mark_faulty, album_id, idempotency_key, "repost_original_document_invalid_non_retryable")
             return _repost_document_rejected_result()
         ledger_members = (attempt or {}).get("source_message_ids_json") if isinstance(attempt, dict) else None
         if isinstance(ledger_members, str):
