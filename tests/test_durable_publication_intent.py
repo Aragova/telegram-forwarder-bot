@@ -281,6 +281,7 @@ def test_mtproto_document_invalid_restores_no_write_fence():
 
         client = publication_client_class(MediaRejectingClient)()
         intent = PublicationIntent(MemoryRepository(), "invalid-document")
+        intent.video_diagnostics = {"phase": "telethon_send_file"}
         request = functions.messages.SendMediaRequest(
             peer=types.InputPeerChannel(9, 10),
             media=types.InputMediaUploadedDocument(
@@ -294,5 +295,11 @@ def test_mtproto_document_invalid_restores_no_write_fence():
         assert client.calls == [100]
         assert not intent.possible_write
         assert not intent.uncertain
+        assert intent.video_diagnostics["rpc_state"] == "rejected"
+        assert intent.video_diagnostics["rpc_request"]["method"] == "SendMediaRequest"
+        assert intent.video_diagnostics["rpc_request"]["mime_type"] == "video/mp4"
+        assert intent.video_diagnostics["rpc_request"]["file_parts"] == 1
+        assert intent.video_diagnostics["error_type"] == "DocumentInvalidError"
+        assert "access_hash" not in str(intent.video_diagnostics)
 
     asyncio.run(scenario())
