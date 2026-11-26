@@ -46,19 +46,43 @@ class PublicationIntent:
 
 _intent: ContextVar[PublicationIntent | None] = ContextVar("publication_intent", default=None)
 _single_rpc: ContextVar[bool] = ContextVar("publication_single_rpc", default=False)
-_diagnostic_rpc: ContextVar[bool] = ContextVar("diagnostic_single_rpc", default=False)
+@dataclass
+class DiagnosticPublicationState:
+    uncertain: bool = False
+
+
+_diagnostic_rpc: ContextVar[DiagnosticPublicationState | None] = ContextVar(
+    "diagnostic_single_rpc", default=None,
+)
 
 
 @contextmanager
-def diagnostic_rpc_scope():
+def diagnostic_rpc_scope(state: DiagnosticPublicationState | None = None):
     """Disable internal RPC retries/flood sleeps only in this diagnostic task."""
-    if _intent.get() is not None:
-        raise PublicationWriteUnavailable("Diagnostic RPC inside production intent")
-    token = _diagnostic_rpc.set(True)
+    if _intent.get() is not None or _diagnostic_rpc.get() is not None:
+        raise PublicationWriteUnavailable("Nested diagnostic/production publication scope")
+    state = state if state is not None else DiagnosticPublicationState()
+    token = _diagnostic_rpc.set(state)
     try:
-        yield
+        yield state
     finally:
         _diagnostic_rpc.reset(token)
+
+
+async def observe_diagnostic_publication(call):
+    """Fence only the actual publication RPC, never upload or queue waits."""
+    state = _diagnostic_rpc.get()
+    if state is None:
+        raise PublicationWriteUnavailable("Missing diagnostic publication scope")
+    if state.uncertain:
+        raise PublicationAlreadyAttempted("Previous diagnostic publication needs verification")
+    state.uncertain = True
+    try:
+        return await call()
+    except Exception as exc:
+        if _definite_rejection(exc):
+            state.uncertain = False
+        raise
 
 
 @contextmanager
@@ -242,7 +266,7 @@ def publication_client_class(base):
             publications = [(item, _publication_members(item)) for item in calls]
             publications = [(item, members) for item, members in publications if members]
             scoped = intent is not None and bool(publications)
-            diagnostic = _diagnostic_rpc.get()
+            diagnostic = _diagnostic_rpc.get() is not None
             token = _single_rpc.set(scoped or diagnostic)
             try:
                 if not scoped:
@@ -253,7 +277,12 @@ def publication_client_class(base):
                     if upload:
                         trace["upload_parts_started"] = trace.get("upload_parts_started", 0) + 1
                     try:
-                        result = await invoke(request, ordered=ordered, flood_sleep_threshold=0 if diagnostic else flood_sleep_threshold)
+                        if diagnostic and publications:
+                            result = await observe_diagnostic_publication(
+                                lambda: invoke(request, ordered=ordered, flood_sleep_threshold=0)
+                            )
+                        else:
+                            result = await invoke(request, ordered=ordered, flood_sleep_threshold=0 if diagnostic else flood_sleep_threshold)
                     except Exception as exc:
                         if upload:
                             trace["upload_parts_failed"] = trace.get("upload_parts_failed", 0) + 1
