@@ -4936,6 +4936,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 # recorded after its high-water mark; do not revive deleted posts.
                 source = str(rule["source_id"])
                 thread = rule["source_thread_id"]
+                tenant_id = rule["tenant_id"] if rule["tenant_id"] is not None else 1
                 observed_ids = sorted(allowed_message_ids)
                 if self_loop:
                     cur.execute(
@@ -4957,7 +4958,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                                SELECT %s,p.id,'pending',%s,%s FROM posts p
                                WHERE p.id=ANY(%s::bigint[]) ORDER BY p.id
                                ON CONFLICT DO NOTHING""",
-                            (int(rule_id), utc_now_iso(), rule["tenant_id"], post_ids),
+                            (int(rule_id), utc_now_iso(), tenant_id, post_ids),
                         )
                         rebuilt = int(cur.rowcount)
                 else:
@@ -4967,7 +4968,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                            WHERE p.source_channel=%s AND p.source_thread_id IS NOT DISTINCT FROM %s
                              AND (p.message_id=ANY(%s::bigint[]) OR p.message_id>%s)
                            ORDER BY p.id ON CONFLICT DO NOTHING""",
-                        (int(rule_id), utc_now_iso(), rule["tenant_id"], source, thread,
+                        (int(rule_id), utc_now_iso(), tenant_id, source, thread,
                          observed_ids, include_newer_than_message_id),
                     )
                     rebuilt = int(cur.rowcount)
