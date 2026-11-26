@@ -35,6 +35,7 @@ class Settings:
     data_read_backend: str = os.getenv("DATA_READ_BACKEND", "postgres").strip().lower()
 
     # --- параметры видеоредактора ---
+    video_emoji_validation_chat_id: str = os.getenv("VIDEO_EMOJI_VALIDATION_CHAT_ID", "").strip()
     intro_duration: int = int(os.getenv("INTRO_DURATION", "2") or 2)
     max_video_duration: int = int(os.getenv("MAX_VIDEO_DURATION", "120") or 120)
 
