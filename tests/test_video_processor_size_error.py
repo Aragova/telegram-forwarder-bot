@@ -176,7 +176,7 @@ def test_telethon_rate_limit_after_send_is_unknown_acceptance_not_rejection(tmp_
     assert client.calls == 1
 
 
-def test_document_invalid_propagates_without_repeat_and_logs_metadata(tmp_path, caplog):
+def test_document_invalid_propagates_without_repeat_and_logs_metadata(tmp_path, caplog, monkeypatch):
     from types import SimpleNamespace
     from telethon.errors import DocumentInvalidError
 
@@ -193,6 +193,13 @@ def test_document_invalid_propagates_without_repeat_and_logs_metadata(tmp_path, 
             self.calls += 1
             raise DocumentInvalidError(request=None)
 
+    checks = []
+
+    async def decode(path, *, thumbnail=False):
+        checks.append((path, thumbnail))
+        return {"status": "decoded" if not thumbnail else "decode_failed"}
+
+    monkeypatch.setattr("app.video_processor.decode_artifact", decode)
     processor = VideoProcessor.__new__(VideoProcessor)
     client = RejectingTelethon()
     processor.telethon = client
@@ -217,4 +224,7 @@ def test_document_invalid_propagates_without_repeat_and_logs_metadata(tmp_path, 
     assert "'codec_name': 'h264'" in caplog.text
     assert "'video_artifact': {'provided': True, 'bytes': 5" in caplog.text
     assert "'thumbnail_artifact': {'provided': True, 'bytes': 5" in caplog.text
+    assert checks == [(str(clip), False), (str(thumb), True)]
+    assert "'video_decode': {'status': 'decoded'}" in caplog.text
+    assert "'thumbnail_decode': {'status': 'decode_failed'}" in caplog.text
     assert "private" not in caplog.text
