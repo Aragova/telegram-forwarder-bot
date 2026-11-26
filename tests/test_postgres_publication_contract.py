@@ -121,6 +121,13 @@ def test_restart_archives_historical_attempt_without_inventing_result(status):
         repo.create_delivery_attempt(delivery_id=1, rule_id=rule_id, tenant_id=1,
                                      job_id=None, idempotency_key=key,
                                      operation_kind="single", status=status)
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE delivery_attempts SET created_at=TIMESTAMPTZ '2026-11-21',
+                       updated_at=TIMESTAMPTZ '2026-11-21' WHERE idempotency_key=%s""",
+                    (key,),
+                )
         attempt = repo.get_delivery_attempt_by_idempotency_key(key)
         assert _restart_from_snapshot(repo, rule_id) == (1, 0, 0)
         assert repo.get_delivery_attempt_by_idempotency_key(key) is None
@@ -480,6 +487,7 @@ def test_restart_preserves_historical_ids_without_interpreting_them(
                    operation_kind='video_send', status='accepted',
                    telegram_method='video_send', target_id=%s,
                    sent_message_ids_json=%s::jsonb, error_text=NULL,
+                   created_at=TIMESTAMPTZ '2026-11-21 10:00:00+00',
                    updated_at=TIMESTAMPTZ '2026-11-21 10:00:00+00'
                    WHERE rule_id=%s""",
                 (key, target, raw_ids, rule_id),
@@ -1136,3 +1144,59 @@ def test_restart_from_full_snapshot_includes_new_excludes_deleted_and_keeps_live
                 assert cur.fetchone()["n"] == 6
     finally:
         repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner)
+
+
+@pytest.mark.parametrize("status", ["sending", "accepted", "failed_after_send"])
+@pytest.mark.parametrize("old_created", [True, False])
+def test_restart_refuses_modern_bot_api_attempt_without_intent(repo, status, old_created):
+    key, rule_id, deliveries, _, _, _ = seed(repo, uuid4().int % 10**12)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE deliveries SET status='faulty' WHERE rule_id=%s", (rule_id,))
+            cur.execute(
+                """UPDATE delivery_attempts SET status=%s,telegram_method='copy_single',
+                   created_at=CASE WHEN %s THEN TIMESTAMPTZ '2026-11-21'
+                                   ELSE TIMESTAMPTZ '2026-11-22 17:56:18+00' END,
+                   updated_at=TIMESTAMPTZ '2026-11-22 17:56:18+00'
+                   WHERE idempotency_key=%s""",
+                (status, old_created, key),
+            )
+    with pytest.raises(RuntimeError, match="современная публикация"):
+        repo.begin_rule_rescan(rule_id, fresh=True)
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == status
+    assert repo.get_delivery(deliveries[0])["status"] == "faulty"
+    assert repo.get_rule(rule_id).is_active
+
+
+def test_restart_scheduler_and_logical_queue_follow_telegram_message_ids(repo):
+    key, rule_id, deliveries, source_ids, source, _ = seed(repo, uuid4().int % 10**12)
+    high = source_ids[0]
+    low = high - 1
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+    was_active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
+    try:
+        repo.save_post_batch(
+            [(low, source, None, {"media_kind": "text"}, None)],
+            preserve_existing_deliveries=True,
+        )
+        assert repo.restart_rule_queue(
+            rule_id, owner_token=owner, allowed_message_ids={low, high},
+            include_newer_than_message_id=high,
+        )[2] == 2
+    finally:
+        repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner,
+                                queue_rebuilt=True)
+    assert repo.get_rule_first_pending_message_id(rule_id) == low
+    assert [item["first_message_id"] for item in repo.get_rule_queue_logical_items(rule_id)] == [low, high]
+    taken = repo.take_due_delivery_and_create_job(rule_id, "9999-01-01T00:00:00+00:00")
+    assert taken and taken["status"] == "created"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT payload_json FROM jobs WHERE id=%s", (taken["job_id"],))
+            assert int(cur.fetchone()["payload_json"]["message_id"]) == low
+            # Leave no runnable test job in the shared disposable database.
+            cur.execute("DELETE FROM jobs WHERE id=%s", (taken["job_id"],))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE id=%s", (taken["delivery_id"],))
