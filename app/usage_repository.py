@@ -326,6 +326,7 @@ class UsageRepository(RepositorySplitBase):
                     FROM jobs j
                     WHERE COALESCE(NULLIF(j.payload_json->>'tenant_id', '')::BIGINT, 1) = %s
                       AND j.status = 'failed'
+                      AND COALESCE(j.payload_json->>'rescan_cancelled','false')<>'true'
                     """,
                     (int(tenant_id),),
                 )
@@ -361,7 +362,8 @@ class UsageRepository(RepositorySplitBase):
                             lease_until = NULL,
                             updated_at = NOW(),
                             error_text = NULL
-                        WHERE id = ANY(%s)
+                        WHERE id = ANY(%s) AND status='failed'
+                          AND COALESCE(payload_json->>'rescan_cancelled','false')<>'true'
                         """,
                         (recover_ids,),
                     )

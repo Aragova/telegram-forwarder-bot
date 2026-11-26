@@ -19,6 +19,9 @@ from app.repository_models import (
 )
 from app.postgres_client import PostgresClient
 from app.rescan_safety import RescanBlocked
+from app.delivery_job_fence import (
+    DELIVERY_JOB_TYPES, DeliveryJobRevoked, current_delivery_job,
+)
 from app.repository import RepositoryProtocol
 from app.rule_folders_repository import RuleFoldersRepositoryMixin
 from app.repost_campaign_top_time import normalize_repost_campaign_top_time_settings
@@ -149,6 +152,53 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         self.ensure_configured()
         with self.client.connect() as conn:
             yield conn
+
+    def _guard_current_delivery_job(self, cur, rule_id: int | None = None) -> None:
+        """Serialize old-worker mutations with the rescan owner's routing lock."""
+        scope = current_delivery_job()
+        if scope is None:
+            return
+        if rule_id is not None and int(rule_id) != scope.rule_id:
+            raise DeliveryJobRevoked("Delivery job rule changed")
+        cur.execute(
+            "SELECT rescan_owner_token FROM routing WHERE id=%s FOR UPDATE",
+            (scope.rule_id,),
+        )
+        route = cur.fetchone()
+        if route is None or route["rescan_owner_token"] is not None:
+            raise DeliveryJobRevoked("Delivery rule is being rescanned")
+        cur.execute(
+            """SELECT 1 FROM jobs WHERE id=%s AND locked_by=%s
+                 AND status='processing' AND payload_json->>'rule_id'=%s
+                 AND COALESCE(payload_json->>'rescan_cancelled','false')<>'true'
+               FOR SHARE""",
+            (scope.job_id, scope.worker_id, str(scope.rule_id)),
+        )
+        if cur.fetchone() is None:
+            raise DeliveryJobRevoked("Delivery job lease was revoked")
+
+    def assert_current_delivery_job(self) -> None:
+        """Read the current lease immediately before a non-idempotent RPC.
+
+        Do not lock a routing row for network preflight: the transaction
+        necessarily ends before Telegram I/O. Mutations still take the locks.
+        Never cache permission to send across an explicit cancellation.
+        """
+        scope = current_delivery_job()
+        if scope is None:
+            return
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT 1 FROM routing r JOIN jobs j ON j.id=%s
+                       WHERE r.id=%s AND r.rescan_owner_token IS NULL
+                         AND j.locked_by=%s AND j.status='processing'
+                         AND j.payload_json->>'rule_id'=%s
+                         AND COALESCE(j.payload_json->>'rescan_cancelled','false')<>'true'""",
+                    (scope.job_id,scope.rule_id,scope.worker_id,str(scope.rule_id)),
+                )
+                if cur.fetchone() is None:
+                    raise DeliveryJobRevoked("Delivery job lease was revoked")
 
     def _row_to_rule(self, row) -> Rule:
         data = dict(row)
@@ -2319,6 +2369,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def enqueue_reaction_job(self, *, tenant_id: int, rule_id: int, target_id: str, message_id: int, account_ids: list[int] | None = None, not_before: str | None = None, max_attempts: int = 3, reaction_payload: dict[str, Any] | None = None, delivery_id: int | None = None, account_id: int | None = None, run_at: str | None = None, publication_intent: tuple[str, datetime] | None = None) -> int | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur, rule_id)
                 if publication_intent is not None:
                     key, started_at = publication_intent
                     try:
@@ -2782,7 +2833,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     if not cur.fetchone():
                         return None
                     cur.execute("""SELECT 1 FROM telegram_publication_receipts
-                        WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""",
+                        WHERE rule_id=%s
+                          AND idempotency_key NOT LIKE '%%:rescan:%%'
+                          AND idempotency_key NOT LIKE 'archived:%%'
+                          AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""",
                         (rule_id,))
                     if cur.fetchone():
                         return None
@@ -2929,6 +2983,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         SET idempotency_key='archived:' || %s || ':' || idempotency_key
                         WHERE rule_id=%s AND delivery_ids && %s::bigint[]
                           AND published_ids IS NOT NULL AND idempotency_key NOT LIKE 'archived:%%'
+                          AND idempotency_key NOT LIKE '%%:rescan:%%'
                         """,
                         (uuid.uuid4().hex, rule_id, delivery_ids),
                     )
@@ -2936,6 +2991,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         """
                         DELETE FROM delivery_attempts
                         WHERE delivery_id = ANY(%s)
+                          AND idempotency_key NOT LIKE '%%:rescan:%%'
+                          AND idempotency_key NOT LIKE 'archived:%%'
                         """,
                         (delivery_ids,),
                     )
@@ -4634,41 +4691,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         if cur.fetchone()["busy"]:
             raise RescanBlocked("Во время сверки появились новые записи; повторите пересканирование")
 
-    def _assert_keep_rescan_safe(self, cur, rule_id: int) -> None:
-        cur.execute(
-            """
-            SELECT COUNT(*) AS unresolved, MIN(a.id) AS first_attempt_id
-            FROM delivery_attempts a
-            WHERE a.rule_id=%s AND a.status IN ('sending','accepted','verified','failed_after_send')
-              AND a.idempotency_key NOT LIKE '%%:rescan:%%' AND a.idempotency_key NOT LIKE 'archived:%%'
-              AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.id=a.delivery_id AND d.rule_id=a.rule_id)
-              AND NOT COALESCE((
-                CASE WHEN a.operation_kind='album' THEN
-                    EXISTS (SELECT 1 FROM telegram_publication_receipts pr
-                        WHERE pr.idempotency_key=a.idempotency_key AND pr.rule_id=a.rule_id)
-                    OR (a.target_id IS NOT NULL
-                        AND starts_with(a.idempotency_key,'rule:'||a.rule_id::text||':target:'||a.target_id||':media_group:')
-                        AND (right(a.idempotency_key,6)=':album'
-                             OR a.idempotency_key LIKE
-                                ('rule:'||a.rule_id::text||':target:'||a.target_id||':media_group:%%:album:members:%%'))
-                        AND length(a.idempotency_key)>length('rule:'||a.rule_id::text||':target:'||a.target_id||':media_group::album'))
-                WHEN a.operation_kind IN ('single','video_send') THEN
-                    jsonb_typeof(a.source_message_ids_json)='array'
-                    AND a.source_message_ids_json <> '[]'::jsonb
-                    AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(
-                        CASE WHEN jsonb_typeof(a.source_message_ids_json)='array'
-                             THEN a.source_message_ids_json ELSE '[]'::jsonb END) AS mid(value)
-                        WHERE jsonb_typeof(mid.value)<>'number' OR mid.value::text !~ '^[1-9][0-9]*$')
-                ELSE FALSE END
-              ),FALSE)
-            """, (int(rule_id),),
-        )
-        blocked = cur.fetchone()
-        if blocked["unresolved"]:
-            raise RescanBlocked(
-                f"У старых отправок нет точной привязки к источнику: {blocked['unresolved']}; "
-                f"первая попытка: {blocked.get('first_attempt_id')}. Требуется ручная проверка."
-            )
 
     def issue_rule_rescan_confirmation(self, rule_id: int, actor_id: int, token: str) -> bool:
         """Replace any old confirmation; bind it to a rule and its requesting actor."""
@@ -4733,28 +4755,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     )
                 cur.execute(
                     """
-                    SELECT EXISTS(
-                        SELECT 1 FROM deliveries
-                        WHERE rule_id = %s AND status = 'processing'
-                    ) OR EXISTS(
-                        SELECT 1 FROM jobs
-                        WHERE payload_json->>'rule_id' = %s
-                          AND status IN ('pending', 'leased', 'processing', 'retry')
-                    ) AS busy
-                    """,
-                    (int(rule_id), str(rule_id)),
-                )
-                if cur.fetchone()["busy"]:
-                    raise RescanBlocked(
-                        "У правила есть незавершённые доставки или задачи; "
-                        "пересканирование отложено во избежание дубликатов"
-                    )
-                if fresh:
-                    self._assert_restart_safe(cur, rule_id)
-                else:
-                    self._assert_keep_rescan_safe(cur, rule_id)
-                cur.execute(
-                    """
                     UPDATE routing
                     SET is_active = FALSE, rescan_owner_token = %s,
                         rescan_started_at = NOW()
@@ -4764,6 +4764,26 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
                 if cur.rowcount != 1:
                     raise RescanBlocked("Другое пересканирование получило блокировку")
+                # Retire both active and historically failed delivery jobs.
+                # Keep campaign-copy cleanup and other rules untouched.
+                cur.execute(
+                    """UPDATE jobs SET status='failed',locked_by=NULL,lease_until=NULL,
+                           payload_json=jsonb_set(payload_json,'{rescan_cancelled}','true'::jsonb),
+                           error_text=CASE WHEN status='failed' THEN error_text
+                                           ELSE 'rule_rescan_cancelled' END,
+                           updated_at=NOW()
+                       WHERE payload_json->>'rule_id'=%s AND job_type=ANY(%s)
+                         AND status IN ('pending','leased','processing','retry','failed')
+                         AND COALESCE(payload_json->>'rescan_cancelled','false')<>'true'""",
+                    (str(rule_id), sorted(DELIVERY_JOB_TYPES)),
+                )
+                # An interrupted scan must not leave a processing row owned by
+                # a cancelled job. Its previous attempt ledger remains intact.
+                cur.execute(
+                    """UPDATE deliveries SET status='faulty',error_text='rule_rescan_cancelled'
+                       WHERE rule_id=%s AND status='processing'""",
+                    (int(rule_id),),
+                )
             conn.commit()
         return bool(rule["is_active"]), owner_token
 
@@ -4858,8 +4878,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             """SELECT EXISTS(SELECT 1 FROM deliveries
                    WHERE rule_id=%s AND status='processing')
                 OR EXISTS(SELECT 1 FROM jobs WHERE payload_json->>'rule_id'=%s
+                   AND job_type=ANY(%s)
                    AND status IN ('pending','leased','processing','retry')) AS busy""",
-            (int(rule_id), str(rule_id)),
+            (int(rule_id), str(rule_id), sorted(DELIVERY_JOB_TYPES)),
         )
         if cur.fetchone()["busy"]:
             raise RescanBlocked("Остались активные задачи; пересканирование отменено")
@@ -4924,29 +4945,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         )
         return {int(row["mid"]) for row in cur.fetchall()}
 
-    def _assert_restart_safe(self, cur, rule_id: int) -> None:
-        """Fence modern uncertain sends; only pre-#507 legacy rows may be archived."""
-        cur.execute(
-            """SELECT EXISTS(
-                   SELECT 1 FROM telegram_publication_receipts
-                   WHERE rule_id=%s AND (published_ids IS NULL
-                       OR reaction_state IN ('pending','dispatching'))
-               ) OR EXISTS(
-                   SELECT 1 FROM delivery_attempts a
-                   WHERE a.rule_id=%s
-                     AND a.status IN ('sending','accepted','failed_after_send')
-                     AND a.idempotency_key NOT LIKE '%%:rescan:%%'
-                     AND a.idempotency_key NOT LIKE 'archived:%%'
-                     AND (
-                         EXISTS (SELECT 1 FROM mtproto_send_intents i WHERE i.attempt_id=a.id)
-                         OR COALESCE(a.created_at >= TIMESTAMPTZ '2026-11-22 17:56:18+00', TRUE)
-                         OR COALESCE(a.updated_at >= TIMESTAMPTZ '2026-11-22 17:56:18+00', TRUE)
-                     )
-               ) AS busy""",
-            (int(rule_id), int(rule_id)),
-        )
-        if cur.fetchone()["busy"]:
-            raise RescanBlocked("Есть незавершённая современная публикация; повтор пока небезопасен")
 
     def restart_rule_queue(
         self, rule_id: int, *, owner_token: str,
@@ -4954,11 +4952,29 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         expected_scope: tuple | None = None,
         checked_missing_message_ids: set[int] | None = None,
     ) -> tuple[int, int, int]:
-        """Atomically restart from the completed Telegram snapshot, not old queue membership."""
+        archived, replaced, rebuilt, _, _ = self._rebuild_rule_queue(
+            rule_id, owner_token=owner_token, allowed_message_ids=allowed_message_ids,
+            include_newer_than_message_id=include_newer_than_message_id,
+            expected_scope=expected_scope, checked_missing_message_ids=checked_missing_message_ids,
+        )
+        return archived, replaced, rebuilt
+
+    def _rebuild_rule_queue(
+        self, rule_id: int, *, owner_token: str,
+        allowed_message_ids: set[int], include_newer_than_message_id: int,
+        expected_scope: tuple | None = None,
+        checked_missing_message_ids: set[int] | None = None,
+        preserve_sent: bool = False,
+        before_message_id: int | None = None,
+    ) -> tuple[int, int, int, int, int]:
+        """Replace the publication cycle from a completed source snapshot.
+
+        Keep-position retains proven sent anchors and resets all other deliveries.
+        Both modes archive old ledger keys, regardless of their historical status.
+        """
         with self.connect() as conn:
             with conn.cursor() as cur:
                 rule = self._lock_rescan_commit(cur, rule_id, owner_token, expected_scope)
-                self._assert_restart_safe(cur, rule_id)
                 self._assert_rescan_live_snapshot(
                     cur, rule, include_newer_than_message_id,
                     allowed_message_ids, checked_missing_message_ids or set(),
@@ -4972,14 +4988,30 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
                 cur.execute(
                     """UPDATE telegram_publication_receipts r
-                       SET idempotency_key=r.idempotency_key || ':rescan:' || a.id::text
+                       SET idempotency_key=r.idempotency_key || ':rescan:' || a.id::text,
+                           expired_at=CASE WHEN r.published_ids IS NULL
+                               THEN COALESCE(r.expired_at,NOW()) ELSE r.expired_at END,
+                           reaction_state=CASE WHEN r.reaction_state IN ('pending','dispatching')
+                               THEN 'uncertain' ELSE r.reaction_state END
                        FROM delivery_attempts a
                        WHERE r.rule_id=%s AND a.rule_id=r.rule_id
                          AND a.idempotency_key=r.idempotency_key
-                         AND r.published_ids IS NOT NULL
                          AND r.idempotency_key NOT LIKE '%%:rescan:%%'
                          AND r.idempotency_key NOT LIKE 'archived:%%'""",
                     (int(rule_id),),
+                )
+                # Receipts without an attempt anchor are historical too.
+                cur.execute(
+                    """UPDATE telegram_publication_receipts
+                       SET idempotency_key=idempotency_key || ':rescan:' || %s,
+                           expired_at=CASE WHEN published_ids IS NULL
+                               THEN COALESCE(expired_at,NOW()) ELSE expired_at END,
+                           reaction_state=CASE WHEN reaction_state IN ('pending','dispatching')
+                               THEN 'uncertain' ELSE reaction_state END
+                       WHERE rule_id=%s
+                         AND idempotency_key NOT LIKE '%%:rescan:%%'
+                         AND idempotency_key NOT LIKE 'archived:%%'""",
+                    (str(owner_token), int(rule_id)),
                 )
                 cur.execute(
                     """UPDATE delivery_attempts
@@ -4990,59 +5022,112 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (int(rule_id),),
                 )
                 archived = int(cur.rowcount)
-                # New delivery IDs isolate this explicit replay from previous jobs.
-                cur.execute("DELETE FROM deliveries WHERE rule_id=%s", (int(rule_id),))
+                echo_ids = self._get_rescan_echo_ids(cur, rule_id) if self_loop else set()
+                observed_ids = sorted(allowed_message_ids - echo_ids)
+                if echo_ids:
+                    for mid in sorted(allowed_message_ids & echo_ids):
+                        self._log_self_target_echo_delivery_skipped(
+                            rule_id=rule_id,source_channel=str(rule["source_id"]),
+                            source_thread_id=rule["source_thread_id"],message_id=mid,
+                        )
+                preserved_ids: list[int] = []
+                removed_stale = excluded_before = 0
+                if preserve_sent:
+                    cur.execute(
+                        """SELECT COUNT(*) AS n FROM deliveries d JOIN posts p ON p.id=d.post_id
+                           WHERE d.rule_id=%s AND (
+                               p.source_channel IS DISTINCT FROM %s
+                               OR p.source_thread_id IS DISTINCT FROM %s
+                               OR NOT(p.message_id=ANY(%s::bigint[]))
+                           )""",
+                        (int(rule_id),str(rule["source_id"]),rule["source_thread_id"],
+                         sorted(allowed_message_ids)),
+                    )
+                    removed_stale = int(cur.fetchone()["n"])
+                    # Use the shared logical builder, including newly discovered
+                    # album members. Never preserve a partial album as completed.
+                    cur.execute(
+                        """SELECT COALESCE(d.id,0) AS delivery_id,
+                                  COALESCE(d.status,'pending') AS status,d.sent_at,
+                                  p.id AS post_id,p.message_id,p.source_channel,p.source_thread_id,
+                                  p.media_group_id,p.content_json,p.created_at
+                           FROM posts p LEFT JOIN deliveries d ON d.post_id=p.id AND d.rule_id=%s
+                           WHERE p.source_channel=%s AND p.source_thread_id IS NOT DISTINCT FROM %s
+                             AND p.message_id=ANY(%s::bigint[])
+                           ORDER BY p.message_id,p.id""",
+                        (int(rule_id),str(rule["source_id"]),rule["source_thread_id"],observed_ids),
+                    )
+                    rows = cur.fetchall()
+                    items = self._build_rule_logical_items_from_rows(rule_id, rows, rule["mode"])
+                    if rows and not items and rule["mode"] != "video":
+                        raise RuntimeError("Не удалось собрать логические элементы пересканирования")
+                    skipped_before: set[int] = set()
+                    for item in items:
+                        message_ids = item["message_ids"]
+                        if not message_ids:
+                            raise RuntimeError("Логический элемент не содержит сообщений")
+                        last_id = max(message_ids)
+                        if item["is_done"]:
+                            preserved_ids.extend(item["delivery_ids"])
+                        elif (before_message_id is not None
+                              and last_id < before_message_id
+                              and last_id <= include_newer_than_message_id):
+                            # The history parser can already have inserted a
+                            # pending delivery for a newly found older post.
+                            # Do not mistake that row for pre-scan progress.
+                            # Retain only genuinely completed members before
+                            # the cursor; do not rewind to a late old member.
+                            for did, mid, status in zip(
+                                item["delivery_ids"], message_ids, item["statuses"],
+                            ):
+                                if status == "sent":
+                                    preserved_ids.append(did)
+                                else:
+                                    skipped_before.add(mid)
+                    excluded_before = len(skipped_before)
+                    observed_ids = sorted(set(observed_ids) - skipped_before)
+                # Preserve the exact prior delivery state for incident diagnosis,
+                # including failures with no associated attempt ledger.
+                cur.execute(
+                    """INSERT INTO audit_log(created_at,event_type,rule_id,tenant_id,
+                                             delivery_id,post_id,status,error_text,extra_json)
+                       SELECT %s,'rule_rescan_delivery_archived',d.rule_id,
+                              COALESCE(d.tenant_id,1),d.id,d.post_id,d.status,d.error_text,
+                              (jsonb_populate_record(NULL::audit_log,jsonb_build_object(
+                                  'extra_json',jsonb_build_object('cycle',%s::text,'delivery',to_jsonb(d))
+                              ))).extra_json
+                       FROM deliveries d WHERE d.rule_id=%s
+                         AND NOT(d.id=ANY(%s::bigint[]))""",
+                    (utc_now_iso(),str(owner_token),int(rule_id),preserved_ids),
+                )
+                # New delivery IDs isolate the new queue from old attempts.
+                # Only already completed anchors may remain in keep-position.
+                cur.execute(
+                    "DELETE FROM deliveries WHERE rule_id=%s AND NOT(id=ANY(%s::bigint[]))",
+                    (int(rule_id),preserved_ids),
+                )
                 old_count = int(cur.rowcount)
                 # Only Telegram-observed messages, including verified live
                 # arrivals, belong to the new queue.
                 source = str(rule["source_id"])
                 thread = rule["source_thread_id"]
                 tenant_id = rule["tenant_id"] if rule["tenant_id"] is not None else 1
-                observed_ids = sorted(allowed_message_ids)
-                if self_loop:
-                    cur.execute(
-                        """SELECT id,message_id FROM posts
-                           WHERE source_channel=%s AND source_thread_id IS NOT DISTINCT FROM %s
-                             AND message_id=ANY(%s::bigint[])""",
-                        (source, thread, observed_ids),
-                    )
-                    source_rows = cur.fetchall()
-                    echo_ids = self._get_rescan_echo_ids(cur, rule_id)
-                    post_ids = []
-                    for row in source_rows:
-                        mid = int(row["message_id"])
-                        if mid in echo_ids:
-                            self._log_self_target_echo_delivery_skipped(
-                                rule_id=rule_id, source_channel=source,
-                                source_thread_id=thread, message_id=mid,
-                            )
-                        else:
-                            post_ids.append(int(row["id"]))
-                    rebuilt = 0
-                    if post_ids:
-                        cur.execute(
-                            """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
-                               SELECT %s,p.id,'pending',%s,%s FROM posts p
-                               WHERE p.id=ANY(%s::bigint[]) ORDER BY p.message_id,p.id
-                               ON CONFLICT DO NOTHING""",
-                            (int(rule_id), utc_now_iso(), tenant_id, post_ids),
-                        )
-                        rebuilt = int(cur.rowcount)
+                cur.execute(
+                    """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
+                       SELECT %s,p.id,'pending',%s,%s FROM posts p
+                       WHERE p.source_channel=%s AND p.source_thread_id IS NOT DISTINCT FROM %s
+                         AND p.message_id=ANY(%s::bigint[])
+                       ORDER BY p.message_id,p.id ON CONFLICT DO NOTHING""",
+                    (int(rule_id), utc_now_iso(), tenant_id, source, thread, observed_ids),
+                )
+                rebuilt = int(cur.rowcount)
+                if preserve_sent:
+                    cur.execute("UPDATE routing SET rescan_queue_built=TRUE WHERE id=%s", (int(rule_id),))
                 else:
                     cur.execute(
-                        """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
-                           SELECT %s,p.id,'pending',%s,%s FROM posts p
-                           WHERE p.source_channel=%s AND p.source_thread_id IS NOT DISTINCT FROM %s
-                             AND p.message_id=ANY(%s::bigint[])
-                           ORDER BY p.message_id,p.id ON CONFLICT DO NOTHING""",
-                        (int(rule_id), utc_now_iso(), tenant_id, source, thread,
-                         observed_ids),
+                        "UPDATE routing SET rescan_queue_built=TRUE,next_run_at=%s,last_sent_at=NULL WHERE id=%s",
+                        (utc_now_iso(), int(rule_id)),
                     )
-                    rebuilt = int(cur.rowcount)
-                cur.execute(
-                    "UPDATE routing SET rescan_queue_built=TRUE,next_run_at=%s,last_sent_at=NULL WHERE id=%s",
-                    (utc_now_iso(), int(rule_id)),
-                )
                 # Live ingestion can commit without taking the routing lock.
                 # Recheck after the destructive DELETE; if a previously unseen
                 # post arrived before it, roll back rather than lose its delivery.
@@ -5051,7 +5136,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     allowed_message_ids, checked_missing_message_ids or set(),
                 )
             conn.commit()
-        return archived, old_count, rebuilt
+        return archived, old_count, rebuilt, removed_stale, excluded_before
 
     def clear_rule_deliveries(self, rule_id: int) -> int:
         with self.connect() as conn:
@@ -5060,7 +5145,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if not cur.fetchone():
                     raise RescanBlocked("Правило недоступно или пересканируется")
                 cur.execute("""SELECT 1 FROM telegram_publication_receipts
-                    WHERE rule_id=%s AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""", (rule_id,))
+                    WHERE rule_id=%s
+                          AND idempotency_key NOT LIKE '%%:rescan:%%'
+                          AND idempotency_key NOT LIKE 'archived:%%'
+                          AND (published_ids IS NULL OR reaction_state IN ('pending','dispatching')) LIMIT 1""", (rule_id,))
                 if cur.fetchone():
                     raise RuntimeError("Есть незавершённая публикация или реакция")
                 cur.execute("DELETE FROM deliveries WHERE rule_id = %s", (rule_id,))
@@ -5101,26 +5189,26 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             return inserted
 
     def get_rule_first_pending_message_id(self, rule_id: int) -> int | None:
+        """First unfinished logical item, including failed and cancelled work."""
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    SELECT p.message_id
-                    FROM deliveries d
-                    JOIN posts p ON p.id = d.post_id
-                    JOIN routing r ON r.id = d.rule_id
-                    WHERE d.rule_id = %s
-                      AND d.status = 'pending'
-                    ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
-                    LIMIT 1
-                    """,
-                    (rule_id,),
+                    """SELECT mode FROM routing WHERE id=%s""", (int(rule_id),),
                 )
-                row = cur.fetchone()
+                rule = cur.fetchone()
+                if not rule:
+                    return None
+                cur.execute(
+                    """SELECT d.id AS delivery_id,d.status,d.sent_at,
+                              p.id AS post_id,p.message_id,p.source_channel,p.source_thread_id,
+                              p.media_group_id,p.content_json,p.created_at
+                       FROM deliveries d JOIN posts p ON p.id=d.post_id
+                       WHERE d.rule_id=%s ORDER BY p.message_id,p.id""",
+                    (int(rule_id),),
+                )
+                items = self._build_rule_logical_items_from_rows(rule_id, cur.fetchall(), rule["mode"])
+        return next((int(item["first_message_id"]) for item in items if not item["is_done"]), None)
 
-        if not row:
-            return None
-        return int(row["message_id"])
 
     def get_rule_sent_message_ids(self, rule_id: int) -> list[int]:
         with self.connect() as conn:
@@ -5298,58 +5386,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
             return count
 
-    def _quarantine_rescan_orphans(self, cur, rule_id: int) -> int:
-        """A lost delivery ID must not turn an accepted write into a fresh send."""
-        cur.execute(
-            """
-            UPDATE deliveries d SET status='faulty',error_text='historical_attempt_unverified_no_resend'
-            FROM posts p, routing r
-            WHERE d.rule_id=%s AND r.id=d.rule_id AND d.post_id=p.id AND d.status='pending'
-              AND EXISTS (
-                SELECT 1 FROM posts member
-                WHERE member.source_channel=p.source_channel
-                  AND member.source_thread_id IS NOT DISTINCT FROM p.source_thread_id
-                  AND (member.id=p.id OR (r.mode='repost' AND p.media_group_id IS NOT NULL
-                       AND member.media_group_id=p.media_group_id))
-                  AND (
-                    EXISTS (
-                        SELECT 1 FROM delivery_attempts a
-                        WHERE a.rule_id=d.rule_id AND a.status IN ('sending','accepted','verified','failed_after_send')
-                          AND a.idempotency_key NOT LIKE '%%:rescan:%%' AND a.idempotency_key NOT LIKE 'archived:%%'
-                          AND (
-                            (a.operation_kind IN ('single','video_send')
-                             AND a.source_message_ids_json @> jsonb_build_array(member.message_id))
-                            OR (a.operation_kind='album' AND member.media_group_id IS NOT NULL
-                                AND (
-                                    a.idempotency_key=('rule:'||a.rule_id::text||':target:'||a.target_id
-                                        ||':media_group:'||member.media_group_id||':album')
-                                    OR starts_with(
-                                        a.idempotency_key,
-                                        'rule:'||a.rule_id::text||':target:'||a.target_id
-                                        ||':media_group:'||member.media_group_id||':album:members:'
-                                    )
-                                ))
-                          )
-                          AND (a.operation_kind='album' OR NOT EXISTS (
-                              SELECT 1 FROM deliveries old
-                              WHERE old.id=a.delivery_id AND old.rule_id=a.rule_id
-                                AND old.post_id=member.id
-                          ))
-                    )
-                    OR EXISTS (
-                        SELECT 1 FROM telegram_publication_receipts pr
-                        WHERE pr.rule_id=d.rule_id AND pr.source_channel=p.source_channel
-                          AND pr.source_thread_id IS NOT DISTINCT FROM p.source_thread_id
-                          AND pr.idempotency_key NOT LIKE '%%:rescan:%%' AND pr.idempotency_key NOT LIKE 'archived:%%'
-                          AND member.message_id=ANY(pr.source_message_ids)
-                          AND NOT EXISTS (SELECT 1 FROM deliveries old WHERE old.id=ANY(pr.delivery_ids)
-                              AND old.rule_id=d.rule_id AND old.post_id=member.id)
-                    )
-                  )
-              )
-            """, (int(rule_id),),
-        )
-        return int(cur.rowcount or 0)
 
     def rebuild_rule_keep_position(
         self, rule_id: int, *, owner_token: str, allowed_message_ids: set[int],
@@ -5357,31 +5393,16 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         expected_scope: tuple | None = None,
         checked_missing_message_ids: set[int] | None = None,
     ) -> tuple[int, int, int, int]:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                rule = self._lock_rescan_commit(cur, rule_id, owner_token, expected_scope)
-                self._assert_keep_rescan_safe(cur, rule_id)
-                missing = checked_missing_message_ids or set()
-                self._assert_rescan_live_snapshot(
-                    cur, rule, include_newer_than_message_id, allowed_message_ids, missing,
-                )
-                source, thread = str(rule["source_id"]), rule["source_thread_id"]
-                rebuilt = self._backfill_deliveries_for_rule_conn(
-                    conn, rule_id, source, thread, allowed_message_ids=allowed_message_ids,
-                )
-                stale = self._prune_rule_pending_conn(
-                    conn, rule_id, source, thread, seen_message_ids=allowed_message_ids,
-                    scan_start_max_message_id=include_newer_than_message_id,
-                    checked_missing_message_ids=missing,
-                )
-                before = 0 if before_message_id is None else self._prune_rule_pending_conn(
-                    conn, rule_id, source, thread, before_message_id=before_message_id,
-                    before_snapshot_max_message_id=include_newer_than_message_id,
-                )
-                quarantined = self._quarantine_rescan_orphans(cur, rule_id)
-                cur.execute("UPDATE routing SET rescan_queue_built=TRUE WHERE id=%s", (rule_id,))
-            conn.commit()
-        return rebuilt, stale, before, quarantined
+        # The existing sent anchors (including explicitly skipped positions)
+        # define progress. Do not let a pending-only cursor skip faulty items.
+        _, _, rebuilt, removed_stale, excluded_before = self._rebuild_rule_queue(
+            rule_id, owner_token=owner_token, allowed_message_ids=allowed_message_ids,
+            include_newer_than_message_id=include_newer_than_message_id,
+            expected_scope=expected_scope, checked_missing_message_ids=checked_missing_message_ids,
+            preserve_sent=True, before_message_id=before_message_id,
+        )
+        # No historical quarantine is applied to the new publication cycle.
+        return rebuilt, removed_stale, excluded_before, 0
 
     def get_rule_next_run_at(self, rule_id: int) -> str | None:
         with self.connect() as conn:
@@ -5491,6 +5512,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def update_rule_next_run_at(self, rule_id: int, next_run_iso: str) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur, rule_id)
                 cur.execute(
                     """
                     UPDATE routing
@@ -5830,6 +5852,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur, rule_id)
                 cur.execute(
                     """
                     SELECT mode, schedule_mode, fixed_times_json, interval, next_run_at
@@ -6537,6 +6560,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def mark_delivery_sent_with_target_message(self, delivery_id: int, *, sent_message_id: int | None, sent_message_ids: list[int] | None, target_id: str | None, delivery_method: str | None):
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
                     """
                     UPDATE deliveries
@@ -6584,6 +6608,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             raise ValueError("Invalid MTProto send identity")
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
                     "SELECT id FROM delivery_attempts WHERE idempotency_key=%s AND status='sending' FOR UPDATE",
                     (key,),
@@ -6785,12 +6810,14 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         pending_ids = [mid for mid,flag in zip(scheduled_ids,mask) if flag]
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur, rule_id)
                 cur.execute(
-                    "SELECT target_id,target_thread_id,source_id,source_thread_id,tenant_id FROM routing WHERE id=%s FOR UPDATE",
+                    "SELECT target_id,target_thread_id,source_id,source_thread_id,tenant_id,rescan_owner_token FROM routing WHERE id=%s FOR UPDATE",
                     (rule_id,),
                 )
                 rule = cur.fetchone()
-                if (not rule or str(rule["target_id"]) != str(peer_id)
+                if (not rule or rule["rescan_owner_token"] is not None
+                        or str(rule["target_id"]) != str(peer_id)
                         or rule["target_thread_id"] != thread_id
                         or str(rule["source_id"]) != source_channel):
                     return False
@@ -6934,12 +6961,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             return False
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
-                    "SELECT target_id,target_thread_id,source_id,source_thread_id,tenant_id FROM routing WHERE id=%s FOR UPDATE",
+                    "SELECT target_id,target_thread_id,source_id,source_thread_id,tenant_id,rescan_owner_token FROM routing WHERE id=%s FOR UPDATE",
                     (receipt["rule_id"],),
                 )
                 rule = cur.fetchone()
-                if not rule:
+                if not rule or rule['rescan_owner_token'] is not None:
                     return False
                 cur.execute(
                     """
@@ -7043,6 +7071,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             return False
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
+                cur.execute('SELECT rescan_owner_token FROM routing WHERE id=%s FOR UPDATE', (receipt['rule_id'],))
+                rule = cur.fetchone()
+                if rule is None or rule['rescan_owner_token'] is not None:
+                    return False
                 cur.execute("SELECT id FROM delivery_attempts WHERE idempotency_key=%s AND status='accepted' FOR UPDATE",(key,))
                 if not cur.fetchone():
                     return False
@@ -7135,6 +7168,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def claim_publication_reaction(self, key: str, published_ids: list[int], *, expected_started_at: datetime) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
                     """
                     UPDATE telegram_publication_receipts r
@@ -7161,6 +7195,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             raise ValueError("Invalid reaction outcome")
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
                     """
                     UPDATE telegram_publication_receipts
@@ -7181,6 +7216,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def create_delivery_attempt(self, *, delivery_id: int, rule_id: int, tenant_id: int, job_id: int | None, idempotency_key: str, operation_kind: str, status: str, telegram_method: str | None = None, target_id: str | None = None, source_message_ids: list[int] | None = None, sent_message_ids: list[int] | None = None, error_text: str | None = None) -> int | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur, rule_id)
                 cur.execute(
                     """
                     INSERT INTO delivery_attempts(
@@ -7230,6 +7266,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def mark_delivery_attempt_sending(self, idempotency_key: str, *, job_id: int | None = None, telegram_method: str | None = None) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
                     """
                     UPDATE delivery_attempts
@@ -7246,6 +7283,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def mark_delivery_attempt_accepted(self, idempotency_key: str, *, sent_message_ids: list[int], telegram_method: str | None = None) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
                     """
                     UPDATE delivery_attempts
@@ -7267,6 +7305,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             return False
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
                     """
                     UPDATE delivery_attempts
@@ -7345,7 +7384,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT target_id, mode, tenant_id FROM routing WHERE id = %s FOR UPDATE",
+                    "SELECT target_id, mode, tenant_id FROM routing WHERE id = %s AND rescan_owner_token IS NULL FOR UPDATE",
                     (int(rule_id),),
                 )
                 rule = cur.fetchone()
@@ -7493,6 +7532,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             return False
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
                     """
                     UPDATE delivery_attempts
@@ -7510,6 +7550,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def mark_delivery_sent(self, delivery_id: int):
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
                     """
                     UPDATE deliveries
@@ -7529,6 +7570,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         now_iso = utc_now_iso()
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.executemany(
                     """
                     UPDATE deliveries
@@ -7544,6 +7586,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def mark_delivery_faulty(self, delivery_id: int, error_text: str):
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
                     """
                     UPDATE deliveries
@@ -7566,6 +7609,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         """
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
                     "SELECT status FROM delivery_attempts WHERE idempotency_key = %s AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication' FOR UPDATE",
                     (str(idempotency_key),),
@@ -7677,6 +7721,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def mark_delivery_pending(self, delivery_id: int):
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur)
                 cur.execute(
                     """
                     UPDATE deliveries
@@ -8131,6 +8176,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
         with self.connect() as conn:
             with conn.cursor() as cur:
+                self._guard_current_delivery_job(cur, payload.get('rule_id'))
                 if dedup_key:
                     cur.execute(
                         """
@@ -8413,6 +8459,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         error_text = NULL,
                         updated_at = NOW()
                     WHERE id = %s
+                      AND COALESCE(payload_json->>'rescan_cancelled','false')<>'true'
                     """,
                     (int(job_id),),
                 )
@@ -8434,6 +8481,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         error_text = %s,
                         updated_at = NOW()
                     WHERE id = %s
+                      AND COALESCE(payload_json->>'rescan_cancelled','false')<>'true'
                     """,
                     (max(1, int(delay_seconds)), (error_text or "")[:1000], int(job_id)),
                 )
@@ -8454,6 +8502,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         error_text = %s,
                         updated_at = NOW()
                     WHERE id = %s
+                      AND COALESCE(payload_json->>'rescan_cancelled','false')<>'true'
                     """,
                     (max(1, int(delay_seconds)), (error_text or "")[:1000], int(job_id)),
                 )
@@ -8474,6 +8523,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         error_text = %s,
                         updated_at = NOW()
                     WHERE id = %s
+                      AND COALESCE(payload_json->>'rescan_cancelled','false')<>'true'
                     """,
                     ((error_text or "")[:1000], int(job_id)),
                 )

@@ -75,6 +75,7 @@ from app.ops_health_service import build_operational_snapshot
 from app.preflight_checks import PreflightError, run_preflight_checks
 from app.runtime_context import RuntimeContext
 from app.worker_runtime import run_heavy_worker, run_light_worker
+from app.delivery_job_fence import cancel_local_rule_delivery_jobs
 from app.worker_resource_policy import POLICY as WORKER_RESOURCE_POLICY
 from app.worker_shutdown import drain_job_workers
 from app.reaction_worker import ReactionWorker
@@ -654,6 +655,7 @@ async def _run_rescan_rule_fresh_job(
             return
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id, fresh=True)
         try:
+            cancel_local_rule_delivery_jobs(rule_id)
             scan_start_max_message_id = await run_db(db.get_rule_scan_start_max_message_id, rule_id)
             await _show_rule_processing_screen(
                 chat_id=chat_id, message_id=message_id,
@@ -690,7 +692,7 @@ async def _run_rescan_rule_fresh_job(
         finally:
             if not commit_pending:
                 await _finish_rule_rescan_with_retry(
-                    rule_id, was_active=was_active,
+                    rule_id, was_active=was_active and scan_complete,
                     owner_token=owner_token, queue_rebuilt=scan_complete,
                 )
     except _RescanReleaseFailed:
@@ -740,13 +742,14 @@ async def _run_rescan_rule_keep_job(
             )
             return
 
-        await _show_rule_processing_screen(
-            chat_id=chat_id, message_id=message_id,
-            text=f"🔄 Пересканирование правила #{rule_id}\n\nРежим: сохранить позицию\nПроверка и пересборка очереди.",
-            terminal=False,
-        )
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
         try:
+            cancel_local_rule_delivery_jobs(rule_id)
+            await _show_rule_processing_screen(
+                chat_id=chat_id, message_id=message_id,
+                text=f"🔄 Пересканирование правила #{rule_id}\n\nРежим: сохранить позицию\nЧитаем историю источника.",
+                terminal=False,
+            )
             scan_start_max_message_id = await run_db(
                 db.get_rule_scan_start_max_message_id, rule_id,
             )
@@ -778,15 +781,15 @@ async def _run_rescan_rule_keep_job(
             audit = {
                 "event_type": "rule_rescanned_keep_position",
                 "old_value": {
-                    "preserved_delivery_state": True,
+                    "preserved_sent_history": True,
                     "saved_first_pending_message_id": saved_first_pending_message_id,
                     "old_next_run_at": old_next_run_at,
                 },
                 "new_value": {"next_run_at": old_next_run_at},
                 "extra": {
                     "mode": "keep_position", "parsed_count": parsed_count,
-                    "rebuilt_count": rebuilt_count, "preserved_delivery_state": True,
-                    "removed_before": removed_before, "removed_stale": removed_stale,
+                    "rebuilt_count": rebuilt_count, "preserved_sent_history": True,
+                    "excluded_before": removed_before, "removed_stale": removed_stale,
                     "quarantined": quarantined, "source_id": str(rule.source_id),
                     "source_thread_id": rule.source_thread_id,
                 },
@@ -799,7 +802,7 @@ async def _run_rescan_rule_keep_job(
         finally:
             if not commit_pending:
                 await _finish_rule_rescan_with_retry(
-                    rule_id, was_active=was_active,
+                    rule_id, was_active=was_active and scan_complete,
                     owner_token=owner_token, queue_rebuilt=scan_complete,
                 )
     except _RescanReleaseFailed:
@@ -829,10 +832,7 @@ async def _run_rescan_rule_keep_job(
     summary = (
         f"✅ Правило #{rule_id} пересканировано с сохранением позиции.\n"
         f"Новых записей источника: {parsed_count}\n"
-        f"Добавлено в очередь: {rebuilt_count}\n"
-        f"Исключено удалённых: {removed_stale}\n"
-        f"Убрано до сохранённой позиции: {removed_before}\n"
-        f"На ручной проверке: {quarantined}"
+        f"Готовых записей в новой очереди: {rebuilt_count}"
     )
     await _complete_rescan_job(
         rule_id=rule_id, rule=rule, was_active=was_active,

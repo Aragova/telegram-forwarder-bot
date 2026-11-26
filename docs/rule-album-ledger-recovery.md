@@ -110,28 +110,12 @@ Manual rollback, clear and start-position changes must obtain the same routing l
 Album attempt arrays historically contain delivery IDs. Keep-position never interprets them as source message IDs; it resolves albums by their stable media-group key or exact receipt. An orphan with neither is blocked before scanning. A collision between a historical delivery ID and a new Telegram message ID must not quarantine the unrelated new post.
 
 
-## Current behavior: full-source rescan and simple queue restart (#94)
+## Current behavior: explicit new publication cycle (#94)
 
-Both modes use the same full-history parser for channels and topics, refresh
-source posts without deleting shared data, and verify cached live arrivals after
-the scan-start high-water mark against Telegram in batches before committing.
-Deleted live candidates are excluded, and a newly committed unchecked candidate
-causes a safe rollback of the restart instead of silently dropping its delivery.
-**Start over** atomically builds a fresh
-queue from observed source IDs, excludes deleted posts and known self-loop
-echoes, allocates new delivery IDs, and archives prior attempt keys without
-rewriting their outcomes. Historical uncertain attempts with both timestamps before the #507 merge
-(2026-11-22 17:56:18 UTC), without MTProto intents or unresolved receipts,
-may be archived without verifying their old outcomes. Modern uncertain sends
-(including Bot API sends without intents), active jobs, and unresolved durable
-publication evidence remain fenced. Age alone never proves publication.
-**Keep position** preserves existing delivery identities and position. After
-a completed rescan, scheduler and logical queue views use Telegram message ID
-order within the source; rules not yet rescanned retain their existing order.
-Rollback selects the completed logical item by its latest member's actual send time,
-not queue position. Confirmed queue changes are audited before attempting owner release.
-If owner release fails after a queue commit, only the fenced release is retried;
-no second rebuild is offered. If the result of the queue commit itself is unknown,
-the owner is retained for manual database verification before another rebuild.
-A complete source scan is required before resetting the queue; its
-duration depends on Telegram and source size.
+The former safety gates described above are historical, not the current
+rescan contract. See [Rescan: explicit new publication cycle](rescan-new-cycle.md).
+Both modes retire old delivery jobs without waiting for publication completion,
+fully scan Telegram, archive old attempts/receipts, and rebuild the queue.
+Keep-position retains completed logical items in the current source snapshot.
+Explicit start-over resets the cursor and all deliveries. Archived evidence is
+not a publication or rollback gate. In-flight Telegram writes cannot be recalled.

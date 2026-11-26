@@ -15,6 +15,7 @@ from typing import Any
 from aiogram.exceptions import TelegramEntityTooLarge
 
 from .delivery_result import normalize_delivery_result
+from .delivery_job_fence import DELIVERY_JOB_TYPES, enter_delivery_job, leave_delivery_job
 from .single_publication_reconciliation import existing_publication_key_for_job, reconcile_pending_publication
 from .job_service import (
     enqueue_video_download,
@@ -584,9 +585,11 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         _heartbeat_active_job(
             repo, job_id, worker_id, job_type, asyncio.current_task(),
             finalization_started=finalization_started,
+            interval_seconds=2.0 if job_type in DELIVERY_JOB_TYPES else 15.0,
         )
     )
     result: dict[str, Any] | None = None
+    scope_token = enter_delivery_job(repo, job_type, int(payload.get("rule_id") or 0), job_id, worker_id)
     try:
         # Late publication mappings may identify an already queued self-loop
         # echo. Suppress exact echoes before entering any Telegram RPC.
@@ -669,7 +672,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 job_attempt=int(job.get("attempts") or 0) + 1,
             )
             if result.get("fallback_to_legacy"):
-                enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
+                await asyncio.to_thread(enqueue_video_delivery_fallback, repo, int(payload.get("delivery_id") or 0))
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
@@ -680,7 +683,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 next_payload["processed_video_path"] = None
                 next_payload["thumbnail_path"] = None
                 next_payload["cleanup_paths"] = [result.get("source_video_path")] if result.get("source_video_path") else []
-                enqueue_video_process(repo, next_payload)
+                await asyncio.to_thread(enqueue_video_process, repo, next_payload)
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO DOWNLOAD DONE | стадия скачивания завершена", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
@@ -693,7 +696,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 job_attempt=int(job.get("attempts") or 0) + 1,
             )
             if result.get("fallback_to_legacy"):
-                enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
+                await asyncio.to_thread(enqueue_video_delivery_fallback, repo, int(payload.get("delivery_id") or 0))
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
@@ -704,15 +707,15 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 next_payload["processed_video_path"] = result.get("processed_video_path")
                 next_payload["thumbnail_path"] = result.get("thumbnail_path")
                 next_payload["cleanup_paths"] = result.get("cleanup_paths") or payload.get("cleanup_paths") or []
-                enqueue_video_send(repo, next_payload)
+                await asyncio.to_thread(enqueue_video_send, repo, next_payload)
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO PROCESS DONE | стадия обработки завершена", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
                 return True
             if result.get("restart_download"):
                 delivery_id = int(payload.get("delivery_id") or 0)
-                enqueue_video_download(
-                    repo,
+                await asyncio.to_thread(
+                    enqueue_video_download, repo,
                     delivery_id,
                     extra_payload={
                         "invalid_file_attempts": int(result.get("invalid_file_attempts") or int(payload.get("invalid_file_attempts") or 0) + 1),
@@ -733,7 +736,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             delivery_result = normalize_delivery_result(raw_result)
             result = delivery_result.to_dict()
             if delivery_result.fallback_to_legacy:
-                enqueue_video_delivery_fallback(repo, int(payload.get("delivery_id") or 0))
+                await asyncio.to_thread(enqueue_video_delivery_fallback, repo, int(payload.get("delivery_id") or 0))
                 await _finish_owned_job(repo, "complete", job_id, worker_id, finalization_started=finalization_started)
                 _log_video_stage_event("VIDEO FALLBACK TO LEGACY | fallback в video_delivery", int(payload.get("delivery_id") or 0))
                 await _runtime_metrics.record_done(queue=queue, job_type=job_type, duration_sec=time.perf_counter() - started_at)
@@ -1018,6 +1021,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
             await _runtime_metrics.record_retry(job_type=job_type)
         return True
     finally:
+        leave_delivery_job(scope_token)
         _dec_in_flight(queue, job_type, state)
         heartbeat_task.cancel()
         await asyncio.gather(heartbeat_task, return_exceptions=True)
