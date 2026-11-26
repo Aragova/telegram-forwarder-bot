@@ -4892,13 +4892,16 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             source_thread_id=thread, message_id=int(row["message_id"]),
                         )
                     ]
-                    cur.execute(
-                        """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
-                           SELECT %s,p.id,'pending',%s,%s FROM posts p
-                           WHERE p.id=ANY(%s::bigint[]) ORDER BY p.id
-                           ON CONFLICT DO NOTHING""",
-                        (int(rule_id), utc_now_iso(), rule["tenant_id"], post_ids),
-                    )
+                    rebuilt = 0
+                    if post_ids:
+                        cur.execute(
+                            """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
+                               SELECT %s,p.id,'pending',%s,%s FROM posts p
+                               WHERE p.id=ANY(%s::bigint[]) ORDER BY p.id
+                               ON CONFLICT DO NOTHING""",
+                            (int(rule_id), utc_now_iso(), rule["tenant_id"], post_ids),
+                        )
+                        rebuilt = int(cur.rowcount)
                 else:
                     cur.execute(
                         """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
@@ -4909,7 +4912,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         (int(rule_id), utc_now_iso(), rule["tenant_id"], source, thread,
                          observed_ids, include_newer_than_message_id),
                     )
-                rebuilt = int(cur.rowcount)
+                    rebuilt = int(cur.rowcount)
                 cur.execute(
                     "UPDATE routing SET rescan_queue_built=TRUE,next_run_at=%s,last_sent_at=NULL WHERE id=%s",
                     (utc_now_iso(), int(rule_id)),
