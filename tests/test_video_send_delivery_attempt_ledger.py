@@ -662,3 +662,29 @@ def test_diagnostic_database_error_does_not_change_rejection(tmp_path):
     assert result["accepted"] is False
     assert result["retryable"] is False
     assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
+
+
+@pytest.mark.parametrize("schedule_mode", ["interval", "fixed"])
+def test_direct_video_scheduler_does_not_treat_failure_dict_as_success(monkeypatch, schedule_mode):
+    from types import SimpleNamespace
+
+    service = _build_service(FakeRepo())
+    monkeypatch.setattr("app.sender.TopTimeGuardService.build_guard_decision", lambda *_a, **_kw: {})
+    service._take_due_delivery_sync = lambda *_a: {
+        "post_id": 1,
+        "due": {"delivery_id": 1, "source_channel": "@src", "message_id": 2,
+                "media_group_id": None, "target_id": "-1001", "target_thread_id": None,
+                "interval": 60},
+    }
+    touches = []
+    service._touch_rule_after_send_sync = lambda *args: touches.append(args)
+
+    async def reject(*_args):
+        return {"ok": False, "retryable": False, "accepted": False}
+
+    service._deliver_single_video = reject
+    result = asyncio.run(service.process_rule_once(
+        SimpleNamespace(id=1, mode="video", schedule_mode=schedule_mode),
+    ))
+    assert result is False
+    assert bool(touches) is (schedule_mode == "fixed")
