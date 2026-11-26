@@ -38,7 +38,9 @@ class _FakeCursor:
             self._fetchone = self.script.get("unfinished_receipt")
             return
 
-        if "FROM deliveries d JOIN posts p ON p.id = d.post_id WHERE d.rule_id = %s ORDER BY p.id ASC" in q:
+        if ("FROM deliveries d JOIN posts p ON p.id = d.post_id "
+                "JOIN routing r ON r.id = d.rule_id WHERE d.rule_id = %s "
+                "ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC") in q:
             self._fetchall = self.script.get("rows", [])
             return
 
