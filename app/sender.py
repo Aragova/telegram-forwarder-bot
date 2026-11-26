@@ -1578,8 +1578,17 @@ class SenderService:
                 conflict = await run_db(
                     conflict_lookup, rule_id=int(rule_id), target_id=str(target_id),
                     media_group_id=str(media_group_id), current_key=idempotency_key,
+                    current_delivery_ids=album_delivery_ids,
                 )
                 if conflict:
+                    if (conflict.get("status") == "failed_before_send"
+                            and conflict.get("error_text") == "repost_original_document_invalid_non_retryable"):
+                        # The old member vector is fenced. Quarantine this
+                        # mixed cohort rather than publishing an incomplete album.
+                        for album_id in album_delivery_ids:
+                            await run_db(self.db.mark_delivery_faulty_if_attempt_unverified,
+                                         album_id, conflict["idempotency_key"], "repost_original_document_invalid_non_retryable")
+                        return _repost_document_rejected_result()
                     error = "album_conflicting_member_vector_manual_review_no_resend"
                     logger.warning(
                         "ALBUM_MEMBER_VECTOR_CONFLICT | rule=%s | target=%s | old_key=%s | new_key=%s",

@@ -362,3 +362,22 @@ def test_repost_document_invalid_keeps_primary_error_without_verification_or_tex
     owner.bot.send_message.assert_not_called()
     owner.reaction.assert_not_called()
     owner._confirm_target_delivery_message_ids_with_retry.assert_not_called()
+
+
+
+def test_document_rejection_survives_diagnostic_failure():
+    from app.telethon_authoritative_resolver import telethon_not_attempted
+
+    reason = "repost_original_document_invalid_non_retryable"
+    owner = _SingleOwner(self_loop=False, reupload_id=telethon_not_attempted(reason))
+
+    async def audit(**kwargs):
+        if kwargs.get("pipeline_stage") == "reupload_single_original_media_rejected":
+            owner.mark_faulty.assert_called_once_with(123, reason)
+            raise RuntimeError("audit unavailable")
+
+    owner._log_delivery_pipeline_step = audit
+    assert _deliver_single(owner) is False
+    owner.mark_faulty.assert_called_once_with(123, reason)
+    owner.reupload_message.assert_awaited_once()
+    owner.bot.send_message.assert_not_called()

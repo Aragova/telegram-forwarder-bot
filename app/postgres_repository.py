@@ -7314,7 +7314,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
             return int(existing["id"]) if existing else None
 
-    def find_conflicting_album_attempt(self, *, rule_id: int, target_id: str, media_group_id: str, current_key: str) -> dict[str, Any] | None:
+    def find_conflicting_album_attempt(self, *, rule_id: int, target_id: str, media_group_id: str, current_key: str, current_delivery_ids: list[int] | None = None) -> dict[str, Any] | None:
         """Prevent cross-cohort replay, including records written before v2 keys.
 
         An old receipt remains authoritative for its own media group. Adding
@@ -7324,7 +7324,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT idempotency_key, status, source_message_ids_json
+                    """SELECT idempotency_key, status, source_message_ids_json, error_text
                        FROM delivery_attempts
                        WHERE rule_id=%s AND target_id::text=%s
                          AND operation_kind='album'
@@ -7332,9 +7332,20 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                          AND idempotency_key<>%s
                          AND idempotency_key NOT LIKE '%%:rescan:%%'
                          AND idempotency_key NOT LIKE 'archived:%%'
-                         AND status IN ('created','sending','accepted','verified','failed_after_send')
+                         AND (
+                             status IN ('created','sending','accepted','verified','failed_after_send')
+                             OR (
+                                 status = 'failed_before_send'
+                                 AND error_text = 'repost_original_document_invalid_non_retryable'
+                                 AND (delivery_id = ANY(%s::bigint[]) OR EXISTS (
+                                     SELECT 1 FROM unnest(%s::bigint[]) AS member(id)
+                                     WHERE source_message_ids_json @> jsonb_build_array(member.id)
+                                 ))
+                             )
+                         )
                        ORDER BY id ASC LIMIT 1""",
-                    (int(rule_id), str(target_id), prefix, str(current_key)),
+                    (int(rule_id), str(target_id), prefix, str(current_key),
+                     current_delivery_ids or [], current_delivery_ids or []),
                 )
                 row = cur.fetchone()
         return dict(row) if row else None

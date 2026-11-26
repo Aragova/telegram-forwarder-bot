@@ -327,3 +327,29 @@ def test_late_album_echo_guard_blocks_rpc(echoes):
     else:
         assert result is True
         assert repo.rpc_members == [[1, 2]]
+
+
+
+def test_reopened_album_member_with_changed_vector_is_not_resent():
+    reason = "repost_original_document_invalid_non_retryable"
+    old_key = _album_key([1, 2])
+
+    class RejectedAlbumRepo(FakeAlbumRepo):
+        def find_conflicting_album_attempt(self, **kwargs):
+            assert kwargs["current_delivery_ids"] == [2, 3]
+            return {"idempotency_key": old_key, "status": "failed_before_send",
+                    "error_text": reason, "source_message_ids_json": [1, 2]}
+
+        def mark_delivery_faulty_if_attempt_unverified(self, delivery_id, key, error_text):
+            assert key == old_key
+            self.faulty.append((delivery_id, error_text))
+            return True
+
+    repo = RejectedAlbumRepo()
+    repo.attempt_by_key[old_key] = {"status": "failed_before_send", "error_text": reason}
+    result = asyncio.run(_execute(repo, delivery_ids=[2, 3]))
+    assert result["retryable"] is False
+    assert result["accepted"] is False
+    assert repo.rpc_members == []
+    assert repo.faulty == [(2, reason), (3, reason)]
+    assert list(repo.attempt_by_key) == [old_key]

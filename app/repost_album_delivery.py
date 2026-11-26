@@ -1214,6 +1214,14 @@ class RepostAlbumDelivery:
             **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
         attempts_debug.append({"stage": "send_album_one_by_one", **one_by_one_result})
+        if (one_by_one_result.get("error_text") == "repost_original_document_invalid_non_retryable"
+                and not one_by_one_result.get("transport_attempted")
+                and not one_by_one_result.get("transport_accepted")):
+            # Persist terminal state before optional diagnostics. Partial/uncertain
+            # publication still follows the existing accepted/uncertain path.
+            for disputed_id in delivery_ids:
+                await run_db(owner._mark_delivery_faulty_sync, disputed_id, "repost_original_document_invalid_non_retryable")
+            return False
         if idempotency_key:
             accepted_ids = normalize_valid_sent_message_ids(
                 one_by_one_result.get("sent_message_ids")
@@ -1282,13 +1290,6 @@ class RepostAlbumDelivery:
             )
             for delivery_id in delivery_ids:
                 await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
-            return False
-
-        if one_by_one_result.get("error_text") == "repost_original_document_invalid_non_retryable":
-            # Previous successful members are handled by the accepted/partial
-            # branch above; only a completely rejected album is terminal here.
-            for disputed_id in delivery_ids:
-                await run_db(owner._mark_delivery_faulty_sync, disputed_id, "repost_original_document_invalid_non_retryable")
             return False
 
         if one_by_one_result["ok"]:
