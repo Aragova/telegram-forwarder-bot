@@ -900,3 +900,24 @@ def test_rescan_missing_rule_does_not_offer_retry(mode):
     asyncio.run(handler(rule_id=94, chat_id=1, message_id=2, admin_id=3))
     show.assert_awaited_once_with(chat_id=1, message_id=2, text="❌ Правило #94 не найдено")
     repo.begin_rule_rescan.assert_not_called()
+
+
+@pytest.mark.parametrize("tenant_id,expected", [(None, 1), (42, 42)])
+def test_restart_preserves_tenant_or_uses_legacy_default(tenant_id, expected):
+    repo, cursor, _ = _rescan_repo()
+    execute = cursor.execute
+    insert_args = []
+
+    def track(sql, args=None):
+        execute(sql, args)
+        if str(sql).startswith("SELECT is_active, rescan_owner_token"):
+            cursor.result["tenant_id"] = tenant_id
+        if "INSERT INTO deliveries" in str(sql):
+            insert_args.append(args)
+
+    cursor.execute = track
+    _, owner = repo.begin_rule_rescan(214, fresh=True)
+    repo.restart_rule_queue(214, owner_token=owner, allowed_message_ids={101},
+                            include_newer_than_message_id=101)
+    assert len(insert_args) == 1
+    assert insert_args[0][2] == expected
