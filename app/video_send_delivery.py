@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
-from telethon.errors import FloodWaitError
+from telethon.errors import DocumentInvalidError, FloodWaitError
 
 from .delivery_idempotency import (
     build_delivery_idempotency_key,
@@ -179,12 +179,21 @@ class VideoSendDelivery:
                     caption_entities_json=caption_payload["caption_entities_json"],
                     caption_send_mode=caption_payload["selected_mode"],
                 )
-        except (VideoPreSendError, TelegramRetryAfter, FloodWaitError, TransportRateLimited, TelegramEntityTooLarge) as exc:
+        except (VideoPreSendError, TelegramRetryAfter, FloodWaitError, TransportRateLimited,
+                TelegramEntityTooLarge, DocumentInvalidError) as exc:
             if intent.possible_write:
                 error = "video_send_accepted_target_id_unresolved_non_retryable"
                 if has_attempt_ledger:
                     await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send", error_text=error)
                 return {"ok": False, "accepted": True, "retryable": False, "fallback_to_legacy": False, "error_text": error, "manual_review_required": True}
+            if isinstance(exc, DocumentInvalidError):
+                error_text = f"DocumentInvalidError: {exc}"
+                if has_attempt_ledger:
+                    await run_db(owner.db.mark_delivery_attempt_failed, idempotency_key,
+                                 status="failed_before_send", error_text=error_text)
+                await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+                return {"ok": False, "accepted": False, "retryable": False,
+                        "fallback_to_legacy": False, "error_text": error_text}
             if isinstance(exc, VideoPreSendError):
                 # The Telegram request has not started. This row may safely
                 # transition back to failed_before_send for a worker retry.
