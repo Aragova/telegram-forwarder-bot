@@ -303,3 +303,33 @@ def test_mtproto_document_invalid_restores_no_write_fence():
         assert "access_hash" not in str(intent.video_diagnostics)
 
     asyncio.run(scenario())
+
+
+def test_diagnostic_rpc_scope_disables_retries_without_mutating_other_tasks():
+    from app.send_intent import diagnostic_rpc_scope, current_publication_intent
+
+    async def scenario():
+        client = publication_client_class(RawTelethon)()
+        entered = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def diagnostic():
+            with diagnostic_rpc_scope():
+                assert current_publication_intent() is None
+                entered.set()
+                await finished.wait()
+                await client(_request())
+                await client(functions.updates.GetStateRequest())
+
+        task = asyncio.create_task(diagnostic())
+        await entered.wait()
+        await client(functions.updates.GetStateRequest())
+        finished.set()
+        await task
+        assert client.calls[0] == ("read", 8, 60)
+        assert client.calls[1][1:] == (0, 0)
+        assert client.calls[2] == ("read", 0, 0)
+        assert client._request_retries == 8
+        assert client.flood_sleep_threshold == 60
+
+    asyncio.run(scenario())
