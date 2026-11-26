@@ -7349,6 +7349,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SET status = 'sending', job_id = COALESCE(%s, job_id), telegram_method = COALESCE(%s, telegram_method), updated_at = NOW()
                     WHERE idempotency_key = %s
                       AND status IN ('created', 'failed_before_send')
+                      AND error_text IS DISTINCT FROM 'repost_original_document_invalid_non_retryable'
                     """,
                     (job_id, telegram_method, str(idempotency_key)),
                 )

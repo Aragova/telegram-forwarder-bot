@@ -1643,3 +1643,25 @@ def test_emoji_validation_registry_checks_inactive_rules_and_active_channels(rep
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM routing WHERE id=%s", (rule_id,))
                 cur.execute("DELETE FROM channels WHERE channel_id=%s", (target,))
+
+
+
+@pytest.mark.skipif(os.getenv("VIMI_TEST_POSTGRES") != "1", reason="requires disposable PostgreSQL")
+def test_terminal_document_rejection_cannot_be_reacquired():
+    assert os.getenv("APP_PG_DB") == "vimi_publication_ci"
+    repo = PostgresRepository()
+    try:
+        repo.init()
+        for error, can_retry in (("repost_original_document_invalid_non_retryable", False), ("temporary download failure", True)):
+            key = str(uuid4())
+            repo.create_delivery_attempt(delivery_id=1, rule_id=1, tenant_id=1,
+                                         job_id=None, idempotency_key=key,
+                                         operation_kind="single", status="created")
+            assert repo.mark_delivery_attempt_sending(key)
+            assert repo.mark_delivery_attempt_failed(key, status="failed_before_send", error_text=error)
+            assert repo.mark_delivery_attempt_sending(key) is can_retry
+            with repo.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+    finally:
+        repo.client.close_all_connections()

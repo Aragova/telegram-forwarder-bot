@@ -478,11 +478,10 @@ class SenderTelethonHelpers:
                 if original_send_started and (not isinstance(exc, BadRequestError) or isinstance(exc, RandomIdDuplicateError)):
                     logger.warning("TELETHON_FILE_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
                     return telethon_transport_failed(f"original_media_send_uncertain: {exc}")
-                if isinstance(exc, DocumentInvalidError) and caption_override is not None:
-                    # Uploading the same bytes cannot repair an invalid caption.
-                    # DOCUMENT_INVALID does not distinguish caption from media errors.
-                    # Fail closed rather than download and upload gigabytes blindly.
-                    return telethon_not_attempted("repost_original_document_invalid_non_retryable")
+                if original_send_started and isinstance(exc, DocumentInvalidError) and caption_override is not None and not file_path:
+                    # The RPC rejected the reference OR caption. The caller may
+                    # attempt a size-bounded recovery, not an unconditional upload.
+                    return telethon_not_attempted("repost_original_document_invalid")
 
         if not file_path:
             logger.warning(
@@ -595,6 +594,9 @@ class SenderTelethonHelpers:
                 file_path.name if file_path else None,
                 exc,
             )
+            if fallback_send_started and isinstance(exc, DocumentInvalidError) and caption_override is not None:
+                # A second explicit rejection with the same caption is terminal.
+                return telethon_not_attempted("repost_original_document_invalid_non_retryable")
             return (
                 telethon_transport_failed(str(exc))
                 if fallback_send_started

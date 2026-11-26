@@ -16,6 +16,18 @@ from .telethon_authoritative_resolver import TelethonSendOutcome, telethon_trans
 
 logger = logging.getLogger("forwarder")
 
+# A DOCUMENT_INVALID response cannot tell us whether the media or the
+# caption was rejected. Recover small files, but never blindly transfer
+# gigabytes or a file with no trustworthy size after this ambiguous error.
+DOCUMENT_INVALID_RECOVERY_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _can_recover_document_invalid(message) -> bool:
+    size = getattr(getattr(message, "document", None), "size", None)
+    if size is None:
+        size = getattr(getattr(message, "file", None), "size", None)
+    return type(size) is int and 0 < size <= DOCUMENT_INVALID_RECOVERY_MAX_BYTES
+
 
 class SenderReuploadHelpers:
     def __init__(self, owner):
@@ -434,9 +446,13 @@ class SenderReuploadHelpers:
             if (
                 getattr(original, "transport_attempted", False)
                 or getattr(original, "transport_accepted", False)
-                or getattr(original, "error_text", None) == "repost_original_document_invalid_non_retryable"
             ):
                 return original
+            if getattr(original, "error_text", None) == "repost_original_document_invalid":
+                if not _can_recover_document_invalid(message):
+                    logger.warning("REPOST_DOCUMENT_INVALID_RECOVERY_SKIPPED | target=%s | reason=size_unknown_or_over_limit", target_id)
+                    return telethon_not_attempted("repost_original_document_invalid_non_retryable")
+                logger.info("REPOST_DOCUMENT_INVALID_RECOVERY_ALLOWED | target=%s", target_id)
 
         file_path = await self.owner.telethon.download_media(message, file=str(settings.media_cache_path))
         if not file_path:
@@ -466,6 +482,8 @@ class SenderReuploadHelpers:
             )
             if isinstance(telethon_outcome, int) and telethon_outcome > 0:
                 return TelethonSendOutcome(True, True, True, int(telethon_outcome), [int(telethon_outcome)], resolution_method="legacy_telethon_helper")
+            if getattr(telethon_outcome, "error_text", None) == "repost_original_document_invalid_non_retryable":
+                return telethon_outcome
             if getattr(telethon_outcome, "transport_attempted", False) or getattr(telethon_outcome, "transport_accepted", False):
                 logger.warning("REUPLOAD_MESSAGE | TELETHON_FILE_UNCERTAIN | no_botapi_fallback=True")
                 return telethon_outcome

@@ -1284,6 +1284,13 @@ class RepostAlbumDelivery:
                 await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
             return False
 
+        if one_by_one_result.get("error_text") == "repost_original_document_invalid_non_retryable":
+            # Previous successful members are handled by the accepted/partial
+            # branch above; only a completely rejected album is terminal here.
+            for disputed_id in delivery_ids:
+                await run_db(owner._mark_delivery_faulty_sync, disputed_id, "repost_original_document_invalid_non_retryable")
+            return False
+
         if one_by_one_result["ok"]:
             sent_message_id = one_by_one_result.get("sent_message_id")
             if sent_message_id:

@@ -56,6 +56,14 @@ def _is_terminal_non_retryable_delivery(row) -> bool:
     return any(reason in error_text for reason in TERMINAL_NON_RETRYABLE_DELIVERY_REASONS)
 
 
+def _repost_document_rejected_result() -> dict:
+    return {
+        "ok": False, "retryable": False, "accepted": False,
+        "transport_accepted": False, "non_retryable": True,
+        "error_text": "repost_original_document_invalid_non_retryable",
+    }
+
+
 def _terminal_non_retryable_result(error_text: str) -> dict:
     return {
         "ok": False,
@@ -1298,6 +1306,8 @@ class SenderService:
             reason = str(row.get("error_text") or "").lower()
             if status == "sent":
                 return True
+            if status == "faulty" and reason == "repost_original_document_invalid_non_retryable":
+                return _repost_document_rejected_result()
             if status == "faulty" and (
                 "self-loop: confirmed publication echo" in reason
                 or "self_loop" in reason
@@ -1320,6 +1330,8 @@ class SenderService:
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
+        if attempt_status == "failed_before_send" and attempt.get("error_text") == "repost_original_document_invalid_non_retryable":
+            return _repost_document_rejected_result()
         if attempt_status == "verified" and cached_ids:
             logger.info("DELIVERY_ATTEMPT_VERIFIED_CACHE_HIT | operation=single | key=%s | delivery_id=%s | sent_message_ids=%s", idempotency_key, delivery_id, cached_ids)
             await run_db(self._mark_delivery_sent_sync, int(delivery_id), sent_message_id=int(cached_ids[0]), sent_message_ids=cached_ids, target_id=str(target_id), delivery_method="idempotency_verified_cache")
@@ -1416,7 +1428,8 @@ class SenderService:
                 await run_db(
                     self.db.mark_delivery_attempt_failed, idempotency_key,
                     status="failed_before_send",
-                    error_text="self_loop_echo_delivery_already_quarantined",
+                    error_text=(late_echo.get("error_text", "self_loop_echo_delivery_already_quarantined")
+                                if isinstance(late_echo, dict) else "self_loop_echo_delivery_already_quarantined"),
                 )
                 return late_echo
             with publication_scope(intent):
@@ -1449,8 +1462,7 @@ class SenderService:
                         and not intent.possible_write):
                     error = "repost_original_document_invalid_non_retryable"
                     await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_before_send", error_text=error)
-                    return {"ok": False, "retryable": False, "accepted": False,
-                            "transport_accepted": False, "non_retryable": True, "error_text": error}
+                    return _repost_document_rejected_result()
                 if _is_terminal_non_retryable_delivery(delivery_row):
                     terminal_error = str(delivery_row.get("error_text") or "telethon_send_accepted_target_id_unresolved_non_retryable")
                     await run_db(self.db.mark_delivery_attempt_failed, idempotency_key, status="failed_after_send", error_text=terminal_error)
@@ -1579,6 +1591,8 @@ class SenderService:
         attempt = await run_db(self.db.get_delivery_attempt_by_idempotency_key, idempotency_key)
         cached_ids = extract_sent_message_ids_from_attempt(attempt)
         attempt_status = str((attempt or {}).get("status") or "").lower() if isinstance(attempt, dict) else ""
+        if attempt_status == "failed_before_send" and attempt.get("error_text") == "repost_original_document_invalid_non_retryable":
+            return _repost_document_rejected_result()
         ledger_members = (attempt or {}).get("source_message_ids_json") if isinstance(attempt, dict) else None
         if isinstance(ledger_members, str):
             try:
@@ -1781,6 +1795,12 @@ class SenderService:
                 )
             else:
                 delivery_rows = [await run_db(self.db.get_delivery, int(row_id)) for row_id in album_delivery_ids]
+                if (delivery_rows and not intent.possible_write
+                        and all(isinstance(row, dict) and row.get("status") == "faulty"
+                                and row.get("error_text") == "repost_original_document_invalid_non_retryable" for row in delivery_rows)):
+                    await run_db(self.db.mark_delivery_attempt_failed, idempotency_key,
+                                 status="failed_before_send", error_text="repost_original_document_invalid_non_retryable")
+                    return _repost_document_rejected_result()
                 terminal_rows = [row for row in delivery_rows if _is_terminal_non_retryable_delivery(row)]
                 if delivery_rows and len(terminal_rows) == len(delivery_rows):
                     terminal_error = str(terminal_rows[0].get("error_text") or "telethon_send_accepted_target_id_unresolved_non_retryable")
