@@ -418,8 +418,13 @@ def test_faulty_counter_and_clear_preserve_pending_publication_evidence(repo):
     with repo.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE routing SET rescan_owner_token=NULL WHERE id=%s", (rule_id,))
-    with pytest.raises(RuntimeError, match="современная публикация"):
-        _restart_from_snapshot(repo, rule_id)
+    assert _restart_from_snapshot(repo, rule_id) == (1,3,3)
+    assert all(repo.get_delivery(d) is None for d in deliveries)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT idempotency_key,expired_at FROM telegram_publication_receipts WHERE rule_id=%s",(rule_id,))
+            archived=cur.fetchone()
+            assert ":rescan:" in archived["idempotency_key"] and archived["expired_at"] is not None
 
 
 def test_rescan_legacy_video_history_431_and_atomic_rebuild(repo, monkeypatch):
@@ -1167,7 +1172,7 @@ def test_restart_from_full_snapshot_includes_new_excludes_deleted_and_keeps_live
 
 @pytest.mark.parametrize("status", ["sending", "accepted", "failed_after_send"])
 @pytest.mark.parametrize("old_created", [True, False])
-def test_restart_refuses_modern_bot_api_attempt_without_intent(repo, status, old_created):
+def test_restart_archives_modern_bot_api_attempt_without_intent(repo, status, old_created):
     key, rule_id, deliveries, _, _, _ = seed(repo, uuid4().int % 10**12)
     with repo.connect() as conn:
         with conn.cursor() as cur:
@@ -1180,10 +1185,12 @@ def test_restart_refuses_modern_bot_api_attempt_without_intent(repo, status, old
                    WHERE idempotency_key=%s""",
                 (status, old_created, key),
             )
-    with pytest.raises(RuntimeError, match="современная публикация"):
-        repo.begin_rule_rescan(rule_id, fresh=True)
-    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == status
-    assert repo.get_delivery(deliveries[0])["status"] == "faulty"
+    attempt = repo.get_delivery_attempt_by_idempotency_key(key)
+    assert _restart_from_snapshot(repo, rule_id) == (1,1,1)
+    archived = repo.get_delivery_attempt_by_idempotency_key(f"{key}:rescan:{attempt['id']}")
+    assert archived["status"] == status
+    assert repo.get_delivery(deliveries[0]) is None
+    assert len(repo.get_rule_queue_logical_items(rule_id)) == 1
     assert repo.get_rule(rule_id).is_active
 
 
@@ -1282,60 +1289,94 @@ def test_restart_rolls_back_if_unchecked_arrival_commits_between_guard_and_delet
         repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner)
 
     
-def test_keep_rebuild_rule_94_resets_quarantined_rows_and_keeps_sent_history(repo):
-    key, rule_id, delivery_ids, source_ids, source, target = seed(
-        repo, uuid4().int % 10**12,
-    )
+@pytest.mark.parametrize("already_quarantined", [False,True])
+def test_keep_rebuild_rule_94_resets_historical_failures_and_preserves_position(repo, already_quarantined):
+    key, rule_id, _, _, source, target = seed(repo, uuid4().int % 10**12)
     observed = set()
+    album_groups = []
+    singles = []
     with repo.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
             cur.execute("DELETE FROM deliveries WHERE rule_id=%s", (rule_id,))
             cur.execute("DELETE FROM posts WHERE source_channel=%s", (source,))
             mid = 1000
-            # 47 completed logical posts = 131 physical rows;
-            # 185 remaining logical posts = 394 physical rows.
-            sizes = [3]*42 + [1]*5 + [3]*104 + [2] + [1]*80
+            # 47 completed = 131 rows; 185 remaining = 394 rows.
+            # 133 remaining albums + 52 single posts match the 240 historical attempts.
+            sizes = [3]*42 + [1]*5 + [3]*76 + [2]*57 + [1]*52
+            faulty_positions = {47,123,124,125}
             for pos, size in enumerate(sizes):
+                group = f"group-{rule_id}-{pos}" if size>1 else None
+                if pos>=47 and group:
+                    album_groups.append(group)
+                status = "sent" if pos<47 else (
+                    "faulty" if already_quarantined or pos in faulty_positions else "pending"
+                )
                 for _ in range(size):
                     mid += 1
                     observed.add(mid)
+                    if pos>=47 and not group:
+                        singles.append(mid)
                     cur.execute(
                         """INSERT INTO posts(message_id,source_channel,content_json,media_group_id,created_at)
                            VALUES (%s,%s,'{"media_kind":"video"}',%s,'2026-01-01') RETURNING id""",
-                        (mid,source,f"group-{rule_id}-{pos}" if size>1 else None),
+                        (mid,source,group),
                     )
-                    post_id = cur.fetchone()["id"]
+                    post_id=cur.fetchone()["id"]
                     cur.execute(
                         """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id,error_text)
                            VALUES (%s,%s,%s,'2026-01-01',1,%s)""",
-                        (rule_id,post_id,"sent" if pos<47 else "faulty",
-                         None if pos<47 else "historical_attempt_unverified_no_resend"),
+                        (rule_id,post_id,status,
+                         "historical_attempt_unverified_no_resend" if status=="faulty" else None),
                     )
-            cur.execute(
-                """INSERT INTO delivery_attempts(delivery_id,rule_id,tenant_id,idempotency_key,
-                           operation_kind,status,target_id,created_at,updated_at)
-                   SELECT -1,%s,1,%s||n::text,'album',
-                          CASE WHEN n<=98 THEN 'accepted' WHEN n<=237 THEN 'sending'
-                               ELSE 'failed_after_send' END,
-                          %s,NOW(),NOW() FROM generate_series(1,240) n""",
-                (rule_id,f"historical:{rule_id}:",target),
-            )
+            album_statuses = ["accepted"]*98 + ["sending"]*87 + ["failed_after_send"]*3
+            single_statuses = ["sending"]*27 + ["accepted"]*25
+            for n,status in enumerate(album_statuses):
+                group=album_groups[n%len(album_groups)]
+                old_key=f"rule:{rule_id}:target:{target}:media_group:{group}:album"
+                if n>=len(album_groups):
+                    old_key+=f":members:historical-{n}"
+                cur.execute(
+                    """INSERT INTO delivery_attempts(delivery_id,rule_id,tenant_id,idempotency_key,
+                           operation_kind,status,target_id,source_message_ids_json,created_at,updated_at)
+                       VALUES(-1,%s,1,%s,'album',%s,%s,'[900001]'::jsonb,
+                              TIMESTAMPTZ '2026-05-03',NOW())""",
+                    (rule_id,old_key,status,target),
+                )
+            for n,(mid,status) in enumerate(zip(singles,single_statuses)):
+                cur.execute(
+                    """INSERT INTO delivery_attempts(delivery_id,rule_id,tenant_id,idempotency_key,
+                           operation_kind,status,target_id,source_message_ids_json,created_at,updated_at)
+                       VALUES(-1,%s,1,%s,'single',%s,%s,jsonb_build_array(%s::bigint),
+                              TIMESTAMPTZ '2026-05-03',NOW())""",
+                    (rule_id,f"delivery:old-{rule_id}-{n}:target:{target}:single",status,target,mid),
+                )
+    before=repo.get_rule_card_snapshot(rule_id)
+    assert before["logical_total"]==232
+    assert before["logical_current_position"]==48
+    assert before["logical_pending"]==(0 if already_quarantined else 181)
+    assert before["logical_faulty"]==(185 if already_quarantined else 4)
     was_active, owner = repo.begin_rule_rescan(rule_id)
+    anchor=repo.get_rule_first_pending_message_id(rule_id)
+    assert anchor==1132
     assert repo.rebuild_rule_keep_position(
         rule_id, owner_token=owner, allowed_message_ids=observed,
-        include_newer_than_message_id=max(observed), before_message_id=None,
+        include_newer_than_message_id=max(observed), before_message_id=anchor,
     ) == (394,0,0,0)
     repo.finish_rule_rescan(rule_id,was_active=was_active,owner_token=owner,queue_rebuilt=True)
     assert repo.get_rule_position_info(rule_id)=={
         "total":232,"completed":47,"current_position":48,
     }
+    after=repo.get_rule_card_snapshot(rule_id)
+    assert after["logical_pending"]==185 and after["logical_faulty"]==0
     with repo.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT status,COUNT(*) AS n FROM deliveries WHERE rule_id=%s GROUP BY status",(rule_id,))
             assert {r["status"]:r["n"] for r in cur.fetchall()}=={"sent":131,"pending":394}
-            cur.execute("SELECT COUNT(*) AS n FROM delivery_attempts WHERE rule_id=%s AND idempotency_key LIKE %s",(rule_id,"%:rescan:%"))
-            assert cur.fetchone()["n"]==240
+            cur.execute("SELECT status,COUNT(*) AS n FROM delivery_attempts WHERE rule_id=%s AND idempotency_key LIKE %s GROUP BY status",(rule_id,"%:rescan:%"))
+            assert {r["status"]:r["n"] for r in cur.fetchall()}=={
+                "accepted":123,"sending":114,"failed_after_send":3,
+            }
             cur.execute("SELECT COUNT(*) AS n FROM audit_log WHERE rule_id=%s AND event_type='rule_rescan_delivery_archived'",(rule_id,))
             assert cur.fetchone()["n"]==394
 

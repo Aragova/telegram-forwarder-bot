@@ -5039,7 +5039,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                        SELECT %s,'rule_rescan_delivery_archived',d.rule_id,
                               COALESCE(d.tenant_id,1),d.id,d.post_id,d.status,d.error_text,
                               (jsonb_populate_record(NULL::audit_log,jsonb_build_object(
-                                  'extra_json',jsonb_build_object('cycle',%s,'delivery',to_jsonb(d))
+                                  'extra_json',jsonb_build_object('cycle',%s::text,'delivery',to_jsonb(d))
                               ))).extra_json
                        FROM deliveries d WHERE d.rule_id=%s
                          AND NOT(d.id=ANY(%s::bigint[]))""",
