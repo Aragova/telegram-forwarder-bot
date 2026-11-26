@@ -16,6 +16,9 @@ class _Repo:
     def mark_delivery_attempt_accepted(self, key, **kwargs):
         self.accepted.append((key, kwargs))
 
+    def mark_delivery_attempt_failed(self, key, **kwargs):
+        return True
+
 
 class _Bot:
     def __init__(self):
@@ -381,3 +384,97 @@ def test_document_rejection_survives_diagnostic_failure():
     owner.mark_faulty.assert_called_once_with(123, reason)
     owner.reupload_message.assert_awaited_once()
     owner.bot.send_message.assert_not_called()
+
+
+
+def test_album_terminal_fence_survives_second_delivery_write_failure():
+    import pytest
+    from app.sender import SenderService
+
+    reason = "repost_original_document_invalid_non_retryable"
+    ids = [100, 101, 102]
+
+    class Repo(_Repo):
+        def __init__(self):
+            super().__init__()
+            self.attempts = {}
+            self.rows = {i: {"status": "processing"} for i in ids}
+
+        def get_delivery_attempt_by_idempotency_key(self, key):
+            return self.attempts.get(key)
+
+        def create_delivery_attempt(self, **kwargs):
+            self.attempts.setdefault(kwargs["idempotency_key"], {
+                "status": kwargs["status"],
+                "source_message_ids_json": kwargs["source_message_ids"],
+            })
+            return 1
+
+        def mark_delivery_attempt_sending(self, key, **kwargs):
+            assert self.attempts[key]["status"] == "created"
+            self.attempts[key]["status"] = "sending"
+            return True
+
+        def mark_delivery_attempt_failed(self, key, *, status, error_text):
+            attempt = self.attempts[key]
+            if attempt.get("error_text") == reason:
+                return False
+            attempt.update(status=status, error_text=error_text)
+            return True
+
+        def get_rule(self, rule_id):
+            return SimpleNamespace(id=rule_id)
+
+        def get_processing_album_for_rule(self, *args):
+            return [{"delivery_id": i, "message_id": i - 90} for i in ids
+                    if self.rows[i]["status"] == "processing"]
+
+        def get_delivery(self, delivery_id):
+            return self.rows[delivery_id]
+
+        def mark_delivery_faulty_if_attempt_unverified(self, delivery_id, key, error_text):
+            assert self.attempts[key]["error_text"] == reason
+            self.rows[delivery_id].update(status="faulty", error_text=error_text)
+            return True
+
+    repo = Repo()
+    owner = _AlbumOwner()
+    owner.db = repo
+    owner._is_self_loop_rule = lambda rule: False
+    owner.reupload_album.return_value = {"ok": False, "sent_count": 0, "error_text": "rejected"}
+    owner._send_album_one_by_one = AsyncMock(return_value={
+        "ok": False, "sent_count": 0, "error_text": reason,
+        "transport_attempted": False, "transport_accepted": False,
+    })
+
+    def mark_faulty(delivery_id, error_text):
+        attempt = next(iter(repo.attempts.values()))
+        assert attempt["status"] == "failed_before_send"
+        assert attempt["error_text"] == reason
+        if delivery_id == 101:
+            raise RuntimeError("second delivery write failed")
+        repo.rows[delivery_id].update(status="faulty", error_text=error_text)
+
+    owner._mark_delivery_faulty_sync = mark_faulty
+    service = SenderService.__new__(SenderService)
+    service.db = repo
+    service._deliver_album = RepostAlbumDelivery(owner).deliver
+
+    def execute():
+        return asyncio.run(service.execute_repost_album_from_job(
+            rule_id=14, delivery_id=100, message_id=10, source_channel="src",
+            source_thread_id=None, media_group_id="g", target_id="dst",
+            target_thread_id=None, delivery_ids=ids,
+        ))
+
+    with pytest.raises(RuntimeError, match="second delivery write failed"):
+        execute()
+    assert repo.rows[100]["status"] == "faulty"
+    assert repo.rows[101]["status"] == "processing"
+    assert next(iter(repo.attempts.values()))["error_text"] == reason
+
+    result = execute()
+    assert result["retryable"] is False
+    assert result["accepted"] is False
+    assert all(row["status"] == "faulty" for row in repo.rows.values())
+    owner._send_album_one_by_one.assert_awaited_once()

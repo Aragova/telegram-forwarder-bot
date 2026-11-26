@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from .runtime_utils import run_db
-from .delivery_idempotency import normalize_valid_sent_message_ids
+from .delivery_idempotency import normalize_valid_sent_message_ids, persist_terminal_repost_rejection
 from .send_intent import PublicationWriteUnavailable
 from .transport_policy import TransportRateLimited
 from .repost_caption import get_repost_caption_override, caption_override_content
@@ -469,6 +469,7 @@ class RepostSingleDelivery:
         )
         if getattr(reupload_outcome, "error_text", None) == "repost_original_document_invalid_non_retryable":
             error_text = reupload_outcome.error_text
+            await persist_terminal_repost_rejection(owner.db, idempotency_key, error_text)
             await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
             try:
                 await owner._log_delivery_pipeline_step(

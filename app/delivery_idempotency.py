@@ -5,6 +5,28 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any
 
+from .runtime_utils import run_db
+
+
+class TerminalRepostFenceUnavailable(RuntimeError):
+    """The terminal rejection could not be durably recorded; keep the write fence."""
+
+
+async def persist_terminal_repost_rejection(repo, key: str | None, reason: str) -> None:
+    """Persist the attempt BEFORE mutating any delivery or emitting diagnostics."""
+    if not key:
+        return
+    try:
+        if await run_db(repo.mark_delivery_attempt_failed, key, status="failed_before_send", error_text=reason):
+            return
+        attempt = await run_db(repo.get_delivery_attempt_by_idempotency_key, key)
+        if (isinstance(attempt, dict) and attempt.get("status") == "failed_before_send"
+                and attempt.get("error_text") == reason):
+            return
+    except Exception as exc:
+        raise TerminalRepostFenceUnavailable("Could not persist terminal repost rejection") from exc
+    raise TerminalRepostFenceUnavailable("Terminal repost rejection CAS not acquired")
+
 
 @dataclass(slots=True)
 class DeliveryIdempotencyResult:

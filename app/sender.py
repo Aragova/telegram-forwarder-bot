@@ -9,7 +9,10 @@ from .telegram_client import ReactionClientInfo
 from .video_processor import VideoProcessor
 from .scheduler_service import SchedulerService
 from .top_time_guard_service import TopTimeGuardService
-from .delivery_idempotency import build_delivery_idempotency_key, extract_sent_message_ids_from_attempt, normalize_valid_sent_message_ids
+from .delivery_idempotency import (
+    TerminalRepostFenceUnavailable, build_delivery_idempotency_key,
+    extract_sent_message_ids_from_attempt, normalize_valid_sent_message_ids,
+)
 from .delivery_content_helpers import (
     build_video_caption_delivery_payload,
     normalize_caption_entities,
@@ -1489,6 +1492,10 @@ class SenderService:
                     delivery_id,
                 )
             return bool(ok)
+        except TerminalRepostFenceUnavailable:
+            # Never turn a failed terminal-fence write into an ordinary retryable
+            # attempt. The existing sending/accepted ledger fences recovery.
+            raise
         except Exception as exc:
             if intent.possible_write:
                 error = "telethon_send_attempted_result_unknown_non_retryable"
@@ -1841,6 +1848,10 @@ class SenderService:
                     delivery_id,
                 )
             return bool(ok)
+        except TerminalRepostFenceUnavailable:
+            # Never turn a failed terminal-fence write into an ordinary retryable
+            # attempt. The existing sending/accepted ledger fences recovery.
+            raise
         except Exception as exc:
             if intent.possible_write:
                 error = "telethon_send_attempted_result_unknown_non_retryable"
