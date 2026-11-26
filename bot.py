@@ -10,6 +10,7 @@ import time
 from html import escape
 from dataclasses import dataclass
 from types import SimpleNamespace
+from weakref import WeakValueDictionary
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,8 @@ from aiogram.types import (
 )
 
 from app.config import settings
+from app.runtime_utils import wait_for_db_task
+from app.video_emoji_validation import VideoEmojiValidator, format_validation_result, utf16_length
 from app.repository_models import utc_now_iso
 from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
 from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view, _button as rule_ui_button
@@ -65,6 +68,8 @@ from app.delivery_diagnostics_admin import format_delivery_diagnostics_admin_tex
 from app.delivery_observability import DeliveryObservabilityService
 from app.delivery_observability_provider import RepositoryDeliveryObservabilityProvider
 telethon_client = None
+video_emoji_validator = VideoEmojiValidator()
+video_caption_save_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIActionResult, UIErrorPolicy
 from app.reaction_auth_state import is_reaction_auth_state, is_reaction_account_reactions_input_state
@@ -277,6 +282,19 @@ def is_menu_navigation_text(text: str | None) -> bool:
     if value in MENU_NAVIGATION_TEXTS:
         return True
     return any(value.startswith(prefix) for prefix in MENU_NAVIGATION_PREFIXES)
+
+
+# A token is kept alive by each in-flight input, not by an unbounded rule cache.
+class _VideoCaptionRevision:
+    pass
+
+
+video_caption_revisions: WeakValueDictionary[int, _VideoCaptionRevision] = WeakValueDictionary()
+
+
+async def _finish_caption_write(func, *args):
+    """A cancelled handler must not release its rule lock ahead of the DB write."""
+    return await wait_for_db_task(asyncio.create_task(run_db(func, *args)))
 
 
 def reset_user_state(user_id: int | None) -> None:
@@ -1529,6 +1547,12 @@ def build_video_caption_menu_keyboard(rule_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="🎛 Режим подписи",
                     callback_data=f"video_caption_mode_menu:{rule_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔍 Проверить Premium-эмодзи",
+                    callback_data=f"video_caption_validate:{rule_id}",
                 )
             ],
             [
@@ -6073,6 +6097,58 @@ async def handle_video_caption_menu(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
+async def _validate_video_caption_emoji(caption, entities_json, *, user_id):
+    # The sender uses the same account. Its transport wrapper provides the
+    # established upload limits; the validation service never runs in a
+    # production publication intent.
+    client = sender_service.telethon if sender_service is not None else None
+    return await video_emoji_validator.validate(
+        client, db, settings.video_emoji_validation_chat_id, caption, entities_json,
+        user_id=user_id,
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("video_caption_validate:"))
+async def handle_video_caption_validate(callback: CallbackQuery):
+    try:
+        rule_id = int(callback.data.split(":", 1)[1])
+    except (AttributeError, IndexError, ValueError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+
+    rule = await run_db(db.get_rule, rule_id)
+    if rule is None or getattr(rule, "mode", None) != "video":
+        await answer_callback_safe(callback, "Правило видео не найдено", show_alert=True)
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    state_before = user_states.get(user_id)
+    await answer_callback_safe_once(callback)
+    result = await _validate_video_caption_emoji(
+        rule.video_caption, rule.video_caption_entities_json, user_id=user_id,
+    )
+    latest = await run_db(db.get_rule, rule_id)
+    if latest is None or (
+        latest.video_caption, latest.video_caption_entities_json
+    ) != (rule.video_caption, rule.video_caption_entities_json):
+        text = "⚠️ Подпись изменилась во время проверки. Повторите проверку."
+    else:
+        text = format_validation_result(result)
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    if user_states.get(user_id) is not state_before:
+        return
+    # A separate result cannot overwrite a newer edit prompt or menu even
+    # if another callback changes the screen while the Telegram RPC awaits.
+    if callback.message is not None:
+        await send_message_safe(
+            chat_id=callback.message.chat.id,
+            text=f"Правило #{rule_id} — проверка подписи\n\n{text}",
+            parse_mode=None,
+        )
+
+
 @dp.callback_query(lambda c: c.data.startswith("video_caption_mode_menu:"))
 async def handle_video_caption_mode_menu(callback: CallbackQuery):
     """Open the two video caption-formatting choices in the current message."""
@@ -6165,29 +6241,46 @@ async def handle_video_caption_clear(callback: CallbackQuery):
     if not await ensure_rule_callback_access(callback, rule_id):
         return
 
-    before_rule = await run_db(db.get_rule, rule_id)
-    ok = await run_db(db.update_rule_video_caption, rule_id, None, None)
-    after_rule = await run_db(db.get_rule, rule_id)
+    revision = _VideoCaptionRevision()
+    video_caption_revisions[rule_id] = revision
+    # Invalidate every pending caption input for this rule before waiting
+    # for an already-submitted save. Other rules and UI flows stay untouched.
+    for actor_id, state in tuple(user_states.items()):
+        if state.get("action") == "video_caption" and state.get("rule_id") == rule_id:
+            reset_user_state(actor_id)
+    save_lock = video_caption_save_locks.setdefault(rule_id, asyncio.Lock())
+    async with save_lock:
+        if not await ensure_rule_callback_access(callback, rule_id):
+            return
+        before_rule = await run_db(db.get_rule, rule_id)
+        if video_caption_revisions.get(rule_id) is not revision:
+            await answer_callback_safe_once(callback, "Очистка отменена: поступила новая подпись")
+            return
+        ok = await _finish_caption_write(db.update_rule_video_caption, rule_id, None, None)
+        if ok:
+            invalidate_rule_card_cache(rule_id)
+            await run_db(
+                db.log_rule_change,
+                event_type="rule_video_caption_cleared",
+                rule_id=rule_id,
+                admin_id=callback.from_user.id,
+                old_value={
+                    "video_caption": before_rule.video_caption if before_rule else None,
+                },
+                new_value={
+                    "video_caption": None,
+                },
+            )
 
     if ok:
-        await run_db(
-            db.log_rule_change,
-            event_type="rule_video_caption_cleared",
-            rule_id=rule_id,
-            admin_id=callback.from_user.id,
-            old_value={
-                "video_caption": before_rule.video_caption if before_rule else None,
-            },
-            new_value={
-                "video_caption": None,
-            },
-        )
-        await edit_message_text_safe(
-            message=callback.message,
-            text = await run_db(build_video_caption_menu_text, rule_id),
-            parse_mode="HTML",
-            reply_markup=build_video_caption_menu_keyboard(rule_id),
-        )
+        menu_text = await run_db(build_video_caption_menu_text, rule_id)
+        if video_caption_revisions.get(rule_id) is revision:
+            await edit_message_text_safe(
+                message=callback.message,
+                text=menu_text,
+                parse_mode="HTML",
+                reply_markup=build_video_caption_menu_keyboard(rule_id),
+            )
         await answer_callback_safe_once(callback, "Очищено")
     else:
         await answer_callback_safe(callback, "Ошибка при очистке", show_alert=True)
@@ -6203,6 +6296,9 @@ async def handle_rule_card(callback: CallbackQuery):
         return
     state = user_states.get(callback.from_user.id if callback.from_user else 0, {})
     if state.get("state") == "awaiting_video_clip_duration" and state.get("flow") == "rule_video_clip_duration":
+        reset_user_state(callback.from_user.id if callback.from_user else 0)
+
+    if state.get("action") == "video_caption" and state.get("rule_id") == rule_id:
         reset_user_state(callback.from_user.id if callback.from_user else 0)
 
     # отвечаем мгновенно
@@ -7355,7 +7451,8 @@ async def handle_delete_rule_callback(callback: CallbackQuery):
         and not is_reaction_auth_state(user_states, m.from_user.id)
         and not is_reaction_account_reactions_input_state(user_states, m.from_user.id)
         and user_states.get(m.from_user.id, {}).get("action") not in {"admin_billing_rate_input", "admin_billing_usd_price_input", "admin_fixed_price_input"}
-        and (m.text is not None or user_states.get(m.from_user.id, {}).get("state") == "awaiting_repost_campaign_saved_post")
+        and (m.text is not None or user_states.get(m.from_user.id, {}).get("state") == "awaiting_repost_campaign_saved_post"
+             or (m.caption is not None and user_states.get(m.from_user.id, {}).get("action") == "video_caption"))
         and not is_menu_navigation_text(m.text)
         and (m.text or "").strip() not in {"📺 Канал", "👥 Группа с темой", "📤 Источник", "📥 Получатель"}
         and not (m.text or "").startswith("Удалить ")
@@ -7376,6 +7473,15 @@ async def handle_stateful_private_inputs(message: Message):
         return
 
     action = state.get("action")
+    if action == "video_caption":
+        # Claim this input before the first await. A later message invalidates
+        # an older validation even when both use the same edit prompt.
+        if message.message_id <= int(state.get("caption_input_message_id") or 0):
+            return
+        state = {**state, "caption_input_message_id": message.message_id}
+        user_states[user_id] = state
+        revision = _VideoCaptionRevision()
+        video_caption_revisions[state["rule_id"]] = revision
     text = (message.text or "").strip()
 
     if await handle_vip_scheduled_post_material_message(campaign_handlers_ctx, message):
@@ -7536,34 +7642,82 @@ async def handle_stateful_private_inputs(message: Message):
     # =========================================================
     if action == "video_caption":
         rule_id = state["rule_id"]
+        if _get_user_state(user_id) is not state:
+            return
+        if not _is_admin_user(user_id) and not await run_db(is_rule_owned_by_user, rule_id, user_id):
+            await reply_message_safe(message, "⛔ Нет доступа к этому правилу")
+            return
 
-        caption = None if text == "-" else text
-        entities_json = serialize_message_entities(message.entities) if caption else None
-
-        result = await run_db(
-            _save_video_caption_sync,
-            rule_id,
-            caption,
-            entities_json,
-            message.from_user.id if message.from_user else settings.admin_id,
-        )
-        ok = result["ok"]
+        # Entities refer to the original, untrimmed UTF-16 text.
+        raw_caption = message.text if message.text is not None else (message.caption or "")
+        caption = None if raw_caption.strip() in {"-", ""} else raw_caption
+        if caption and utf16_length(caption) > 1024:
+            await reply_message_safe(message, "❌ Подпись слишком длинная. Максимум 1024 символа Telegram.")
+            return
+        input_entities = message.entities if message.text is not None else message.caption_entities
+        entities_json = serialize_message_entities(input_entities) if caption else None
+        validation = await _validate_video_caption_emoji(caption, entities_json, user_id=user_id)
+        if _get_user_state(user_id) is not state:
+            return
+        if video_caption_revisions.get(rule_id) is not revision:
+            await reply_message_safe(message, "⚠️ Ввод устарел: поступила новая подпись. Повторите ввод.")
+            return
+        if not validation.ok:
+            await reply_message_safe(message, "Подпись не сохранена.\n" + format_validation_result(validation))
+            return
+        # Serialize commits for this rule, but do not hold the lock during
+        # Telegram validation. A newer input cannot be overwritten by an
+        # older DB call which was already submitted.
+        save_lock = video_caption_save_locks.setdefault(rule_id, asyncio.Lock())
+        async with save_lock:
+            if _get_user_state(user_id) is not state:
+                return
+            if not _is_admin_user(user_id) and not await run_db(is_rule_owned_by_user, rule_id, user_id):
+                await reply_message_safe(message, "⛔ Нет доступа к этому правилу")
+                return
+            if _get_user_state(user_id) is not state:
+                return
+            if video_caption_revisions.get(rule_id) is not revision:
+                await reply_message_safe(message, "⚠️ Ввод устарел: поступила новая подпись. Повторите ввод.")
+                return
+            result = await _finish_caption_write(
+                _save_video_caption_sync,
+                rule_id,
+                caption,
+                entities_json,
+                message.from_user.id if message.from_user else settings.admin_id,
+            )
+            ok = result["ok"]
+            if ok:
+                invalidate_rule_card_cache(rule_id)
+            if _get_user_state(user_id) is not state:
+                return
+            if ok:
+                reset_user_state(user_id)
 
         if ok:
-            invalidate_rule_card_cache(rule_id)
             await try_delete_message_safe(message.chat.id, message.message_id)
 
+            if _get_user_state(user_id):
+                return
             prompt_chat_id = state.get("prompt_chat_id")
             prompt_message_id = state.get("prompt_message_id")
             if prompt_chat_id and prompt_message_id:
                 await try_delete_message_safe(prompt_chat_id, prompt_message_id)
 
+            if _get_user_state(user_id):
+                return
             card_chat_id = state.get("card_chat_id")
             card_message_id = state.get("card_message_id")
             if card_chat_id and card_message_id:
                 await try_delete_message_safe(card_chat_id, card_message_id)
 
-            await send_message_safe(chat_id=message.chat.id, text=build_video_caption_menu_text(rule_id), parse_mode="HTML", reply_markup=build_video_caption_menu_keyboard(rule_id))
+            if _get_user_state(user_id):
+                return
+            menu_text = await run_db(build_video_caption_menu_text, rule_id)
+            if _get_user_state(user_id):
+                return
+            await send_message_safe(chat_id=message.chat.id, text=menu_text, parse_mode="HTML", reply_markup=build_video_caption_menu_keyboard(rule_id))
         else:
             prompt_chat_id, prompt_message_id = _state_prompt_ids(state)
             if prompt_chat_id and prompt_message_id:
@@ -7581,7 +7735,6 @@ async def handle_stateful_private_inputs(message: Message):
             else:
                 await send_message_safe(chat_id=message.chat.id, text="❌ Не удалось сохранить подпись", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
 
-        reset_user_state(user_id)
         return
 
     # =========================================================

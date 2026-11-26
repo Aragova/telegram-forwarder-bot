@@ -76,3 +76,18 @@ def test_failure_stage_is_based_on_observed_rpc_not_assumed(trace, expected):
                              uncertain=False, blocked=False)
     asyncio.run(persist_video_failure(owner, intent, delivery_id=1, rule_id=2, error_text="failure"))
     assert events[0]["extra"]["failure_stage"] == expected
+
+
+def test_rpc_diagnostics_include_custom_emoji_document_id_not_caption():
+    from telethon import types
+    from app.video_send_diagnostics import media_request_details
+
+    request = SimpleNamespace(
+        media=None, message="private caption",
+        entities=[types.MessageEntityCustomEmoji(offset=0, length=2, document_id=5319302290127991242),
+                  types.MessageEntityBold(offset=2, length=3)],
+    )
+    snapshot = media_request_details(request)
+    assert snapshot["caption_entities"][0]["document_id"] == 5319302290127991242
+    assert "document_id" not in snapshot["caption_entities"][1]
+    assert "private caption" not in repr(snapshot)

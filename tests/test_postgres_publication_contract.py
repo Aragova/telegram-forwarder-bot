@@ -1546,3 +1546,100 @@ def test_rescan_delivery_archive_supports_both_audit_column_types(repo, extra_ty
             with conn.cursor() as cur:
                 cur.execute("DROP TABLE IF EXISTS pg_temp.audit_log")
         repo.finish_rule_rescan(rid,was_active=active,owner_token=owner,queue_rebuilt=True)
+
+
+@pytest.mark.skipif(os.getenv("VIMI_TEST_POSTGRES") != "1", reason="requires disposable PostgreSQL")
+def test_emoji_probe_quota_and_fence_across_process_connections():
+    assert os.getenv("APP_PG_DB") == "vimi_publication_ci"
+    repo = PostgresRepository()
+    account = 8745123
+    chat = -1008745123
+    root = f"video-emoji:{account}"
+    try:
+        repo.init()
+
+        def reserve(user):
+            other = PostgresRepository()
+            try:
+                return other.reserve_video_emoji_check(account, user, chat)
+            finally:
+                other.close_all_connections()
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(reserve, [10, 10, 11, 12]))
+        assert results.count("reserved") == 1
+        assert results.count("pending_review") == 3
+        # Unknown result remains fenced for a fresh repository connection.
+        assert reserve(13) == "pending_review"
+        repo.release_video_emoji_check(account)
+        assert reserve(13) == "quota"
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE telegram_transport_cooldowns SET blocked_until=NOW()-interval '1 second' WHERE scope_key=%s", (f"{root}:quota",))
+        winner = [10, 10, 11, 12][results.index("reserved")]
+        assert reserve(winner) == "quota"
+        repo.extend_transport_cooldown(f"mtproto:{account}", 60)
+        assert reserve(13) == "flood_wait"
+    finally:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM telegram_transport_cooldowns WHERE scope_key LIKE %s OR scope_key=%s", (f"{root}:%", f"mtproto:{account}"))
+        repo.close_all_connections()
+
+
+def test_emoji_validation_rejects_campaign_only_destinations(repo):
+    chat_id = -int("100" + str(uuid4().int % 10**12))
+    target = str(chat_id)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO rule_repost_campaign_targets(rule_id,target_id,is_active) VALUES (0,%s,FALSE)", (target,))
+            cur.execute("INSERT INTO campaign_scheduled_post_targets(scheduled_post_id,rule_id,target_id,is_active) VALUES (0,0,%s,FALSE)", (target,))
+    try:
+        assert not repo.is_video_emoji_validation_chat_registered(chat_id)
+        for table, enable, disable in (
+            ("rule_repost_campaign_targets",
+             "UPDATE rule_repost_campaign_targets SET is_active=TRUE WHERE target_id=%s",
+             "UPDATE rule_repost_campaign_targets SET is_active=FALSE WHERE target_id=%s"),
+            ("campaign_scheduled_post_targets",
+             "UPDATE campaign_scheduled_post_targets SET is_active=TRUE WHERE target_id=%s",
+             "UPDATE campaign_scheduled_post_targets SET is_active=FALSE WHERE target_id=%s"),
+        ):
+            with repo.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(enable, (target,))
+            assert repo.is_video_emoji_validation_chat_registered(chat_id), table
+            with repo.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(disable, (target,))
+        assert not repo.is_video_emoji_validation_chat_registered(chat_id)
+    finally:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM rule_repost_campaign_targets WHERE target_id=%s", (target,))
+                cur.execute("DELETE FROM campaign_scheduled_post_targets WHERE target_id=%s", (target,))
+
+
+def test_emoji_validation_registry_checks_inactive_rules_and_active_channels(repo):
+    target = "-100" + str(uuid4().int % 10**12)
+    other = target + "1"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO routing(source_id,target_id,created_date,is_active) VALUES(%s,%s,'2026-01-01',FALSE) RETURNING id", (target, other))
+            rule_id = cur.fetchone()["id"]
+            cur.execute("INSERT INTO channels(channel_id,channel_type,added_date,is_active) VALUES(%s,'source','2026-01-01',FALSE)", (target,))
+    try:
+        assert repo.is_video_emoji_validation_chat_registered(int(target))
+        assert repo.is_video_emoji_validation_chat_registered(int(other))
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM routing WHERE id=%s", (rule_id,))
+        assert not repo.is_video_emoji_validation_chat_registered(int(target))
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE channels SET is_active=TRUE WHERE channel_id=%s", (target,))
+        assert repo.is_video_emoji_validation_chat_registered(int(target))
+    finally:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM routing WHERE id=%s", (rule_id,))
+                cur.execute("DELETE FROM channels WHERE channel_id=%s", (target,))

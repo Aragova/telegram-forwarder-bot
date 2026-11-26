@@ -6599,6 +6599,82 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (scope_key, max(1, int(delay))),
                 )
 
+    def is_video_emoji_validation_chat_registered(self, chat_id: int) -> bool:
+        """Check all tenants, including inactive routing rules, without loading rows."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT EXISTS (
+                           SELECT 1 FROM routing WHERE source_id=%s OR target_id=%s
+                       ) OR EXISTS (
+                           SELECT 1 FROM channels
+                           WHERE channel_id=%s AND is_active=TRUE
+                             AND channel_type IN ('source','target')
+                       ) OR EXISTS (
+                           SELECT 1 FROM rule_repost_campaign_targets
+                           WHERE target_id=%s AND is_active=TRUE
+                       ) OR EXISTS (
+                           SELECT 1 FROM campaign_scheduled_post_targets
+                           WHERE target_id=%s AND is_active=TRUE
+                       ) AS registered""",
+                    (str(chat_id),) * 5,
+                )
+                return bool(cur.fetchone()["registered"])
+
+    def reserve_video_emoji_check(self, account_id: int, user_id: int, chat_id: int) -> str:
+        """Atomically reserve one diagnostic check across UI processes.
+
+        The non-expiring fence is deliberately separate from normal Telegram
+        cooldowns. A crashed/ambiguous check requires operator reconciliation.
+        Expiring quota rows reserve the entire bounded probe budget up front.
+        """
+        if account_id <= 0 or user_id <= 0 or chat_id >= 0:
+            raise ValueError("Invalid diagnostic scope")
+        root = f"video-emoji:{account_id}"
+        fence, account_quota, user_quota = (
+            f"{root}:inflight", f"{root}:quota", f"{root}:user:{user_id}:quota",
+        )
+        scopes = [f"mtproto:{account_id}", f"mtproto:{account_id}:{chat_id}",
+                  account_quota, user_quota]
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (root,))
+                cur.execute("SELECT 1 FROM telegram_transport_cooldowns WHERE scope_key=%s", (fence,))
+                if cur.fetchone():
+                    return "pending_review"
+                cur.execute(
+                    """SELECT scope_key FROM telegram_transport_cooldowns
+                       WHERE scope_key=ANY(%s) AND blocked_until>clock_timestamp()""",
+                    (scopes,),
+                )
+                blocked = {row["scope_key"] for row in cur.fetchall()}
+                if blocked.intersection(scopes[:2]):
+                    return "flood_wait"
+                if blocked:
+                    return "quota"
+                cur.execute(
+                    """INSERT INTO telegram_transport_cooldowns(scope_key,blocked_until)
+                       VALUES (%s,'infinity'::timestamptz)""",
+                    (fence,),
+                )
+                for key, seconds in ((account_quota, 60), (user_quota, 120)):
+                    cur.execute(
+                        """INSERT INTO telegram_transport_cooldowns(scope_key,blocked_until)
+                           VALUES (%s,clock_timestamp()+make_interval(secs=>%s))
+                           ON CONFLICT(scope_key) DO UPDATE SET blocked_until=EXCLUDED.blocked_until""",
+                        (key, seconds),
+                    )
+        return "reserved"
+
+    def release_video_emoji_check(self, account_id: int) -> None:
+        """Release only after definite completion; ambiguous writes keep the fence."""
+        root = f"video-emoji:{account_id}"
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (root,))
+                cur.execute("DELETE FROM telegram_transport_cooldowns WHERE scope_key=%s",
+                            (f"{root}:inflight",))
+
     def get_or_create_mtproto_random_ids(self, key: str, ordinal: int,
                                          fingerprint: str, count: int) -> list[int]:
         """Persist a request identity under the currently claimed ledger row."""

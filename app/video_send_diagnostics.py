@@ -128,7 +128,9 @@ def media_request_details(request):
         "video_attributes": {key: getattr(video, key, None) for key in
                              ("duration", "w", "h", "supports_streaming", "round_message")} if video else None,
         "caption_entities": [{"type": type(e).__name__, "offset": getattr(e, "offset", None),
-                              "length": getattr(e, "length", None)}
+                              "length": getattr(e, "length", None),
+                              **({"document_id": getattr(e, "document_id", None)}
+                                 if type(e).__name__ == "MessageEntityCustomEmoji" else {})}
                              for e in (getattr(request, "entities", None) or [])],
     }
 
