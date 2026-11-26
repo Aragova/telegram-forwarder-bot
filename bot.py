@@ -6222,23 +6222,33 @@ async def handle_video_caption_clear(callback: CallbackQuery):
     if not await ensure_rule_callback_access(callback, rule_id):
         return
 
-    before_rule = await run_db(db.get_rule, rule_id)
-    ok = await run_db(db.update_rule_video_caption, rule_id, None, None)
-    after_rule = await run_db(db.get_rule, rule_id)
+    # Invalidate every pending caption input for this rule before waiting
+    # for an already-submitted save. Other rules and UI flows stay untouched.
+    for actor_id, state in tuple(user_states.items()):
+        if state.get("action") == "video_caption" and state.get("rule_id") == rule_id:
+            reset_user_state(actor_id)
+    save_lock = video_caption_save_locks.setdefault(rule_id, asyncio.Lock())
+    async with save_lock:
+        if not await ensure_rule_callback_access(callback, rule_id):
+            return
+        before_rule = await run_db(db.get_rule, rule_id)
+        ok = await run_db(db.update_rule_video_caption, rule_id, None, None)
+        if ok:
+            invalidate_rule_card_cache(rule_id)
+            await run_db(
+                db.log_rule_change,
+                event_type="rule_video_caption_cleared",
+                rule_id=rule_id,
+                admin_id=callback.from_user.id,
+                old_value={
+                    "video_caption": before_rule.video_caption if before_rule else None,
+                },
+                new_value={
+                    "video_caption": None,
+                },
+            )
 
     if ok:
-        await run_db(
-            db.log_rule_change,
-            event_type="rule_video_caption_cleared",
-            rule_id=rule_id,
-            admin_id=callback.from_user.id,
-            old_value={
-                "video_caption": before_rule.video_caption if before_rule else None,
-            },
-            new_value={
-                "video_caption": None,
-            },
-        )
         await edit_message_text_safe(
             message=callback.message,
             text = await run_db(build_video_caption_menu_text, rule_id),
