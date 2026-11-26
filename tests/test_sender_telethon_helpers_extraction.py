@@ -252,7 +252,13 @@ def test_verify_album_delivery_smoke():
 
 
 def test_file_path_only_fallback_never_repeats_original_media(tmp_path):
-    telethon = FakeTelethon()
+    class FallbackTelethon(FakeTelethon):
+        async def get_messages(self, entity, ids=None, limit=None):
+            if limit:
+                return [SimpleNamespace(id=122)]
+            return SimpleNamespace(id=ids, message="replacement")
+
+    telethon = FallbackTelethon()
     helper = SenderTelethonHelpers(_owner(telethon))
     file_path = tmp_path / "video.mp4"
     file_path.write_bytes(b"video")

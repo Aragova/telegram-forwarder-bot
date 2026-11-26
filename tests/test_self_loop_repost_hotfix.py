@@ -347,3 +347,18 @@ def test_validation_none_does_not_log_self_loop_applied_or_react_to_source(caplo
     assert owner.reaction.call_args.kwargs["sent_message_id"] == 777
     assert all(call.kwargs.get("sent_message_id") != 469 for call in owner.reaction.call_args_list)
     assert "SELF_LOOP_REACTION_APPLIED" not in caplog.text
+
+
+
+def test_repost_document_invalid_keeps_primary_error_without_verification_or_text_fallback():
+    from app.telethon_authoritative_resolver import telethon_not_attempted
+
+    reason = "repost_original_document_invalid_non_retryable"
+    owner = _SingleOwner(self_loop=False, reupload_id=telethon_not_attempted(reason))
+    owner._confirm_target_delivery_message_ids_with_retry = AsyncMock(side_effect=AssertionError("no publication to verify"))
+    assert _deliver_single(owner) is False
+    owner.mark_faulty.assert_called_once_with(123, reason)
+    owner.mark_delivery_sent.assert_not_called()
+    owner.bot.send_message.assert_not_called()
+    owner.reaction.assert_not_called()
+    owner._confirm_target_delivery_message_ids_with_retry.assert_not_called()
