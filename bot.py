@@ -500,6 +500,19 @@ async def _show_rule_processing_screen(
                             reply_markup=reply_markup, parse_mode=parse_mode)
 
 
+async def _scan_rule_source(rule):
+    """Shared full-history scan for both rescan modes; never deletes source posts."""
+    if rule.source_thread_id is None:
+        return await parse_channel_history(
+            telethon_client, db, str(rule.source_id), clean_start=False,
+            preserve_existing_deliveries=True, collect_seen_message_ids=True,
+        )
+    return await parse_group_history(
+        telethon_client, db, str(rule.source_id), int(rule.source_thread_id),
+        clean_start=False, preserve_existing_deliveries=True, collect_seen_message_ids=True,
+    )
+
+
 async def _run_rescan_rule_fresh_job(
     *,
     rule_id: int,
@@ -508,7 +521,29 @@ async def _run_rescan_rule_fresh_job(
     admin_id: int,
 ) -> None:
     try:
-        archived, old_count, rebuilt_count = await run_db(db.restart_rule_queue, rule_id)
+        rule = await run_db(db.get_rule, rule_id)
+        if not rule:
+            raise RescanBlocked(f"Правило #{rule_id} не найдено")
+        was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id, fresh=True)
+        scan_complete = False
+        try:
+            scan_start_max_message_id = await run_db(db.get_rule_scan_start_max_message_id, rule_id)
+            await _show_rule_processing_screen(
+                chat_id=chat_id, message_id=message_id,
+                text=f"🔄 Пересканирование правила #{rule_id}\\nЧитаем историю источника.",
+            )
+            parsed_count, seen_message_ids = await _scan_rule_source(rule)
+            archived, old_count, rebuilt_count = await run_db(
+                db.restart_rule_queue, rule_id, owner_token=owner_token,
+                allowed_message_ids=seen_message_ids,
+                include_newer_than_message_id=scan_start_max_message_id,
+                expected_scope=(str(rule.source_id), rule.source_thread_id,
+                                str(rule.target_id), rule.target_thread_id, rule.mode),
+            )
+            scan_complete = True
+        finally:
+            await run_db(db.finish_rule_rescan, rule_id, was_active=was_active,
+                         owner_token=owner_token, queue_rebuilt=scan_complete)
     except Exception as exc:
         if isinstance(exc, RescanBlocked):
             logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
@@ -531,13 +566,15 @@ async def _run_rescan_rule_fresh_job(
             rule_id=rule_id, admin_id=admin_id, old_value=None,
             new_value={"next_run_at": utc_now_iso()},
             extra={"mode": "fresh", "rebuilt_count": rebuilt_count,
-                   "archived_attempts": archived, "replayed_deliveries": old_count},
+                   "archived_attempts": archived, "replayed_deliveries": old_count,
+                   "parsed_count": parsed_count, "seen_message_count": len(seen_message_ids)},
         )
         await ensure_rule_workers()
     except Exception:
         logger.exception("RESTART_POST_COMMIT_FAILED | rule_id=%s", rule_id)
 
-    summary = f"✅ Правило #{rule_id}: очередь начата заново."
+    summary = (f"✅ Правило #{rule_id}: очередь начата заново.\\n"
+               f"Новых сообщений источника: {parsed_count}")
     try:
         refreshed = await refresh_rule_card_by_ids(
             chat_id=chat_id, message_id=message_id, rule_id=rule_id,
@@ -590,21 +627,7 @@ async def _run_rescan_rule_keep_job(
                 if previous_sent:
                     saved_first_pending_message_id = max(previous_sent) + 1
 
-            # Keep existing delivery IDs and sent status. Only source posts
-            # seen in this complete Telegram scan may be newly queued.
-            if rule.source_thread_id is None:
-                parsed_count, seen_message_ids = await parse_channel_history(
-                    telethon_client, db, str(rule.source_id), clean_start=False,
-                    preserve_existing_deliveries=True,
-                    collect_seen_message_ids=True,
-                )
-            else:
-                parsed_count, seen_message_ids = await parse_group_history(
-                    telethon_client, db, str(rule.source_id),
-                    int(rule.source_thread_id), clean_start=False,
-                    preserve_existing_deliveries=True,
-                    collect_seen_message_ids=True,
-                )
+            parsed_count, seen_message_ids = await _scan_rule_source(rule)
             rebuilt_count, removed_stale, removed_before, quarantined = await run_db(
                 db.rebuild_rule_keep_position, rule_id,
                 owner_token=owner_token, allowed_message_ids=seen_message_ids,
@@ -6716,7 +6739,7 @@ async def handle_rescan_rule_menu(callback: CallbackQuery):
                 f"Источник: {source_name}\n\n"
                 f"Выбери режим:\n"
                 f"• ♻️ Сохранить позицию — пересканировать источник и попытаться сохранить текущую точку старта\n"
-                f"• 🆕 Начать заново — новый цикл; ранее отправленные посты могут быть опубликованы повторно"
+                f"• 🆕 Начать заново — пересканировать источник и начать публикацию с первого поста"
             ),
             reply_markup=build_rescan_rule_keyboard(rule_id),
         )
@@ -6746,9 +6769,8 @@ async def handle_rescan_rule_fresh(callback: CallbackQuery):
     await answer_callback_safe_once(callback)
     text = (
         f"🆕 Начать заново: правило #{rule_id}\n\n"
-        "Все посты текущей очереди будут поставлены на отправку с начала. "
-        "Ранее опубликованные посты будут опубликованы повторно. "
-        "Если нужно обновить историю источника, выберите «Сохранить позицию»."
+        "История источника будет перечитана. Новые посты добавятся, "
+        "удалённые исключатся. Публикация начнётся с первого поста."
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить новый цикл",
