@@ -602,3 +602,63 @@ def test_legacy_document_invalid_is_not_retried():
     assert "DocumentInvalidError" in result["error_text"]
     assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
     assert not any(c[0] == "accepted" for c in repo.calls)
+
+
+def test_document_invalid_diagnostics_survive_worker_cleanup(tmp_path):
+    from telethon.errors import DocumentInvalidError
+    from app.send_intent import current_publication_intent
+
+    repo = FakeRepo()
+    events = []
+    repo.log_video_event = lambda **kwargs: events.append(kwargs)
+    service = _build_service(repo)
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"video")
+
+    async def reject(*_args, **_kwargs):
+        trace = current_publication_intent().video_diagnostics
+        trace.update({"phase": "telethon_send_file", "rpc_state": "rejected",
+                      "rpc_request": {"method": "SendMediaRequest", "mime_type": "video/mp4"},
+                      "video_artifact": {"bytes": 5}})
+        raise DocumentInvalidError(request=None)
+
+    service.video_processor.send_with_retry = reject
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=81, rule_id=1, target_id="-10081",
+        processed_video_path=str(clip),
+    ))
+    clip.unlink()
+    assert result["accepted"] is False
+    assert result["retryable"] is False
+    assert len(events) == 1
+    event = events[0]
+    assert event["event_type"] == "video_send_diagnostics"
+    assert event["delivery_id"] == 81
+    assert event["extra"]["failure_stage"] == "send_media_rpc"
+    assert event["extra"]["video_artifact"]["bytes"] == 5
+    assert event["extra"]["possible_write"] is False
+
+
+def test_diagnostic_database_error_does_not_change_rejection(tmp_path):
+    from telethon.errors import DocumentInvalidError
+
+    repo = FakeRepo()
+    service = _build_service(repo)
+    clip = tmp_path / "processed.mp4"
+    clip.write_bytes(b"video")
+
+    def fail_audit(**_kwargs):
+        raise RuntimeError("audit database unavailable")
+
+    async def reject(*_args, **_kwargs):
+        raise DocumentInvalidError(request=None)
+
+    repo.log_video_event = fail_audit
+    service.video_processor.send_with_retry = reject
+    result = asyncio.run(service.execute_video_send_from_job(
+        delivery_id=82, rule_id=1, target_id="-10082",
+        processed_video_path=str(clip),
+    ))
+    assert result["accepted"] is False
+    assert result["retryable"] is False
+    assert any(c[0] == "failed" and c[2]["status"] == "failed_before_send" for c in repo.calls)
