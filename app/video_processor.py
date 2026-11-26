@@ -16,7 +16,8 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramEntityTooLarge, TelegramRetryAfter
 from .bot_api_session import create_bot_api_session
 from .transport_policy import TransportRateLimited
-from .send_intent import PublicationWriteUnavailable
+from .send_intent import PublicationWriteUnavailable, current_publication_intent
+from .video_send_diagnostics import VIDEO_METADATA_KEYS, artifact_details, record_error
 from .subprocess_safety import (
     communicate_safely,
     await_critical_cleanup,
@@ -203,7 +204,10 @@ class VideoProcessor:
         thumbnail_path,
         caption,
         caption_entities_json=None,
+        diagnostics=None,
     ):
+        trace = diagnostics if diagnostics is not None else {}
+        trace["phase"] = "video_probe"
         if not self.telethon:
             raise RuntimeError("Telethon-клиент не передан в VideoProcessor")
 
@@ -214,6 +218,7 @@ class VideoProcessor:
         if not video_info:
             raise VideoPreSendError(f"Не удалось получить video_info до Telethon send_file: {video_path}")
 
+        trace["video_metadata"] = {key: video_info.get(key) for key in VIDEO_METADATA_KEYS}
         width = int(video_info.get("width") or 0)
         height = int(video_info.get("height") or 0)
         duration = max(1, int(round(float(video_info.get("duration") or 0))))
@@ -258,6 +263,10 @@ class VideoProcessor:
 
         # A Telethon result id may refer to another peer; resolve against
         # the target channel before handing the message to delivery or reactions.
+        trace["phase"] = "target_preflight"
+        trace["thumbnail_attached"] = "thumb" in send_kwargs
+        trace["caption_entity_count"] = len(formatting_entities or [])
+        trace["caption_utf16_length"] = len((caption or "").encode("utf-16-le", errors="surrogatepass")) // 2
         try:
             target_entity = await self.telethon.get_entity(entity)
             broadcast = bool(getattr(target_entity, "broadcast", False) and not getattr(target_entity, "megagroup", False))
@@ -269,27 +278,13 @@ class VideoProcessor:
         except Exception as exc:
             # None of these reads sends media. They can be safely retried.
             raise VideoPreSendError(f"video_telethon_preflight: {type(exc).__name__}: {exc}") from exc
+        trace["before_max_message_id"] = watermark
+        trace["phase"] = "telethon_send_file"
         started_at = datetime.now(timezone.utc)
-        try:
-            sent_msg = await self.telethon.send_file(**{**send_kwargs, "entity": target_entity})
-        except DocumentInvalidError:
-            # Record bounded metadata while the artifacts still exist. Do not
-            # retain customer media or caption contents in the logs.
-            sizes = []
-            for path in (video_path, send_kwargs.get("thumb")):
-                try:
-                    sizes.append(os.path.getsize(path) if path else None)
-                except OSError:
-                    sizes.append(None)
-            logger.warning(
-                "VIDEO_DOCUMENT_INVALID | target=%s | video_bytes=%s | thumb_bytes=%s | "
-                "duration=%s | width=%s | height=%s | fps=%s | codec=%s | "
-                "streaming=True | entities=%s",
-                destination_channel, *sizes, duration, width, height,
-                video_info.get("fps"), video_info.get("codec_name"), len(formatting_entities or []),
-            )
-            raise
+        sent_msg = await self.telethon.send_file(**{**send_kwargs, "entity": target_entity})
         finished_at = datetime.now(timezone.utc)
+        trace["send_file_elapsed_ms"] = round((finished_at - started_at).total_seconds() * 1000)
+        trace["phase"] = "send_file_returned"
         if isinstance(sent_msg, list):
             sent_msg = sent_msg[0] if sent_msg else None
         if sent_msg is None:
@@ -297,6 +292,8 @@ class VideoProcessor:
             return TelethonSendOutcome(True, True, False, None, [], resolution_method="empty_response", error_text="empty_response_after_send")
 
         raw_id = getattr(sent_msg, "id", None)
+        trace["returned_candidate_id"] = raw_id
+        trace["phase"] = "target_message_resolution"
         try:
             resolved = await resolver.resolve_authoritative_single_message(
                 target_entity=target_entity,
@@ -316,6 +313,7 @@ class VideoProcessor:
         except Exception as exc:
             # The send RPC already returned. Even an explicit flood wait from
             # verification is not evidence that Telegram rejected publication.
+            record_error(trace, exc)
             logger.warning("TELETHON_VIDEO_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | action=no_resend", destination_channel)
             return TelethonSendOutcome(
                 True, True, False, None, [],
@@ -324,6 +322,8 @@ class VideoProcessor:
                 resolution_method="resolver_exception",
                 error_text=str(exc),
             )
+        trace["resolution_method"] = resolved.resolution_method
+        trace["authoritative_message_id"] = resolved.authoritative_message_id
         logger.info(
             "TELETHON_VIDEO_SEND | ID_RESOLVED | target=%s | thread=%s | returned_candidate_id=%s | authoritative_message_id=%s | resolution_method=%s",
             destination_channel, target_thread_id, raw_id, resolved.authoritative_message_id, resolved.resolution_method,
@@ -744,6 +744,11 @@ class VideoProcessor:
                 'rotate_filter': rotate_filter,
                 'audio_sample_rate': audio_sample_rate,
                 'audio_channels': audio_channels,
+                'audio_codec_name': audio_stream.get('codec_name') if audio_stream else None,
+                'format_name': format_info.get('format_name'),
+                'video_profile': video_stream.get('profile'),
+                'video_level': video_stream.get('level'),
+                'stream_count': len(info.get('streams', [])),
             }
 
             self.video_info_cache[video_path] = (result, time.time())
@@ -1501,12 +1506,34 @@ class VideoProcessor:
             logger.warning("Неизвестный caption_send_mode=%s, fallback -> plain", normalized_mode)
             normalized_mode = "plain"
 
+        intent = current_publication_intent()
+        trace = intent.video_diagnostics if intent is not None and intent.video_diagnostics is not None else {}
+        if intent is not None:
+            intent.video_diagnostics = trace
+        trace.update({"phase": "file_preflight", "transport": normalized_mode,
+                      "target_id": str(destination_channel), "target_thread_id": target_thread_id,
+                      "rpc_state": "not_observed"})
+
+        async def capture_failure(exc=None):
+            if exc is not None:
+                record_error(trace, exc)
+            try:
+                trace["video_artifact"] = await asyncio.to_thread(artifact_details, video_path)
+                trace["thumbnail_artifact"] = await asyncio.to_thread(artifact_details, thumbnail_path, thumbnail=True)
+            except Exception:
+                logger.exception("VIDEO_ARTIFACT_DIAGNOSTICS_FAILED")
+            logger.warning("VIDEO_SEND_FAILURE_SNAPSHOT | key=%s | details=%s",
+                           intent.key if intent is not None else None, trace)
+
         try:
             file_size_bytes = os.path.getsize(video_path)
         except OSError as exc:
+            await capture_failure(exc)
             raise VideoPreSendError(f"video_file_preflight: {type(exc).__name__}: {exc}") from exc
         api_session = getattr(bot, "session", None)
         local_api = bool(getattr(getattr(api_session, "api", None), "is_local", False))
+        trace["local_bot_api"] = local_api
+        trace["file_size_bytes"] = file_size_bytes
         logger.info(
             "VIDEO_SEND_ROUTE | transport=%s | file_size_bytes=%s | local_bot_api=%s",
             "telethon" if normalized_mode == "premium" else "bot",
@@ -1530,6 +1557,7 @@ class VideoProcessor:
                         thumbnail_path=thumbnail_path,
                         caption=caption,
                         caption_entities_json=caption_entities_json,
+                        diagnostics=trace,
                     )
                 else:
                     logger.info("📤 Отправка видео через Bot API (plain mode)")
@@ -1548,9 +1576,14 @@ class VideoProcessor:
                     if thumbnail_path and os.path.isfile(thumbnail_path):
                         send_kwargs["thumbnail"] = FSInputFile(thumbnail_path, filename="thumb.jpg")
 
+                    trace["phase"] = "bot_api_send_video"
+                    trace["thumbnail_attached"] = "thumbnail" in send_kwargs
                     sent_msg = await bot.send_video(**send_kwargs)
+                    trace["phase"] = "bot_api_response_received"
 
                 if isinstance(sent_msg, TelethonSendOutcome) and not sent_msg.authoritative_resolved:
+                    trace["resolution_method"] = sent_msg.resolution_method
+                    await capture_failure()
                     logger.warning("VIDEO_SEND_ACCEPTED_UNRESOLVED | transport=%s | candidate_id=%s | action=no_resend", normalized_mode, sent_msg.returned_candidate_id)
                     self._stage_failed(
                         stage_logger, "send",
@@ -1582,18 +1615,22 @@ class VideoProcessor:
                 return sent_msg
 
             except DocumentInvalidError as exc:
+                await capture_failure(exc)
                 self._stage_failed(
                     stage_logger, "send", error_text=f"DocumentInvalidError: {exc}",
                     extra={"retryable": False, "rpc_rejected": True, "file_size_bytes": file_size_bytes},
                 )
                 raise
             except PublicationWriteUnavailable as exc:
+                await capture_failure(exc)
                 raise VideoPreSendError(str(exc)) from exc
             except VideoPreSendError as exc:
+                await capture_failure(exc)
                 self._stage_failed(stage_logger, "send", error_text=str(exc), extra={"retryable": True, "accepted": False})
                 logger.warning("VIDEO_SEND_PREFLIGHT_FAILED | action=safe_retry | error=%s", exc)
                 raise
             except TransportRateLimited as exc:
+                await capture_failure(exc)
                 self._stage_failed(
                     stage_logger, "send", error_text=str(exc),
                     extra={"retryable": True, "accepted": False, "retry_after_seconds": exc.retry_after_seconds},
@@ -1604,6 +1641,7 @@ class VideoProcessor:
                 )
                 raise
             except FloodWaitError as exc:
+                await capture_failure(exc)
                 self._stage_failed(
                     stage_logger, "send", error_text=str(exc),
                     extra={"retryable": True, "accepted": False, "retry_after_seconds": int(exc.seconds)},
@@ -1614,6 +1652,7 @@ class VideoProcessor:
                 )
                 raise
             except TelegramRetryAfter as exc:
+                await capture_failure(exc)
                 # The Bot API explicitly refused this request. Retrying via
                 # the job scheduler is safe, unlike retrying a network timeout.
                 self._stage_failed(
@@ -1626,6 +1665,7 @@ class VideoProcessor:
                 )
                 raise
             except TelegramEntityTooLarge as exc:
+                await capture_failure(exc)
                 logger.error(
                     "VIDEO_SEND_TOO_LARGE | transport=%s | file_size_bytes=%s | action=no_retry",
                     "telethon" if normalized_mode == "premium" else "bot",
@@ -1639,6 +1679,7 @@ class VideoProcessor:
                 )
                 raise
             except Exception as e:
+                await capture_failure(e)
                 logger.error("   ❌ Ошибка отправки (%s/%s): %s", attempt + 1, max_retries, e)
 
                 self._emit_stage(
@@ -2355,6 +2396,9 @@ class VideoProcessor:
             logger.info(f"   ✅ Проверка пройдена")
 
             if send_output:
+                intent = current_publication_intent()
+                if intent is not None:
+                    intent.video_diagnostics = {"video_metadata": {key: final_info.get(key) for key in VIDEO_METADATA_KEYS}}
                 # SEND
                 logger.info(f"📤 [8/8] Отправка видео в канал {destination_channel}...")
                 sent_msg = await self.send_with_retry(
