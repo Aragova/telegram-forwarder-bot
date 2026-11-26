@@ -110,15 +110,15 @@ Manual rollback, clear and start-position changes must obtain the same routing l
 Album attempt arrays historically contain delivery IDs. Keep-position never interprets them as source message IDs; it resolves albums by their stable media-group key or exact receipt. An orphan with neither is blocked before scanning. A collision between a historical delivery ID and a new Telegram message ID must not quarantine the unrelated new post.
 
 
-## Superseding behavior: fast explicit restart (#94)
+## Current behavior: full-source rescan and simple queue restart (#94)
 
-The **Start over** UI now restarts the existing queue directly in PostgreSQL.
-It does not call Telegram, scan the source, inspect historical status/ID
-formats, or acquire a persistent rescan owner. Existing queue membership is
-retained, new delivery IDs are allocated, and old attempt keys are archived
-without rewriting their statuses or candidates. The transaction uses the
-routing lock shared with the scheduler. Active jobs and unresolved durable
-publication evidence still block a reset; known self-loop echoes are excluded.
-**Keep position** remains the history synchronization operation. Use it
-before restart when the source's remote contents have changed. Earlier
-sections describe the old full-scan implementation and its historical fixes.
+Both modes use the same full-history parser for channels and topics, refresh
+source posts without deleting shared data, and preserve live arrivals after
+the scan-start high-water mark. **Start over** atomically builds a fresh
+queue from observed source IDs, excludes deleted posts and known self-loop
+echoes, allocates new delivery IDs, and archives prior attempt keys without
+rewriting their outcomes. Historical status/ID formats are not prerequisites
+for a new cycle. **Keep position** preserves existing delivery identities and
+position. Active work and unresolved durable publication evidence remain
+guarded. A complete source scan is required before resetting the queue; its
+duration depends on Telegram and source size.
