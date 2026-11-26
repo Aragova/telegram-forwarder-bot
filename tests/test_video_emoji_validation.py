@@ -370,3 +370,126 @@ def test_flood_after_accepted_publication_keeps_fence(monkeypatch):
     result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
     assert result.issues[0].reason == "flood_wait"
     assert repo.inflight and not client.deleted
+
+
+def test_issue_without_offset_never_displays_none():
+    result = validation.ValidationResult("invalid", (validation.EmojiIssue(123, None, "invalid_id_or_utf16"),))
+    text = validation.format_validation_result(result)
+    assert "ID 123:" in text and "None" not in text
+
+
+def _caption_input_handler(save, validate, states):
+    # Execute the actual production input-claim and save branches without
+    # bootstrapping the bot, Telegram client or unrelated menu handlers.
+    import ast
+    import inspect
+    from weakref import WeakValueDictionary
+
+    source = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    fn = next(node for node in source.body
+              if isinstance(node, ast.AsyncFunctionDef) and node.name == "handle_stateful_private_inputs")
+    caption_branches = [node for node in fn.body
+                        if isinstance(node, ast.If) and ast.unparse(node.test) == "action == 'video_caption'"]
+    assert len(caption_branches) == 2
+
+    async def run_db(func, *args):
+        result = func(*args)
+        return await result if inspect.isawaitable(result) else result
+
+    async def noop(*_args, **_kwargs):
+        pass
+
+    ns = {
+        "asyncio": asyncio, "user_states": states, "video_caption_save_locks": WeakValueDictionary(),
+        "_get_user_state": lambda uid: states.get(uid) or {},
+        "_is_admin_user": lambda _uid: True,
+        "reset_user_state": lambda uid: states.pop(uid, None),
+        "serialize_message_entities": lambda _entities: None,
+        "utf16_length": validation.utf16_length, "run_db": run_db,
+        "_validate_video_caption_emoji": validate, "_save_video_caption_sync": save,
+        "invalidate_rule_card_cache": lambda _rule_id: None,
+        "try_delete_message_safe": noop, "send_message_safe": noop,
+        "reply_message_safe": noop, "format_validation_result": validation.format_validation_result,
+        "build_video_caption_menu_text": lambda _rule_id: "menu",
+        "build_video_caption_menu_keyboard": lambda _rule_id: None,
+        "settings": SimpleNamespace(admin_id=7),
+    }
+    header = ast.parse(
+        "async def handle(message):\n"
+        "    user_id = message.from_user.id\n"
+        "    state = _get_user_state(user_id)\n"
+        "    if not state: return\n"
+        "    action = state.get('action')\n"
+    ).body[0]
+    header.body.extend(caption_branches)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[header], type_ignores=[])),
+                 "bot.py", "exec"), ns)
+    return ns["handle"]
+
+
+def _caption_input(mid, text):
+    return SimpleNamespace(message_id=mid, text=text, caption=None, entities=[], caption_entities=[],
+                           from_user=SimpleNamespace(id=7), chat=SimpleNamespace(id=7))
+
+
+def test_new_input_invalidates_older_validation_and_does_not_reset_new_session():
+    async def scenario():
+        entered, resume = asyncio.Event(), asyncio.Event()
+        writes = []
+        states = {7: {"action": "video_caption", "rule_id": 141}}
+
+        async def validate(caption, _entities, **_kwargs):
+            if caption == "old":
+                entered.set()
+                await resume.wait()
+            return validation.ValidationResult("verified")
+
+        def save(_rule, caption, *_args):
+            writes.append(caption)
+            return {"ok": True}
+
+        handle = _caption_input_handler(save, validate, states)
+        old = asyncio.create_task(handle(_caption_input(100, "old")))
+        await entered.wait()
+        await handle(_caption_input(101, "new"))
+        # Simulate opening another input while the old probe is still running.
+        new_state = {"action": "video_caption", "rule_id": 142}
+        states[7] = new_state
+        resume.set()
+        await old
+        assert writes == ["new"]
+        assert states[7] is new_state
+
+    asyncio.run(scenario())
+
+
+def test_inflight_db_save_cannot_finish_after_newer_input_commit():
+    async def scenario():
+        entered, resume, new_validated = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        writes = []
+        states = {7: {"action": "video_caption", "rule_id": 141}}
+
+        async def validate(caption, _entities, **_kwargs):
+            if caption == "new":
+                new_validated.set()
+            return validation.ValidationResult("verified")
+
+        async def save(_rule, caption, *_args):
+            if caption == "old":
+                entered.set()
+                await resume.wait()
+            writes.append(caption)
+            return {"ok": True}
+
+        handle = _caption_input_handler(save, validate, states)
+        old = asyncio.create_task(handle(_caption_input(100, "old")))
+        await entered.wait()
+        new = asyncio.create_task(handle(_caption_input(101, "new")))
+        await new_validated.wait()
+        assert writes == []
+        resume.set()
+        await asyncio.gather(old, new)
+        assert writes == ["old", "new"]
+        assert 7 not in states
+
+    asyncio.run(scenario())
