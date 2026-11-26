@@ -301,7 +301,20 @@ class VideoEmojiValidator:
             # media can be published without the emoji.
             if not await session.accepts([]):
                 return ValidationResult("unavailable", (EmojiIssue(None, None, "control_failed"),))
-            issues = await session.isolate(occurrences)
+            # Repeated occurrences must be checked in the full probe, but
+            # isolate each document only once; report every original position.
+            by_id = {}
+            for item in occurrences:
+                by_id.setdefault(item.document_id, item)
+            unique = list(by_id.values())
+            if len(unique) != len(occurrences) and await session.accepts(unique):
+                issues = [EmojiIssue(None, None, "combination_rejected")]
+            else:
+                isolated = await session.isolate(unique)
+                rejected = {i.document_id for i in isolated if i.document_id is not None}
+                issues = [i for i in isolated if i.document_id is None]
+                issues.extend(EmojiIssue(item.document_id, item.offset, "publication_rejected")
+                              for item in occurrences if item.document_id in rejected)
             logger.warning("VIDEO_EMOJI_VALIDATION_REJECTED | ids=%s | reasons=%s",
                            sorted({i.document_id for i in issues if i.document_id is not None}),
                            sorted({i.reason for i in issues}))
