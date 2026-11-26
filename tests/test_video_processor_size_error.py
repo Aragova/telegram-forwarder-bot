@@ -198,7 +198,7 @@ def test_document_invalid_propagates_without_repeat_and_logs_metadata(tmp_path, 
     processor.telethon = client
 
     async def video_info(*_args, **_kwargs):
-        return {"width": 720, "height": 1280, "duration": 30, "fps": 30}
+        return {"width": 720, "height": 1280, "duration": 30, "fps": 30, "codec_name": "h264"}
 
     processor.get_video_info = video_info
     clip = tmp_path / "clip.mp4"
@@ -212,6 +212,9 @@ def test_document_invalid_propagates_without_repeat_and_logs_metadata(tmp_path, 
             duration=30, caption_send_mode="premium", max_retries=3,
         ))
     assert client.calls == 1
-    assert "VIDEO_DOCUMENT_INVALID" in caplog.text
-    assert "video_bytes=5 | thumb_bytes=5" in caplog.text
+    assert "VIDEO_SEND_FAILURE_SNAPSHOT" in caplog.text
+    assert "'error_type': 'DocumentInvalidError'" in caplog.text
+    assert "'codec_name': 'h264'" in caplog.text
+    assert "'video_artifact': {'provided': True, 'bytes': 5" in caplog.text
+    assert "'thumbnail_artifact': {'provided': True, 'bytes': 5" in caplog.text
     assert "private" not in caplog.text
