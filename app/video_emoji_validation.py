@@ -221,7 +221,7 @@ class _ProbeSession:
             sent = await self.client.send_file(
                 entity=self.target, file=str(self.path), caption=caption,
                 parse_mode=None, formatting_entities=entities,
-                supports_streaming=True, link_preview=False, silent=True,
+                supports_streaming=True, silent=True,
                 attributes=[types.DocumentAttributeVideo(
                     duration=1, w=64, h=64, supports_streaming=True, round_message=False,
                 )],
