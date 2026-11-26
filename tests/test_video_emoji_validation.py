@@ -9,6 +9,7 @@ from telethon import functions, types
 from telethon.errors import DocumentInvalidError, FloodWaitError
 
 from app import video_emoji_validation as validation
+from app.send_intent import observe_diagnostic_publication
 
 CHAT = -1003812542665
 BAD_ID = 5319302290127991242
@@ -82,6 +83,9 @@ class FakeClient:
         return [doc for doc in self.docs if doc.id in request.document_id]
 
     async def send_file(self, **kwargs):
+        return await observe_diagnostic_publication(lambda: self._publish(**kwargs))
+
+    async def _publish(self, **kwargs):
         ids = [e.document_id for e in kwargs["formatting_entities"]]
         self.calls.append(ids)
         if self.uncertain:
@@ -258,11 +262,11 @@ def test_cancelled_publication_timeout_keeps_fence(monkeypatch):
     repo = FakeRepo()
     client = FakeClient([document(1, "💎")])
 
-    async def hanging_send(**kwargs):
+    async def hanging_publish(**kwargs):
         client.calls.append([e.document_id for e in kwargs["formatting_entities"]])
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(client, "send_file", hanging_send)
+    monkeypatch.setattr(client, "_publish", hanging_publish)
     monkeypatch.setattr(validation, "CHECK_TIMEOUT", 0.05)
     result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
     assert result.status == "unavailable"
@@ -286,7 +290,7 @@ def test_flood_wait_persisted_and_definite_rejection_releases_fence(monkeypatch)
     async def flood(**_kwargs):
         raise FloodWaitError(request=None, capture=17)
 
-    monkeypatch.setattr(client, "send_file", flood)
+    monkeypatch.setattr(client, "_publish", flood)
     result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
     assert result.issues[0].reason == "flood_wait"
     assert repo.waits == {"mtproto:42": 18}
@@ -310,3 +314,59 @@ def test_cancel_rule_card_resets_video_caption_edit():
     handler = source.split("async def handle_rule_card(callback", 1)[1].split("@dp.callback_query", 1)[0]
     assert 'state.get("action") == "video_caption" and state.get("rule_id") == rule_id' in handler
     assert "reset_user_state" in handler
+
+
+def test_timeout_before_publication_rpc_releases_fence(monkeypatch):
+    repo = FakeRepo()
+    client = FakeClient([document(1, "💎")])
+
+    async def queued_send(**_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client, "send_file", queued_send)
+    monkeypatch.setattr(validation, "CHECK_TIMEOUT", 0.05)
+    result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
+    assert result.status == "unavailable"
+    assert not repo.inflight and repo.releases == 1
+
+
+def test_explicit_non_emoji_rpc_rejection_releases_fence(monkeypatch):
+    from telethon.errors import ChatWriteForbiddenError
+    repo = FakeRepo()
+    client = FakeClient([document(1, "💎")])
+
+    async def forbidden(**_kwargs):
+        raise ChatWriteForbiddenError(request=None)
+
+    monkeypatch.setattr(client, "_publish", forbidden)
+    result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
+    assert result.status == "unavailable"
+    assert not repo.inflight and repo.releases == 1
+
+
+def test_upload_part_failure_does_not_leave_unknown_publication(monkeypatch):
+    from telethon.errors import FilePartMissingError
+    repo = FakeRepo()
+    client = FakeClient([document(1, "💎")])
+
+    async def upload_failure(**_kwargs):
+        raise FilePartMissingError(request=functions.upload.SaveFilePartRequest(
+            file_id=1, file_part=0, bytes=b"x"), capture=0)
+
+    monkeypatch.setattr(client, "send_file", upload_failure)
+    result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
+    assert result.status == "unavailable"
+    assert not repo.inflight and repo.releases == 1
+
+
+def test_flood_after_accepted_publication_keeps_fence(monkeypatch):
+    repo = FakeRepo()
+    client = FakeClient([document(1, "💎")])
+
+    async def flooded_read(*_args, **_kwargs):
+        raise FloodWaitError(request=None, capture=17)
+
+    monkeypatch.setattr(client, "get_messages", flooded_read)
+    result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
+    assert result.issues[0].reason == "flood_wait"
+    assert repo.inflight and not client.deleted
