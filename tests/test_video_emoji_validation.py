@@ -11,6 +11,7 @@ from telethon.errors import DocumentInvalidError, FloodWaitError
 
 from app import video_emoji_validation as validation
 from app.send_intent import observe_diagnostic_publication
+from app.runtime_utils import wait_for_db_task
 
 CHAT = -1003812542665
 BAD_ID = 5319302290127991242
@@ -409,7 +410,7 @@ def _caption_input_handler(save, validate, states, *, with_clear=False, menu_tex
 
     ns = {
         "asyncio": asyncio, "user_states": states, "video_caption_save_locks": WeakValueDictionary(),
-        "video_caption_revisions": WeakValueDictionary(),
+        "video_caption_revisions": WeakValueDictionary(), "wait_for_db_task": wait_for_db_task,
         "_get_user_state": lambda uid: states.get(uid) or {},
         "_is_admin_user": lambda _uid: True,
         "reset_user_state": lambda uid: states.pop(uid, None),
@@ -731,6 +732,9 @@ def test_cancel_during_db_reservation_releases_only_owned_fence(monkeypatch, sta
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
         finish.set()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -789,5 +793,43 @@ def test_newer_caption_from_another_user_wins():
         resume.set()
         await old
         assert writes == ["new"]
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_caption_write_keeps_lock_until_db_finishes():
+    async def scenario():
+        entered, finish = asyncio.Event(), asyncio.Event()
+        writes = []
+        states = {7: {"action": "video_caption", "rule_id": 141},
+                  8: {"action": "video_caption", "rule_id": 141}}
+
+        async def validate(*_args, **_kwargs):
+            return validation.ValidationResult("verified")
+
+        async def save(_rule, caption, *_args):
+            if caption == "old":
+                entered.set()
+                await finish.wait()
+            writes.append(caption)
+            return {"ok": True}
+
+        handle = _caption_input_handler(save, validate, states)
+        old = asyncio.create_task(handle(_caption_input(100, "old")))
+        await entered.wait()
+        old.cancel()
+        await asyncio.sleep(0)
+        new_message = _caption_input(101, "new")
+        new_message.from_user.id = 8
+        new = asyncio.create_task(handle(new_message))
+        await asyncio.sleep(0)
+        old.cancel()
+        await asyncio.sleep(0)
+        assert not old.done() and not new.done() and not writes
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await old
+        await new
+        assert writes == ["old", "new"]
 
     asyncio.run(scenario())

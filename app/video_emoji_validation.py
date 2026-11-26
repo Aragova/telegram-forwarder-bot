@@ -19,7 +19,7 @@ from pathlib import Path
 from telethon import functions, types, utils
 from telethon.errors import DocumentInvalidError, FloodWaitError, SlowModeWaitError
 
-from .runtime_utils import run_db
+from .runtime_utils import run_db, wait_for_db_task
 from .send_intent import DiagnosticPublicationState, current_publication_intent, diagnostic_rpc_scope
 from .subprocess_safety import communicate_safely
 from .transport_policy import TransportRateLimited
@@ -311,18 +311,14 @@ class VideoEmojiValidator:
                 reservation_task = asyncio.create_task(
                     run_db(repo.reserve_video_emoji_check, account_id, user_id, chat_id)
                 )
-                cancelled = False
-                while not reservation_task.done():
-                    try:
-                        await asyncio.shield(reservation_task)
-                    except asyncio.CancelledError:
-                        cancelled = True
-                    except Exception:
-                        break  # Read the task result below, including DB errors.
-                reservation = reservation_task.result()
-                reserved = reservation == "reserved"
-                if cancelled:
-                    raise asyncio.CancelledError
+                try:
+                    reservation = await wait_for_db_task(reservation_task)
+                finally:
+                    # On cancellation the DB task has still completed. Only
+                    # release the fence if this call actually acquired it.
+                    if (reservation_task.done() and not reservation_task.cancelled()
+                            and reservation_task.exception() is None):
+                        reserved = reservation_task.result() == "reserved"
                 if reservation != "reserved":
                     return ValidationResult("unavailable", (EmojiIssue(None, None, reservation),))
                 return await asyncio.wait_for(
@@ -352,7 +348,9 @@ class VideoEmojiValidator:
             self._next_check = max(self._next_check, time.monotonic() + MIN_CHECK_INTERVAL)
             if reserved and not fence.uncertain:
                 try:
-                    await run_db(repo.release_video_emoji_check, account_id)
+                    await wait_for_db_task(asyncio.create_task(
+                        run_db(repo.release_video_emoji_check, account_id)
+                    ))
                 except Exception:
                     logger.exception("VIDEO_EMOJI_RESERVATION_RELEASE_FAILED")
             elif reserved:

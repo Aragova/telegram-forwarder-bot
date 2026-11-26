@@ -34,6 +34,7 @@ from aiogram.types import (
 )
 
 from app.config import settings
+from app.runtime_utils import wait_for_db_task
 from app.video_emoji_validation import VideoEmojiValidator, format_validation_result, utf16_length
 from app.repository_models import utc_now_iso
 from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
@@ -293,19 +294,7 @@ video_caption_revisions: WeakValueDictionary[int, _VideoCaptionRevision] = WeakV
 
 async def _finish_caption_write(func, *args):
     """A cancelled handler must not release its rule lock ahead of the DB write."""
-    task = asyncio.create_task(run_db(func, *args))
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-        except Exception:
-            break
-    result = task.result()
-    if cancelled:
-        raise asyncio.CancelledError
-    return result
+    return await wait_for_db_task(asyncio.create_task(run_db(func, *args)))
 
 
 def reset_user_state(user_id: int | None) -> None:
