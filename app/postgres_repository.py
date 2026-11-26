@@ -7314,7 +7314,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
             return int(existing["id"]) if existing else None
 
-    def find_conflicting_album_attempt(self, *, rule_id: int, target_id: str, media_group_id: str, current_key: str) -> dict[str, Any] | None:
+    def find_conflicting_album_attempt(self, *, rule_id: int, target_id: str, media_group_id: str, current_key: str, current_delivery_ids: list[int] | None = None) -> dict[str, Any] | None:
         """Prevent cross-cohort replay, including records written before v2 keys.
 
         An old receipt remains authoritative for its own media group. Adding
@@ -7324,7 +7324,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT idempotency_key, status, source_message_ids_json
+                    """SELECT idempotency_key, status, source_message_ids_json, error_text
                        FROM delivery_attempts
                        WHERE rule_id=%s AND target_id::text=%s
                          AND operation_kind='album'
@@ -7332,9 +7332,20 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                          AND idempotency_key<>%s
                          AND idempotency_key NOT LIKE '%%:rescan:%%'
                          AND idempotency_key NOT LIKE 'archived:%%'
-                         AND status IN ('created','sending','accepted','verified','failed_after_send')
+                         AND (
+                             status IN ('created','sending','accepted','verified','failed_after_send')
+                             OR (
+                                 status = 'failed_before_send'
+                                 AND error_text = 'repost_original_document_invalid_non_retryable'
+                                 AND (delivery_id = ANY(%s::bigint[]) OR EXISTS (
+                                     SELECT 1 FROM unnest(%s::bigint[]) AS member(id)
+                                     WHERE source_message_ids_json @> jsonb_build_array(member.id)
+                                 ))
+                             )
+                         )
                        ORDER BY id ASC LIMIT 1""",
-                    (int(rule_id), str(target_id), prefix, str(current_key)),
+                    (int(rule_id), str(target_id), prefix, str(current_key),
+                     current_delivery_ids or [], current_delivery_ids or []),
                 )
                 row = cur.fetchone()
         return dict(row) if row else None
@@ -7349,6 +7360,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SET status = 'sending', job_id = COALESCE(%s, job_id), telegram_method = COALESCE(%s, telegram_method), updated_at = NOW()
                     WHERE idempotency_key = %s
                       AND status IN ('created', 'failed_before_send')
+                      AND error_text IS DISTINCT FROM 'repost_original_document_invalid_non_retryable'
                     """,
                     (job_id, telegram_method, str(idempotency_key)),
                 )
@@ -7616,6 +7628,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     WHERE idempotency_key = %s
                       AND status NOT IN ('accepted', 'verified')
                       AND (status <> 'failed_after_send' OR %s = 'failed_after_send')
+                      AND NOT (status = 'failed_before_send' AND error_text IS NOT DISTINCT FROM 'repost_original_document_invalid_non_retryable')
                     """,
                     (normalized, (error_text or "")[:1000], str(idempotency_key), normalized),
                 )
@@ -7687,11 +7700,18 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             with conn.cursor() as cur:
                 self._guard_current_delivery_job(cur)
                 cur.execute(
-                    "SELECT status FROM delivery_attempts WHERE idempotency_key = %s AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication' FOR UPDATE",
+                    "SELECT status, error_text FROM delivery_attempts WHERE idempotency_key = %s AND telegram_method IS DISTINCT FROM 'mtproto_pending_publication' FOR UPDATE",
                     (str(idempotency_key),),
                 )
                 attempt = cur.fetchone()
-                if not attempt or str(attempt.get("status") or "") not in {"sending", "accepted", "failed_after_send"}:
+                if not attempt:
+                    return False
+                terminal_rejection = (
+                    attempt.get("status") == "failed_before_send"
+                    and attempt.get("error_text") == error_text
+                    and error_text == "repost_original_document_invalid_non_retryable"
+                )
+                if not terminal_rejection and str(attempt.get("status") or "") not in {"sending", "accepted", "failed_after_send"}:
                     return False
                 cur.execute(
                     """

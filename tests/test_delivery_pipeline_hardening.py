@@ -86,11 +86,11 @@ def test_media_unknown_mtproto_result_never_falls_through_to_botapi(tmp_path):
         file_outcome=telethon_transport_failed("timeout after send_file"),
     )
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
-        SimpleNamespace(media=object()), "target", None,
+        SimpleNamespace(media=object(), video=True), "target", None,
     ))
     assert result.transport_attempted
     assert bot.calls == []
-    assert not path.exists()  # existing temp file cleanup still runs
+    assert path.exists()  # no download or cleanup on ambiguous original send
 
 
 def test_album_unknown_mtproto_result_never_falls_through_to_botapi():
@@ -281,7 +281,7 @@ def test_missing_download_before_send_does_not_claim_telegram_write():
     bot = FakeBot()
     owner = _owner(bot, video_path=None)
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
-        SimpleNamespace(media=object()), "target", None,
+        SimpleNamespace(media=object(), video=True), "target", None,
     ))
     assert result.transport_attempted is False
     assert result.transport_accepted is False
@@ -334,3 +334,48 @@ def test_definitely_rejected_original_media_without_fallback_is_pre_send_recover
     assert client.calls == 1
     assert result.transport_attempted is False
     assert result.error_text == "telethon_original_media_failed_no_file_path"
+
+
+
+def test_custom_caption_document_invalid_is_a_recoverable_reference_rejection():
+    from telethon.errors import DocumentInvalidError
+
+    client, sender = _real_telethon_owner()
+
+    async def reject(**kwargs):
+        client.send_count += 1
+        raise DocumentInvalidError(request=None)
+
+    client.send_file = reject
+    result = asyncio.run(sender.send_file_via_telethon(
+        target_id="target", target_thread_id=None,
+        message=SimpleNamespace(media=object(), id=10),
+        caption_override={"text": "new", "entities": []},
+    ))
+    assert client.send_count == 1
+    assert result.transport_attempted is False
+    assert result.error_text == "repost_original_document_invalid"
+
+
+
+def test_document_invalid_after_local_upload_is_a_definite_rejection(tmp_path):
+    from telethon.errors import DocumentInvalidError
+
+    client, sender = _real_telethon_owner()
+
+    async def reject(**kwargs):
+        client.send_count += 1
+        raise DocumentInvalidError(request=None)
+
+    client.send_file = reject
+    path = tmp_path / "media.bin"
+    path.write_bytes(b"data")
+    result = asyncio.run(sender.send_file_via_telethon(
+        target_id="target", target_thread_id=None,
+        message=SimpleNamespace(media=object(), id=10),
+        file_path=path, skip_original=True, force_document=True,
+        caption_override={"text": "new", "entities": []},
+    ))
+    assert client.send_count == 1
+    assert result.transport_attempted is False
+    assert result.error_text == "repost_original_document_invalid_non_retryable"

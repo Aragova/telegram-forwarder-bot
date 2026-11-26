@@ -248,3 +248,27 @@ def test_verify_album_delivery_smoke():
     assert result["count"] == 2
     assert result["first_message_id"] == 10
     assert result["sent_message_ids"] == [10, 11]
+
+
+
+def test_file_path_only_fallback_never_repeats_original_media(tmp_path):
+    class FallbackTelethon(FakeTelethon):
+        async def get_messages(self, entity, ids=None, limit=None):
+            if limit:
+                return [SimpleNamespace(id=122)]
+            return SimpleNamespace(id=ids, message="replacement")
+
+    telethon = FallbackTelethon()
+    helper = SenderTelethonHelpers(_owner(telethon))
+    file_path = tmp_path / "video.mp4"
+    file_path.write_bytes(b"video")
+    message = SimpleNamespace(media="original-media", video=True, raw_text="original")
+    result = asyncio.run(helper.send_file_via_telethon(
+        target_id="-100", target_thread_id=None, message=message,
+        file_path=file_path, skip_original=True,
+        caption_override={"text": "replacement", "entities": []},
+    ))
+    assert result.authoritative_resolved is True
+    assert len(telethon.calls) == 1
+    assert telethon.calls[0]["file"] == str(file_path)
+    assert telethon.calls[0]["caption"] == "replacement"

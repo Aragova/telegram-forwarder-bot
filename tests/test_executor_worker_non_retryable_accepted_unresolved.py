@@ -338,3 +338,29 @@ def test_worker_lost_echo_guard_ownership_never_sends(job_type):
     assert asyncio.run(_process_job(repo, sender, "w", "light", job, policy=POLICY, state=_InFlightState()))
     assert sender.calls == 0
     assert not repo.complete_calls and not repo.fail_calls and not repo.retry_calls
+
+
+
+def test_album_definite_document_rejection_stays_terminal_on_replay():
+    reason = "repost_original_document_invalid_non_retryable"
+
+    class RejectedRepo(_ExecutorRepo):
+        def mark_delivery_attempt_failed(self, key, *, status, error_text):
+            self.attempts[key].update(status=status, error_text=error_text)
+            return super().mark_delivery_attempt_failed(key, status=status, error_text=error_text)
+
+    repo = RejectedRepo({
+        1: {"delivery_id": 1, "status": "faulty", "error_text": reason},
+        2: {"delivery_id": 2, "status": "faulty", "error_text": reason},
+    })
+    sender = _ExecutorSender(repo)
+    for _ in range(2):
+        result = asyncio.run(sender.execute_repost_album_from_job(
+            rule_id=1, delivery_id=1, message_id=1, source_channel="src", source_thread_id=None,
+            media_group_id="g", target_id="dst", target_thread_id=None, delivery_ids=[1, 2],
+        ))
+        assert result["retryable"] is False
+        assert result["accepted"] is False
+        assert result["error_text"] == reason
+    assert sender.album_calls == 1
+    assert repo.failed_attempts[-1][1:] == ("failed_before_send", reason)

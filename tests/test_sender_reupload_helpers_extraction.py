@@ -244,14 +244,15 @@ def test_reupload_message_media_telethon_success_smoke(tmp_path):
     video_path.write_bytes(b"video")
     bot = FakeBot()
     owner = _owner_for_message(bot=bot, telethon=FakeTelethon([video_path]), file_id=789)
-    message = SimpleNamespace(media=object())
+    message = SimpleNamespace(media=object(), video=True)
 
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(message, "dst", 777))
 
     assert result.authoritative_message_id == 789
     assert result.authoritative_resolved is True
     assert owner.send_file_calls[0]["force_document"] is False
-    assert not video_path.exists()
+    assert owner.telethon.download_media_calls == []
+    assert video_path.exists()
     assert bot.send_video_calls == []
     assert bot.send_document_calls == []
     assert bot.send_photo_calls == []
@@ -264,13 +265,17 @@ def test_reupload_message_media_botapi_fallback_smoke(tmp_path):
     video_path.write_bytes(b"video")
     bot = FakeBot()
     owner = _owner_for_message(bot=bot, telethon=FakeTelethon([video_path]), file_id=None)
-    message = SimpleNamespace(media=object())
+    message = SimpleNamespace(media=object(), video=True)
 
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(message, "dst", 777))
 
     assert result.authoritative_message_id == 790
     assert result.authoritative_resolved is True
     assert bot.send_video_calls[0]["supports_streaming"] is True
+    assert len(owner.send_file_calls) == 2
+    assert owner.send_file_calls[1]["skip_original"] is True
+    assert owner.send_file_calls[1]["file_path"] == video_path
+    assert len(owner.telethon.download_media_calls) == 1
     assert not video_path.exists()
 
 
@@ -332,13 +337,14 @@ def test_reupload_message_media_accepted_unresolved_blocks_botapi_fallback(tmp_p
         returned_candidate_ids=[1157], resolution_method="unresolved", error_text="not_found_in_target",
     )
     owner = _owner_for_message(bot=bot, telethon=FakeTelethon([video_path]), file_id=unresolved)
-    message = SimpleNamespace(media=object())
+    message = SimpleNamespace(media=object(), video=True)
 
     result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(message, "dst", 777))
 
     assert result.transport_accepted is True
     assert result.authoritative_resolved is False
     assert owner.send_file_calls and len(owner.send_file_calls) == 1
+    assert owner.telethon.download_media_calls == []
     assert bot.send_video_calls == []
     assert bot.send_document_calls == []
     assert bot.send_photo_calls == []
@@ -456,3 +462,90 @@ def test_send_album_one_by_one_stops_on_second_accepted_unresolved(monkeypatch):
     assert result["sent_count"] == 2
     assert result["manual_review_required"] is True
     assert calls == ["m1", "m2"]
+
+
+
+def test_original_media_document_invalid_custom_caption_never_downloads():
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    from app.telethon_authoritative_resolver import telethon_not_attempted
+
+    bot = FakeBot()
+    owner = _owner_for_message(
+        bot=bot, file_id=telethon_not_attempted("repost_original_document_invalid"),
+    )
+    caption = {"text": "New caption", "entities": []}
+    result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
+        SimpleNamespace(media=object(), video=True, document=SimpleNamespace(size=1544047359)), "dst", 777, caption_override=caption,
+    ))
+    assert result.error_text == "repost_original_document_invalid_non_retryable"
+    assert owner.telethon.download_media_calls == []
+    assert len(owner.send_file_calls) == 1
+    assert owner.send_file_calls[0]["caption_override"] is caption
+    assert bot.send_video_calls == []
+
+
+
+def test_small_document_invalid_recovers_via_upload_once(tmp_path):
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    from app.telethon_authoritative_resolver import telethon_not_attempted
+
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"video")
+    owner = _owner_for_message(telethon=FakeTelethon([path]))
+    calls = []
+
+    async def send(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return telethon_not_attempted("repost_original_document_invalid")
+        return 789
+
+    owner._send_file_via_telethon = send
+    caption = {"text": "", "entities": []}
+    result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
+        SimpleNamespace(media=object(), video=True, document=SimpleNamespace(size=5)),
+        "dst", 777, caption_override=caption,
+    ))
+    assert result.authoritative_message_id == 789
+    assert len(calls) == 2
+    assert calls[1]["skip_original"] is True
+    assert calls[1]["caption_override"] is caption
+    assert len(owner.telethon.download_media_calls) == 1
+    assert not path.exists()
+
+
+def test_document_invalid_unknown_size_never_downloads():
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    from app.telethon_authoritative_resolver import telethon_not_attempted
+
+    owner = _owner_for_message(file_id=telethon_not_attempted("repost_original_document_invalid"))
+    result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
+        SimpleNamespace(media=object(), video=True), "dst", 777,
+        caption_override={"text": "caption", "entities": []},
+    ))
+    assert result.error_text == "repost_original_document_invalid_non_retryable"
+    assert owner.telethon.download_media_calls == []
+
+
+def test_second_document_invalid_rejection_never_falls_back_to_botapi(tmp_path):
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    from app.telethon_authoritative_resolver import telethon_not_attempted
+
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"video")
+    owner = _owner_for_message(telethon=FakeTelethon([path]))
+    calls = []
+
+    async def send(**kwargs):
+        calls.append(kwargs)
+        return telethon_not_attempted("repost_original_document_invalid" if len(calls) == 1 else "repost_original_document_invalid_non_retryable")
+
+    owner._send_file_via_telethon = send
+    result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
+        SimpleNamespace(media=object(), video=True, document=SimpleNamespace(size=5)),
+        "dst", 777, caption_override={"text": "caption", "entities": []},
+    ))
+    assert result.error_text == "repost_original_document_invalid_non_retryable"
+    assert len(calls) == 2
+    assert owner.bot.send_video_calls == []
+    assert not path.exists()

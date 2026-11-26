@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from .delivery_idempotency import normalize_valid_sent_message_ids
+from .delivery_idempotency import normalize_valid_sent_message_ids, persist_terminal_repost_rejection
 from .runtime_utils import run_db
 from .transport_policy import TransportRateLimited
 from .send_intent import PublicationWriteUnavailable
@@ -1214,6 +1214,17 @@ class RepostAlbumDelivery:
             **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
         attempts_debug.append({"stage": "send_album_one_by_one", **one_by_one_result})
+        if (one_by_one_result.get("error_text") == "repost_original_document_invalid_non_retryable"
+                and not one_by_one_result.get("transport_attempted")
+                and not one_by_one_result.get("transport_accepted")):
+            # Fence the entire immutable cohort before updating individual rows.
+            # Partial/uncertain publication still follows the existing path.
+            await persist_terminal_repost_rejection(
+                owner.db, idempotency_key, "repost_original_document_invalid_non_retryable",
+            )
+            for disputed_id in delivery_ids:
+                await run_db(owner._mark_delivery_faulty_sync, disputed_id, "repost_original_document_invalid_non_retryable")
+            return False
         if idempotency_key:
             accepted_ids = normalize_valid_sent_message_ids(
                 one_by_one_result.get("sent_message_ids")

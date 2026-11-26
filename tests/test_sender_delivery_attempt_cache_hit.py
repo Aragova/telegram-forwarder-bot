@@ -284,3 +284,49 @@ def test_repost_single_retried_after_echo_quarantine_never_sends():
     assert result["ok"] is False
     assert result["retryable"] is False
     assert result["manual_review_required"] is True
+
+
+
+def test_terminal_document_rejection_replay_cannot_acquire_attempt():
+    class RejectedRepo(FakeRepo):
+        def get_delivery_attempt_by_idempotency_key(self, _key):
+            return {"status": "failed_before_send", "error_text": "repost_original_document_invalid_non_retryable"}
+
+        def get_delivery(self, _delivery_id):
+            # A scheduler may have already reset the row to processing.
+            return {"status": "processing", "error_text": None}
+
+        def mark_delivery_attempt_sending(self, *_args, **_kwargs):
+            raise AssertionError("terminal rejection must not be acquired")
+
+    service = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=RejectedRepo())
+
+    async def must_not_send(*_args, **_kwargs):
+        raise AssertionError("terminal rejection must not publish again")
+
+    service._deliver_single = must_not_send
+    for _ in range(2):
+        result = asyncio.run(service.execute_repost_single_from_job(
+            rule_id=1, delivery_id=10, message_id=11,
+            source_channel="@src", target_id="-1001",
+        ))
+        assert result["retryable"] is False
+        assert result["accepted"] is False
+        assert result["error_text"] == "repost_original_document_invalid_non_retryable"
+
+
+def test_faulty_document_rejection_stops_before_attempt_lookup():
+    class RejectedRepo(FakeRepo):
+        def get_delivery(self, _delivery_id):
+            return {"status": "faulty", "error_text": "repost_original_document_invalid_non_retryable"}
+
+        def get_delivery_attempt_by_idempotency_key(self, _key):
+            raise AssertionError("faulty terminal delivery must not acquire a new attempt")
+
+    service = SenderService(bot=DummyBot(), telethon_client=None, reaction_clients=[], db=RejectedRepo())
+    result = asyncio.run(service.execute_repost_single_from_job(
+        rule_id=1, delivery_id=10, message_id=11,
+        source_channel="@src", target_id="-1001",
+    ))
+    assert result["retryable"] is False
+    assert result["accepted"] is False

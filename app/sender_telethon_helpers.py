@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from telethon.tl import types as tl_types
-from telethon.errors import BadRequestError, RandomIdDuplicateError
+from telethon.errors import BadRequestError, DocumentInvalidError, RandomIdDuplicateError
 
 from .send_intent import PublicationWriteUnavailable
 from .transport_policy import TransportRateLimited
@@ -383,6 +383,7 @@ class SenderTelethonHelpers:
         post_row: dict | None = None,
         is_self_loop: bool = False,
         caption_override: dict | None = None,
+        skip_original: bool = False,
     ) -> TelethonSendOutcome:
         content = (
             caption_override
@@ -396,86 +397,91 @@ class SenderTelethonHelpers:
         media_kind = _detect_message_media_kind(message)
         supports_streaming = media_kind == "video"
 
-        # A transport exception after send_file starts does not establish
-        # that Telegram rejected the request. Do not send again.
-        original_send_started = False
-        try:
-            logger.info(
-                "TELETHON_FILE_SEND | START_ORIGINAL_MEDIA | target=%s | thread=%s | media_kind=%s | caption_len=%s | entities_in=%s | entities_out=%s | supports_streaming=%s",
-                target_id,
-                target_thread_id,
-                media_kind,
-                len(raw_text or ""),
-                len(raw_entities or []),
-                len(formatting_entities or []),
-                supports_streaming,
-            )
-
-            send_kwargs = {
-                "entity": entity,
-                "file": getattr(message, "media", None),
-                "caption": raw_text or "",
-                "formatting_entities": formatting_entities or None,
-                "force_document": force_document,
-                "link_preview": False,
-                "supports_streaming": supports_streaming,
-            }
-
-            if caption_override is not None:
-                send_kwargs["parse_mode"] = None
-            if target_thread_id is not None:
-                send_kwargs["comment_to"] = int(target_thread_id)
-
-            resolver = TelethonAuthoritativeMessageResolver(self.owner.telethon)
-            before_max_message_id = await resolver.get_before_max_message_id(entity, target_id)
-            send_started_at = datetime.now(timezone.utc)
-            original_send_started = True
-            sent = await self.owner.telethon.send_file(**send_kwargs)
-            send_finished_at = datetime.now(timezone.utc)
-            returned_candidate_id = int(sent.id) if sent else None
-            if not sent:
-                return telethon_transport_failed("telethon_send_file_returned_empty")
+        if not skip_original:
+            # A transport exception after send_file starts does not establish
+            # that Telegram rejected the request. Do not send again.
+            original_send_started = False
             try:
-                resolved = await resolver.resolve_authoritative_single_message(
-                    target_entity=entity,
-                    target_id=target_id,
-                    sent=sent,
-                    expected_message=message,
-                    expected_text=raw_text or "",
-                    before_max_message_id=before_max_message_id,
-                    send_started_at=send_started_at,
-                    send_finished_at=send_finished_at,
-                    source_message_ids=({int(getattr(message, "id"))} if is_self_loop and getattr(message, "id", None) else None),
-                    target_thread_id=target_thread_id,
-                    target_is_broadcast_channel=target_is_broadcast_channel,
+                logger.info(
+                    "TELETHON_FILE_SEND | START_ORIGINAL_MEDIA | target=%s | thread=%s | media_kind=%s | caption_len=%s | entities_in=%s | entities_out=%s | supports_streaming=%s",
+                    target_id,
+                    target_thread_id,
+                    media_kind,
+                    len(raw_text or ""),
+                    len(raw_entities or []),
+                    len(formatting_entities or []),
+                    supports_streaming,
                 )
+
+                send_kwargs = {
+                    "entity": entity,
+                    "file": getattr(message, "media", None),
+                    "caption": raw_text or "",
+                    "formatting_entities": formatting_entities or None,
+                    "force_document": force_document,
+                    "link_preview": False,
+                    "supports_streaming": supports_streaming,
+                }
+
+                if caption_override is not None:
+                    send_kwargs["parse_mode"] = None
+                if target_thread_id is not None:
+                    send_kwargs["comment_to"] = int(target_thread_id)
+
+                resolver = TelethonAuthoritativeMessageResolver(self.owner.telethon)
+                before_max_message_id = await resolver.get_before_max_message_id(entity, target_id)
+                send_started_at = datetime.now(timezone.utc)
+                original_send_started = True
+                sent = await self.owner.telethon.send_file(**send_kwargs)
+                send_finished_at = datetime.now(timezone.utc)
+                returned_candidate_id = int(sent.id) if sent else None
+                if not sent:
+                    return telethon_transport_failed("telethon_send_file_returned_empty")
+                try:
+                    resolved = await resolver.resolve_authoritative_single_message(
+                        target_entity=entity,
+                        target_id=target_id,
+                        sent=sent,
+                        expected_message=message,
+                        expected_text=raw_text or "",
+                        before_max_message_id=before_max_message_id,
+                        send_started_at=send_started_at,
+                        send_finished_at=send_finished_at,
+                        source_message_ids=({int(getattr(message, "id"))} if is_self_loop and getattr(message, "id", None) else None),
+                        target_thread_id=target_thread_id,
+                        target_is_broadcast_channel=target_is_broadcast_channel,
+                    )
+                except Exception as exc:
+                    logger.warning("TELETHON_FILE_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_id=%s | error=%s | action=no_second_send", target_id, returned_candidate_id, exc)
+                    return TelethonSendOutcome(True, True, False, None, [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method="resolver_exception", error_text=str(exc))
+                sent_id = resolved.authoritative_message_id if resolved.ok else None
+
+                logger.info(
+                    "TELETHON_FILE_SEND | OK_ORIGINAL_MEDIA | target=%s | thread=%s | returned_candidate_id=%s | sent_message_id=%s | resolution_method=%s",
+                    target_id,
+                    target_thread_id,
+                    returned_candidate_id,
+                    sent_id,
+                    resolved.resolution_method,
+                )
+                return TelethonSendOutcome(True, True, bool(resolved.ok), sent_id, [sent_id] if sent_id else [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method=resolved.resolution_method, error_text=resolved.error_text)
+
+            except (TransportRateLimited, PublicationWriteUnavailable):
+                raise
             except Exception as exc:
-                logger.warning("TELETHON_FILE_SEND | RESOLUTION_FAILED_AFTER_ACCEPT | target=%s | returned_candidate_id=%s | error=%s | action=no_second_send", target_id, returned_candidate_id, exc)
-                return TelethonSendOutcome(True, True, False, None, [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method="resolver_exception", error_text=str(exc))
-            sent_id = resolved.authoritative_message_id if resolved.ok else None
-
-            logger.info(
-                "TELETHON_FILE_SEND | OK_ORIGINAL_MEDIA | target=%s | thread=%s | returned_candidate_id=%s | sent_message_id=%s | resolution_method=%s",
-                target_id,
-                target_thread_id,
-                returned_candidate_id,
-                sent_id,
-                resolved.resolution_method,
-            )
-            return TelethonSendOutcome(True, True, bool(resolved.ok), sent_id, [sent_id] if sent_id else [], returned_candidate_id=returned_candidate_id, returned_candidate_ids=[returned_candidate_id] if returned_candidate_id else [], resolution_method=resolved.resolution_method, error_text=resolved.error_text)
-
-        except (TransportRateLimited, PublicationWriteUnavailable):
-            raise
-        except Exception as exc:
-            logger.warning(
-                "TELETHON_FILE_SEND | FAILED_ORIGINAL_MEDIA | target=%s | thread=%s | error=%s",
-                target_id,
-                target_thread_id,
-                exc,
-            )
-            if original_send_started and (not isinstance(exc, BadRequestError) or isinstance(exc, RandomIdDuplicateError)):
-                logger.warning("TELETHON_FILE_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
-                return telethon_transport_failed(f"original_media_send_uncertain: {exc}")
+                logger.warning(
+                    "TELETHON_FILE_SEND | FAILED_ORIGINAL_MEDIA | target=%s | thread=%s | error=%s",
+                    target_id,
+                    target_thread_id,
+                    exc,
+                )
+                if original_send_started and (not isinstance(exc, BadRequestError) or isinstance(exc, RandomIdDuplicateError)):
+                    logger.warning("TELETHON_FILE_SEND | UNCERTAIN_ORIGINAL_MEDIA | action=no_second_send")
+                    return telethon_transport_failed(f"original_media_send_uncertain: {exc}")
+                if original_send_started and isinstance(exc, DocumentInvalidError) and caption_override is not None and not file_path:
+                    # The RPC rejected the reference OR caption. The caller may
+                    # attempt a size-bounded recovery, not an unconditional upload.
+                    return telethon_not_attempted("repost_original_document_invalid")
 
         if not file_path:
             logger.warning(
@@ -588,6 +594,9 @@ class SenderTelethonHelpers:
                 file_path.name if file_path else None,
                 exc,
             )
+            if fallback_send_started and isinstance(exc, DocumentInvalidError) and caption_override is not None:
+                # A second explicit rejection with the same caption is terminal.
+                return telethon_not_attempted("repost_original_document_invalid_non_retryable")
             return (
                 telethon_transport_failed(str(exc))
                 if fallback_send_started

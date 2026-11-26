@@ -1643,3 +1643,60 @@ def test_emoji_validation_registry_checks_inactive_rules_and_active_channels(rep
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM routing WHERE id=%s", (rule_id,))
                 cur.execute("DELETE FROM channels WHERE channel_id=%s", (target,))
+
+
+
+@pytest.mark.skipif(os.getenv("VIMI_TEST_POSTGRES") != "1", reason="requires disposable PostgreSQL")
+def test_terminal_document_rejection_cannot_be_reacquired():
+    assert os.getenv("APP_PG_DB") == "vimi_publication_ci"
+    repo = PostgresRepository()
+    try:
+        repo.init()
+        for error, can_retry in (("repost_original_document_invalid_non_retryable", False), ("temporary download failure", True)):
+            key = str(uuid4())
+            repo.create_delivery_attempt(delivery_id=1, rule_id=1, tenant_id=1,
+                                         job_id=None, idempotency_key=key,
+                                         operation_kind="single", status="created")
+            assert repo.mark_delivery_attempt_sending(key)
+            assert repo.mark_delivery_attempt_failed(key, status="failed_before_send", error_text=error)
+            assert repo.mark_delivery_attempt_sending(key) is can_retry
+            if not can_retry:
+                assert not repo.mark_delivery_attempt_failed(key, status="failed_before_send", error_text="late temporary failure")
+                assert repo.get_delivery_attempt_by_idempotency_key(key)["error_text"] == error
+                assert not repo.mark_delivery_attempt_sending(key)
+            with repo.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+    finally:
+        repo.client.close_all_connections()
+
+
+
+@pytest.mark.skipif(os.getenv("VIMI_TEST_POSTGRES") != "1", reason="requires disposable PostgreSQL")
+def test_terminal_album_conflict_requires_overlapping_member():
+    from app.delivery_idempotency import build_delivery_idempotency_key
+
+    assert os.getenv("APP_PG_DB") == "vimi_publication_ci"
+    repo = PostgresRepository()
+    group = str(uuid4())
+    args = dict(rule_id=1, target_id="-100123", media_group_id=group)
+    def key(members):
+        return build_delivery_idempotency_key(operation_kind="album", source_message_ids=members, **args)
+    old = key([1, 2])
+    try:
+        repo.init()
+        repo.create_delivery_attempt(delivery_id=1, rule_id=1, tenant_id=1,
+                                     job_id=None, idempotency_key=old, target_id="-100123",
+                                     operation_kind="album", status="created", source_message_ids=[1, 2])
+        assert repo.mark_delivery_attempt_sending(old)
+        assert repo.mark_delivery_attempt_failed(old, status="failed_before_send",
+                                                error_text="repost_original_document_invalid_non_retryable")
+        conflict = repo.find_conflicting_album_attempt(**args, current_key=key([2, 3]), current_delivery_ids=[2, 3])
+        assert conflict["idempotency_key"] == old
+        assert repo.find_conflicting_album_attempt(**args, current_key=key([3, 4]), current_delivery_ids=[3, 4]) is None
+        assert repo.find_conflicting_album_attempt(**args, current_key=old, current_delivery_ids=[1, 2]) is None
+    finally:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (old,))
+        repo.client.close_all_connections()
