@@ -251,7 +251,8 @@ def test_reupload_message_media_telethon_success_smoke(tmp_path):
     assert result.authoritative_message_id == 789
     assert result.authoritative_resolved is True
     assert owner.send_file_calls[0]["force_document"] is False
-    assert not video_path.exists()
+    assert owner.telethon.download_media_calls == []
+    assert video_path.exists()
     assert bot.send_video_calls == []
     assert bot.send_document_calls == []
     assert bot.send_photo_calls == []
@@ -271,6 +272,10 @@ def test_reupload_message_media_botapi_fallback_smoke(tmp_path):
     assert result.authoritative_message_id == 790
     assert result.authoritative_resolved is True
     assert bot.send_video_calls[0]["supports_streaming"] is True
+    assert len(owner.send_file_calls) == 2
+    assert owner.send_file_calls[1]["skip_original"] is True
+    assert owner.send_file_calls[1]["file_path"] == video_path
+    assert len(owner.telethon.download_media_calls) == 1
     assert not video_path.exists()
 
 
@@ -339,6 +344,7 @@ def test_reupload_message_media_accepted_unresolved_blocks_botapi_fallback(tmp_p
     assert result.transport_accepted is True
     assert result.authoritative_resolved is False
     assert owner.send_file_calls and len(owner.send_file_calls) == 1
+    assert owner.telethon.download_media_calls == []
     assert bot.send_video_calls == []
     assert bot.send_document_calls == []
     assert bot.send_photo_calls == []
@@ -456,3 +462,23 @@ def test_send_album_one_by_one_stops_on_second_accepted_unresolved(monkeypatch):
     assert result["sent_count"] == 2
     assert result["manual_review_required"] is True
     assert calls == ["m1", "m2"]
+
+
+
+def test_original_media_document_invalid_custom_caption_never_downloads():
+    from app.sender_reupload_helpers import SenderReuploadHelpers
+    from app.telethon_authoritative_resolver import telethon_not_attempted
+
+    bot = FakeBot()
+    owner = _owner_for_message(
+        bot=bot, file_id=telethon_not_attempted("repost_original_document_invalid_non_retryable"),
+    )
+    caption = {"text": "New caption", "entities": []}
+    result = asyncio.run(SenderReuploadHelpers(owner).reupload_message(
+        SimpleNamespace(media=object()), "dst", 777, caption_override=caption,
+    ))
+    assert result.error_text == "repost_original_document_invalid_non_retryable"
+    assert owner.telethon.download_media_calls == []
+    assert len(owner.send_file_calls) == 1
+    assert owner.send_file_calls[0]["caption_override"] is caption
+    assert bot.send_video_calls == []

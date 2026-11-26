@@ -467,6 +467,20 @@ class RepostSingleDelivery:
             is_self_loop=is_self_loop,
             **({"caption_override": custom_caption} if custom_caption is not None else {}),
         )
+        if getattr(reupload_outcome, "error_text", None) == "repost_original_document_invalid_non_retryable":
+            error_text = reupload_outcome.error_text
+            await owner._log_delivery_pipeline_step(
+                rule_id=rule.id, delivery_ids=delivery_ids,
+                event_type="delivery_pipeline_step",
+                pipeline_stage="reupload_single_original_media_rejected",
+                pipeline_result="failed",
+                source_channel=source_channel, target_id=target_id,
+                source_message_ids=source_message_ids, error_text=error_text,
+                extra={"non_retryable": True, "action": "no_blind_reupload"},
+            )
+            await run_db(owner._mark_delivery_faulty_sync, delivery_id, error_text)
+            return False
+
         if (
             getattr(reupload_outcome, "transport_attempted", False)
             and not getattr(reupload_outcome, "transport_accepted", False)

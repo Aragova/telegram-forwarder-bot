@@ -413,6 +413,29 @@ class SenderReuploadHelpers:
             logger.warning("REUPLOAD_MESSAGE | TEXT_ONLY | ALL_METHODS_FAILED")
             return telethon_outcome if isinstance(telethon_outcome, TelethonSendOutcome) else telethon_not_attempted("text_only_all_methods_failed")
 
+        # The existing Telegram media reference can be reused with a new
+        # caption. Do not download until the original-media attempt is rejected.
+        media_kind = _sender_primitives._detect_message_media_kind(message)
+        send_kwargs = {
+            "target_id": target_id,
+            "target_thread_id": target_thread_id,
+            "message": message,
+            "post_row": post_row,
+            "is_self_loop": is_self_loop,
+            **({"caption_override": caption_override} if caption_override is not None else {}),
+        }
+        original = await self.owner._send_file_via_telethon(
+            **send_kwargs, force_document=media_kind == "document",
+        )
+        if isinstance(original, int) and original > 0:
+            return TelethonSendOutcome(True, True, True, int(original), [int(original)], resolution_method="legacy_telethon_helper")
+        if (
+            getattr(original, "transport_attempted", False)
+            or getattr(original, "transport_accepted", False)
+            or getattr(original, "error_text", None) == "repost_original_document_invalid_non_retryable"
+        ):
+            return original
+
         file_path = await self.owner.telethon.download_media(message, file=str(settings.media_cache_path))
         if not file_path:
             logger.warning("REUPLOAD_MESSAGE | DOWNLOAD_FAILED")
@@ -434,14 +457,10 @@ class SenderReuploadHelpers:
             )
 
             telethon_outcome = await self.owner._send_file_via_telethon(
-                target_id=target_id,
-                target_thread_id=target_thread_id,
-                message=message,
+                **send_kwargs,
                 file_path=path,
                 force_document=not (mime.startswith("image/") or mime.startswith("video/")),
-                post_row=post_row,
-                is_self_loop=is_self_loop,
-                **({"caption_override": caption_override} if caption_override is not None else {}),
+                skip_original=True,
             )
             if isinstance(telethon_outcome, int) and telethon_outcome > 0:
                 return TelethonSendOutcome(True, True, True, int(telethon_outcome), [int(telethon_outcome)], resolution_method="legacy_telethon_helper")

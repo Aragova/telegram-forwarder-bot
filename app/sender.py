@@ -37,6 +37,7 @@ logger = logging.getLogger("forwarder")
 POST_SEND_REACTION_TIMEOUT_SEC = 35.0
 
 TERMINAL_NON_RETRYABLE_DELIVERY_REASONS = (
+    "repost_original_document_invalid_non_retryable",
     "telethon_send_attempted_result_unknown_non_retryable",
     "copy_album_uncertain_no_fallback",
     "copy_single_uncertain_no_fallback",
@@ -817,6 +818,7 @@ class SenderService:
         post_row: dict | None = None,
         is_self_loop: bool = False,
         caption_override: dict | None = None,
+        skip_original: bool = False,
     ):
         from .sender_telethon_helpers import SenderTelethonHelpers
 
@@ -828,6 +830,8 @@ class SenderService:
             "force_document": force_document,
             "post_row": post_row,
         }
+        if skip_original:
+            kwargs["skip_original"] = True
         if is_self_loop:
             kwargs["is_self_loop"] = True
         if caption_override is not None:

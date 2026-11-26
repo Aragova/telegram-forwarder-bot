@@ -90,7 +90,7 @@ def test_media_unknown_mtproto_result_never_falls_through_to_botapi(tmp_path):
     ))
     assert result.transport_attempted
     assert bot.calls == []
-    assert not path.exists()  # existing temp file cleanup still runs
+    assert path.exists()  # no download or cleanup on ambiguous original send
 
 
 def test_album_unknown_mtproto_result_never_falls_through_to_botapi():
@@ -334,3 +334,26 @@ def test_definitely_rejected_original_media_without_fallback_is_pre_send_recover
     assert client.calls == 1
     assert result.transport_attempted is False
     assert result.error_text == "telethon_original_media_failed_no_file_path"
+
+
+
+def test_custom_caption_document_invalid_is_not_a_blind_upload(tmp_path):
+    from telethon.errors import DocumentInvalidError
+
+    client, sender = _real_telethon_owner()
+
+    async def reject(**kwargs):
+        client.send_count += 1
+        raise DocumentInvalidError(request=None)
+
+    client.send_file = reject
+    path = tmp_path / "media.mp4"
+    path.write_bytes(b"video")
+    result = asyncio.run(sender.send_file_via_telethon(
+        target_id="target", target_thread_id=None,
+        message=SimpleNamespace(media=object(), id=10),
+        file_path=path, caption_override={"text": "new", "entities": []},
+    ))
+    assert client.send_count == 1
+    assert result.transport_attempted is False
+    assert result.error_text == "repost_original_document_invalid_non_retryable"
