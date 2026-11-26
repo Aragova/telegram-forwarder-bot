@@ -100,8 +100,8 @@ rebuild therefore remain eligible. All of this happens without deleting shared
 source posts or loosening the idempotency checks on previously sent albums.
 
 
-## Regression #213 — explicit replay of historical accepted video attempts
-Before #507 video sends could remain accepted even with a stored candidate ID. Earlier full rescans removed delivery rows while retaining attempt history. #527 blocked every such attempt. The new explicit confirmation authorizes a new replay cycle, not verification of old video. Eligibility: accepted legacy video_send, updated before the #507 merge (2026-11-22 17:56:18 UTC), error-free, matching rule/tenant/target and exact delivery-based key, exactly one positive numeric candidate ID, no durable MTProto intent or receipt, and no original delivery or a matching sent delivery. Age is not evidence of publication. Other uncertain attempts remain fenced. Archive retains original status and IDs. Preflight runs under the routing lock before parsing and again at commit. Archive/delete/rebuild share one transaction. Keep-position pruning retains attempted delivery evidence. Explicit replay may intentionally duplicate historical content.
+## Historical regression #213 — former accepted-video-only replay policy
+Before #507 video sends could remain accepted even with a stored candidate ID. Earlier full rescans removed delivery rows while retaining attempt history. #527 blocked every such attempt. The then-current explicit confirmation authorized a new replay cycle, not verification of old video. Former eligibility (superseded by Current behavior below): accepted legacy video_send, updated before the #507 merge (2026-11-22 17:56:18 UTC), error-free, matching rule/tenant/target and exact delivery-based key, exactly one positive numeric candidate ID, no durable MTProto intent or receipt, and no original delivery or a matching sent delivery. Age is not evidence of publication. Other uncertain attempts remain fenced. Archive retains original status and IDs. Preflight runs under the routing lock before parsing and again at commit. Archive/delete/rebuild share one transaction. Keep-position pruning retains attempted delivery evidence. Explicit replay may intentionally duplicate historical content.
 
 Both modes fence the route snapshot at commit. Keep-position backfill, pruning and quarantine share a transaction; a recreated delivery with a known orphan attempt is quarantined, not marked sent. Missing source IDs block keep-position before parsing. Fresh replay snapshots existing self-loop echo evidence into a route-scoped audit event before removing old delivery anchors. Successful queue marker and fresh next_run are committed with the rebuilt queue.
 
@@ -117,8 +117,14 @@ source posts without deleting shared data, and preserve live arrivals after
 the scan-start high-water mark. **Start over** atomically builds a fresh
 queue from observed source IDs, excludes deleted posts and known self-loop
 echoes, allocates new delivery IDs, and archives prior attempt keys without
-rewriting their outcomes. Historical status/ID formats are not prerequisites
-for a new cycle. **Keep position** preserves existing delivery identities and
-position. Active work and unresolved durable publication evidence remain
-guarded. A complete source scan is required before resetting the queue; its
+rewriting their outcomes. Historical uncertain attempts with both timestamps before the #507 merge
+(2026-11-22 17:56:18 UTC), without MTProto intents or unresolved receipts,
+may be archived without verifying their old outcomes. Modern uncertain sends
+(including Bot API sends without intents), active jobs, and unresolved durable
+publication evidence remain fenced. Age alone never proves publication.
+**Keep position** preserves existing delivery identities and position. After
+a completed rescan, scheduler and logical queue views use Telegram message ID
+order within the source; rules not yet rescanned retain their existing order.
+If owner release fails after a queue commit, only the fenced release is retried;
+no second rebuild is offered. A complete source scan is required before resetting the queue; its
 duration depends on Telegram and source size.
