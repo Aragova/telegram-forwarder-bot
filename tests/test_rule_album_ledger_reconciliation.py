@@ -192,9 +192,10 @@ def test_rescan_never_deletes_shared_source_posts_and_keep_does_not_reset_queue(
     )[0]
     assert "db.clear_rule_deliveries" not in keep + fresh
     assert "clean_start=True" not in keep + fresh
-    assert "db.begin_rule_rescan" in keep and "db.begin_rule_rescan" in fresh
-    assert "db.reset_rule_history_for_replay" in fresh
-    assert "db.reset_rule_history_for_replay" not in keep
+    assert "db.begin_rule_rescan" in keep and "db.begin_rule_rescan" not in fresh
+    assert "db.restart_rule_queue" in fresh
+    assert "db.restart_rule_queue" not in keep
+    assert "parse_channel_history" not in fresh and "parse_group_history" not in fresh
     assert "db.mark_rule_messages_sent" not in keep
     assert "db.rebuild_rule_keep_position" in keep
     assert "saved_first_pending_message_id" in keep
@@ -203,12 +204,12 @@ def test_rescan_never_deletes_shared_source_posts_and_keep_does_not_reset_queue(
 
 def test_repository_archives_attempt_keys_instead_of_deleting_history():
     source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
-    fn = source.split("def reset_rule_history_for_replay(", 1)[1].split(
+    fn = source.split("def restart_rule_queue(", 1)[1].split(
         "def clear_rule_deliveries(", 1
     )[0]
     assert "idempotency_key || ':rescan:' || id::text" in fn
     assert "DELETE FROM delivery_attempts" not in fn
-    assert "DELETE FROM deliveries WHERE rule_id = %s" in fn
+    assert "DELETE FROM deliveries WHERE rule_id=%s RETURNING post_id" in fn
     assert "is_active = FALSE" in source
     assert "UPDATE posts" in source
 
@@ -332,7 +333,7 @@ def test_rescan_batch_refresh_skips_recreating_old_delivery_rows():
     keep = bot.split("async def _run_rescan_rule_keep_job(", 1)[1].split(
         "\n@dataclass(slots=True)", 1
     )[0]
-    assert fresh.count("preserve_existing_deliveries=True") == 2
+    assert "preserve_existing_deliveries=True" not in fresh
     assert keep.count("preserve_existing_deliveries=True") == 2
 
 
@@ -346,10 +347,12 @@ class RescanCursor:
         q = " ".join(str(sql).split())
         self.sql.append(q)
         self.rowcount = 1
-        if q.startswith("SELECT is_active, rescan_owner_token"):
-            self.result = {"is_active": self.active, "rescan_owner_token": self.owner, "source_id": "-100123", "source_thread_id": None}
+        if q.startswith(("SELECT is_active, rescan_owner_token", "SELECT rescan_owner_token")):
+            self.result = {"is_active": self.active, "rescan_owner_token": self.owner,
+                           "source_id": "-100123", "source_thread_id": None,
+                           "target_id": "-100456", "target_thread_id": None, "tenant_id": 1}
         elif "AS busy" in q:
-            self.result = {"busy": self.busy}
+            self.result = {"busy": self.unresolved if "JOIN mtproto_send_intents" in q else self.busy}
         elif "AS unresolved" in q:
             self.result = {"unresolved": self.unresolved}
         elif "SET is_active = FALSE, rescan_owner_token =" in q:
@@ -363,10 +366,16 @@ class RescanCursor:
             self.rowcount = 12
         elif q.startswith("DELETE FROM deliveries WHERE rule_id"):
             self.rowcount = 33
+            self.result = [{"post_id": i} for i in range(1, 34)]
+        elif q.startswith("INSERT INTO deliveries"):
+            self.rowcount = 33
         else:
             self.result = None
 
     def fetchone(self):
+        return self.result
+
+    def fetchall(self):
         return self.result
 
 
@@ -406,29 +415,26 @@ def test_rescan_second_owner_rejected_across_modes():
     assert cursor.owner is None and cursor.active is True
 
 
-def test_explicit_replay_archives_attempts_with_matching_owner():
-    repo, cursor, conn = _rescan_repo(active=False, owner="valid")
-    assert repo.reset_rule_history_for_replay(214, owner_token="valid", allowed_message_ids={101}, include_newer_than_message_id=101) == (12, 33, 17)
-    assert conn.commits == 1
+def test_explicit_restart_archives_attempts_without_scanning_or_deleting_posts():
+    repo, cursor, conn = _rescan_repo()
+    assert repo.restart_rule_queue(214) == (12, 33, 33)
+    assert conn.commits == 1 and cursor.owner is None and cursor.active
     assert any("UPDATE delivery_attempts SET idempotency_key" in q for q in cursor.sql)
-    assert any("DELETE FROM deliveries WHERE rule_id = %s" in q for q in cursor.sql)
+    assert any("DELETE FROM deliveries WHERE rule_id=%s RETURNING post_id" in q for q in cursor.sql)
     assert not any("DELETE FROM posts" in q for q in cursor.sql)
 
 
-def test_replay_refuses_unresolved_publications():
-    repo, cursor, conn = _rescan_repo(active=False, owner="valid", unresolved=True)
-    with pytest.raises(RuntimeError):
-        repo.reset_rule_history_for_replay(214, owner_token="valid", allowed_message_ids={101}, include_newer_than_message_id=101)
+@pytest.mark.parametrize("options,reason", [
+    ({"unresolved": True}, "современная публикация"),
+    ({"busy": True}, "незавершённые задачи"),
+    ({"owner": "other"}, "пересканируется"),
+])
+def test_restart_refuses_live_work_or_another_owner(options, reason):
+    repo, cursor, conn = _rescan_repo(**options)
+    with pytest.raises(RuntimeError, match=reason):
+        repo.restart_rule_queue(214)
     assert conn.commits == 0
     assert not any("UPDATE delivery_attempts" in q or "DELETE FROM deliveries" in q for q in cursor.sql)
-
-
-@pytest.mark.parametrize("active,token", [(True, "valid"), (False, "wrong"), (False, "")])
-def test_replay_refuses_active_or_wrong_owner(active, token):
-    repo, cursor, conn = _rescan_repo(active=active, owner="valid")
-    with pytest.raises(RuntimeError, match="владеть остановленным"):
-        repo.reset_rule_history_for_replay(214, owner_token=token, allowed_message_ids={101}, include_newer_than_message_id=101)
-    assert conn.commits == 0
 
 
 def test_backfill_filters_deleted_source_posts():
@@ -571,12 +577,12 @@ def test_reactivation_does_not_reintroduce_deleted_cached_posts(
 def test_scan_finish_sets_persistent_queue_marker_before_resuming():
     source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
     finish = source.split("def finish_rule_rescan(", 1)[1].split(
-        "def reset_rule_history_for_replay(", 1
+        "def restart_rule_queue(", 1
     )[0]
     assert "rescan_queue_built = rescan_queue_built OR %s" in finish
     assert "WHERE id = %s AND rescan_owner_token = %s" in finish
     bot = Path("bot.py").read_text(encoding="utf-8")
-    assert "queue_rebuilt=successful" in bot
+    assert "db.restart_rule_queue" in bot
     assert "queue_rebuilt=scan_complete" in bot
     assert "rescan_queue_built BOOLEAN NOT NULL DEFAULT FALSE" in source
     activate = source.split("def activate_rule_with_backfill(", 1)[1].split(
@@ -616,27 +622,14 @@ def test_mid_scan_live_arrival_survives_replay_backfill():
     assert conn.cur.inserted == [1, 3, 4]
 
 
-def test_scan_high_water_is_captured_inside_owner_finally_scope():
+def test_scan_high_water_is_captured_inside_keep_owner_finally_scope():
     source = Path("bot.py").read_text(encoding="utf-8")
-    for start, end in [
-        ("async def _run_rescan_rule_fresh_job(", "async def _run_rescan_rule_keep_job("),
-        ("async def _run_rescan_rule_keep_job(", "\n@dataclass(slots=True)"),
-    ]:
-        block = source.split(start, 1)[1].split(end, 1)[0]
-        assert "db.get_rule_scan_start_max_message_id" in block
-        assert block.index("        try:") < block.index(
-            "db.get_rule_scan_start_max_message_id"
-        )
-        assert "include_newer_than_message_id=scan_start_max_message_id" in block
-    assert "include_newer_than_message_id=scan_start_max_message_id" in source
-
-
-def test_fresh_preflight_rejects_unknown_before_owner_is_acquired():
-    repo, cursor, conn = _rescan_repo(unresolved=True)
-    with pytest.raises(RuntimeError, match="неизвестным результатом"):
-        repo.begin_rule_rescan(214, fresh=True)
-    assert cursor.owner is None and cursor.active
-    assert conn.commits == 0
+    block = source.split("async def _run_rescan_rule_keep_job(", 1)[1].split(
+        "\n@dataclass(slots=True)", 1
+    )[0]
+    assert "db.get_rule_scan_start_max_message_id" in block
+    assert block.index("        try:") < block.index("db.get_rule_scan_start_max_message_id")
+    assert "include_newer_than_message_id=scan_start_max_message_id" in block
 
 
 def test_fresh_replay_requires_one_time_db_confirmation():
