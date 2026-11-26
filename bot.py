@@ -33,6 +33,7 @@ from aiogram.types import (
 )
 
 from app.config import settings
+from app.video_emoji_validation import VideoEmojiValidator, format_validation_result
 from app.repository_models import utc_now_iso
 from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
 from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view, _button as rule_ui_button
@@ -65,6 +66,7 @@ from app.delivery_diagnostics_admin import format_delivery_diagnostics_admin_tex
 from app.delivery_observability import DeliveryObservabilityService
 from app.delivery_observability_provider import RepositoryDeliveryObservabilityProvider
 telethon_client = None
+video_emoji_validator = VideoEmojiValidator()
 from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIActionResult, UIErrorPolicy
 from app.reaction_auth_state import is_reaction_auth_state, is_reaction_account_reactions_input_state
@@ -1529,6 +1531,12 @@ def build_video_caption_menu_keyboard(rule_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="🎛 Режим подписи",
                     callback_data=f"video_caption_mode_menu:{rule_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔍 Проверить Premium-эмодзи",
+                    callback_data=f"video_caption_validate:{rule_id}",
                 )
             ],
             [
@@ -6073,6 +6081,51 @@ async def handle_video_caption_menu(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
+async def _validate_video_caption_emoji(caption, entities_json):
+    # The sender uses the same account. Its transport wrapper provides the
+    # established upload limits; the validation service never runs in a
+    # production publication intent.
+    client = sender_service.telethon if sender_service is not None else None
+    return await video_emoji_validator.validate(
+        client, db, settings.video_emoji_validation_chat_id, caption, entities_json,
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("video_caption_validate:"))
+async def handle_video_caption_validate(callback: CallbackQuery):
+    try:
+        rule_id = int(callback.data.split(":", 1)[1])
+    except (AttributeError, IndexError, ValueError):
+        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+        return
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+
+    rule = await run_db(db.get_rule, rule_id)
+    if rule is None or getattr(rule, "mode", None) != "video":
+        await answer_callback_safe(callback, "Правило видео не найдено", show_alert=True)
+        return
+    await answer_callback_safe_once(callback)
+    result = await _validate_video_caption_emoji(
+        rule.video_caption, rule.video_caption_entities_json,
+    )
+    latest = await run_db(db.get_rule, rule_id)
+    if latest is None or (
+        latest.video_caption, latest.video_caption_entities_json
+    ) != (rule.video_caption, rule.video_caption_entities_json):
+        text = "⚠️ Подпись изменилась во время проверки. Повторите проверку."
+    else:
+        text = format_validation_result(result)
+    if not await ensure_rule_callback_access(callback, rule_id):
+        return
+    await edit_message_text_safe(
+        message=callback.message,
+        text=text,
+        reply_markup=build_video_caption_menu_keyboard(rule_id),
+        parse_mode=None,
+    )
+
+
 @dp.callback_query(lambda c: c.data.startswith("video_caption_mode_menu:"))
 async def handle_video_caption_mode_menu(callback: CallbackQuery):
     """Open the two video caption-formatting choices in the current message."""
@@ -7536,9 +7589,25 @@ async def handle_stateful_private_inputs(message: Message):
     # =========================================================
     if action == "video_caption":
         rule_id = state["rule_id"]
+        if not _is_admin_user(user_id) and not await run_db(is_rule_owned_by_user, rule_id, user_id):
+            await reply_message_safe(message, "⛔ Нет доступа к этому правилу")
+            return
 
-        caption = None if text == "-" else text
+        # Entities refer to the original, untrimmed UTF-16 text.
+        caption = None if text == "-" or not text else (message.text or "")
+        if caption and len(caption.encode("utf-16-le")) // 2 > 1024:
+            await reply_message_safe(message, "❌ Подпись слишком длинная. Максимум 1024 символа Telegram.")
+            return
         entities_json = serialize_message_entities(message.entities) if caption else None
+        validation = await _validate_video_caption_emoji(caption, entities_json)
+        if _get_user_state(user_id) is not state:
+            return
+        if not validation.ok:
+            await reply_message_safe(message, "Подпись не сохранена.\n" + format_validation_result(validation))
+            return
+        if not _is_admin_user(user_id) and not await run_db(is_rule_owned_by_user, rule_id, user_id):
+            await reply_message_safe(message, "⛔ Нет доступа к этому правилу")
+            return
 
         result = await run_db(
             _save_video_caption_sync,
