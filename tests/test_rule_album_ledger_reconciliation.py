@@ -497,7 +497,7 @@ def test_stale_pending_prune_is_rule_scoped():
     assert "DELETE FROM deliveries d" in query
     assert "d.rule_id = %s" in query and "d.status = 'pending'" in query
     assert "p.source_thread_id IS NOT DISTINCT FROM %s" in query
-    assert params == (214, "-100123", None, None, None, None, None, None, [101, 103], 103)
+    assert params == (214, "-100123", None, None, None, None, None, None, [101, 103], 103, [])
     assert "p.message_id <= %s" in query
 
 
@@ -795,7 +795,9 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails(release):
         return func(*args, **kwargs)
 
     show = AsyncMock()
+    sleep = AsyncMock()
     handler = _load_rescan_handler("_run_rescan_rule_fresh_job", {
+        "asyncio": SimpleNamespace(sleep=sleep),
         "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
         "logger": logging.getLogger(__name__),
         "invalidate_preview_cache": Mock(), "invalidate_rule_card_cache": Mock(),
@@ -808,6 +810,10 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails(release):
         "build_rule_card_keyboard": Mock(return_value="card"),
     })
     asyncio.run(handler(rule_id=94, chat_id=1, message_id=2, admin_id=3))
+    if release in {"retry", "failed"}:
+        sleep.assert_awaited_once_with(1.0)
+    else:
+        sleep.assert_not_awaited()
     scan.assert_awaited_once_with(rule)
     repo.restart_rule_queue.assert_called_once_with(
         94, owner_token="owner", allowed_message_ids=set(range(1, 531)),
@@ -898,7 +904,9 @@ def test_keep_rescan_post_commit_failure_still_reports_success(failure):
     workers = AsyncMock(side_effect=RuntimeError("workers") if failure == "workers" else None)
     refresh = AsyncMock(return_value="failed",
                         side_effect=RuntimeError("card") if failure == "card" else None)
+    sleep = AsyncMock()
     handler = _load_rescan_handler("_run_rescan_rule_keep_job", {
+        "asyncio": SimpleNamespace(sleep=sleep),
         "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
         "logger": logging.getLogger(__name__),
         "invalidate_preview_cache": Mock(), "invalidate_rule_card_cache": Mock(),
@@ -910,6 +918,10 @@ def test_keep_rescan_post_commit_failure_still_reports_success(failure):
         "build_rescan_rule_keyboard": Mock(return_value="rescan"),
     })
     asyncio.run(handler(rule_id=94, chat_id=1, message_id=2, admin_id=3))
+    if failure.startswith("release"):
+        sleep.assert_awaited_once_with(1.0)
+    else:
+        sleep.assert_not_awaited()
     if failure == "unknown":
         repo.finish_rule_rescan.assert_not_called()
         repo.log_rule_change.assert_not_called()

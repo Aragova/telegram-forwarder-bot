@@ -2854,7 +2854,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     selected = max(
                         completed_items,
                         key=lambda item: max(
-                            (sent_times[did], did) for did in item["delivery_ids"]
+                            (sent_times[int(did)], int(did)) for did in item["delivery_ids"]
                         ),
                     )
                     delivery_ids = [int(x) for x in selected["delivery_ids"]]

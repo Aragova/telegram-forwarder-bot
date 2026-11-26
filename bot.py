@@ -533,6 +533,7 @@ async def _finish_rule_rescan_with_retry(rule_id: int, *, was_active: bool,
             if attempt:
                 raise _RescanReleaseFailed("Не подтверждено снятие блокировки") from exc
             logger.warning("RESCAN_RELEASE_RETRY | rule_id=%s", rule_id, exc_info=True)
+            await asyncio.sleep(1.0)
 
 
 async def _report_rescan_release_failure(*, rule_id: int, chat_id: int,
