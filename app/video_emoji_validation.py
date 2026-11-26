@@ -20,7 +20,7 @@ from telethon import functions, types, utils
 from telethon.errors import DocumentInvalidError, FloodWaitError, SlowModeWaitError
 
 from .runtime_utils import run_db
-from .send_intent import current_publication_intent, diagnostic_rpc_scope
+from .send_intent import DiagnosticPublicationState, current_publication_intent, diagnostic_rpc_scope
 from .subprocess_safety import communicate_safely
 from .transport_policy import TransportRateLimited
 
@@ -192,11 +192,6 @@ class ProbeBudgetExceeded(RuntimeError):
     pass
 
 
-@dataclass
-class ProbeFence:
-    uncertain: bool = False
-
-
 class _ProbeSession:
     def __init__(self, client, target, chat_id, path, fence, repo, account_id):
         self.client = client
@@ -219,7 +214,6 @@ class _ProbeSession:
         self.count += 1
         marker = f"ViMi emoji check {secrets.token_hex(8)}"
         caption, entities = _synthetic_caption(occurrences, marker)
-        self.fence.uncertain = True
         try:
             sent = await self.client.send_file(
                 entity=self.target, file=str(self.path), caption=caption,
@@ -231,14 +225,14 @@ class _ProbeSession:
             )
         except DocumentInvalidError as exc:
             # A rejection in some other RPC is not evidence against an emoji.
-            if not isinstance(getattr(exc, "request", None), functions.messages.SendMediaRequest):
+            if (self.fence.uncertain
+                    or not isinstance(getattr(exc, "request", None), functions.messages.SendMediaRequest)):
                 raise
-            self.fence.uncertain = False
             return False
-        except (FloodWaitError, SlowModeWaitError, TransportRateLimited):
-            # An explicit throttle rejection is not an accepted publication.
-            self.fence.uncertain = False
-            raise
+        if not self.fence.uncertain:
+            # A send result without a tracked RPC is not proof of completion.
+            self.fence.uncertain = True
+            raise RuntimeError("diagnostic publication RPC was not tracked")
         message_id = getattr(sent, "id", None)
         if type(message_id) is not int or message_id <= 0 or getattr(sent, "chat_id", None) != self.chat_id:
             # No deletion or further probe when the response is ambiguous.
@@ -298,9 +292,9 @@ class VideoEmojiValidator:
     async def _run_reserved(self, client, repo, chat_id, occurrences, user_id):
         account_id = None
         reserved = False
-        fence = ProbeFence()
+        fence = DiagnosticPublicationState()
         try:
-            with diagnostic_rpc_scope():
+            with diagnostic_rpc_scope(fence):
                 me = await asyncio.wait_for(client.get_me(input_peer=True), timeout=10)
                 account_id = getattr(me, "user_id", None)
                 if isinstance(me, types.InputPeerSelf):
