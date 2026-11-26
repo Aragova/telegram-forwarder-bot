@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from telethon import functions, types
-from telethon.errors import DocumentInvalidError
+from telethon.errors import DocumentInvalidError, FloodWaitError
 
 from app import video_emoji_validation as validation
 
@@ -33,6 +33,33 @@ def rejection():
     ))
 
 
+class FakeRepo:
+    def __init__(self):
+        self.inflight = False
+        self.reservation = "reserved"
+        self.waits = {}
+        self.releases = 0
+
+    def reserve_video_emoji_check(self, account_id, user_id, chat_id):
+        assert (account_id, user_id, chat_id) == (42, 7, CHAT)
+        if self.inflight:
+            return "pending_review"
+        if self.reservation == "reserved":
+            self.inflight = True
+        return self.reservation
+
+    def release_video_emoji_check(self, account_id):
+        assert account_id == 42
+        self.inflight = False
+        self.releases += 1
+
+    def get_transport_cooldown(self, scope):
+        return self.waits.get(scope, 0)
+
+    def extend_transport_cooldown(self, scope, seconds):
+        self.waits[scope] = seconds
+
+
 class FakeClient:
     def __init__(self, docs, *, bad=(), strip=(), control_rejected=False, uncertain=False):
         self.docs = docs
@@ -45,6 +72,10 @@ class FakeClient:
         self.deleted = []
         self.wrong_identity = False
         self.wrong_text = False
+
+    async def get_me(self, *, input_peer):
+        assert input_peer
+        return types.InputPeerUser(user_id=42, access_hash=123)
 
     async def __call__(self, request):
         assert isinstance(request, functions.messages.GetCustomEmojiDocumentsRequest)
@@ -78,7 +109,7 @@ class FakeClient:
         self.deleted.extend(ids)
 
 
-def run_check(monkeypatch, client, caption, entities, *, chat_id=CHAT):
+def run_check(monkeypatch, client, caption, entities, *, chat_id=CHAT, repo=None):
     async def target(_client, _repo, _id):
         return object()
 
@@ -88,13 +119,13 @@ def run_check(monkeypatch, client, caption, entities, *, chat_id=CHAT):
     monkeypatch.setattr(validation, "_private_test_target", target)
     monkeypatch.setattr(validation, "_generate_probe_video", generate)
     return asyncio.run(validation.VideoEmojiValidator().validate(
-        client, object(), chat_id, caption, entities,
+        client, repo or FakeRepo(), chat_id, caption, entities, user_id=7,
     ))
 
 
 def test_plain_caption_does_not_need_config_or_telegram():
     result = asyncio.run(validation.VideoEmojiValidator().validate(
-        None, None, "", "ordinary", [{"type": "bold", "offset": 0, "length": 8}],
+        None, None, "", "ordinary", [{"type": "bold", "offset": 0, "length": 8}], user_id=7,
     ))
     assert result.ok and result.status == "no_custom"
 
@@ -187,7 +218,7 @@ def test_unconfigured_channel_blocks_custom_caption(monkeypatch):
 def test_registered_channel_is_rejected_before_resolving_entity():
     repo = SimpleNamespace(
         get_all_rules=lambda: [SimpleNamespace(source_id=str(CHAT), target_id="-10099")],
-        get_channels=lambda: [],
+        get_channels=lambda _kind: [],
     )
     try:
         asyncio.run(validation._private_test_target(None, repo, CHAT))
@@ -203,8 +234,79 @@ def test_save_guard_and_existing_caption_button_are_wired():
         "# 2. Перенос следующего поста", 1
     )[0]
     assert branch.index("await _validate_video_caption_emoji") < branch.index("_save_video_caption_sync")
-    assert 'caption = None if text == "-" or not text else (message.text or "")' in branch
+    assert 'caption = None if raw_caption.strip() in {"-", ""} else raw_caption' in branch
+    assert "message.caption_entities" in branch
+    assert "user_id=user_id" in branch
     assert "if not validation.ok:" in branch
     assert "if _get_user_state(user_id) is not state:" in branch
     assert 'callback_data=f"video_caption_validate:{rule_id}"' in source
     assert 'c.data.startswith("video_caption_validate:")' in source
+
+
+def test_unknown_send_leaves_durable_fence_across_validator_instances(monkeypatch):
+    repo = FakeRepo()
+    client = FakeClient([document(1, "💎")], uncertain=True)
+    result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
+    assert result.status == "unavailable" and repo.inflight and repo.releases == 0
+    client.uncertain = False
+    result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
+    assert result.issues[0].reason == "pending_review"
+    assert client.calls == [[1]]
+
+
+def test_cancelled_publication_timeout_keeps_fence(monkeypatch):
+    repo = FakeRepo()
+    client = FakeClient([document(1, "💎")])
+
+    async def hanging_send(**kwargs):
+        client.calls.append([e.document_id for e in kwargs["formatting_entities"]])
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client, "send_file", hanging_send)
+    monkeypatch.setattr(validation, "CHECK_TIMEOUT", 0.05)
+    result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
+    assert result.status == "unavailable"
+    assert client.calls == [[1]] and repo.inflight
+
+
+def test_quota_and_shared_throttle_prevent_probes(monkeypatch):
+    for reason in ("quota", "flood_wait"):
+        repo = FakeRepo()
+        repo.reservation = reason
+        client = FakeClient([document(1, "💎")])
+        result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
+        assert result.issues[0].reason == reason
+        assert not client.calls and not repo.inflight
+
+
+def test_flood_wait_persisted_and_definite_rejection_releases_fence(monkeypatch):
+    repo = FakeRepo()
+    client = FakeClient([document(1, "💎")])
+
+    async def flood(**_kwargs):
+        raise FloodWaitError(request=None, capture=17)
+
+    monkeypatch.setattr(client, "send_file", flood)
+    result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
+    assert result.issues[0].reason == "flood_wait"
+    assert repo.waits == {"mtproto:42": 18}
+    assert not repo.inflight and repo.releases == 1
+
+
+def test_variation_selector_difference_still_uses_real_probe(monkeypatch):
+    client = FakeClient([document(1, "⭐️")])
+    result = run_check(monkeypatch, client, "⭐", [entity(1, 0, 1)])
+    assert result.ok and client.calls == [[1]]
+
+
+def test_registered_target_channel_is_rejected():
+    repo = SimpleNamespace(get_all_rules=lambda: [],
+                           get_channels=lambda kind: [{"channel_id": CHAT}] if kind == "target" else [])
+    assert validation._registered_chat(repo, CHAT)
+
+
+def test_cancel_rule_card_resets_video_caption_edit():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    handler = source.split("async def handle_rule_card(callback", 1)[1].split("@dp.callback_query", 1)[0]
+    assert 'state.get("action") == "video_caption" and state.get("rule_id") == rule_id' in handler
+    assert "reset_user_state" in handler
