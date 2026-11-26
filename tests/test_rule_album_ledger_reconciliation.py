@@ -721,7 +721,7 @@ def _load_rescan_handler(name, namespace):
     helpers = [n for n in tree.body
                if isinstance(n, (ast.AsyncFunctionDef, ast.ClassDef))
                and n.name in {"_RescanReleaseFailed", "_finish_rule_rescan_with_retry",
-                              "_report_rescan_release_failure"}]
+                              "_report_rescan_release_failure", "_complete_rescan_job"}]
     exec(compile(ast.Module(body=[*helpers, node], type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace[name]
 
@@ -992,3 +992,21 @@ def test_rescan_terminal_screen_retries_fallback_send_after_flood_lock():
     asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
     assert send.await_count == 2
     sleep.assert_awaited_once_with(4.05)
+
+
+def test_rescan_progress_edit_failure_does_not_send_new_message():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    policy = SimpleNamespace(edit_text=AsyncMock(
+        return_value=SimpleNamespace(ok=False, reason="retry_after"),
+    ))
+    sleep = AsyncMock()
+    send = AsyncMock()
+    handler = _load_rescan_handler("_show_rule_processing_screen", {
+        "asyncio": SimpleNamespace(sleep=sleep), "ui_policy": policy,
+        "send_message_safe": send,
+    })
+    asyncio.run(handler(chat_id=1, message_id=2, text="Читаем историю", terminal=False))
+    send.assert_not_awaited()
+    sleep.assert_not_awaited()
