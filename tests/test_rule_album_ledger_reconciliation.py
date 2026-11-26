@@ -432,7 +432,7 @@ def test_explicit_restart_archives_attempts_using_scanned_posts():
 
 @pytest.mark.parametrize("options,reason", [
     ({"unresolved": True}, "современная публикация"),
-    ({"busy": True}, "незавершённые задачи"),
+    ({"busy": True}, "незавершённые доставки или задачи"),
     ({"owner": "other"}, "уже выполняется"),
 ])
 def test_restart_refuses_live_work_or_another_owner(options, reason):
@@ -796,3 +796,19 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails():
     repo.finish_rule_rescan.assert_called_once_with(94, was_active=True, owner_token="owner", queue_rebuilt=True)
     assert "очередь начата заново" in show.await_args.kwargs["text"]
     assert "530" in show.await_args.kwargs["text"]
+
+
+@pytest.mark.parametrize("reason", ["same_message_signature", "message_not_modified"])
+def test_rescan_final_screen_does_not_duplicate_existing_message(reason):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    policy = SimpleNamespace(edit_text=AsyncMock(
+        return_value=SimpleNamespace(ok=False, reason=reason),
+    ))
+    send = AsyncMock()
+    handler = _load_rescan_handler("_show_rule_processing_screen", {
+        "asyncio": asyncio, "ui_policy": policy, "send_message_safe": send,
+    })
+    asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
+    send.assert_not_awaited()
