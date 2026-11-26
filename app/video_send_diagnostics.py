@@ -5,10 +5,12 @@ Diagnostics do not change media or authorize a retry.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
 from .runtime_utils import run_db
+from .subprocess_safety import communicate_safely
 
 logger = logging.getLogger("forwarder")
 
@@ -63,6 +65,39 @@ def artifact_details(path, *, thumbnail=False):
     except (OSError, ValueError) as exc:
         result["read_error"] = type(exc).__name__
     return result
+
+
+
+async def decode_artifact(path, *, thumbnail=False):
+    """Failure-only decode, bounded in time and never part of send eligibility."""
+    if not path or not Path(path).is_file():
+        return {"status": "missing"}
+    timeout = 3 if thumbnail else 20
+    cmd = [
+        "ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-xerror",
+        "-protocol_whitelist", "file,pipe", "-threads", "1",
+        "-f", "mjpeg" if thumbnail else "mov", "-i", str(path), "-map", "0:v:0",
+    ]
+    if thumbnail:
+        cmd.extend(["-frames:v", "1"])
+    else:
+        cmd.extend(["-map", "0:a:0?"])
+    cmd.extend(["-f", "null", "-"])
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await communicate_safely(process, timeout_seconds=timeout)
+        return {
+            "status": "decoded" if process.returncode == 0 else "decode_failed",
+            "returncode": process.returncode,
+            "stderr_tail": stderr.decode("utf-8", errors="replace").replace(str(path), "<artifact>")[-1200:],
+            "scope": "first_frame" if thumbnail else "full_video_and_audio",
+        }
+    except asyncio.TimeoutError:
+        return {"status": "timeout_inconclusive", "timeout_seconds": timeout}
+    except OSError as exc:
+        return {"status": "unavailable", "error_type": type(exc).__name__}
 
 
 def rpc_error_details(exc):
