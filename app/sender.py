@@ -1171,7 +1171,7 @@ class SenderService:
             # VIDEO-РЕЖИМ:
             # Даже если сообщение пришло из альбома, обрабатываем его как отдельный пост.
             if rule_mode == "video":
-                ok = await self._deliver_single_video(
+                outcome = await self._deliver_single_video(
                     rule,
                     delivery_id,
                     message_id,
@@ -1179,6 +1179,7 @@ class SenderService:
                     target_id,
                     target_thread_id,
                 )
+                ok = bool(outcome.get("ok")) if isinstance(outcome, dict) else bool(outcome)
 
                 if ok or schedule_mode == "fixed":
                     await run_db(self._touch_rule_after_send_sync, rule.id, interval)
