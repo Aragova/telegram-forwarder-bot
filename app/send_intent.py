@@ -245,8 +245,9 @@ def publication_client_class(base):
                             trace["upload_parts_failed"] = trace.get("upload_parts_failed", 0) + 1
                             record_error(trace, exc)
                         raise
-                    if upload and result is True:
-                        trace["upload_parts_acknowledged"] = trace.get("upload_parts_acknowledged", 0) + 1
+                    if upload:
+                        counter = "upload_parts_acknowledged" if result is True else "upload_parts_rejected"
+                        trace[counter] = trace.get(counter, 0) + 1
                     return result
                 _check_fence(intent)
                 if getattr(self, "publication_inbox_required", False) and (
@@ -306,7 +307,10 @@ def publication_client_class(base):
                         if trace is None or not isinstance(item, functions.messages.SendMediaRequest):
                             return await invoke(request, ordered=ordered, flood_sleep_threshold=0)
                         trace["rpc_state"] = "invoked"
-                        trace["rpc_request"] = media_request_details(item)
+                        try:
+                            trace["rpc_request"] = media_request_details(item)
+                        except Exception:
+                            logger.exception("VIDEO_RPC_DIAGNOSTICS_FAILED")
                         try:
                             result = await invoke(request, ordered=ordered, flood_sleep_threshold=0)
                         except Exception as exc:
