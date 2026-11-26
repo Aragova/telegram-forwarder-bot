@@ -4934,9 +4934,22 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         allowed_message_ids: set[int], include_newer_than_message_id: int,
         expected_scope: tuple | None = None,
         checked_missing_message_ids: set[int] | None = None,
+    ) -> tuple[int, int, int]:
+        archived, replaced, rebuilt, _, _ = self._rebuild_rule_queue(
+            rule_id, owner_token=owner_token, allowed_message_ids=allowed_message_ids,
+            include_newer_than_message_id=include_newer_than_message_id,
+            expected_scope=expected_scope, checked_missing_message_ids=checked_missing_message_ids,
+        )
+        return archived, replaced, rebuilt
+
+    def _rebuild_rule_queue(
+        self, rule_id: int, *, owner_token: str,
+        allowed_message_ids: set[int], include_newer_than_message_id: int,
+        expected_scope: tuple | None = None,
+        checked_missing_message_ids: set[int] | None = None,
         preserve_sent: bool = False,
         before_message_id: int | None = None,
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, int, int]:
         """Replace the publication cycle from a completed source snapshot.
 
         Keep-position retains proven sent anchors and resets all other deliveries.
@@ -5001,7 +5014,19 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             source_thread_id=rule["source_thread_id"],message_id=mid,
                         )
                 preserved_ids: list[int] = []
+                removed_stale = excluded_before = 0
                 if preserve_sent:
+                    cur.execute(
+                        """SELECT COUNT(*) AS n FROM deliveries d JOIN posts p ON p.id=d.post_id
+                           WHERE d.rule_id=%s AND (
+                               p.source_channel IS DISTINCT FROM %s
+                               OR p.source_thread_id IS DISTINCT FROM %s
+                               OR NOT(p.message_id=ANY(%s::bigint[]))
+                           )""",
+                        (int(rule_id),str(rule["source_id"]),rule["source_thread_id"],
+                         sorted(allowed_message_ids)),
+                    )
+                    removed_stale = int(cur.fetchone()["n"])
                     # Use the shared logical builder, including newly discovered
                     # album members. Never preserve a partial album as completed.
                     cur.execute(
@@ -5030,6 +5055,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             # A newly discovered old post before the saved
                             # cursor must not rewind keep-position.
                             skipped_before.update(item["message_ids"])
+                    excluded_before = len(skipped_before)
                     observed_ids = sorted(set(observed_ids) - skipped_before)
                 # Preserve the exact prior delivery state for incident diagnosis,
                 # including failures with no associated attempt ledger.
@@ -5081,7 +5107,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     allowed_message_ids, checked_missing_message_ids or set(),
                 )
             conn.commit()
-        return archived, old_count, rebuilt
+        return archived, old_count, rebuilt, removed_stale, excluded_before
 
     def clear_rule_deliveries(self, rule_id: int) -> int:
         with self.connect() as conn:
@@ -5340,13 +5366,14 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     ) -> tuple[int, int, int, int]:
         # The existing sent anchors (including explicitly skipped positions)
         # define progress. Do not let a pending-only cursor skip faulty items.
-        _, _, rebuilt = self.restart_rule_queue(
+        _, _, rebuilt, removed_stale, excluded_before = self._rebuild_rule_queue(
             rule_id, owner_token=owner_token, allowed_message_ids=allowed_message_ids,
             include_newer_than_message_id=include_newer_than_message_id,
             expected_scope=expected_scope, checked_missing_message_ids=checked_missing_message_ids,
             preserve_sent=True, before_message_id=before_message_id,
         )
-        return rebuilt, 0, 0, 0
+        # No historical quarantine is applied to the new publication cycle.
+        return rebuilt, removed_stale, excluded_before, 0
 
     def get_rule_next_run_at(self, rule_id: int) -> str | None:
         with self.connect() as conn:

@@ -789,7 +789,7 @@ async def _run_rescan_rule_keep_job(
                 "extra": {
                     "mode": "keep_position", "parsed_count": parsed_count,
                     "rebuilt_count": rebuilt_count, "preserved_sent_history": True,
-                    "removed_before": removed_before, "removed_stale": removed_stale,
+                    "excluded_before": removed_before, "removed_stale": removed_stale,
                     "quarantined": quarantined, "source_id": str(rule.source_id),
                     "source_thread_id": rule.source_thread_id,
                 },

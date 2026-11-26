@@ -663,7 +663,7 @@ def test_keep_prune_archives_stale_album_without_preserving_deleted_posts(repo):
     # Both members are absent from the Telegram snapshot. Evidence still survives.
     assert repo.rebuild_rule_keep_position(rule_id,owner_token=owner,
         allowed_message_ids=set(),include_newer_than_message_id=max(source_ids),
-        before_message_id=max(source_ids)+1)==(0,0,0,0)
+        before_message_id=max(source_ids)+1)==(0,2,0,0)
     assert all(repo.get_delivery(d) is None for d in deliveries)
     repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
 
@@ -679,11 +679,11 @@ def test_keep_removes_single_orphan_absent_from_snapshot(repo):
             )
             cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
     active, owner = repo.begin_rule_rescan(rule_id)
-    _, _, _, quarantined = repo.rebuild_rule_keep_position(
+    _, removed_stale, _, quarantined = repo.rebuild_rule_keep_position(
         rule_id, owner_token=owner, allowed_message_ids=set(),
         include_newer_than_message_id=max(source_ids), before_message_id=None,
     )
-    assert quarantined == 0
+    assert removed_stale == 1 and quarantined == 0
     assert repo.get_delivery(deliveries[0]) is None
     repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner, queue_rebuilt=True)
 
@@ -1472,7 +1472,7 @@ def test_keep_position_rebuilds_partial_album_and_removes_deleted_sent_member(re
     assert repo.rebuild_rule_keep_position(
         rule_id,owner_token=owner,allowed_message_ids=set(source_ids[1:]),
         include_newer_than_message_id=max(source_ids),before_message_id=source_ids[0],
-    ) == (2,0,0,0)
+    ) == (2,1,0,0)
     repo.finish_rule_rescan(rule_id,was_active=active,owner_token=owner,queue_rebuilt=True)
     items = repo.get_rule_queue_logical_items(rule_id)
     assert len(items)==1 and items[0]["message_ids"] == source_ids[1:]
