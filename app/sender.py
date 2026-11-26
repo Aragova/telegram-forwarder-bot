@@ -1931,8 +1931,8 @@ class SenderService:
                 return {"ok": False, "retryable": False, "accepted": True, "transport_accepted": True, "authoritative_resolved": False, "error_text": error, "manual_review_required": True}
             if isinstance(outcome, dict) and outcome.get("rejected_before_send") and not intent.possible_write:
                 publication_possible = False
-                # Telegram explicitly rejected the attempt (429), so it is
-                # safe to retry; unlike a timeout, no video was published.
+                # A definite rejection may be terminal (invalid document) or
+                # transient (rate limit/preflight); preserve that distinction.
                 if has_attempt_ledger:
                     await run_db(
                         self.db.mark_delivery_attempt_failed,
@@ -1943,11 +1943,16 @@ class SenderService:
                     "VIDEO_DELIVERY_PRE_SEND_REJECTED | delivery_id=%s | rule_id=%s | retry_after=%s",
                     delivery_id, rule_id, outcome.get("retry_after_seconds"),
                 )
+                error_text = str(outcome.get("error_text") or "telegram rate limited")
+                if outcome.get("retryable") is False:
+                    await run_db(self._mark_delivery_faulty_sync, int(delivery_id), error_text)
+                    return {"ok": False, "retryable": False, "accepted": False,
+                            "fallback_to_legacy": False, "error_text": error_text}
                 return {
                     "ok": False, "retryable": True, "accepted": False,
                     "fallback_to_legacy": False,
                     "retry_after_seconds": int(outcome.get("retry_after_seconds") or 1),
-                    "error_text": str(outcome.get("error_text") or "telegram rate limited"),
+                    "error_text": error_text,
                 }
             ok = bool(outcome.get("ok")) if isinstance(outcome, dict) else bool(outcome)
             raw_sent_ids = outcome.get("sent_message_ids") if isinstance(outcome, dict) else None
