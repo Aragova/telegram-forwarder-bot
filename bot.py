@@ -10,6 +10,7 @@ import time
 from html import escape
 from dataclasses import dataclass
 from types import SimpleNamespace
+from weakref import WeakValueDictionary
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,7 @@ from aiogram.types import (
 )
 
 from app.config import settings
-from app.video_emoji_validation import VideoEmojiValidator, format_validation_result
+from app.video_emoji_validation import VideoEmojiValidator, format_validation_result, utf16_length
 from app.repository_models import utc_now_iso
 from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
 from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view, _button as rule_ui_button
@@ -67,6 +68,7 @@ from app.delivery_observability import DeliveryObservabilityService
 from app.delivery_observability_provider import RepositoryDeliveryObservabilityProvider
 telethon_client = None
 video_emoji_validator = VideoEmojiValidator()
+video_caption_save_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIActionResult, UIErrorPolicy
 from app.reaction_auth_state import is_reaction_auth_state, is_reaction_account_reactions_input_state
@@ -7435,6 +7437,13 @@ async def handle_stateful_private_inputs(message: Message):
         return
 
     action = state.get("action")
+    if action == "video_caption":
+        # Claim this input before the first await. A later message invalidates
+        # an older validation even when both use the same edit prompt.
+        if message.message_id <= int(state.get("caption_input_message_id") or 0):
+            return
+        state = {**state, "caption_input_message_id": message.message_id}
+        user_states[user_id] = state
     text = (message.text or "").strip()
 
     if await handle_vip_scheduled_post_material_message(campaign_handlers_ctx, message):
@@ -7595,6 +7604,8 @@ async def handle_stateful_private_inputs(message: Message):
     # =========================================================
     if action == "video_caption":
         rule_id = state["rule_id"]
+        if _get_user_state(user_id) is not state:
+            return
         if not _is_admin_user(user_id) and not await run_db(is_rule_owned_by_user, rule_id, user_id):
             await reply_message_safe(message, "⛔ Нет доступа к этому правилу")
             return
@@ -7602,7 +7613,7 @@ async def handle_stateful_private_inputs(message: Message):
         # Entities refer to the original, untrimmed UTF-16 text.
         raw_caption = message.text if message.text is not None else (message.caption or "")
         caption = None if raw_caption.strip() in {"-", ""} else raw_caption
-        if caption and len(caption.encode("utf-16-le")) // 2 > 1024:
+        if caption and utf16_length(caption) > 1024:
             await reply_message_safe(message, "❌ Подпись слишком длинная. Максимум 1024 символа Telegram.")
             return
         input_entities = message.entities if message.text is not None else message.caption_entities
@@ -7613,37 +7624,52 @@ async def handle_stateful_private_inputs(message: Message):
         if not validation.ok:
             await reply_message_safe(message, "Подпись не сохранена.\n" + format_validation_result(validation))
             return
-        if not _is_admin_user(user_id) and not await run_db(is_rule_owned_by_user, rule_id, user_id):
-            await reply_message_safe(message, "⛔ Нет доступа к этому правилу")
-            return
-
-        # Access may have changed while awaiting the live probe. Re-check the
-        # edit session after that access read as well, before the DB write.
-        if _get_user_state(user_id) is not state:
-            return
-        result = await run_db(
-            _save_video_caption_sync,
-            rule_id,
-            caption,
-            entities_json,
-            message.from_user.id if message.from_user else settings.admin_id,
-        )
-        ok = result["ok"]
+        # Serialize commits for this rule, but do not hold the lock during
+        # Telegram validation. A newer input cannot be overwritten by an
+        # older DB call which was already submitted.
+        save_lock = video_caption_save_locks.setdefault(rule_id, asyncio.Lock())
+        async with save_lock:
+            if _get_user_state(user_id) is not state:
+                return
+            if not _is_admin_user(user_id) and not await run_db(is_rule_owned_by_user, rule_id, user_id):
+                await reply_message_safe(message, "⛔ Нет доступа к этому правилу")
+                return
+            if _get_user_state(user_id) is not state:
+                return
+            result = await run_db(
+                _save_video_caption_sync,
+                rule_id,
+                caption,
+                entities_json,
+                message.from_user.id if message.from_user else settings.admin_id,
+            )
+            ok = result["ok"]
+            if ok:
+                invalidate_rule_card_cache(rule_id)
+            if _get_user_state(user_id) is not state:
+                return
+            if ok:
+                reset_user_state(user_id)
 
         if ok:
-            invalidate_rule_card_cache(rule_id)
             await try_delete_message_safe(message.chat.id, message.message_id)
 
+            if _get_user_state(user_id):
+                return
             prompt_chat_id = state.get("prompt_chat_id")
             prompt_message_id = state.get("prompt_message_id")
             if prompt_chat_id and prompt_message_id:
                 await try_delete_message_safe(prompt_chat_id, prompt_message_id)
 
+            if _get_user_state(user_id):
+                return
             card_chat_id = state.get("card_chat_id")
             card_message_id = state.get("card_message_id")
             if card_chat_id and card_message_id:
                 await try_delete_message_safe(card_chat_id, card_message_id)
 
+            if _get_user_state(user_id):
+                return
             await send_message_safe(chat_id=message.chat.id, text=build_video_caption_menu_text(rule_id), parse_mode="HTML", reply_markup=build_video_caption_menu_keyboard(rule_id))
         else:
             prompt_chat_id, prompt_message_id = _state_prompt_ids(state)
@@ -7662,7 +7688,6 @@ async def handle_stateful_private_inputs(message: Message):
             else:
                 await send_message_safe(chat_id=message.chat.id, text="❌ Не удалось сохранить подпись", reply_markup=_cancel_reply_markup_for_user(message.from_user.id if message.from_user else None))
 
-        reset_user_state(user_id)
         return
 
     # =========================================================
