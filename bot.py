@@ -485,13 +485,13 @@ async def _show_rule_processing_screen(
                 chat_id=chat_id, message_id=message_id, text=text,
                 reply_markup=reply_markup, parse_mode=parse_mode,
             )
-            if result.reason == "message_edit_throttled":
+            if result is not None and result.reason == "message_edit_throttled":
                 await asyncio.sleep(ui_policy.MESSAGE_EDIT_THROTTLE_SECONDS)
                 result = await ui_policy.edit_text(
                     chat_id=chat_id, message_id=message_id, text=text,
                     reply_markup=reply_markup, parse_mode=parse_mode,
                 )
-            if result.ok or result.reason in {"same_message_signature", "message_not_modified"}:
+            if result is not None and (result.ok or result.reason in {"same_message_signature", "message_not_modified"}):
                 return
     except Exception as exc:
         logger.exception("Не удалось показать экран обработки chat_id=%s message_id=%s: %s", chat_id, message_id, exc)
