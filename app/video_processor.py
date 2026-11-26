@@ -2398,10 +2398,22 @@ class VideoProcessor:
             logger.info(f"   💾 Свободно: {self._get_free_space_gb()} GB")
             logger.info(f"   ✅ Проверка пройдена")
 
+            processing_diagnostics = {
+                "source_metadata": {key: video_info.get(key) for key in VIDEO_METADATA_KEYS},
+                "processed_metadata": {key: final_info.get(key) for key in VIDEO_METADATA_KEYS},
+                "clip_requested_seconds": requested_clip,
+                "trim_applied": bool(trim_applied),
+                "clip_start_seconds": float(clip_window.start_time) if trim_applied else 0,
+                "clip_duration_seconds": main_cut_duration,
+                "intro_applied": bool(intro_created),
+                "intro_duration_seconds": float(intro_info["duration"]) if intro_created and intro_info else None,
+                "thumbnail_created": bool(thumb_success),
+            }
             if send_output:
                 intent = current_publication_intent()
                 if intent is not None:
-                    intent.video_diagnostics = {"video_metadata": {key: final_info.get(key) for key in VIDEO_METADATA_KEYS}}
+                    intent.video_diagnostics = {"video_metadata": processing_diagnostics["processed_metadata"],
+                                                "processing": processing_diagnostics}
                 # SEND
                 logger.info(f"📤 [8/8] Отправка видео в канал {destination_channel}...")
                 sent_msg = await self.send_with_retry(
@@ -2458,6 +2470,7 @@ class VideoProcessor:
                 "height": final_info["height"],
                 "has_intro": bool(intro_created),
                 "trim_applied": bool(trim_applied),
+                "processing_diagnostics": processing_diagnostics,
                 "processing_summary": {
                     "target_width": profile["target_width"],
                     "target_height": profile["target_height"],
