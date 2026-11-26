@@ -2840,7 +2840,23 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         )
                         return None
 
-                    selected = completed_items[-1]
+                    # Queue order is not publication chronology after a rescan.
+                    sent_times = {}
+                    for row in rows:
+                        value = row["sent_at"]
+                        try:
+                            sent_at = datetime.fromisoformat(str(value))
+                            if sent_at.tzinfo is None:
+                                sent_at = sent_at.replace(tzinfo=timezone.utc)
+                        except (ValueError, TypeError):
+                            sent_at = datetime.min.replace(tzinfo=timezone.utc)
+                        sent_times[int(row["delivery_id"])] = sent_at
+                    selected = max(
+                        completed_items,
+                        key=lambda item: max(
+                            (sent_times[did], did) for did in item["delivery_ids"]
+                        ),
+                    )
                     delivery_ids = [int(x) for x in selected["delivery_ids"]]
                     post_ids = [int(x) for x in selected["post_ids"]]
                     message_ids = [int(x) for x in selected["message_ids"]]
@@ -4591,6 +4607,33 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 row = cur.fetchone()
         return int(row["max_message_id"] or 0) if row else 0
 
+    def get_rule_rescan_live_message_ids(self, rule_id: int, watermark: int) -> set[int]:
+        """Return cached candidates requiring a final Telegram existence check."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT p.message_id FROM posts p JOIN routing r
+                         ON p.source_channel=r.source_id
+                        AND p.source_thread_id IS NOT DISTINCT FROM r.source_thread_id
+                       WHERE r.id=%s AND p.message_id>%s""",
+                    (int(rule_id), int(watermark)),
+                )
+                return {int(row["message_id"]) for row in cur.fetchall()}
+
+    def _assert_rescan_live_snapshot(self, cur, rule, watermark: int,
+                                     observed: set[int], missing: set[int]) -> None:
+        # The routing row is already locked by the caller. Never silently
+        # replay cached live candidates not checked by Telegram.
+        cur.execute(
+            """SELECT EXISTS(SELECT 1 FROM posts
+                   WHERE source_channel=%s AND source_thread_id IS NOT DISTINCT FROM %s
+                     AND message_id>%s AND NOT(message_id=ANY(%s::bigint[]))) AS busy""",
+            (str(rule["source_id"]), rule["source_thread_id"], int(watermark),
+             sorted(observed | missing)),
+        )
+        if cur.fetchone()["busy"]:
+            raise RescanBlocked("Во время сверки появились новые записи; повторите пересканирование")
+
     def _assert_keep_rescan_safe(self, cur, rule_id: int) -> None:
         cur.execute(
             """
@@ -4744,9 +4787,17 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (bool(was_active), bool(queue_rebuilt), int(rule_id), str(owner_token)),
                 )
                 if cur.rowcount != 1:
-                    raise RuntimeError(
-                        "Владелец пересканирования изменился; нельзя менять статус правила"
+                    cur.execute(
+                        "SELECT rescan_owner_token,is_active,rescan_queue_built "
+                        "FROM routing WHERE id=%s FOR UPDATE", (int(rule_id),),
                     )
+                    current = cur.fetchone()
+                    if (not current or current["rescan_owner_token"] is not None
+                            or bool(current["is_active"]) != bool(was_active)
+                            or (queue_rebuilt and not current["rescan_queue_built"])):
+                        raise RuntimeError(
+                            "Владелец пересканирования изменился; нельзя менять статус правила"
+                        )
             conn.commit()
 
     def _snapshot_rescan_echo_ids(self, cur, rule_id: int) -> None:
@@ -4901,12 +4952,17 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         self, rule_id: int, *, owner_token: str,
         allowed_message_ids: set[int], include_newer_than_message_id: int,
         expected_scope: tuple | None = None,
+        checked_missing_message_ids: set[int] | None = None,
     ) -> tuple[int, int, int]:
         """Atomically restart from the completed Telegram snapshot, not old queue membership."""
         with self.connect() as conn:
             with conn.cursor() as cur:
                 rule = self._lock_rescan_commit(cur, rule_id, owner_token, expected_scope)
                 self._assert_restart_safe(cur, rule_id)
+                self._assert_rescan_live_snapshot(
+                    cur, rule, include_newer_than_message_id,
+                    allowed_message_ids, checked_missing_message_ids or set(),
+                )
                 self_loop = (
                     str(rule["source_id"]) == str(rule["target_id"])
                     and rule["source_thread_id"] == rule["target_thread_id"]
@@ -4937,8 +4993,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 # New delivery IDs isolate this explicit replay from previous jobs.
                 cur.execute("DELETE FROM deliveries WHERE rule_id=%s", (int(rule_id),))
                 old_count = int(cur.rowcount)
-                # The complete scan determines membership. Include live arrivals
-                # recorded after its high-water mark; do not revive deleted posts.
+                # Only Telegram-observed messages, including verified live
+                # arrivals, belong to the new queue.
                 source = str(rule["source_id"])
                 thread = rule["source_thread_id"]
                 tenant_id = rule["tenant_id"] if rule["tenant_id"] is not None else 1
@@ -4947,15 +5003,21 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     cur.execute(
                         """SELECT id,message_id FROM posts
                            WHERE source_channel=%s AND source_thread_id IS NOT DISTINCT FROM %s
-                             AND (message_id=ANY(%s::bigint[]) OR message_id>%s)""",
-                        (source, thread, observed_ids, include_newer_than_message_id),
+                             AND message_id=ANY(%s::bigint[])""",
+                        (source, thread, observed_ids),
                     )
                     source_rows = cur.fetchall()
                     echo_ids = self._get_rescan_echo_ids(cur, rule_id)
-                    post_ids = [
-                        int(row["id"]) for row in source_rows
-                        if int(row["message_id"]) not in echo_ids
-                    ]
+                    post_ids = []
+                    for row in source_rows:
+                        mid = int(row["message_id"])
+                        if mid in echo_ids:
+                            self._log_self_target_echo_delivery_skipped(
+                                rule_id=rule_id, source_channel=source,
+                                source_thread_id=thread, message_id=mid,
+                            )
+                        else:
+                            post_ids.append(int(row["id"]))
                     rebuilt = 0
                     if post_ids:
                         cur.execute(
@@ -4971,10 +5033,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
                            SELECT %s,p.id,'pending',%s,%s FROM posts p
                            WHERE p.source_channel=%s AND p.source_thread_id IS NOT DISTINCT FROM %s
-                             AND (p.message_id=ANY(%s::bigint[]) OR p.message_id>%s)
+                             AND p.message_id=ANY(%s::bigint[])
                            ORDER BY p.message_id,p.id ON CONFLICT DO NOTHING""",
                         (int(rule_id), utc_now_iso(), tenant_id, source, thread,
-                         observed_ids, include_newer_than_message_id),
+                         observed_ids),
                     )
                     rebuilt = int(cur.rowcount)
                 cur.execute(
@@ -5157,6 +5219,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         *, seen_message_ids: set[int] | None = None, scan_start_max_message_id: int = 0,
         before_message_id: int | None = None,
         before_snapshot_max_message_id: int | None = None,
+        checked_missing_message_ids: set[int] | None = None,
     ) -> int:
         with conn.cursor() as cur:
             cur.execute(
@@ -5194,14 +5257,14 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                       (%s::bigint IS NOT NULL AND p.message_id < %s::bigint
                           AND (%s::bigint IS NULL OR p.message_id <= %s::bigint))
                       OR (%s::bigint IS NULL AND NOT (p.message_id = ANY(%s::bigint[]))
-                          AND p.message_id <= %s)
+                          AND (p.message_id <= %s OR p.message_id=ANY(%s::bigint[])))
                   )
                 """,
                 (int(rule_id), str(source_channel), source_thread_id,
                  before_message_id, before_message_id,
                  before_snapshot_max_message_id, before_snapshot_max_message_id,
                  before_message_id, sorted(seen_message_ids or set()),
-                 int(scan_start_max_message_id)),
+                 int(scan_start_max_message_id), sorted(checked_missing_message_ids or set())),
             )
             return int(cur.rowcount or 0)
 
@@ -5285,19 +5348,24 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         self, rule_id: int, *, owner_token: str, allowed_message_ids: set[int],
         include_newer_than_message_id: int, before_message_id: int | None,
         expected_scope: tuple | None = None,
+        checked_missing_message_ids: set[int] | None = None,
     ) -> tuple[int, int, int, int]:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 rule = self._lock_rescan_commit(cur, rule_id, owner_token, expected_scope)
                 self._assert_keep_rescan_safe(cur, rule_id)
+                missing = checked_missing_message_ids or set()
+                self._assert_rescan_live_snapshot(
+                    cur, rule, include_newer_than_message_id, allowed_message_ids, missing,
+                )
                 source, thread = str(rule["source_id"]), rule["source_thread_id"]
                 rebuilt = self._backfill_deliveries_for_rule_conn(
                     conn, rule_id, source, thread, allowed_message_ids=allowed_message_ids,
-                    include_newer_than_message_id=include_newer_than_message_id,
                 )
                 stale = self._prune_rule_pending_conn(
                     conn, rule_id, source, thread, seen_message_ids=allowed_message_ids,
                     scan_start_max_message_id=include_newer_than_message_id,
+                    checked_missing_message_ids=missing,
                 )
                 before = 0 if before_message_id is None else self._prune_rule_pending_conn(
                     conn, rule_id, source, thread, before_message_id=before_message_id,

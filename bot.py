@@ -562,17 +562,57 @@ async def _scan_rule_source(rule):
     )
 
 
-async def _complete_rescan_job(
-    *, rule_id: int, rule, was_active: bool, chat_id: int, message_id: int,
-    admin_id: int, summary: str, audit: dict, fallback_text: str | None = None,
-) -> None:
-    """Post-commit actions cannot turn a completed rescan into a failed reset."""
-    invalidate_preview_cache(rule_id)
-    invalidate_rule_card_cache(rule_id)
+async def _verify_rescan_live_arrivals(rule_id: int, rule, watermark: int,
+                                       observed: set[int]) -> set[int]:
+    """Verify cached live candidates in bounded Telegram batches before committing."""
+    candidates = sorted(await run_db(db.get_rule_rescan_live_message_ids, rule_id, watermark))
+    missing: set[int] = set()
+    if not candidates:
+        return missing
+    source = str(rule.source_id)
+    entity = int(source) if source.lstrip("-").isdigit() else source
+    chat = await telethon_client.get_entity(entity)
+    for start in range(0, len(candidates), 100):
+        batch = candidates[start:start + 100]
+        messages = await telethon_client.get_messages(chat, ids=batch)
+        if len(messages) != len(batch):
+            raise RuntimeError("Неполный ответ Telegram при сверке новых записей")
+        for mid, message in zip(batch, messages):
+            if message is None:
+                observed.discard(mid)
+                missing.add(mid)
+            elif int(message.id) != mid:
+                raise RuntimeError("Telegram вернул неожиданный ID при сверке")
+            else:
+                observed.add(mid)
+    return missing
+
+
+async def _write_rescan_audit(rule_id: int, admin_id: int, audit: dict) -> None:
     try:
         await run_db(db.log_rule_change, rule_id=rule_id, admin_id=admin_id, **audit)
     except Exception:
         logger.exception("RESCAN_AUDIT_FAILED | rule_id=%s", rule_id)
+
+
+async def _report_rescan_unknown(*, rule_id: int, chat_id: int, message_id: int) -> None:
+    logger.exception("RESCAN_COMMIT_UNKNOWN | rule_id=%s", rule_id)
+    invalidate_preview_cache(rule_id)
+    invalidate_rule_card_cache(rule_id)
+    await _show_rule_processing_screen(
+        chat_id=chat_id, message_id=message_id,
+        text=(f"⚠️ Правило #{rule_id}. Результат перестройки очереди неизвестен.\n"
+              "Правило оставлено заблокированным до проверки базы. Не запускайте повторно."),
+    )
+
+
+async def _complete_rescan_job(
+    *, rule_id: int, rule, was_active: bool, chat_id: int, message_id: int,
+    summary: str, fallback_text: str | None = None,
+) -> None:
+    """Post-commit actions cannot turn a completed rescan into a failed reset."""
+    invalidate_preview_cache(rule_id)
+    invalidate_rule_card_cache(rule_id)
     try:
         await ensure_rule_workers()
     except Exception:
@@ -602,6 +642,7 @@ async def _run_rescan_rule_fresh_job(
     admin_id: int,
 ) -> None:
     scan_complete = False
+    commit_pending = False
     try:
         rule = await run_db(db.get_rule, rule_id)
         if not rule:
@@ -619,24 +660,46 @@ async def _run_rescan_rule_fresh_job(
                 terminal=False,
             )
             parsed_count, seen_message_ids = await _scan_rule_source(rule)
+            missing = await _verify_rescan_live_arrivals(
+                rule_id, rule, scan_start_max_message_id, seen_message_ids,
+            )
+            commit_pending = True
             archived, old_count, rebuilt_count = await run_db(
                 db.restart_rule_queue, rule_id, owner_token=owner_token,
                 allowed_message_ids=seen_message_ids,
                 include_newer_than_message_id=scan_start_max_message_id,
+                checked_missing_message_ids=missing,
                 expected_scope=(str(rule.source_id), rule.source_thread_id,
                                 str(rule.target_id), rule.target_thread_id, rule.mode),
             )
             scan_complete = True
+            commit_pending = False
+            audit = {
+                "event_type": "rule_rescanned_fresh", "old_value": None,
+                "new_value": {"next_run_at": utc_now_iso()},
+                "extra": {"mode": "fresh", "rebuilt_count": rebuilt_count,
+                          "archived_attempts": archived, "replayed_deliveries": old_count,
+                          "parsed_count": parsed_count, "seen_message_count": len(seen_message_ids)},
+            }
+            await _write_rescan_audit(rule_id, admin_id, audit)
+        except RescanBlocked:
+            # Repository preconditions fail before any destructive write.
+            commit_pending = False
+            raise
         finally:
-            await _finish_rule_rescan_with_retry(
-                rule_id, was_active=was_active,
-                owner_token=owner_token, queue_rebuilt=scan_complete,
-            )
+            if not commit_pending:
+                await _finish_rule_rescan_with_retry(
+                    rule_id, was_active=was_active,
+                    owner_token=owner_token, queue_rebuilt=scan_complete,
+                )
     except _RescanReleaseFailed:
         await _report_rescan_release_failure(rule_id=rule_id, chat_id=chat_id,
                                              message_id=message_id, scan_complete=scan_complete)
         return
     except Exception as exc:
+        if commit_pending:
+            await _report_rescan_unknown(rule_id=rule_id, chat_id=chat_id, message_id=message_id)
+            return
         if isinstance(exc, RescanBlocked):
             logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
         else:
@@ -652,15 +715,9 @@ async def _run_rescan_rule_fresh_job(
                f"Новых сообщений источника: {parsed_count}")
     await _complete_rescan_job(
         rule_id=rule_id, rule=rule, was_active=was_active,
-        chat_id=chat_id, message_id=message_id, admin_id=admin_id,
+        chat_id=chat_id, message_id=message_id,
         summary=summary, fallback_text=summary + f"\nЗаписей в новой очереди: {rebuilt_count}",
-        audit={
-            "event_type": "rule_rescanned_fresh", "old_value": None,
-            "new_value": {"next_run_at": utc_now_iso()},
-            "extra": {"mode": "fresh", "rebuilt_count": rebuilt_count,
-                      "archived_attempts": archived, "replayed_deliveries": old_count,
-                      "parsed_count": parsed_count, "seen_message_count": len(seen_message_ids)},
-        },
+
     )
 
 
@@ -672,6 +729,7 @@ async def _run_rescan_rule_keep_job(
     admin_id: int,
 ) -> None:
     scan_complete = False
+    commit_pending = False
     try:
         rule = await run_db(db.get_rule, rule_id)
         if not rule:
@@ -702,20 +760,48 @@ async def _run_rescan_rule_keep_job(
                     saved_first_pending_message_id = max(previous_sent) + 1
 
             parsed_count, seen_message_ids = await _scan_rule_source(rule)
+            missing = await _verify_rescan_live_arrivals(
+                rule_id, rule, scan_start_max_message_id, seen_message_ids,
+            )
+            commit_pending = True
             rebuilt_count, removed_stale, removed_before, quarantined = await run_db(
                 db.rebuild_rule_keep_position, rule_id,
                 owner_token=owner_token, allowed_message_ids=seen_message_ids,
                 include_newer_than_message_id=scan_start_max_message_id,
+                checked_missing_message_ids=missing,
                 before_message_id=saved_first_pending_message_id,
                 expected_scope=(str(rule.source_id), rule.source_thread_id,
                                 str(rule.target_id), rule.target_thread_id, rule.mode),
             )
             scan_complete = True
+            commit_pending = False
+            audit = {
+                "event_type": "rule_rescanned_keep_position",
+                "old_value": {
+                    "preserved_delivery_state": True,
+                    "saved_first_pending_message_id": saved_first_pending_message_id,
+                    "old_next_run_at": old_next_run_at,
+                },
+                "new_value": {"next_run_at": old_next_run_at},
+                "extra": {
+                    "mode": "keep_position", "parsed_count": parsed_count,
+                    "rebuilt_count": rebuilt_count, "preserved_delivery_state": True,
+                    "removed_before": removed_before, "removed_stale": removed_stale,
+                    "quarantined": quarantined, "source_id": str(rule.source_id),
+                    "source_thread_id": rule.source_thread_id,
+                },
+            }
+            await _write_rescan_audit(rule_id, admin_id, audit)
+        except RescanBlocked:
+            # Repository preconditions fail before any destructive write.
+            commit_pending = False
+            raise
         finally:
-            await _finish_rule_rescan_with_retry(
-                rule_id, was_active=was_active,
-                owner_token=owner_token, queue_rebuilt=scan_complete,
-            )
+            if not commit_pending:
+                await _finish_rule_rescan_with_retry(
+                    rule_id, was_active=was_active,
+                    owner_token=owner_token, queue_rebuilt=scan_complete,
+                )
 
 
     except _RescanReleaseFailed:
@@ -723,6 +809,9 @@ async def _run_rescan_rule_keep_job(
                                              message_id=message_id, scan_complete=scan_complete)
         return
     except Exception as exc:
+        if commit_pending:
+            await _report_rescan_unknown(rule_id=rule_id, chat_id=chat_id, message_id=message_id)
+            return
         if isinstance(exc, RescanBlocked):
             logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
         else:
@@ -749,24 +838,9 @@ async def _run_rescan_rule_keep_job(
     )
     await _complete_rescan_job(
         rule_id=rule_id, rule=rule, was_active=was_active,
-        chat_id=chat_id, message_id=message_id, admin_id=admin_id,
+        chat_id=chat_id, message_id=message_id,
         summary=summary,
-        audit={
-            "event_type": "rule_rescanned_keep_position",
-            "old_value": {
-                "preserved_delivery_state": True,
-                "saved_first_pending_message_id": saved_first_pending_message_id,
-                "old_next_run_at": old_next_run_at,
-            },
-            "new_value": {"next_run_at": old_next_run_at},
-            "extra": {
-                "mode": "keep_position", "parsed_count": parsed_count,
-                "rebuilt_count": rebuilt_count, "preserved_delivery_state": True,
-                "removed_before": removed_before, "removed_stale": removed_stale,
-                "quarantined": quarantined, "source_id": str(rule.source_id),
-                "source_thread_id": rule.source_thread_id,
-            },
-        },
+
     )
 
 

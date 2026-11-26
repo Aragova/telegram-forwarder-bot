@@ -534,21 +534,26 @@ def test_rule_rescan_confirmation_one_time_per_actor(repo):
     assert not repo.issue_rule_rescan_confirmation(rule_id, 321, "replaced")
 
 
-def test_rescan_durable_video_intent_cannot_be_archived_as_legacy(repo):
-    _, rule_id, deliveries, _, _, target = seed(repo, 132)
+@pytest.mark.parametrize("with_intent", [True, False])
+def test_rescan_durable_video_intent_cannot_be_archived_as_legacy(repo, with_intent):
+    _, rule_id, deliveries, _, _, target = seed(repo, 132 if with_intent else 13201)
     key=f"delivery:{deliveries[0]}:target:{target}:video_send:v1"
     with repo.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE deliveries SET status='sent',sent_message_id=651 WHERE id=%s", (deliveries[0],))
             cur.execute("UPDATE delivery_attempts SET idempotency_key=%s,operation_kind='video_send',telegram_method='video_send' WHERE rule_id=%s", (key,rule_id))
-    repo.get_or_create_mtproto_random_ids(key,0,"legacy-test",1)
+    if with_intent:
+        repo.get_or_create_mtproto_random_ids(key,0,"legacy-test",1)
     assert repo.mark_delivery_attempt_accepted(key,sent_message_ids=[651],telegram_method="video_send")
     with repo.connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE delivery_attempts SET updated_at=TIMESTAMPTZ '2026-11-21 10:00:00+00' WHERE rule_id=%s", (rule_id,))
-    with pytest.raises(RuntimeError, match="современная публикация"):
-        _restart_from_snapshot(repo, rule_id)
-    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"]=="accepted"
+            cur.execute("UPDATE delivery_attempts SET created_at=TIMESTAMPTZ '2026-11-21 10:00:00+00', updated_at=TIMESTAMPTZ '2026-11-21 10:00:00+00' WHERE rule_id=%s", (rule_id,))
+    if with_intent:
+        with pytest.raises(RuntimeError, match="современная публикация"):
+            _restart_from_snapshot(repo, rule_id)
+        assert repo.get_delivery_attempt_by_idempotency_key(key)["status"]=="accepted"
+    else:
+        assert _restart_from_snapshot(repo, rule_id)[0] == 1
 
 
 def test_keep_position_quarantines_orphan_without_resending(repo):
@@ -1118,18 +1123,25 @@ def test_restart_from_full_snapshot_includes_new_excludes_deleted_and_keeps_live
             cur.execute("UPDATE deliveries SET status='sent' WHERE rule_id=%s", (rule_id,))
     was_active, owner = repo.begin_rule_rescan(rule_id, fresh=True)
     high_water = repo.get_rule_scan_start_max_message_id(rule_id)
-    new_ids = [high_water + 1, high_water + 2, high_water + 3]
+    new_ids = [min(source_ids) - 1, high_water + 1, high_water + 2, high_water + 3]
     try:
-        # First cached message was deleted remotely; two new messages were
-        # observed by the parser, and the third arrived during the scan.
+        # A cached message is absent, one newly observed ID lies below the
+        # watermark, and one cached live candidate was deleted remotely.
         repo.save_post_batch(
             [(mid, source, None, {"media_kind": "video"}, None) for mid in new_ids],
             preserve_existing_deliveries=True,
         )
-        observed = set(source_ids[1:] + new_ids[:2])
+        observed = set(source_ids[1:] + new_ids[:3])
+        assert repo.get_rule_rescan_live_message_ids(rule_id, high_water) == set(new_ids[1:])
+        with pytest.raises(RuntimeError, match="появились новые записи"):
+            repo.restart_rule_queue(
+                rule_id, owner_token=owner, allowed_message_ids=observed,
+                include_newer_than_message_id=high_water,
+            )
         _, _, rebuilt = repo.restart_rule_queue(
             rule_id, owner_token=owner, allowed_message_ids=observed,
             include_newer_than_message_id=high_water,
+            checked_missing_message_ids={new_ids[-1]},
         )
         assert rebuilt == 5
         with repo.connect() as conn:
@@ -1138,10 +1150,10 @@ def test_restart_from_full_snapshot_includes_new_excludes_deleted_and_keeps_live
                                JOIN posts p ON p.id=d.post_id WHERE d.rule_id=%s""",
                             (rule_id,))
                 assert {r["message_id"]:r["status"] for r in cur.fetchall()} == {
-                    mid:"pending" for mid in source_ids[1:] + new_ids
+                    mid:"pending" for mid in source_ids[1:] + new_ids[:3]
                 }
                 cur.execute("SELECT COUNT(*) AS n FROM posts WHERE source_channel=%s", (source,))
-                assert cur.fetchone()["n"] == 6
+                assert cur.fetchone()["n"] == 7
     finally:
         repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=owner)
 
@@ -1200,3 +1212,20 @@ def test_restart_scheduler_and_logical_queue_follow_telegram_message_ids(repo):
             # Leave no runnable test job in the shared disposable database.
             cur.execute("DELETE FROM jobs WHERE id=%s", (taken["job_id"],))
             cur.execute("UPDATE deliveries SET status='pending' WHERE id=%s", (taken["delivery_id"],))
+
+
+def test_rescan_release_repeated_after_lost_commit_response(repo):
+    key, rule_id, _, _, _, _ = seed(repo, uuid4().int % 10**12)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+    active, owner = repo.begin_rule_rescan(rule_id)
+    repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner, queue_rebuilt=True)
+    repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner, queue_rebuilt=True)
+    active2, owner2 = repo.begin_rule_rescan(rule_id)
+    try:
+        with pytest.raises(RuntimeError, match="Владелец"):
+            repo.finish_rule_rescan(rule_id, was_active=active, owner_token=owner)
+    finally:
+        repo.finish_rule_rescan(rule_id, was_active=active2, owner_token=owner2)
