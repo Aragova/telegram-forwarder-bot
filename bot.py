@@ -478,26 +478,54 @@ async def _show_rule_processing_screen(
     text: str,
     reply_markup=None,
     parse_mode: str | None = None,
+    terminal: bool = True,
 ) -> None:
     try:
         if ui_policy:
-            result = await ui_policy.edit_text(
-                chat_id=chat_id, message_id=message_id, text=text,
-                reply_markup=reply_markup, parse_mode=parse_mode,
-            )
-            if result is not None and result.reason == "message_edit_throttled":
-                await asyncio.sleep(ui_policy.MESSAGE_EDIT_THROTTLE_SECONDS)
+            for attempt in range(3):
                 result = await ui_policy.edit_text(
                     chat_id=chat_id, message_id=message_id, text=text,
                     reply_markup=reply_markup, parse_mode=parse_mode,
                 )
-            if result is not None and (result.ok or result.reason in {"same_message_signature", "message_not_modified"}):
-                return
+                if result is None:
+                    break
+                if result.ok or result.reason in {"same_message_signature", "message_not_modified"}:
+                    return
+                if attempt == 2:
+                    break
+                if result.reason == "message_edit_throttled":
+                    await asyncio.sleep(ui_policy.MESSAGE_EDIT_THROTTLE_SECONDS)
+                elif terminal and result.reason in {"retry_after", "chat_retry_after_active"}:
+                    await asyncio.sleep(max(0.0, ui_policy.chat_cooldown_left(chat_id)) + 0.05)
+                else:
+                    break
     except Exception as exc:
         logger.exception("Не удалось показать экран обработки chat_id=%s message_id=%s: %s", chat_id, message_id, exc)
-    # A terminal status must not disappear when the edit limiter suppresses it.
-    await send_message_safe(chat_id=chat_id, text=text,
-                            reply_markup=reply_markup, parse_mode=parse_mode)
+    # Only terminal screens may wait for a chat flood lock. The database
+    # rescan owner is released before we wait for a terminal notification.
+    sent = await send_message_safe(chat_id=chat_id, text=text,
+                                   reply_markup=reply_markup, parse_mode=parse_mode)
+    if terminal and sent is None and ui_policy:
+        remaining = ui_policy.chat_cooldown_left(chat_id)
+        if remaining > 0:
+            await asyncio.sleep(remaining + 0.05)
+            sent = await send_message_safe(chat_id=chat_id, text=text,
+                                           reply_markup=reply_markup, parse_mode=parse_mode)
+        if sent is None:
+            logger.warning("RESCAN_STATUS_NOT_DELIVERED | chat_id=%s | message_id=%s", chat_id, message_id)
+
+
+async def _finish_rule_rescan_with_retry(rule_id: int, *, was_active: bool,
+                                         owner_token: str, queue_rebuilt: bool) -> None:
+    # The repository UPDATE is fenced by the exact owner token, including
+    # on retry. Never rerun a queue transaction to recover a failed release.
+    try:
+        await run_db(db.finish_rule_rescan, rule_id, was_active=was_active,
+                     owner_token=owner_token, queue_rebuilt=queue_rebuilt)
+    except Exception:
+        logger.warning("RESCAN_RELEASE_RETRY | rule_id=%s", rule_id, exc_info=True)
+        await run_db(db.finish_rule_rescan, rule_id, was_active=was_active,
+                     owner_token=owner_token, queue_rebuilt=queue_rebuilt)
 
 
 async def _scan_rule_source(rule):
@@ -520,6 +548,8 @@ async def _run_rescan_rule_fresh_job(
     message_id: int,
     admin_id: int,
 ) -> None:
+    scan_complete = False
+    release_failed = False
     try:
         rule = await run_db(db.get_rule, rule_id)
         if not rule:
@@ -529,12 +559,12 @@ async def _run_rescan_rule_fresh_job(
             )
             return
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id, fresh=True)
-        scan_complete = False
         try:
             scan_start_max_message_id = await run_db(db.get_rule_scan_start_max_message_id, rule_id)
             await _show_rule_processing_screen(
                 chat_id=chat_id, message_id=message_id,
                 text=f"🔄 Пересканирование правила #{rule_id}\nЧитаем историю источника.",
+                terminal=False,
             )
             parsed_count, seen_message_ids = await _scan_rule_source(rule)
             archived, old_count, rebuilt_count = await run_db(
@@ -546,9 +576,27 @@ async def _run_rescan_rule_fresh_job(
             )
             scan_complete = True
         finally:
-            await run_db(db.finish_rule_rescan, rule_id, was_active=was_active,
-                         owner_token=owner_token, queue_rebuilt=scan_complete)
+            try:
+                await _finish_rule_rescan_with_retry(
+                    rule_id, was_active=was_active,
+                    owner_token=owner_token, queue_rebuilt=scan_complete,
+                )
+            except Exception:
+                release_failed = True
+                raise
     except Exception as exc:
+        if release_failed:
+            logger.exception("RESCAN_RELEASE_FAILED | rule_id=%s | rebuilt=%s", rule_id, scan_complete)
+            invalidate_preview_cache(rule_id)
+            invalidate_rule_card_cache(rule_id)
+            status = ("Очередь перестроена." if scan_complete else "Пересканирование прервано.")
+            await _show_rule_processing_screen(
+                chat_id=chat_id, message_id=message_id,
+                text=(f"⚠️ Правило #{rule_id}. {status}\n"
+                      "Не удалось подтвердить восстановление статуса правила. "
+                      "Требуется проверка владельца пересканирования; не запускайте повторно."),
+            )
+            return
         if isinstance(exc, RescanBlocked):
             logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
         else:
@@ -607,6 +655,8 @@ async def _run_rescan_rule_keep_job(
     message_id: int,
     admin_id: int,
 ) -> None:
+    scan_complete = False
+    release_failed = False
     try:
         rule = await run_db(db.get_rule, rule_id)
         if not rule:
@@ -620,9 +670,9 @@ async def _run_rescan_rule_keep_job(
         await _show_rule_processing_screen(
             chat_id=chat_id, message_id=message_id,
             text=f"🔄 Пересканирование правила #{rule_id}\n\nРежим: сохранить позицию\nПроверка и пересборка очереди.",
+            terminal=False,
         )
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
-        scan_complete = False
         try:
             scan_start_max_message_id = await run_db(
                 db.get_rule_scan_start_max_message_id, rule_id,
@@ -647,14 +697,29 @@ async def _run_rescan_rule_keep_job(
             )
             scan_complete = True
         finally:
-            await run_db(
-                db.finish_rule_rescan, rule_id,
-                was_active=was_active, owner_token=owner_token,
-                queue_rebuilt=scan_complete,
-            )
+            try:
+                await _finish_rule_rescan_with_retry(
+                    rule_id, was_active=was_active,
+                    owner_token=owner_token, queue_rebuilt=scan_complete,
+                )
+            except Exception:
+                release_failed = True
+                raise
 
 
     except Exception as exc:
+        if release_failed:
+            logger.exception("RESCAN_RELEASE_FAILED | rule_id=%s | rebuilt=%s", rule_id, scan_complete)
+            invalidate_preview_cache(rule_id)
+            invalidate_rule_card_cache(rule_id)
+            status = ("Очередь перестроена." if scan_complete else "Пересканирование прервано.")
+            await _show_rule_processing_screen(
+                chat_id=chat_id, message_id=message_id,
+                text=(f"⚠️ Правило #{rule_id}. {status}\n"
+                      "Не удалось подтвердить восстановление статуса правила. "
+                      "Требуется проверка владельца пересканирования; не запускайте повторно."),
+            )
+            return
         if isinstance(exc, RescanBlocked):
             logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
         else:
@@ -6785,7 +6850,8 @@ async def handle_rescan_rule_fresh(callback: CallbackQuery):
     text = (
         f"🆕 Начать заново: правило #{rule_id}\n\n"
         "История источника будет перечитана. Новые посты добавятся, "
-        "удалённые исключатся. Публикация начнётся с первого поста."
+        "удалённые исключатся. Публикация начнётся с первого поста.\n\n"
+        "Ранее отправленные посты могут быть опубликованы повторно."
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить новый цикл",
