@@ -25,7 +25,7 @@ from .subprocess_safety import (
 )
 from aiogram.types import FSInputFile, MessageEntity
 from telethon import types as tl_types
-from telethon.errors import FloodWaitError
+from telethon.errors import DocumentInvalidError, FloodWaitError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -270,7 +270,25 @@ class VideoProcessor:
             # None of these reads sends media. They can be safely retried.
             raise VideoPreSendError(f"video_telethon_preflight: {type(exc).__name__}: {exc}") from exc
         started_at = datetime.now(timezone.utc)
-        sent_msg = await self.telethon.send_file(**{**send_kwargs, "entity": target_entity})
+        try:
+            sent_msg = await self.telethon.send_file(**{**send_kwargs, "entity": target_entity})
+        except DocumentInvalidError:
+            # Record bounded metadata while the artifacts still exist. Do not
+            # retain customer media or caption contents in the logs.
+            sizes = []
+            for path in (video_path, send_kwargs.get("thumb")):
+                try:
+                    sizes.append(os.path.getsize(path) if path else None)
+                except OSError:
+                    sizes.append(None)
+            logger.warning(
+                "VIDEO_DOCUMENT_INVALID | target=%s | video_bytes=%s | thumb_bytes=%s | "
+                "duration=%s | width=%s | height=%s | fps=%s | codec=%s | "
+                "streaming=True | entities=%s",
+                destination_channel, *sizes, duration, width, height,
+                video_info.get("fps"), video_info.get("codec"), len(formatting_entities or []),
+            )
+            raise
         finished_at = datetime.now(timezone.utc)
         if isinstance(sent_msg, list):
             sent_msg = sent_msg[0] if sent_msg else None
@@ -1563,6 +1581,12 @@ class VideoProcessor:
 
                 return sent_msg
 
+            except DocumentInvalidError as exc:
+                self._stage_failed(
+                    stage_logger, "send", error_text=f"DocumentInvalidError: {exc}",
+                    extra={"retryable": False, "rpc_rejected": True, "file_size_bytes": file_size_bytes},
+                )
+                raise
             except PublicationWriteUnavailable as exc:
                 raise VideoPreSendError(str(exc)) from exc
             except VideoPreSendError as exc:
@@ -2419,7 +2443,7 @@ class VideoProcessor:
                 # its evidence instead of reporting a retryable pipeline failure.
                 return sent_msg
             if isinstance(e, (TelegramEntityTooLarge, TelegramRetryAfter, FloodWaitError,
-                              TransportRateLimited, VideoPreSendError)):
+                              TransportRateLimited, VideoPreSendError, DocumentInvalidError)):
                 # Preserve definite send rejection/preflight classification.
                 raise
             return False
