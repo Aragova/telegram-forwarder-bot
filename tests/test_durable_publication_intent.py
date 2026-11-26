@@ -333,3 +333,42 @@ def test_diagnostic_rpc_scope_disables_retries_without_mutating_other_tasks():
         assert client.flood_sleep_threshold == 60
 
     asyncio.run(scenario())
+
+
+def test_diagnostic_rpc_fence_tracks_only_publication_boundary():
+    from app.send_intent import DiagnosticPublicationState, diagnostic_rpc_scope
+    from telethon.errors import DocumentInvalidError
+
+    class DiagnosticClient(RawTelethon):
+        async def __call__(self, request, ordered=False, flood_sleep_threshold=None):
+            assert self._request_retries == 0
+            if isinstance(request, functions.messages.SendMediaRequest):
+                if self.error:
+                    raise self.error
+            elif isinstance(request, functions.upload.SaveFilePartRequest):
+                raise TimeoutError("upload timed out before publication")
+            return object()
+
+    async def scenario():
+        client = publication_client_class(DiagnosticClient)()
+        state = DiagnosticPublicationState()
+        request = functions.messages.SendMediaRequest(
+            peer=types.InputPeerSelf(), media=types.InputMediaEmpty(), message="", random_id=1,
+        )
+        with diagnostic_rpc_scope(state):
+            with pytest.raises(TimeoutError):
+                await client(functions.upload.SaveFilePartRequest(file_id=1, file_part=0, bytes=b"x"))
+            assert not state.uncertain
+            client.error = DocumentInvalidError(request=request)
+            with pytest.raises(DocumentInvalidError):
+                await client(request)
+            assert not state.uncertain
+            client.error = TimeoutError("publication result unknown")
+            with pytest.raises(TimeoutError):
+                await client(request)
+            assert state.uncertain
+            with pytest.raises(PublicationAlreadyAttempted):
+                await client(request)
+        assert client._request_retries == 8
+
+    asyncio.run(scenario())
