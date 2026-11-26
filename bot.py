@@ -523,7 +523,11 @@ async def _run_rescan_rule_fresh_job(
     try:
         rule = await run_db(db.get_rule, rule_id)
         if not rule:
-            raise RescanBlocked(f"Правило #{rule_id} не найдено")
+            await _show_rule_processing_screen(
+                chat_id=chat_id, message_id=message_id,
+                text=f"❌ Правило #{rule_id} не найдено",
+            )
+            return
         was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id, fresh=True)
         scan_complete = False
         try:
@@ -569,9 +573,12 @@ async def _run_rescan_rule_fresh_job(
                    "archived_attempts": archived, "replayed_deliveries": old_count,
                    "parsed_count": parsed_count, "seen_message_count": len(seen_message_ids)},
         )
+    except Exception:
+        logger.exception("RESTART_AUDIT_FAILED | rule_id=%s", rule_id)
+    try:
         await ensure_rule_workers()
     except Exception:
-        logger.exception("RESTART_POST_COMMIT_FAILED | rule_id=%s", rule_id)
+        logger.exception("RESTART_WORKERS_FAILED | rule_id=%s", rule_id)
 
     summary = (f"✅ Правило #{rule_id}: очередь начата заново.\n"
                f"Новых сообщений источника: {parsed_count}")
@@ -587,7 +594,9 @@ async def _run_rescan_rule_fresh_job(
     await _show_rule_processing_screen(
         chat_id=chat_id, message_id=message_id,
         text=summary + f"\nЗаписей в новой очереди: {rebuilt_count}",
-        reply_markup=build_rescan_rule_keyboard(rule_id),
+        reply_markup=build_rule_card_keyboard(
+            rule_id, was_active, rule.schedule_mode or "interval", rule.mode or "repost",
+        ),
     )
 
 
@@ -636,7 +645,6 @@ async def _run_rescan_rule_keep_job(
                 expected_scope=(str(rule.source_id), rule.source_thread_id,
                                 str(rule.target_id), rule.target_thread_id, rule.mode),
             )
-            invalidate_preview_cache(rule_id)
             scan_complete = True
         finally:
             await run_db(
@@ -645,6 +653,29 @@ async def _run_rescan_rule_keep_job(
                 queue_rebuilt=scan_complete,
             )
 
+
+    except Exception as exc:
+        if isinstance(exc, RescanBlocked):
+            logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
+        else:
+            logger.exception("Ошибка перескана правила %s с сохранением позиции: %s", rule_id, exc)
+
+        await _show_rule_processing_screen(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=(
+                f"❌ Не удалось пересканировать правило #{rule_id} с сохранением позиции.\n\n"
+                f"Причина: {str(exc)[:300]}"
+            ),
+            reply_markup=build_rescan_rule_keyboard(rule_id),
+        )
+        return
+
+    # The queue is committed: audit, worker startup and UI failures are not
+    # a failed rescan and must not prompt another queue reset.
+    invalidate_preview_cache(rule_id)
+    invalidate_rule_card_cache(rule_id)
+    try:
         await run_db(
             db.log_rule_change,
             event_type="rule_rescanned_keep_position",
@@ -671,52 +702,36 @@ async def _run_rescan_rule_keep_job(
             },
         )
 
+    except Exception:
+        logger.exception("KEEP_RESCAN_AUDIT_FAILED | rule_id=%s", rule_id)
+    try:
         await ensure_rule_workers()
+    except Exception:
+        logger.exception("KEEP_RESCAN_WORKERS_FAILED | rule_id=%s", rule_id)
 
-        invalidate_rule_card_cache(rule_id)
+    summary = (
+        f"✅ Правило #{rule_id} пересканировано с сохранением позиции.\n"
+        f"Новых записей источника: {parsed_count}\n"
+        f"Добавлено в очередь: {rebuilt_count}\n"
+        f"Исключено удалённых: {removed_stale}\n"
+        f"Убрано до сохранённой позиции: {removed_before}\n"
+        f"На ручной проверке: {quarantined}"
+    )
+    try:
         refreshed = await refresh_rule_card_by_ids(
-            chat_id=chat_id,
-            message_id=message_id,
-            rule_id=rule_id,
-            prefix_text=(
-                f"✅ Правило #{rule_id} пересканировано с сохранением позиции.\n"
-                f"Найдено постов источника: {parsed_count}\n"
-                f"Очередь пересобрана: {rebuilt_count}\n"
-                f"Исключено удалённых из источника: {removed_stale}\n"
-                f"Убрано pending до нужной точки: {removed_before}\n"
-                f"На ручной проверке без повторной отправки: {quarantined}"
-            ),
+            chat_id=chat_id, message_id=message_id, rule_id=rule_id, prefix_text=summary,
         )
+        if refreshed in {"updated", "resent"}:
+            return
+    except Exception:
+        logger.exception("KEEP_RESCAN_CARD_REFRESH_FAILED | rule_id=%s", rule_id)
+    await _show_rule_processing_screen(
+        chat_id=chat_id, message_id=message_id, text=summary,
+        reply_markup=build_rule_card_keyboard(
+            rule_id, was_active, rule.schedule_mode or "interval", rule.mode or "repost",
+        ),
+    )
 
-        if refreshed not in {"updated", "resent"}:
-            await _show_rule_processing_screen(
-                chat_id=chat_id, message_id=message_id,
-                text=(
-                    f"✅ Правило #{rule_id} пересканировано с сохранением позиции.\n"
-                    f"Новых записей источника: {parsed_count}\n"
-                    f"Добавлено в очередь: {rebuilt_count}\n"
-                    f"Исключено удалённых: {removed_stale}\n"
-                    f"Убрано до сохранённой позиции: {removed_before}\n"
-                    f"На ручной проверке: {quarantined}"
-                ),
-                reply_markup=build_rescan_rule_keyboard(rule_id),
-            )
-
-    except Exception as exc:
-        if isinstance(exc, RescanBlocked):
-            logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
-        else:
-            logger.exception("Ошибка перескана правила %s с сохранением позиции: %s", rule_id, exc)
-
-        await _show_rule_processing_screen(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=(
-                f"❌ Не удалось пересканировать правило #{rule_id} с сохранением позиции.\n\n"
-                f"Причина: {str(exc)[:300]}"
-            ),
-            reply_markup=build_rescan_rule_keyboard(rule_id),
-        )
 
 @dataclass(slots=True)
 class ChannelChoice:
