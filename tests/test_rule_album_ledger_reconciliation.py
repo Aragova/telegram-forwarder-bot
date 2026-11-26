@@ -765,7 +765,8 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails():
     from app.rescan_safety import RescanBlocked
 
     rule = SimpleNamespace(source_id="-100123", source_thread_id=None,
-                           target_id="-100456", target_thread_id=None, mode="repost")
+                           target_id="-100456", target_thread_id=None, mode="repost",
+                           schedule_mode="interval")
     repo = SimpleNamespace(restart_rule_queue=Mock(return_value=(240, 525, 530)),
                            log_rule_change=Mock(), get_rule=Mock(return_value=rule),
                            begin_rule_rescan=Mock(return_value=(True, "owner")),
@@ -785,7 +786,8 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails():
         "ensure_rule_workers": AsyncMock(),
         "refresh_rule_card_by_ids": AsyncMock(return_value="failed"),
         "_show_rule_processing_screen": show, "_scan_rule_source": scan,
-        "build_rescan_rule_keyboard": Mock(return_value="keyboard"),
+        "build_rescan_rule_keyboard": Mock(return_value="rescan"),
+        "build_rule_card_keyboard": Mock(return_value="card"),
     })
     asyncio.run(handler(rule_id=94, chat_id=1, message_id=2, admin_id=3))
     scan.assert_awaited_once_with(rule)
@@ -796,6 +798,7 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails():
     repo.finish_rule_rescan.assert_called_once_with(94, was_active=True, owner_token="owner", queue_rebuilt=True)
     assert "очередь начата заново" in show.await_args.kwargs["text"]
     assert "530" in show.await_args.kwargs["text"]
+    assert show.await_args.kwargs["reply_markup"] == "card"
 
 
 @pytest.mark.parametrize("reason", ["same_message_signature", "message_not_modified"])
@@ -825,3 +828,75 @@ def test_rescan_final_screen_handles_missing_ui_result():
     })
     asyncio.run(handler(chat_id=1, message_id=2, text="Готово"))
     send.assert_awaited_once_with(chat_id=1, text="Готово", reply_markup=None, parse_mode=None)
+
+
+@pytest.mark.parametrize("failure", ["audit", "workers", "card"])
+def test_keep_rescan_post_commit_failure_still_reports_success(failure):
+    import asyncio
+    import logging
+    from unittest.mock import AsyncMock, Mock
+
+    from app.rescan_safety import RescanBlocked
+
+    rule = SimpleNamespace(source_id="-100123", source_thread_id=None,
+                           target_id="-100456", target_thread_id=None,
+                           mode="repost", schedule_mode="interval")
+    repo = SimpleNamespace(
+        get_rule=Mock(return_value=rule),
+        begin_rule_rescan=Mock(return_value=(True, "owner")),
+        get_rule_scan_start_max_message_id=Mock(return_value=525),
+        get_rule_next_run_at=Mock(return_value="2026-11-26"),
+        get_rule_first_pending_message_id=Mock(return_value=100),
+        rebuild_rule_keep_position=Mock(return_value=(5, 1, 0, 0)),
+        finish_rule_rescan=Mock(),
+        log_rule_change=Mock(side_effect=RuntimeError("audit") if failure == "audit" else None),
+    )
+
+    async def run_db(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    show = AsyncMock()
+    workers = AsyncMock(side_effect=RuntimeError("workers") if failure == "workers" else None)
+    refresh = AsyncMock(return_value="failed",
+                        side_effect=RuntimeError("card") if failure == "card" else None)
+    handler = _load_rescan_handler("_run_rescan_rule_keep_job", {
+        "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
+        "logger": logging.getLogger(__name__),
+        "invalidate_preview_cache": Mock(), "invalidate_rule_card_cache": Mock(),
+        "ensure_rule_workers": workers, "refresh_rule_card_by_ids": refresh,
+        "_show_rule_processing_screen": show,
+        "_scan_rule_source": AsyncMock(return_value=(5, {100, 101})),
+        "build_rule_card_keyboard": Mock(return_value="card"),
+        "build_rescan_rule_keyboard": Mock(return_value="rescan"),
+    })
+    asyncio.run(handler(rule_id=94, chat_id=1, message_id=2, admin_id=3))
+    repo.finish_rule_rescan.assert_called_once_with(
+        94, was_active=True, owner_token="owner", queue_rebuilt=True,
+    )
+    workers.assert_awaited_once()
+    refresh.assert_awaited_once()
+    assert "пересканировано с сохранением позиции" in show.await_args.kwargs["text"]
+    assert show.await_args.kwargs["reply_markup"] == "card"
+
+
+@pytest.mark.parametrize("mode", ["fresh", "keep"])
+def test_rescan_missing_rule_does_not_offer_retry(mode):
+    import asyncio
+    import logging
+    from unittest.mock import AsyncMock, Mock
+
+    from app.rescan_safety import RescanBlocked
+
+    repo = SimpleNamespace(get_rule=Mock(return_value=None), begin_rule_rescan=Mock())
+
+    async def run_db(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    show = AsyncMock()
+    handler = _load_rescan_handler(f"_run_rescan_rule_{mode}_job", {
+        "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
+        "logger": logging.getLogger(__name__), "_show_rule_processing_screen": show,
+    })
+    asyncio.run(handler(rule_id=94, chat_id=1, message_id=2, admin_id=3))
+    show.assert_awaited_once_with(chat_id=1, message_id=2, text="❌ Правило #94 не найдено")
+    repo.begin_rule_rescan.assert_not_called()
