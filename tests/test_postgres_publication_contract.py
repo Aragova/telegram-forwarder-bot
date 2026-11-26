@@ -1595,7 +1595,7 @@ def test_emoji_validation_rejects_campaign_only_destinations(repo):
             cur.execute("INSERT INTO rule_repost_campaign_targets(rule_id,target_id,is_active) VALUES (0,%s,FALSE)", (target,))
             cur.execute("INSERT INTO campaign_scheduled_post_targets(scheduled_post_id,rule_id,target_id,is_active) VALUES (0,0,%s,FALSE)", (target,))
     try:
-        assert not repo.has_active_campaign_target(chat_id)
+        assert not repo.is_video_emoji_validation_chat_registered(chat_id)
         for table, enable, disable in (
             ("rule_repost_campaign_targets",
              "UPDATE rule_repost_campaign_targets SET is_active=TRUE WHERE target_id=%s",
@@ -1607,13 +1607,39 @@ def test_emoji_validation_rejects_campaign_only_destinations(repo):
             with repo.connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute(enable, (target,))
-            assert repo.has_active_campaign_target(chat_id), table
+            assert repo.is_video_emoji_validation_chat_registered(chat_id), table
             with repo.connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute(disable, (target,))
-        assert not repo.has_active_campaign_target(chat_id)
+        assert not repo.is_video_emoji_validation_chat_registered(chat_id)
     finally:
         with repo.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM rule_repost_campaign_targets WHERE target_id=%s", (target,))
                 cur.execute("DELETE FROM campaign_scheduled_post_targets WHERE target_id=%s", (target,))
+
+
+def test_emoji_validation_registry_checks_inactive_rules_and_active_channels(repo):
+    target = "-100" + str(uuid4().int % 10**12)
+    other = target + "1"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO routing(source_id,target_id,created_date,is_active) VALUES(%s,%s,'2026-01-01',FALSE) RETURNING id", (target, other))
+            rule_id = cur.fetchone()["id"]
+            cur.execute("INSERT INTO channels(channel_id,channel_type,added_date,is_active) VALUES(%s,'source','2026-01-01',FALSE)", (target,))
+    try:
+        assert repo.is_video_emoji_validation_chat_registered(int(target))
+        assert repo.is_video_emoji_validation_chat_registered(int(other))
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM routing WHERE id=%s", (rule_id,))
+        assert not repo.is_video_emoji_validation_chat_registered(int(target))
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE channels SET is_active=TRUE WHERE channel_id=%s", (target,))
+        assert repo.is_video_emoji_validation_chat_registered(int(target))
+    finally:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM routing WHERE id=%s", (rule_id,))
+                cur.execute("DELETE FROM channels WHERE channel_id=%s", (target,))

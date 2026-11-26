@@ -283,6 +283,31 @@ def is_menu_navigation_text(text: str | None) -> bool:
     return any(value.startswith(prefix) for prefix in MENU_NAVIGATION_PREFIXES)
 
 
+# A token is kept alive by each in-flight input, not by an unbounded rule cache.
+class _VideoCaptionRevision:
+    pass
+
+
+video_caption_revisions: WeakValueDictionary[int, _VideoCaptionRevision] = WeakValueDictionary()
+
+
+async def _finish_caption_write(func, *args):
+    """A cancelled handler must not release its rule lock ahead of the DB write."""
+    task = asyncio.create_task(run_db(func, *args))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 def reset_user_state(user_id: int | None) -> None:
     if user_id is None:
         return
@@ -6227,6 +6252,8 @@ async def handle_video_caption_clear(callback: CallbackQuery):
     if not await ensure_rule_callback_access(callback, rule_id):
         return
 
+    revision = _VideoCaptionRevision()
+    video_caption_revisions[rule_id] = revision
     # Invalidate every pending caption input for this rule before waiting
     # for an already-submitted save. Other rules and UI flows stay untouched.
     for actor_id, state in tuple(user_states.items()):
@@ -6237,7 +6264,10 @@ async def handle_video_caption_clear(callback: CallbackQuery):
         if not await ensure_rule_callback_access(callback, rule_id):
             return
         before_rule = await run_db(db.get_rule, rule_id)
-        ok = await run_db(db.update_rule_video_caption, rule_id, None, None)
+        if video_caption_revisions.get(rule_id) is not revision:
+            await answer_callback_safe_once(callback, "Очистка отменена: поступила новая подпись")
+            return
+        ok = await _finish_caption_write(db.update_rule_video_caption, rule_id, None, None)
         if ok:
             invalidate_rule_card_cache(rule_id)
             await run_db(
@@ -6254,12 +6284,14 @@ async def handle_video_caption_clear(callback: CallbackQuery):
             )
 
     if ok:
-        await edit_message_text_safe(
-            message=callback.message,
-            text = await run_db(build_video_caption_menu_text, rule_id),
-            parse_mode="HTML",
-            reply_markup=build_video_caption_menu_keyboard(rule_id),
-        )
+        menu_text = await run_db(build_video_caption_menu_text, rule_id)
+        if video_caption_revisions.get(rule_id) is revision:
+            await edit_message_text_safe(
+                message=callback.message,
+                text=menu_text,
+                parse_mode="HTML",
+                reply_markup=build_video_caption_menu_keyboard(rule_id),
+            )
         await answer_callback_safe_once(callback, "Очищено")
     else:
         await answer_callback_safe(callback, "Ошибка при очистке", show_alert=True)
@@ -7459,6 +7491,8 @@ async def handle_stateful_private_inputs(message: Message):
             return
         state = {**state, "caption_input_message_id": message.message_id}
         user_states[user_id] = state
+        revision = _VideoCaptionRevision()
+        video_caption_revisions[state["rule_id"]] = revision
     text = (message.text or "").strip()
 
     if await handle_vip_scheduled_post_material_message(campaign_handlers_ctx, message):
@@ -7636,6 +7670,9 @@ async def handle_stateful_private_inputs(message: Message):
         validation = await _validate_video_caption_emoji(caption, entities_json, user_id=user_id)
         if _get_user_state(user_id) is not state:
             return
+        if video_caption_revisions.get(rule_id) is not revision:
+            await reply_message_safe(message, "⚠️ Ввод устарел: поступила новая подпись. Повторите ввод.")
+            return
         if not validation.ok:
             await reply_message_safe(message, "Подпись не сохранена.\n" + format_validation_result(validation))
             return
@@ -7651,7 +7688,10 @@ async def handle_stateful_private_inputs(message: Message):
                 return
             if _get_user_state(user_id) is not state:
                 return
-            result = await run_db(
+            if video_caption_revisions.get(rule_id) is not revision:
+                await reply_message_safe(message, "⚠️ Ввод устарел: поступила новая подпись. Повторите ввод.")
+                return
+            result = await _finish_caption_write(
                 _save_video_caption_sync,
                 rule_id,
                 caption,

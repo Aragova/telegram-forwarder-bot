@@ -134,13 +134,7 @@ async def check_documents(client, occurrences):
 
 
 def _registered_chat(repo, chat_id):
-    for rule in repo.get_all_rules():
-        if str(chat_id) in (str(rule.source_id), str(rule.target_id)):
-            return True
-    if any(str(row["channel_id"]) == str(chat_id)
-           for kind in ("source", "target") for row in repo.get_channels(kind)):
-        return True
-    return repo.has_active_campaign_target(chat_id)
+    return repo.is_video_emoji_validation_chat_registered(chat_id)
 
 
 async def _private_test_target(client, repo, chat_id):
@@ -314,10 +308,23 @@ class VideoEmojiValidator:
                     account_id = getattr(await asyncio.wait_for(client.get_me(input_peer=False), timeout=10), "id", None)
                 if type(account_id) is not int or account_id <= 0:
                     raise RuntimeError("diagnostic account identity unavailable")
-                reservation = await run_db(repo.reserve_video_emoji_check, account_id, user_id, chat_id)
+                reservation_task = asyncio.create_task(
+                    run_db(repo.reserve_video_emoji_check, account_id, user_id, chat_id)
+                )
+                cancelled = False
+                while not reservation_task.done():
+                    try:
+                        await asyncio.shield(reservation_task)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                    except Exception:
+                        break  # Read the task result below, including DB errors.
+                reservation = reservation_task.result()
+                reserved = reservation == "reserved"
+                if cancelled:
+                    raise asyncio.CancelledError
                 if reservation != "reserved":
                     return ValidationResult("unavailable", (EmojiIssue(None, None, reservation),))
-                reserved = True
                 return await asyncio.wait_for(
                     self._validate_live(client, repo, chat_id, occurrences, fence, account_id),
                     timeout=CHECK_TIMEOUT,
@@ -367,20 +374,23 @@ class VideoEmojiValidator:
             # media can be published without the emoji.
             if not await session.accepts([]):
                 return ValidationResult("unavailable", (EmojiIssue(None, None, "control_failed"),))
-            # Repeated occurrences must be checked in the full probe, but
-            # isolate each document only once; report every original position.
-            by_id = {}
+            # Exact variants can behave differently (e.g. ⭐ and ⭐️).
+            # A deduplicated group must itself fail before isolation.
+            by_variant = {}
             for item in occurrences:
-                by_id.setdefault(item.document_id, item)
-            unique = list(by_id.values())
+                by_variant.setdefault((item.document_id, item.symbol), item)
+            unique = list(by_variant.values())
             if len(unique) != len(occurrences) and await session.accepts(unique):
                 issues = [EmojiIssue(None, None, "combination_rejected")]
             else:
                 isolated = await session.isolate(unique)
-                rejected = {i.document_id for i in isolated if i.document_id is not None}
+                rejected_offsets = {i.offset for i in isolated if i.document_id is not None}
+                rejected = {(item.document_id, item.symbol) for item in unique
+                            if item.offset in rejected_offsets}
                 issues = [i for i in isolated if i.document_id is None]
                 issues.extend(EmojiIssue(item.document_id, item.offset, "publication_rejected")
-                              for item in occurrences if item.document_id in rejected)
+                              for item in occurrences
+                              if (item.document_id, item.symbol) in rejected)
             logger.warning("VIDEO_EMOJI_VALIDATION_REJECTED | ids=%s | reasons=%s",
                            sorted({i.document_id for i in issues if i.document_id is not None}),
                            sorted({i.reason for i in issues}))

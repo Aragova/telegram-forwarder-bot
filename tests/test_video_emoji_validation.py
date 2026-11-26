@@ -229,8 +229,7 @@ def test_unconfigured_channel_blocks_custom_caption(monkeypatch):
 
 def test_registered_channel_is_rejected_before_resolving_entity():
     repo = SimpleNamespace(
-        get_all_rules=lambda: [SimpleNamespace(source_id=str(CHAT), target_id="-10099")],
-        get_channels=lambda _kind: [],
+        is_video_emoji_validation_chat_registered=lambda cid: cid == CHAT,
     )
     try:
         asyncio.run(validation._private_test_target(None, repo, CHAT))
@@ -272,10 +271,9 @@ def test_cancelled_publication_timeout_keeps_fence(monkeypatch):
 
     async def hanging_publish(**kwargs):
         client.calls.append([e.document_id for e in kwargs["formatting_entities"]])
-        await asyncio.Event().wait()
+        await asyncio.wait_for(asyncio.Event().wait(), timeout=0)
 
     monkeypatch.setattr(client, "_publish", hanging_publish)
-    monkeypatch.setattr(validation, "CHECK_TIMEOUT", 0.05)
     result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
     assert result.status == "unavailable"
     assert client.calls == [[1]] and repo.inflight
@@ -312,8 +310,7 @@ def test_variation_selector_difference_still_uses_real_probe(monkeypatch):
 
 
 def test_registered_target_channel_is_rejected():
-    repo = SimpleNamespace(get_all_rules=lambda: [],
-                           get_channels=lambda kind: [{"channel_id": CHAT}] if kind == "target" else [])
+    repo = SimpleNamespace(is_video_emoji_validation_chat_registered=lambda cid: cid == CHAT)
     assert validation._registered_chat(repo, CHAT)
 
 
@@ -328,12 +325,15 @@ def test_timeout_before_publication_rpc_releases_fence(monkeypatch):
     repo = FakeRepo()
     client = FakeClient([document(1, "💎")])
 
+    entered = []
+
     async def queued_send(**_kwargs):
-        await asyncio.Event().wait()
+        entered.append(True)
+        await asyncio.wait_for(asyncio.Event().wait(), timeout=0)
 
     monkeypatch.setattr(client, "send_file", queued_send)
-    monkeypatch.setattr(validation, "CHECK_TIMEOUT", 0.05)
     result = run_check(monkeypatch, client, "💎", [entity(1, 0)], repo=repo)
+    assert entered == [True]
     assert result.status == "unavailable"
     assert not repo.inflight and repo.releases == 1
 
@@ -409,6 +409,7 @@ def _caption_input_handler(save, validate, states, *, with_clear=False, menu_tex
 
     ns = {
         "asyncio": asyncio, "user_states": states, "video_caption_save_locks": WeakValueDictionary(),
+        "video_caption_revisions": WeakValueDictionary(),
         "_get_user_state": lambda uid: states.get(uid) or {},
         "_is_admin_user": lambda _uid: True,
         "reset_user_state": lambda uid: states.pop(uid, None),
@@ -422,6 +423,11 @@ def _caption_input_handler(save, validate, states, *, with_clear=False, menu_tex
         "build_video_caption_menu_keyboard": lambda _rule_id: None,
         "settings": SimpleNamespace(admin_id=7),
     }
+    helpers = [node for node in source.body
+               if isinstance(node, (ast.ClassDef, ast.AsyncFunctionDef))
+               and node.name in {"_VideoCaptionRevision", "_finish_caption_write"}]
+    exec(compile(ast.fix_missing_locations(ast.Module(body=helpers, type_ignores=[])),
+                 "bot.py", "exec"), ns)
     header = ast.parse(
         "async def handle(message):\n"
         "    user_id = message.from_user.id\n"
@@ -583,9 +589,7 @@ def test_clear_wins_against_pending_caption_validation_or_save(save_already_star
 @pytest.mark.parametrize("registered", [True, False])
 def test_campaign_only_target_registry(registered):
     repo = SimpleNamespace(
-        get_all_rules=lambda: [],
-        get_channels=lambda _kind: [],
-        has_active_campaign_target=lambda cid: registered and cid == CHAT,
+        is_video_emoji_validation_chat_registered=lambda cid: registered and cid == CHAT,
     )
     assert validation._registered_chat(repo, CHAT) is registered
     if registered:
@@ -699,5 +703,91 @@ def test_caption_menu_db_read_does_not_replace_new_input(new_input):
             assert states[7]["rule_id"] == 142
         else:
             assert len(messages) == 1 and messages[0]["text"] == "menu"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("status", ["reserved", "pending_review", "quota"])
+def test_cancel_during_db_reservation_releases_only_owned_fence(monkeypatch, status):
+    async def scenario():
+        repo = FakeRepo()
+        client = FakeClient([document(1, "💎")])
+        entered, finish = asyncio.Event(), asyncio.Event()
+
+        async def db_call(func, *args):
+            if func == repo.reserve_video_emoji_check:
+                entered.set()
+                await finish.wait()
+                if status == "reserved":
+                    return func(*args)
+                return status
+            return func(*args)
+
+        monkeypatch.setattr(validation, "run_db", db_call)
+        task = asyncio.create_task(validation.VideoEmojiValidator().validate(
+            client, repo, CHAT, "💎", [entity(1, 0)], user_id=7,
+        ))
+        await entered.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not client.calls
+        assert repo.releases == int(status == "reserved")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("caption, offsets, rejected", [
+    ("⭐️ ⭐", [0, 3], 3),
+    ("⭐ ⭐️", [0, 2], 0),
+])
+def test_same_document_different_symbol_variants(monkeypatch, caption, offsets, rejected):
+    client = FakeClient([document(1, "⭐️")])
+    original_publish = client._publish
+
+    async def publish(**kwargs):
+        result = await original_publish(**kwargs)
+        raw = kwargs["caption"].encode("utf-16-le")
+        result.entities = [e for e in result.entities
+                           if raw[e.offset * 2:(e.offset + e.length) * 2].decode("utf-16-le") != "⭐"]
+        return result
+
+    monkeypatch.setattr(client, "_publish", publish)
+    lengths = [2, 1] if caption.startswith("⭐️") else [1, 2]
+    result = run_check(monkeypatch, client, caption,
+                       [entity(1, offset, length) for offset, length in zip(offsets, lengths)])
+    assert result.status == "invalid"
+    assert [(i.document_id, i.offset) for i in result.issues] == [(1, rejected)]
+
+
+def test_newer_caption_from_another_user_wins():
+    async def scenario():
+        entered, resume = asyncio.Event(), asyncio.Event()
+        writes = []
+        states = {7: {"action": "video_caption", "rule_id": 141},
+                  8: {"action": "video_caption", "rule_id": 141}}
+
+        async def validate(caption, *_args, **_kwargs):
+            if caption == "old":
+                entered.set()
+                await resume.wait()
+            return validation.ValidationResult("verified")
+
+        def save(_rule, caption, *_args):
+            writes.append(caption)
+            return {"ok": True}
+
+        handle = _caption_input_handler(save, validate, states)
+        old = asyncio.create_task(handle(_caption_input(100, "old")))
+        await entered.wait()
+        new = _caption_input(101, "new")
+        new.from_user.id = 8
+        await handle(new)
+        resume.set()
+        await old
+        assert writes == ["new"]
 
     asyncio.run(scenario())
