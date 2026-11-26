@@ -84,6 +84,13 @@ class FakeClient:
         return [doc for doc in self.docs if doc.id in request.document_id]
 
     async def send_file(self, **kwargs):
+        import inspect
+        from telethon import TelegramClient
+
+        parameters = inspect.signature(TelegramClient.send_file).parameters
+        # Do not allow the fake to silently accept a keyword that is not
+        # explicitly declared by the installed Telethon send_file API.
+        assert set(kwargs) <= set(parameters), set(kwargs) - set(parameters)
         return await observe_diagnostic_publication(lambda: self._publish(**kwargs))
 
     async def _publish(self, **kwargs):
