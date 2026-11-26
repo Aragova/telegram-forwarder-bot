@@ -665,32 +665,19 @@ async def _run_rescan_rule_keep_job(
             ),
         )
 
-        if not refreshed:
-            row = get_rule_stats_row(rule_id)
-            if row:
-                await send_message_safe(
-                    chat_id=chat_id,
-                    text=build_rule_card_text(row),
-                    parse_mode="HTML",
-                    reply_markup=build_rule_card_keyboard(
-                        rule_id,
-                        bool(row["is_active"]),
-                        row["schedule_mode"] or "interval",
-                        row["mode"] or "repost",
-                    ),
-                )
-            else:
-                await send_message_safe(
-                    chat_id=chat_id,
-                    text=(
-                        f"✅ Правило #{rule_id} пересканировано с сохранением позиции.\n"
-                        f"Найдено постов источника: {parsed_count}\n"
-                        f"Очередь пересобрана: {rebuilt_count}\n"
-                        f"Исключено удалённых из источника: {removed_stale}\n"
-                        f"Убрано pending до нужной точки: {removed_before}\n"
-                        f"На ручной проверке без повторной отправки: {quarantined}"
-                    ),
-                )
+        if refreshed not in {"updated", "resent"}:
+            await _show_rule_processing_screen(
+                chat_id=chat_id, message_id=message_id,
+                text=(
+                    f"✅ Правило #{rule_id} пересканировано с сохранением позиции.\n"
+                    f"Новых записей источника: {parsed_count}\n"
+                    f"Добавлено в очередь: {rebuilt_count}\n"
+                    f"Исключено удалённых: {removed_stale}\n"
+                    f"Убрано до сохранённой позиции: {removed_before}\n"
+                    f"На ручной проверке: {quarantined}"
+                ),
+                reply_markup=build_rescan_rule_keyboard(rule_id),
+            )
 
     except Exception as exc:
         if isinstance(exc, RescanBlocked):
