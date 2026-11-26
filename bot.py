@@ -6108,10 +6108,11 @@ async def handle_video_caption_validate(callback: CallbackQuery):
     if rule is None or getattr(rule, "mode", None) != "video":
         await answer_callback_safe(callback, "Правило видео не найдено", show_alert=True)
         return
+    user_id = callback.from_user.id if callback.from_user else 0
+    state_before = user_states.get(user_id)
     await answer_callback_safe_once(callback)
     result = await _validate_video_caption_emoji(
-        rule.video_caption, rule.video_caption_entities_json,
-        user_id=callback.from_user.id if callback.from_user else 0,
+        rule.video_caption, rule.video_caption_entities_json, user_id=user_id,
     )
     latest = await run_db(db.get_rule, rule_id)
     if latest is None or (
@@ -6122,12 +6123,16 @@ async def handle_video_caption_validate(callback: CallbackQuery):
         text = format_validation_result(result)
     if not await ensure_rule_callback_access(callback, rule_id):
         return
-    await edit_message_text_safe(
-        message=callback.message,
-        text=text,
-        reply_markup=build_video_caption_menu_keyboard(rule_id),
-        parse_mode=None,
-    )
+    if user_states.get(user_id) is not state_before:
+        return
+    # A separate result cannot overwrite a newer edit prompt or menu even
+    # if another callback changes the screen while the Telegram RPC awaits.
+    if callback.message is not None:
+        await send_message_safe(
+            chat_id=callback.message.chat.id,
+            text=f"Правило #{rule_id} — проверка подписи\n\n{text}",
+            parse_mode=None,
+        )
 
 
 @dp.callback_query(lambda c: c.data.startswith("video_caption_mode_menu:"))

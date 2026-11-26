@@ -137,8 +137,10 @@ def _registered_chat(repo, chat_id):
     for rule in repo.get_all_rules():
         if str(chat_id) in (str(rule.source_id), str(rule.target_id)):
             return True
-    return any(str(row["channel_id"]) == str(chat_id)
-               for kind in ("source", "target") for row in repo.get_channels(kind))
+    if any(str(row["channel_id"]) == str(chat_id)
+           for kind in ("source", "target") for row in repo.get_channels(kind)):
+        return True
+    return repo.has_active_campaign_target(chat_id)
 
 
 async def _private_test_target(client, repo, chat_id):

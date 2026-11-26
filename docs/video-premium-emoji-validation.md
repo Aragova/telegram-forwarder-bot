@@ -21,7 +21,7 @@ The service host must have `ffmpeg` available in its `PATH` to generate the
 synthetic probe clip. Check with `ffmpeg -version` in the service environment.
 
 Restart the application normally. The validator refuses registered source/target
-channels and checks their isolation before generating a synthetic clip. The operator
+channels and active campaign destinations, and checks their isolation before generating a synthetic clip. The operator
 must keep this channel isolated after setup; a concurrent external registration
 cannot be made atomic with Telegram publication.
 
@@ -31,7 +31,8 @@ cannot be made atomic with Telegram publication.
   If the test channel is unconfigured, unavailable, busy, or the result is unknown,
   the previous caption stays unchanged. Ordinary captions and clearing still work.
 - A dedicated button "Проверить Premium-эмодзи" checks an already stored video caption
-  without editing it. Existing captions are not silently rewritten or auto-scanned.
+  without editing it. The result is a separate message, not an edit of a potentially
+  newer menu or input prompt. Existing captions are not silently rewritten or auto-scanned.
 - Validate document IDs, UTF-16 substrings and Telegram Custom Emoji alt text (VS16-only differences are tested by the real probe).
 - Use a one-second generated black MP4 with silent audio, and a random diagnostic
   marker plus only the ordinary emoji characters. No source video, original

@@ -578,3 +578,66 @@ def test_clear_wins_against_pending_caption_validation_or_save(save_already_star
         assert writes == (["old", None] if save_already_started else [None])
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("registered", [True, False])
+def test_campaign_only_target_registry(registered):
+    repo = SimpleNamespace(
+        get_all_rules=lambda: [],
+        get_channels=lambda _kind: [],
+        has_active_campaign_target=lambda cid: registered and cid == CHAT,
+    )
+    assert validation._registered_chat(repo, CHAT) is registered
+    if registered:
+        with pytest.raises(RuntimeError, match="registered"):
+            asyncio.run(validation._private_test_target(None, repo, CHAT))
+
+
+@pytest.mark.parametrize("change_state", [True, False])
+def test_manual_check_does_not_overwrite_new_caption_prompt(change_state):
+    import ast
+
+    source = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    handler = next(node for node in source.body
+                   if isinstance(node, ast.AsyncFunctionDef) and node.name == "handle_video_caption_validate")
+    handler.decorator_list = []
+    handler.args.args[0].annotation = None
+    states = {}
+    messages = []
+    rule = SimpleNamespace(mode="video", video_caption="test", video_caption_entities_json=None)
+
+    async def allowed(*_args):
+        return True
+
+    async def get_db(func, *args):
+        return func(*args)
+
+    async def validate(*_args, **_kwargs):
+        if change_state:
+            states[7] = {"action": "video_caption", "rule_id": 1}
+        return validation.ValidationResult("no_custom")
+
+    async def send(**kwargs):
+        messages.append(kwargs)
+
+    async def never_edit(**_kwargs):
+        pytest.fail("A manual check must never edit a live menu or input prompt")
+
+    ns = {
+        "user_states": states, "ensure_rule_callback_access": allowed,
+        "answer_callback_safe_once": allowed, "run_db": get_db,
+        "db": SimpleNamespace(get_rule=lambda _rid: rule),
+        "_validate_video_caption_emoji": validate,
+        "format_validation_result": validation.format_validation_result,
+        "send_message_safe": send, "edit_message_text_safe": never_edit,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[handler], type_ignores=[])),
+                 "bot.py", "exec"), ns)
+    callback = SimpleNamespace(data="video_caption_validate:1", from_user=SimpleNamespace(id=7),
+                               message=SimpleNamespace(chat=SimpleNamespace(id=7)))
+    asyncio.run(ns["handle_video_caption_validate"](callback))
+    if change_state:
+        assert not messages
+        assert states[7]["action"] == "video_caption"
+    else:
+        assert len(messages) == 1 and "Правило #1" in messages[0]["text"]

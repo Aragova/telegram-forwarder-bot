@@ -6599,6 +6599,22 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (scope_key, max(1, int(delay))),
                 )
 
+    def has_active_campaign_target(self, chat_id: int) -> bool:
+        """Check campaign destinations even when absent from the channel registry."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT EXISTS (
+                           SELECT 1 FROM rule_repost_campaign_targets
+                           WHERE target_id=%s AND is_active=TRUE
+                       ) OR EXISTS (
+                           SELECT 1 FROM campaign_scheduled_post_targets
+                           WHERE target_id=%s AND is_active=TRUE
+                       ) AS registered""",
+                    (str(chat_id), str(chat_id)),
+                )
+                return bool(cur.fetchone()["registered"])
+
     def reserve_video_emoji_check(self, account_id: int, user_id: int, chat_id: int) -> str:
         """Atomically reserve one diagnostic check across UI processes.
 
