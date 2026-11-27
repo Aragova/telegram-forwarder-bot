@@ -136,7 +136,6 @@ from app.user_handlers import (
 )
 
 from app.intro_handlers import IntroHandlersContext, register_intro_handlers
-from app.campaign_invite_link_update_handlers import router as campaign_invite_link_update_router
 
 from app.admin_handlers import (
     AdminHandlersContext,
@@ -9413,8 +9412,6 @@ register_repost_campaign_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_schedule_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_report_handlers(dp, campaign_handlers_ctx)
 register_repost_campaign_scheduled_post_handlers(dp, campaign_handlers_ctx)
-dp["campaign_invite_link_repo"] = db
-dp.include_router(campaign_invite_link_update_router)
 
 
 if __name__ == "__main__":
