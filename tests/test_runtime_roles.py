@@ -389,22 +389,15 @@ def test_polling_retries_and_only_continues_if_webhook_is_inactive(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_supervisor_survives_failed_start():
+def test_supervisor_delegates_to_lifecycle():
     async def scenario():
-        ownership = RuntimeOwnership()
-        ownership.bind("worker")
-        start = AsyncMock(side_effect=[RuntimeError("failed"), None])
-        async def sleep(_):
-            if start.await_count == 2:
-                ownership.begin_shutdown()
-        ns = {
-            "runtime_ownership": ownership, "logger": logging.getLogger(__name__),
-            "asyncio": SimpleNamespace(sleep=sleep),
-        }
+        start = AsyncMock()
+        lifecycle = SimpleNamespace(supervise=AsyncMock())
+        ns = {"job_workers": lifecycle}
         _load_runtime_functions(ns)
         ns["start_job_workers_runtime"] = start
         await ns["_supervise_job_workers"]()
-        assert start.await_count == 2
+        lifecycle.supervise.assert_awaited_once_with(start)
 
     asyncio.run(scenario())
 

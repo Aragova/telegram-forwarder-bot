@@ -9223,12 +9223,7 @@ async def _start_all_role() -> None:
 
 
 async def _supervise_job_workers() -> None:
-    while runtime_ownership.can_start_workers:
-        try:
-            await start_job_workers_runtime()
-        except Exception:
-            logger.exception("JOB_SUPERVISOR_ERROR")
-        await asyncio.sleep(10)
+    await job_workers.supervise(start_job_workers_runtime)
 
 
 async def start_job_workers_runtime(*, resume: bool = False) -> None:
