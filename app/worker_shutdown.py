@@ -33,3 +33,34 @@ async def drain_job_workers(
         await asyncio.gather(*done_after, return_exceptions=True)
     if still_pending:
         logger.error("WORKER_DRAIN_CANCEL_INCOMPLETE | workers=%s", len(still_pending))
+
+async def drain_in_flight(
+    tasks: Iterable[asyncio.Task], *, timeout_sec: float, logger: logging.Logger, queue: str,
+) -> None:
+    """A loop cannot report completion while its child sends still own resources.
+
+    If the outer drain cancels the loop, cancel the children and keep the loop
+    alive until they settle. Do not release a processing job or infer a failed
+    Telegram write from cancellation. The durable watchdog/ledger own recovery.
+    """
+    children = tuple(tasks)
+    cancelled = False
+    try:
+        _, pending = await asyncio.wait(children, timeout=max(0.01, float(timeout_sec)))
+    except asyncio.CancelledError:
+        cancelled = True
+        pending = {task for task in children if not task.done()}
+    if pending:
+        logger.warning("WORKER_CHILD_DRAIN_CANCEL | queue=%s | unfinished=%s", queue, len(pending))
+        for task in pending:
+            task.cancel()
+    # Shield the join, not the sends. Repeated outer cancellation must not
+    # detach children or interrupt their own cleanup a second time.
+    joined = asyncio.gather(*children, return_exceptions=True)
+    while not joined.done():
+        try:
+            await asyncio.shield(joined)
+        except asyncio.CancelledError:
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError

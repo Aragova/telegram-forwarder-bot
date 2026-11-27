@@ -29,6 +29,7 @@ from .transport_policy import TransportRateLimited
 from .usage_service import UsageService
 from .worker_load_service import build_worker_load_snapshot
 from .worker_resource_policy import POLICY, WorkerResourcePolicy
+from .worker_shutdown import drain_in_flight
 
 logger = logging.getLogger("forwarder")
 
@@ -494,6 +495,20 @@ def _dec_in_flight(queue: str, job_type: str, state: _InFlightState) -> None:
         state.heavy_send_active = max(0, state.heavy_send_active - 1)
 
 
+async def _finish_unstarted_job(
+    repo, job_id: int, worker_id: str, action: str, error_text: str, delay: int = 1,
+) -> bool:
+    """A leased job has not entered the Telegram pipeline yet."""
+    finalize = getattr(repo, "finalize_leased_job", None)
+    if callable(finalize):
+        return bool(await asyncio.to_thread(finalize, job_id, worker_id, action, error_text, delay))
+    # Compatibility for repositories without the PostgreSQL owner-fenced API.
+    if action == "fail":
+        return bool(await asyncio.to_thread(repo.fail_job, job_id, error_text))
+    method = (getattr(repo, "defer_job", None) if action == "defer" else None) or repo.retry_job
+    return bool(await asyncio.to_thread(method, job_id, error_text, delay))
+
+
 async def _process_job(repo, sender_service, worker_id: str, queue: str, job: dict, *, policy: WorkerResourcePolicy, state: _InFlightState) -> bool:
     job_id = int(job["id"])
     job_type = str(job["job_type"])
@@ -531,7 +546,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                     },
                 },
             )
-        await asyncio.to_thread(repo.fail_job, job_id, enqueue_reason or "Подписка неактивна")
+        await _finish_unstarted_job(repo, job_id, worker_id, "fail", enqueue_reason or "Подписка неактивна")
         return True
 
     if not reconcile_only and str(job_type).startswith("video_"):
@@ -561,7 +576,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
                 "Новые видео будут доступны после обновления дневного лимита "
                 "или после перехода на PRO."
             )
-            await asyncio.to_thread(repo.fail_job, job_id, video_reason or friendly)
+            await _finish_unstarted_job(repo, job_id, worker_id, "fail", video_reason or friendly)
             return True
 
     can_start, reason = _can_start_job(queue, job_type, state, policy)
@@ -569,7 +584,7 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
         logger.warning("%s | queue=%s | job_id=%s | job_type=%s", reason, queue, job_id, job_type)
         attempts = int(job.get("attempts") or 0) + 1
         delay = compute_retry_delay_seconds(queue, attempts, job_type, policy)
-        await asyncio.to_thread(repo.retry_job, job_id, reason or "Лимит concurrency", delay)
+        await _finish_unstarted_job(repo, job_id, worker_id, "retry", reason or "Лимит concurrency", delay)
         return True
 
     marked = await asyncio.to_thread(repo.mark_job_processing, job_id, worker_id)
@@ -1047,7 +1062,7 @@ async def _run_one_job(repo, sender_service, worker_id: str, queue: str, *, poli
     logger.info("JOB LEASED | %s взял задачу #%s (%s)", worker_id, int(job["id"]), str(job["job_type"]))
     # Возвращаем остальные в очередь, если взяли batch>1 и сейчас не запускаем их.
     for extra in leased[1:]:
-        await asyncio.to_thread(repo.retry_job, int(extra["id"]), "Контролируемый leasing: слот пока недоступен", 1)
+        await _finish_unstarted_job(repo, int(extra["id"]), worker_id, "defer", "Контролируемый leasing: слот пока недоступен")
 
     return await _process_job(repo, sender_service, worker_id, queue, job, policy=cfg, state=active_state)
 
@@ -1134,12 +1149,15 @@ async def _worker_loop(repo, sender_service, *, queue: str, worker_id: str, poli
             for job in leased:
                 if stop_event is not None and stop_event.is_set():
                     # Lease returned after drain started. No Telegram send was begun.
-                    defer = getattr(repo, "defer_job", None) or repo.retry_job
-                    await asyncio.to_thread(defer, int(job["id"]), "Worker draining: job never started", 1)
-                    logger.info("WORKER_DRAIN | queue=%s | job_id=%s | action=defer_unstarted", queue, job["id"])
+                    released = await _finish_unstarted_job(
+                        repo, int(job["id"]), lease_owner, "defer", "Worker draining: job never started",
+                    )
+                    logger.info("WORKER_DRAIN | queue=%s | job_id=%s | released=%s", queue, job["id"], released)
                     continue
                 if len(in_flight) >= queue_limit:
-                    await asyncio.to_thread(repo.retry_job, int(job["id"]), "Контролируемый leasing: нет свободных execution slots", 1)
+                    await _finish_unstarted_job(
+                        repo, int(job["id"]), lease_owner, "defer", "Контролируемый leasing: нет свободных execution slots",
+                    )
                     continue
                 logger.info("JOB LEASED | %s взял задачу #%s (%s)", worker_id, int(job["id"]), str(job["job_type"]))
                 task = asyncio.create_task(_process_job(repo, sender_service, lease_owner, queue, job, policy=policy, state=state))
@@ -1152,17 +1170,10 @@ async def _worker_loop(repo, sender_service, *, queue: str, worker_id: str, poli
     finally:
         if in_flight:
             logger.info("Worker ждёт завершения in-flight задач | queue=%s | count=%s", queue, len(in_flight))
-            done, pending = await asyncio.wait(in_flight, timeout=float(policy.graceful_shutdown_timeout_sec))
-            if pending:
-                logger.warning(
-                    "Worker graceful shutdown timeout | queue=%s | unfinished=%s | timeout_sec=%s",
-                    queue,
-                    len(pending),
-                    policy.graceful_shutdown_timeout_sec,
-                )
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
+            await drain_in_flight(
+                tuple(in_flight), timeout_sec=policy.graceful_shutdown_timeout_sec,
+                logger=logger, queue=queue,
+            )
 
 
 async def run_light_worker(repo, sender_service, worker_id: str = "light-worker-1", *, stop_event: asyncio.Event | None = None, policy: WorkerResourcePolicy | None = None) -> None:

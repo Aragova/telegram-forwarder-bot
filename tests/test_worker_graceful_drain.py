@@ -137,3 +137,39 @@ def test_shutdown_drains_publication_before_cancelling_retries():
     assert shutdown.index("await asyncio.wait_for(flush_publication()") < shutdown.index("await stop_background_tasks()")
     assert shutdown.rindex("publication_evidence_unpersisted") > shutdown.index("await stop_background_tasks()")
     assert shutdown.rindex("publication_evidence_unpersisted") < shutdown.index("await raw_telethon.disconnect()")
+
+
+def test_outer_cancellation_does_not_detach_child_cleanup():
+    from app.worker_shutdown import drain_in_flight
+
+    async def scenario():
+        started = asyncio.Event()
+        cleaning = asyncio.Event()
+        release = asyncio.Event()
+
+        async def child():
+            started.set()
+            try:
+                await asyncio.sleep(60)
+            finally:
+                cleaning.set()
+                await release.wait()
+
+        task = asyncio.create_task(child())
+        await started.wait()
+        parent = asyncio.create_task(drain_in_flight(
+            [task], timeout_sec=60, logger=logging.getLogger("test.drain"), queue="heavy",
+        ))
+        await asyncio.sleep(0)
+        parent.cancel()
+        await asyncio.wait_for(cleaning.wait(), 1)
+        parent.cancel()
+        await asyncio.sleep(0)
+        assert not parent.done()
+        assert not task.done()
+        release.set()
+        await asyncio.gather(parent, return_exceptions=True)
+        assert parent.cancelled()
+        assert task.done()
+
+    asyncio.run(scenario())

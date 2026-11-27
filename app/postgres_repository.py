@@ -1785,18 +1785,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
 
     def reset_stuck_processing(self) -> int:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE deliveries
-                    SET status = 'pending'
-                    WHERE status = 'processing'
-                    """
-                )
-                count = cur.rowcount
-            conn.commit()
-            return int(count or 0)
+        """Compatibility only: never reopen all processing deliveries.
+
+        A processing delivery can have a live job or a durable Telegram
+        receipt. Recovery belongs to the existing job/receipt state machine.
+        """
+        logger.warning("LEGACY_PROCESSING_RESET_DISABLED | action=preserve_delivery_state")
+        return 0
 
 
     def get_stuck_processing_deliveries(
@@ -8341,12 +8336,44 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     WHERE id = %s
                       AND status = 'leased'
                       AND locked_by = %s
+                      AND lease_until > NOW()
                     """,
                     (int(job_id), worker_id),
                 )
                 ok = cur.rowcount > 0
             conn.commit()
             return ok
+
+    def finalize_leased_job(
+        self, job_id: int, worker_id: str, action: str,
+        error_text: str, delay_seconds: int = 1,
+    ) -> bool:
+        """Release an unstarted lease only if this exact owner still holds it."""
+        if action not in {"defer", "retry", "fail"}:
+            raise ValueError(f"Unsupported leased job action: {action}")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = %s, attempts = attempts + %s,
+                        run_at = CASE WHEN %s = 'retry'
+                                      THEN NOW() + make_interval(secs => %s)
+                                      ELSE run_at END,
+                        locked_by = NULL, lease_until = NULL,
+                        error_text = %s, updated_at = NOW()
+                    WHERE id = %s AND status = 'leased' AND locked_by = %s
+                      AND lease_until > NOW()
+                      AND COALESCE(payload_json->>'rescan_cancelled','false')<>'true'
+                    """,
+                    ("failed" if action == "fail" else "retry",
+                     int(action != "defer"), "failed" if action == "fail" else "retry",
+                     max(1, int(delay_seconds)), (error_text or "")[:1000],
+                     int(job_id), str(worker_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
 
     def heartbeat_job_processing(self, job_id: int, worker_id: str) -> bool:
         """Refresh liveness only for the execution that still owns the processing job."""

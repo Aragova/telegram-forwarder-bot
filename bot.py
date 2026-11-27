@@ -8591,8 +8591,9 @@ async def _init_db_runtime() -> None:
     if not ok:
         raise RuntimeError(f"PostgreSQL недоступен: {msg}")
 
-    reset_count = await run_db(db.reset_stuck_processing)
-    logger.warning(f"♻️ Сброшено зависших processing задач: {reset_count}")
+    # All runtime roles share PostgreSQL. An UI/scheduler restart must never
+    # revoke a live worker or reopen a possibly published delivery.
+    # Existing jobs are recovered by the lease/heartbeat watchdog.
 
 
 async def _init_sender_runtime(*, create_ui_policy: bool) -> None:

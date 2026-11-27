@@ -81,3 +81,14 @@ def test_retry_increments_attempts_but_rate_limit_defer_does_not():
     assert repo.finalize_owned_job(21, "w1", "defer", "flood", 30)
     _, args = repo.conn.cursor_obj.calls[0]
     assert args[0] == 0
+
+
+def test_unstarted_job_release_is_lease_fenced_and_defer_is_free():
+    repo = _Repo(rowcount=0)
+    for action in ("defer", "retry", "fail"):
+        assert not PostgresRepository.finalize_leased_job(repo, 17, "old", action, "reason", 1)
+        sql, args = repo.conn.cursor_obj.calls[-1]
+        assert "status = 'leased' AND locked_by = %s" in sql
+        assert "lease_until > NOW()" in sql
+        assert args[-2:] == (17, "old")
+        assert args[1] == int(action != "defer")
