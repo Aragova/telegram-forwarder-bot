@@ -2040,9 +2040,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                                         OR a.idempotency_key =
                                             'rule:' || d.rule_id::text || ':target:' || a.target_id
                                             || ':media_group:' || p.media_group_id || ':album'
-                                        OR starts_with(a.idempotency_key,
+                                        OR strpos(a.idempotency_key,
                                             'rule:' || d.rule_id::text || ':target:' || a.target_id
-                                            || ':media_group:' || p.media_group_id || ':album:members:')
+                                            || ':media_group:' || p.media_group_id || ':album:members:') = 1
                                     ))
                                 )
                           )
