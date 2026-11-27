@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable
@@ -36,13 +37,21 @@ def register_user_status_handlers(dp: Dispatcher, ctx: UserStatusHandlersContext
         sub = await ctx.run_db(ctx.subscription_service.get_active_subscription, tenant_id) or {}
         status = str(sub.get("status") or "active")
         usage_today = await ctx.run_db(ctx.usage_service.get_today_usage, tenant_id)
-        stats = await ctx.run_db(ctx.db.get_tenant_queue_stats, tenant_id)
-        active_rules = int(stats["active_rules"])
+        try:
+            stats = await ctx.run_db(ctx.db.get_tenant_queue_stats, tenant_id)
+            active_rules = int(stats["active_rules"])
+            queue_total = int(stats["pending"])
+            errors_total = int(stats["faulty"])
+            next_run = stats["next_run_at"]
+            next_publication = str(next_run)[11:16] if next_run else "—"
+            stats_note = ""
+        except Exception:
+            logging.getLogger("forwarder.user_status").exception(
+                "Не удалось получить сводку доставки аккаунта %s", tenant_id,
+            )
+            active_rules = queue_total = errors_total = next_publication = "—"
+            stats_note = "⚠️ Статистика временно недоступна. Повторите обновление.\n\n"
         jobs_today = int((usage_today or {}).get("jobs_count") or 0)
-        queue_total = int(stats["pending"])
-        errors_total = int(stats["faulty"])
-        next_run = stats["next_run_at"]
-        next_publication = str(next_run)[11:16] if next_run else "—"
         state_line = "🟢 Доступ активен"
         if status == "grace":
             state_line = "⚠️ Льготный период"
@@ -63,6 +72,7 @@ def register_user_status_handlers(dp: Dispatcher, ctx: UserStatusHandlersContext
             f"⏳ В обработке: {active_rules}\n"
             f"✅ Отправлено сегодня: {jobs_today}\n"
             f"⚠️ Ошибки: {errors_total}\n\n"
+            f"{stats_note}"
             "──────────────\n\n"
             f"🕒 Обновлено: {datetime.now(ctx.USER_TZ).strftime('%H:%M')} (UTC+3)\n"
             f"Следующая публикация: {next_publication}"

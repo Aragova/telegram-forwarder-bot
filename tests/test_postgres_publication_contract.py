@@ -1733,6 +1733,11 @@ def test_rule_catalog_sql_pagination_and_scope(repo):
     assert last.page == 1 and [r.id for r in last.rules] == ids[10:]
     assert repo.get_rule_catalog_page(1, search=f"#{ids[0]}").total == 1
     assert repo.get_rule_catalog_page(1, search=f"#{other}").total == 0
+    assert repo.get_rule_catalog_page(1, search=f"# {ids[0]}").total == 1
+    # Numeric input without # matches chat metadata, not the rule primary key.
+    assert repo.get_rule_catalog_page(1, search=str(ids[0]), selected_ids=[ids[0]]).valid_selected_ids == (
+        {ids[0]} if str(ids[0]) in f"{prefix}-src-0" or str(ids[0]) in f"{prefix}-dst-0" else set()
+    )
     assert repo.get_rule_catalog_page(1, search="#999999999999999999999999").total == 0
     assert repo.get_rule_catalog_page(1, search=prefix, owner_admin_id=777).total == 14
     assert repo.get_rule_catalog_page(1, search=prefix, active=False).total == 6
@@ -1778,7 +1783,7 @@ def test_tenant_live_status_matches_canonical_logical_counts(repo):
             cur.execute("UPDATE deliveries SET status='pending' WHERE id=ANY(%s)", (repost_ids + video_ids,))
             cur.execute(
                 "UPDATE posts SET content_json=%s WHERE id=(SELECT post_id FROM deliveries WHERE id=%s)",
-                ('{"media_kind":"photo"}', video_ids[-1]),
+                ('null', video_ids[-1]),
             )
             cur.execute("UPDATE deliveries SET status='faulty' WHERE id=%s", (video_ids[0],))
     snapshots = [repo.get_rule_card_snapshot(rule_id) for rule_id in (repost, video)]

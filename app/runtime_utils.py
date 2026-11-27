@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar, copy_context
 from functools import partial
@@ -50,7 +51,12 @@ async def run_ui_db(callable_obj, *args, **kwargs):
             if error is not None:
                 reported = True
                 logging.getLogger("forwarder.runtime_utils").error(
-                    "UI_DB_TASK_FAILED_AFTER_CANCEL | error_type=%s", type(error).__name__,
+                    "UI_DB_TASK_FAILED_AFTER_CANCEL | error_type=%s\n%s",
+                    type(error).__name__,
+                    "\n".join(
+                        f"{frame.filename}:{frame.lineno} in {frame.name}"
+                        for frame in traceback.extract_tb(error.__traceback__)
+                    ),
                 )
 
     def finished(result):

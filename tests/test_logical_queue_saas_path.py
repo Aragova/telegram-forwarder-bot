@@ -298,3 +298,16 @@ def test_compact_logical_projection_matches_canonical_builder():
         compact = repo._build_rule_logical_items_from_rows(1, projected, mode, compact=True)
         assert repo._summarize_rule_logical_items(compact) == repo._summarize_rule_logical_items(full)
         assert all("content_json" not in item and "delivery_ids" not in item for item in compact)
+
+
+def test_non_object_video_json_does_not_break_other_publications():
+    repo = _RepoForTests()
+    rows = [
+        _mk_row(i, post_id=i, message_id=i, status="pending", media_kind="video")
+        for i in range(1, 8)
+    ]
+    for row, raw in zip(rows, ("null", "[]", '"video"', "42", "true", "broken")):
+        row["content_json"] = raw
+    for compact in (False, True):
+        items = repo._build_rule_logical_items_from_rows(1, iter(rows), "video", compact=compact)
+        assert repo._summarize_rule_logical_items(items)["pending"] == 1

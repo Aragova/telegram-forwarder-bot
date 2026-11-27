@@ -103,3 +103,69 @@ def test_ui_lane_progresses_while_background_executor_is_saturated():
         asyncio.run(main())
     finally:
         shutdown_ui_db_executor()
+
+
+def test_workers_started_from_private_handler_do_not_inherit_ui_lane():
+    import logging
+    from app.job_worker_lifecycle import JobWorkerLifecycle
+    from app.runtime_roles import RuntimeOwnership
+
+    async def main():
+        ownership = RuntimeOwnership()
+        ownership.bind("all")
+        lifecycle = JobWorkerLifecycle(ownership, logging.getLogger(__name__))
+        observed = asyncio.get_running_loop().create_future()
+
+        async def worker(stop):
+            observed.set_result(await run_db(lambda: threading.current_thread().name))
+            await stop.wait()
+
+        async def handler(event, data):
+            lifecycle.ensure_running({"test-worker": worker})
+            assert (await run_db(lambda: threading.current_thread().name)).startswith("vimi-ui-db")
+            assert not (await asyncio.wait_for(observed, 2)).startswith("vimi-ui-db")
+
+        try:
+            await UiDatabaseMiddleware()(handler, SimpleNamespace(chat=SimpleNamespace(type="private")), {})
+        finally:
+            await lifecycle.stop(timeout_sec=2)
+
+    try:
+        asyncio.run(main())
+    finally:
+        shutdown_ui_db_executor()
+
+
+def test_abandoned_db_failure_logs_stack_once_without_exception_payload(caplog):
+    from app.runtime_utils import run_ui_db
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def failing_db():
+        started.set()
+        release.wait(3)
+        raise ValueError("private database payload")
+
+    async def main():
+        task = asyncio.create_task(run_ui_db(failing_db))
+        try:
+            async with asyncio.timeout(2):
+                while not started.is_set():
+                    await asyncio.sleep(0.01)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                release.set()
+                while "UI_DB_TASK_FAILED_AFTER_CANCEL" not in caplog.text:
+                    await asyncio.sleep(0.01)
+        finally:
+            release.set()
+
+    try:
+        asyncio.run(main())
+    finally:
+        shutdown_ui_db_executor()
+    assert caplog.text.count("UI_DB_TASK_FAILED_AFTER_CANCEL") == 1
+    assert "failing_db" in caplog.text
+    assert "private database payload" not in caplog.text

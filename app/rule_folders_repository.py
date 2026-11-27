@@ -60,7 +60,9 @@ class RuleFoldersRepositoryMixin:
         # Callback page numbers are untrusted and may exceed BIGINT.
         requested_page = min(max(0, int(page)), 2**31 - 1)
         filters = ["TRUE"]
-        params = [folder_tenant_id]
+        params = []
+        filter_titles = False
+        filter_folders = folder_id >= 0 or exclude_folder_id is not None
         if tenant_id is not None:
             if owner_admin_id is None:
                 filters.append("(r.tenant_id = %s OR (r.tenant_id IS NULL AND %s = 1))")
@@ -83,7 +85,8 @@ class RuleFoldersRepositoryMixin:
             if not needle:
                 filters.append("FALSE")
             elif exact:
-                rule_id = int(exact.group(1))
+                digits = exact.group(1).lstrip("0")
+                rule_id = int(digits) if 0 < len(digits) <= 19 else 0
                 if 0 < rule_id < 2**63:
                     filters.append("r.id = %s")
                     params.append(rule_id)
@@ -91,39 +94,45 @@ class RuleFoldersRepositoryMixin:
                     filters.append("FALSE")
             else:
                 # strpos treats % and _ literally, unlike a LIKE pattern.
+                filter_titles = True
                 filters.append("""
-                    (strpos(lower(r.id::text), lower(%s)) > 0
-                     OR strpos(lower(COALESCE(NULLIF(s.title, ''), r.source_id)), lower(%s)) > 0
+                    (strpos(lower(COALESCE(NULLIF(s.title, ''), r.source_id)), lower(%s)) > 0
                      OR strpos(lower(COALESCE(NULLIF(t.title, ''), r.target_id)), lower(%s)) > 0
                      OR strpos(lower(r.source_id), lower(%s)) > 0
                      OR strpos(lower(r.target_id), lower(%s)) > 0)
                 """)
-                params.extend([needle] * 5)
+                params.extend([needle] * 4)
         selected = sorted({int(rid) for rid in selected_ids if 0 < int(rid) < 2**63})
+        # Reuse the same metadata joins for filtering and rendering. On the
+        # ordinary page path, join titles/folder names only after LIMIT.
+        title_joins = """
+            LEFT JOIN channels s
+              ON s.channel_id = r.source_id
+             AND s.thread_id IS NOT DISTINCT FROM r.source_thread_id
+             AND s.channel_type = 'source'
+             AND COALESCE(s.tenant_id, 1) = COALESCE(r.tenant_id, 1)
+            LEFT JOIN channels t
+              ON t.channel_id = r.target_id
+             AND t.thread_id IS NOT DISTINCT FROM r.target_thread_id
+             AND t.channel_type = 'target'
+             AND COALESCE(t.tenant_id, 1) = COALESCE(r.tenant_id, 1)
+        """
+        folder_joins = """
+            LEFT JOIN rule_folder_assignments a
+              ON a.rule_id = r.id AND a.tenant_id = %s
+            LEFT JOIN rule_folders f
+              ON f.id = a.folder_id AND f.tenant_id = a.tenant_id
+        """
+        filter_joins = (title_joins if filter_titles else "") + (folder_joins if filter_folders else "")
+        filter_params = [folder_tenant_id] if filter_folders else []
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
                     WITH eligible AS MATERIALIZED (
-                        SELECT r.id, r.created_date, r.source_id, r.source_thread_id,
-                               r.target_id, r.target_thread_id, r.interval, r.is_active,
-                               s.title AS source_title, t.title AS target_title,
-                               f.id AS folder_id, f.name AS folder_name
+                        SELECT r.id, r.created_date, r.is_active
                         FROM routing r
-                        LEFT JOIN channels s
-                          ON s.channel_id = r.source_id
-                         AND s.thread_id IS NOT DISTINCT FROM r.source_thread_id
-                         AND s.channel_type = 'source'
-                         AND COALESCE(s.tenant_id, 1) = COALESCE(r.tenant_id, 1)
-                        LEFT JOIN channels t
-                          ON t.channel_id = r.target_id
-                         AND t.thread_id IS NOT DISTINCT FROM r.target_thread_id
-                         AND t.channel_type = 'target'
-                         AND COALESCE(t.tenant_id, 1) = COALESCE(r.tenant_id, 1)
-                        LEFT JOIN rule_folder_assignments a
-                          ON a.rule_id = r.id AND a.tenant_id = %s
-                        LEFT JOIN rule_folders f
-                          ON f.id = a.folder_id AND f.tenant_id = a.tenant_id
+                        {filter_joins}
                         WHERE {" AND ".join(filters)}
                     ), stats AS (
                         SELECT COUNT(*) AS total,
@@ -135,14 +144,21 @@ class RuleFoldersRepositoryMixin:
                         SELECT *, LEAST(%s::bigint, GREATEST(total - 1, 0) / %s) AS page
                         FROM stats
                     )
-                    SELECT bounds.*, e.*
+                    SELECT bounds.*, e.id, r.source_id, r.source_thread_id,
+                           r.target_id, r.target_thread_id, r.interval, r.is_active,
+                           s.title AS source_title, t.title AS target_title,
+                           f.id AS folder_id, f.name AS folder_name
                     FROM bounds LEFT JOIN LATERAL (
-                        SELECT * FROM eligible ORDER BY created_date, id
+                        SELECT id, created_date FROM eligible ORDER BY created_date, id
                         LIMIT %s OFFSET (bounds.page * %s)
                     ) e ON TRUE
+                    LEFT JOIN routing r ON r.id = e.id
+                    {title_joins}
+                    {folder_joins}
                     ORDER BY e.created_date, e.id
                     """,
-                    (*params, selected, requested_page, page_size, page_size, page_size),
+                    (*filter_params, *params, selected, requested_page, page_size,
+                     page_size, page_size, folder_tenant_id),
                 )
                 rows = cur.fetchall()
         stats = rows[0]

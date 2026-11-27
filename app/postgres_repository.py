@@ -7858,8 +7858,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     LEFT JOIN (deliveries d JOIN posts p ON p.id = d.post_id)
                       ON d.rule_id = r.id
                     WHERE (r.tenant_id = %s OR (r.tenant_id IS NULL AND %s = 1))
-                    ORDER BY r.created_date, r.id,
-                             CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
+                    ORDER BY r.created_date, r.id
                     """,
                     (tenant, tenant),
                 )
@@ -9459,6 +9458,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         content = {}
                         broken_content_json += 1
 
+                    if not isinstance(content, dict):
+                        content = {}
+                        broken_content_json += 1
                     media_kind = str(content.get("media_kind") or "text").strip().lower()
                     if media_kind != "video":
                         skipped_non_video += 1

@@ -219,6 +219,7 @@ def test_hash_prefixed_rule_search_finds_exact_id_and_not_partial_id():
     assert rule_matches_query(FakeRule(214), "#214")
     assert rule_matches_query(FakeRule(214), "# 214")
     assert not rule_matches_query(FakeRule(1214), "#214")
+    assert not rule_matches_query(FakeRule(1214), "214")
     assert not rule_matches_query(FakeRule(214), "#215")
     assert rule_matches_query(FakeRule(214), "длинное название")
     assert rule_matches_query(FakeRule(214), "-1002")

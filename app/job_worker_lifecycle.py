@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from typing import Any
 
 from app.runtime_roles import RuntimeOwnership
+from app.runtime_utils import create_background_task
 from app.worker_shutdown import drain_job_workers
 
 WorkerFactory = Callable[[asyncio.Event], Coroutine[Any, Any, None]]
@@ -56,7 +57,7 @@ class JobWorkerLifecycle:
                 current = self._tasks.get(name)
             if current is not None and not current.done():
                 continue
-            task = asyncio.create_task(factory(self._stop_event), name=name)
+            task = create_background_task(factory(self._stop_event), name=name)
             with self._tasks_lock:
                 self._tasks[name] = task
             task.add_done_callback(self._report_exit)

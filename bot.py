@@ -8678,7 +8678,7 @@ def _start_channel_title_sync_runtime() -> None:
         return
     if bot is None:
         return
-    channel_title_sync_task = asyncio.create_task(
+    channel_title_sync_task = create_background_task(
         channel_title_sync_loop(
             db=db,
             bot=bot,
@@ -8873,7 +8873,7 @@ async def _start_scheduler_role() -> None:
     await _init_db_runtime()
     logger.info("STARTUP | Запуск роли scheduler")
     start_background_task(heartbeat_loop("scheduler", db), name="scheduler-heartbeat")
-    watchdog_task = asyncio.create_task(run_watchdog_loop(db, interval_seconds=10.0))
+    watchdog_task = create_background_task(run_watchdog_loop(db, interval_seconds=10.0))
     try:
         await run_scheduler_loop(
             db,
@@ -8908,7 +8908,7 @@ async def _start_all_role() -> None:
     _start_repost_campaign_runtime_tasks(role="all")
     _start_channel_title_sync_runtime()
     if scheduler_runtime_task is None or scheduler_runtime_task.done():
-        scheduler_runtime_task = asyncio.create_task(
+        scheduler_runtime_task = create_background_task(
             run_scheduler_loop(
                 db,
                 interval_seconds=1.0,
@@ -8916,10 +8916,10 @@ async def _start_all_role() -> None:
             )
         )
     if job_watchdog_task is None or job_watchdog_task.done():
-        job_watchdog_task = asyncio.create_task(run_watchdog_loop(db, interval_seconds=10.0))
+        job_watchdog_task = create_background_task(run_watchdog_loop(db, interval_seconds=10.0))
     if reaction_worker_task is None or reaction_worker_task.done():
         reaction_worker = ReactionWorker(db=db, worker_id="reaction-worker-1", poll_interval_sec=2.0, lock_timeout_seconds=300)
-        reaction_worker_task = asyncio.create_task(reaction_worker.run_forever())
+        reaction_worker_task = create_background_task(reaction_worker.run_forever())
         logger.info("Reaction worker запущен: reaction-worker-1")
     await start_job_workers_runtime(resume=True)
     start_background_task(_supervise_job_workers(), name="job-workers-supervisor")

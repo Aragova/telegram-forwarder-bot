@@ -22,7 +22,6 @@ def rule_matches_query(rule, query: str) -> bool:
     if id_match:
         return int(rule.id) == int(id_match.group(1))
     fields = (
-        rule.id,
         rule.source_title or rule.source_id,
         rule.target_title or rule.target_id,
         rule.source_id,
