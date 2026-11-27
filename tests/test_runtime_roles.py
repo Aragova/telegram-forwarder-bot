@@ -13,6 +13,7 @@ import pytest
 
 from app.runtime_roles import ForwardingControlUnavailable, RuntimeOwnership, normalize_runtime_role, run_role
 from app.job_worker_lifecycle import JobWorkerLifecycle
+from app.runtime_utils import create_background_task
 
 
 def test_bot_role_runs_only_bot_callable():
@@ -135,6 +136,7 @@ def test_normalize_runtime_role_defaults_to_all_for_invalid_value():
 # Execute the actual startup functions without importing bot.py, which configures
 # production clients at module import. The sender wiring test covers that part.
 def _load_runtime_functions(namespace):
+    namespace.setdefault("create_background_task", create_background_task)
     tree = ast.parse((Path(__file__).resolve().parents[1] / "bot.py").read_text(encoding="utf-8"))
     names = {
         "_start_bot_role", "_start_scheduler_role", "_start_worker_role",

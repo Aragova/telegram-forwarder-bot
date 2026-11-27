@@ -1700,3 +1700,95 @@ def test_terminal_album_conflict_requires_overlapping_member():
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (old,))
         repo.client.close_all_connections()
+
+
+def test_rule_catalog_sql_pagination_and_scope(repo):
+    # Use a unique search term so this test does not depend on fixture row counts.
+    prefix = str(uuid4())
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            ids = []
+            for i in range(13):
+                cur.execute(
+                    """
+                    INSERT INTO routing(source_id,target_id,created_date,tenant_id,is_active)
+                    VALUES (%s,%s,%s,1,%s) RETURNING id
+                    """,
+                    (f"{prefix}-src-{i}", f"{prefix}-dst-{i}", "2026-01-01", i % 2 == 0),
+                )
+                ids.append(cur.fetchone()["id"])
+            cur.execute(
+                """
+                INSERT INTO routing(source_id,target_id,created_date,tenant_id,created_by)
+                VALUES (%s,%s,%s,42,777) RETURNING id
+                """,
+                (f"{prefix}-other", f"{prefix}-other-dst", "2026-01-01"),
+            )
+            other = cur.fetchone()["id"]
+    first = repo.get_rule_catalog_page(1, search=prefix, page=0, selected_ids=[ids[-1], other])
+    assert first.total == 13 and first.active == 7
+    assert [r.id for r in first.rules] == ids[:10]
+    assert first.valid_selected_ids == {ids[-1]}
+    last = repo.get_rule_catalog_page(1, search=prefix, page=999)
+    assert last.page == 1 and [r.id for r in last.rules] == ids[10:]
+    assert repo.get_rule_catalog_page(1, search=f"#{ids[0]}").total == 1
+    assert repo.get_rule_catalog_page(1, search=f"#{other}").total == 0
+    assert repo.get_rule_catalog_page(1, search=f"# {ids[0]}").total == 1
+    # Numeric input without # matches chat metadata, not the rule primary key.
+    assert repo.get_rule_catalog_page(1, search=str(ids[0]), selected_ids=[ids[0]]).valid_selected_ids == (
+        {ids[0]} if str(ids[0]) in f"{prefix}-src-0" or str(ids[0]) in f"{prefix}-dst-0" else set()
+    )
+    assert repo.get_rule_catalog_page(1, search="#999999999999999999999999").total == 0
+    assert repo.get_rule_catalog_page(1, search=prefix, owner_admin_id=777).total == 14
+    assert repo.get_rule_catalog_page(1, search=prefix, active=False).total == 6
+    assert repo.get_rule_catalog_page(1, search=prefix + "%").total == 0
+    folder = repo.create_rule_folder(1, prefix)
+    assert folder
+    repo.assign_rules_to_folder(1, [ids[0], ids[1]], folder)
+    in_folder = repo.get_rule_catalog_page(1, folder_id=folder, search=prefix)
+    assert {r.id for r in in_folder.rules} == {ids[0], ids[1]}
+    assert in_folder.assignments[ids[0]]["id"] == folder
+    outside = repo.get_rule_catalog_page(1, exclude_folder_id=folder, search=prefix)
+    assert outside.total == 11
+    assert repo.get_rule_catalog_page(1, search=prefix + "missing").rules == []
+
+
+def test_postgres_queue_stats_aggregate_matches_physical_counts(repo):
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            expected = {}
+            for table, column, where in (
+                ("posts", "posts", ""), ("deliveries", "deliveries", ""),
+                ("deliveries", "pending", "WHERE status='pending'"),
+                ("deliveries", "processing", "WHERE status='processing'"),
+                ("deliveries", "sent", "WHERE status='sent'"),
+                ("deliveries", "faulty", "WHERE status='faulty'"),
+                ("routing", "rules", ""), ("routing", "active_rules", "WHERE is_active"),
+            ):
+                cur.execute(f"SELECT COUNT(*) AS cnt FROM {table} {where}")
+                expected[column] = cur.fetchone()["cnt"]
+    assert repo.get_queue_stats() == expected
+
+
+
+
+def test_tenant_live_status_matches_canonical_logical_counts(repo):
+    tenant = 1000000 + uuid4().int % 100000000
+    _, repost, repost_ids, _, _, _ = seed(repo, uuid4().int % 10**12, count=3)
+    _, video, video_ids, _, _, _ = seed(repo, uuid4().int % 10**12, count=3)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET tenant_id=%s WHERE id=ANY(%s)", (tenant, [repost, video]))
+            cur.execute("UPDATE routing SET mode='video' WHERE id=%s", (video,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE id=ANY(%s)", (repost_ids + video_ids,))
+            cur.execute(
+                "UPDATE posts SET content_json=%s WHERE id=(SELECT post_id FROM deliveries WHERE id=%s)",
+                ('null', video_ids[-1]),
+            )
+            cur.execute("UPDATE deliveries SET status='faulty' WHERE id=%s", (video_ids[0],))
+    snapshots = [repo.get_rule_card_snapshot(rule_id) for rule_id in (repost, video)]
+    assert all(snapshots)
+    totals = repo.get_tenant_queue_stats(tenant)
+    assert totals["pending"] == sum(s["logical_pending"] for s in snapshots) == 2
+    assert totals["faulty"] == sum(s["logical_faulty"] for s in snapshots) == 1
+    assert totals["active_rules"] == 2

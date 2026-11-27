@@ -6,6 +6,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .context import UserHandlersContext
 from app import user_ui
 from app.rule_folders_ui import root_view, additional_functions_view, rule_catalog_view
+from app.rule_catalog import RulePage
 from app.rich_rule_buttons import (
     rich_catalog_payload, rich_rule_list_enabled, try_edit_rich_catalog,
 )
@@ -13,7 +14,7 @@ from app.rule_folder_handlers import clear_new_rule_folder, clear_folder_input
 
 
 def build_user_rules_keyboard(rules, page: int = 0, *, rules_page_size: int = 8, compact_rule_text=None) -> InlineKeyboardMarkup:
-    total = len(rules)
+    total = rules.total if isinstance(rules, RulePage) else len(rules)
     if total == 0:
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -21,10 +22,13 @@ def build_user_rules_keyboard(rules, page: int = 0, *, rules_page_size: int = 8,
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
             ]
         )
-    max_page = (total - 1) // rules_page_size
-    page = max(0, min(page, max_page))
-    start = page * rules_page_size
-    current = rules[start:start + rules_page_size]
+    if isinstance(rules, RulePage):
+        current, page, max_page = rules.rules, rules.page, rules.pages - 1
+    else:
+        max_page = (total - 1) // rules_page_size
+        page = max(0, min(page, max_page))
+        start = page * rules_page_size
+        current = rules[start:start + rules_page_size]
     rows: list[list[InlineKeyboardButton]] = []
     for row in current:
         rid = int(getattr(row, "id", 0))
@@ -80,10 +84,10 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
         clear_folder_input(user_id)
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         ctx.logger.info("пользователь открыл список правил user_id=%s tenant_id=%s", user_id, tenant_id)
-        rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id) if hasattr(ctx.db, "get_rules_for_tenant") else []
+        total = await ctx.run_db(ctx.db.count_catalog_rules, tenant_id)
         await ctx.answer_callback_safe_once(callback)
         folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
-        text, kb = root_view(total_rules=len(rules), folders_count=len(folders), admin=False)
+        text, kb = root_view(total_rules=total, folders_count=len(folders), admin=False)
         await ctx.edit_message_text_safe(
             message=callback.message, text=text, reply_markup=kb, parse_mode="HTML",
         )
@@ -104,14 +108,13 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             return
         user_id = callback.from_user.id if callback.from_user else 0
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
-        rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+        rules = await ctx.run_db(ctx.db.get_rule_catalog_page, tenant_id, page=page)
         text, keyboard = rule_catalog_view(
             rules, folder_id=-1, folder_name="", page=page,
         )
         await ctx.answer_callback_safe_once(callback)
         if rich_rule_list_enabled(admin=False):
-            assigned = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
-            variant = rich_catalog_payload(text, keyboard, rules, assigned=assigned)
+            variant = rich_catalog_payload(text, keyboard, rules.rules, assigned=rules.assignments)
             if variant:
                 rich_html, footer = variant
                 if await try_edit_rich_catalog(

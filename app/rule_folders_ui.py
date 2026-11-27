@@ -9,7 +9,7 @@ from aiogram.types import InlineKeyboardMarkup
 
 from app.user_ui import build_button
 
-CATALOG_PAGE_SIZE = 10
+from app.rule_catalog import CATALOG_PAGE_SIZE, RulePage
 RULE_BUTTONS_PER_ROW = 5
 FOLDER_PAGE_SIZE = 7
 
@@ -22,7 +22,6 @@ def rule_matches_query(rule, query: str) -> bool:
     if id_match:
         return int(rule.id) == int(id_match.group(1))
     fields = (
-        rule.id,
         rule.source_title or rule.source_id,
         rule.target_title or rule.target_id,
         rule.source_id,
@@ -107,8 +106,13 @@ def rule_catalog_view(
     folders_page: int = 0,
 ):
     """Ten readable route lines and two rows of five short rule buttons."""
-    current, page, pages = _paginate(rules, page, CATALOG_PAGE_SIZE)
-    enabled = sum(bool(getattr(rule, "is_active", False)) for rule in rules)
+    if isinstance(rules, RulePage):
+        current, page, pages = rules.rules, rules.page, rules.pages
+        total, enabled = rules.total, rules.active
+    else:
+        current, page, pages = _paginate(rules, page, CATALOG_PAGE_SIZE)
+        total = len(rules)
+        enabled = sum(bool(getattr(rule, "is_active", False)) for rule in rules)
     if search_term is not None:
         heading = "🔎 <b>РЕЗУЛЬТАТЫ ПОИСКА</b>"
     elif selected is not None:
@@ -120,7 +124,7 @@ def rule_catalog_view(
 
     lines = [
         heading,
-        f"📊 {len(rules)} · 🟢 {enabled} · ⏸ {len(rules) - enabled}",
+        f"📊 {total} · 🟢 {enabled} · ⏸ {total - enabled}",
     ]
     if search_term is not None:
         lines.append(f"🔎 {escape(search_term)}")
@@ -229,10 +233,15 @@ def folder_fill_view(
     selected: set[int], assignments: dict[int, dict],
 ):
     """Compact ten-rule picker sourced from the entire accessible catalog."""
-    current, page, pages = _paginate(candidates, page, CATALOG_PAGE_SIZE)
+    if isinstance(candidates, RulePage):
+        current, page, pages = candidates.rules, candidates.page, candidates.pages
+        total = candidates.total
+    else:
+        current, page, pages = _paginate(candidates, page, CATALOG_PAGE_SIZE)
+        total = len(candidates)
     lines = [
         f"📥 <b>В ПАПКУ: {escape(folder_name)}</b>",
-        f"📊 Доступно: {len(candidates)} · ✅ Выбрано: {len(selected)}",
+        f"📊 Доступно: {total} · ✅ Выбрано: {len(selected)}",
         "",
     ]
     rows = []

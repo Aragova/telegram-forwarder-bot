@@ -24,15 +24,12 @@ from app.rule_folders_ui import (
     _button,
     additional_functions_view,
     folder_delete_confirmation_view,
-    folder_fill_candidates,
     folder_fill_view,
     folder_index_view,
     folder_settings_view,
     move_picker_view,
     root_view,
     rule_catalog_view,
-    rule_matches_query,
-    CATALOG_PAGE_SIZE,
 )
 
 # These are navigation/input caches only. Persistent assignments stay in PostgreSQL.
@@ -108,32 +105,28 @@ async def _error(ctx: Any, callback: CallbackQuery, message: str) -> None:
 
 
 async def _root(ctx: Any, callback: CallbackQuery, tenant_id: int, admin: bool) -> None:
-    rules = await ctx.run_db(ctx.db.get_all_rules if admin else ctx.db.get_rules_for_tenant, *([] if admin else [tenant_id]))
+    total = await ctx.run_db(ctx.db.count_catalog_rules, None if admin else tenant_id)
     folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
     await _render(ctx, callback, *root_view(
-        total_rules=len(rules), folders_count=len(folders), admin=admin,
+        total_rules=total, folders_count=len(folders), admin=admin,
     ))
 
 
-async def _workspace_rules(ctx: Any, tenant_id: int, admin: bool, user_id: int):
-    """Accessible rules for folder organization, including the owner's legacy rules."""
-    if not admin:
-        return await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
-    ids = await ctx.run_db(
-        ctx.db.list_folder_manageable_rule_ids, tenant_id, int(user_id),
+async def _workspace_page(ctx: Any, tenant_id: int, admin: bool, user_id: int, **filters):
+    """The owner can organize their legacy rules, not every tenant's rules."""
+    return await ctx.run_db(
+        ctx.db.get_rule_catalog_page, tenant_id,
+        owner_admin_id=int(user_id) if admin else None, **filters,
     )
-    all_rules = await ctx.run_db(ctx.db.get_all_rules)
-    return [rule for rule in all_rules if int(rule.id) in ids]
 
 
 async def _can_manage_folder_rule(
     ctx: Any, tenant_id: int, admin: bool, user_id: int, rule_id: int,
 ) -> bool:
     if admin:
-        ids = await ctx.run_db(
-            ctx.db.list_folder_manageable_rule_ids, tenant_id, int(user_id),
+        return await ctx.run_db(
+            ctx.db.can_manage_folder_rule, tenant_id, int(user_id), int(rule_id),
         )
-        return int(rule_id) in ids
     return int(await ctx.run_db(ctx.db.get_rule_tenant_id, rule_id)) == tenant_id
 
 
@@ -154,31 +147,13 @@ async def _assign_for_actor(
 
 async def _catalog(ctx: Any, callback: CallbackQuery, *, tenant_id: int, admin: bool,
                    folder_id: int, page: int, search: str | None = None, batch: bool = False):
-    # Admin's legacy All rules continues to include every rule; folders are tenant-specific.
-    if folder_id == -1 and admin and not batch:
-        rules = await ctx.run_db(ctx.db.get_all_rules)
-    else:
-        rules = await _workspace_rules(
-            ctx, tenant_id, admin, callback.from_user.id,
-        )
     folder_name = "Без папки"
-    mapping = (
-        await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
-        if folder_id >= 0 or rich_rule_list_enabled(admin=admin) else {}
-    )
-    if folder_id >= 0:
-        if folder_id > 0:
-            folder = await ctx.run_db(ctx.db.get_rule_folder, tenant_id, folder_id)
-            if not folder:
-                await _error(ctx, callback, "Папка не найдена")
-                return
-            folder_name = str(folder["name"])
-        rules = [
-            r for r in rules
-            if (int(mapping[int(r.id)]["id"]) if int(r.id) in mapping else 0) == folder_id
-        ]
-    if search is not None:
-        rules = [r for r in rules if rule_matches_query(r, search)]
+    if folder_id > 0:
+        folder = await ctx.run_db(ctx.db.get_rule_folder, tenant_id, folder_id)
+        if not folder:
+            await _error(ctx, callback, "Папка не найдена")
+            return
+        folder_name = str(folder["name"])
     chosen = None
     if batch:
         selection = _selected.get(callback.from_user.id)
@@ -186,13 +161,19 @@ async def _catalog(ctx: Any, callback: CallbackQuery, *, tenant_id: int, admin: 
             selection = (folder_id, set())
             _selected[callback.from_user.id] = selection
         chosen = selection[1]
-        # If a rule was moved by another action, prevent stale bulk selections.
-        chosen.intersection_update({int(r.id) for r in rules})
+    requested_selection = frozenset(chosen or ())
+    filters = dict(folder_id=folder_id, page=page, search=search, selected_ids=requested_selection)
+    if folder_id == -1 and admin and not batch:
+        result = await ctx.run_db(ctx.db.get_rule_catalog_page, folder_tenant_id=tenant_id, **filters)
+    else:
+        result = await _workspace_page(ctx, tenant_id, admin, callback.from_user.id, **filters)
+    if chosen is not None:
+        chosen.difference_update(requested_selection - result.valid_selected_ids)
     await _render(ctx, callback, *rule_catalog_view(
-        rules, folder_id=folder_id, folder_name=folder_name, page=page,
+        result, folder_id=folder_id, folder_name=folder_name, page=page,
         search_term=search, selected=chosen,
         folders_page=_folder_index_page.get(callback.from_user.id, 0),
-    ), rich_rules=rules, rich_assignments=mapping, rich_selected=chosen)
+    ), rich_rules=result.rules, rich_assignments=result.assignments, rich_selected=chosen)
 
 
 async def _fill_catalog(
@@ -203,20 +184,20 @@ async def _fill_catalog(
     if not folder:
         await _error(ctx, callback, "Папка не найдена")
         return
-    rules = await _workspace_rules(
-        ctx, tenant_id, bool(ctx.is_admin_user(callback.from_user.id)), callback.from_user.id,
-    )
-    assignments = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
-    candidates = folder_fill_candidates(rules, assignments, folder_id)
     choice = _fill_selected.get(callback.from_user.id)
     if choice is None or choice[0] != folder_id:
         choice = (folder_id, set())
         _fill_selected[callback.from_user.id] = choice
-    choice[1].intersection_update({int(r.id) for r in candidates})
+    requested_selection = frozenset(choice[1])
+    result = await _workspace_page(
+        ctx, tenant_id, bool(ctx.is_admin_user(callback.from_user.id)), callback.from_user.id,
+        exclude_folder_id=folder_id, page=page, selected_ids=requested_selection,
+    )
+    choice[1].difference_update(requested_selection - result.valid_selected_ids)
     await _render(ctx, callback, *folder_fill_view(
-        candidates, folder_id=folder_id, folder_name=str(folder["name"]),
-        page=page, selected=choice[1], assignments=assignments,
-    ), rich_rules=candidates, rich_assignments=assignments,
+        result, folder_id=folder_id, folder_name=str(folder["name"]),
+        page=page, selected=choice[1], assignments=result.assignments,
+    ), rich_rules=result.rules, rich_assignments=result.assignments,
        rich_selected=choice[1])
 
 
@@ -227,17 +208,14 @@ async def _selected_folder_rule_ids(
     """Require every selected ID to be in this folder and owned by this tenant."""
     if not selected_ids:
         raise ValueError("Сначала выберите правила")
-    rules = await _workspace_rules(
+    requested_selection = frozenset(selected_ids)
+    result = await _workspace_page(
         ctx, tenant_id, owner_admin_id is not None, int(owner_admin_id or 0),
+        folder_id=folder_id, selected_ids=requested_selection, page_size=1,
     )
-    mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
-    allowed = {
-        int(r.id) for r in rules
-        if int(mapping.get(int(r.id), {}).get("id") or 0) == folder_id
-    }
-    if not selected_ids.issubset(allowed):
+    if not requested_selection.issubset(result.valid_selected_ids):
         raise ValueError("Список изменился. Повторите выбор правил")
-    return sorted(selected_ids)
+    return sorted(requested_selection)
 
 
 async def _extra(ctx: Any, callback: CallbackQuery, tenant_id: int, rule_id: int):
@@ -253,7 +231,7 @@ async def _extra(ctx: Any, callback: CallbackQuery, tenant_id: int, rule_id: int
     if not rule:
         await _error(ctx, callback, "Правило не найдено")
         return
-    mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+    mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id, [rule_id])
     folder = mapping.get(rule_id)
     await _render(ctx, callback, *additional_functions_view(
         rule_id=rule_id,
@@ -276,7 +254,7 @@ async def _move(ctx: Any, callback: CallbackQuery, *, tenant_id: int, origin: st
         ):
             await _error(ctx, callback, "Нельзя переместить правило другого аккаунта")
             return
-        mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+        mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id, [rule_id])
         folder_name = mapping.get(rule_id, {}).get("name")
         count = 1
     elif origin.startswith("b"):
@@ -427,7 +405,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not await ctx.ensure_rule_callback_access(callback, rule_id):
                     return
                 if fid >= 0:
-                    mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+                    mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id, [rule_id])
                     if (int(mapping.get(rule_id, {}).get("id") or 0)) != fid:
                         await _error(ctx, callback, "Правило уже перемещено")
                         return
@@ -510,7 +488,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not await _can_manage_folder_rule(ctx, tenant_id, admin, user_id, rid):
                     await _error(ctx, callback, "Нет доступа к правилу")
                     return
-                assignments = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+                assignments = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id, [rid])
                 if rid not in assignments:
                     await _error(ctx, callback, "Это правило уже находится вне папок")
                     return
@@ -541,10 +519,11 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not choice or choice[0] != fid:
                     await _error(ctx, callback, "Список выбора устарел")
                     return
-                rules = await _workspace_rules(ctx, tenant_id, admin, user_id)
-                mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
-                eligible = {int(r.id) for r in folder_fill_candidates(rules, mapping, fid)}
-                if rid not in eligible:
+                result = await _workspace_page(
+                    ctx, tenant_id, admin, user_id,
+                    exclude_folder_id=fid, selected_ids=[rid], page_size=1,
+                )
+                if rid not in result.valid_selected_ids:
                     await _error(ctx, callback, "Это правило уже в папке или недоступно")
                     return
                 if rid in choice[1]:
@@ -558,11 +537,14 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not choice or choice[0] != fid:
                     await _error(ctx, callback, "Список выбора устарел")
                     return
-                rules = await _workspace_rules(ctx, tenant_id, admin, user_id)
-                mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
-                candidates = folder_fill_candidates(rules, mapping, fid)
-                current = candidates[max(0, page) * CATALOG_PAGE_SIZE:(max(0, page) + 1) * CATALOG_PAGE_SIZE]
-                if not current:
+                requested_selection = frozenset(choice[1])
+                result = await _workspace_page(
+                    ctx, tenant_id, admin, user_id,
+                    exclude_folder_id=fid, page=page, selected_ids=requested_selection,
+                )
+                choice[1].difference_update(requested_selection - result.valid_selected_ids)
+                current = result.rules
+                if page != result.page or not current:
                     await _error(ctx, callback, "На странице нет правил")
                     return
                 page_ids = {int(r.id) for r in current}
@@ -584,13 +566,15 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not await ctx.run_db(ctx.db.get_rule_folder, tenant_id, fid):
                     await _error(ctx, callback, "Папка не найдена")
                     return
-                rules = await _workspace_rules(ctx, tenant_id, admin, user_id)
-                mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
-                eligible = {int(r.id) for r in folder_fill_candidates(rules, mapping, fid)}
-                if not choice[1].issubset(eligible):
+                requested_selection = frozenset(choice[1])
+                result = await _workspace_page(
+                    ctx, tenant_id, admin, user_id,
+                    exclude_folder_id=fid, selected_ids=requested_selection, page_size=1,
+                )
+                if not requested_selection.issubset(result.valid_selected_ids):
                     await _error(ctx, callback, "Часть правил изменила папку. Повторите выбор")
                     return
-                ids = sorted(choice[1])
+                ids = sorted(requested_selection)
                 await _assign_for_actor(ctx, tenant_id, admin, user_id, ids, fid)
                 _fill_selected.pop(user_id, None)
                 await _catalog(ctx, callback, tenant_id=tenant_id, admin=admin, folder_id=fid, page=0)
@@ -624,12 +608,11 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     await _error(ctx, callback, "Выбор устарел")
                     return
                 # Selection is constrained to the current tenant and folder.
-                own_rules = await _workspace_rules(ctx, tenant_id, admin, user_id)
-                mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
-                match = any(int(r.id) == rid for r in own_rules)
-                if fid >= 0:
-                    match = match and int(mapping.get(rid, {}).get("id") or 0) == fid
-                if not match:
+                result = await _workspace_page(
+                    ctx, tenant_id, admin, user_id,
+                    folder_id=fid, selected_ids=[rid], page_size=1,
+                )
+                if rid not in result.valid_selected_ids:
                     await _error(ctx, callback, "Правило недоступно")
                     return
                 if rid in selection[1]:
@@ -644,21 +627,17 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not selection or selection[0] != fid:
                     await _error(ctx, callback, "Выбор устарел")
                     return
-                rules = await _workspace_rules(ctx, tenant_id, admin, user_id)
-                if fid >= 0:
-                    mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
-                    if fid > 0 and not await ctx.run_db(ctx.db.get_rule_folder, tenant_id, fid):
-                        await _error(ctx, callback, "Папка не найдена")
-                        return
-                    rules = [
-                        rule for rule in rules
-                        if int(mapping.get(int(rule.id), {}).get("id") or 0) == fid
-                    ]
-                available = {int(rule.id) for rule in rules}
-                selection[1].intersection_update(available)
-                start = max(0, page) * CATALOG_PAGE_SIZE
-                current = rules[start:start + CATALOG_PAGE_SIZE]
-                if not current:
+                if fid > 0 and not await ctx.run_db(ctx.db.get_rule_folder, tenant_id, fid):
+                    await _error(ctx, callback, "Папка не найдена")
+                    return
+                requested_selection = frozenset(selection[1])
+                result = await _workspace_page(
+                    ctx, tenant_id, admin, user_id,
+                    folder_id=fid, page=page, selected_ids=requested_selection,
+                )
+                selection[1].difference_update(requested_selection - result.valid_selected_ids)
+                current = result.rules
+                if page != result.page or not current:
                     await _error(ctx, callback, "На странице нет правил")
                     return
                 page_ids = {int(rule.id) for rule in current}
@@ -757,9 +736,10 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 return
             _searches[user_id] = raw
             _inputs.pop(user_id, None)
-            rules = await ctx.run_db(ctx.db.get_all_rules if admin else ctx.db.get_rules_for_tenant,
-                                     *([] if admin else [tenant_id]))
-            filtered = [r for r in rules if rule_matches_query(r, raw)]
+            filtered = await ctx.run_db(
+                ctx.db.get_rule_catalog_page, None if admin else tenant_id,
+                folder_tenant_id=tenant_id, search=raw,
+            )
             text, kb = rule_catalog_view(filtered, folder_id=-1, folder_name="",
                                          page=0, search_term=raw)
         else:
@@ -845,9 +825,9 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                         text, kb = folder_index_view(folders, 0)
                 elif moved and origin.startswith("b"):
                     _selected.pop(user_id, None)
-                    own_rules = await _workspace_rules(ctx, tenant_id, admin, user_id)
+                    result = await _workspace_page(ctx, tenant_id, admin, user_id, folder_id=fid)
                     text, kb = rule_catalog_view(
-                        [r for r in own_rules if int(r.id) in set(ids)],
+                        result,
                         folder_id=fid, folder_name=name, page=0,
                     )
                 else:
@@ -859,9 +839,8 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
         await ctx.try_delete_message_safe(message.chat.id, message.message_id)
         edited = False
         if kind == "search" and rich_rule_list_enabled(admin=admin):
-            assigned = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
             variant = rich_catalog_payload(
-                text, kb, filtered, assigned=assigned,
+                text, kb, filtered.rules, assigned=filtered.assignments,
             )
             if variant:
                 html, footer = variant

@@ -34,11 +34,16 @@ from aiogram.types import (
 )
 
 from app.config import settings
-from app.runtime_utils import wait_for_db_task
+from app.runtime_utils import (
+    UiDatabaseMiddleware, create_background_task, run_db as run_runtime_db,
+    shutdown_ui_db_executor, wait_for_db_task,
+)
 from app.video_emoji_validation import VideoEmojiValidator, format_validation_result, utf16_length
 from app.repository_models import utc_now_iso
 from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
 from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view, _button as rule_ui_button
+from app.rule_catalog import CATALOG_PAGE_SIZE, RulePage
+from app.user_handlers.rules import build_user_rules_keyboard as build_user_rules_keyboard_view
 from app.repository import RepositoryProtocol
 from app.rescan_safety import RescanBlocked
 from app.repository_factory import create_repository
@@ -321,7 +326,7 @@ def _schedule_rule_ui_task(task_key: str, coro) -> bool:
             coro.close()
         return False
 
-    task = asyncio.create_task(coro)
+    task = create_background_task(coro)
     rule_ui_tasks[task_key] = task
 
     def _cleanup(done_task: asyncio.Task) -> None:
@@ -388,13 +393,13 @@ def _cancel_dashboard_task(user_id: int) -> None:
 
 def _start_dashboard_task(user_id: int, message: Message) -> None:
     _cancel_dashboard_task(user_id)
-    dashboard_tasks[user_id] = asyncio.create_task(dashboard_worker(user_id, message))
+    dashboard_tasks[user_id] = create_background_task(dashboard_worker(user_id, message))
 
 async def run_db(callable_obj, *args, **kwargs):
     """
     Уводит sync DB/CPU работу из event loop в thread pool.
     """
-    return await asyncio.to_thread(callable_obj, *args, **kwargs)
+    return await run_runtime_db(callable_obj, *args, **kwargs)
 
 
 async def heartbeat_loop(role: str, repo: RepositoryProtocol):
@@ -1264,34 +1269,10 @@ def interval_to_text(seconds: int) -> str:
 
 
 def build_user_rules_keyboard(rules, page: int = 0) -> InlineKeyboardMarkup:
-    total = len(rules)
-    if total == 0:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="➕ Добавить правило", callback_data="user_rules_add")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
-            ]
-        )
-    max_page = (total - 1) // RULES_PAGE_SIZE
-    page = max(0, min(page, max_page))
-    start = page * RULES_PAGE_SIZE
-    current = rules[start:start + RULES_PAGE_SIZE]
-    rows: list[list[InlineKeyboardButton]] = []
-    for row in current:
-        rid = int(getattr(row, "id", 0))
-        label = compact_rule_text(row)
-        state = "▶️" if bool(getattr(row, "is_active", False)) else "⏸"
-        rows.append([InlineKeyboardButton(text=f"{state} #{rid} {label}", callback_data=f"user_rule_open:{rid}")])
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"user_rules_page:{page - 1}"))
-    nav.append(InlineKeyboardButton(text=f"{page + 1}/{max_page + 1}", callback_data="user_rules_noop"))
-    if page < max_page:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"user_rules_page:{page + 1}"))
-    rows.append(nav)
-    rows.append([InlineKeyboardButton(text="➕ Добавить правило", callback_data="user_rules_add")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return build_user_rules_keyboard_view(
+        rules, page=page, rules_page_size=RULES_PAGE_SIZE,
+        compact_rule_text=compact_rule_text,
+    )
 
 
 def _with_recovery_button(keyboard: InlineKeyboardMarkup, *, enabled: bool) -> InlineKeyboardMarkup:
@@ -1994,6 +1975,8 @@ def get_rule_wait_reason(row) -> str:
         return "⚠️ Ошибка расчёта времени"
 
 def paginate_items(items, page: int, page_size: int = RULES_PAGE_SIZE):
+    if isinstance(items, RulePage):
+        return items.rules, items.page, items.pages
     total = len(items)
     if total == 0:
         return [], 0, 0
@@ -2973,8 +2956,8 @@ async def show_admin_rule_manager(message: Message, user_id: int) -> None:
     clear_folder_input(user_id)
     tenant_id = await run_db(ensure_user_tenant, user_id)
     folders = await run_db(db.list_rule_folders, tenant_id)
-    rules = await run_db(db.get_all_rules)
-    text, markup = root_view(total_rules=len(rules), folders_count=len(folders), admin=True)
+    total = await run_db(db.count_catalog_rules)
+    text, markup = root_view(total_rules=total, folders_count=len(folders), admin=True)
     cleanup = await send_message_safe(
         chat_id=message.chat.id,
         text="🔄 Открываю правила",
@@ -3154,66 +3137,36 @@ async def handle_dashboard_back(callback: CallbackQuery):
 async def handle_list_rules(message: Message):
     reset_user_state(message.from_user.id if message.from_user else None)
     user_id = message.from_user.id if message.from_user else settings.admin_id
-    is_admin_mode = is_admin_user(user_id)
-    if is_admin_mode:
-        rules = await run_db(db.get_all_rules)
-    else:
-        tenant_id = await run_db(ensure_user_tenant, user_id)
-        rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
-
-    if not rules:
-        if is_admin_mode:
-            await show_admin_rule_manager(message, user_id)
-        else:
+    admin = is_admin_user(user_id)
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    result = await run_db(db.get_rule_catalog_page, None if admin else tenant_id,
+                          folder_tenant_id=tenant_id)
+    if not admin:
+        if not result.total:
             await send_message_safe(
-                chat_id=message.chat.id,
-                text="Правил пока нет",
+                chat_id=message.chat.id, text="Правил пока нет",
                 reply_markup=ReplyKeyboardRemove(),
             )
-            await send_message_safe(
-                chat_id=message.chat.id,
-                text="⚙️ Мои правила",
-                reply_markup=build_user_rules_keyboard([], page=0),
-            )
-        return
-
-    if is_admin_mode:
-        text, markup = rule_catalog_view(
-            rules, folder_id=-1, folder_name="", page=0,
-        )
-        cleanup = await send_message_safe(
-            chat_id=message.chat.id, text="📜 Открываю список",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        # The legacy user keyboard retains its Add/Back controls. The SQL
+        # catalog uses 10 rows, matching the user_rules_page callback.
         await send_message_safe(
-            chat_id=message.chat.id, text=text, reply_markup=markup, parse_mode="HTML",
-        )
-        if cleanup and bot:
-            try:
-                await try_delete_message_safe(message.chat.id, cleanup.message_id)
-            except Exception:
-                pass
-        return
-
-    if not rules:
-        await send_message_safe(
-            chat_id=message.chat.id,
-            text=(
-                "⚙️ Мои правила\n\n"
-                "У вас пока нет правил.\n\n"
-                "Создайте первое правило:\n"
-                "1. выберите источник;\n"
-                "2. выберите получателя;\n"
-                "3. задайте интервал публикации."
-            ),
-            reply_markup=build_user_rules_keyboard(rules, page=0),
+            chat_id=message.chat.id, text="⚙️ Мои правила",
+            reply_markup=build_user_rules_keyboard(result),
         )
         return
-    await send_message_safe(
-        chat_id=message.chat.id,
-        text="⚙️ Мои правила",
-        reply_markup=build_user_rules_keyboard(rules, page=0),
+    if not result.total:
+        await show_admin_rule_manager(message, user_id)
+        return
+    text, markup = rule_catalog_view(result, folder_id=-1, folder_name="", page=0)
+    cleanup = await send_message_safe(
+        chat_id=message.chat.id, text="📜 Открываю список",
+        reply_markup=ReplyKeyboardRemove(),
     )
+    await send_message_safe(
+        chat_id=message.chat.id, text=text, reply_markup=markup, parse_mode="HTML",
+    )
+    if cleanup and bot:
+        await try_delete_message_safe(message.chat.id, cleanup.message_id)
 
 @dp.callback_query(lambda c: c.data == "rules_back")
 async def handle_rules_back(callback: CallbackQuery):
@@ -3225,9 +3178,9 @@ async def handle_rules_back(callback: CallbackQuery):
     user_id = callback.from_user.id if callback.from_user else settings.admin_id
     tenant_id = await run_db(ensure_user_tenant, user_id)
     folders = await run_db(db.list_rule_folders, tenant_id)
-    rules = await run_db(db.get_all_rules)
+    total = await run_db(db.count_catalog_rules)
     text, markup = root_view(
-        total_rules=len(rules), folders_count=len(folders), admin=True,
+        total_rules=total, folders_count=len(folders), admin=True,
     )
     await edit_message_text_safe(
         message=callback.message, text=text, reply_markup=markup, parse_mode="HTML",
@@ -3252,44 +3205,38 @@ async def handle_rules_page(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
-    if action in {"disable", "enable", "delete", "interval", "next_run", "trigger", "list"}:
-        all_rules = await run_db(db.get_all_rules)
-    else:
+    if action not in {"disable", "enable", "delete", "interval", "next_run", "trigger", "list"}:
         await answer_callback_safe(callback, "Неизвестная страница", show_alert=True)
         return
+    active = True if action in {"disable", "trigger"} else False if action == "enable" else None
+    rules = await run_db(db.get_rule_catalog_page, page=page, active=active,
+                         page_size=CATALOG_PAGE_SIZE if action == "list" else RULES_PAGE_SIZE)
 
     if action == "disable":
-        rules = [r for r in all_rules if r.is_active]
         text = "Список активных правил:"
         markup = rules_inline_keyboard(rules, "disable", page=page)
 
     elif action == "enable":
-        rules = [r for r in all_rules if not r.is_active]
         text = "Список выключенных правил:"
         markup = rules_inline_keyboard(rules, "enable", page=page)
 
     elif action == "delete":
-        rules = all_rules
         text = "📜 Список правил:"
         markup = rules_inline_keyboard(rules, "delete", page=page)
 
     elif action == "interval":
-        rules = all_rules
         text = "Выберите правило для изменения интервала:"
         markup = rules_interval_keyboard(rules, page=page)
 
     elif action == "next_run":
-        rules = all_rules
         text = "Выберите правило для переноса следующего поста:"
         markup = rules_next_run_keyboard(rules, page=page)
 
     elif action == "trigger":
-        rules = [r for r in all_rules if r.is_active]
         text = "Выберите правило, для которого нужно отправить следующий пост сейчас:"
         markup = rules_trigger_now_keyboard(rules, page=page)
 
     elif action == "list":
-        rules = all_rules
         text, markup = rule_catalog_view(
             rules, folder_id=-1, folder_name="", page=page,
         )
@@ -4224,7 +4171,7 @@ def _build_rule_card_render_sync(rule_id: int, prefix_text: str | None = None) -
     }
 
 async def _build_rule_card_render_async(rule_id: int, prefix_text: str | None = None) -> dict | None:
-    return await asyncio.to_thread(_build_rule_card_render_sync, rule_id, prefix_text)
+    return await run_db(_build_rule_card_render_sync, rule_id, prefix_text)
 
 async def refresh_rule_card_by_ids(
     *,
@@ -6551,7 +6498,7 @@ async def handle_rule_to_list(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
-    rules = await run_db(db.get_all_rules)
+    rules = await run_db(db.get_rule_catalog_page)
     text, keyboard = rule_catalog_view(
         rules, folder_id=-1, folder_name="", page=0,
     )
@@ -8731,7 +8678,7 @@ def _start_channel_title_sync_runtime() -> None:
         return
     if bot is None:
         return
-    channel_title_sync_task = asyncio.create_task(
+    channel_title_sync_task = create_background_task(
         channel_title_sync_loop(
             db=db,
             bot=bot,
@@ -8926,7 +8873,7 @@ async def _start_scheduler_role() -> None:
     await _init_db_runtime()
     logger.info("STARTUP | Запуск роли scheduler")
     start_background_task(heartbeat_loop("scheduler", db), name="scheduler-heartbeat")
-    watchdog_task = asyncio.create_task(run_watchdog_loop(db, interval_seconds=10.0))
+    watchdog_task = create_background_task(run_watchdog_loop(db, interval_seconds=10.0))
     try:
         await run_scheduler_loop(
             db,
@@ -8961,7 +8908,7 @@ async def _start_all_role() -> None:
     _start_repost_campaign_runtime_tasks(role="all")
     _start_channel_title_sync_runtime()
     if scheduler_runtime_task is None or scheduler_runtime_task.done():
-        scheduler_runtime_task = asyncio.create_task(
+        scheduler_runtime_task = create_background_task(
             run_scheduler_loop(
                 db,
                 interval_seconds=1.0,
@@ -8969,10 +8916,10 @@ async def _start_all_role() -> None:
             )
         )
     if job_watchdog_task is None or job_watchdog_task.done():
-        job_watchdog_task = asyncio.create_task(run_watchdog_loop(db, interval_seconds=10.0))
+        job_watchdog_task = create_background_task(run_watchdog_loop(db, interval_seconds=10.0))
     if reaction_worker_task is None or reaction_worker_task.done():
         reaction_worker = ReactionWorker(db=db, worker_id="reaction-worker-1", poll_interval_sec=2.0, lock_timeout_seconds=300)
-        reaction_worker_task = asyncio.create_task(reaction_worker.run_forever())
+        reaction_worker_task = create_background_task(reaction_worker.run_forever())
         logger.info("Reaction worker запущен: reaction-worker-1")
     await start_job_workers_runtime(resume=True)
     start_background_task(_supervise_job_workers(), name="job-workers-supervisor")
@@ -9194,6 +9141,8 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+dp.message.outer_middleware(UiDatabaseMiddleware())
+dp.callback_query.outer_middleware(UiDatabaseMiddleware())
 dp.callback_query.outer_middleware(CallbackNavigationMiddleware(answer_callback_safe_once))
 _register_admin_handlers()
 _register_user_saas_handlers()
@@ -9260,4 +9209,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("👋 Бот остановлен")
     finally:
+        shutdown_ui_db_executor()
         db.close_all_connections()
