@@ -24,15 +24,6 @@ from app.repost_campaign_ui import (
     build_repost_campaign_views_report_loading_view,
     build_repost_campaign_views_report_error_view,
     build_repost_campaign_vip_features_view,
-    build_repost_campaign_invite_link_view,
-    build_repost_campaign_invite_links_destination_view,
-    build_repost_campaign_invite_links_injection_view,
-    build_repost_campaign_invite_links_list_view,
-    build_repost_campaign_invite_links_mode_view,
-    build_repost_campaign_invite_links_per_target_view,
-    build_repost_campaign_invite_links_preview_view,
-    build_repost_campaign_invite_links_stats_view,
-    build_repost_campaign_invite_links_view,
     build_repost_campaign_vip_coming_soon_view,
     build_repost_campaign_top_time_intro_view,
     build_repost_campaign_top_time_active_pauses_view,
@@ -560,7 +551,7 @@ def test_post_stats_loading_view():
 def test_vip_features_view_contains_placeholder_text():
     text, keyboard = build_repost_campaign_vip_features_view(rule_id=5)
     assert "💎 VIP-функции" in text
-    assert "📥 Заявки и вступления" in text
+    assert "📥 Заявки и вступления" not in text
     assert "A/B-тесты" not in text
     assert "⬅️ Назад" in _texts_from_keyboard(keyboard)
 
@@ -927,7 +918,6 @@ def test_vip_features_menu_uses_approved_copy():
         "обычный автопостинг ViMi",
         "автоматические репосты",
         "видеопосты",
-        "📥 Заявки и вступления",
     ]:
         assert expected in text
 
@@ -953,7 +943,6 @@ def test_vip_features_menu_keeps_callbacks():
         "rule_repost_campaign_scheduled_posts:73",
         "rule_repost_campaign_clean_channel:73",
         "rule_repost_campaign_top_time:73",
-        "rule_repost_campaign_invite_links:73",
         "rule_repost_campaign_menu:73",
     ]
     assert "rule_repost_campaign_vip_coming_soon:73:ab_test" not in _callbacks_from_keyboard(keyboard)
@@ -2858,181 +2847,3 @@ def test_top_time_active_pauses_handler_source_exists_and_runtime_untouched():
         assert "build_repost_campaign_top_time_active_pauses_view" not in source
 
 
-def test_vip_features_view_shows_invite_links_statuses():
-    text, keyboard = build_repost_campaign_vip_features_view(rule_id=10, invite_links_settings={"enabled": False})
-    labels = _texts_from_keyboard(keyboard)
-    assert "📥 Заявки и вступления" in text
-    assert "📥 Заявки и вступления — 🔴 выключено" in text
-    assert "📥 Заявки и вступления — 🔴 выключено" in labels
-    assert "rule_repost_campaign_invite_links:10" in _callbacks_from_keyboard(keyboard)
-
-    text, keyboard = build_repost_campaign_vip_features_view(rule_id=10, invite_links_settings={"enabled": True})
-    assert "📥 Заявки и вступления — 🟢 включено" in text
-    assert "📥 Заявки и вступления — 🟢 включено" in _texts_from_keyboard(keyboard)
-
-    text, keyboard = build_repost_campaign_vip_features_view(rule_id=10, invite_links_settings=None)
-    assert "📥 Заявки и вступления — ⚠️ статус недоступен" in text
-    assert "📥 Заявки и вступления — ⚠️ статус недоступен" in _texts_from_keyboard(keyboard)
-
-
-def test_invite_links_main_view_content_and_toggle_buttons():
-    text, keyboard = build_repost_campaign_invite_links_view(
-        rule_id=10,
-        settings={
-            "enabled": False,
-            "destination_chat_title": "Канал",
-            "link_mode": "join_request",
-            "injection_mode": "placeholder",
-            "per_target_links_enabled": True,
-            "preview_required": True,
-        },
-        stats={"links_total": 3, "links_active": 2, "join_requests_total": 4, "joins_total": 3, "left_total": 1, "kicked_total": 0, "unknown_total": 0, "unique_users_total": 4},
-    )
-    assert "📥 Заявки и вступления" in text
-    assert "ViMi будет создавать Telegram-ссылки" in text
-    assert "ViMi не принимает и не отклоняет заявки" in text
-    assert "бот автоприёма" in text
-    assert "Канал для вступления" in text
-    assert "👉 Канал" in text
-    assert "Режим ссылки" in text
-    assert "📥 с заявкой" in text
-    assert "Автоподстановка" in text
-    assert "{invite_link}" in text
-    assert "Ссылки по каналам" in text
-    assert "🟢 отдельная ссылка для каждого рекламного канала" in text
-    assert "Предпросмотр" in text
-    assert "обязателен" in text
-    assert "📊 Статистика" in text
-    assert "🔗 Ссылок всего" in text
-    assert "📥 Заявки" in text
-    assert "✅ Вступления" in text
-    texts = _texts_from_keyboard(keyboard)
-    assert "🟢 Включить" in texts
-    assert "📥 Канал для вступления" in texts
-    assert "🔗 Режим ссылки" in texts
-    assert "⚙️ Автоподстановка" in texts
-    assert "📣 Ссылки по каналам" in texts
-    assert "👁 Предпросмотр" in texts
-    callbacks = _callbacks_from_keyboard(keyboard)
-    assert "rule_repost_campaign_menu:10" in callbacks
-    assert "rule_repost_campaign:10" not in callbacks
-
-    text, keyboard = build_repost_campaign_invite_links_view(rule_id=10, settings={"enabled": True})
-    assert "Статус: 🟢 включено" in text
-    assert "🔴 Выключить" in _texts_from_keyboard(keyboard)
-
-
-def test_invite_links_modes_rendering():
-    text, _ = build_repost_campaign_invite_links_view(rule_id=10, settings={"link_mode": "direct_join", "injection_mode": "append_footer"}, stats={"links_total": 1, "links_active": 1, "join_requests_total": 1, "joins_total": 1, "left_total": 0, "kicked_total": 0, "unknown_total": 0, "unique_users_total": 1})
-    assert "✅ обычное вступление" in text
-    assert "📥 Заявки" in text
-    assert "✅ Вступления" in text
-    assert "🚪 Выходы" in text
-    assert "⛔ Исключены" in text
-    assert "добавить в конец" in text
-
-    text, _ = build_repost_campaign_invite_links_view(rule_id=10, settings={"injection_mode": "disabled", "per_target_links_enabled": False, "preview_required": False})
-    assert "выключена" in text
-    assert "⚪ одна ссылка на весь рекламный запуск" in text
-    assert "не обязателен" in text
-
-    text, _ = build_repost_campaign_invite_links_view(rule_id=10, settings={"preview_checked_at": "2026-01-01T00:00:00"})
-    assert "✅ проверен" in text
-
-
-def test_invite_links_info_views():
-    text, keyboard = build_repost_campaign_invite_links_destination_view(
-        rule_id=10,
-        settings={"destination_chat_title": "Главный канал"},
-        targets=[{"id": 7, "target_id": "-1001", "title": "Канал 1"}],
-    )
-    assert "📥 Канал для вступления" in text
-    assert "Выберите канал, куда должны вступать люди" in text
-    assert "👉 Главный канал" in text
-    assert "Канал 1" in _texts_from_keyboard(keyboard)
-    assert "rule_repost_campaign_invite_links_destination_set:10:7" in _callbacks_from_keyboard(keyboard)
-    assert "⬅️ Назад" in _texts_from_keyboard(keyboard)
-
-    text, keyboard = build_repost_campaign_invite_links_list_view(rule_id=10)
-    assert "🔗 Рекламные ссылки" in text
-    assert "Пока нет созданных Telegram-ссылок" in text
-    assert "📊 конверсию" in text
-    assert "➕ Создать Telegram-ссылку" in _texts_from_keyboard(keyboard)
-    assert "rule_repost_campaign_invite_links_create:10" in _callbacks_from_keyboard(keyboard)
-    assert "⬅️ Назад" in _texts_from_keyboard(keyboard)
-
-    text, keyboard = build_repost_campaign_invite_links_list_view(
-        rule_id=10,
-        links=[
-            {"id": 123, "rule_id": 10, "status": "active", "link_mode": "join_request", "destination_chat_title": "Канал", "invite_link": "https://t.me/+abc", "created_at": "2026-06-20T11:32:00+00:00"},
-            {"id": 124, "rule_id": 10, "status": "revoked", "link_mode": "direct_join", "destination_chat_title": "Канал", "invite_link": "https://t.me/+def", "created_at": "2026-06-20T10:10:00+00:00"},
-        ],
-        link_stats={123: {"join_requests_total": 4, "joins_total": 3, "left_total": 1, "kicked_total": 0, "unknown_total": 0, "unique_users_total": 4}, 124: {"join_requests_total": 0, "joins_total": 2, "left_total": 0, "kicked_total": 0, "unknown_total": 0, "unique_users_total": 2}},
-    )
-    assert "Создано ссылок" in text
-    assert "https://t.me/+" in text
-    assert "📥 с заявкой" in text
-    assert "✅ обычное вступление" in text
-    assert "rule_repost_campaign_invite_link_view:10:123" in _callbacks_from_keyboard(keyboard)
-
-    text, keyboard = build_repost_campaign_invite_link_view(rule_id=10, link={"id": 123, "rule_id": 10, "status": "active", "link_mode": "join_request", "destination_chat_title": "Канал", "invite_link": "https://t.me/+abc", "created_at": "2026-06-20T11:32:00+00:00"}, stats={"join_requests_total": 4, "joins_total": 3, "left_total": 1, "kicked_total": 0, "unknown_total": 0, "unique_users_total": 4})
-    assert "🔗 Рекламная Telegram-ссылка" in text
-    assert "Статус" in text
-    assert "Канал" in text
-    assert "Режим" in text
-    assert "Ссылка" in text
-    assert "📊 Статистика" in text
-    assert "📥 Заявки" in text
-    assert "✅ Вступления" in text
-    assert "👤 Уникальных пользователей" in text
-    assert "75.0%" in text
-    assert "🚫 Отозвать ссылку" in _texts_from_keyboard(keyboard)
-
-    text, keyboard = build_repost_campaign_invite_link_view(rule_id=10, link={"id": 123, "rule_id": 10, "status": "revoked", "link_mode": "join_request", "destination_chat_title": "Канал", "invite_link": "https://t.me/+abc"})
-    assert "🚫 Отозвать ссылку" not in _texts_from_keyboard(keyboard)
-
-
-    stats_text, stats_keyboard = build_repost_campaign_invite_links_stats_view(
-        rule_id=10,
-        stats={"links_total": 3, "links_active": 2, "join_requests_total": 4, "joins_total": 3, "left_total": 1, "kicked_total": 0, "unknown_total": 0, "unique_users_total": 4},
-    )
-    assert "📊 Статистика заявок и вступлений" in stats_text
-    assert "Ссылки" in stats_text
-    assert "Люди" in stats_text
-    assert "Принятие заявок" in stats_text
-    assert "75.0%" in stats_text
-    assert "rule_repost_campaign_invite_links_list:10:0" in _callbacks_from_keyboard(stats_keyboard)
-
-    no_data_text, _ = build_repost_campaign_invite_links_stats_view(rule_id=10, stats={"links_total": 0, "links_active": 0, "join_requests_total": 0, "joins_total": 0, "left_total": 0, "kicked_total": 0, "unknown_total": 0, "unique_users_total": 0})
-    assert "пока нет данных" in no_data_text
-
-    text, keyboard = build_repost_campaign_invite_links_mode_view(rule_id=10, settings={"link_mode": "join_request"})
-    assert "📥 С заявкой" in text
-    assert "✅ Обычное вступление" in text
-    callbacks = _callbacks_from_keyboard(keyboard)
-    assert "rule_repost_campaign_invite_links_mode_set:10:join_request" in callbacks
-    assert "rule_repost_campaign_invite_links_mode_set:10:direct_join" in callbacks
-
-    text, keyboard = build_repost_campaign_invite_links_injection_view(rule_id=10, settings={"injection_mode": "disabled"})
-    assert "⚙️ Автоподстановка" in text
-    assert "{invite_link}" in text
-    assert "Добавить в конец" in text
-    assert "Выключена" in text
-    callbacks = _callbacks_from_keyboard(keyboard)
-    assert "rule_repost_campaign_invite_links_injection_set:10:placeholder" in callbacks
-    assert "rule_repost_campaign_invite_links_injection_set:10:append_footer" in callbacks
-    assert "rule_repost_campaign_invite_links_injection_set:10:disabled" in callbacks
-
-    text, keyboard = build_repost_campaign_invite_links_per_target_view(rule_id=10, settings={"per_target_links_enabled": True})
-    assert "Отдельная ссылка для каждого рекламного канала" in text
-    assert "Одна ссылка на весь рекламный запуск" in text
-    callbacks = _callbacks_from_keyboard(keyboard)
-    assert "rule_repost_campaign_invite_links_per_target_set:10:on" in callbacks
-    assert "rule_repost_campaign_invite_links_per_target_set:10:off" in callbacks
-
-    text, keyboard = build_repost_campaign_invite_links_preview_view(rule_id=10, settings={"preview_required": True})
-    assert "предпросмотр обязателен" in text
-    assert any("Не требовать предпросмотр" in item for item in _texts_from_keyboard(keyboard))
-    callbacks = _callbacks_from_keyboard(keyboard)
-    assert "rule_repost_campaign_invite_links_preview_set:10:required" in callbacks
-    assert "rule_repost_campaign_invite_links_preview_set:10:optional" in callbacks
