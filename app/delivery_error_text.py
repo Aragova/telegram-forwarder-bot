@@ -16,7 +16,7 @@ class DeliveryError:
 
 _RESCAN = DeliveryError(
     "Несоответствие очереди и истории отправки",
-    "Состав альбома не совпадает с ранее сохранёнными данными отправки. "
+    "Данные о составе альбома в очереди не согласуются с сохранённой историей или изменились до отправки. "
     "Повторная отправка заблокирована для защиты от дублей.",
     "Проверьте, до какого поста канал уже опубликован. В правиле выберите "
     "«Пересканировать» → «Начать заново», затем «Начать с этого» на нужном посте. "
@@ -62,6 +62,31 @@ _MEDIA = DeliveryError(
     "Telegram отклонил медиафайл или не смог использовать его исходные данные.",
     "Проверьте исходный файл и возможность его воспроизведения; при необходимости замените его.",
 )
+_DOWNLOAD = DeliveryError(
+    "Не удалось скачать файл",
+    "Бот не получил медиафайл из Telegram.",
+    "Проверьте доступ к источнику и наличие файла; при повторении обратитесь к администратору.",
+)
+_LOCAL_FILE = DeliveryError(
+    "Файл на сервере не найден",
+    "Исходный или временный файл недоступен для обработки.",
+    "Проверьте исходный пост; администратору следует проверить хранение временных файлов.",
+)
+_VIDEO_PROCESSING = DeliveryError(
+    "Ошибка обработки видео",
+    "Не удалось подготовить видео к отправке.",
+    "Проверьте исходный файл; при повторении обратитесь к администратору.",
+)
+_VIDEO_PENDING = DeliveryError(
+    "Telegram обрабатывает видео",
+    "Видео принято Telegram, но результат публикации пока не подтверждён.",
+    "Дождитесь обработки и проверьте получателя. Не запускайте повторную отправку вслепую.",
+)
+_GROUP_SIZE = DeliveryError(
+    "Некорректный состав альбома",
+    "Количество элементов альбома не подходит для отправки выбранным способом.",
+    "Проверьте состав исходного альбома и пересканируйте правило, если очередь устарела.",
+)
 _UNKNOWN = DeliveryError(
     "Не удалось определить причину",
     "Произошла ошибка, для которой пока нет точного описания.",
@@ -87,6 +112,25 @@ _CODES = {
     "telethon_one_by_one_send_accepted_target_id_unresolved_non_retryable": _UNCERTAIN,
     "video_send_accepted_target_id_unresolved_non_retryable": _UNCERTAIN,
     "telethon_album_target_id_unresolved": _UNCERTAIN,
+    "telegram_video_processing_pending": _VIDEO_PENDING,
+    "empty_response_after_send": _UNCERTAIN,
+    "album_sent_messages_empty": _UNCERTAIN,
+    "album_sent_count_mismatch": _UNCERTAIN,
+    "album_grouped_id_mismatch": _UNCERTAIN,
+    "album_authoritative_ids_not_unique": _UNCERTAIN,
+    "reupload_album_sent_ids_missing": _UNCERTAIN,
+    "verify_album_sent_ids_not_found": _UNCERTAIN,
+    "verify_album_grouped_id_mismatch": _UNCERTAIN,
+    "verify_album_target_grouped_id_mismatch": _UNCERTAIN,
+    "verify_album_count_mismatch": _UNCERTAIN,
+    "uncertain_one_by_one_transport": _UNCERTAIN,
+    "telethon_send_message_returned_empty": _UNCERTAIN,
+    "telethon_send_file_returned_empty": _UNCERTAIN,
+    "telethon_album_send_file_returned_empty": _UNCERTAIN,
+    "weak_media_fingerprint": _UNCERTAIN,
+    "stale_or_pre_send_candidate": _UNCERTAIN,
+    "wrong_peer": _UNCERTAIN,
+    "invalid media group size": _GROUP_SIZE,
     "target_message_not_found_after_send": _UNCERTAIN,
     "self_loop_album_accepted_unverified_no_resend": _UNCERTAIN,
     "self_loop_single_accepted_unverified_no_resend": _UNCERTAIN,
@@ -125,25 +169,24 @@ _CODES = {
 }
 
 _PATTERNS = (
-    (("accepted_target_id_unresolved", "target message id not confirmed", "result unknown", "failed_after_send"), _UNCERTAIN),
+    (("accepted_target_id_unresolved", "target message id not confirmed", "target message id unresolved", "result unknown", "failed_after_send", "copymessages вернул пустой результат", "send_media_group вернул пустой результат", "telethon send_file(album) вернул пустой результат", "ошибка verify"), _UNCERTAIN),
     (("request entity too large", "entity too large", "file is too big", "file too large", "payload too large", "file_part_too_big"), _SIZE),
     (("telegramretryafter", "retry_after", "retry after", "floodwait", "flood_wait", "flood wait", "too many requests", "rate limited", "rate_limit", "rate-limit", "slowmode"), _RATE_LIMIT),
     (("chat_write_forbidden", "chat_admin_required", "channel_private", "chat write forbidden", "chat admin required", "not enough rights", "bot is not a member", "bot was kicked", "forbidden", "protected content", "chat_forwards_restricted"), _ACCESS),
     (("chat not found", "message not found", "message_id_invalid", "message to copy not found", "peer_id_invalid", "channel_invalid"), _MISSING),
-    (("document_invalid", "documentinvalid", "media_invalid", "media empty", "file_reference_expired", "file reference expired", "wrong file identifier", "invalid file", "moov atom not found", "invalid data found when processing input"), _MEDIA),
+    (("document_invalid", "documentinvalid", "media_invalid", "media empty", "file_reference_expired", "file reference expired", "wrong file identifier", "invalid file", "moov atom not found", "invalid data found when processing input", "битый mp4", "видеопоток отсутствует"), _MEDIA),
     (("timeout", "timed out", "timeouterror", "превышено время ожидания"), _TIMEOUT),
     (("connection reset", "connection refused", "networkerror", "network error", "server disconnected", "temporary failure", "bad gateway", "service unavailable"), DeliveryError(
         "Ошибка связи", "Не удалось завершить обмен данными с Telegram или сервером.",
         "Проверьте связь и канал-получатель перед повторной отправкой.",
     )),
-    (("disk full", "no space left on device"), DeliveryError(
+    (("disk full", "no space left on device", "недостаточно свободного места на диске"), DeliveryError(
         "Недостаточно места на сервере", "Сервер не смог сохранить или обработать файл.",
         "Обратитесь к администратору для освобождения места.",
     )),
-    (("ffmpeg", "ffprobe"), DeliveryError(
-        "Ошибка обработки видео", "Не удалось подготовить видео к отправке.",
-        "Проверьте исходный файл; при повторении обратитесь к администратору.",
-    )),
+    (("не удалось скачать видео", "не удалось скачать элемент альбома"), _DOWNLOAD),
+    (("исходный файл не найден", "входной файл не найден", "файл для проверки не найден", "отсутствует путь к исходному файлу", "не передан ни file_id, ни путь"), _LOCAL_FILE),
+    (("ffmpeg", "ffprobe", "не удалось получить информацию о видео", "нормализация не удалась", "не удалось обрезать видео", "не удалось подготовить заставку", "ошибка при склейке видео", "не удалось создать превью"), _VIDEO_PROCESSING),
     (("auth_key_unregistered", "authkeyunregistered", "session_revoked", "sessionrevoked", "session expired"), DeliveryError(
         "Сессия Telegram недействительна", "Подключённый аккаунт потерял авторизацию.",
         "Проверьте подключение аккаунта и восстановите авторизацию.",
