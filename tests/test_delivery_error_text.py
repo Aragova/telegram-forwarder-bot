@@ -28,6 +28,8 @@ def test_rescan_instructions_for_known_queue_conflicts(code):
     "video_send_accepted_without_ids_non_retryable",
     "publication_receipt_missing_no_resend",
     "publication_receipt_expired_no_resend",
+    "publication_sender_unavailable",
+    "publication_mapping_unavailable",
     "self_loop_album_accepted_unverified_no_resend",
 ])
 def test_uncertain_send_never_recommends_blind_rescan(code):

@@ -128,6 +128,8 @@ _CODES = {
     "video_send_accepted_without_ids_non_retryable": _UNCERTAIN,
     "publication_receipt_missing_no_resend": _UNCERTAIN,
     "publication_receipt_expired_no_resend": _UNCERTAIN,
+    "publication_sender_unavailable": _UNCERTAIN,
+    "publication_mapping_unavailable": _UNCERTAIN,
     "telethon_album_target_id_unresolved": _UNCERTAIN,
     "telegram_video_processing_pending": _VIDEO_PENDING,
     "empty_response_after_send": _UNCERTAIN,
