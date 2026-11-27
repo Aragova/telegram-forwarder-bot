@@ -24,11 +24,17 @@ def test_rescan_instructions_for_known_queue_conflicts(code):
     "copy_album_uncertain_no_fallback",
     "telethon_send_attempted_result_unknown_non_retryable",
     "video_send_accepted_target_id_unresolved_non_retryable",
+    "video_send_response_missing_non_retryable",
+    "video_send_accepted_without_ids_non_retryable",
+    "publication_receipt_missing_no_resend",
+    "publication_receipt_expired_no_resend",
     "self_loop_album_accepted_unverified_no_resend",
 ])
 def test_uncertain_send_never_recommends_blind_rescan(code):
     text = describe_delivery_error(code).text()
     assert "Проверьте канал-получатель вручную" in text
+    assert "Не повторяйте отправку вслепую" in text
+    assert "возможен дубль" in text
     assert "Пересканировать" not in text
     assert "<secret>" not in text
 
