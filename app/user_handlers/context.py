@@ -33,6 +33,7 @@ class UserHandlersContext:
     answer_callback_safe_once: Callable[..., Any] | None = None
     edit_message_text_safe: Callable[..., Any] | None = None
     invalidate_rich_edit_cache: Callable[[int | str, int], Any] | None = None
+    get_ui_policy: Callable[[], Any] | None = None
     edit_message_reply_markup_safe: Callable[..., Any] | None = None
     with_recovery_button: Callable[..., Any] | None = None
     recovery_has_items: Callable[..., bool] | None = None

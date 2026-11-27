@@ -72,6 +72,7 @@ video_emoji_validator = VideoEmojiValidator()
 video_caption_save_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIActionResult, UIErrorPolicy
+from app.ui_navigation import CallbackNavigationMiddleware, edit_result_status
 from app.reaction_auth_state import is_reaction_auth_state, is_reaction_account_reactions_input_state
 from app.scheduler_service import SchedulerService
 from app.runtime_roles import ForwardingControlUnavailable, RuntimeOwnership, normalize_runtime_role, run_role as run_runtime_role
@@ -348,18 +349,6 @@ RULE_CARD_CACHE_TTL_SEC = 15.0
 rule_card_cache: dict[int, RuleCardCacheEntry] = {}
 rule_card_build_locks: dict[int, asyncio.Lock] = {}
 
-RULE_REFRESH_DEBOUNCE_SEC = 4.0
-rule_refresh_inflight: set[tuple[int, int | str | None, int | None]] = set()
-rule_refresh_last_ts: dict[tuple[int, int | str | None, int | None], float] = {}
-
-rule_card_open_inflight: set[tuple[int, int | str | None, int | None]] = set()
-rule_card_open_last_ts: dict[tuple[int, int | str | None, int | None], float] = {}
-rule_card_refresh_inflight: set[tuple[int, int | str, int]] = set()
-rule_card_refresh_last_ts: dict[tuple[int, int | str, int], float] = {}
-
-rule_to_list_last_ts: dict[str, float] = {}
-
-
 def invalidate_rule_card_cache(rule_id: int) -> None:
     rule_card_cache.pop(int(rule_id), None)
 
@@ -389,21 +378,6 @@ def _get_cached_rule_card(rule_id: int) -> RuleCardCacheEntry | None:
         return None
 
     return entry
-
-def _is_debounce_active(storage: dict[Any, float], key: Any, cooldown_sec: float) -> bool:
-    now = time.monotonic()
-    last_ts = storage.get(key, 0.0)
-    return (now - last_ts) < cooldown_sec
-
-
-def _mark_debounce(storage: dict[Any, float], key: Any) -> None:
-    storage[key] = time.monotonic()
-
-
-def _rule_card_message_key(rule_id: int, message: Message | None) -> tuple[int, int | str | None, int | None]:
-    chat_id = getattr(getattr(message, "chat", None), "id", None)
-    message_id = getattr(message, "message_id", None)
-    return (int(rule_id), chat_id, message_id)
 
 def _cancel_dashboard_task(user_id: int) -> None:
     task = dashboard_tasks.pop(user_id, None)
@@ -1412,6 +1386,8 @@ async def refresh_rule_card_for_actor(
 ) -> str:
     if _is_admin_user(callback.from_user.id if callback.from_user else None):
         return await refresh_rule_card_message(callback, rule_id, prefix_text=prefix_text, force=force)
+    if force:
+        invalidate_rule_card_cache(rule_id)
     text, keyboard = await build_user_rule_card_payload(rule_id)
     if not text or not keyboard:
         return "failed"
@@ -1423,11 +1399,8 @@ async def refresh_rule_card_for_actor(
         parse_mode="HTML",
         reply_markup=keyboard,
     )
-    if result.ok:
-        return "updated"
-    if result.skipped:
-        return "not_modified"
-    return "failed"
+    status = edit_result_status(result)
+    return status if status in {"updated", "not_modified"} else "failed"
 
 
 def rule_label(row) -> str:
@@ -2591,7 +2564,7 @@ async def handle_cancel(message: Message):
             chat_id=card_chat_id,
             message_id=card_message_id,
             rule_id=rule_id,
-        )
+        ) in {"updated", "not_modified", "resent"}
 
     reset_user_state(user_id)
 
@@ -3825,84 +3798,24 @@ async def refresh_rule_card_message(
     prefix_text: str | None = None,
     force: bool = False,
 ) -> str:
-    """
-    Быстрый путь карточки:
-    - snapshot cache
-    - без лишнего edit на cache_hit
-    - без шторма message_not_modified
-    """
-    effective_force = force or bool(prefix_text)
-    chat_id = getattr(getattr(callback.message, "chat", None), "id", None)
-    message_id = getattr(callback.message, "message_id", None)
-    if chat_id is not None and message_id is not None:
-        card_key = (int(rule_id), chat_id, int(message_id))
-        if card_key in rule_card_refresh_inflight:
-            logger.info(
-                "RULE_CARD_MESSAGE | skipped=inflight | rule_id=%s | chat_id=%s | message_id=%s",
-                rule_id,
-                chat_id,
-                message_id,
-            )
-            return "not_modified"
-        if (
-            not effective_force
-            and _is_debounce_active(rule_card_refresh_last_ts, card_key, RULE_REFRESH_DEBOUNCE_SEC)
-        ):
-            logger.info(
-                "RULE_CARD_MESSAGE | skipped=debounce | rule_id=%s | chat_id=%s | message_id=%s",
-                rule_id,
-                chat_id,
-                message_id,
-            )
-            return "not_modified"
-        if not effective_force:
-            _mark_debounce(rule_card_refresh_last_ts, card_key)
-        rule_card_refresh_inflight.add(card_key)
-    else:
-        card_key = None
-
+    """Cache the payload, not the assumption that the card is on screen."""
+    if force:
+        invalidate_rule_card_cache(rule_id)
     try:
         text, reply_markup, cache_status = await build_rule_card_payload_cached(rule_id)
         if not text or not reply_markup:
             return "error"
-
         if prefix_text:
             text = f"{prefix_text}\n\n{text}"
-
-        logger.info(
-            "RULE_CARD_MESSAGE | rule_id=%s | cache_status=%s",
-            rule_id,
-            cache_status,
-        )
-
-        # КЛЮЧЕВОЕ:
-        # если карточка взята из кеша и сверху нет нового prefix_text,
-        # значит текст и клавиатура те же самые — edit не нужен
-        if (
-            cache_status in {"cache_hit", "cache_hit_after_wait"}
-            and not prefix_text
-            and not effective_force
-        ):
-            return "not_modified"
-
+        logger.info("RULE_CARD_MESSAGE | rule_id=%s | cache_status=%s", rule_id, cache_status)
         result = await edit_message_text_safe_result(
-            message=callback.message,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=reply_markup,
+            message=callback.message, text=text, parse_mode="HTML", reply_markup=reply_markup,
         )
-        if result.ok:
-            return "updated"
-        if result.skipped:
-            return "not_modified"
-        return "error"
-
+        status = edit_result_status(result)
+        return status if status in {"updated", "not_modified"} else "error"
     except Exception as exc:
         logger.exception("RULE_CARD_MESSAGE | failed | rule_id=%s | error=%s", rule_id, exc)
         return "error"
-    finally:
-        if card_key is not None:
-            rule_card_refresh_inflight.discard(card_key)
 
 
 def _save_repost_caption_sync(
@@ -4320,101 +4233,28 @@ async def refresh_rule_card_by_ids(
     prefix_text: str | None = None,
     force: bool = False,
 ) -> str:
-    """
-    Возвращает:
-    - "updated"
-    - "not_modified"
-    - "resent"
-    - "failed"
-    """
-    effective_force = force or bool(prefix_text)
-    card_key = (int(rule_id), chat_id, int(message_id))
-    if card_key in rule_card_refresh_inflight:
-        logger.info(
-            "RULE_CARD_REFRESH | skipped=inflight | rule_id=%s | chat_id=%s | message_id=%s",
-            rule_id,
-            chat_id,
-            message_id,
-        )
-        return "not_modified"
-
-    if (
-        not effective_force
-        and _is_debounce_active(rule_card_refresh_last_ts, card_key, RULE_REFRESH_DEBOUNCE_SEC)
-    ):
-        logger.info(
-            "RULE_CARD_REFRESH | skipped=debounce | rule_id=%s | chat_id=%s | message_id=%s",
-            rule_id,
-            chat_id,
-            message_id,
-        )
-        return "not_modified"
-
-    if not effective_force:
-        _mark_debounce(rule_card_refresh_last_ts, card_key)
-    rule_card_refresh_inflight.add(card_key)
-    try:
-        text, reply_markup, cache_status = await build_rule_card_payload_cached(rule_id)
-        if not text or not reply_markup:
-            return "failed"
-
-        if prefix_text:
-            text = f"{prefix_text}\n\n{text}"
-
-        logger.info(
-            "RULE_CARD_REFRESH | rule_id=%s | cache_status=%s",
-            rule_id,
-            cache_status,
-        )
-
-        # КЛЮЧЕВОЕ:
-        # если cache_hit и нет prefix_text — не дёргаем edit вообще
-        if (
-            cache_status in {"cache_hit", "cache_hit_after_wait"}
-            and not prefix_text
-            and not effective_force
-        ):
-            return "not_modified"
-
-        edit_result = await try_edit_message_text_by_ids_safe(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=reply_markup,
-        )
-
-        if edit_result == "updated":
-            return "updated"
-
-        if edit_result == "not_modified":
-            return "not_modified"
-
-        if edit_result == "failed":
-            return "failed"
-
-        if edit_result == "gone":
-            try:
-                sent = await send_message_safe(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode="HTML",
-                    reply_markup=reply_markup,
-                )
-                return "resent" if sent else "failed"
-            except Exception as exc:
-                logger.exception(
-                    "Не удалось ни обновить, ни отправить карточку правила #%s по ids chat_id=%s message_id=%s: %s",
-                    rule_id,
-                    chat_id,
-                    message_id,
-                    exc,
-                )
-                return "failed"
-
+    """Render cached data even when returning from a different screen."""
+    if force:
+        invalidate_rule_card_cache(rule_id)
+    text, reply_markup, cache_status = await build_rule_card_payload_cached(rule_id)
+    if not text or not reply_markup:
         return "failed"
-    finally:
-        rule_card_refresh_inflight.discard(card_key)
+    if prefix_text:
+        text = f"{prefix_text}\n\n{text}"
+    logger.info("RULE_CARD_REFRESH | rule_id=%s | cache_status=%s", rule_id, cache_status)
+    edit_result = await try_edit_message_text_by_ids_safe(
+        chat_id=chat_id, message_id=message_id, text=text,
+        parse_mode="HTML", reply_markup=reply_markup,
+    )
+    if edit_result in {"updated", "not_modified"}:
+        return edit_result
+    if edit_result == "gone":
+        sent = await send_message_safe(
+            chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=reply_markup,
+        )
+        return "resent" if sent else "failed"
+    return "failed"
+
 
 async def refresh_input_prompt_by_ids(
     *,
@@ -4461,12 +4301,28 @@ async def refresh_input_prompt_by_ids(
 
     return "failed"
 
+async def notify_callback_error(callback: CallbackQuery, text: str) -> bool:
+    """Preserve an alert after ACK; enqueue it if the chat is rate limited."""
+    chat = getattr(getattr(callback, "message", None), "chat", None)
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None or getattr(chat, "type", None) != "private":
+        return False
+    if ui_policy is not None:
+        return ui_policy.notify_after_ack(chat_id=chat_id, text=text)
+    return bool(await send_message_safe(chat_id=chat_id, text=text))
+
+
 async def answer_callback_safe(
     callback: CallbackQuery,
     text: str | None = None,
     show_alert: bool = False,
 ) -> bool:
     global ui_policy
+
+    if getattr(callback, "_navigation_ack_sent", False):
+        if text and show_alert:
+            return await notify_callback_error(callback, text)
+        return False
 
     if ui_policy is not None:
         try:
@@ -4524,6 +4380,8 @@ async def edit_message_text_safe_result(
             )
             return UIActionResult(ok=True)
         except Exception as exc:
+            if is_message_not_modified_error(exc):
+                return UIActionResult(ok=False, skipped=True, reason="message_not_modified")
             logger.exception("edit_message_text_safe fallback failed")
             return UIActionResult(ok=False, skipped=False, reason="unexpected_error", result=exc)
 
@@ -4557,7 +4415,7 @@ async def edit_message_text_safe(
         parse_mode=parse_mode,
         disable_web_page_preview=disable_web_page_preview,
     )
-    return bool(result.ok)
+    return edit_result_status(result) in {"updated", "not_modified"}
 
 
 async def send_message_safe(
@@ -4636,7 +4494,7 @@ async def edit_message_reply_markup_safe(*, message: Message, reply_markup=None)
         message_id=message.message_id,
         reply_markup=reply_markup,
     )
-    return bool(result.ok)
+    return edit_result_status(result) in {"updated", "not_modified"}
 
 
 async def delete_message_safe(
@@ -4728,6 +4586,12 @@ async def try_edit_message_text_safe(
     """
     if not message:
         return "gone"
+    if ui_policy is not None:
+        return await try_edit_message_text_by_ids_safe(
+            chat_id=message.chat.id, message_id=message.message_id, text=text,
+            parse_mode=parse_mode, reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview,
+        )
 
     try:
         await message.edit_text(
@@ -4787,25 +4651,7 @@ async def try_edit_message_text_by_ids_safe(
             reply_markup=reply_markup,
             disable_web_page_preview=disable_web_page_preview,
         )
-        if result.ok:
-            return "updated"
-        if result.reason == "message_not_modified":
-            return "not_modified"
-        if result.reason in {
-            "same_message_signature",
-            "message_edit_throttled",
-            "chat_retry_after_active",
-            "retry_after",
-        }:
-            return "not_modified"
-        if result.reason in {
-            "message_id_invalid",
-            "message_to_edit_not_found",
-            "message_cant_be_edited",
-            "no_text_to_edit",
-        }:
-            return "gone"
-        return "failed"
+        return edit_result_status(result)
 
     try:
         edit_message_text = getattr(bot, "edit_message_text")
@@ -5131,6 +4977,8 @@ async def answer_callback_safe_once(
     show_alert: bool = False,
 ) -> bool:
     if getattr(callback, "_safe_answer_sent", False):
+        if text and show_alert:
+            return await notify_callback_error(callback, text)
         return False
 
     ok = await answer_callback_safe(
@@ -5918,7 +5766,10 @@ async def handle_repost_caption_menu(callback: CallbackQuery):
         reply_markup=await run_db(build_repost_caption_menu_keyboard, rule_id),
         parse_mode="HTML",
     )
-    await answer_callback_safe_once(callback, "Открыто" if edited else "Уже открыто")
+    if not edited:
+        await answer_callback_safe_once(callback, "Не удалось открыть меню подписи", show_alert=True)
+        return
+    await answer_callback_safe_once(callback, "Открыто")
 
 
 @dp.callback_query(lambda c: c.data.startswith("repost_caption_edit:"))
@@ -6332,28 +6183,9 @@ async def handle_rule_card(callback: CallbackQuery):
     # отвечаем мгновенно
     await answer_callback_safe_once(callback)
 
-    card_key = _rule_card_message_key(rule_id, callback.message)
-    if card_key in rule_card_open_inflight:
-        return
-
-    if _is_debounce_active(rule_card_open_last_ts, card_key, RULE_REFRESH_DEBOUNCE_SEC):
-        return
-
-    _mark_debounce(rule_card_open_last_ts, card_key)
-
-    rule_card_open_inflight.add(card_key)
-    try:
-        result = await refresh_rule_card_for_actor(callback, rule_id)
-
-        if result in {"updated", "not_modified", "resent"}:
-            return
-
-        await send_message_safe(
-            chat_id=callback.message.chat.id,
-            text="❌ Не удалось открыть карточку",
-        )
-    finally:
-        rule_card_open_inflight.discard(card_key)
+    result = await refresh_rule_card_for_actor(callback, rule_id)
+    if result not in {"updated", "not_modified", "resent"}:
+        await answer_callback_safe_once(callback, "❌ Не удалось открыть карточку", show_alert=True)
 
 @dp.callback_query(lambda c: c.data == "rule_to_main_menu")
 async def handle_rule_to_main_menu(callback: CallbackQuery):
@@ -6717,31 +6549,9 @@ async def handle_rule_refresh(callback: CallbackQuery):
     # отвечаем сразу, пока callback живой
     await answer_callback_safe_once(callback)
 
-    card_key = _rule_card_message_key(rule_id, callback.message)
-
-    # антишторм: если уже идёт refresh этой конкретной карточки — игнорируем
-    if card_key in rule_refresh_inflight:
-        return
-
-    # антидребезг: повторный refresh той же карточки раньше безопасного окна игнорируем
-    if _is_debounce_active(rule_refresh_last_ts, card_key, RULE_REFRESH_DEBOUNCE_SEC):
-        return
-
-    _mark_debounce(rule_refresh_last_ts, card_key)
-
-    rule_refresh_inflight.add(card_key)
-    try:
-        result = await refresh_rule_card_for_actor(callback, rule_id)
-
-        if result in {"updated", "not_modified", "resent"}:
-            return
-
-        await send_message_safe(
-            chat_id=callback.message.chat.id,
-            text="❌ Не удалось обновить карточку",
-        )
-    finally:
-        rule_refresh_inflight.discard(card_key)
+    result = await refresh_rule_card_for_actor(callback, rule_id)
+    if result not in {"updated", "not_modified", "resent"}:
+        await answer_callback_safe_once(callback, "❌ Не удалось обновить карточку", show_alert=True)
 
 @dp.callback_query(lambda c: c.data == "rule_to_list")
 async def handle_rule_to_list(callback: CallbackQuery):
@@ -6749,11 +6559,6 @@ async def handle_rule_to_list(callback: CallbackQuery):
         return
 
     await answer_callback_safe_once(callback)
-
-    debounce_key = f"{callback.message.chat.id}:{callback.message.message_id}:rule_to_list"
-    if _is_debounce_active(rule_to_list_last_ts, debounce_key, 1.0):
-        return
-    _mark_debounce(rule_to_list_last_ts, debounce_key)
 
     rules = await run_db(db.get_all_rules)
     text, keyboard = rule_catalog_view(
@@ -9266,6 +9071,7 @@ def _register_user_saas_handlers() -> None:
         answer_callback_safe_once=lambda *a, **k: answer_callback_safe_once(*a, **k),
         edit_message_text_safe=lambda *a, **k: edit_message_text_safe(*a, **k),
         invalidate_rich_edit_cache=invalidate_rule_rich_edit_cache,
+        get_ui_policy=lambda: ui_policy,
         edit_message_reply_markup_safe=edit_message_reply_markup_safe,
         with_recovery_button=_with_recovery_button,
         recovery_has_items=_recovery_has_items,
@@ -9427,6 +9233,7 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+dp.callback_query.outer_middleware(CallbackNavigationMiddleware(answer_callback_safe_once))
 _register_admin_handlers()
 _register_user_saas_handlers()
 register_rule_folder_handlers(dp, SimpleNamespace(
@@ -9439,6 +9246,7 @@ register_rule_folder_handlers(dp, SimpleNamespace(
     answer_callback_safe_once=answer_callback_safe_once,
     edit_message_text_safe=edit_message_text_safe,
     invalidate_rich_edit_cache=invalidate_rule_rich_edit_cache,
+    get_ui_policy=lambda: ui_policy,
     send_message_safe=send_message_safe,
     try_delete_message_safe=try_delete_message_safe,
     refresh_rule_card_for_actor=refresh_rule_card_for_actor,

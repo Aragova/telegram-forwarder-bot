@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -7,7 +8,9 @@ from typing import Any
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
+from app.background_tasks import start_background_task
 from app.telegram_flood_locks import TelegramFloodLockStore
+from app.ui_navigation import edit_locks, message_key
 
 
 logger = logging.getLogger("forwarder.ui")
@@ -35,6 +38,10 @@ class UIErrorPolicy:
     """
 
     MESSAGE_EDIT_THROTTLE_SECONDS = 0.5
+    EDIT_WAIT_BUDGET_SECONDS = 5.0
+    ALERT_MAX_CHATS = 256
+    ALERT_MAX_PER_CHAT = 16
+    ALERT_SEND_TIMEOUT_SECONDS = 15.0
 
     def __init__(
         self, bot, flood_lock_store: TelegramFloodLockStore | None = None
@@ -43,7 +50,9 @@ class UIErrorPolicy:
         self._flood_lock_store = flood_lock_store or TelegramFloodLockStore()
         self._chat_retry_after_until: dict[str, float] = {}
         self._last_edit_at: dict[tuple[int | str, int], float] = {}
-        self._last_edit_signature: dict[tuple[int | str, int], tuple[str, str]] = {}
+        self._last_edit_signature: dict[tuple[int | str, int], tuple[Any, ...]] = {}
+        self._pending_alerts: dict[str, dict[str, None]] = {}
+        self._alert_tasks: dict[str, asyncio.Task] = {}
         self._load_persistent_chat_locks()
 
     # =========================================================
@@ -239,16 +248,13 @@ class UIErrorPolicy:
                 exc,
             )
 
-    def _build_message_signature(self, *, text: str, reply_markup) -> tuple[str, str]:
-        return (text, repr(reply_markup))
-
     def invalidate_edit_cache(self, *, chat_id: int | str, message_id: int) -> None:
         """Clear stale edit state after an externally executed Rich edit.
 
         Without this, the next navigation to a previously seen screen can be
         dropped as same_message_signature, even though the message changed.
         """
-        key = (chat_id, int(message_id))
+        key = message_key(chat_id, message_id)
         self._last_edit_signature.pop(key, None)
         self._last_edit_at.pop(key, None)
 
@@ -376,6 +382,53 @@ class UIErrorPolicy:
     # EDIT
     # =========================================================
 
+    async def edit_operation(
+        self, *, chat_id: int | str, message_id: int, action: str,
+        signature: tuple[Any, ...] | None, func,
+    ) -> UIActionResult:
+        """Serialize all screen writes, wait for short rate limits, never report
+        a skipped distinct screen as already rendered.
+        """
+        key = message_key(chat_id, message_id)
+        details = {"chat_id": chat_id, "message_id": message_id}
+        async with edit_locks.get(chat_id, message_id):
+            if signature is not None and self._last_edit_signature.get(key) == signature:
+                return UIActionResult(ok=False, skipped=True, reason="same_message_signature")
+
+            deadline = time.monotonic() + self.EDIT_WAIT_BUDGET_SECONDS
+            previous = None
+            for attempt in range(2):
+                last_edit = self._last_edit_at.get(key)
+                throttle = (
+                    self.MESSAGE_EDIT_THROTTLE_SECONDS - (time.monotonic() - last_edit)
+                    if last_edit is not None else 0.0
+                )
+                cooldown = self._chat_cooldown_left(chat_id)
+                delay = max(0.0, throttle, cooldown)
+                if delay > max(0.0, deadline - time.monotonic()):
+                    reason = "chat_retry_after_active" if cooldown > 0 else "message_edit_throttled"
+                    self._log_suppressed(action=action, reason=reason, details=details)
+                    return previous or UIActionResult(ok=False, skipped=True, reason=reason)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+                # A request with unknown outcome cannot leave a previous screen
+                # marked as confirmed. Only success / not-modified restores it.
+                self._last_edit_signature.pop(key, None)
+                result = await self._execute(action=action, details=details, func=func, chat_id=chat_id)
+                if result.ok and result.result is False:
+                    return UIActionResult(ok=False, reason="edit_rejected")
+                if result.ok or result.reason == "message_not_modified":
+                    self._last_edit_at[key] = time.monotonic()
+                    if signature is not None:
+                        self._last_edit_signature[key] = signature
+                    return result
+                if attempt == 0 and result.reason in {"retry_after", "chat_retry_after_active"}:
+                    previous = result
+                    continue
+                return result
+            return previous or UIActionResult(ok=False, reason="edit_rejected")
+
     async def edit_text(
         self,
         *,
@@ -386,83 +439,26 @@ class UIErrorPolicy:
         parse_mode: str | None = None,
         disable_web_page_preview: bool | None = None,
     ) -> UIActionResult:
-        edit_key = (chat_id, message_id)
-        details = {
-            "chat_id": chat_id,
-            "message_id": message_id,
-        }
-        cooldown_left = self._chat_cooldown_left(chat_id)
-        if cooldown_left > 0:
-            self._log_suppressed(
-                action="bot.edit_message_text",
-                reason="chat_retry_after_active",
-                details={
-                    **details,
-                    "cooldown_left": round(cooldown_left, 3),
-                },
-            )
-            return UIActionResult(
-                ok=False,
-                skipped=True,
-                reason="chat_retry_after_active",
-                result=None,
-            )
-
-        signature = self._build_message_signature(text=text, reply_markup=reply_markup)
-        if self._last_edit_signature.get(edit_key) == signature:
-            self._log_suppressed(
-                action="bot.edit_message_text",
-                reason="same_message_signature",
-                details=details,
-            )
-            return UIActionResult(
-                ok=False,
-                skipped=True,
-                reason="same_message_signature",
-                result=None,
-            )
-
-        last_edit_at = self._last_edit_at.get(edit_key)
-        now = time.monotonic()
-        elapsed_since_last_edit = now - last_edit_at if last_edit_at is not None else None
-        if (
-            elapsed_since_last_edit is not None
-            and elapsed_since_last_edit < self.MESSAGE_EDIT_THROTTLE_SECONDS
-        ):
-            self._log_suppressed(
-                action="bot.edit_message_text",
-                reason="message_edit_throttled",
-                details={
-                    **details,
-                    "throttle_left": round(
-                        self.MESSAGE_EDIT_THROTTLE_SECONDS - elapsed_since_last_edit, 3
-                    ),
-                },
-            )
-            return UIActionResult(
-                ok=False,
-                skipped=True,
-                reason="message_edit_throttled",
-                result=None,
-            )
-
-        result = await self._execute(
-            action="bot.edit_message_text",
-            details=details,
+        return await self.edit_operation(
+            chat_id=chat_id, message_id=message_id, action="bot.edit_message_text",
+            signature=("text", text, repr(reply_markup), parse_mode, disable_web_page_preview),
             func=lambda: self.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode,
+                chat_id=chat_id, message_id=message_id, text=text,
+                reply_markup=reply_markup, parse_mode=parse_mode,
                 disable_web_page_preview=disable_web_page_preview,
             ),
-            chat_id=chat_id,
         )
-        if result.ok:
-            self._last_edit_at[edit_key] = time.monotonic()
-            self._last_edit_signature[edit_key] = signature
-        return result
+
+    async def edit_message_reply_markup(
+        self, *, chat_id: int | str, message_id: int, reply_markup=None,
+    ) -> UIActionResult:
+        return await self.edit_operation(
+            chat_id=chat_id, message_id=message_id, action="bot.edit_message_reply_markup",
+            signature=None,
+            func=lambda: self.bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=message_id, reply_markup=reply_markup,
+            ),
+        )
 
     async def edit_text_from_message(
         self,
@@ -504,6 +500,69 @@ class UIErrorPolicy:
     # =========================================================
     # SEND
     # =========================================================
+
+    def notify_after_ack(self, *, chat_id: int | str, text: str) -> bool:
+        """Accept a private-chat alert for delivery without blocking its handler.
+
+        One tracked task per chat; duplicate pending texts coalesce. Flood
+        cooldowns are rechecked on every wake and every send. No delivery
+        promise is made across process shutdown.
+        """
+        key = str(chat_id)
+        pending = self._pending_alerts.get(key)
+        if pending is None:
+            if len(self._pending_alerts) >= self.ALERT_MAX_CHATS:
+                logger.warning("UI_ALERT_CAPACITY | chat_id=%s", key)
+                return False
+            pending = {}
+            self._pending_alerts[key] = pending
+        if text in pending:
+            return True
+        if len(pending) >= self.ALERT_MAX_PER_CHAT:
+            logger.warning("UI_ALERT_CHAT_CAPACITY | chat_id=%s", key)
+            return False
+        pending[text] = None
+        if key not in self._alert_tasks:
+            task = start_background_task(self._deliver_alerts(chat_id, key), name="ui-deferred-alert")
+            self._alert_tasks[key] = task
+            task.add_done_callback(lambda done: self._finish_alert_task(key, done))
+        return True
+
+    def _finish_alert_task(self, key: str, task: asyncio.Task) -> None:
+        if self._alert_tasks.get(key) is task:
+            self._alert_tasks.pop(key, None)
+            self._pending_alerts.pop(key, None)
+
+    async def _deliver_alerts(self, chat_id: int | str, key: str) -> None:
+        pending = self._pending_alerts[key]
+        try:
+            while pending:
+                cooldown = self._chat_cooldown_left(chat_id)
+                if cooldown > 0:
+                    await asyncio.sleep(cooldown)
+                    continue
+                text = next(iter(pending))
+                try:
+                    async with asyncio.timeout(self.ALERT_SEND_TIMEOUT_SECONDS):
+                        result = await self.send_message(chat_id=chat_id, text=text)
+                except TimeoutError:
+                    # Unknown send outcome: do not create a duplicate warning.
+                    logger.warning("UI_ALERT_TIMEOUT | chat_id=%s", key)
+                    pending.pop(text, None)
+                    continue
+                if result.reason in {"retry_after", "chat_retry_after_active"}:
+                    # Retry only when a positive cooldown was actually recorded.
+                    if self._chat_cooldown_left(chat_id) > 0:
+                        continue
+                if not result.ok:
+                    logger.warning("UI_ALERT_UNDELIVERED | chat_id=%s | reason=%s", key, result.reason)
+                pending.pop(text, None)
+        finally:
+            # Remove synchronously before returning, so a new alert cannot be
+            # appended to a finished task's queue before its done callback.
+            current = asyncio.current_task()
+            if current is not None:
+                self._finish_alert_task(key, current)
 
     async def send_message(
         self,
@@ -704,18 +763,15 @@ class UIErrorPolicy:
         chat_id: int | str,
         message_id: int,
     ) -> UIActionResult:
-        return await self._execute(
-            action="bot.delete_message",
-            details={
-                "chat_id": chat_id,
-                "message_id": message_id,
-            },
-            func=lambda: self.bot.delete_message(
+        async with edit_locks.get(chat_id, message_id):
+            result = await self._execute(
+                action="bot.delete_message",
+                details={"chat_id": chat_id, "message_id": message_id},
+                func=lambda: self.bot.delete_message(chat_id=chat_id, message_id=message_id),
                 chat_id=chat_id,
-                message_id=message_id,
-            ),
-            chat_id=chat_id,
-        )
+            )
+            self.invalidate_edit_cache(chat_id=chat_id, message_id=message_id)
+            return result
 
     async def delete_from_message(
         self,
