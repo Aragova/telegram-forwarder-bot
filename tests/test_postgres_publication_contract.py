@@ -1792,3 +1792,79 @@ def test_tenant_live_status_matches_canonical_logical_counts(repo):
     assert totals["pending"] == sum(s["logical_pending"] for s in snapshots) == 2
     assert totals["faulty"] == sum(s["logical_faulty"] for s in snapshots) == 1
     assert totals["active_rules"] == 2
+
+
+def test_runtime_restart_and_manual_recovery_preserve_album_and_live_lease(repo):
+    key, rule_id, ids, _, _, _ = seed(repo, uuid4().int % 10**12, count=3)
+    payload = {"rule_id": rule_id, "delivery_id": ids[0], "delivery_ids": ids}
+    job_id = repo.create_job("repost_album", payload, "light")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE jobs SET status='processing',locked_by='live',
+                   updated_at=NOW(),created_at=NOW()-INTERVAL '30 days' WHERE id=%s""",
+                (job_id,),
+            )
+    restarted = PostgresRepository()
+    try:
+        assert restarted.reset_stuck_processing() == 0
+        assert restarted.get_stuck_processing_deliveries(
+            older_than_seconds=600, rule_id=rule_id,
+        ) == []
+        assert restarted.recover_stale_delivery_jobs(
+            older_than_seconds=600, rule_id=rule_id,
+        )["updated_count"] == 0
+        assert restarted.get_job(job_id)["locked_by"] == "live"
+        assert [restarted.get_delivery(i)["status"] for i in ids] == ["processing"] * 3
+
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET updated_at=NOW()-INTERVAL '11 minutes' WHERE id=%s",
+                    (job_id,),
+                )
+        found = restarted.get_stuck_processing_deliveries(
+            older_than_seconds=600, rule_id=rule_id,
+        )
+        assert {row["delivery_id"] for row in found} == set(ids)
+        result = restarted.recover_stale_delivery_jobs(older_than_seconds=600, rule_id=rule_id)
+        assert result["job_ids"] == [job_id]
+        assert not repo.heartbeat_job_processing(job_id, "live")
+        job = restarted.get_job(job_id)
+        assert job["status"] == "retry" and job["locked_by"] is None
+        assert job["payload_json"] == payload
+        assert restarted.get_delivery_attempt_by_idempotency_key(key)["status"] == "sending"
+        assert [restarted.get_delivery(i)["status"] for i in ids] == ["processing"] * 3
+        assert restarted.recover_stale_delivery_jobs(
+            older_than_seconds=600, rule_id=rule_id,
+        )["updated_count"] == 0
+    finally:
+        restarted.client.close_all_connections()
+
+
+def test_unstarted_job_cannot_be_released_by_expired_or_replaced_owner(repo):
+    _, rule_id, ids, _, _, _ = seed(repo, uuid4().int % 10**12)
+    job_id = repo.create_job("repost_single", {"rule_id": rule_id, "delivery_id": ids[0]}, "light")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE jobs SET status='leased',locked_by='old',
+                   lease_until=NOW()-INTERVAL '1 second' WHERE id=%s""",
+                (job_id,),
+            )
+    assert not repo.mark_job_processing(job_id, "old")
+    assert not repo.finalize_leased_job(job_id, "old", "defer", "shutdown")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE jobs SET locked_by='new',
+                   lease_until=NOW()+INTERVAL '30 seconds' WHERE id=%s""",
+                (job_id,),
+            )
+    assert not repo.finalize_leased_job(job_id, "old", "fail", "stale")
+    before = repo.get_job(job_id)["attempts"]
+    assert repo.finalize_leased_job(job_id, "new", "defer", "shutdown")
+    job = repo.get_job(job_id)
+    assert job["status"] == "retry" and job["locked_by"] is None
+    assert job["attempts"] == before
+    assert repo.get_delivery(ids[0])["status"] == "processing"
