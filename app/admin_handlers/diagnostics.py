@@ -25,7 +25,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         page = 0
         total_pages = len(pages)
         current = pages[page]
-        await ctx.send_message_safe(chat_id=message.chat.id, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]))
+        await ctx.send_message_safe(chat_id=message.chat.id, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]))
 
 
     @dp.message(lambda m: m.text == "📊 Диагностика доставки")
@@ -37,8 +37,13 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             text = await ctx.build_delivery_diagnostics_admin_text()
         except Exception:
             ctx.logger.warning("Ошибка подготовки диагностики доставки", exc_info=True)
-            text = "📊 Диагностика доставки\n\nСтатус: UNKNOWN\nПричина: временная ошибка диагностики. Попробуйте позже."
-        await ctx.send_message_safe(chat_id=message.chat.id, text=text)
+            text = (
+                "<b>📊 Диагностика доставки</b>\n\n"
+                "⚪ <b>Диагностика недоступна</b>\n\n"
+                "Не удалось получить данные.\n\n"
+                "🔄 Попробуйте обновить диагностику позже."
+            )
+        await ctx.send_message_safe(chat_id=message.chat.id, text=text, parse_mode="HTML")
 
 
     @dp.message(lambda m: (m.text or "").strip() == "🧯 Зависшие задачи")
@@ -92,7 +97,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         if not await ctx.is_admin_callback(callback):
             return
         await ctx.answer_callback_safe_once(callback, "Отменено")
-        await ctx.edit_message_text_safe(message=callback.message, text="🧯 Зависшие задачи\n\nДействие отменено. Reset не выполнялся.")
+        await ctx.edit_message_text_safe(message=callback.message, text="🧯 Зависшие задачи\n\nДействие отменено. Возврат в очередь не выполнялся.")
 
     @dp.message(lambda m: m.text == "📊 Журнал системы")
     async def handle_system_journal(message: Message):
@@ -195,7 +200,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         total_pages = len(pages)
         page = ctx.clamp_page(page, total_pages)
         current = pages[page]
-        await ctx.edit_message_text_safe(message=callback.message, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]))
+        await ctx.edit_message_text_safe(message=callback.message, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]))
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("faulty_refresh:"))
     async def handle_faulty_refresh(callback: CallbackQuery):
@@ -212,33 +217,14 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         total_pages = len(pages)
         page = ctx.clamp_page(page, total_pages)
         current = pages[page]
-        await ctx.edit_message_text_safe(message=callback.message, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]))
+        await ctx.edit_message_text_safe(message=callback.message, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]))
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("faulty_ack:"))
     async def handle_faulty_ack(callback: CallbackQuery):
+        # Legacy keyboards must not acknowledge or resolve incidents.
         if not await ctx.is_admin_callback(callback):
             return
-        try:
-            _, delivery_id_raw, page_raw = ctx.parse_callback_parts(callback.data, "faulty_ack", 3)
-            delivery_id = int(delivery_id_raw)
-            page = int(page_raw)
-        except Exception:
-            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-            return
-        row = await ctx.run_db(ctx.db.get_delivery, delivery_id)
-        if not row:
-            await ctx.answer_callback_safe(callback, "Этой проблемы уже нет", show_alert=True)
-            return
-        rule_id = int(row["rule_id"])
-        await ctx.run_db(ctx.db.resolve_problem, f"rule_faulty_{rule_id}")
-        await ctx.run_db(ctx.db.resolve_problem, f"target_dead_{rule_id}")
-        await ctx.run_db(ctx.db.resolve_problem, f"rule_worker_error_{rule_id}")
-        await ctx.answer_callback_safe_once(callback, "✅ Помечено как «взята в работу»")
-        pages = await ctx.run_db(ctx.build_faulty_pages, 200)
-        total_pages = len(pages)
-        page = ctx.clamp_page(page, total_pages)
-        current = pages[page]
-        await ctx.edit_message_text_safe(message=callback.message, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]))
+        await ctx.answer_callback_safe(callback, "Кнопка устарела. Нажмите «Обновить».", show_alert=True)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("faulty_clear:"))
     async def handle_faulty_clear(callback: CallbackQuery):
@@ -260,7 +246,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         total_pages = len(pages)
         page = ctx.clamp_page(page, total_pages)
         current = pages[page]
-        await ctx.edit_message_text_safe(message=callback.message, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]))
+        await ctx.edit_message_text_safe(message=callback.message, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]))
 
     @dp.callback_query(lambda c: c.data == "faulty_back")
     async def handle_faulty_back(callback: CallbackQuery):
@@ -292,7 +278,7 @@ def _format_stuck_processing_deliveries_text(rows) -> str:
     for index, row in enumerate(rows, start=1):
         lines.extend([
             "",
-            f"{index}) delivery_id={row.get('delivery_id')}",
+            f"{index}) Доставка №{row.get('delivery_id')}",
             f"Правило #{row.get('rule_id')}",
             f"Висит: {_duration_ru(row.get('age_seconds'))}",
             f"Пост: {row.get('post_id')}",

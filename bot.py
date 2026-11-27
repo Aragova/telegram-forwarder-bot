@@ -65,6 +65,7 @@ from app.logging_setup import setup_logging
 from app.parser import parse_channel_history, parse_group_history
 from app.sender import SenderService
 from app.delivery_diagnostics_admin import format_delivery_diagnostics_admin_text
+from app.delivery_error_text import describe_delivery_error
 from app.delivery_observability import DeliveryObservabilityService
 from app.delivery_observability_provider import RepositoryDeliveryObservabilityProvider
 telethon_client = None
@@ -5098,8 +5099,10 @@ def audit_event_title(event_type: str) -> str:
         "rule_mode_changed": "🎛 Режим правила изменён",
         "rule_video_caption_changed": "📝 Подпись видеорежима изменена",
         "rule_caption_delivery_mode_changed": "✍️ Режим подписи изменён",
+        "rule_rescan_delivery_archived": "📦 Старая доставка архивирована",
+        "rule_start_position_changed": "↪ Стартовая позиция изменена",
     }
-    return mapping.get(event_type, event_type)
+    return mapping.get(event_type, "Системное событие")
 
 def _short_time_from_iso(iso_value: str | None) -> str | None:
     if not iso_value:
@@ -5205,7 +5208,7 @@ def format_audit_details(row) -> list[str]:
         if parts:
             details.append("  " + " | ".join(parts))
         if error_text:
-            details.append(f"  ❌ {error_text[:160]}")
+            details.append(f"  ❌ {describe_delivery_error(error_text).text()}")
 
     elif event_type == "delivery_rolled_back":
         delivery_id = row["delivery_id"]
@@ -5301,7 +5304,7 @@ def format_audit_details(row) -> list[str]:
             details.append("  " + " | ".join(parts))
 
     elif error_text:
-        details.append(f"  ❌ {error_text[:160]}")
+        details.append(f"  ❌ {describe_delivery_error(error_text).text()}")
 
     return details
 
@@ -5313,7 +5316,7 @@ def format_audit_details_html(row) -> list[str]:
             continue
 
         if clean.startswith("❌ "):
-            lines.append(f"  ❌ {escape(clean[2:].strip())}")
+            lines.append(describe_delivery_error(row["error_text"]).html())
         else:
             lines.append(f"  <code>{escape(clean)}</code>")
 
@@ -5322,7 +5325,14 @@ def format_audit_details_html(row) -> list[str]:
 def build_audit_event_block_html(row, include_rule: bool = False) -> str:
     time_part = audit_row_time_local(row["created_at"])
     title = escape(audit_event_title(row["event_type"] or "unknown"))
-    status = escape(row["status"] or "")
+    raw_status = row["status"] or ""
+    status = escape({
+        "pending": "ожидает", "processing": "обрабатывается", "sent": "отправлено",
+        "faulty": "ошибка", "failed": "ошибка", "done": "завершено",
+        "verified": "подтверждено", "accepted": "принято", "retry": "повтор",
+        "cancelled": "отменено", "skipped": "пропущено", "success": "успешно",
+        "ok": "успешно",
+    }.get(raw_status, "состояние не распознано" if raw_status else ""))
 
     rule_part = ""
     if include_rule and row["rule_id"] is not None:
@@ -5491,7 +5501,10 @@ def build_rule_logs_inline_keyboard(rule_id: int, page: int, total_pages: int) -
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def build_faulty_inline_keyboard(page: int, total_pages: int, delivery_id: int | None = None) -> InlineKeyboardMarkup:
+def build_faulty_inline_keyboard(
+    page: int, total_pages: int, delivery_id: int | None = None,
+    *, rule_id: int | None = None,
+) -> InlineKeyboardMarkup:
     nav_row: list[InlineKeyboardButton] = []
 
     if total_pages > 1:
@@ -5512,11 +5525,12 @@ def build_faulty_inline_keyboard(page: int, total_pages: int, delivery_id: int |
     rows = []
 
     if delivery_id is not None:
+        if rule_id is not None:
+            rows.append([
+                InlineKeyboardButton(text="📂 Открыть правило", callback_data=f"rule_card:{rule_id}", style="primary"),
+            ])
         rows.append([
-            InlineKeyboardButton(text="✅ Взята в работу", callback_data=f"faulty_ack:{delivery_id}:{page}"),
-        ])
-        rows.append([
-            InlineKeyboardButton(text="🧹 Очистить", callback_data=f"faulty_clear:{delivery_id}:{page}"),
+            InlineKeyboardButton(text="🧹 Очистить ошибку", callback_data=f"faulty_clear:{delivery_id}:{page}"),
         ])
 
     if nav_row:
@@ -5611,6 +5625,7 @@ def build_faulty_pages(limit: int = 200) -> list[dict[str, Any]]:
         return [{
             "text": "✅ Проблемных доставок нет",
             "delivery_id": None,
+            "rule_id": None,
         }]
 
     rows = list(reversed(rows))
@@ -5626,31 +5641,26 @@ def build_faulty_pages(limit: int = 200) -> list[dict[str, Any]]:
             tgt = f"{tgt} (тема {row['target_thread_id']})"
 
         status_label, error_type = classify_faulty_row(row)
-        error_text = escape((row["error_text"] or "Причина не указана").strip())
+        error = describe_delivery_error(row["error_text"])
         created_at_text = faulty_delivery_time_from_created_at(row["fault_created_at"] or row["created_at"])
         if created_at_text == "дата неизвестна":
             created_at_text = faulty_delivery_time_from_created_at(row["created_at"])
 
-        problem_state = db.get_problem_state(f"rule_faulty_{row['rule_id']}")
-        in_work_text = ""
-        if problem_state and int(problem_state.get("is_active") or 0) == 0:
-            in_work_text = "\n  <b>Статус:</b> ✅ Взята в работу"
-
         text = (
             f"<b>⚠️ ПРОБЛЕМНАЯ ДОСТАВКА</b>\n\n"
-            f"<b>{status_label}</b>\n"
-            f"<b>Правило #{row['rule_id']}</b>\n"
-            f"<code>{escape(created_at_text)}</code>\n"
-            f"<code>{escape(str(src))} → {escape(str(tgt))}</code>\n"
-            f"<code>Тип: {escape(error_type)}</code>\n"
-            f"<code>Сообщение: {row['message_id']} | Попыток: {row['attempt_count']}</code>\n"
-            f"❌ {error_text}"
-            f"{in_work_text}"
+            f"<b>Правило #{row['rule_id']}</b> · {escape(status_label)}\n"
+            f"🕒 {escape(created_at_text)}\n\n"
+            f"📤 <b>Источник</b>\n{escape(str(src)[:180])}\n"
+            f"📥 <b>Получатель</b>\n{escape(str(tgt)[:180])}\n\n"
+            f"📌 <b>{escape(error_type)}</b>\n"
+            f"Сообщение: <code>{row['message_id']}</code> · Попыток: {row['attempt_count']}\n\n"
+            f"{error.html()}"
         )
 
         pages.append({
             "text": text,
             "delivery_id": int(row["id"]),
+            "rule_id": int(row["rule_id"]),
         })
 
     return list(reversed(pages))
@@ -5672,26 +5682,7 @@ def classify_faulty_row(row) -> tuple[str, str]:
     else:
         status_label = "💤 Старая"
 
-    text = (row["error_text"] or "").lower()
-
-    if (
-        "accepted_target_id_unresolved" in text
-        or "copy_single_uncertain_no_fallback" in text
-        or "target message id not confirmed" in text
-    ):
-        error_type = "🧭 Отправка требует сверки с Telegram"
-    elif "entity too large" in text or "request entity too large" in text:
-        error_type = "📦 Слишком большой файл"
-    elif "timeout" in text:
-        error_type = "⏱ Таймаут"
-    elif "forbidden" in text or "not found" in text:
-        error_type = "🚫 Получатель недоступен"
-    elif "copy_" in text or "copy " in text:
-        error_type = "📤 Ошибка копирования"
-    elif "self-loop" in text:
-        error_type = "🔁 Self-loop"
-    else:
-        error_type = "⚠️ Общая ошибка"
+    error_type = describe_delivery_error(row["error_text"]).title
 
     return status_label, error_type
 
@@ -8508,7 +8499,7 @@ async def handle_faulty_page(callback: CallbackQuery):
         message=callback.message,
         text=current["text"],
         parse_mode="HTML",
-        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]),
+        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]),
     )
 
 @dp.callback_query(lambda c: c.data.startswith("faulty_refresh:"))
@@ -8541,46 +8532,16 @@ async def handle_faulty_refresh(callback: CallbackQuery):
             page,
             total_pages,
             current["delivery_id"],
+            rule_id=current["rule_id"],
         ),
     )
 
-@dp.callback_query(lambda c: c.data.startswith("faulty_ack:"))
+@dp.callback_query(lambda c: c.data and c.data.startswith("faulty_ack:"))
 async def handle_faulty_ack(callback: CallbackQuery):
+    # Old Telegram messages may still contain the retired button.
     if not await is_admin_callback(callback):
         return
-
-    try:
-        _, delivery_id_raw, page_raw = parse_callback_parts(callback.data, "faulty_ack", 3)
-        delivery_id = int(delivery_id_raw)
-        page = int(page_raw)
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-
-    row = await run_db(db.get_delivery, delivery_id)
-    if not row:
-        await answer_callback_safe(callback, "Этой проблемы уже нет", show_alert=True)
-        return
-
-    rule_id = int(row["rule_id"])
-
-    await run_db(db.resolve_problem, f"rule_faulty_{rule_id}")
-    await run_db(db.resolve_problem, f"target_dead_{rule_id}")
-    await run_db(db.resolve_problem, f"rule_worker_error_{rule_id}")
-
-    await answer_callback_safe_once(callback, "✅ Помечено как «взята в работу»")
-
-    pages = await run_db(build_faulty_pages, 200)
-    total_pages = len(pages)
-    page = clamp_page(page, total_pages)
-    current = pages[page]
-
-    await edit_message_text_safe(
-        message=callback.message,
-        text=current["text"],
-        parse_mode="HTML",
-        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]),
-    )
+    await answer_callback_safe(callback, "Кнопка устарела. Нажмите «Обновить».", show_alert=True)
 
 @dp.callback_query(lambda c: c.data.startswith("faulty_clear:"))
 async def handle_faulty_clear(callback: CallbackQuery):
@@ -8616,7 +8577,7 @@ async def handle_faulty_clear(callback: CallbackQuery):
         message=callback.message,
         text=current["text"],
         parse_mode="HTML",
-        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]),
+        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]),
     )
 
 @dp.callback_query(lambda c: c.data == "faulty_back")

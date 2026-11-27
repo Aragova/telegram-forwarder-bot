@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from html import escape
+
 from app.delivery_observability import (
     DeliveryDiagnosticSignal,
     DeliveryDiagnosticsSnapshot,
     DeliveryObservabilityConfig,
     DeliveryHealthStatus,
     DeliveryRuleMetrics,
-    sanitize_diagnostic_text,
 )
+from app.delivery_error_text import DeliveryError, describe_delivery_error
 
 _MAX_TEXT_LENGTH = 4000
 _MAX_RULES = 8
@@ -43,12 +45,10 @@ def _status_line(snapshot: DeliveryDiagnosticsSnapshot) -> str:
     return "🟢 Состояние: очередь работает"
 
 
-def _safe_error(rule: DeliveryRuleMetrics) -> str | None:
-    error_type = sanitize_diagnostic_text(rule.last_error_type, max_length=80)
-    error_text = sanitize_diagnostic_text(rule.last_error_text, max_length=160)
-    if error_type and error_text:
-        return f"{error_type}: {error_text}"
-    return error_type or error_text
+def _safe_error(rule: DeliveryRuleMetrics) -> DeliveryError | None:
+    if not rule.last_error_type and not rule.last_error_text:
+        return None
+    return describe_delivery_error(rule.last_error_text, rule.last_error_type)
 
 
 def _stuck_rules(snapshot: DeliveryDiagnosticsSnapshot) -> list[DeliveryRuleMetrics]:
@@ -73,7 +73,7 @@ def _largest_queues(snapshot: DeliveryDiagnosticsSnapshot) -> list[DeliveryRuleM
 
 
 def _append_stuck_section(lines: list[str], snapshot: DeliveryDiagnosticsSnapshot) -> None:
-    lines.extend(["", "🧯 Зависшие задачи:"])
+    lines.extend(["", "<b>🧯 Зависшие задачи:</b>"])
     rules = _stuck_rules(snapshot)
     if not rules and snapshot.stuck_processing_count <= 0:
         lines.append("• Не найдено")
@@ -84,28 +84,31 @@ def _append_stuck_section(lines: list[str], snapshot: DeliveryDiagnosticsSnapsho
     for index, rule in enumerate(rules[:_MAX_RULES], start=1):
         count = rule.processing_count
         word = "задача" if count == 1 else "задачи"
-        lines.append(f"{index}) Правило #{rule.rule_id} — зависло {count} {word}, старшая висит {_duration_ru(rule.oldest_processing_age_seconds)}")
+        lines.append(f"{index}) Правило #{escape(str(rule.rule_id)[:64])} — зависло {count} {word}, старшая висит {_duration_ru(rule.oldest_processing_age_seconds)}")
 
 
 def _append_error_section(lines: list[str], snapshot: DeliveryDiagnosticsSnapshot) -> None:
     rules = _error_rules(snapshot)
-    lines.extend(["", "⚠️ Правила с ошибками:"])
+    lines.extend(["", "<b>⚠️ Правила с ошибками:</b>"])
     if not rules:
         lines.append("• Не найдено")
         return
     for index, rule in enumerate(rules[:_MAX_RULES], start=1):
-        details = [f"С ошибкой: {rule.faulty_count}"]
+        block = [
+            f"<b>{index}) Правило #{escape(str(rule.rule_id)[:64])}</b>",
+            f"❌ С ошибкой: {rule.faulty_count}",
+        ]
         delayed = rule.deferred_count + rule.rate_limited_count
         if delayed:
-            details.append(f"Задержано Telegram/rate-limit: {delayed}")
+            block.append(f"⏳ Отложено из-за ограничений Telegram: {delayed}")
         error = _safe_error(rule)
         if error:
-            details.append(f"последняя ошибка: {error}")
-        lines.append(f"{index}) Правило #{rule.rule_id} — " + "; ".join(details))
+            block.extend([f"📌 <b>{escape(error.title)}</b>", "", error.html()])
+        lines.append("\n".join(block))
 
 
 def _append_largest_queues(lines: list[str], snapshot: DeliveryDiagnosticsSnapshot) -> None:
-    lines.extend(["", "📌 Самые большие очереди по правилам:"])
+    lines.extend(["", "<b>📌 Самые большие очереди по правилам:</b>"])
     rules = _largest_queues(snapshot)
     if not rules:
         lines.append("• Нет данных по большим очередям")
@@ -114,46 +117,54 @@ def _append_largest_queues(lines: list[str], snapshot: DeliveryDiagnosticsSnapsh
         age = ""
         if rule.oldest_pending_age_seconds is not None:
             age = f" — старшая ждёт {_duration_ru(rule.oldest_pending_age_seconds)}"
-        lines.append(f"{index}) Правило #{rule.rule_id} — ждут своего времени: {rule.pending_count}{age}")
+        lines.append(f"{index}) Правило #{escape(str(rule.rule_id)[:64])} — ждут своего времени: {rule.pending_count}{age}")
 
 
 def format_delivery_diagnostics_admin_text(snapshot: DeliveryDiagnosticsSnapshot) -> str:
-    reason = sanitize_diagnostic_text(snapshot.reason, max_length=160)
-    lines = ["📊 Диагностика доставки", "", _status_line(snapshot)]
+    reason = describe_delivery_error(snapshot.reason).reason
+    lines = ["<b>📊 Диагностика доставки</b>", "", f"<b>{_status_line(snapshot)}</b>"]
     if snapshot.status == DeliveryHealthStatus.OK:
         lines.append("Посты ждут своего времени по интервалам правил.")
     elif snapshot.status == DeliveryHealthStatus.UNKNOWN:
-        lines.append(f"Не удалось получить данные диагностики: {reason or 'причина неизвестна'}.")
+        lines.append(f"Причина: {escape(reason)}")
 
     lines.extend([
         "",
-        "📦 Очередь:",
-        f"• Ждут своего времени: {snapshot.total_pending}",
-        f"• Сейчас обрабатываются: {snapshot.total_processing}",
-        f"• Уже отправлено: {snapshot.total_sent}",
-        f"• С ошибкой: {snapshot.total_faulty}",
-        f"• Задержано Telegram/rate-limit: {snapshot.total_deferred + snapshot.total_rate_limited}",
+        "<b>📦 Очередь:</b>",
+        f"🕒 Ждут своего времени: <b>{snapshot.total_pending}</b>",
+        f"🔄 Сейчас обрабатываются: <b>{snapshot.total_processing}</b>",
+        f"✅ Уже отправлено: <b>{snapshot.total_sent}</b>",
+        f"❌ С ошибкой: <b>{snapshot.total_faulty}</b>",
+        f"⏳ Отложено из-за ограничений Telegram: <b>{snapshot.total_deferred + snapshot.total_rate_limited}</b>",
     ])
     if snapshot.queue_lag_seconds is not None:
         lines.append(f"• Старшие посты в плановой очереди ждут: {_duration_ru(snapshot.queue_lag_seconds)}")
 
-    _append_stuck_section(lines, snapshot)
-    _append_error_section(lines, snapshot)
-    _append_largest_queues(lines, snapshot)
+    # Reserve the conclusion and fit whole blocks instead of slicing HTML or
+    # cutting a safety instruction halfway through.
+    sections: list[str] = []
+    _append_stuck_section(sections, snapshot)
+    _append_error_section(sections, snapshot)
+    _append_largest_queues(sections, snapshot)
 
-    lines.extend(["", "Вывод:"])
-    if snapshot.stuck_processing_count > 0:
-        lines.append('есть зависшие задачи. Нажмите "🧯 Зависшие задачи", чтобы посмотреть и вручную вернуть их в очередь.')
+    conclusion = ["", "<b>💡 Вывод:</b>"]
+    if snapshot.status == DeliveryHealthStatus.UNKNOWN:
+        conclusion.append("Состояние доставки неизвестно. Повторите диагностику позже.")
+    elif snapshot.stuck_processing_count > 0:
+        conclusion.append('Есть зависшие задачи. Нажмите «🧯 Зависшие задачи» для проверки. Возврат в очередь возможен после сверки с получателем.')
     elif snapshot.total_faulty == 0 and snapshot.total_deferred + snapshot.total_rate_limited == 0:
-        lines.append("ошибок и зависших задач нет. Большая очередь — это плановые доставки, которые будут отправляться по интервалам правил.")
+        conclusion.append("Ошибок и зависших задач нет. Большая очередь — это плановые доставки, которые будут отправляться по интервалам правил.")
     else:
-        lines.append("есть предупреждения по ошибкам или задержкам Telegram/rate-limit; плановая очередь сама по себе не является ошибкой.")
+        conclusion.append("Есть предупреждения по ошибкам или ограничениям Telegram. Плановая очередь сама по себе не является ошибкой.")
 
-    text = "\n".join(lines)
-    for marker in ("content_json", "caption", "Traceback", "SECRET_TOKEN"):
-        text = text.replace(marker, "<скрыто>")
-    for technical in ("pending", "processing", "faulty", "rule_id", "lag", "Deferred/rate-limit"):
-        text = text.replace(technical, "<скрыто>")
-    if len(text) > _MAX_TEXT_LENGTH:
-        text = text[: _MAX_TEXT_LENGTH - 1] + "…"
-    return text
+    omitted = "… Остальные записи смотрите в разделе «Проблемные доставки»."
+    for block in sections:
+        separator = [""] if "\n" in block else []
+        candidate = "\n".join([*lines, *separator, block, "", omitted, *conclusion])
+        # UTF-16 length is conservative for Telegram's message limit, including
+        # markup and astral emoji.
+        if len(candidate.encode("utf-16-le")) // 2 > _MAX_TEXT_LENGTH:
+            lines.extend(["", omitted])
+            break
+        lines.extend([*separator, block])
+    return "\n".join([*lines, *conclusion])
