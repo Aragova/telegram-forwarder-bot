@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
@@ -17,16 +18,21 @@ class JobWorkerLifecycle:
         self._ownership = ownership
         self._logger = logger
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._tasks_lock = threading.Lock()
         self._stop_event: asyncio.Event | None = None
         self._stop_lock = asyncio.Lock()
         self._paused = False
         self._stop_requests = 0
 
+    def _task_snapshot(self) -> tuple[asyncio.Task[None], ...]:
+        # The dashboard reads from a DB executor thread. Never hold this
+        # lock across task creation, task inspection or an await.
+        with self._tasks_lock:
+            return tuple(self._tasks.values())
+
     @property
     def live_count(self) -> int:
-        # The dashboard reads from a DB executor thread. Snapshot the task
-        # references before counting; CPython copies dict values under the GIL.
-        return sum(not task.done() for task in tuple(self._tasks.values()))
+        return sum(not task.done() for task in self._task_snapshot())
 
     def ensure_running(self, factories: Mapping[str, WorkerFactory], *, resume: bool = False) -> None:
         # This method contains no await: checking and creating tasks is atomic
@@ -44,11 +50,13 @@ class JobWorkerLifecycle:
         if self._stop_event is None or self._stop_event.is_set():
             self._stop_event = asyncio.Event()
         for name, factory in factories.items():
-            current = self._tasks.get(name)
+            with self._tasks_lock:
+                current = self._tasks.get(name)
             if current is not None and not current.done():
                 continue
             task = asyncio.create_task(factory(self._stop_event), name=name)
-            self._tasks[name] = task
+            with self._tasks_lock:
+                self._tasks[name] = task
             task.add_done_callback(self._report_exit)
 
     def _report_exit(self, task: asyncio.Task[None]) -> None:
@@ -63,12 +71,13 @@ class JobWorkerLifecycle:
         try:
             async with self._stop_lock:
                 await drain_job_workers(
-                    tasks=tuple(self._tasks.values()), stop_event=self._stop_event,
+                    tasks=self._task_snapshot(), stop_event=self._stop_event,
                     timeout_sec=timeout_sec, logger=self._logger,
                 )
                 if self.live_count:
                     raise RuntimeError("Не завершены активные job workers")
-                self._tasks.clear()
+                with self._tasks_lock:
+                    self._tasks.clear()
                 self._stop_event = None
         finally:
             self._stop_requests -= 1

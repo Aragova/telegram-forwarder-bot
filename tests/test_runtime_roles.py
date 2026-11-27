@@ -463,18 +463,21 @@ def test_live_count_snapshot_during_worker_start():
         async def worker(stop):
             await stop.wait()
 
-        lifecycle.ensure_running({"light": worker})
-        first = lifecycle._tasks["light"]
-        original_done = first.done
+        class BlockingTask(asyncio.Task):
+            def done(self):
+                if threading.get_ident() != loop_thread:
+                    reading.set()
+                    if not release.wait(5):
+                        raise RuntimeError("snapshot reader timed out")
+                return super().done()
 
-        def blocked_done():
-            if threading.get_ident() != loop_thread:
-                reading.set()
-                if not release.wait(5):
-                    raise RuntimeError("snapshot reader timed out")
-            return original_done()
-
-        first.done = blocked_done
+        loop = asyncio.get_running_loop()
+        original_factory = loop.get_task_factory()
+        loop.set_task_factory(lambda loop, coro, **kwargs: BlockingTask(coro, loop=loop, **kwargs))
+        try:
+            lifecycle.ensure_running({"light": worker})
+        finally:
+            loop.set_task_factory(original_factory)
         reader = asyncio.create_task(asyncio.to_thread(lambda: lifecycle.live_count))
         try:
             assert await asyncio.to_thread(reading.wait, 5)
@@ -485,7 +488,6 @@ def test_live_count_snapshot_during_worker_start():
         finally:
             release.set()
             await asyncio.gather(reader, return_exceptions=True)
-            first.done = original_done
             await lifecycle.stop(timeout_sec=1)
         assert lifecycle.live_count == 0
 
