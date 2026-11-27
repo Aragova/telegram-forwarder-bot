@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.runtime_roles import normalize_runtime_role, run_role
+from app.runtime_roles import RuntimeOwnership, normalize_runtime_role, run_role
+from app.job_worker_lifecycle import JobWorkerLifecycle
 
 
 def test_bot_role_runs_only_bot_callable():
@@ -136,16 +137,9 @@ def _load_runtime_functions(namespace):
     names = {
         "_start_bot_role", "_start_scheduler_role", "_start_worker_role",
         "_start_all_role", "_prepare_polling_runtime", "ensure_rule_workers",
-        "start_job_workers_runtime",
+        "start_job_workers_runtime", "_supervise_job_workers", "stop_job_workers_runtime",
     }
-    nodes = [node for node in tree.body if (
-        isinstance(node, ast.AsyncFunctionDef) and node.name in names
-    ) or (
-        isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "workers_runtime_enabled"
-            for target in node.targets
-        )
-    )]
+    nodes = [node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name in names]
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "bot.py", "exec"), namespace)
 
 
@@ -175,11 +169,14 @@ def test_runtime_role_owns_polling_and_job_workers(role, owns_polling, owns_work
         raw_bot = SimpleNamespace(delete_webhook=AsyncMock(), set_my_commands=AsyncMock())
         dispatcher = SimpleNamespace(start_polling=AsyncMock(side_effect=polling))
         light, heavy = AsyncMock(side_effect=worker), AsyncMock(side_effect=worker)
+        ownership = RuntimeOwnership()
+        lifecycle = JobWorkerLifecycle(ownership, logging.getLogger(__name__))
         ns = {
             "asyncio": asyncio, "logger": logging.getLogger(__name__),
             "bot": raw_bot, "dp": dispatcher, "db": object(),
             "sender_service": object(), "posting_active": False,
-            "job_worker_tasks": [], "job_workers_stop_event": None,
+            "runtime_ownership": ownership, "job_workers": lifecycle,
+            "WORKER_RESOURCE_POLICY": SimpleNamespace(graceful_shutdown_timeout_sec=0),
             "scheduler_runtime_task": None, "job_watchdog_task": None,
             "reaction_worker_task": None,
             "DEFAULT_TELEGRAM_COMMANDS": [], "BotCommandScopeDefault": object,
@@ -197,31 +194,164 @@ def test_runtime_role_owns_polling_and_job_workers(role, owns_polling, owns_work
         try:
             # No worker may be created until a runtime role explicitly enables it.
             await try_start_workers()
-            assert ns["job_worker_tasks"] == []
-            assert ns["job_workers_stop_event"] is None
+            assert lifecycle.live_count == 0
+            with pytest.raises(RuntimeError, match="polling"):
+                await ns["_prepare_polling_runtime"]()
             await run_role(
                 role, run_bot=ns["_start_bot_role"],
                 run_scheduler=ns["_start_scheduler_role"],
                 run_worker=ns["_start_worker_role"], run_all=ns["_start_all_role"],
             )
-            assert ns["workers_runtime_enabled"] is owns_workers
+            assert ownership.can_start_workers is owns_workers
+            assert ownership.can_poll is owns_polling
             assert dispatcher.start_polling.await_count == int(owns_polling)
             assert raw_bot.delete_webhook.await_count == int(owns_polling)
             assert raw_bot.set_my_commands.await_count == int(owns_polling)
             assert light.call_count == heavy.call_count == int(owns_workers)
-            assert len(ns["job_worker_tasks"]) == (2 if owns_workers else 0)
+            assert lifecycle.live_count == (2 if owns_workers else 0)
+            if not owns_polling:
+                with pytest.raises(RuntimeError, match="polling"):
+                    await ns["_prepare_polling_runtime"]()
             if owns_workers:
                 await try_start_workers()
                 assert light.call_count == heavy.call_count == 1
-            else:
-                assert ns["job_workers_stop_event"] is None
         finally:
-            if ns["job_workers_stop_event"] is not None:
-                ns["job_workers_stop_event"].set()
-            tasks = ns["job_worker_tasks"] + [
+            ownership.begin_shutdown()
+            await lifecycle.stop(timeout_sec=1)
+            tasks = [
                 ns[key] for key in ("scheduler_runtime_task", "job_watchdog_task", "reaction_worker_task")
                 if ns[key] is not None
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_runtime_ownership_cannot_change_role_or_reopen_after_shutdown():
+    ownership = RuntimeOwnership()
+    ownership.bind("ui")
+    ownership.bind("bot")
+    with pytest.raises(RuntimeError):
+        ownership.bind("worker")
+    ownership.begin_shutdown()
+    assert not ownership.can_poll and not ownership.can_start_workers
+    with pytest.raises(RuntimeError):
+        ownership.bind("bot")
+
+
+def test_worker_lifecycle_recovers_only_failed_worker_and_respects_pause():
+    async def scenario():
+        ownership = RuntimeOwnership()
+        ownership.bind("all")
+        lifecycle = JobWorkerLifecycle(ownership, logging.getLogger(__name__))
+        failed = asyncio.Event()
+        attempts = {"light": 0, "heavy": 0}
+
+        async def light(stop):
+            attempts["light"] += 1
+            if attempts["light"] == 1:
+                failed.set()
+                raise RuntimeError("temporary failure")
+            await stop.wait()
+
+        async def heavy(stop):
+            attempts["heavy"] += 1
+            await stop.wait()
+
+        factories = {"light": light, "heavy": heavy}
+        lifecycle.ensure_running(factories)
+        await failed.wait()
+        lifecycle.ensure_running(factories)
+        await asyncio.sleep(0)
+        assert attempts == {"light": 2, "heavy": 1}
+        assert lifecycle.live_count == 2
+        await lifecycle.stop(timeout_sec=1)
+        lifecycle.ensure_running(factories)
+        assert lifecycle.live_count == 0
+        lifecycle.ensure_running(factories, resume=True)
+        assert lifecycle.live_count == 2
+        ownership.begin_shutdown()
+        await lifecycle.stop(timeout_sec=1)
+        lifecycle.ensure_running(factories, resume=True)
+        assert lifecycle.live_count == 0
+
+    asyncio.run(scenario())
+
+
+def test_worker_lifecycle_never_restarts_while_draining(monkeypatch):
+    import app.job_worker_lifecycle as module
+
+    async def scenario():
+        ownership = RuntimeOwnership()
+        ownership.bind("worker")
+        lifecycle = JobWorkerLifecycle(ownership, logging.getLogger(__name__))
+        draining = asyncio.Event()
+        release = asyncio.Event()
+
+        async def worker(stop):
+            await stop.wait()
+            await release.wait()
+
+        async def incomplete_drain(*, tasks, stop_event, **kwargs):
+            stop_event.set()
+            draining.set()
+            await asyncio.sleep(0)
+
+        monkeypatch.setattr(module, "drain_job_workers", incomplete_drain)
+        factories = {"light": worker, "heavy": worker}
+        lifecycle.ensure_running(factories)
+        stop = asyncio.create_task(lifecycle.stop(timeout_sec=1))
+        await draining.wait()
+        with pytest.raises(RuntimeError, match="завершаются"):
+            lifecycle.ensure_running(factories, resume=True)
+        with pytest.raises(RuntimeError, match="Не завершены"):
+            await stop
+        lifecycle.ensure_running(factories)
+        with pytest.raises(RuntimeError, match="завершаются"):
+            lifecycle.ensure_running(factories, resume=True)
+        assert lifecycle.live_count == 2
+        release.set()
+        await asyncio.sleep(0)
+        await lifecycle.stop(timeout_sec=1)
+        assert lifecycle.live_count == 0
+
+    asyncio.run(scenario())
+
+
+def test_worker_lifecycle_serializes_overlapping_stop_requests(monkeypatch):
+    import app.job_worker_lifecycle as module
+
+    async def scenario():
+        ownership = RuntimeOwnership()
+        ownership.bind("all")
+        lifecycle = JobWorkerLifecycle(ownership, logging.getLogger(__name__))
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def worker(stop):
+            await stop.wait()
+
+        async def drain(*, tasks, stop_event, **kwargs):
+            entered.set()
+            await release.wait()
+            if stop_event is not None:
+                stop_event.set()
+            await asyncio.gather(*tasks)
+
+        monkeypatch.setattr(module, "drain_job_workers", drain)
+        factories = {"light": worker, "heavy": worker}
+        lifecycle.ensure_running(factories)
+        first = asyncio.create_task(lifecycle.stop(timeout_sec=1))
+        await entered.wait()
+        second = asyncio.create_task(lifecycle.stop(timeout_sec=1))
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match="завершаются"):
+            lifecycle.ensure_running(factories, resume=True)
+        release.set()
+        await asyncio.gather(first, second)
+        assert lifecycle.live_count == 0
+        lifecycle.ensure_running(factories, resume=True)
+        assert lifecycle.live_count == 2
+        await lifecycle.stop(timeout_sec=1)
 
     asyncio.run(scenario())

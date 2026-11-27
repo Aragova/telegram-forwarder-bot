@@ -74,7 +74,8 @@ from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIActionResult, UIErrorPolicy
 from app.reaction_auth_state import is_reaction_auth_state, is_reaction_account_reactions_input_state
 from app.scheduler_service import SchedulerService
-from app.runtime_roles import normalize_runtime_role, run_role as run_runtime_role
+from app.runtime_roles import RuntimeOwnership, normalize_runtime_role, run_role as run_runtime_role
+from app.job_worker_lifecycle import JobWorkerLifecycle
 from app.health_service import get_system_health, update_heartbeat
 from app.ops_health_service import build_operational_snapshot
 from app.preflight_checks import PreflightError, run_preflight_checks
@@ -82,7 +83,6 @@ from app.runtime_context import RuntimeContext
 from app.worker_runtime import run_heavy_worker, run_light_worker
 from app.delivery_job_fence import cancel_local_rule_delivery_jobs
 from app.worker_resource_policy import POLICY as WORKER_RESOURCE_POLICY
-from app.worker_shutdown import drain_job_workers
 from app.reaction_worker import ReactionWorker
 from app.scheduler_runtime import run_scheduler_loop
 from app.job_watchdog import run_watchdog_loop
@@ -165,12 +165,11 @@ reaction_clients = []
 sender_service = None
 runtime_context: RuntimeContext | None = None
 posting_active = False
-job_worker_tasks: list[asyncio.Task] = []
-job_workers_stop_event: asyncio.Event | None = None
+runtime_ownership = RuntimeOwnership()
+job_workers = JobWorkerLifecycle(runtime_ownership, logger)
 reaction_worker_task: asyncio.Task | None = None
 scheduler_runtime_task: asyncio.Task | None = None
 job_watchdog_task: asyncio.Task | None = None
-workers_runtime_enabled = False
 user_states: dict[int, dict[str, Any]] = {}
 saved_post_album_buffer = SavedPostAlbumCaptureBuffer(delay_seconds=1.2)
 dashboard_tasks: dict[int, asyncio.Task] = {}
@@ -1675,7 +1674,7 @@ def build_dashboard_text() -> str:
     health = get_system_health(db)
     next_rule = db.get_next_scheduled_rule()
     now_text = datetime.now(USER_TZ).strftime("%d.%m.%Y %H:%M:%S")
-    live_workers = sum(1 for task in job_worker_tasks if not task.done())
+    live_workers = job_workers.live_count
 
     next_block = "⏭ **Ближайший пост:**\nне запланирован"
 
@@ -2287,8 +2286,8 @@ async def stop_all_workers() -> None:
 
 async def start_forwarding() -> None:
     global posting_active
+    await start_job_workers_runtime(resume=True)
     posting_active = True
-    await ensure_rule_workers()
 
 
 async def stop_forwarding() -> None:
@@ -8902,12 +8901,11 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
 
 async def _prepare_polling_runtime() -> None:
     """Настройка получения обновлений только для владельца polling."""
+    if not runtime_ownership.can_poll:
+        raise RuntimeError("Runtime-роль не владеет polling")
     if bot is None:
         raise RuntimeError("Bot API не инициализирован")
-    try:
-        await bot.delete_webhook(drop_pending_updates=False, request_timeout=90)
-    except Exception as e:
-        logger.warning("Webhook skip (network issue): %s", e)
+    await bot.delete_webhook(drop_pending_updates=False, request_timeout=90)
     try:
         await bot.set_my_commands(
             DEFAULT_TELEGRAM_COMMANDS,
@@ -8961,9 +8959,14 @@ async def _shutdown_runtime(
 ) -> None:
     global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, repost_campaign_runtime_tasks, channel_title_sync_task
 
+    runtime_ownership.begin_shutdown()
+    workers_drain_complete = True
     if stop_workers_runtime:
-        await stop_job_workers_runtime()
-        await stop_all_workers()
+        try:
+            await stop_job_workers_runtime()
+        except Exception:
+            workers_drain_complete = False
+            logger.exception("JOB_WORKERS_SHUTDOWN_INCOMPLETE | keeping Telegram clients open")
 
     if close_dashboard_tasks:
         tasks = list(dashboard_tasks.values())
@@ -8977,7 +8980,7 @@ async def _shutdown_runtime(
         await asyncio.gather(channel_title_sync_task, return_exceptions=True)
         channel_title_sync_task = None
 
-    campaign_drain_complete = True
+    campaign_drain_complete = workers_drain_complete
     if repost_campaign_runtime_tasks is not None:
         try:
             await repost_campaign_runtime_tasks.stop()
@@ -9029,7 +9032,7 @@ async def _shutdown_runtime(
                 logger.exception("PUBLICATION_SHUTDOWN_RETRY_FAILED")
 
     await stop_background_tasks()
-    if sender_service is not None:
+    if sender_service is not None and workers_drain_complete:
         await sender_service.video_processor.shutdown()
 
     if close_telegram_clients and campaign_drain_complete and telethon_client:
@@ -9079,16 +9082,14 @@ async def _run_scheduler_role_loop() -> None:
 
 
 async def _run_worker_role_loop() -> None:
-    global posting_active
-    await start_job_workers_runtime()
+    await start_job_workers_runtime(resume=True)
     logger.info("🚀 Режим worker запущен")
-    while True:
-        await asyncio.sleep(10)
+    await _supervise_job_workers()
 
 
 async def _start_bot_role() -> None:
-    global workers_runtime_enabled, posting_active
-    workers_runtime_enabled = False
+    global posting_active
+    runtime_ownership.bind("bot")
     posting_active = False
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=True)
@@ -9108,8 +9109,8 @@ async def _start_bot_role() -> None:
 
 
 async def _start_scheduler_role() -> None:
-    global workers_runtime_enabled, posting_active
-    workers_runtime_enabled = False
+    global posting_active
+    runtime_ownership.bind("scheduler")
     posting_active = False
     await _init_db_runtime()
     logger.info("STARTUP | Запуск роли scheduler")
@@ -9127,8 +9128,7 @@ async def _start_scheduler_role() -> None:
 
 
 async def _start_worker_role() -> None:
-    global workers_runtime_enabled
-    workers_runtime_enabled = True
+    runtime_ownership.bind("worker")
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=False)
     logger.info("STARTUP | Запуск роли worker")
@@ -9137,8 +9137,8 @@ async def _start_worker_role() -> None:
 
 
 async def _start_all_role() -> None:
-    global workers_runtime_enabled, posting_active, scheduler_runtime_task, job_watchdog_task, reaction_worker_task
-    workers_runtime_enabled = True
+    global posting_active, scheduler_runtime_task, job_watchdog_task, reaction_worker_task
+    runtime_ownership.bind("all")
     posting_active = False
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=True)
@@ -9163,7 +9163,8 @@ async def _start_all_role() -> None:
         reaction_worker = ReactionWorker(db=db, worker_id="reaction-worker-1", poll_interval_sec=2.0, lock_timeout_seconds=300)
         reaction_worker_task = asyncio.create_task(reaction_worker.run_forever())
         logger.info("Reaction worker запущен: reaction-worker-1")
-    await start_job_workers_runtime()
+    await start_job_workers_runtime(resume=True)
+    start_background_task(_supervise_job_workers(), name="job-workers-supervisor")
     logger.info("STARTUP | Legacy режим all запущен")
     await dp.start_polling(
         bot,
@@ -9176,35 +9177,23 @@ async def _start_all_role() -> None:
     )
 
 
-async def start_job_workers_runtime() -> None:
-    global job_worker_tasks, job_workers_stop_event
-    if not workers_runtime_enabled or not sender_service:
-        return
-    if any(not task.done() for task in job_worker_tasks):
-        return
+async def _supervise_job_workers() -> None:
+    while runtime_ownership.can_start_workers:
+        await start_job_workers_runtime()
+        await asyncio.sleep(10)
 
-    job_workers_stop_event = asyncio.Event()
-    job_worker_tasks = [
-        asyncio.create_task(run_light_worker(db, sender_service, "light-worker-1", stop_event=job_workers_stop_event)),
-        asyncio.create_task(run_heavy_worker(db, sender_service, "heavy-worker-1", stop_event=job_workers_stop_event)),
-    ]
-    logger.info("JOB WORKERS | запущены light/heavy воркеры")
+
+async def start_job_workers_runtime(*, resume: bool = False) -> None:
+    if not runtime_ownership.can_start_workers or sender_service is None:
+        return
+    job_workers.ensure_running({
+        "light-worker-1": lambda stop: run_light_worker(db, sender_service, "light-worker-1", stop_event=stop),
+        "heavy-worker-1": lambda stop: run_heavy_worker(db, sender_service, "heavy-worker-1", stop_event=stop),
+    }, resume=resume)
 
 
 async def stop_job_workers_runtime() -> None:
-    global job_worker_tasks, job_workers_stop_event
-    if not job_worker_tasks:
-        return
-    tasks = list(job_worker_tasks)
-    await drain_job_workers(
-        tasks=tasks,
-        stop_event=job_workers_stop_event,
-        timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec + 20,
-        logger=logger,
-    )
-    job_worker_tasks = []
-    job_workers_stop_event = None
-    logger.info("JOB WORKERS | остановлены")
+    await job_workers.stop(timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec + 20)
 
 
 def _register_user_saas_handlers() -> None:

@@ -19,6 +19,33 @@ def normalize_runtime_role(role: str | None) -> str:
     return normalized
 
 
+class RuntimeOwnership:
+    """Bind a process to one role before any runtime resources are started."""
+
+    def __init__(self) -> None:
+        self._role: str | None = None
+        self._closing = False
+
+    def bind(self, role: str) -> None:
+        if role not in _ALLOWED_ROLES:
+            raise ValueError(f"Неизвестная runtime-роль: {role}")
+        normalized = normalize_runtime_role(role)
+        if self._closing or (self._role is not None and self._role != normalized):
+            raise RuntimeError("Нельзя менять runtime-роль запущенного процесса")
+        self._role = normalized
+
+    @property
+    def can_start_workers(self) -> bool:
+        return not self._closing and self._role in {"worker", "all"}
+
+    @property
+    def can_poll(self) -> bool:
+        return not self._closing and self._role in {"bot", "all"}
+
+    def begin_shutdown(self) -> None:
+        self._closing = True
+
+
 async def run_role(
     role: str,
     *,
