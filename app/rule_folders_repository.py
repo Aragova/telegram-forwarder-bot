@@ -244,23 +244,46 @@ class RuleFoldersRepositoryMixin:
             conn.commit()
         return deleted
 
-    def get_rule_folder_map(self, tenant_id: int) -> dict[int, dict]:
+    def get_rule_folder_map(self, tenant_id: int, rule_ids: Collection[int] | None = None) -> dict[int, dict]:
+        """Read all assignments only when explicitly requested; card lookups use IDs."""
+        params = [int(tenant_id)]
+        predicate = ""
+        if rule_ids is not None:
+            ids = sorted({int(rid) for rid in rule_ids})
+            if not ids:
+                return {}
+            predicate = "AND a.rule_id = ANY(%s)"
+            params.append(ids)
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT a.rule_id, f.id AS folder_id, f.name
                     FROM rule_folder_assignments a
                     JOIN rule_folders f ON f.id = a.folder_id AND f.tenant_id = a.tenant_id
                     JOIN routing r ON r.id = a.rule_id
-                    WHERE a.tenant_id = %s
+                    WHERE a.tenant_id = %s {predicate}
                     """,
-                    (int(tenant_id),),
+                    tuple(params),
                 )
                 return {
                     int(row["rule_id"]): {"id": int(row["folder_id"]), "name": str(row["name"])}
                     for row in cur.fetchall()
                 }
+
+    def can_manage_folder_rule(self, tenant_id: int, owner_admin_id: int, rule_id: int) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM routing
+                        WHERE id = %s AND (COALESCE(tenant_id, 1) = %s OR created_by = %s)
+                    ) AS allowed
+                    """,
+                    (int(rule_id), int(tenant_id), int(owner_admin_id)),
+                )
+                return bool(cur.fetchone()["allowed"])
 
     def list_folder_manageable_rule_ids(
         self, tenant_id: int, owner_admin_id: int,

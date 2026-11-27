@@ -7838,6 +7838,32 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
                 return {key: int(value) for key, value in cur.fetchone().items()}
 
+    def get_tenant_queue_stats(self, tenant_id: int) -> dict[str, Any]:
+        """Physical queue counters for the user's live status, not N card reads."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH scoped AS MATERIALIZED (
+                        SELECT id, is_active, next_run_at, created_date
+                        FROM routing
+                        WHERE COALESCE(tenant_id, 1) = %s
+                    ), delivery_counts AS (
+                        SELECT COUNT(*) FILTER (WHERE d.status = 'pending') AS pending,
+                               COUNT(*) FILTER (WHERE d.status = 'faulty') AS faulty
+                        FROM deliveries d JOIN scoped r ON r.id = d.rule_id
+                    )
+                    SELECT delivery_counts.*,
+                           (SELECT COUNT(*) FILTER (WHERE is_active) FROM scoped) AS active_rules,
+                           (SELECT next_run_at FROM scoped
+                            WHERE next_run_at IS NOT NULL
+                            ORDER BY created_date, id LIMIT 1) AS next_run_at
+                    FROM delivery_counts
+                    """,
+                    (int(tenant_id),),
+                )
+                return dict(cur.fetchone())
+
     def count_uncleared_faulty_deliveries(self) -> int:
         """Count delivery IDs still visible in the admin faulty-delivery list."""
         with self.connect() as conn:
@@ -9272,30 +9298,21 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         """
         Единая сводка по logical items для snapshot/position.
         """
-        items = list(logical_items or [])
-        total = len(items)
-        completed = sum(1 for item in items if item.get("is_done"))
-        processing = sum(
-            1
-            for item in items
-            if (not item.get("is_done")) and int(item.get("processing_count") or 0) > 0
-        )
-        faulty = sum(
-            1
-            for item in items
-            if (not item.get("is_done"))
-            and int(item.get("processing_count") or 0) <= 0
-            and int(item.get("pending_count") or 0) <= 0
-            and int(item.get("faulty_count") or 0) > 0
-        )
-        pending = max(total - completed - processing - faulty, 0)
-
+        total = completed = processing = faulty = 0
         current_position = None
-        for item in items:
-            if not item.get("is_done"):
+        for item in logical_items or ():
+            total += 1
+            if item.get("is_done"):
+                completed += 1
+                continue
+            if current_position is None:
                 current_position = int(item["position"])
-                break
+            if int(item.get("processing_count") or 0) > 0:
+                processing += 1
+            elif int(item.get("pending_count") or 0) <= 0 and int(item.get("faulty_count") or 0) > 0:
+                faulty += 1
 
+        pending = max(total - completed - processing - faulty, 0)
         if current_position is None and total > 0:
             current_position = total
 

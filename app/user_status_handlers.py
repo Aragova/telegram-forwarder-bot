@@ -36,25 +36,13 @@ def register_user_status_handlers(dp: Dispatcher, ctx: UserStatusHandlersContext
         sub = await ctx.run_db(ctx.subscription_service.get_active_subscription, tenant_id) or {}
         status = str(sub.get("status") or "active")
         usage_today = await ctx.run_db(ctx.usage_service.get_today_usage, tenant_id)
-        rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id) if hasattr(ctx.db, "get_rules_for_tenant") else []
-        active_rules = sum(1 for row in rules if bool(getattr(row, "is_active", False)))
-        rule_limit = int(sub.get("max_rules") or 0)
-        max_video = int(sub.get("max_video_per_day") or 0)
-        max_jobs = int(sub.get("max_jobs_per_day") or 0)
-        video_today = int((usage_today or {}).get("video_count") or 0)
+        stats = await ctx.run_db(ctx.db.get_tenant_queue_stats, tenant_id)
+        active_rules = int(stats["active_rules"])
         jobs_today = int((usage_today or {}).get("jobs_count") or 0)
-        queue_total = 0
-        errors_total = 0
-        next_publication = "—"
-        for row in rules:
-            snapshot = await ctx.run_db(ctx.db.get_rule_card_snapshot, int(getattr(row, "id", 0)))
-            if not snapshot:
-                continue
-            queue_total += int(snapshot.get("pending_count") or 0)
-            errors_total += int(snapshot.get("faulty_count") or 0)
-            next_run = snapshot.get("next_run_at")
-            if next_run and next_publication == "—":
-                next_publication = str(next_run)[11:16]
+        queue_total = int(stats["pending"])
+        errors_total = int(stats["faulty"])
+        next_run = stats["next_run_at"]
+        next_publication = str(next_run)[11:16] if next_run else "—"
         state_line = "🟢 Доступ активен"
         if status == "grace":
             state_line = "⚠️ Льготный период"

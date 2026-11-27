@@ -1745,3 +1745,35 @@ def test_rule_catalog_sql_pagination_and_scope(repo):
     outside = repo.get_rule_catalog_page(1, exclude_folder_id=folder, search=prefix)
     assert outside.total == 11
     assert repo.get_rule_catalog_page(1, search=prefix + "missing").rules == []
+
+
+def test_postgres_queue_stats_aggregate_matches_physical_counts(repo):
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            expected = {}
+            for table, column, where in (
+                ("posts", "posts", ""), ("deliveries", "deliveries", ""),
+                ("deliveries", "pending", "WHERE status='pending'"),
+                ("deliveries", "processing", "WHERE status='processing'"),
+                ("deliveries", "sent", "WHERE status='sent'"),
+                ("deliveries", "faulty", "WHERE status='faulty'"),
+                ("routing", "rules", ""), ("routing", "active_rules", "WHERE is_active"),
+            ):
+                cur.execute(f"SELECT COUNT(*) AS cnt FROM {table} {where}")
+                expected[column] = cur.fetchone()["cnt"]
+    assert repo.get_queue_stats() == expected
+
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) FILTER (WHERE d.status='pending') AS pending,
+                       COUNT(*) FILTER (WHERE d.status='faulty') AS faulty
+                FROM deliveries d JOIN routing r ON r.id=d.rule_id
+                WHERE COALESCE(r.tenant_id,1)=1
+                """
+            )
+            expected_tenant = cur.fetchone()
+    tenant = repo.get_tenant_queue_stats(1)
+    assert tenant["pending"] == expected_tenant["pending"]
+    assert tenant["faulty"] == expected_tenant["faulty"]

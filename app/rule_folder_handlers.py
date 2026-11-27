@@ -124,10 +124,9 @@ async def _can_manage_folder_rule(
     ctx: Any, tenant_id: int, admin: bool, user_id: int, rule_id: int,
 ) -> bool:
     if admin:
-        ids = await ctx.run_db(
-            ctx.db.list_folder_manageable_rule_ids, tenant_id, int(user_id),
+        return await ctx.run_db(
+            ctx.db.can_manage_folder_rule, tenant_id, int(user_id), int(rule_id),
         )
-        return int(rule_id) in ids
     return int(await ctx.run_db(ctx.db.get_rule_tenant_id, rule_id)) == tenant_id
 
 
@@ -229,7 +228,7 @@ async def _extra(ctx: Any, callback: CallbackQuery, tenant_id: int, rule_id: int
     if not rule:
         await _error(ctx, callback, "Правило не найдено")
         return
-    mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+    mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id, [rule_id])
     folder = mapping.get(rule_id)
     await _render(ctx, callback, *additional_functions_view(
         rule_id=rule_id,
@@ -252,7 +251,7 @@ async def _move(ctx: Any, callback: CallbackQuery, *, tenant_id: int, origin: st
         ):
             await _error(ctx, callback, "Нельзя переместить правило другого аккаунта")
             return
-        mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+        mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id, [rule_id])
         folder_name = mapping.get(rule_id, {}).get("name")
         count = 1
     elif origin.startswith("b"):
@@ -403,7 +402,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not await ctx.ensure_rule_callback_access(callback, rule_id):
                     return
                 if fid >= 0:
-                    mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+                    mapping = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id, [rule_id])
                     if (int(mapping.get(rule_id, {}).get("id") or 0)) != fid:
                         await _error(ctx, callback, "Правило уже перемещено")
                         return
@@ -486,7 +485,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not await _can_manage_folder_rule(ctx, tenant_id, admin, user_id, rid):
                     await _error(ctx, callback, "Нет доступа к правилу")
                     return
-                assignments = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
+                assignments = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id, [rid])
                 if rid not in assignments:
                     await _error(ctx, callback, "Это правило уже находится вне папок")
                     return

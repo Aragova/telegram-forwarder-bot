@@ -14,7 +14,7 @@ from app.runtime_utils import (
 )
 
 
-def test_reused_postgres_connection_does_not_execute_probe(monkeypatch):
+def test_reused_postgres_connection_does_not_execute_probe():
     client = postgres_client.PostgresClient()
     connection = SimpleNamespace(closed=False, broken=False)
     client._local.conn = connection
@@ -68,3 +68,38 @@ def test_queue_stats_uses_one_statement():
     assert len(calls) == 1
     assert calls[0].count("FROM deliveries") == 1
     assert calls[0].count("FROM routing") == 1
+
+
+def test_ui_lane_progresses_while_background_executor_is_saturated():
+    from concurrent.futures import ThreadPoolExecutor
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow():
+        started.set()
+        return release.wait(3)
+
+    async def handler(event, data):
+        return await run_db(lambda: "ui")
+
+    async def main():
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        background = asyncio.create_task(run_db(slow))
+        try:
+            async with asyncio.timeout(2):
+                while not started.is_set():
+                    await asyncio.sleep(0.01)
+                result = await UiDatabaseMiddleware()(
+                    handler, SimpleNamespace(chat=SimpleNamespace(type="private")), {},
+                )
+                assert result == "ui"
+                assert not background.done()
+        finally:
+            release.set()
+            await background
+
+    try:
+        asyncio.run(main())
+    finally:
+        shutdown_ui_db_executor()

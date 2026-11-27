@@ -9,7 +9,7 @@ def test_user_status_handlers_module_exists_and_symbols():
     assert 'class UserStatusHandlersContext' in t
     assert 'def register_user_status_handlers' in t
     assert 'lambda c: c.data == "user_status"' in t
-    for marker in ['subscription_grace_warning_shown', 'limit_service', 'usage_service', 'get_rule_card_snapshot']:
+    for marker in ['subscription_grace_warning_shown', 'limit_service', 'usage_service', 'get_tenant_queue_stats']:
         assert marker in t
 
 
