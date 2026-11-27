@@ -1914,7 +1914,8 @@ def test_orphan_quarantine_refuses_publication_evidence_and_partial_album(repo):
 
 
 
-def test_orphan_quarantine_preserves_historical_source_message_ledger(repo):
+@pytest.mark.parametrize("string_ids", [False, True])
+def test_orphan_quarantine_preserves_historical_source_message_ledger(repo, string_ids):
     key, rule_id, ids, source_ids, _, target = seed(repo, uuid4().int % 10**12, count=3)
     assert repo.mark_delivery_attempt_accepted(key, sent_message_ids=[501, 502, 503],
                                                telegram_method="copy_album")
@@ -1924,6 +1925,12 @@ def test_orphan_quarantine_preserves_historical_source_message_ledger(repo):
     with repo.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE routing SET is_active=FALSE WHERE id=%s", (rule_id,))
-    assert repo.get_delivery_attempt_by_idempotency_key(key)["source_message_ids_json"] == source_ids
+    expected_ids = [str(value) for value in source_ids] if string_ids else source_ids
+    if string_ids:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE delivery_attempts SET source_message_ids_json=%s::jsonb WHERE idempotency_key=%s",
+                            (json.dumps(expected_ids), key))
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["source_message_ids_json"] == expected_ids
     assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1)["status"] == "publication_evidence"
     assert [repo.get_delivery(i)["status"] for i in ids] == ["sent", "processing", "processing"]

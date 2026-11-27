@@ -2013,7 +2013,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                                         -- Current album keys store delivery IDs;
                                         -- historical rows may store source message IDs.
                                         a.source_message_ids_json @> jsonb_build_array(d.id)
+                                        OR a.source_message_ids_json @> jsonb_build_array(d.id::text)
                                         OR a.source_message_ids_json @> jsonb_build_array(p.message_id)
+                                        OR a.source_message_ids_json @> jsonb_build_array(p.message_id::text)
                                         OR (p.media_group_id IS NOT NULL AND starts_with(
                                             a.idempotency_key,
                                             'rule:' || d.rule_id::text || ':target:' || a.target_id
