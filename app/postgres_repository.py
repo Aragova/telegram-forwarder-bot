@@ -1794,135 +1794,132 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         return 0
 
 
+    @staticmethod
+    def _stale_delivery_job_predicate() -> str:
+        # Fixed SQL shared by diagnostics and the confirmed recovery action.
+        # A job's creation time is not a liveness signal.
+        return """
+            j.job_type IN ('repost_single','repost_album','video_download',
+                           'video_process','video_send','video_delivery')
+            AND COALESCE(j.payload_json->>'rescan_cancelled','false') <> 'true'
+            AND (
+                (j.status = 'processing'
+                 AND j.updated_at < NOW() - make_interval(secs => %s))
+                OR (j.status = 'leased' AND j.lease_until < NOW())
+            )
+        """
+
+    @staticmethod
+    def _delivery_job_membership_predicate() -> str:
+        # Compare text IDs without casts: historical malformed JSON must
+        # neither break diagnostics nor authorize a different delivery.
+        return """
+            j.payload_json->>'rule_id' = d.rule_id::text
+            AND (
+                j.payload_json->>'delivery_id' = d.id::text
+                OR EXISTS (
+                    SELECT 1 FROM jsonb_array_elements_text(
+                        CASE WHEN jsonb_typeof(j.payload_json->'delivery_ids') = 'array'
+                             THEN j.payload_json->'delivery_ids' ELSE '[]'::jsonb END
+                    ) AS member(id)
+                    WHERE member.id = d.id::text
+                )
+            )
+        """
+
     def get_stuck_processing_deliveries(
-        self,
-        *,
-        older_than_seconds: int,
-        limit: int = 50,
+        self, *, older_than_seconds: int, limit: int = 50,
         rule_id: int | None = None,
     ) -> list[dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 50))
-        safe_seconds = max(1, int(older_than_seconds))
-        params: list[Any] = [safe_seconds]
-        rule_filter = ""
-        if rule_id is not None:
-            rule_filter = "AND d.rule_id = %s"
-            params.append(int(rule_id))
-        params.append(safe_limit)
+        safe_seconds = max(600, int(older_than_seconds))
+        stale = self._stale_delivery_job_predicate()
+        membership = self._delivery_job_membership_predicate()
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT
-                        d.id AS delivery_id,
-                        d.rule_id,
-                        d.post_id,
-                        r.source_id,
-                        r.target_id,
-                        EXTRACT(EPOCH FROM (NOW() - processing_clock.processing_job_created_at)) AS age_seconds,
-                        processing_clock.processing_job_created_at AS created_at,
-                        d.error_text
+                    SELECT d.id AS delivery_id, d.rule_id, d.post_id,
+                           r.source_id, r.target_id, d.error_text,
+                           EXTRACT(EPOCH FROM (NOW() - clock.stale_since)) AS age_seconds,
+                           clock.stale_since AS created_at
                     FROM deliveries d
                     JOIN routing r ON r.id = d.rule_id
                     JOIN LATERAL (
-                        SELECT MIN(j.created_at) AS processing_job_created_at
+                        SELECT MIN(CASE WHEN j.status='leased' THEN j.lease_until
+                                        ELSE j.updated_at END) AS stale_since
                         FROM jobs j
-                        WHERE j.status IN ('pending', 'leased', 'processing', 'retry')
-                          AND (
-                              (
-                                  (j.payload_json ->> 'delivery_id') ~ '^[0-9]+$'
-                                  AND (j.payload_json ->> 'delivery_id')::bigint = d.id
-                              )
-                              OR EXISTS (
-                                  SELECT 1
-                                  FROM jsonb_array_elements_text(COALESCE(j.payload_json -> 'delivery_ids', '[]'::jsonb)) AS delivery_ids(value)
-                                  WHERE delivery_ids.value ~ '^[0-9]+$'
-                                    AND delivery_ids.value::bigint = d.id
-                              )
-                          )
-                    ) AS processing_clock ON TRUE
-                    WHERE d.status = 'processing'
-                      AND processing_clock.processing_job_created_at IS NOT NULL
-                      AND processing_clock.processing_job_created_at < NOW() - make_interval(secs => %s)
-                      {rule_filter}
-                    ORDER BY processing_clock.processing_job_created_at ASC, d.id ASC
+                        WHERE {stale} AND {membership}
+                    ) AS clock ON clock.stale_since IS NOT NULL
+                    WHERE d.status='processing'
+                      AND (%s::bigint IS NULL OR d.rule_id=%s)
+                    ORDER BY clock.stale_since, d.id
                     LIMIT %s
                     """,
-                    tuple(params),
+                    (safe_seconds, rule_id, rule_id, safe_limit),
                 )
                 rows = cur.fetchall() or []
         return [dict(row) for row in rows]
 
-    def reset_stuck_processing_deliveries_to_pending(
-        self,
-        *,
-        older_than_seconds: int,
-        limit: int = 50,
-        rule_id: int | None = None,
-        admin_id: int | None = None,
+    def recover_stale_delivery_jobs(
+        self, *, older_than_seconds: int, limit: int = 50,
+        rule_id: int | None = None, admin_id: int | None = None,
     ) -> dict[str, Any]:
+        """Requeue only existing stale jobs. Never reopen deliveries or receipts.
+
+        Same recovery semantics as the lease watchdog. The original job
+        payload preserves album membership, video stage and publication key.
+        """
         safe_limit = max(1, min(int(limit), 50))
-        safe_seconds = max(1, int(older_than_seconds))
-        params: list[Any] = [safe_seconds]
-        rule_filter = ""
-        if rule_id is not None:
-            rule_filter = "AND d.rule_id = %s"
-            params.append(int(rule_id))
-        params.append(safe_limit)
+        safe_seconds = max(600, int(older_than_seconds))
+        stale = self._stale_delivery_job_predicate()
+        membership = self._delivery_job_membership_predicate()
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
                     WITH candidates AS (
-                        SELECT d.id
-                        FROM deliveries d
-                        JOIN LATERAL (
-                            SELECT MIN(j.created_at) AS processing_job_created_at
-                            FROM jobs j
-                            WHERE j.status IN ('pending', 'leased', 'processing', 'retry')
-                              AND (
-                                  (
-                                      (j.payload_json ->> 'delivery_id') ~ '^[0-9]+$'
-                                      AND (j.payload_json ->> 'delivery_id')::bigint = d.id
-                                  )
-                                  OR EXISTS (
-                                      SELECT 1
-                                      FROM jsonb_array_elements_text(COALESCE(j.payload_json -> 'delivery_ids', '[]'::jsonb)) AS delivery_ids(value)
-                                      WHERE delivery_ids.value ~ '^[0-9]+$'
-                                        AND delivery_ids.value::bigint = d.id
-                                  )
-                              )
-                        ) AS processing_clock ON TRUE
-                        WHERE d.status = 'processing'
-                          AND processing_clock.processing_job_created_at IS NOT NULL
-                          AND processing_clock.processing_job_created_at < NOW() - make_interval(secs => %s)
-                          AND d.sent_at IS NULL
-                          AND d.sent_message_id IS NULL
-                          AND (d.sent_message_ids_json IS NULL OR d.sent_message_ids_json = '[]'::jsonb)
-                          {rule_filter}
-                        ORDER BY processing_clock.processing_job_created_at ASC, d.id ASC
+                        SELECT j.id
+                        FROM jobs j
+                        WHERE {stale}
+                          AND EXISTS (
+                              SELECT 1 FROM deliveries d
+                              JOIN routing r ON r.id=d.rule_id
+                              WHERE d.status='processing'
+                                AND r.rescan_owner_token IS NULL
+                                AND (%s::bigint IS NULL OR d.rule_id=%s)
+                                AND {membership}
+                          )
+                        ORDER BY j.updated_at, j.id
                         LIMIT %s
+                        FOR UPDATE OF j SKIP LOCKED
                     )
-                    UPDATE deliveries d
-                    SET status = 'pending',
-                        error_text = NULL
+                    UPDATE jobs j
+                    SET status='retry',
+                        attempts=attempts + CASE WHEN j.status='processing' THEN 1 ELSE 0 END,
+                        run_at=NOW() + INTERVAL '15 seconds',
+                        locked_by=NULL, lease_until=NULL, updated_at=NOW(),
+                        error_text='Watchdog: ручное восстановление устаревшей задачи'
                     FROM candidates
-                    WHERE d.id = candidates.id
-                      AND d.status = 'processing'
-                    RETURNING d.id
+                    WHERE j.id=candidates.id AND {stale}
+                    RETURNING j.id
                     """,
-                    tuple(params),
+                    (safe_seconds, rule_id, rule_id, safe_limit, safe_seconds),
                 )
-                rows = cur.fetchall() or []
-                delivery_ids = [int(row["id"]) for row in rows]
+                ids = [int(row["id"]) for row in cur.fetchall() or []]
             conn.commit()
-        logger.warning(
-            "manual_stuck_processing_reset: admin_id=%s reset_count=%s delivery_ids=%s",
-            admin_id,
-            len(delivery_ids),
-            delivery_ids,
+        logger.warning("MANUAL_STALE_JOB_RECOVERY | admin_id=%s | job_ids=%s", admin_id, ids)
+        return {"updated_count": len(ids), "job_ids": ids, "limit": safe_limit}
+
+    def reset_stuck_processing_deliveries_to_pending(
+        self, *, older_than_seconds: int, limit: int = 50,
+        rule_id: int | None = None, admin_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Compatibility entry point; no direct delivery reset is allowed."""
+        return self.recover_stale_delivery_jobs(
+            older_than_seconds=older_than_seconds, limit=limit,
+            rule_id=rule_id, admin_id=admin_id,
         )
-        return {"updated_count": len(delivery_ids), "delivery_ids": delivery_ids, "limit": safe_limit}
 
     # =========================================================
     # SAAS REACTIONS FOUNDATION

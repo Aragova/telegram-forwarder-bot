@@ -67,11 +67,11 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             return
         await ctx.answer_callback_safe_once(callback)
         text = (
-            "🧯 Возврат зависших задач в очередь\n\n"
-            f"Будет обработано не больше 50 задач. Сейчас найдено к возврату: {len(rows)}.\n\n"
-            "⚠️ Важно:\n"
-            "если задача зависла после фактической отправки в Telegram, возврат в очередь может привести к дублю.\n"
-            "Используйте только когда уверены, что задача действительно зависла."
+            "🧯 Безопасное восстановление\n\n"
+            f"Найдено доставок с устаревшими заданиями: {len(rows)}.\n"
+            "Будет проверено не больше 50 заданий.\n\n"
+            "Активные воркеры не затрагиваются. Статусы публикаций не сбрасываются. "
+            "При восстановлении бот проверит сохранённые данные отправки."
         )
         await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=_build_stuck_reset_confirm_keyboard())
 
@@ -81,7 +81,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             return
         stale_seconds = DeliveryObservabilityConfig().stale_processing_after_seconds
         result = await ctx.run_db(
-            ctx.db.reset_stuck_processing_deliveries_to_pending,
+            ctx.db.recover_stale_delivery_jobs,
             older_than_seconds=stale_seconds,
             limit=50,
             admin_id=callback.from_user.id if callback.from_user else None,
@@ -89,8 +89,8 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         await ctx.answer_callback_safe_once(callback, "Готово")
         updated = int(result.get("updated_count") or 0)
         remaining = await ctx.run_db(ctx.db.get_stuck_processing_deliveries, older_than_seconds=stale_seconds, limit=1)
-        tail = "\nОстались зависшие задачи — повторите действие при необходимости." if remaining else "\nЗависших задач больше не найдено."
-        await ctx.edit_message_text_safe(message=callback.message, text=f"🧯 Зависшие задачи\n\nВозвращено в очередь: {updated}.{tail}")
+        tail = "\nОстались устаревшие задания. Проверьте диагностику повторно." if remaining else "\nУстаревших заданий больше не найдено."
+        await ctx.edit_message_text_safe(message=callback.message, text=f"🧯 Зависшие задачи\n\nВосстановлено заданий: {updated}.{tail}")
 
     @dp.callback_query(lambda c: c.data == "stuck_reset_cancel")
     async def handle_stuck_reset_cancel(callback: CallbackQuery):
@@ -285,8 +285,8 @@ def _format_stuck_processing_deliveries_text(rows) -> str:
         ])
     lines.extend([
         "",
-        "Вы можете вернуть зависшие задачи в очередь.",
-        "Это безопаснее, чем править базу руками, но если пост уже был фактически отправлен Telegram, возможен дубль.",
+        "Можно восстановить существующие задания с истёкшей арендой или устаревшим heartbeat.",
+        "Это не сбрасывает статусы публикаций и не разрешает повторную отправку без проверки.",
     ])
     return "\n".join(lines)[:4000]
 
@@ -294,8 +294,8 @@ def _format_stuck_processing_deliveries_text(rows) -> str:
 def _build_stuck_processing_keyboard(has_rows: bool) -> InlineKeyboardMarkup | None:
     if not has_rows:
         return None
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Вернуть зависшие в очередь", callback_data="stuck_reset_request")]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Восстановить задания", callback_data="stuck_reset_request")]])
 
 
 def _build_stuck_reset_confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Да, вернуть в очередь", callback_data="stuck_reset_confirm")], [InlineKeyboardButton(text="❌ Отмена", callback_data="stuck_reset_cancel")]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Восстановить", callback_data="stuck_reset_confirm")], [InlineKeyboardButton(text="❌ Отмена", callback_data="stuck_reset_cancel")]])

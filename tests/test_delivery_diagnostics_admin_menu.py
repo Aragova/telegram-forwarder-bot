@@ -65,9 +65,9 @@ def test_stuck_delivery_handlers_are_admin_only_and_confirmation_required() -> N
     assert "ctx.is_admin_callback(callback)" in handler_source
     assert "stuck_reset_request" in handler_source
     assert "stuck_reset_confirm" in handler_source
-    assert handler_source.index("stuck_reset_request") < handler_source.index("reset_stuck_processing_deliveries_to_pending")
+    assert handler_source.index("stuck_reset_request") < handler_source.index("recover_stale_delivery_jobs")
     request_block = handler_source[handler_source.index("async def handle_stuck_reset_request"):handler_source.index("async def handle_stuck_reset_confirm")]
-    assert "reset_stuck_processing_deliveries_to_pending" not in request_block
+    assert "recover_stale_delivery_jobs" not in request_block
 
 
 def test_stuck_button_not_added_to_rule_card() -> None:
