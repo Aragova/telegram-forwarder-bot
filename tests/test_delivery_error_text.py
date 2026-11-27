@@ -13,7 +13,9 @@ def test_rescan_instructions_for_known_queue_conflicts(code):
     text = describe_delivery_error(code).text()
     assert "Пересканировать" in text and "Начать заново" in text
     assert "Начать с этого" in text and "возможен дубль" in text
-    assert text.index("Выключите правило") < text.index("Пересканировать")
+    assert text.index("Выключите правило") < text.index("Дождитесь завершения текущей отправки")
+    assert text.index("Дождитесь завершения текущей отправки") < text.index("проверьте последний опубликованный пост")
+    assert text.index("проверьте последний опубликованный пост") < text.index("Пересканировать")
     assert text.index("Начать заново") < text.index("Не включая правило")
     assert text.index("Начать с этого") < text.index("Затем включите правило")
     assert code not in text

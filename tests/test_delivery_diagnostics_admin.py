@@ -61,6 +61,8 @@ def test_unknown_snapshot_text_is_safe() -> None:
     assert "диагностика временно недоступна" in text
     assert "Не удалось определить" not in text
     assert "нет точного описания" in text
+    assert "Состояние доставки неизвестно. Повторите диагностику позже." in text
+    assert "Ошибок и зависших задач нет" not in text
     for forbidden in ("SECRET_TOKEN", "content_json", "caption", "Traceback"):
         assert forbidden not in text
     assert len(text) <= 4000

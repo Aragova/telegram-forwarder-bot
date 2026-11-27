@@ -148,7 +148,9 @@ def format_delivery_diagnostics_admin_text(snapshot: DeliveryDiagnosticsSnapshot
     _append_largest_queues(sections, snapshot)
 
     conclusion = ["", "<b>💡 Вывод:</b>"]
-    if snapshot.stuck_processing_count > 0:
+    if snapshot.status == DeliveryHealthStatus.UNKNOWN:
+        conclusion.append("Состояние доставки неизвестно. Повторите диагностику позже.")
+    elif snapshot.stuck_processing_count > 0:
         conclusion.append('Есть зависшие задачи. Нажмите «🧯 Зависшие задачи» для проверки. Возврат в очередь возможен после сверки с получателем.')
     elif snapshot.total_faulty == 0 and snapshot.total_deferred + snapshot.total_rate_limited == 0:
         conclusion.append("Ошибок и зависших задач нет. Большая очередь — это плановые доставки, которые будут отправляться по интервалам правил.")
