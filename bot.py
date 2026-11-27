@@ -5316,7 +5316,7 @@ def format_audit_details_html(row) -> list[str]:
             continue
 
         if clean.startswith("❌ "):
-            lines.append(f"  ❌ {escape(clean[2:].strip())}")
+            lines.append(describe_delivery_error(row["error_text"]).html())
         else:
             lines.append(f"  <code>{escape(clean)}</code>")
 
@@ -5637,7 +5637,6 @@ def build_faulty_pages(limit: int = 200) -> list[dict[str, Any]]:
 
         status_label, error_type = classify_faulty_row(row)
         error = describe_delivery_error(row["error_text"])
-        error_text = escape(error.text())
         created_at_text = faulty_delivery_time_from_created_at(row["fault_created_at"] or row["created_at"])
         if created_at_text == "дата неизвестна":
             created_at_text = faulty_delivery_time_from_created_at(row["created_at"])
@@ -5645,17 +5644,17 @@ def build_faulty_pages(limit: int = 200) -> list[dict[str, Any]]:
         problem_state = db.get_problem_state(f"rule_faulty_{row['rule_id']}")
         in_work_text = ""
         if problem_state and int(problem_state.get("is_active") or 0) == 0:
-            in_work_text = "\n  <b>Статус:</b> ✅ Взята в работу"
+            in_work_text = "\n\n✅ <b>Взята в работу</b>"
 
         text = (
             f"<b>⚠️ ПРОБЛЕМНАЯ ДОСТАВКА</b>\n\n"
-            f"<b>{status_label}</b>\n"
-            f"<b>Правило #{row['rule_id']}</b>\n"
-            f"<code>{escape(created_at_text)}</code>\n"
-            f"<code>{escape(str(src))} → {escape(str(tgt))}</code>\n"
-            f"<code>Тип: {escape(error_type)}</code>\n"
-            f"<code>Сообщение: {row['message_id']} | Попыток: {row['attempt_count']}</code>\n"
-            f"❌ {error_text}"
+            f"<b>Правило #{row['rule_id']}</b> · {escape(status_label)}\n"
+            f"🕒 {escape(created_at_text)}\n\n"
+            f"📤 <b>Источник</b>\n{escape(str(src)[:180])}\n"
+            f"📥 <b>Получатель</b>\n{escape(str(tgt)[:180])}\n\n"
+            f"📌 <b>{escape(error_type)}</b>\n"
+            f"Сообщение: <code>{row['message_id']}</code> · Попыток: {row['attempt_count']}\n\n"
+            f"{error.html()}"
             f"{in_work_text}"
         )
 

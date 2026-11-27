@@ -37,8 +37,13 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             text = await ctx.build_delivery_diagnostics_admin_text()
         except Exception:
             ctx.logger.warning("Ошибка подготовки диагностики доставки", exc_info=True)
-            text = "📊 Диагностика доставки\n\nСтатус: диагностика недоступна\nПричина: временная ошибка диагностики. Попробуйте позже."
-        await ctx.send_message_safe(chat_id=message.chat.id, text=text)
+            text = (
+                "<b>📊 Диагностика доставки</b>\n\n"
+                "⚪ <b>Диагностика недоступна</b>\n\n"
+                "Не удалось получить данные.\n\n"
+                "🔄 Попробуйте обновить диагностику позже."
+            )
+        await ctx.send_message_safe(chat_id=message.chat.id, text=text, parse_mode="HTML")
 
 
     @dp.message(lambda m: (m.text or "").strip() == "🧯 Зависшие задачи")

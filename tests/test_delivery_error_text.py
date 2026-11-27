@@ -67,3 +67,12 @@ def test_known_and_unknown_errors_are_safe_russian(raw, expected):
 
 def test_error_type_used_when_raw_text_is_unknown():
     assert describe_delivery_error("unrecognised details", "TelegramRetryAfter").title == "Ограничение Telegram"
+
+
+def test_error_html_has_clear_separate_blocks_and_escapes_values():
+    from app.delivery_error_text import DeliveryError
+    description = DeliveryError("Название", "<опасно>", "Проверьте A & B")
+    assert description.html() == (
+        "🔴 <b>Причина</b>\n&lt;опасно&gt;\n\n"
+        "🛠 <b>Что делать:</b>\nПроверьте A &amp; B"
+    )

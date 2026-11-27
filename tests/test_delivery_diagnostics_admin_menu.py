@@ -37,6 +37,7 @@ def test_delivery_diagnostics_handler_is_admin_only() -> None:
     assert "📊 Диагностика доставки" in source
     assert "ctx.is_admin(message)" in handler_source
     assert "build_delivery_diagnostics_admin_text" in handler_source
+    assert 'parse_mode="HTML"' in handler_source
 
 
 def test_delivery_observability_repository_method_is_read_only_select() -> None:
