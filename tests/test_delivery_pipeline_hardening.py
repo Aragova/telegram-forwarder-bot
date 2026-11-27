@@ -182,7 +182,14 @@ def test_policy_skip_does_not_use_error_text_field():
 
 def test_faulty_card_distinguishes_unverified_send_from_generic_failure():
     source = Path("bot.py").read_text(encoding="utf-8")
-    assert 'error_type = "🧭 Отправка требует сверки с Telegram"' in source
+    from app.delivery_error_text import describe_delivery_error
+
+    uncertain = describe_delivery_error("copy_single_uncertain_no_fallback")
+    generic = describe_delivery_error("unknown_failure")
+    assert uncertain.title == "Отправка не подтверждена"
+    assert "Проверьте канал-получатель вручную" in uncertain.action
+    assert uncertain != generic
+    assert 'error_type = describe_delivery_error(row["error_text"]).title' in source
     assert 'created_at_text == "дата неизвестна"' in source
 
 
