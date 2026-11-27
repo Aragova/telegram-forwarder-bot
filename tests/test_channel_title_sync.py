@@ -196,7 +196,7 @@ def test_loop_starts_without_waiting_six_hours(monkeypatch):
 def test_bot_and_unified_runtime_start_title_refresh_and_shutdown_cleanly():
     source = Path("bot.py").read_text(encoding="utf-8")
     bot_role = source[source.index("async def _start_bot_role()"):source.index("async def _start_scheduler_role()")]
-    all_role = source[source.index("async def _start_all_role()"):source.index("async def start_job_workers_runtime()")]
+    all_role = source[source.index("async def _start_all_role()"):source.index("async def start_job_workers_runtime(")]
     shutdown = source[source.index("async def _shutdown_runtime("):source.index("async def _run_scheduler_role_loop()")]
     assert "_start_channel_title_sync_runtime()" in bot_role
     assert "_start_channel_title_sync_runtime()" in all_role

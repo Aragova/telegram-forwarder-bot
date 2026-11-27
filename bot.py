@@ -74,7 +74,8 @@ from app.telegram_client import create_telethon_client, create_reaction_clients
 from app.ui_error_policy import UIActionResult, UIErrorPolicy
 from app.reaction_auth_state import is_reaction_auth_state, is_reaction_account_reactions_input_state
 from app.scheduler_service import SchedulerService
-from app.runtime_roles import normalize_runtime_role, run_role as run_runtime_role
+from app.runtime_roles import ForwardingControlUnavailable, RuntimeOwnership, normalize_runtime_role, run_role as run_runtime_role
+from app.job_worker_lifecycle import JobWorkerLifecycle
 from app.health_service import get_system_health, update_heartbeat
 from app.ops_health_service import build_operational_snapshot
 from app.preflight_checks import PreflightError, run_preflight_checks
@@ -82,7 +83,6 @@ from app.runtime_context import RuntimeContext
 from app.worker_runtime import run_heavy_worker, run_light_worker
 from app.delivery_job_fence import cancel_local_rule_delivery_jobs
 from app.worker_resource_policy import POLICY as WORKER_RESOURCE_POLICY
-from app.worker_shutdown import drain_job_workers
 from app.reaction_worker import ReactionWorker
 from app.scheduler_runtime import run_scheduler_loop
 from app.job_watchdog import run_watchdog_loop
@@ -165,12 +165,11 @@ reaction_clients = []
 sender_service = None
 runtime_context: RuntimeContext | None = None
 posting_active = False
-job_worker_tasks: list[asyncio.Task] = []
-job_workers_stop_event: asyncio.Event | None = None
+runtime_ownership = RuntimeOwnership()
+job_workers = JobWorkerLifecycle(runtime_ownership, logger)
 reaction_worker_task: asyncio.Task | None = None
 scheduler_runtime_task: asyncio.Task | None = None
 job_watchdog_task: asyncio.Task | None = None
-workers_runtime_enabled = True
 user_states: dict[int, dict[str, Any]] = {}
 saved_post_album_buffer = SavedPostAlbumCaptureBuffer(delay_seconds=1.2)
 dashboard_tasks: dict[int, asyncio.Task] = {}
@@ -1675,7 +1674,11 @@ def build_dashboard_text() -> str:
     health = get_system_health(db)
     next_rule = db.get_next_scheduled_rule()
     now_text = datetime.now(USER_TZ).strftime("%d.%m.%Y %H:%M:%S")
-    live_workers = sum(1 for task in job_worker_tasks if not task.done())
+    live_workers = str(job_workers.live_count) if runtime_ownership.can_control_forwarding else 'н/д (отдельный процесс)'
+    forwarding_status = (
+        ('✅ РАБОТАЕТ' if posting_active else '⏸ ПЛАНИРОВЩИК ОСТАНОВЛЕН')
+        if runtime_ownership.can_control_forwarding else 'Управление отдельными процессами'
+    )
 
     next_block = "⏭ **Ближайший пост:**\nне запланирован"
 
@@ -1715,7 +1718,7 @@ def build_dashboard_text() -> str:
         f"В обработке: {health['processing']}\n\n"
         f"⚠️ Ошибки за 5 минут: {health['errors']}\n\n"
         f"{next_block}\n\n"
-        f"Статус: {'✅ РАБОТАЕТ' if posting_active else '⏸ ОСТАНОВЛЕН'}\n"
+        f"Статус: {forwarding_status}\n"
         f"🕒 Обновлено: {now_text}"
     )
 
@@ -2285,16 +2288,30 @@ async def stop_all_workers() -> None:
     await stop_job_workers_runtime()
 
 
-async def start_forwarding() -> None:
+def _require_forwarding_control() -> None:
+    if not runtime_ownership.can_control_forwarding:
+        raise ForwardingControlUnavailable("Глобальное управление пересылкой доступно только в режиме all.")
+
+
+async def start_forwarding() -> bool:
     global posting_active
+    _require_forwarding_control()
+    if sender_service is None:
+        raise RuntimeError("Sender runtime не инициализирован")
+    was_active = posting_active
+    await start_job_workers_runtime(resume=True)
     posting_active = True
-    await ensure_rule_workers()
+    return not was_active
 
 
-async def stop_forwarding() -> None:
+async def stop_forwarding() -> bool:
     global posting_active
+    _require_forwarding_control()
+    # Stop scheduling immediately, but always allow another drain attempt.
+    was_active = posting_active or job_workers.live_count > 0
     posting_active = False
     await stop_all_workers()
+    return was_active
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
@@ -3039,18 +3056,30 @@ async def handle_admin_reply_keyboard_router(message: Message):
         await reply_message_safe(message, "📋 Главное меню", reply_markup=get_main_menu())
         return
     if canonical == "▶️ Запустить пересылку":
-        if posting_active:
-            await reply_message_safe(message, "ℹ️ Пересылка уже запущена.")
-            return
-        await start_forwarding()
-        await reply_message_safe(message, "▶️ Пересылка запущена.", reply_markup=get_main_menu())
+        try:
+            runtime_ownership.validate_forwarding_command(message.date)
+            changed = await start_forwarding()
+        except ForwardingControlUnavailable as exc:
+            await reply_message_safe(message, str(exc))
+        except Exception:
+            logger.exception("FORWARDING_START_FAILED")
+            await reply_message_safe(message, "❌ Ошибка запуска пересылки")
+        else:
+            text = "▶️ Пересылка запущена." if changed else "ℹ️ Пересылка уже запущена."
+            await reply_message_safe(message, text, reply_markup=get_main_menu())
         return
     if canonical == "⏸ Остановить пересылку":
-        if not posting_active:
-            await reply_message_safe(message, "ℹ️ Пересылка уже остановлена.")
-            return
-        await stop_forwarding()
-        await reply_message_safe(message, "⏸ Пересылка остановлена.", reply_markup=get_main_menu())
+        try:
+            runtime_ownership.validate_forwarding_command(message.date)
+            changed = await stop_forwarding()
+        except ForwardingControlUnavailable as exc:
+            await reply_message_safe(message, str(exc))
+        except Exception:
+            logger.exception("FORWARDING_STOP_FAILED")
+            await reply_message_safe(message, "❌ Ошибка остановки пересылки. Повторите остановку.")
+        else:
+            text = "⏸ Пересылка остановлена." if changed else "ℹ️ Пересылка уже остановлена."
+            await reply_message_safe(message, text, reply_markup=get_main_menu())
         return
 
     logger.info(
@@ -8868,18 +8897,6 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
     else:
         ui_policy = None
 
-    try:
-        await bot.delete_webhook(drop_pending_updates=True, request_timeout=90)
-    except Exception as e:
-        logger.warning("Webhook skip (network issue): %s", e)
-    try:
-        await bot.set_my_commands(
-            DEFAULT_TELEGRAM_COMMANDS,
-            scope=BotCommandScopeDefault(),
-        )
-    except Exception as exc:
-        logger.warning("Не удалось установить команды бота: %s", exc)
-
     telethon_client = await create_telethon_client(publication_repository=db)
     reaction_clients = await create_reaction_clients()
     if admin_handlers_ctx is not None:
@@ -8911,6 +8928,34 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
         reaction_clients=reaction_clients,
     )
 
+
+async def _prepare_polling_runtime() -> None:
+    """Настройка получения обновлений только для владельца polling."""
+    if not runtime_ownership.can_poll:
+        raise RuntimeError("Runtime-роль не владеет polling")
+    if bot is None:
+        raise RuntimeError("Bot API не инициализирован")
+    for attempt in range(3):
+        try:
+            if await bot.delete_webhook(drop_pending_updates=False, request_timeout=90):
+                break
+            raise RuntimeError("Telegram не подтвердил удаление webhook")
+        except Exception:
+            logger.warning("POLLING_WEBHOOK_PREPARE_FAILED | attempt=%s", attempt + 1, exc_info=True)
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+            else:
+                # A lost HTTP response may hide a successful deletion.
+                info = await bot.get_webhook_info(request_timeout=15)
+                if info.url:
+                    raise RuntimeError("Polling невозможен: webhook остаётся активным")
+    try:
+        await bot.set_my_commands(
+            DEFAULT_TELEGRAM_COMMANDS,
+            scope=BotCommandScopeDefault(),
+        )
+    except Exception as exc:
+        logger.warning("Не удалось установить команды бота: %s", exc)
 
 
 def _start_channel_title_sync_runtime() -> None:
@@ -8957,9 +9002,14 @@ async def _shutdown_runtime(
 ) -> None:
     global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, repost_campaign_runtime_tasks, channel_title_sync_task
 
+    runtime_ownership.begin_shutdown()
+    workers_drain_complete = True
     if stop_workers_runtime:
-        await stop_job_workers_runtime()
-        await stop_all_workers()
+        try:
+            await stop_job_workers_runtime()
+        except Exception:
+            workers_drain_complete = False
+            logger.exception("JOB_WORKERS_SHUTDOWN_INCOMPLETE | keeping Telegram clients open")
 
     if close_dashboard_tasks:
         tasks = list(dashboard_tasks.values())
@@ -8985,6 +9035,8 @@ async def _shutdown_runtime(
             )
         else:
             repost_campaign_runtime_tasks = None
+
+    resource_drain_complete = workers_drain_complete and campaign_drain_complete
 
     if scheduler_runtime_task and not scheduler_runtime_task.done():
         scheduler_runtime_task.cancel()
@@ -9025,10 +9077,10 @@ async def _shutdown_runtime(
                 logger.exception("PUBLICATION_SHUTDOWN_RETRY_FAILED")
 
     await stop_background_tasks()
-    if sender_service is not None:
+    if sender_service is not None and workers_drain_complete:
         await sender_service.video_processor.shutdown()
 
-    if close_telegram_clients and campaign_drain_complete and telethon_client:
+    if close_telegram_clients and resource_drain_complete and telethon_client:
         raw_telethon = getattr(telethon_client, "raw", telethon_client)
         while getattr(raw_telethon, "publication_evidence_unpersisted", False):
             raw_telethon.publication_write_blocked = True
@@ -9043,7 +9095,7 @@ async def _shutdown_runtime(
             logger.warning("Ошибка при закрытии Telethon: %s", exc)
         telethon_client = None
 
-    if close_telegram_clients and campaign_drain_complete:
+    if close_telegram_clients and resource_drain_complete:
         for reactor in reaction_clients:
             try:
                 raw_client = getattr(reactor.client, "raw", reactor.client)
@@ -9054,14 +9106,14 @@ async def _shutdown_runtime(
         sender_service = None
         runtime_context = None
 
-    if close_bot_session and campaign_drain_complete and bot:
+    if close_bot_session and resource_drain_complete and bot:
         try:
             await bot.session.close()
         except Exception as exc:
             logger.warning("Ошибка при закрытии Bot session: %s", exc)
         bot = None
 
-    return campaign_drain_complete
+    return resource_drain_complete
 
 
 async def _run_scheduler_role_loop() -> None:
@@ -9075,19 +9127,18 @@ async def _run_scheduler_role_loop() -> None:
 
 
 async def _run_worker_role_loop() -> None:
-    global posting_active
-    await start_job_workers_runtime()
+    await start_job_workers_runtime(resume=True)
     logger.info("🚀 Режим worker запущен")
-    while True:
-        await asyncio.sleep(10)
+    await _supervise_job_workers()
 
 
 async def _start_bot_role() -> None:
-    global workers_runtime_enabled, posting_active
-    workers_runtime_enabled = False
+    global posting_active
+    runtime_ownership.bind("bot")
     posting_active = False
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=True)
+    await _prepare_polling_runtime()
     start_background_task(heartbeat_loop("bot", db), name="bot-heartbeat")
     start_background_task(watchdog_loop(db), name="health-watchdog")
     _start_repost_campaign_runtime_tasks(role="bot")
@@ -9103,8 +9154,8 @@ async def _start_bot_role() -> None:
 
 
 async def _start_scheduler_role() -> None:
-    global workers_runtime_enabled, posting_active
-    workers_runtime_enabled = False
+    global posting_active
+    runtime_ownership.bind("scheduler")
     posting_active = False
     await _init_db_runtime()
     logger.info("STARTUP | Запуск роли scheduler")
@@ -9122,8 +9173,7 @@ async def _start_scheduler_role() -> None:
 
 
 async def _start_worker_role() -> None:
-    global workers_runtime_enabled
-    workers_runtime_enabled = True
+    runtime_ownership.bind("worker")
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=False)
     logger.info("STARTUP | Запуск роли worker")
@@ -9132,11 +9182,12 @@ async def _start_worker_role() -> None:
 
 
 async def _start_all_role() -> None:
-    global workers_runtime_enabled, posting_active, scheduler_runtime_task, job_watchdog_task, reaction_worker_task
-    workers_runtime_enabled = True
+    global posting_active, scheduler_runtime_task, job_watchdog_task, reaction_worker_task
+    runtime_ownership.bind("all")
     posting_active = False
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=True)
+    await _prepare_polling_runtime()
     start_background_task(heartbeat_loop("bot", db), name="bot-heartbeat")
     start_background_task(heartbeat_loop("scheduler", db), name="scheduler-heartbeat")
     start_background_task(heartbeat_loop("worker", db), name="worker-heartbeat")
@@ -9157,7 +9208,8 @@ async def _start_all_role() -> None:
         reaction_worker = ReactionWorker(db=db, worker_id="reaction-worker-1", poll_interval_sec=2.0, lock_timeout_seconds=300)
         reaction_worker_task = asyncio.create_task(reaction_worker.run_forever())
         logger.info("Reaction worker запущен: reaction-worker-1")
-    await start_job_workers_runtime()
+    await start_job_workers_runtime(resume=True)
+    start_background_task(_supervise_job_workers(), name="job-workers-supervisor")
     logger.info("STARTUP | Legacy режим all запущен")
     await dp.start_polling(
         bot,
@@ -9170,35 +9222,21 @@ async def _start_all_role() -> None:
     )
 
 
-async def start_job_workers_runtime() -> None:
-    global job_worker_tasks, job_workers_stop_event
-    if not sender_service:
-        return
-    if any(not task.done() for task in job_worker_tasks):
-        return
+async def _supervise_job_workers() -> None:
+    await job_workers.supervise(start_job_workers_runtime)
 
-    job_workers_stop_event = asyncio.Event()
-    job_worker_tasks = [
-        asyncio.create_task(run_light_worker(db, sender_service, "light-worker-1", stop_event=job_workers_stop_event)),
-        asyncio.create_task(run_heavy_worker(db, sender_service, "heavy-worker-1", stop_event=job_workers_stop_event)),
-    ]
-    logger.info("JOB WORKERS | запущены light/heavy воркеры")
+
+async def start_job_workers_runtime(*, resume: bool = False) -> None:
+    if not runtime_ownership.can_start_workers or sender_service is None:
+        return
+    job_workers.ensure_running({
+        "light-worker-1": lambda stop: run_light_worker(db, sender_service, "light-worker-1", stop_event=stop),
+        "heavy-worker-1": lambda stop: run_heavy_worker(db, sender_service, "heavy-worker-1", stop_event=stop),
+    }, resume=resume)
 
 
 async def stop_job_workers_runtime() -> None:
-    global job_worker_tasks, job_workers_stop_event
-    if not job_worker_tasks:
-        return
-    tasks = list(job_worker_tasks)
-    await drain_job_workers(
-        tasks=tasks,
-        stop_event=job_workers_stop_event,
-        timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec + 20,
-        logger=logger,
-    )
-    job_worker_tasks = []
-    job_workers_stop_event = None
-    logger.info("JOB WORKERS | остановлены")
+    await job_workers.stop(timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec + 20)
 
 
 def _register_user_saas_handlers() -> None:
@@ -9311,6 +9349,7 @@ def _register_admin_handlers() -> None:
         parse_channel_history=parse_channel_history,
         telethon_client=telethon_client,
         show_public_user_menu_message=_show_public_user_menu_message,
+        validate_forwarding_command=runtime_ownership.validate_forwarding_command,
         start_forwarding=start_forwarding,
         stop_forwarding=stop_forwarding,
         is_posting_active=lambda: posting_active,
@@ -9356,7 +9395,7 @@ async def main(role: str = "all"):
             logger.info("SHUTDOWN | Роль %s остановлена", normalized_role)
         else:
             logger.error(
-                "SHUTDOWN | Роль %s остановлена частично: фоновые задачи кампании "
+                "SHUTDOWN | Роль %s остановлена частично: job workers или задачи кампании "
                 "не завершены, Telegram-клиенты оставлены открытыми",
                 normalized_role,
             )

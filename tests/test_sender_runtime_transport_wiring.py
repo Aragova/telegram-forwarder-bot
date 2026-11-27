@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 
 class _RawBot:
     def __init__(self, *args, **kwargs):
@@ -29,7 +31,8 @@ class _Policy:
         return await func()
 
 
-def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
+@pytest.mark.parametrize("create_ui_policy", [False, True])
+def test_sender_runtime_wraps_only_sender_clients(monkeypatch, create_ui_policy):
     async def scenario():
         import bot as runtime
 
@@ -81,9 +84,16 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch):
         monkeypatch.setattr(runtime, "user_handlers_ctx", None)
         monkeypatch.setattr(runtime, "admin_handlers_ctx", None)
 
-        await runtime._init_sender_runtime(create_ui_policy=False)
+        # Restore all globals assigned by _init_sender_runtime after the test.
+        for name in ("bot", "ui_policy", "telethon_client", "reaction_clients", "sender_service", "runtime_context"):
+            monkeypatch.setattr(runtime, name, getattr(runtime, name))
+        monkeypatch.setattr(runtime, "UIErrorPolicy", lambda bot: object())
+        await runtime._init_sender_runtime(create_ui_policy=create_ui_policy)
 
         raw_bot = runtime.bot
+        assert not raw_bot.deleted_webhook
+        assert not raw_bot.commands_set
+        assert (runtime.ui_policy is not None) is create_ui_policy
         assert raw_bot.init_kwargs["session"].api.is_local is True
         assert raw_bot.init_kwargs["session"].api.api_url("123456:ABC", "sendVideo").startswith(runtime.settings.bot_api_base)
         assert "base_url" not in raw_bot.init_kwargs

@@ -325,6 +325,7 @@ def test_incomplete_campaign_drain_continues_cleanup_without_closing_telegram_cl
         "asyncio": asyncio, "logger": logging.getLogger("test.shutdown.drain"),
         "stop_background_tasks": lambda: record("background_cleanup"),
         "stop_job_workers_runtime": lambda: record("workers_cleanup"),
+        "runtime_ownership": SimpleNamespace(begin_shutdown=lambda: None),
         "stop_all_workers": lambda: record("all_workers_cleanup"),
         "dashboard_tasks": {},
         "channel_title_sync_task": None,
