@@ -116,3 +116,33 @@ def test_legacy_ack_is_read_only_and_requires_admin() -> None:
         assert "Обновить" in body
         assert "resolve_problem" not in body
         assert "run_db" not in body
+
+
+
+def test_orphan_recovery_instruction_uses_safe_rich_format():
+    from app.admin_handlers.diagnostics import _format_orphan_recovery_instruction
+    from html.parser import HTMLParser
+
+    for rule_id in (None, 547):
+        text = _format_orphan_recovery_instruction(rule_id)
+        assert text.startswith("<b>🧯 ")
+        assert "<b>Причина</b>" in text
+        assert "<b>Что делать</b>" in text
+        assert all(f"{i}. " in text for i in (1, 2, 3))
+        assert "История сохранится" in text
+        assert "не отправит их повторно" in text
+        assert len(text.encode("utf-16-le")) // 2 <= 4000
+        class Balanced(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.tags = []
+
+            def handle_starttag(self, tag, attrs):
+                self.tags.append(tag)
+
+            def handle_endtag(self, tag):
+                assert self.tags.pop() == tag
+
+        parser = Balanced()
+        parser.feed(text)
+        assert not parser.tags

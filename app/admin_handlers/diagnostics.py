@@ -70,9 +70,8 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
                     )])
             await ctx.send_message_safe(
                 chat_id=message.chat.id,
-                text="🧯 Доставки без активного задания\n\n"
-                     "Результат прежней отправки неизвестен. Выключите правило и проверьте получатель. "
-                     "Доставки без доказательств публикации можно завершить как проблемные, без повторной отправки.",
+                text=_format_orphan_recovery_instruction(),
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
             )
 
@@ -87,10 +86,8 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(
             message=callback.message,
-            text=f"🧯 Правило #{rule_id}\n\n"
-                 "Убедитесь, что правило выключено и прежняя отправка завершилась. "
-                 "Доставки без подтверждения будут отмечены как проблемные. "
-                 "История сохранится, повторной отправки не будет.",
+            text=_format_orphan_recovery_instruction(rule_id),
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✅ Завершить без повтора", callback_data=f"stuck_orphan_confirm:{rule_id}")],
                 [InlineKeyboardButton(text="❌ Отмена", callback_data="stuck_reset_cancel")],
@@ -114,7 +111,11 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             message = f"Завершено проблемных доставок: {int(result.get('updated_count') or 0)}. История сохранена."
         else:
             message = _ORPHAN_STATUS_TEXT.get(status, "Действие не выполнено. Обновите диагностику.")
-        await ctx.edit_message_text_safe(message=callback.message, text=f"🧯 Правило #{rule_id}\n\n{message}")
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=f"<b>🧯 Правило #{rule_id}</b>\n\n<b>Результат</b>\n{message}",
+            parse_mode="HTML",
+        )
 
     @dp.callback_query(lambda c: c.data == "stuck_reset_request")
     async def handle_stuck_reset_request(callback: CallbackQuery):
@@ -127,13 +128,18 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             return
         await ctx.answer_callback_safe_once(callback)
         text = (
-            "🧯 Безопасное восстановление\n\n"
-            f"Найдено доставок с устаревшими заданиями: {len(rows)}.\n"
-            "Будет проверено не больше 50 заданий.\n\n"
-            "Активные воркеры не затрагиваются. Статусы публикаций не сбрасываются. "
-            "При восстановлении бот проверит сохранённые данные отправки."
+            "<b>🧯 Безопасное восстановление</b>\n\n"
+            "<b>Причина</b>\n"
+            f"Найдено доставок с устаревшими заданиями: {len(rows)}.\n\n"
+            "<b>Действие</b>\n"
+            "Подтвердите восстановление не более 50 заданий. "
+            "Активные воркеры не затрагиваются, статусы публикаций не сбрасываются. "
+            "Бот проверит сохранённые данные отправки."
         )
-        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=_build_stuck_reset_confirm_keyboard())
+        await ctx.edit_message_text_safe(
+            message=callback.message, text=text, parse_mode="HTML",
+            reply_markup=_build_stuck_reset_confirm_keyboard(),
+        )
 
     @dp.callback_query(lambda c: c.data == "stuck_reset_confirm")
     async def handle_stuck_reset_confirm(callback: CallbackQuery):
@@ -150,14 +156,22 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         updated = int(result.get("updated_count") or 0)
         remaining = await ctx.run_db(ctx.db.get_stuck_processing_deliveries, older_than_seconds=stale_seconds, limit=1)
         tail = "\nОстались устаревшие задания. Проверьте диагностику повторно." if remaining else "\nУстаревших заданий больше не найдено."
-        await ctx.edit_message_text_safe(message=callback.message, text=f"🧯 Зависшие задачи\n\nВосстановлено заданий: {updated}.{tail}")
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=f"<b>🧯 Зависшие задачи</b>\n\n<b>Результат</b>\nВосстановлено заданий: {updated}.{tail}",
+            parse_mode="HTML",
+        )
 
     @dp.callback_query(lambda c: c.data == "stuck_reset_cancel")
     async def handle_stuck_reset_cancel(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
             return
         await ctx.answer_callback_safe_once(callback, "Отменено")
-        await ctx.edit_message_text_safe(message=callback.message, text="🧯 Зависшие задачи\n\nДействие отменено. Возврат в очередь не выполнялся.")
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text="<b>🧯 Зависшие задачи</b>\n\nДействие отменено. Возврат в очередь не выполнялся.",
+            parse_mode="HTML",
+        )
 
     @dp.message(lambda m: m.text == "📊 Журнал системы")
     async def handle_system_journal(message: Message):
@@ -377,3 +391,19 @@ def _parse_orphan_rule_id(data: str | None) -> int | None:
     except (IndexError, ValueError):
         return None
     return rule_id if 0 < rule_id < 2**63 else None
+
+
+
+def _format_orphan_recovery_instruction(rule_id: int | None = None) -> str:
+    heading = "Доставки без активного задания" if rule_id is None else f"Правило #{int(rule_id)}"
+    return (
+        f"<b>🧯 {heading}</b>\n\n"
+        "<b>Причина</b>\n"
+        "Результат прежней отправки неизвестен, активное задание отсутствует.\n\n"
+        "<b>Что делать</b>\n"
+        "1. Выключите правило.\n"
+        "2. Дождитесь завершения прежней отправки и проверьте получатель.\n"
+        "3. Если результат неизвестен, подтвердите завершение без повтора.\n\n"
+        "История сохранится. Доставки без подтверждения будут отмечены как проблемные. "
+        "Бот не отправит их повторно."
+    )
