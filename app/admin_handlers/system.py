@@ -118,6 +118,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             return
 
         try:
+            if ctx.validate_forwarding_command is not None:
+                ctx.validate_forwarding_command(message.date)
             changed = await ctx.start_forwarding()
             if changed is False:
                 await ctx.send_message_safe(chat_id=message.chat.id, text="ℹ️ Пересылка уже запущена.")
@@ -150,6 +152,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             return
 
         try:
+            if ctx.validate_forwarding_command is not None:
+                ctx.validate_forwarding_command(message.date)
             changed = await ctx.stop_forwarding()
             if changed is False:
                 await ctx.send_message_safe(chat_id=message.chat.id, text="ℹ️ Пересылка уже остановлена.")

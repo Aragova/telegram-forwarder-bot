@@ -4,6 +4,7 @@ import asyncio
 import ast
 import logging
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -492,3 +493,17 @@ def test_live_count_snapshot_during_worker_start():
         assert lifecycle.live_count == 0
 
     asyncio.run(scenario())
+
+
+def test_forwarding_commands_from_previous_runtime_are_rejected():
+    ownership = RuntimeOwnership()
+    before_start = datetime.now(timezone.utc) - timedelta(seconds=2)
+    ownership.bind("all")
+    with pytest.raises(ForwardingControlUnavailable, match="устарела"):
+        ownership.validate_forwarding_command(before_start)
+    ownership.validate_forwarding_command(datetime.now(timezone.utc).replace(microsecond=0))
+    with pytest.raises(ForwardingControlUnavailable, match="устарела"):
+        ownership.validate_forwarding_command(datetime.now())
+    ownership.begin_shutdown()
+    with pytest.raises(ForwardingControlUnavailable):
+        ownership.validate_forwarding_command(datetime.now(timezone.utc))

@@ -1674,7 +1674,7 @@ def build_dashboard_text() -> str:
     health = get_system_health(db)
     next_rule = db.get_next_scheduled_rule()
     now_text = datetime.now(USER_TZ).strftime("%d.%m.%Y %H:%M:%S")
-    live_workers = job_workers.live_count
+    live_workers = str(job_workers.live_count) if runtime_ownership.can_control_forwarding else 'н/д (отдельный процесс)'
     forwarding_status = (
         ('✅ РАБОТАЕТ' if posting_active else '⏸ ПЛАНИРОВЩИК ОСТАНОВЛЕН')
         if runtime_ownership.can_control_forwarding else 'Управление отдельными процессами'
@@ -3057,6 +3057,7 @@ async def handle_admin_reply_keyboard_router(message: Message):
         return
     if canonical == "▶️ Запустить пересылку":
         try:
+            runtime_ownership.validate_forwarding_command(message.date)
             changed = await start_forwarding()
         except ForwardingControlUnavailable as exc:
             await reply_message_safe(message, str(exc))
@@ -3069,6 +3070,7 @@ async def handle_admin_reply_keyboard_router(message: Message):
         return
     if canonical == "⏸ Остановить пересылку":
         try:
+            runtime_ownership.validate_forwarding_command(message.date)
             changed = await stop_forwarding()
         except ForwardingControlUnavailable as exc:
             await reply_message_safe(message, str(exc))
@@ -9352,6 +9354,7 @@ def _register_admin_handlers() -> None:
         parse_channel_history=parse_channel_history,
         telethon_client=telethon_client,
         show_public_user_menu_message=_show_public_user_menu_message,
+        validate_forwarding_command=runtime_ownership.validate_forwarding_command,
         start_forwarding=start_forwarding,
         stop_forwarding=stop_forwarding,
         is_posting_active=lambda: posting_active,
