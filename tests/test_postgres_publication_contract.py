@@ -1733,6 +1733,7 @@ def test_rule_catalog_sql_pagination_and_scope(repo):
     assert last.page == 1 and [r.id for r in last.rules] == ids[10:]
     assert repo.get_rule_catalog_page(1, search=f"#{ids[0]}").total == 1
     assert repo.get_rule_catalog_page(1, search=f"#{other}").total == 0
+    assert repo.get_rule_catalog_page(1, search="#999999999999999999999999").total == 0
     assert repo.get_rule_catalog_page(1, search=prefix, owner_admin_id=777).total == 14
     assert repo.get_rule_catalog_page(1, search=prefix, active=False).total == 6
     assert repo.get_rule_catalog_page(1, search=prefix + "%").total == 0
@@ -1763,17 +1764,26 @@ def test_postgres_queue_stats_aggregate_matches_physical_counts(repo):
                 expected[column] = cur.fetchone()["cnt"]
     assert repo.get_queue_stats() == expected
 
+
+
+
+def test_tenant_live_status_matches_canonical_logical_counts(repo):
+    tenant = 1000000 + uuid4().int % 100000000
+    _, repost, repost_ids, _, _, _ = seed(repo, uuid4().int % 10**12, count=3)
+    _, video, video_ids, _, _, _ = seed(repo, uuid4().int % 10**12, count=3)
     with repo.connect() as conn:
         with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET tenant_id=%s WHERE id=ANY(%s)", (tenant, [repost, video]))
+            cur.execute("UPDATE routing SET mode='video' WHERE id=%s", (video,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE id=ANY(%s)", (repost_ids + video_ids,))
             cur.execute(
-                """
-                SELECT COUNT(*) FILTER (WHERE d.status='pending') AS pending,
-                       COUNT(*) FILTER (WHERE d.status='faulty') AS faulty
-                FROM deliveries d JOIN routing r ON r.id=d.rule_id
-                WHERE COALESCE(r.tenant_id,1)=1
-                """
+                "UPDATE posts SET content_json=%s WHERE id=(SELECT post_id FROM deliveries WHERE id=%s)",
+                ('{"media_kind":"photo"}', video_ids[-1]),
             )
-            expected_tenant = cur.fetchone()
-    tenant = repo.get_tenant_queue_stats(1)
-    assert tenant["pending"] == expected_tenant["pending"]
-    assert tenant["faulty"] == expected_tenant["faulty"]
+            cur.execute("UPDATE deliveries SET status='faulty' WHERE id=%s", (video_ids[0],))
+    snapshots = [repo.get_rule_card_snapshot(rule_id) for rule_id in (repost, video)]
+    assert all(snapshots)
+    totals = repo.get_tenant_queue_stats(tenant)
+    assert totals["pending"] == sum(s["logical_pending"] for s in snapshots) == 2
+    assert totals["faulty"] == sum(s["logical_faulty"] for s in snapshots) == 1
+    assert totals["active_rules"] == 2

@@ -161,13 +161,14 @@ async def _catalog(ctx: Any, callback: CallbackQuery, *, tenant_id: int, admin: 
             selection = (folder_id, set())
             _selected[callback.from_user.id] = selection
         chosen = selection[1]
-    filters = dict(folder_id=folder_id, page=page, search=search, selected_ids=chosen or ())
+    requested_selection = frozenset(chosen or ())
+    filters = dict(folder_id=folder_id, page=page, search=search, selected_ids=requested_selection)
     if folder_id == -1 and admin and not batch:
         result = await ctx.run_db(ctx.db.get_rule_catalog_page, folder_tenant_id=tenant_id, **filters)
     else:
         result = await _workspace_page(ctx, tenant_id, admin, callback.from_user.id, **filters)
     if chosen is not None:
-        chosen.intersection_update(result.valid_selected_ids)
+        chosen.difference_update(requested_selection - result.valid_selected_ids)
     await _render(ctx, callback, *rule_catalog_view(
         result, folder_id=folder_id, folder_name=folder_name, page=page,
         search_term=search, selected=chosen,
@@ -187,11 +188,12 @@ async def _fill_catalog(
     if choice is None or choice[0] != folder_id:
         choice = (folder_id, set())
         _fill_selected[callback.from_user.id] = choice
+    requested_selection = frozenset(choice[1])
     result = await _workspace_page(
         ctx, tenant_id, bool(ctx.is_admin_user(callback.from_user.id)), callback.from_user.id,
-        exclude_folder_id=folder_id, page=page, selected_ids=choice[1],
+        exclude_folder_id=folder_id, page=page, selected_ids=requested_selection,
     )
-    choice[1].intersection_update(result.valid_selected_ids)
+    choice[1].difference_update(requested_selection - result.valid_selected_ids)
     await _render(ctx, callback, *folder_fill_view(
         result, folder_id=folder_id, folder_name=str(folder["name"]),
         page=page, selected=choice[1], assignments=result.assignments,
@@ -206,13 +208,14 @@ async def _selected_folder_rule_ids(
     """Require every selected ID to be in this folder and owned by this tenant."""
     if not selected_ids:
         raise ValueError("Сначала выберите правила")
+    requested_selection = frozenset(selected_ids)
     result = await _workspace_page(
         ctx, tenant_id, owner_admin_id is not None, int(owner_admin_id or 0),
-        folder_id=folder_id, selected_ids=selected_ids, page_size=1,
+        folder_id=folder_id, selected_ids=requested_selection, page_size=1,
     )
-    if not selected_ids.issubset(result.valid_selected_ids):
+    if not requested_selection.issubset(result.valid_selected_ids):
         raise ValueError("Список изменился. Повторите выбор правил")
-    return sorted(selected_ids)
+    return sorted(requested_selection)
 
 
 async def _extra(ctx: Any, callback: CallbackQuery, tenant_id: int, rule_id: int):
@@ -534,11 +537,12 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not choice or choice[0] != fid:
                     await _error(ctx, callback, "Список выбора устарел")
                     return
+                requested_selection = frozenset(choice[1])
                 result = await _workspace_page(
                     ctx, tenant_id, admin, user_id,
-                    exclude_folder_id=fid, page=page, selected_ids=choice[1],
+                    exclude_folder_id=fid, page=page, selected_ids=requested_selection,
                 )
-                choice[1].intersection_update(result.valid_selected_ids)
+                choice[1].difference_update(requested_selection - result.valid_selected_ids)
                 current = result.rules
                 if page != result.page or not current:
                     await _error(ctx, callback, "На странице нет правил")
@@ -562,14 +566,15 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if not await ctx.run_db(ctx.db.get_rule_folder, tenant_id, fid):
                     await _error(ctx, callback, "Папка не найдена")
                     return
+                requested_selection = frozenset(choice[1])
                 result = await _workspace_page(
                     ctx, tenant_id, admin, user_id,
-                    exclude_folder_id=fid, selected_ids=choice[1], page_size=1,
+                    exclude_folder_id=fid, selected_ids=requested_selection, page_size=1,
                 )
-                if not choice[1].issubset(result.valid_selected_ids):
+                if not requested_selection.issubset(result.valid_selected_ids):
                     await _error(ctx, callback, "Часть правил изменила папку. Повторите выбор")
                     return
-                ids = sorted(choice[1])
+                ids = sorted(requested_selection)
                 await _assign_for_actor(ctx, tenant_id, admin, user_id, ids, fid)
                 _fill_selected.pop(user_id, None)
                 await _catalog(ctx, callback, tenant_id=tenant_id, admin=admin, folder_id=fid, page=0)
@@ -625,11 +630,12 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                 if fid > 0 and not await ctx.run_db(ctx.db.get_rule_folder, tenant_id, fid):
                     await _error(ctx, callback, "Папка не найдена")
                     return
+                requested_selection = frozenset(selection[1])
                 result = await _workspace_page(
                     ctx, tenant_id, admin, user_id,
-                    folder_id=fid, page=page, selected_ids=selection[1],
+                    folder_id=fid, page=page, selected_ids=requested_selection,
                 )
-                selection[1].intersection_update(result.valid_selected_ids)
+                selection[1].difference_update(requested_selection - result.valid_selected_ids)
                 current = result.rules
                 if page != result.page or not current:
                     await _error(ctx, callback, "На странице нет правил")

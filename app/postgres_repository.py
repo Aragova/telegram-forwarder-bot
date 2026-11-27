@@ -7839,30 +7839,44 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 return {key: int(value) for key, value in cur.fetchone().items()}
 
     def get_tenant_queue_stats(self, tenant_id: int) -> dict[str, Any]:
-        """Physical queue counters for the user's live status, not N card reads."""
+        """Canonical logical queue totals for all rules in one streamed query."""
+        from itertools import chain, groupby
+
+        result = {"pending": 0, "faulty": 0, "active_rules": 0, "next_run_at": None}
+        tenant = int(tenant_id)
         with self.connect() as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(name="tenant_logical_summary") as cur:
+                cur.itersize = 512
                 cur.execute(
                     """
-                    WITH scoped AS MATERIALIZED (
-                        SELECT id, is_active, next_run_at, created_date
-                        FROM routing
-                        WHERE COALESCE(tenant_id, 1) = %s
-                    ), delivery_counts AS (
-                        SELECT COUNT(*) FILTER (WHERE d.status = 'pending') AS pending,
-                               COUNT(*) FILTER (WHERE d.status = 'faulty') AS faulty
-                        FROM deliveries d JOIN scoped r ON r.id = d.rule_id
-                    )
-                    SELECT delivery_counts.*,
-                           (SELECT COUNT(*) FILTER (WHERE is_active) FROM scoped) AS active_rules,
-                           (SELECT next_run_at FROM scoped
-                            WHERE next_run_at IS NOT NULL
-                            ORDER BY created_date, id LIMIT 1) AS next_run_at
-                    FROM delivery_counts
+                    SELECT r.id AS rule_id, r.mode, r.is_active, r.next_run_at,
+                           d.status, p.id AS post_id, p.source_channel,
+                           p.source_thread_id, p.media_group_id,
+                           CASE WHEN lower(trim(r.mode)) = 'video'
+                                THEN p.content_json ELSE NULL END AS content_json
+                    FROM routing r
+                    LEFT JOIN (deliveries d JOIN posts p ON p.id = d.post_id)
+                      ON d.rule_id = r.id
+                    WHERE (r.tenant_id = %s OR (r.tenant_id IS NULL AND %s = 1))
+                    ORDER BY r.created_date, r.id,
+                             CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
                     """,
-                    (int(tenant_id),),
+                    (tenant, tenant),
                 )
-                return dict(cur.fetchone())
+                for rule_id, group in groupby(cur, key=lambda row: row["rule_id"]):
+                    first = next(group)
+                    result["active_rules"] += int(bool(first["is_active"]))
+                    if result["next_run_at"] is None and first["next_run_at"]:
+                        result["next_run_at"] = first["next_run_at"]
+                    # A LEFT JOIN produces one metadata-only row for an empty rule.
+                    rows = (row for row in chain((first,), group) if row["post_id"] is not None)
+                    items = self._build_rule_logical_items_from_rows(
+                        rule_id=rule_id, rows=rows, mode=first["mode"], compact=True,
+                    )
+                    summary = self._summarize_rule_logical_items(items)
+                    result["pending"] += summary["pending"]
+                    result["faulty"] += summary["faulty"]
+        return result
 
     def count_uncleared_faulty_deliveries(self) -> int:
         """Count delivery IDs still visible in the admin faulty-delivery list."""

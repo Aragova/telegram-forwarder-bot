@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar, copy_context
 from functools import partial
@@ -39,10 +40,24 @@ async def run_ui_db(callable_obj, *args, **kwargs):
         slots.release()
         raise
 
+    abandoned = False
+    reported = False
+
+    def report_abandoned_failure(result):
+        nonlocal reported
+        if abandoned and not reported and result.done() and not result.cancelled():
+            error = result.exception()
+            if error is not None:
+                reported = True
+                logging.getLogger("forwarder.runtime_utils").error(
+                    "UI_DB_TASK_FAILED_AFTER_CANCEL | error_type=%s", type(error).__name__,
+                )
+
     def finished(result):
         slots.release()
         if not result.cancelled():
             result.exception()
+            report_abandoned_failure(result)
 
     wrapped.add_done_callback(finished)
     try:
@@ -50,7 +65,9 @@ async def run_ui_db(callable_obj, *args, **kwargs):
     except asyncio.CancelledError:
         # A queued call may be cancelled; a running call owns its slot until
         # it actually returns. Never replay a database write.
+        abandoned = True
         future.cancel()
+        report_abandoned_failure(wrapped)
         raise
 
 
@@ -78,7 +95,7 @@ def create_background_task(coro, *, name=None):
     """Detached operations must not inherit foreground executor capacity."""
     context = copy_context()
     context.run(_ui_scope.set, False)
-    return asyncio.create_task(coro, name=name, context=context)
+    return context.run(asyncio.create_task, coro, name=name)
 
 
 def shutdown_ui_db_executor() -> None:

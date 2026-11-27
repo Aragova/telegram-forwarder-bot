@@ -23,8 +23,8 @@ class RuleFoldersRepositoryMixin:
                     cur.execute("SELECT COUNT(*) AS cnt FROM routing")
                 else:
                     cur.execute(
-                        "SELECT COUNT(*) AS cnt FROM routing WHERE COALESCE(tenant_id, 1) = %s",
-                        (int(tenant_id),),
+                        "SELECT COUNT(*) AS cnt FROM routing WHERE tenant_id = %s OR (tenant_id IS NULL AND %s = 1)",
+                        (int(tenant_id), int(tenant_id)),
                     )
                 return int(cur.fetchone()["cnt"])
 
@@ -63,11 +63,11 @@ class RuleFoldersRepositoryMixin:
         params = [folder_tenant_id]
         if tenant_id is not None:
             if owner_admin_id is None:
-                filters.append("COALESCE(r.tenant_id, 1) = %s")
-                params.append(int(tenant_id))
+                filters.append("(r.tenant_id = %s OR (r.tenant_id IS NULL AND %s = 1))")
+                params.extend((int(tenant_id), int(tenant_id)))
             else:
-                filters.append("(COALESCE(r.tenant_id, 1) = %s OR r.created_by = %s)")
-                params.extend((int(tenant_id), int(owner_admin_id)))
+                filters.append("(r.tenant_id = %s OR (r.tenant_id IS NULL AND %s = 1) OR r.created_by = %s)")
+                params.extend((int(tenant_id), int(tenant_id), int(owner_admin_id)))
         if folder_id >= 0:
             filters.append("COALESCE(f.id, 0) = %s")
             params.append(int(folder_id))
@@ -83,8 +83,12 @@ class RuleFoldersRepositoryMixin:
             if not needle:
                 filters.append("FALSE")
             elif exact:
-                filters.append("r.id::text = %s")
-                params.append(str(int(exact.group(1))))
+                rule_id = int(exact.group(1))
+                if 0 < rule_id < 2**63:
+                    filters.append("r.id = %s")
+                    params.append(rule_id)
+                else:
+                    filters.append("FALSE")
             else:
                 # strpos treats % and _ literally, unlike a LIKE pattern.
                 filters.append("""
