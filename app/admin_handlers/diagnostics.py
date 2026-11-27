@@ -80,7 +80,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         if not await ctx.is_admin_callback(callback):
             return
         rule_id = _parse_orphan_rule_id(callback.data)
-        if rule_id is None:
+        if rule_id is None or not isinstance(callback.message, Message):
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
@@ -99,7 +99,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         if not await ctx.is_admin_callback(callback):
             return
         rule_id = _parse_orphan_rule_id(callback.data)
-        if rule_id is None or callback.from_user is None:
+        if rule_id is None or callback.from_user is None or not isinstance(callback.message, Message):
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)

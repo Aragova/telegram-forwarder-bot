@@ -7,7 +7,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterable
-from contextlib import suppress
+from app.runtime_utils import wait_for_db_task
+
+_CANCEL_SETTLE_TIMEOUT_SEC = 10.0
 
 
 async def drain_job_workers(
@@ -29,7 +31,7 @@ async def drain_job_workers(
     logger.error("WORKER_DRAIN_TIMEOUT | pending=%s | action=cancel_and_reconcile", len(pending))
     for task in pending:
         task.cancel()
-    done_after, still_pending = await asyncio.wait(pending, timeout=10)
+    done_after, still_pending = await asyncio.wait(pending, timeout=_CANCEL_SETTLE_TIMEOUT_SEC)
     if done_after:
         await asyncio.gather(*done_after, return_exceptions=True)
     if still_pending:
@@ -62,9 +64,10 @@ async def drain_in_flight(
             for task in children:
                 if not task.done():
                     task.cancel()
-        # Preserve the original cancellation. Additional cancellation requests
-        # cannot interrupt the children again or detach their cleanup.
-        while not joined.done():
-            with suppress(asyncio.CancelledError):
-                await asyncio.shield(joined)
-        raise
+        # Reuse the existing cancellation-safe join. The outer lifecycle
+        # has its own bounded settle timeout and will report incomplete drain
+        # while this worker still owns children, rather than close resources.
+        try:
+            await wait_for_db_task(joined)
+        finally:
+            raise

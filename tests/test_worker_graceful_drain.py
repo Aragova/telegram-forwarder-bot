@@ -173,3 +173,40 @@ def test_outer_cancellation_does_not_detach_child_cleanup():
         assert task.done()
 
     asyncio.run(scenario())
+
+
+
+def test_outer_drain_deadline_keeps_worker_visible_during_blocked_thread_cleanup(monkeypatch):
+    from app import worker_shutdown
+
+    monkeypatch.setattr(worker_shutdown, "_CANCEL_SETTLE_TIMEOUT_SEC", 0.02)
+    release = threading.Event()
+
+    async def scenario():
+        cleaning = asyncio.Event()
+
+        async def child():
+            try:
+                await asyncio.sleep(60)
+            finally:
+                cleaning.set()
+                await asyncio.to_thread(release.wait, 2)
+
+        task = asyncio.create_task(child())
+        parent = asyncio.create_task(worker_shutdown.drain_in_flight(
+            [task], timeout_sec=60, logger=logging.getLogger("test.drain"), queue="heavy",
+        ))
+        await asyncio.sleep(0)
+        try:
+            await worker_shutdown.drain_job_workers(
+                tasks=[parent], stop_event=None, timeout_sec=0.01,
+                logger=logging.getLogger("test.drain"),
+            )
+            assert cleaning.is_set()
+            assert not parent.done() and not task.done()
+        finally:
+            release.set()
+            await asyncio.gather(parent, return_exceptions=True)
+        assert parent.cancelled() and task.done()
+
+    asyncio.run(scenario())

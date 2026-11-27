@@ -1911,3 +1911,19 @@ def test_orphan_quarantine_refuses_publication_evidence_and_partial_album(repo):
             cur.execute("UPDATE deliveries SET status='pending' WHERE id=%s", (members[-1],))
     assert repo.quarantine_orphaned_processing_rule(second, admin_id=1)["status"] == "partial_album"
     assert [repo.get_delivery(i)["status"] for i in members] == ["processing", "processing", "pending"]
+
+
+
+def test_orphan_quarantine_preserves_historical_source_message_ledger(repo):
+    key, rule_id, ids, source_ids, _, target = seed(repo, uuid4().int % 10**12, count=3)
+    assert repo.mark_delivery_attempt_accepted(key, sent_message_ids=[501, 502, 503],
+                                               telegram_method="copy_album")
+    assert repo.mark_delivery_attempt_verified(key, sent_message_ids=[501, 502, 503])
+    repo.mark_delivery_sent_with_target_message(ids[0], sent_message_id=501,
+        sent_message_ids=[501, 502, 503], target_id=target, delivery_method="copy_album")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE WHERE id=%s", (rule_id,))
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["source_message_ids_json"] == source_ids
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1)["status"] == "publication_evidence"
+    assert [repo.get_delivery(i)["status"] for i in ids] == ["sent", "processing", "processing"]
