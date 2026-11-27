@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.rule_folders_repository import RuleFoldersRepositoryMixin, normalize_folder_name
+from app.rule_catalog import RulePage
 from app import rule_folder_handlers as folder_handlers
 from app.rule_folders_ui import (
     additional_functions_view,
@@ -393,17 +394,17 @@ def test_batch_unfile_scope_rejects_other_tenant_and_other_folder():
     }
     calls = []
 
-    async def run_db(fn, *args):
-        calls.append((fn.__name__, args))
-        return fn(*args)
+    def catalog(tenant, **filters):
+        assert tenant == 2
+        eligible = [r for r in rules if mapping[r.id]["id"] == filters["folder_id"]]
+        valid = {r.id for r in eligible} & set(filters["selected_ids"])
+        return RulePage(eligible[:1], len(eligible), len(eligible), 0, 1, valid_selected_ids=valid)
 
-    ctx = SimpleNamespace(
-        db=SimpleNamespace(
-            get_rules_for_tenant=lambda tenant: rules,
-            get_rule_folder_map=lambda tenant: mapping,
-        ),
-        run_db=run_db,
-    )
+    async def run_db(fn, *args, **kwargs):
+        calls.append((fn.__name__, args))
+        return fn(*args, **kwargs)
+
+    ctx = SimpleNamespace(db=SimpleNamespace(get_rule_catalog_page=catalog), run_db=run_db)
 
     async def verify():
         with pytest.raises(ValueError, match="Список изменился"):
@@ -411,7 +412,7 @@ def test_batch_unfile_scope_rejects_other_tenant_and_other_folder():
         assert await folder_handlers._selected_folder_rule_ids(ctx, 2, 9, {214, 216}) == [214, 216]
 
     asyncio.run(verify())
-    assert len(calls) == 4
+    assert len(calls) == 2
     assert all(arguments == (2,) for _, arguments in calls)
 
 
@@ -475,8 +476,8 @@ def test_empty_destination_handler_renders_candidates_from_entire_tenant():
     rules = [FakeRule(214), FakeRule(215), FakeRule(216)]
     mapping = {215: {"id": 11, "name": "ПУБЛИЧНЫЕ"}}
 
-    async def run_db(fn, *args):
-        return fn(*args)
+    async def run_db(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
 
     async def answer(_callback):
         return None
@@ -486,8 +487,10 @@ def test_empty_destination_handler_renders_candidates_from_entire_tenant():
 
     db = SimpleNamespace(
         get_rule_folder=lambda tenant, fid: {"id": 9, "name": "ПРИВАТЫ"} if tenant == 1 and fid == 9 else None,
-        get_rules_for_tenant=lambda tenant: rules,
-        get_rule_folder_map=lambda tenant: mapping,
+        get_rule_catalog_page=lambda tenant, **filters: RulePage(
+            folder_fill_candidates(rules, mapping, filters["exclude_folder_id"]),
+            3, 3, 0, 10, assignments=mapping,
+        ),
     )
     ctx = SimpleNamespace(
         db=db, run_db=run_db,
@@ -521,19 +524,19 @@ def test_owner_workspace_includes_owned_legacy_tenant_rules_but_not_other_users(
     import asyncio
     from types import SimpleNamespace
 
-    async def run_db(fn, *args):
-        return fn(*args)
+    async def run_db(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
 
-    db = SimpleNamespace(
-        get_all_rules=lambda: [FakeRule(214), FakeRule(215), FakeRule(216)],
-        list_folder_manageable_rule_ids=lambda tenant_id, owner_id: {214, 216},
-        get_rules_for_tenant=lambda tenant_id: [FakeRule(214)],
-    )
-    ctx = SimpleNamespace(run_db=run_db, db=db)
-    admin_rules = asyncio.run(folder_handlers._workspace_rules(ctx, 2, True, 888))
-    assert [r.id for r in admin_rules] == [214, 216]
-    ordinary_rules = asyncio.run(folder_handlers._workspace_rules(ctx, 2, False, 777))
-    assert [r.id for r in ordinary_rules] == [214]
+    def catalog(tenant, **filters):
+        assert tenant == 2
+        rules = [FakeRule(214), FakeRule(216)] if filters["owner_admin_id"] == 888 else [FakeRule(214)]
+        return RulePage(rules, len(rules), len(rules), 0, 10)
+
+    ctx = SimpleNamespace(run_db=run_db, db=SimpleNamespace(get_rule_catalog_page=catalog))
+    admin_page = asyncio.run(folder_handlers._workspace_page(ctx, 2, True, 888))
+    assert [r.id for r in admin_page.rules] == [214, 216]
+    ordinary_page = asyncio.run(folder_handlers._workspace_page(ctx, 2, False, 777))
+    assert [r.id for r in ordinary_page.rules] == [214]
 
 
 def test_folder_move_respects_legacy_owner_permission_and_blocks_wrong_owner():
@@ -640,3 +643,12 @@ def test_rule_card_repost_compact_buttons_keep_campaign_mode():
     assert cb[-2:] == ["rf:back:214", "rule_to_main_menu"]
     assert all(len(row) <= 2 for row in kb.inline_keyboard)
     assert 4 <= len(kb.inline_keyboard) <= 5
+
+
+def test_catalog_pre_paginated_counts_and_callbacks():
+    rules = [FakeRule(201), FakeRule(202)]
+    result = RulePage(rules, 22, 17, 2, 10)
+    text, kb = rule_catalog_view(result, folder_id=-1, folder_name="", page=100)
+    assert "📊 22 · 🟢 17 · ⏸ 5" in text
+    assert "rf:open:201:-1:2" in callbacks(kb)
+    assert "rf:list:-1:1" in callbacks(kb)

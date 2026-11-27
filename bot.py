@@ -42,6 +42,7 @@ from app.video_emoji_validation import VideoEmojiValidator, format_validation_re
 from app.repository_models import utc_now_iso
 from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
 from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view, _button as rule_ui_button
+from app.rule_catalog import CATALOG_PAGE_SIZE, RulePage
 from app.repository import RepositoryProtocol
 from app.rescan_safety import RescanBlocked
 from app.repository_factory import create_repository
@@ -1997,6 +1998,8 @@ def get_rule_wait_reason(row) -> str:
         return "⚠️ Ошибка расчёта времени"
 
 def paginate_items(items, page: int, page_size: int = RULES_PAGE_SIZE):
+    if isinstance(items, RulePage):
+        return items.rules, items.page, items.pages
     total = len(items)
     if total == 0:
         return [], 0, 0
@@ -2976,8 +2979,8 @@ async def show_admin_rule_manager(message: Message, user_id: int) -> None:
     clear_folder_input(user_id)
     tenant_id = await run_db(ensure_user_tenant, user_id)
     folders = await run_db(db.list_rule_folders, tenant_id)
-    rules = await run_db(db.get_all_rules)
-    text, markup = root_view(total_rules=len(rules), folders_count=len(folders), admin=True)
+    total = await run_db(db.count_catalog_rules)
+    text, markup = root_view(total_rules=total, folders_count=len(folders), admin=True)
     cleanup = await send_message_safe(
         chat_id=message.chat.id,
         text="🔄 Открываю правила",
@@ -3157,66 +3160,23 @@ async def handle_dashboard_back(callback: CallbackQuery):
 async def handle_list_rules(message: Message):
     reset_user_state(message.from_user.id if message.from_user else None)
     user_id = message.from_user.id if message.from_user else settings.admin_id
-    is_admin_mode = is_admin_user(user_id)
-    if is_admin_mode:
-        rules = await run_db(db.get_all_rules)
-    else:
-        tenant_id = await run_db(ensure_user_tenant, user_id)
-        rules = await run_db(db.get_rules_for_tenant, tenant_id) if hasattr(db, "get_rules_for_tenant") else []
-
-    if not rules:
-        if is_admin_mode:
-            await show_admin_rule_manager(message, user_id)
-        else:
-            await send_message_safe(
-                chat_id=message.chat.id,
-                text="Правил пока нет",
-                reply_markup=ReplyKeyboardRemove(),
-            )
-            await send_message_safe(
-                chat_id=message.chat.id,
-                text="⚙️ Мои правила",
-                reply_markup=build_user_rules_keyboard([], page=0),
-            )
+    admin = is_admin_user(user_id)
+    tenant_id = await run_db(ensure_user_tenant, user_id)
+    result = await run_db(db.get_rule_catalog_page, None if admin else tenant_id,
+                          folder_tenant_id=tenant_id)
+    if admin and not result.total:
+        await show_admin_rule_manager(message, user_id)
         return
-
-    if is_admin_mode:
-        text, markup = rule_catalog_view(
-            rules, folder_id=-1, folder_name="", page=0,
-        )
-        cleanup = await send_message_safe(
-            chat_id=message.chat.id, text="📜 Открываю список",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        await send_message_safe(
-            chat_id=message.chat.id, text=text, reply_markup=markup, parse_mode="HTML",
-        )
-        if cleanup and bot:
-            try:
-                await try_delete_message_safe(message.chat.id, cleanup.message_id)
-            except Exception:
-                pass
-        return
-
-    if not rules:
-        await send_message_safe(
-            chat_id=message.chat.id,
-            text=(
-                "⚙️ Мои правила\n\n"
-                "У вас пока нет правил.\n\n"
-                "Создайте первое правило:\n"
-                "1. выберите источник;\n"
-                "2. выберите получателя;\n"
-                "3. задайте интервал публикации."
-            ),
-            reply_markup=build_user_rules_keyboard(rules, page=0),
-        )
-        return
-    await send_message_safe(
-        chat_id=message.chat.id,
-        text="⚙️ Мои правила",
-        reply_markup=build_user_rules_keyboard(rules, page=0),
+    text, markup = rule_catalog_view(result, folder_id=-1, folder_name="", page=0)
+    cleanup = await send_message_safe(
+        chat_id=message.chat.id, text="📜 Открываю список",
+        reply_markup=ReplyKeyboardRemove(),
     )
+    await send_message_safe(
+        chat_id=message.chat.id, text=text, reply_markup=markup, parse_mode="HTML",
+    )
+    if cleanup and bot:
+        await try_delete_message_safe(message.chat.id, cleanup.message_id)
 
 @dp.callback_query(lambda c: c.data == "rules_back")
 async def handle_rules_back(callback: CallbackQuery):
@@ -3228,9 +3188,9 @@ async def handle_rules_back(callback: CallbackQuery):
     user_id = callback.from_user.id if callback.from_user else settings.admin_id
     tenant_id = await run_db(ensure_user_tenant, user_id)
     folders = await run_db(db.list_rule_folders, tenant_id)
-    rules = await run_db(db.get_all_rules)
+    total = await run_db(db.count_catalog_rules)
     text, markup = root_view(
-        total_rules=len(rules), folders_count=len(folders), admin=True,
+        total_rules=total, folders_count=len(folders), admin=True,
     )
     await edit_message_text_safe(
         message=callback.message, text=text, reply_markup=markup, parse_mode="HTML",
@@ -3255,44 +3215,38 @@ async def handle_rules_page(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
-    if action in {"disable", "enable", "delete", "interval", "next_run", "trigger", "list"}:
-        all_rules = await run_db(db.get_all_rules)
-    else:
+    if action not in {"disable", "enable", "delete", "interval", "next_run", "trigger", "list"}:
         await answer_callback_safe(callback, "Неизвестная страница", show_alert=True)
         return
+    active = True if action in {"disable", "trigger"} else False if action == "enable" else None
+    rules = await run_db(db.get_rule_catalog_page, page=page, active=active,
+                         page_size=CATALOG_PAGE_SIZE if action == "list" else RULES_PAGE_SIZE)
 
     if action == "disable":
-        rules = [r for r in all_rules if r.is_active]
         text = "Список активных правил:"
         markup = rules_inline_keyboard(rules, "disable", page=page)
 
     elif action == "enable":
-        rules = [r for r in all_rules if not r.is_active]
         text = "Список выключенных правил:"
         markup = rules_inline_keyboard(rules, "enable", page=page)
 
     elif action == "delete":
-        rules = all_rules
         text = "📜 Список правил:"
         markup = rules_inline_keyboard(rules, "delete", page=page)
 
     elif action == "interval":
-        rules = all_rules
         text = "Выберите правило для изменения интервала:"
         markup = rules_interval_keyboard(rules, page=page)
 
     elif action == "next_run":
-        rules = all_rules
         text = "Выберите правило для переноса следующего поста:"
         markup = rules_next_run_keyboard(rules, page=page)
 
     elif action == "trigger":
-        rules = [r for r in all_rules if r.is_active]
         text = "Выберите правило, для которого нужно отправить следующий пост сейчас:"
         markup = rules_trigger_now_keyboard(rules, page=page)
 
     elif action == "list":
-        rules = all_rules
         text, markup = rule_catalog_view(
             rules, folder_id=-1, folder_name="", page=page,
         )
@@ -6554,7 +6508,7 @@ async def handle_rule_to_list(callback: CallbackQuery):
 
     await answer_callback_safe_once(callback)
 
-    rules = await run_db(db.get_all_rules)
+    rules = await run_db(db.get_rule_catalog_page)
     text, keyboard = rule_catalog_view(
         rules, folder_id=-1, folder_name="", page=0,
     )

@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
+
+from app.rule_catalog import CATALOG_PAGE_SIZE, RuleListItem, RulePage
 
 
 def normalize_folder_name(value: str) -> str:
@@ -12,6 +15,155 @@ def normalize_folder_name(value: str) -> str:
 
 
 class RuleFoldersRepositoryMixin:
+    def count_catalog_rules(self, tenant_id: int | None = None) -> int:
+        """Count rules without loading routing objects or channel titles."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if tenant_id is None:
+                    cur.execute("SELECT COUNT(*) AS cnt FROM routing")
+                else:
+                    cur.execute(
+                        "SELECT COUNT(*) AS cnt FROM routing WHERE COALESCE(tenant_id, 1) = %s",
+                        (int(tenant_id),),
+                    )
+                return int(cur.fetchone()["cnt"])
+
+    def get_rule_catalog_page(
+        self, tenant_id: int | None = None, *,
+        folder_tenant_id: int | None = None,
+        owner_admin_id: int | None = None,
+        folder_id: int = -1,
+        exclude_folder_id: int | None = None,
+        search: str | None = None,
+        active: bool | None = None,
+        page: int = 0,
+        page_size: int = CATALOG_PAGE_SIZE,
+        selected_ids: Collection[int] = (),
+    ) -> RulePage:
+        """Return one page and exact scoped counts from the same SQL snapshot.
+
+        tenant_id=None is the system-admin global catalog. Legacy owner access
+        is explicit and limited to the workspace used for folder management.
+        Folder assignments always belong to the actor's tenant, never another
+        tenant. All filtering precedes pagination.
+        """
+        if not 1 <= page_size <= 100:
+            raise ValueError("Некорректный размер страницы")
+        if owner_admin_id is not None and tenant_id is None:
+            raise ValueError("Для управления папками нужен аккаунт")
+        if folder_tenant_id is None:
+            folder_tenant_id = tenant_id
+        if tenant_id is not None and folder_tenant_id != tenant_id:
+            raise ValueError("Некорректный аккаунт папок")
+        if (folder_id >= 0 or exclude_folder_id is not None) and folder_tenant_id is None:
+            raise ValueError("Для фильтра папок нужен аккаунт")
+        # Callback page numbers are untrusted and may exceed BIGINT.
+        requested_page = min(max(0, int(page)), 2**31 - 1)
+        filters = ["TRUE"]
+        params = [folder_tenant_id]
+        if tenant_id is not None:
+            if owner_admin_id is None:
+                filters.append("COALESCE(r.tenant_id, 1) = %s")
+                params.append(int(tenant_id))
+            else:
+                filters.append("(COALESCE(r.tenant_id, 1) = %s OR r.created_by = %s)")
+                params.extend((int(tenant_id), int(owner_admin_id)))
+        if folder_id >= 0:
+            filters.append("COALESCE(f.id, 0) = %s")
+            params.append(int(folder_id))
+        if exclude_folder_id is not None:
+            filters.append("COALESCE(f.id, 0) <> %s")
+            params.append(int(exclude_folder_id))
+        if active is not None:
+            filters.append("r.is_active = %s")
+            params.append(bool(active))
+        if search is not None:
+            needle = str(search).strip()
+            exact = re.fullmatch(r"#\s*(\d+)", needle)
+            if not needle:
+                filters.append("FALSE")
+            elif exact:
+                filters.append("r.id::text = %s")
+                params.append(str(int(exact.group(1))))
+            else:
+                # strpos treats % and _ literally, unlike a LIKE pattern.
+                filters.append("""
+                    (strpos(lower(r.id::text), lower(%s)) > 0
+                     OR strpos(lower(COALESCE(NULLIF(s.title, ''), r.source_id)), lower(%s)) > 0
+                     OR strpos(lower(COALESCE(NULLIF(t.title, ''), r.target_id)), lower(%s)) > 0
+                     OR strpos(lower(r.source_id), lower(%s)) > 0
+                     OR strpos(lower(r.target_id), lower(%s)) > 0)
+                """)
+                params.extend([needle] * 5)
+        selected = sorted({int(rid) for rid in selected_ids if 0 < int(rid) < 2**63})
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH eligible AS MATERIALIZED (
+                        SELECT r.id, r.created_date, r.source_id, r.source_thread_id,
+                               r.target_id, r.target_thread_id, r.interval, r.is_active,
+                               s.title AS source_title, t.title AS target_title,
+                               f.id AS folder_id, f.name AS folder_name
+                        FROM routing r
+                        LEFT JOIN channels s
+                          ON s.channel_id = r.source_id
+                         AND s.thread_id IS NOT DISTINCT FROM r.source_thread_id
+                         AND s.channel_type = 'source'
+                         AND COALESCE(s.tenant_id, 1) = COALESCE(r.tenant_id, 1)
+                        LEFT JOIN channels t
+                          ON t.channel_id = r.target_id
+                         AND t.thread_id IS NOT DISTINCT FROM r.target_thread_id
+                         AND t.channel_type = 'target'
+                         AND COALESCE(t.tenant_id, 1) = COALESCE(r.tenant_id, 1)
+                        LEFT JOIN rule_folder_assignments a
+                          ON a.rule_id = r.id AND a.tenant_id = %s
+                        LEFT JOIN rule_folders f
+                          ON f.id = a.folder_id AND f.tenant_id = a.tenant_id
+                        WHERE {" AND ".join(filters)}
+                    ), stats AS (
+                        SELECT COUNT(*) AS total,
+                               COUNT(*) FILTER (WHERE is_active) AS active,
+                               COALESCE(array_agg(id) FILTER (WHERE id = ANY(%s::bigint[])),
+                                        ARRAY[]::bigint[]) AS valid_selected_ids
+                        FROM eligible
+                    ), bounds AS (
+                        SELECT *, LEAST(%s::bigint, GREATEST(total - 1, 0) / %s) AS page
+                        FROM stats
+                    )
+                    SELECT bounds.*, e.*
+                    FROM bounds LEFT JOIN LATERAL (
+                        SELECT * FROM eligible ORDER BY created_date, id
+                        LIMIT %s OFFSET (bounds.page * %s)
+                    ) e ON TRUE
+                    ORDER BY e.created_date, e.id
+                    """,
+                    (*params, selected, requested_page, page_size, page_size, page_size),
+                )
+                rows = cur.fetchall()
+        stats = rows[0]
+        rules = []
+        assignments = {}
+        for row in rows:
+            if row["id"] is None:
+                continue
+            rules.append(RuleListItem(
+                id=int(row["id"]), source_id=row["source_id"],
+                source_thread_id=row["source_thread_id"], target_id=row["target_id"],
+                target_thread_id=row["target_thread_id"], interval=int(row["interval"]),
+                is_active=bool(row["is_active"]), source_title=row["source_title"],
+                target_title=row["target_title"],
+            ))
+            if row["folder_id"] is not None:
+                assignments[int(row["id"])] = {
+                    "id": int(row["folder_id"]), "name": row["folder_name"],
+                }
+        return RulePage(
+            rules=rules, total=int(stats["total"]), active=int(stats["active"]),
+            page=int(stats["page"]), page_size=page_size, assignments=assignments,
+            valid_selected_ids=set(stats["valid_selected_ids"]),
+        )
+
     def list_rule_folders(self, tenant_id: int) -> list[dict]:
         with self.connect() as conn:
             with conn.cursor() as cur:

@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from app.repository_models import IntroItem
+from app.rule_catalog import RulePage
+from collections.abc import Collection
 
 
 class RepositoryProtocol(Protocol):
@@ -104,6 +106,14 @@ class RepositoryProtocol(Protocol):
     def delete_rule_with_audit(self, rule_id: int, admin_id: int) -> bool: ...
     def get_all_rules(self): ...
     def get_rules_for_tenant(self, tenant_id: int): ...
+    def count_catalog_rules(self, tenant_id: int | None = None) -> int: ...
+    def get_rule_catalog_page(
+        self, tenant_id: int | None = None, *,
+        folder_tenant_id: int | None = None, owner_admin_id: int | None = None,
+        folder_id: int = -1, exclude_folder_id: int | None = None,
+        search: str | None = None, active: bool | None = None,
+        page: int = 0, page_size: int = 10, selected_ids: Collection[int] = (),
+    ) -> RulePage: ...
     # Rule folder metadata is tenant-scoped and orthogonal to routing state.
     def list_rule_folders(self, tenant_id: int) -> list[dict]: ...
     def get_rule_folder(self, tenant_id: int, folder_id: int) -> dict | None: ...

@@ -80,10 +80,10 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
         clear_folder_input(user_id)
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
         ctx.logger.info("пользователь открыл список правил user_id=%s tenant_id=%s", user_id, tenant_id)
-        rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id) if hasattr(ctx.db, "get_rules_for_tenant") else []
+        total = await ctx.run_db(ctx.db.count_catalog_rules, tenant_id)
         await ctx.answer_callback_safe_once(callback)
         folders = await ctx.run_db(ctx.db.list_rule_folders, tenant_id)
-        text, kb = root_view(total_rules=len(rules), folders_count=len(folders), admin=False)
+        text, kb = root_view(total_rules=total, folders_count=len(folders), admin=False)
         await ctx.edit_message_text_safe(
             message=callback.message, text=text, reply_markup=kb, parse_mode="HTML",
         )
@@ -104,14 +104,13 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             return
         user_id = callback.from_user.id if callback.from_user else 0
         tenant_id = await ctx.run_db(ctx.ensure_user_tenant, user_id)
-        rules = await ctx.run_db(ctx.db.get_rules_for_tenant, tenant_id)
+        rules = await ctx.run_db(ctx.db.get_rule_catalog_page, tenant_id, page=page)
         text, keyboard = rule_catalog_view(
             rules, folder_id=-1, folder_name="", page=page,
         )
         await ctx.answer_callback_safe_once(callback)
         if rich_rule_list_enabled(admin=False):
-            assigned = await ctx.run_db(ctx.db.get_rule_folder_map, tenant_id)
-            variant = rich_catalog_payload(text, keyboard, rules, assigned=assigned)
+            variant = rich_catalog_payload(text, keyboard, rules.rules, assigned=rules.assignments)
             if variant:
                 rich_html, footer = variant
                 if await try_edit_rich_catalog(
