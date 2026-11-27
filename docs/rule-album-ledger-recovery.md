@@ -119,3 +119,33 @@ fully scan Telegram, archive old attempts/receipts, and rebuild the queue.
 Keep-position retains completed logical items in the current source snapshot.
 Explicit start-over resets the cursor and all deliveries. Archived evidence is
 not a publication or rollback gate. In-flight Telegram writes cannot be recalled.
+
+
+## Orphaned legacy album conflict (rule 208, 2026-11-27)
+
+Do not compare Telegram message IDs with the historical delivery-ID array.
+The current explicit-rescan contract already archives old publication keys;
+changing album keys globally to Telegram message IDs would break new-cycle
+isolation. Keep the normal sender's no-resend fence.
+
+A targeted operator recovery for the legacy group-only error
+`album_member_set_changed_manual_review_no_resend` is available:
+
+    ./venv/bin/python scripts/reconcile_rule_album_ledger.py --rule-id 208 --recover-faulty 14273766158872138
+
+The command is read-only by default. Only `EXACT_MEDIA_OK` is eligible for
+apply: every source and target member must have the same Telegram photo/document
+identity in order and matching caption, and the source group ID must match.
+No downloads, uploads or Telegram writes are performed. Re-uploaded/transformed
+media, changed captions, missing messages, target topics and ambiguous receipts
+remain fenced; structural-only matching is not allowed in this mode.
+
+After backing up PostgreSQL, pause the rule, ensure no jobs remain active, repeat
+the audit and add `--apply` to the same command. The transaction locks the rule,
+attempt and complete album, checks the route and exact delivery IDs, rejects
+existing old delivery anchors, competing attempts/receipts and unrelated errors,
+then marks only the selected faulty album sent. The original delivery-ID vector
+and the Telegram source IDs are recorded in audit_log. No schedule or other rule
+is modified; resume the rule explicitly. An accepted old receipt alone is not
+proof of publication. A dry-run match is not a guarantee that apply will pass
+the database guards.

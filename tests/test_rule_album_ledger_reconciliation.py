@@ -1074,3 +1074,66 @@ def test_verify_live_candidates_checks_deleted_and_present(wrong_id):
         assert asyncio.run(handler(214, rule, 102, observed)) == {103}
         assert observed == {101, 104}
     client.get_messages.assert_awaited_once_with("peer", ids=[103, 104])
+
+
+def _faulty_candidate():
+    rows = [_row(1, 101, ids=[701, 702]), _row(2, 102, ids=[701, 702])]
+    for row in rows:
+        row["media_group_id"] = "50"
+    return build_candidates(rows)[0]
+
+
+def test_faulty_recovery_requires_exact_ordered_media_identity():
+    candidate = _faulty_candidate()
+    src = {101: _message(101), 102: _message(102)}
+    dst = {701: _message(701, grouped_id=60), 702: _message(702, grouped_id=60)}
+    for message, media_id in zip([*src.values(), *dst.values()], [11, 12, 11, 12]):
+        message.photo = SimpleNamespace(id=media_id)
+    assert validate_candidate(candidate, src, dst, exact_media=True) == "EXACT_MEDIA_OK"
+    dst[701].photo, dst[702].photo = dst[702].photo, dst[701].photo
+    assert validate_candidate(candidate, src, dst, exact_media=True) == "MEDIA_IDENTITY_MISMATCH"
+    dst[701].photo, dst[702].photo = dst[702].photo, dst[701].photo
+    src[101].grouped_id = 51
+    assert validate_candidate(candidate, src, dst, exact_media=True) == "SOURCE_GROUP_MISMATCH"
+
+
+@pytest.mark.parametrize("fault", [None, "active", "wrong_target", "other_error",
+                                  "conflict", "new_ids", "sent_evidence"])
+def test_faulty_recovery_is_atomic_and_fenced(fault):
+    repo, cursor, connection = _repository(row_statuses=["faulty"] * 3)
+    original = cursor.execute
+
+    def execute(sql, args=None):
+        original(sql, args)
+        query = " ".join(str(sql).split())
+        if query.startswith("SELECT target_id, mode, tenant_id"):
+            cursor.result.update(source_id="-100123", source_thread_id=None,
+                                 target_thread_id=None, is_active=fault == "active")
+        elif "FROM delivery_attempts WHERE id =" in query:
+            cursor.result.update(rule_id=214, tenant_id=1, error_text=None,
+                                 delivery_id=11, source_message_ids_json=[11, 12, 13])
+        elif "SELECT EXISTS(SELECT 1 FROM deliveries WHERE" in query:
+            cursor.result = {"busy": fault == "conflict"}
+        elif "FROM deliveries d JOIN posts p" in query:
+            for row in cursor.result:
+                row.update(error_text="album_member_set_changed_manual_review_no_resend",
+                           sent_message_id=None, sent_message_ids_json=None)
+            if fault == "other_error":
+                cursor.result[0]["error_text"] = "unrelated"
+            if fault == "sent_evidence":
+                cursor.result[0]["sent_message_id"] = 701
+    cursor.execute = execute
+
+    args = dict(recover_faulty=True,
+                expected_target_id="-100999" if fault == "wrong_target" else "-100456",
+                expected_delivery_ids=[4, 5, 6] if fault == "new_ids" else [1, 2, 3])
+    if fault is None:
+        assert _apply(repo, **args) == 3
+        assert connection.commits == 1
+        writes = [q for q, _ in cursor.executed if "UPDATE deliveries SET status = 'sent'" in q]
+        assert len(writes) == 3 and all("status = 'faulty'" in q for q in writes)
+    else:
+        with pytest.raises(RuntimeError):
+            _apply(repo, **args)
+        assert connection.commits == 0
+        assert not any("UPDATE deliveries SET status = 'sent'" in q for q, _ in cursor.executed)

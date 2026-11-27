@@ -75,6 +75,7 @@ def build_candidates(rows: list[dict]) -> list[dict]:
             "target_thread_id": target_thread,
             "media_group_id": mgid,
             "source_ids": source_ids,
+            "delivery_ids": [int(x["delivery_id"]) for x in members],
             "target_ids": sent_ids,
         })
     return candidates
@@ -88,7 +89,17 @@ def _media_kind(message) -> str:
     return "other"
 
 
-def validate_candidate(candidate: dict, sources: dict, targets: dict) -> str:
+def _media_identity(message) -> tuple[str, int] | None:
+    for kind in ("photo", "document"):
+        media = getattr(message, kind, None)
+        media_id = getattr(media, "id", None)
+        if type(media_id) is int and media_id != 0:
+            return kind, media_id
+    return None
+
+
+def validate_candidate(candidate: dict, sources: dict, targets: dict, *,
+                       exact_media: bool = False) -> str:
     source_ids = candidate["source_ids"]
     target_ids = candidate["target_ids"]
     if len(source_ids) != len(target_ids):
@@ -115,6 +126,19 @@ def validate_candidate(candidate: dict, sources: dict, targets: dict) -> str:
     if candidate["target_thread_id"] is not None:
         # Telegram forum replies require a separate topic-specific verifier.
         return "TOPIC_REQUIRES_MANUAL_REVIEW"
+    if exact_media:
+        if not 2 <= len(src) <= 10 or any(
+            str(getattr(message, "grouped_id", None)) != candidate["media_group_id"]
+            for message in src
+        ):
+            return "SOURCE_GROUP_ID_MISMATCH"
+        for source, target in zip(src, dst):
+            identity = _media_identity(source)
+            if identity is None or identity != _media_identity(target):
+                return "MEDIA_IDENTITY_MISMATCH"
+            if (source.message or "") != (target.message or ""):
+                return "MEMBER_CAPTION_MISMATCH"
+        return "EXACT_MEDIA_OK"
     return "STRUCTURE_OK"
 
 
@@ -149,11 +173,16 @@ async def _fetch(client, entity, ids: list[int], label: str, max_wait: int) -> d
 
 async def audit(args) -> None:
     repo = PostgresRepository()
-    candidates = build_candidates(repo.get_pending_album_ledger_candidates(args.rule_id))
+    faulty_group = args.recover_faulty
+    candidates = build_candidates(repo.get_pending_album_ledger_candidates(
+        args.rule_id, faulty_media_group_id=faulty_group,
+    ))
+    if faulty_group and len(candidates) > 1:
+        raise RuntimeError("Multiple receipts for the selected album; no recovery")
     print(f"RULE={args.rule_id} CANDIDATES={len(candidates)}", flush=True)
     if not candidates:
         return
-    if args.apply and not args.accept_structural_match:
+    if args.apply and not faulty_group and not args.accept_structural_match:
         raise RuntimeError(
             "--apply requires --accept-structural-match: media bytes are NOT compared"
         )
@@ -196,10 +225,11 @@ async def audit(args) -> None:
 
             counts = Counter()
             for item in candidates:
-                verdict = validate_candidate(item, sources, dest)
+                verdict = validate_candidate(item, sources, dest, exact_media=bool(faulty_group))
                 counts[verdict] += 1
                 outcome = "DRY_RUN"
-                if verdict == "STRUCTURE_OK" and args.apply:
+                expected_verdict = "EXACT_MEDIA_OK" if faulty_group else "STRUCTURE_OK"
+                if verdict == expected_verdict and args.apply:
                     try:
                         updated = await asyncio.to_thread(
                             repo.reconcile_confirmed_album_ledger,
@@ -210,6 +240,9 @@ async def audit(args) -> None:
                             media_group_id=item["media_group_id"],
                             source_message_ids=item["source_ids"],
                             target_message_ids=item["target_ids"],
+                            recover_faulty=bool(faulty_group),
+                            expected_target_id=item["target_id"],
+                            expected_delivery_ids=item["delivery_ids"],
                         )
                         outcome = f"RESTORED_{updated}"
                     except Exception as exc:
@@ -232,11 +265,18 @@ def main() -> None:
     parser.add_argument("--rule-id", type=int, required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument(
+        "--recover-faulty", metavar="MEDIA_GROUP_ID",
+        help="Audit a single orphaned legacy faulty album; apply requires a paused rule "
+             "and exact Telegram media identities, not just structural similarity",
+    )
+    parser.add_argument(
         "--accept-structural-match", action="store_true",
         help="Explicitly accept verified IDs, media types, album groups and captions (not byte-identical media)",
     )
     parser.add_argument("--max-flood-wait", type=int, default=120)
     args = parser.parse_args()
+    if args.recover_faulty and args.accept_structural_match:
+        parser.error("--recover-faulty never accepts structural-only matches")
     asyncio.run(audit(args))
 
 
