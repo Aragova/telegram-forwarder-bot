@@ -24,7 +24,9 @@ class JobWorkerLifecycle:
 
     @property
     def live_count(self) -> int:
-        return sum(not task.done() for task in self._tasks.values())
+        # The dashboard reads from a DB executor thread. Snapshot the task
+        # references before counting; CPython copies dict values under the GIL.
+        return sum(not task.done() for task in tuple(self._tasks.values()))
 
     def ensure_running(self, factories: Mapping[str, WorkerFactory], *, resume: bool = False) -> None:
         # This method contains no await: checking and creating tasks is atomic

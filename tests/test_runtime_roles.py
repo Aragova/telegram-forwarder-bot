@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import logging
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -446,5 +447,46 @@ def test_failed_stop_can_be_retried_even_with_scheduler_paused():
         assert ns["posting_active"] is False
         assert await ns["stop_forwarding"]() is True
         assert await ns["stop_forwarding"]() is False
+
+    asyncio.run(scenario())
+
+
+def test_live_count_snapshot_during_worker_start():
+    async def scenario():
+        ownership = RuntimeOwnership()
+        ownership.bind("all")
+        lifecycle = JobWorkerLifecycle(ownership, logging.getLogger(__name__))
+        reading = threading.Event()
+        release = threading.Event()
+        loop_thread = threading.get_ident()
+
+        async def worker(stop):
+            await stop.wait()
+
+        lifecycle.ensure_running({"light": worker})
+        first = lifecycle._tasks["light"]
+        original_done = first.done
+
+        def blocked_done():
+            if threading.get_ident() != loop_thread:
+                reading.set()
+                if not release.wait(5):
+                    raise RuntimeError("snapshot reader timed out")
+            return original_done()
+
+        first.done = blocked_done
+        reader = asyncio.create_task(asyncio.to_thread(lambda: lifecycle.live_count))
+        try:
+            assert await asyncio.to_thread(reading.wait, 5)
+            lifecycle.ensure_running({"heavy": worker})
+            release.set()
+            assert await reader == 1
+            assert lifecycle.live_count == 2
+        finally:
+            release.set()
+            await asyncio.gather(reader, return_exceptions=True)
+            first.done = original_done
+            await lifecycle.stop(timeout_sec=1)
+        assert lifecycle.live_count == 0
 
     asyncio.run(scenario())
