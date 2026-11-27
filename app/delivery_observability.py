@@ -9,6 +9,8 @@ from enum import Enum
 from inspect import isawaitable
 from typing import Any
 
+from app.delivery_error_text import describe_delivery_error
+
 
 class DeliveryHealthStatus(str, Enum):
     OK = "ok"
@@ -239,29 +241,34 @@ class DeliveryDiagnosticsSnapshot:
         lines = [
             "📊 Диагностика доставки",
             "",
-            f"Статус: {self.status.name}",
+            "Статус: " + {
+                DeliveryHealthStatus.OK: "норма",
+                DeliveryHealthStatus.WARNING: "предупреждение",
+                DeliveryHealthStatus.CRITICAL: "требуется внимание",
+                DeliveryHealthStatus.UNKNOWN: "нет данных",
+            }[self.status],
             f"В очереди: {self.total_pending}",
             f"В обработке: {self.total_processing}",
             f"Отправлено: {self.total_sent}",
             f"Ошибок: {self.total_faulty}",
-            f"Rate-limit/deferred: {self.total_rate_limited + self.total_deferred}",
+            f"Отложено из-за ограничений Telegram: {self.total_rate_limited + self.total_deferred}",
         ]
         if self.queue_lag_seconds is not None:
-            lines.append(f"Максимальный lag: {self.queue_lag_seconds}s")
+            lines.append(f"Максимальное ожидание: {self.queue_lag_seconds} сек")
         if self.reason:
-            lines.append(f"Причина: {sanitize_diagnostic_text(self.reason, max_length=120)}")
+            lines.append(f"Причина: {describe_delivery_error(self.reason).reason}")
         if self.problem_rules:
             lines.extend(["", "Проблемные правила:"])
             for rule in self.problem_rules:
                 lag = rule.oldest_pending_age_seconds
-                bits = [f"pending={rule.pending_count}", f"faulty={rule.faulty_count}"]
+                bits = [f"в очереди: {rule.pending_count}", f"ошибок: {rule.faulty_count}"]
                 if rule.processing_count:
-                    bits.append(f"processing={rule.processing_count}")
+                    bits.append(f"в обработке: {rule.processing_count}")
                 if rule.rate_limited_count or rule.deferred_count:
-                    bits.append(f"rate/deferred={rule.rate_limited_count + rule.deferred_count}")
+                    bits.append(f"отложено: {rule.rate_limited_count + rule.deferred_count}")
                 if lag is not None:
-                    bits.append(f"lag={lag}s")
-                lines.append(f"• rule {rule.rule_id}: " + " ".join(bits))
+                    bits.append(f"ожидание: {lag} сек")
+                lines.append(f"• Правило #{rule.rule_id}: " + " ".join(bits))
         return "\n".join(lines)
 
 

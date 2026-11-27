@@ -65,6 +65,7 @@ from app.logging_setup import setup_logging
 from app.parser import parse_channel_history, parse_group_history
 from app.sender import SenderService
 from app.delivery_diagnostics_admin import format_delivery_diagnostics_admin_text
+from app.delivery_error_text import describe_delivery_error
 from app.delivery_observability import DeliveryObservabilityService
 from app.delivery_observability_provider import RepositoryDeliveryObservabilityProvider
 telethon_client = None
@@ -5098,8 +5099,10 @@ def audit_event_title(event_type: str) -> str:
         "rule_mode_changed": "🎛 Режим правила изменён",
         "rule_video_caption_changed": "📝 Подпись видеорежима изменена",
         "rule_caption_delivery_mode_changed": "✍️ Режим подписи изменён",
+        "rule_rescan_delivery_archived": "📦 Старая доставка архивирована",
+        "rule_start_position_changed": "↪ Стартовая позиция изменена",
     }
-    return mapping.get(event_type, event_type)
+    return mapping.get(event_type, "Системное событие")
 
 def _short_time_from_iso(iso_value: str | None) -> str | None:
     if not iso_value:
@@ -5205,7 +5208,7 @@ def format_audit_details(row) -> list[str]:
         if parts:
             details.append("  " + " | ".join(parts))
         if error_text:
-            details.append(f"  ❌ {error_text[:160]}")
+            details.append(f"  ❌ {describe_delivery_error(error_text).text()}")
 
     elif event_type == "delivery_rolled_back":
         delivery_id = row["delivery_id"]
@@ -5301,7 +5304,7 @@ def format_audit_details(row) -> list[str]:
             details.append("  " + " | ".join(parts))
 
     elif error_text:
-        details.append(f"  ❌ {error_text[:160]}")
+        details.append(f"  ❌ {describe_delivery_error(error_text).text()}")
 
     return details
 
@@ -5322,7 +5325,14 @@ def format_audit_details_html(row) -> list[str]:
 def build_audit_event_block_html(row, include_rule: bool = False) -> str:
     time_part = audit_row_time_local(row["created_at"])
     title = escape(audit_event_title(row["event_type"] or "unknown"))
-    status = escape(row["status"] or "")
+    raw_status = row["status"] or ""
+    status = escape({
+        "pending": "ожидает", "processing": "обрабатывается", "sent": "отправлено",
+        "faulty": "ошибка", "failed": "ошибка", "done": "завершено",
+        "verified": "подтверждено", "accepted": "принято", "retry": "повтор",
+        "cancelled": "отменено", "skipped": "пропущено", "success": "успешно",
+        "ok": "успешно",
+    }.get(raw_status, "состояние не распознано" if raw_status else ""))
 
     rule_part = ""
     if include_rule and row["rule_id"] is not None:
@@ -5626,7 +5636,8 @@ def build_faulty_pages(limit: int = 200) -> list[dict[str, Any]]:
             tgt = f"{tgt} (тема {row['target_thread_id']})"
 
         status_label, error_type = classify_faulty_row(row)
-        error_text = escape((row["error_text"] or "Причина не указана").strip())
+        error = describe_delivery_error(row["error_text"])
+        error_text = escape(error.text())
         created_at_text = faulty_delivery_time_from_created_at(row["fault_created_at"] or row["created_at"])
         if created_at_text == "дата неизвестна":
             created_at_text = faulty_delivery_time_from_created_at(row["created_at"])
@@ -5672,26 +5683,7 @@ def classify_faulty_row(row) -> tuple[str, str]:
     else:
         status_label = "💤 Старая"
 
-    text = (row["error_text"] or "").lower()
-
-    if (
-        "accepted_target_id_unresolved" in text
-        or "copy_single_uncertain_no_fallback" in text
-        or "target message id not confirmed" in text
-    ):
-        error_type = "🧭 Отправка требует сверки с Telegram"
-    elif "entity too large" in text or "request entity too large" in text:
-        error_type = "📦 Слишком большой файл"
-    elif "timeout" in text:
-        error_type = "⏱ Таймаут"
-    elif "forbidden" in text or "not found" in text:
-        error_type = "🚫 Получатель недоступен"
-    elif "copy_" in text or "copy " in text:
-        error_type = "📤 Ошибка копирования"
-    elif "self-loop" in text:
-        error_type = "🔁 Self-loop"
-    else:
-        error_type = "⚠️ Общая ошибка"
+    error_type = describe_delivery_error(row["error_text"]).title
 
     return status_label, error_type
 

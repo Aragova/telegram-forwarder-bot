@@ -8,8 +8,8 @@ from app.delivery_observability import (
     DeliveryObservabilityConfig,
     DeliveryHealthStatus,
     DeliveryRuleMetrics,
-    sanitize_diagnostic_text,
 )
+from app.delivery_error_text import describe_delivery_error
 
 _MAX_TEXT_LENGTH = 4000
 _MAX_RULES = 8
@@ -44,11 +44,9 @@ def _status_line(snapshot: DeliveryDiagnosticsSnapshot) -> str:
 
 
 def _safe_error(rule: DeliveryRuleMetrics) -> str | None:
-    error_type = sanitize_diagnostic_text(rule.last_error_type, max_length=80)
-    error_text = sanitize_diagnostic_text(rule.last_error_text, max_length=160)
-    if error_type and error_text:
-        return f"{error_type}: {error_text}"
-    return error_type or error_text
+    if not rule.last_error_type and not rule.last_error_text:
+        return None
+    return describe_delivery_error(rule.last_error_text, rule.last_error_type).text()
 
 
 def _stuck_rules(snapshot: DeliveryDiagnosticsSnapshot) -> list[DeliveryRuleMetrics]:
@@ -97,7 +95,7 @@ def _append_error_section(lines: list[str], snapshot: DeliveryDiagnosticsSnapsho
         details = [f"С ошибкой: {rule.faulty_count}"]
         delayed = rule.deferred_count + rule.rate_limited_count
         if delayed:
-            details.append(f"Задержано Telegram/rate-limit: {delayed}")
+            details.append(f"Отложено из-за ограничений Telegram: {delayed}")
         error = _safe_error(rule)
         if error:
             details.append(f"последняя ошибка: {error}")
@@ -118,12 +116,12 @@ def _append_largest_queues(lines: list[str], snapshot: DeliveryDiagnosticsSnapsh
 
 
 def format_delivery_diagnostics_admin_text(snapshot: DeliveryDiagnosticsSnapshot) -> str:
-    reason = sanitize_diagnostic_text(snapshot.reason, max_length=160)
+    reason = describe_delivery_error(snapshot.reason).reason
     lines = ["📊 Диагностика доставки", "", _status_line(snapshot)]
     if snapshot.status == DeliveryHealthStatus.OK:
         lines.append("Посты ждут своего времени по интервалам правил.")
     elif snapshot.status == DeliveryHealthStatus.UNKNOWN:
-        lines.append(f"Не удалось получить данные диагностики: {reason or 'причина неизвестна'}.")
+        lines.append(f"Причина: {reason}")
 
     lines.extend([
         "",
@@ -132,7 +130,7 @@ def format_delivery_diagnostics_admin_text(snapshot: DeliveryDiagnosticsSnapshot
         f"• Сейчас обрабатываются: {snapshot.total_processing}",
         f"• Уже отправлено: {snapshot.total_sent}",
         f"• С ошибкой: {snapshot.total_faulty}",
-        f"• Задержано Telegram/rate-limit: {snapshot.total_deferred + snapshot.total_rate_limited}",
+        f"• Отложено из-за ограничений Telegram: {snapshot.total_deferred + snapshot.total_rate_limited}",
     ])
     if snapshot.queue_lag_seconds is not None:
         lines.append(f"• Старшие посты в плановой очереди ждут: {_duration_ru(snapshot.queue_lag_seconds)}")
@@ -147,13 +145,9 @@ def format_delivery_diagnostics_admin_text(snapshot: DeliveryDiagnosticsSnapshot
     elif snapshot.total_faulty == 0 and snapshot.total_deferred + snapshot.total_rate_limited == 0:
         lines.append("ошибок и зависших задач нет. Большая очередь — это плановые доставки, которые будут отправляться по интервалам правил.")
     else:
-        lines.append("есть предупреждения по ошибкам или задержкам Telegram/rate-limit; плановая очередь сама по себе не является ошибкой.")
+        lines.append("есть предупреждения по ошибкам или ограничениям Telegram; плановая очередь сама по себе не является ошибкой.")
 
     text = "\n".join(lines)
-    for marker in ("content_json", "caption", "Traceback", "SECRET_TOKEN"):
-        text = text.replace(marker, "<скрыто>")
-    for technical in ("pending", "processing", "faulty", "rule_id", "lag", "Deferred/rate-limit"):
-        text = text.replace(technical, "<скрыто>")
     if len(text) > _MAX_TEXT_LENGTH:
         text = text[: _MAX_TEXT_LENGTH - 1] + "…"
     return text

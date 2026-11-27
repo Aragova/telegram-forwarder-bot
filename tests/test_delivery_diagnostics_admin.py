@@ -31,7 +31,8 @@ def test_critical_snapshot_splits_stuck_errors_and_largest_queues() -> None:
     assert "старшая висит 1 ч 30 мин" in text
     assert "⚠️ Правила с ошибками" in text
     assert "📌 Самые большие очереди по правилам" in text
-    assert "TelegramRetryAfter" in text
+    assert "временно ограничил частоту запросов" in text
+    assert "TelegramRetryAfter" not in text
 
 
 def test_big_planned_queue_is_not_described_as_error() -> None:
@@ -56,7 +57,19 @@ def test_young_processing_is_not_shown_as_stuck() -> None:
 def test_unknown_snapshot_text_is_safe() -> None:
     text = format_delivery_diagnostics_admin_text(_snapshot(status=DeliveryHealthStatus.UNKNOWN, signals=(DeliveryDiagnosticSignal.NO_DATA,), reason="Traceback SECRET_TOKEN content_json caption"))
     assert "диагностика временно недоступна" in text
-    assert "<скрыто>" in text
+    assert "Не удалось определить" not in text
+    assert "нет точного описания" in text
     for forbidden in ("SECRET_TOKEN", "content_json", "caption", "Traceback"):
         assert forbidden not in text
     assert len(text) <= 4000
+
+
+def test_rescan_error_has_instruction_without_raw_code() -> None:
+    rule = DeliveryRuleMetrics(rule_id=208, faulty_count=10,
+        last_error_text="album_member_set_changed_manual_review_no_resend")
+    text = format_delivery_diagnostics_admin_text(_snapshot(
+        status=DeliveryHealthStatus.CRITICAL, total_faulty=10, problem_rules=(rule,)))
+    assert "Пересканировать" in text
+    assert "Начать заново" in text
+    assert "возможен дубль" in text
+    assert "album_member_set_changed" not in text

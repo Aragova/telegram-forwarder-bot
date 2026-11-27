@@ -7251,9 +7251,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
             return updated
 
-    def get_pending_album_ledger_candidates(
-        self, rule_id: int, *, faulty_media_group_id: str | None = None,
-    ) -> list[dict[str, Any]]:
+    def get_pending_album_ledger_candidates(self, rule_id: int) -> list[dict[str, Any]]:
         """Read-only candidates; never infer success from accepted ledger alone."""
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -7275,16 +7273,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             'rule:' || r.id::text || ':target:' || r.target_id
                             || ':media_group:' || p.media_group_id || ':album:members:')
                     )
-                    WHERE d.rule_id = %s
-                       AND (
-                           (%s::text IS NULL AND d.status = 'pending')
-                           OR (%s::text IS NOT NULL AND p.media_group_id = %s
-                               AND d.status = 'faulty'
-                               AND d.error_text = 'album_member_set_changed_manual_review_no_resend'
-                               AND a.idempotency_key =
-                                   ('rule:' || r.id::text || ':target:' || r.target_id
-                                    || ':media_group:' || p.media_group_id || ':album'))
-                       )
+                    WHERE d.rule_id = %s AND d.status = 'pending'
                       AND r.mode = 'repost'
                       AND p.media_group_id IS NOT NULL
                       AND a.operation_kind = 'album'
@@ -7293,8 +7282,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                       AND a.status IN ('accepted', 'verified')
                     ORDER BY p.id, p.message_id
                     """,
-                    (int(rule_id), faulty_media_group_id, faulty_media_group_id,
-                     faulty_media_group_id),
+                    (int(rule_id),),
                 )
                 return list(cur.fetchall())
 
@@ -7302,11 +7290,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         self, *, rule_id: int, attempt_id: int, source_channel: str,
         source_thread_id: int | None, media_group_id: str,
         source_message_ids: list[int], target_message_ids: list[int],
-        recover_faulty: bool = False, expected_target_id: str | None = None,
-        expected_delivery_ids: list[int] | None = None,
-        published_at: datetime | None = None,
-        observed_source_ids: list[int] | None = None,
-        observed_target_ids: list[int] | None = None,
     ) -> int:
         """Atomically promote one *externally verified* complete album.
 
@@ -7326,45 +7309,16 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         if source_ids != sorted(source_ids):
             raise ValueError("Album IDs must be in source order")
 
-        if recover_faulty and (not expected_target_id or not expected_delivery_ids
-                               or len(expected_delivery_ids) != len(source_ids)
-                               or len(set(expected_delivery_ids)) != len(source_ids)):
-            raise ValueError("Faulty album recovery requires the audited route and delivery IDs")
-
-        if recover_faulty and (
-            not isinstance(published_at, datetime)
-            or published_at.utcoffset() is None
-            or published_at > datetime.now(timezone.utc)
-        ):
-            raise ValueError("Faulty album recovery requires a historical Telegram publication time")
-
-        if recover_faulty and (
-            not 2 <= len(source_ids) <= 10
-            or observed_source_ids != source_ids
-            or observed_target_ids != sorted(target_ids)
-        ):
-            raise ValueError("Faulty album recovery requires complete observed Telegram groups")
-
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT target_id, mode, tenant_id, source_id, source_thread_id, "
-                    "target_thread_id, is_active FROM routing WHERE id = %s AND rescan_owner_token IS NULL FOR UPDATE",
+                    "SELECT target_id, mode, tenant_id FROM routing WHERE id = %s AND rescan_owner_token IS NULL FOR UPDATE",
                     (int(rule_id),),
                 )
                 rule = cur.fetchone()
                 if not rule or str(rule["mode"]) != "repost":
                     raise RuntimeError("Rule missing or not in repost mode")
                 target_id = str(rule["target_id"])
-                if target_id == str(source_channel) and set(source_ids) & set(target_ids):
-                    raise RuntimeError("Source and target album IDs overlap in one chat")
-                if recover_faulty and (
-                    rule["is_active"] or target_id != expected_target_id
-                    or str(rule["source_id"]) != str(source_channel)
-                    or rule["source_thread_id"] != source_thread_id
-                    or rule["target_thread_id"] is not None
-                ):
-                    raise RuntimeError("Faulty album recovery requires the audited, paused route")
                 key = build_delivery_idempotency_key(
                     operation_kind="album", rule_id=rule_id,
                     target_id=target_id, media_group_id=media_group_id,
@@ -7372,8 +7326,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 cur.execute(
                     """
                     SELECT id, status, operation_kind, target_id, idempotency_key,
-                           delivery_id, source_message_ids_json, sent_message_ids_json,
-                           rule_id, tenant_id, error_text
+                           delivery_id, source_message_ids_json, sent_message_ids_json
                     FROM delivery_attempts WHERE id = %s FOR UPDATE
                     """,
                     (int(attempt_id),),
@@ -7406,33 +7359,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 expected = _safe_json_loads(attempt["sent_message_ids_json"], [])
                 if expected != target_ids:
                     raise RuntimeError("Accepted Telegram IDs changed; reconciliation aborted")
-                if recover_faulty:
-                    # This repair is deliberately limited to orphaned group-only
-                    # receipts, never modern publication intents or other faults.
-                    if (attempt["idempotency_key"] != key
-                            or int(attempt["rule_id"]) != int(rule_id)
-                            or attempt["tenant_id"] != (rule["tenant_id"] or 1)
-                            or attempt["error_text"] is not None
-                            or member_key is None
-                            or len(stored_members) != len(source_ids)
-                            or attempt["delivery_id"] not in stored_members
-                            or set(stored_members) & set(expected_delivery_ids or [])):
-                        raise RuntimeError("Not an orphaned legacy album receipt")
-                    cur.execute(
-                        """SELECT EXISTS(SELECT 1 FROM deliveries WHERE id=ANY(%s::bigint[]))
-                                  OR EXISTS(SELECT 1 FROM delivery_attempts
-                                      WHERE rule_id=%s AND id<>%s
-                                        AND (idempotency_key=%s OR starts_with(idempotency_key,%s))
-                                        AND idempotency_key NOT LIKE '%%:rescan:%%')
-                                  OR EXISTS(SELECT 1 FROM telegram_publication_receipts
-                                      WHERE rule_id=%s
-                                        AND (idempotency_key=%s OR starts_with(idempotency_key,%s))
-                                        AND idempotency_key NOT LIKE '%%:rescan:%%') AS busy""",
-                        (stored_members, int(rule_id), int(attempt_id), key, key + ":members:",
-                         int(rule_id), key, key + ":members:"),
-                    )
-                    if cur.fetchone()["busy"]:
-                        raise RuntimeError("Existing anchors or conflicting publication evidence")
 
                 cur.execute(
                     """
@@ -7448,8 +7374,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     raise RuntimeError("Rule has a live job; no ledger recovery while sending")
                 cur.execute(
                     """
-                    SELECT d.id, d.status, p.message_id, d.error_text,
-                           d.sent_message_id, d.sent_message_ids_json
+                    SELECT d.id, d.status, p.message_id
                     FROM deliveries d JOIN posts p ON p.id = d.post_id
                     WHERE d.rule_id = %s
                       AND p.source_channel = %s
@@ -7461,18 +7386,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     (int(rule_id), str(source_channel), source_thread_id, str(media_group_id)),
                 )
                 rows = cur.fetchall()
+                if ([int(x["message_id"]) for x in rows] != source_ids
+                        or any(x["status"] != "pending" for x in rows)):
+                    raise RuntimeError("Album changed or partially processed; no mutation")
+
                 delivery_ids = [int(x["id"]) for x in rows]
-                if [int(x["message_id"]) for x in rows] != source_ids:
-                    raise RuntimeError("Album changed or partially processed; no mutation")
-                if recover_faulty:
-                    if (delivery_ids != expected_delivery_ids
-                            or any(x["status"] != "faulty"
-                                   or x["error_text"] != "album_member_set_changed_manual_review_no_resend"
-                                   or x["sent_message_id"] is not None
-                                   or x["sent_message_ids_json"] is not None for x in rows)):
-                        raise RuntimeError("Faulty album changed or has publication evidence")
-                elif any(x["status"] != "pending" for x in rows):
-                    raise RuntimeError("Album changed or partially processed; no mutation")
                 original_delivery_id = int(attempt.get("delivery_id") or 0)
                 original_ids = _safe_json_loads(attempt.get("source_message_ids_json"), [])
                 cur.execute(
@@ -7493,23 +7411,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if cur.rowcount != 1:
                     raise RuntimeError("Attempt promotion lost a race")
                 for did, tid in zip(delivery_ids, target_ids):
-                    if recover_faulty:
-                        cur.execute(
-                            """
-                            UPDATE deliveries
-                            SET status = 'sent', sent_at = %s, error_text = NULL,
-                                sent_message_id = %s, sent_message_ids_json = %s::jsonb,
-                                target_id_snapshot = %s,
-                                delivery_method = 'reconciled_verified_album_ledger'
-                            WHERE id = %s AND status = 'faulty'
-                              AND error_text = 'album_member_set_changed_manual_review_no_resend'
-                              AND sent_message_id IS NULL AND sent_message_ids_json IS NULL
-                            """,
-                            (published_at.isoformat(), int(tid), _json_dumps(target_ids), target_id, int(did)),
-                        )
-                        if cur.rowcount != 1:
-                            raise RuntimeError("Faulty album row changed concurrently; rolled back")
-                        continue
                     cur.execute(
                         """
                         UPDATE deliveries
@@ -7543,12 +7444,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         }),
                         _json_dumps({
                             "new_delivery_ids": delivery_ids,
-                            "source_message_ids": source_ids,
                             "target_message_ids": target_ids,
                         }),
                         _json_dumps({"media_group_id": str(media_group_id),
-                                     "verification": ("telegram_exact_media_identity" if recover_faulty
-                                                      else "telegram_group_media_caption")}),
+                                     "verification": "telegram_group_media_caption"}),
                         int(rule.get("tenant_id") or 1),
                     ),
                 )

@@ -37,7 +37,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             text = await ctx.build_delivery_diagnostics_admin_text()
         except Exception:
             ctx.logger.warning("Ошибка подготовки диагностики доставки", exc_info=True)
-            text = "📊 Диагностика доставки\n\nСтатус: UNKNOWN\nПричина: временная ошибка диагностики. Попробуйте позже."
+            text = "📊 Диагностика доставки\n\nСтатус: диагностика недоступна\nПричина: временная ошибка диагностики. Попробуйте позже."
         await ctx.send_message_safe(chat_id=message.chat.id, text=text)
 
 
@@ -92,7 +92,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         if not await ctx.is_admin_callback(callback):
             return
         await ctx.answer_callback_safe_once(callback, "Отменено")
-        await ctx.edit_message_text_safe(message=callback.message, text="🧯 Зависшие задачи\n\nДействие отменено. Reset не выполнялся.")
+        await ctx.edit_message_text_safe(message=callback.message, text="🧯 Зависшие задачи\n\nДействие отменено. Возврат в очередь не выполнялся.")
 
     @dp.message(lambda m: m.text == "📊 Журнал системы")
     async def handle_system_journal(message: Message):
@@ -292,7 +292,7 @@ def _format_stuck_processing_deliveries_text(rows) -> str:
     for index, row in enumerate(rows, start=1):
         lines.extend([
             "",
-            f"{index}) delivery_id={row.get('delivery_id')}",
+            f"{index}) Доставка №{row.get('delivery_id')}",
             f"Правило #{row.get('rule_id')}",
             f"Висит: {_duration_ru(row.get('age_seconds'))}",
             f"Пост: {row.get('post_id')}",
