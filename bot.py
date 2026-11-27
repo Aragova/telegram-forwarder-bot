@@ -43,6 +43,7 @@ from app.repository_models import utc_now_iso
 from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
 from app.rule_folders_ui import root_view, rule_catalog_view, additional_functions_view, _button as rule_ui_button
 from app.rule_catalog import CATALOG_PAGE_SIZE, RulePage
+from app.user_handlers.rules import build_user_rules_keyboard as build_user_rules_keyboard_view
 from app.repository import RepositoryProtocol
 from app.rescan_safety import RescanBlocked
 from app.repository_factory import create_repository
@@ -1268,34 +1269,10 @@ def interval_to_text(seconds: int) -> str:
 
 
 def build_user_rules_keyboard(rules, page: int = 0) -> InlineKeyboardMarkup:
-    total = len(rules)
-    if total == 0:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="➕ Добавить правило", callback_data="user_rules_add")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")],
-            ]
-        )
-    max_page = (total - 1) // RULES_PAGE_SIZE
-    page = max(0, min(page, max_page))
-    start = page * RULES_PAGE_SIZE
-    current = rules[start:start + RULES_PAGE_SIZE]
-    rows: list[list[InlineKeyboardButton]] = []
-    for row in current:
-        rid = int(getattr(row, "id", 0))
-        label = compact_rule_text(row)
-        state = "▶️" if bool(getattr(row, "is_active", False)) else "⏸"
-        rows.append([InlineKeyboardButton(text=f"{state} #{rid} {label}", callback_data=f"user_rule_open:{rid}")])
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"user_rules_page:{page - 1}"))
-    nav.append(InlineKeyboardButton(text=f"{page + 1}/{max_page + 1}", callback_data="user_rules_noop"))
-    if page < max_page:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"user_rules_page:{page + 1}"))
-    rows.append(nav)
-    rows.append([InlineKeyboardButton(text="➕ Добавить правило", callback_data="user_rules_add")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user_main")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return build_user_rules_keyboard_view(
+        rules, page=page, rules_page_size=RULES_PAGE_SIZE,
+        compact_rule_text=compact_rule_text,
+    )
 
 
 def _with_recovery_button(keyboard: InlineKeyboardMarkup, *, enabled: bool) -> InlineKeyboardMarkup:
@@ -3164,7 +3141,20 @@ async def handle_list_rules(message: Message):
     tenant_id = await run_db(ensure_user_tenant, user_id)
     result = await run_db(db.get_rule_catalog_page, None if admin else tenant_id,
                           folder_tenant_id=tenant_id)
-    if admin and not result.total:
+    if not admin:
+        if not result.total:
+            await send_message_safe(
+                chat_id=message.chat.id, text="Правил пока нет",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+        # The legacy user keyboard retains its Add/Back controls. The SQL
+        # catalog uses 10 rows, matching the user_rules_page callback.
+        await send_message_safe(
+            chat_id=message.chat.id, text="⚙️ Мои правила",
+            reply_markup=build_user_rules_keyboard(result),
+        )
+        return
+    if not result.total:
         await show_admin_rule_manager(message, user_id)
         return
     text, markup = rule_catalog_view(result, folder_id=-1, folder_name="", page=0)

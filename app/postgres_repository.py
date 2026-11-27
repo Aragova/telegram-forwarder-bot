@@ -7852,8 +7852,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SELECT r.id AS rule_id, r.mode, r.is_active, r.next_run_at,
                            d.status, p.id AS post_id, p.source_channel,
                            p.source_thread_id, p.media_group_id,
-                           CASE WHEN lower(trim(r.mode)) = 'video'
-                                THEN p.content_json ELSE NULL END AS content_json
+                           CASE WHEN r.mode = 'repost'
+                                THEN NULL ELSE p.content_json END AS content_json
                     FROM routing r
                     LEFT JOIN (deliveries d JOIN posts p ON p.id = d.post_id)
                       ON d.rule_id = r.id

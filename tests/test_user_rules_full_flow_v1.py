@@ -141,3 +141,17 @@ def test_user_creation_flow_uses_inline_pick_callbacks():
     source = Path("bot.py").read_text(encoding="utf-8")
     assert "user_rule_pick_source:" in source
     assert "user_rule_pick_target:" in source
+
+
+def test_legacy_user_keyboard_accepts_sql_page_and_keeps_add_button():
+    from app.rule_catalog import RulePage
+
+    rule = SimpleNamespace(id=21, source_id="s", source_title=None, target_id="t",
+                           target_title=None, source_thread_id=None, target_thread_id=None,
+                           interval=60, is_active=True)
+    kb = bot.build_user_rules_keyboard(RulePage([rule], 21, 21, 2, 10))
+    buttons = [button for row in kb.inline_keyboard for button in row]
+    assert any(button.callback_data == "user_rule_open:21" for button in buttons)
+    assert any(button.text == "3/3" for button in buttons)
+    assert any(button.text == "➕ Добавить правило" for button in buttons)
+    assert any(button.callback_data == "user_rules_page:1" for button in buttons)
