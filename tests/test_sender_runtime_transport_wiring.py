@@ -84,6 +84,9 @@ def test_sender_runtime_wraps_only_sender_clients(monkeypatch, create_ui_policy)
         monkeypatch.setattr(runtime, "user_handlers_ctx", None)
         monkeypatch.setattr(runtime, "admin_handlers_ctx", None)
 
+        # Restore all globals assigned by _init_sender_runtime after the test.
+        for name in ("bot", "ui_policy", "telethon_client", "reaction_clients", "sender_service", "runtime_context"):
+            monkeypatch.setattr(runtime, name, getattr(runtime, name))
         monkeypatch.setattr(runtime, "UIErrorPolicy", lambda bot: object())
         await runtime._init_sender_runtime(create_ui_policy=create_ui_policy)
 

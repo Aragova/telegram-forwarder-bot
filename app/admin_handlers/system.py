@@ -4,6 +4,7 @@ from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .context import AdminHandlersContext
+from app.runtime_roles import ForwardingControlUnavailable
 from app.billing_catalog import USD_PRICES
 from app.payments.fixed_prices import FIXED_CRYPTO_PRICES, FIXED_STARS_PRICES, format_crypto_price, format_stars_price
 
@@ -116,12 +117,11 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         if not await ctx.is_admin(message):
             return
 
-        if ctx.is_posting_active and ctx.is_posting_active():
-            await ctx.send_message_safe(chat_id=message.chat.id, text="ℹ️ Пересылка уже запущена.")
-            return
-
         try:
-            await ctx.start_forwarding()
+            changed = await ctx.start_forwarding()
+            if changed is False:
+                await ctx.send_message_safe(chat_id=message.chat.id, text="ℹ️ Пересылка уже запущена.")
+                return
             await ctx.send_message_safe(chat_id=message.chat.id, text=
                 "▶️ Пересылка запущена.\n"
                 "Новые задачи будут обрабатываться.",
@@ -131,6 +131,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
                 "Пересылка запущена через системное меню admin_id=%s",
                 message.from_user.id if message.from_user else None,
             )
+        except ForwardingControlUnavailable as exc:
+            await ctx.send_message_safe(chat_id=message.chat.id, text=str(exc))
         except Exception as exc:
             ctx.logger.exception("Ошибка запуска пересылки: %s", exc)
             await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Ошибка запуска пересылки")
@@ -147,12 +149,11 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         if not await ctx.is_admin(message):
             return
 
-        if ctx.is_posting_active and not ctx.is_posting_active():
-            await ctx.send_message_safe(chat_id=message.chat.id, text="ℹ️ Пересылка уже остановлена.")
-            return
-
         try:
-            await ctx.stop_forwarding()
+            changed = await ctx.stop_forwarding()
+            if changed is False:
+                await ctx.send_message_safe(chat_id=message.chat.id, text="ℹ️ Пересылка уже остановлена.")
+                return
             await ctx.send_message_safe(chat_id=message.chat.id, text=
                 "⏸ Пересылка остановлена.\n"
                 "Новые задачи запускаться не будут.",
@@ -162,6 +163,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
                 "Пересылка остановлена через системное меню admin_id=%s",
                 message.from_user.id if message.from_user else None,
             )
+        except ForwardingControlUnavailable as exc:
+            await ctx.send_message_safe(chat_id=message.chat.id, text=str(exc))
         except Exception as exc:
             ctx.logger.exception("Ошибка остановки пересылки: %s", exc)
             await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Ошибка остановки пересылки")

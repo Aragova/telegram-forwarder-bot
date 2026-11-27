@@ -19,6 +19,10 @@ def normalize_runtime_role(role: str | None) -> str:
     return normalized
 
 
+class ForwardingControlUnavailable(RuntimeError):
+    """Global start/stop cannot control other processes in split mode."""
+
+
 class RuntimeOwnership:
     """Bind a process to one role before any runtime resources are started."""
 
@@ -41,6 +45,10 @@ class RuntimeOwnership:
     @property
     def can_poll(self) -> bool:
         return not self._closing and self._role in {"bot", "all"}
+
+    @property
+    def can_control_forwarding(self) -> bool:
+        return not self._closing and self._role == "all"
 
     def begin_shutdown(self) -> None:
         self._closing = True

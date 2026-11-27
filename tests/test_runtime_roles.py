@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.runtime_roles import RuntimeOwnership, normalize_runtime_role, run_role
+from app.runtime_roles import ForwardingControlUnavailable, RuntimeOwnership, normalize_runtime_role, run_role
 from app.job_worker_lifecycle import JobWorkerLifecycle
 
 
@@ -138,8 +138,10 @@ def _load_runtime_functions(namespace):
         "_start_bot_role", "_start_scheduler_role", "_start_worker_role",
         "_start_all_role", "_prepare_polling_runtime", "ensure_rule_workers",
         "start_job_workers_runtime", "_supervise_job_workers", "stop_job_workers_runtime",
+        "start_forwarding", "stop_forwarding", "stop_all_workers",
     }
-    nodes = [node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name in names]
+    names.add("_require_forwarding_control")
+    nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names]
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "bot.py", "exec"), namespace)
 
 
@@ -353,5 +355,96 @@ def test_worker_lifecycle_serializes_overlapping_stop_requests(monkeypatch):
         lifecycle.ensure_running(factories, resume=True)
         assert lifecycle.live_count == 2
         await lifecycle.stop(timeout_sec=1)
+
+    asyncio.run(scenario())
+
+
+def test_polling_retries_and_only_continues_if_webhook_is_inactive(monkeypatch):
+    async def scenario():
+        ownership = RuntimeOwnership()
+        ownership.bind("bot")
+        raw_bot = SimpleNamespace(
+            delete_webhook=AsyncMock(side_effect=TimeoutError),
+            get_webhook_info=AsyncMock(return_value=SimpleNamespace(url="")),
+            set_my_commands=AsyncMock(),
+        )
+        ns = {
+            "runtime_ownership": ownership, "bot": raw_bot,
+            "asyncio": SimpleNamespace(sleep=AsyncMock()),
+            "logger": logging.getLogger(__name__),
+            "DEFAULT_TELEGRAM_COMMANDS": [], "BotCommandScopeDefault": object,
+        }
+        _load_runtime_functions(ns)
+        await ns["_prepare_polling_runtime"]()
+        assert raw_bot.delete_webhook.await_count == 3
+        assert all(call.kwargs["drop_pending_updates"] is False for call in raw_bot.delete_webhook.await_args_list)
+        raw_bot.set_my_commands.assert_awaited_once()
+        raw_bot.get_webhook_info.return_value = SimpleNamespace(url="https://example.invalid")
+        with pytest.raises(RuntimeError, match="webhook"):
+            await ns["_prepare_polling_runtime"]()
+        assert raw_bot.set_my_commands.await_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_supervisor_survives_failed_start():
+    async def scenario():
+        ownership = RuntimeOwnership()
+        ownership.bind("worker")
+        start = AsyncMock(side_effect=[RuntimeError("failed"), None])
+        async def sleep(_):
+            if start.await_count == 2:
+                ownership.begin_shutdown()
+        ns = {
+            "runtime_ownership": ownership, "logger": logging.getLogger(__name__),
+            "asyncio": SimpleNamespace(sleep=sleep),
+        }
+        _load_runtime_functions(ns)
+        ns["start_job_workers_runtime"] = start
+        await ns["_supervise_job_workers"]()
+        assert start.await_count == 2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("role", ["bot", "scheduler", "worker"])
+def test_split_forwarding_controls_never_report_local_success(role):
+    async def scenario():
+        ownership = RuntimeOwnership()
+        ownership.bind(role)
+        ns = {
+            "runtime_ownership": ownership, "posting_active": False,
+            "ForwardingControlUnavailable": ForwardingControlUnavailable,
+        }
+        _load_runtime_functions(ns)
+        for name in ("start_forwarding", "stop_forwarding"):
+            with pytest.raises(ForwardingControlUnavailable):
+                await ns[name]()
+        assert ns["posting_active"] is False
+
+    asyncio.run(scenario())
+
+
+def test_failed_stop_can_be_retried_even_with_scheduler_paused():
+    async def scenario():
+        ownership = RuntimeOwnership()
+        ownership.bind("all")
+        lifecycle = SimpleNamespace(live_count=2)
+        async def drain():
+            if lifecycle.live_count == 2:
+                lifecycle.live_count = 1
+                raise RuntimeError("incomplete drain")
+            lifecycle.live_count = 0
+        ns = {
+            "runtime_ownership": ownership, "posting_active": True,
+            "job_workers": lifecycle, "ForwardingControlUnavailable": ForwardingControlUnavailable,
+        }
+        _load_runtime_functions(ns)
+        ns["stop_all_workers"] = drain
+        with pytest.raises(RuntimeError, match="incomplete"):
+            await ns["stop_forwarding"]()
+        assert ns["posting_active"] is False
+        assert await ns["stop_forwarding"]() is True
+        assert await ns["stop_forwarding"]() is False
 
     asyncio.run(scenario())
