@@ -118,6 +118,7 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
                     bot=ctx.bot, message=callback.message, html=rich_html,
                     footer=footer, logger=ctx.logger,
                     invalidate_cache=ctx.invalidate_rich_edit_cache,
+                    policy=ctx.get_ui_policy() if ctx.get_ui_policy else None,
                 ):
                     return
         await ctx.edit_message_text_safe(
@@ -221,7 +222,9 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+        edited = await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+        if edited is False:
+            await ctx.answer_callback_safe(callback, "Не удалось открыть карточку. Повторите попытку.", show_alert=True)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_refresh:"))
     async def handle_user_rule_refresh(callback: CallbackQuery):
@@ -233,7 +236,9 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+        edited = await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+        if edited is False:
+            await ctx.answer_callback_safe(callback, "Не удалось открыть карточку. Повторите попытку.", show_alert=True)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("user_rule_extra:"))
     async def handle_user_rule_extra(callback: CallbackQuery):

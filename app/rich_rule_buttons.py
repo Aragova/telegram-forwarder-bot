@@ -11,7 +11,10 @@ import os
 from html import escape
 from typing import Any, Callable
 
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup
+
+from app.ui_navigation import edit_locks, edit_result_status
 
 _RULE_CALLBACKS = frozenset({"open", "open_search", "pick", "fill_pick"})
 # Exactly one route button per row, even for short channel names.
@@ -152,6 +155,7 @@ async def try_edit_rich_catalog(
     logger: Any = None,
     session_factory: Callable[[], Any] | None = None,
     invalidate_cache: Callable[[int, int], Any] | None = None,
+    policy: Any = None,
 ) -> bool:
     """Use configured LOCAL Bot API endpoint. Never log the bot token or URL.
 
@@ -163,38 +167,45 @@ async def try_edit_rich_catalog(
     log = logger or _LOGGER
     if bot is None or message is None:
         return False
-    try:
-        url = bot.session.api.api_url(token=bot.token, method="editMessageText")
-        payload = rich_edit_payload(
-            chat_id=int(message.chat.id),
-            message_id=int(message.message_id),
-            html=html,
-            footer=footer,
+    chat_id = int(message.chat.id)
+    message_id = int(message.message_id)
+
+    async def request() -> bool:
+        try:
+            url = bot.session.api.api_url(token=bot.token, method="editMessageText")
+            payload = rich_edit_payload(chat_id=chat_id, message_id=message_id, html=html, footer=footer)
+            session = await (session_factory() if session_factory else bot.session.create_session())
+            async with session.post(url, json=payload) as response:
+                data = await response.json()
+                status_code = response.status
+            if data.get("ok") is True:
+                return True
+            description = str(data.get("description") or "").lower()
+            if "message is not modified" in description:
+                return True
+            if policy is not None and (status_code == 429 or data.get("error_code") == 429):
+                retry_after = int((data.get("parameters") or {}).get("retry_after") or 1)
+                raise TelegramRetryAfter(method=None, message="Rich edit rate limited", retry_after=retry_after)
+            log.warning(
+                "RICH_RULE_CATALOG_FALLBACK | api_code=%s status=%s",
+                data.get("error_code"), status_code,
+            )
+        except TelegramRetryAfter:
+            raise
+        except Exception as exc:
+            # Never log the token-bearing URL from an aiohttp exception.
+            log.warning("RICH_RULE_CATALOG_FALLBACK | exception_type=%s", type(exc).__name__)
+        return False
+
+    if policy is not None:
+        result = await policy.edit_operation(
+            chat_id=chat_id, message_id=message_id, action="bot.edit_rich_catalog",
+            signature=("rich", html, repr(footer)), func=request,
         )
-        # Direct edits bypass UIErrorPolicy; invalidate its cached signature
-        # and edit timestamp BEFORE this request so both success and fallback
-        # can immediately navigate back without getting silently throttled.
+        return edit_result_status(result) in {"updated", "not_modified"}
+
+    # Compatibility for callers without an initialized UI policy.
+    async with edit_locks.get(chat_id, message_id):
         if invalidate_cache is not None:
-            invalidate_cache(int(message.chat.id), int(message.message_id))
-        # Reuse aiogram's aiohttp transport. Unlike httpx (which logs every
-        # request URL at INFO), aiohttp emits no full bot-token request URLs.
-        session = await (session_factory() if session_factory else bot.session.create_session())
-        async with session.post(url, json=payload) as response:
-            data = await response.json()
-            status_code = response.status
-        if data.get("ok") is True:
-            return True
-        description = str(data.get("description") or "").lower()
-        if "message is not modified" in description:
-            return True
-        log.warning(
-            "RICH_RULE_CATALOG_FALLBACK | api_code=%s status=%s",
-            data.get("error_code"), status_code,
-        )
-    except Exception as exc:
-        # The exception text may contain the bot-token URL. Do not log it.
-        log.warning(
-            "RICH_RULE_CATALOG_FALLBACK | exception_type=%s",
-            type(exc).__name__,
-        )
-    return False
+            invalidate_cache(chat_id, message_id)
+        return await request()

@@ -14,6 +14,7 @@ from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 
 from app.rule_folders_repository import normalize_folder_name
+from app.ui_navigation import ack_navigation, callback_locks, is_navigation
 from app.rich_rule_buttons import (
     rich_catalog_payload,
     rich_rule_list_enabled,
@@ -91,12 +92,15 @@ async def _render(
                 message=callback.message, html=html,
                 footer=footer, logger=getattr(ctx, "logger", None),
                 invalidate_cache=getattr(ctx, "invalidate_rich_edit_cache", None),
+                policy=getattr(ctx, "get_ui_policy", lambda: None)(),
             )
             if success:
                 return
-    await ctx.edit_message_text_safe(
+    edited = await ctx.edit_message_text_safe(
         message=callback.message, text=text, reply_markup=kb, parse_mode="HTML",
     )
+    if edited is False:
+        await _error(ctx, callback, "Не удалось открыть экран. Повторите попытку.")
 
 
 async def _error(ctx: Any, callback: CallbackQuery, message: str) -> None:
@@ -370,14 +374,15 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
         user_id = callback.from_user.id if callback.from_user else 0
         if not user_id:
             return
-        if getattr(callback.message.chat, "type", None) != "private":
+        if getattr(getattr(callback.message, "chat", None), "type", None) != "private":
             await ctx.answer_callback_safe_once(
                 callback, "Управление правилами доступно только в личном чате", show_alert=True,
             )
             return
-        tenant_id, admin = await _actor(ctx, user_id)
         data = (callback.data or "").split(":")
-        action = data[1]
+        action = data[1] if len(data) > 1 else ""
+        if is_navigation(callback.data):
+            await ack_navigation(callback, ctx.answer_callback_safe_once)
         # A back/cancel/navigation press must invalidate pending text input.
         if action not in {"create", "create_for", "rename", "search"}:
             _inputs.pop(user_id, None)
@@ -388,6 +393,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
             await ctx.answer_callback_safe_once(callback)
             return
         try:
+            tenant_id, admin = await _actor(ctx, user_id)
             if action == "root":
                 _inputs.pop(user_id, None)
                 await _root(ctx, callback, tenant_id, admin)
@@ -427,7 +433,9 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                         return
                 _origins[(user_id, rule_id)] = (fid, page, is_search)
                 await ctx.answer_callback_safe_once(callback)
-                await ctx.refresh_rule_card_for_actor(callback, rule_id)
+                result = await ctx.refresh_rule_card_for_actor(callback, rule_id)
+                if result not in {"updated", "not_modified", "resent"}:
+                    await _error(ctx, callback, "Не удалось открыть карточку. Повторите попытку.")
             elif action == "back":
                 rid = int(data[2])
                 fid, page, was_search = _origins.get((user_id, rid), (-1, 0, False))
@@ -730,6 +738,12 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
         state = _inputs.get(user_id)
         if not state or state.get("chat_id") != message.chat.id:
             return
+        async with callback_locks.get(message.chat.id, state["message_id"]):
+            if _inputs.get(user_id) is not state:
+                return
+            await _consume_folder_input(message, user_id, state)
+
+    async def _consume_folder_input(message: Message, user_id: int, state: dict[str, Any]) -> None:
         tenant_id, admin = await _actor(ctx, user_id)
         raw = (message.text or "").strip()
         kind = state["kind"]
@@ -856,6 +870,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     message=state["origin_message"], html=html,
                     footer=footer, logger=getattr(ctx, "logger", None),
                     invalidate_cache=getattr(ctx, "invalidate_rich_edit_cache", None),
+                    policy=getattr(ctx, "get_ui_policy", lambda: None)(),
                 )
         if not edited:
             edited = await ctx.edit_message_text_safe(
