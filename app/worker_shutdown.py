@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterable
+from contextlib import suppress
 
 
 async def drain_job_workers(
@@ -44,23 +45,26 @@ async def drain_in_flight(
     Telegram write from cancellation. The durable watchdog/ledger own recovery.
     """
     children = tuple(tasks)
-    cancelled = False
+    if not children:
+        return
+    joined = asyncio.gather(*children, return_exceptions=True)
+    cancellation_requested = False
     try:
         _, pending = await asyncio.wait(children, timeout=max(0.01, float(timeout_sec)))
+        if pending:
+            cancellation_requested = True
+            logger.warning("WORKER_CHILD_DRAIN_CANCEL | queue=%s | unfinished=%s", queue, len(pending))
+            for task in pending:
+                task.cancel()
+        await asyncio.shield(joined)
     except asyncio.CancelledError:
-        cancelled = True
-        pending = {task for task in children if not task.done()}
-    if pending:
-        logger.warning("WORKER_CHILD_DRAIN_CANCEL | queue=%s | unfinished=%s", queue, len(pending))
-        for task in pending:
-            task.cancel()
-    # Shield the join, not the sends. Repeated outer cancellation must not
-    # detach children or interrupt their own cleanup a second time.
-    joined = asyncio.gather(*children, return_exceptions=True)
-    while not joined.done():
-        try:
-            await asyncio.shield(joined)
-        except asyncio.CancelledError:
-            cancelled = True
-    if cancelled:
-        raise asyncio.CancelledError
+        if not cancellation_requested:
+            for task in children:
+                if not task.done():
+                    task.cancel()
+        # Preserve the original cancellation. Additional cancellation requests
+        # cannot interrupt the children again or detach their cleanup.
+        while not joined.done():
+            with suppress(asyncio.CancelledError):
+                await asyncio.shield(joined)
+        raise
