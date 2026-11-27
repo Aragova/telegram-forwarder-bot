@@ -146,3 +146,21 @@ def test_orphan_recovery_instruction_uses_safe_rich_format():
         parser = Balanced()
         parser.feed(text)
         assert not parser.tags
+
+
+
+def test_orphan_confirmation_is_one_use_and_bound_to_operator():
+    from types import SimpleNamespace as NS
+    from app.admin_handlers.diagnostics import _OrphanConfirmations, _orphan_page_keyboard
+    store = _OrphanConfirmations()
+    cb = NS(from_user=NS(id=1), message=NS(chat=NS(id=2), message_id=3), data="")
+    token = store.issue(cb, 547, [10, 11])
+    cb.data = "stuck_orphan_confirm:" + token
+    other = NS(from_user=NS(id=9), message=cb.message, data=cb.data)
+    assert store.consume(other) is None
+    assert store.consume(cb) == (547, [10, 11])
+    assert store.consume(cb) is None
+    rows = [{"rule_id": i, "is_active": False} for i in range(1, 11)]
+    keyboard = _orphan_page_keyboard(rows, 0)
+    assert keyboard.inline_keyboard[-1][-1].callback_data == "stuck_orphan_page:10"
+    assert _orphan_page_keyboard([], 10).inline_keyboard[-1][0].callback_data == "stuck_orphan_page:0"

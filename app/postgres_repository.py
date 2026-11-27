@@ -1852,6 +1852,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         WHERE {stale} AND {membership}
                     ) AS clock ON clock.stale_since IS NOT NULL
                     WHERE d.status='processing'
+                      AND r.rescan_owner_token IS NULL
                       AND (%s::bigint IS NULL OR d.rule_id=%s)
                     ORDER BY clock.stale_since, d.id
                     LIMIT %s
@@ -1867,7 +1868,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     ) -> dict[str, Any]:
         """Requeue only existing stale jobs. Never reopen deliveries or receipts.
 
-        Same recovery semantics as the lease watchdog. The original job
+        Like the watchdog, only stale processing consumes an attempt.
+        An expired unstarted lease does not. The original job
         payload preserves album membership, video stage and publication key.
         """
         safe_limit = max(1, min(int(limit), 50))
@@ -1911,7 +1913,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         logger.warning("MANUAL_STALE_JOB_RECOVERY | admin_id=%s | job_ids=%s", admin_id, ids)
         return {"updated_count": len(ids), "job_ids": ids, "limit": safe_limit}
 
-    def get_orphaned_processing_rules(self, *, limit: int = 10) -> list[dict[str, Any]]:
+    def get_orphaned_processing_rules(self, *, limit: int = 10, after_rule_id: int = 0) -> list[dict[str, Any]]:
         """Read-only diagnostic. Absence of a job is not evidence of no send."""
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -1920,6 +1922,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     SELECT r.id AS rule_id, r.is_active
                     FROM routing r
                     WHERE r.rescan_owner_token IS NULL
+                      AND r.id > %s
                       AND EXISTS (
                           SELECT 1 FROM deliveries d
                           WHERE d.rule_id=r.id AND d.status='processing'
@@ -1933,11 +1936,23 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     ORDER BY r.id
                     LIMIT %s
                     """,
-                    (sorted(DELIVERY_JOB_TYPES), max(1, min(int(limit), 10))),
+                    (max(0, int(after_rule_id)), sorted(DELIVERY_JOB_TYPES), max(1, min(int(limit), 10))),
                 )
                 return [dict(row) for row in cur.fetchall() or []]
 
-    def quarantine_orphaned_processing_rule(self, rule_id: int, *, admin_id: int) -> dict[str, Any]:
+    def get_orphan_processing_ids(self, rule_id: int) -> list[int]:
+        """Bounded preview; never authorize a subset of an oversized rule."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id FROM deliveries WHERE rule_id=%s AND status='processing'
+                       ORDER BY id LIMIT 101""", (int(rule_id),),
+                )
+                return [int(row["id"]) for row in cur.fetchall() or []]
+
+    def quarantine_orphaned_processing_rule(
+        self, rule_id: int, *, admin_id: int, expected_ids: list[int],
+    ) -> dict[str, Any]:
         """Explicit operator action, never a retry or evidence of a failed RPC.
 
         The rule lock serializes this with the atomic scheduler, rescan and
@@ -1983,6 +1998,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 ids = [int(row["id"]) for row in cur.fetchall() or []]
                 if not ids:
                     return {"status": "nothing_to_do", "updated_count": 0}
+                if len(ids) > 100 or ids != sorted(set(expected_ids)):
+                    return {"status": "snapshot_changed", "updated_count": 0}
                 cur.execute(
                     """
                     SELECT 1 FROM telegram_publication_receipts
@@ -2009,18 +2026,23 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                                 AND a.idempotency_key NOT LIKE '%%:rescan:%%'
                                 AND (
                                     a.delivery_id=d.id
-                                    OR (a.operation_kind='album' AND (
-                                        -- Current album keys store delivery IDs;
-                                        -- historical rows may store source message IDs.
-                                        a.source_message_ids_json @> jsonb_build_array(d.id)
-                                        OR a.source_message_ids_json @> jsonb_build_array(d.id::text)
-                                        OR a.source_message_ids_json @> jsonb_build_array(p.message_id)
-                                        OR a.source_message_ids_json @> jsonb_build_array(p.message_id::text)
-                                        OR (p.media_group_id IS NOT NULL AND starts_with(
-                                            a.idempotency_key,
+                                    OR (a.operation_kind='album' AND p.media_group_id IS NOT NULL AND (
+                                        -- A verified sibling protects the whole logical album.
+                                        -- Never compare bare IDs across namespaces.
+                                        EXISTS (
+                                            SELECT 1 FROM deliveries anchor
+                                            JOIN posts ap ON ap.id=anchor.post_id
+                                            WHERE anchor.id=a.delivery_id AND anchor.rule_id=d.rule_id
+                                              AND ap.source_channel=p.source_channel
+                                              AND ap.source_thread_id IS NOT DISTINCT FROM p.source_thread_id
+                                              AND ap.media_group_id=p.media_group_id
+                                        )
+                                        OR a.idempotency_key =
                                             'rule:' || d.rule_id::text || ':target:' || a.target_id
                                             || ':media_group:' || p.media_group_id || ':album'
-                                        ))
+                                        OR starts_with(a.idempotency_key,
+                                            'rule:' || d.rule_id::text || ':target:' || a.target_id
+                                            || ':media_group:' || p.media_group_id || ':album:members:')
                                     ))
                                 )
                           )
@@ -6025,7 +6047,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         FROM deliveries d_sent
                         JOIN posts p_sent ON p_sent.id = d_sent.post_id
                         WHERE d_sent.rule_id = d.rule_id
-                            AND d_sent.status = 'sent'
+                            AND (d_sent.status = 'sent' OR (d_sent.status = 'faulty'
+                                 AND d_sent.error_text = 'orphaned_processing_manual_review_no_resend'))
                             AND p.media_group_id IS NOT NULL
                             AND p_sent.source_channel = p.source_channel
                             AND (
@@ -6289,7 +6312,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             FROM deliveries d_sent
                             JOIN posts p_sent ON p_sent.id = d_sent.post_id
                             WHERE d_sent.rule_id = d.rule_id
-                              AND d_sent.status = 'sent'
+                              AND (d_sent.status = 'sent' OR (d_sent.status = 'faulty'
+                                   AND d_sent.error_text = 'orphaned_processing_manual_review_no_resend'))
                               AND p.media_group_id IS NOT NULL
                               AND p_sent.source_channel = p.source_channel
                               AND (
@@ -8934,13 +8958,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         return [dict(r) for r in rows]
 
     def requeue_expired_leases(self, delay_seconds: int = 15) -> int:
+        """An expired, unstarted lease does not consume an execution attempt."""
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE jobs
                     SET status = 'retry',
-                        attempts = attempts + 1,
                         run_at = NOW() + make_interval(secs => %s),
                         locked_by = NULL,
                         lease_until = NULL,
