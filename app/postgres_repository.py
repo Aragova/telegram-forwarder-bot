@@ -7814,42 +7814,29 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     # =========================================================
 
     def get_queue_stats(self):
+        """Exact physical counters from one PostgreSQL statement/snapshot."""
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS cnt FROM posts")
-                posts = int(cur.fetchone()["cnt"])
-
-                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries")
-                deliveries = int(cur.fetchone()["cnt"])
-
-                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'pending'")
-                pending = int(cur.fetchone()["cnt"])
-
-                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'processing'")
-                processing = int(cur.fetchone()["cnt"])
-
-                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'sent'")
-                sent = int(cur.fetchone()["cnt"])
-
-                cur.execute("SELECT COUNT(*) AS cnt FROM deliveries WHERE status = 'faulty'")
-                faulty = int(cur.fetchone()["cnt"])
-
-                cur.execute("SELECT COUNT(*) AS cnt FROM routing")
-                rules = int(cur.fetchone()["cnt"])
-
-                cur.execute("SELECT COUNT(*) AS cnt FROM routing WHERE is_active = TRUE")
-                active_rules = int(cur.fetchone()["cnt"])
-
-        return {
-            "posts": posts,
-            "deliveries": deliveries,
-            "pending": pending,
-            "processing": processing,
-            "sent": sent,
-            "faulty": faulty,
-            "rules": rules,
-            "active_rules": active_rules,
-        }
+                cur.execute(
+                    """
+                    WITH delivery_counts AS (
+                        SELECT COUNT(*) AS deliveries,
+                               COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+                               COUNT(*) FILTER (WHERE status = 'processing') AS processing,
+                               COUNT(*) FILTER (WHERE status = 'sent') AS sent,
+                               COUNT(*) FILTER (WHERE status = 'faulty') AS faulty
+                        FROM deliveries
+                    ), rule_counts AS (
+                        SELECT COUNT(*) AS rules,
+                               COUNT(*) FILTER (WHERE is_active) AS active_rules
+                        FROM routing
+                    )
+                    SELECT (SELECT COUNT(*) FROM posts) AS posts,
+                           delivery_counts.*, rule_counts.*
+                    FROM delivery_counts CROSS JOIN rule_counts
+                    """
+                )
+                return {key: int(value) for key, value in cur.fetchone().items()}
 
     def count_uncleared_faulty_deliveries(self) -> int:
         """Count delivery IDs still visible in the admin faulty-delivery list."""
@@ -9140,13 +9127,50 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             )
         return metrics
 
+    def _get_rule_logical_summary(self, rule_id: int, mode: str) -> tuple[dict[str, Any], dict[str, int]]:
+        """Stream only the columns required by the canonical builder.
+
+        Repost summaries never fetch post payloads. Video payloads are TEXT
+        (including legacy malformed JSON), so preserve the Python decoder.
+        A named server cursor bounds the number of raw rows held by psycopg.
+        """
+        physical = dict.fromkeys(("pending", "processing", "sent", "faulty"), 0)
+
+        def counted_rows(rows):
+            for row in rows:
+                status = str(row["status"] or "").strip().lower()
+                if status in physical:
+                    physical[status] += 1
+                yield row
+
+        with self.connect() as conn:
+            with conn.cursor(name="rule_logical_summary") as cur:
+                cur.itersize = 512
+                cur.execute(
+                    """
+                    SELECT d.status, p.id AS post_id, p.source_channel,
+                           p.source_thread_id, p.media_group_id,
+                           CASE WHEN %s THEN p.content_json ELSE NULL END AS content_json
+                    FROM deliveries d
+                    JOIN posts p ON p.id = d.post_id
+                    JOIN routing r ON r.id = d.rule_id
+                    WHERE d.rule_id = %s
+                    ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
+                    """,
+                    (mode == "video", rule_id),
+                )
+                logical_items = self._build_rule_logical_items_from_rows(
+                    rule_id=rule_id, rows=counted_rows(cur), mode=mode, compact=True,
+                )
+        return self._summarize_rule_logical_items(logical_items), physical
+
     def get_rule_card_snapshot(self, rule_id: int) -> dict[str, Any] | None:
         """
         Быстрый snapshot для карточки одного правила.
 
         Что делает:
         - читает только одно правило
-        - одним отдельным запросом читает deliveries/posts только этого правила
+        - потоково читает компактную проекцию deliveries/posts только этого правила
         - ОДИН раз собирает logical items
         - возвращает уже готовые данные для build_rule_card_text()
 
@@ -9160,55 +9184,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
             mode = (getattr(rule, "mode", "repost") or "repost").strip().lower()
 
-            with self.connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT
-                            d.id AS delivery_id,
-                            d.status,
-                            d.sent_at,
-                            d.error_text,
-                            d.attempt_count,
-                            p.id AS post_id,
-                            p.message_id,
-                            p.source_channel,
-                            p.source_thread_id,
-                            p.media_group_id,
-                            p.content_json,
-                            p.created_at
-                        FROM deliveries d
-                        JOIN posts p ON p.id = d.post_id
-                        JOIN routing r ON r.id = d.rule_id
-                        WHERE d.rule_id = %s
-                        ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
-                        """,
-                        (rule_id,),
-                    )
-                    rows = cur.fetchall()
-
-            logical_items = self._build_rule_logical_items_from_rows(
-                rule_id=rule_id,
-                rows=rows,
-                mode=mode,
-            )
-            logical_summary = self._summarize_rule_logical_items(logical_items)
-
-            physical_pending = 0
-            physical_processing = 0
-            physical_sent = 0
-            physical_faulty = 0
-
-            for row in rows:
-                status = str(row["status"] or "").strip().lower()
-                if status == "pending":
-                    physical_pending += 1
-                elif status == "processing":
-                    physical_processing += 1
-                elif status == "sent":
-                    physical_sent += 1
-                elif status == "faulty":
-                    physical_faulty += 1
+            logical_summary, physical = self._get_rule_logical_summary(rule_id, mode)
+            physical_pending = physical["pending"]
+            physical_processing = physical["processing"]
+            physical_sent = physical["sent"]
+            physical_faulty = physical["faulty"]
 
             logical_total = logical_summary["total"]
             logical_completed = logical_summary["completed"]
@@ -9269,7 +9249,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 "get_rule_card_snapshot: rule_id=%s, mode=%s, raw_rows=%s, logical_total=%s, logical_pending=%s, logical_processing=%s, logical_completed=%s, logical_faulty=%s, logical_current_position=%s",
                 rule_id,
                 mode,
-                len(rows),
+                sum(physical.values()),
                 logical_total,
                 logical_pending,
                 logical_processing,
@@ -9389,6 +9369,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         rule_id: int,
         rows,
         mode: str | None = None,
+        *,
+        compact: bool = False,
     ) -> list[dict[str, Any]]:
         """
         Единый builder логических элементов для правила.
@@ -9428,14 +9410,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             normalized_mode = "repost"
 
         try:
-            raw_rows = list(rows or [])
-            if not raw_rows:
-                logger.info(
-                    "_build_rule_logical_items_from_rows: пустой набор rows, rule_id=%s, mode=%s",
-                    rule_id,
-                    normalized_mode,
-                )
-                return []
+            raw_rows = iter(rows) if rows is not None else iter(())
+            row_count = 0
 
             # =========================================================
             # VIDEO-РЕЖИМ
@@ -9445,6 +9421,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 broken_content_json = 0
 
                 for row in raw_rows:
+                    row_count += 1
                     try:
                         content = _safe_json_loads(row["content_json"], {})
                     except Exception:
@@ -9458,10 +9435,18 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
                     status = str(row["status"] or "").strip().lower()
 
-                    items.append(
-                        {
+                    item = {
+                        "position": len(items) + 1,
+                        "count": 1,
+                        "pending_count": int(status == "pending"),
+                        "processing_count": int(status == "processing"),
+                        "sent_count": int(status == "sent"),
+                        "faulty_count": int(status == "faulty"),
+                        "is_done": status == "sent",
+                    }
+                    if not compact:
+                        item.update({
                             "kind": "video_single",
-                            "position": len(items) + 1,
                             "rule_id": rule_id,
                             "mode": normalized_mode,
                             "source_channel": row["source_channel"],
@@ -9473,22 +9458,16 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             "first_post_id": int(row["post_id"]),
                             "first_message_id": int(row["message_id"]),
                             "content_json": row["content_json"],
-                            "created_at": row["created_at"] if "created_at" in row.keys() else None,
-                            "sent_at": row["sent_at"] if "sent_at" in row.keys() else None,
-                            "count": 1,
+                            "created_at": row.get("created_at"),
+                            "sent_at": row.get("sent_at"),
                             "statuses": [status],
-                            "pending_count": 1 if status == "pending" else 0,
-                            "processing_count": 1 if status == "processing" else 0,
-                            "sent_count": 1 if status == "sent" else 0,
-                            "faulty_count": 1 if status == "faulty" else 0,
-                            "is_done": status == "sent",
-                        }
-                    )
+                        })
+                    items.append(item)
 
                 logger.info(
                     "_build_rule_logical_items_from_rows: built video items, rule_id=%s, raw_rows=%s, items=%s, skipped_non_video=%s, broken_content_json=%s",
                     rule_id,
-                    len(raw_rows),
+                    row_count,
                     len(items),
                     skipped_non_video,
                     broken_content_json,
@@ -9499,9 +9478,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             # REPOST-РЕЖИМ
             # =========================================================
             groups: dict[str, dict[str, Any]] = {}
-            order_keys: list[str] = []
 
             for row in raw_rows:
+                row_count += 1
                 media_group_id = row["media_group_id"]
 
                 if media_group_id:
@@ -9512,40 +9491,41 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     kind = "single"
 
                 if group_key not in groups:
-                    groups[group_key] = {
-                        "kind": kind,
-                        "rule_id": rule_id,
-                        "mode": normalized_mode,
-                        "source_channel": row["source_channel"],
-                        "source_thread_id": row["source_thread_id"],
-                        "media_group_id": media_group_id,
-                        "delivery_ids": [],
-                        "post_ids": [],
-                        "message_ids": [],
-                        "first_post_id": int(row["post_id"]),
-                        "first_message_id": int(row["message_id"]),
-                        "content_json": row["content_json"],
-                        "created_at": row["created_at"] if "created_at" in row.keys() else None,
-                        "sent_at": row["sent_at"] if "sent_at" in row.keys() else None,
-                        "statuses": [],
+                    item = {
+                        "count": 0,
                         "pending_count": 0,
                         "processing_count": 0,
                         "sent_count": 0,
                         "faulty_count": 0,
                     }
-                    order_keys.append(group_key)
+                    if not compact:
+                        item.update({
+                            "kind": kind,
+                            "rule_id": rule_id,
+                            "mode": normalized_mode,
+                            "source_channel": row["source_channel"],
+                            "source_thread_id": row["source_thread_id"],
+                            "media_group_id": media_group_id,
+                            "delivery_ids": [],
+                            "post_ids": [],
+                            "message_ids": [],
+                            "first_post_id": int(row["post_id"]),
+                            "first_message_id": int(row["message_id"]),
+                            "content_json": row["content_json"],
+                            "created_at": row.get("created_at"),
+                            "sent_at": row.get("sent_at"),
+                            "statuses": [],
+                        })
+                    groups[group_key] = item
 
                 item = groups[group_key]
-
-                delivery_id = int(row["delivery_id"])
-                post_id = int(row["post_id"])
-                message_id = int(row["message_id"])
                 status = str(row["status"] or "").strip().lower()
-
-                item["delivery_ids"].append(delivery_id)
-                item["post_ids"].append(post_id)
-                item["message_ids"].append(message_id)
-                item["statuses"].append(status)
+                item["count"] += 1
+                if not compact:
+                    item["delivery_ids"].append(int(row["delivery_id"]))
+                    item["post_ids"].append(int(row["post_id"]))
+                    item["message_ids"].append(int(row["message_id"]))
+                    item["statuses"].append(status)
 
                 if status == "pending":
                     item["pending_count"] += 1
@@ -9556,9 +9536,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 elif status == "faulty":
                     item["faulty_count"] += 1
 
-            for group_key in order_keys:
-                item = groups[group_key]
-                item["count"] = len(item["delivery_ids"])
+            for item in groups.values():
                 item["is_done"] = item["count"] > 0 and item["sent_count"] == item["count"]
                 item["position"] = len(items) + 1
                 items.append(item)
@@ -9566,7 +9544,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             logger.info(
                 "_build_rule_logical_items_from_rows: built repost items, rule_id=%s, raw_rows=%s, items=%s",
                 rule_id,
-                len(raw_rows),
+                row_count,
                 len(items),
             )
             return items
@@ -9578,6 +9556,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 normalized_mode,
                 exc,
             )
+            if compact:
+                raise
             return []
 
     # =========================================================
@@ -9823,45 +9803,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
             mode = (getattr(rule, "mode", "repost") or "repost").strip().lower()
 
-            with self.connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT
-                            d.id AS delivery_id,
-                            d.status,
-                            d.sent_at,
-                            p.id AS post_id,
-                            p.message_id,
-                            p.source_channel,
-                            p.source_thread_id,
-                            p.media_group_id,
-                            p.content_json,
-                            p.created_at
-                        FROM deliveries d
-                        JOIN posts p ON p.id = d.post_id
-                        JOIN routing r ON r.id = d.rule_id
-                        WHERE d.rule_id = %s
-                        ORDER BY CASE WHEN r.rescan_queue_built THEN p.message_id ELSE p.id END, p.id ASC
-                        """,
-                        (rule_id,),
-                    )
-                    rows = cur.fetchall()
-
-            if not rows:
-                logger.info(
-                    "get_rule_position_info: у правила нет deliveries, rule_id=%s, mode=%s",
-                    rule_id,
-                    mode,
-                )
-                return empty_result
-
-            logical_items = self._build_rule_logical_items_from_rows(
-                rule_id=rule_id,
-                rows=rows,
-                mode=mode,
-            )
-            logical_summary = self._summarize_rule_logical_items(logical_items)
+            logical_summary, physical = self._get_rule_logical_summary(rule_id, mode)
 
             total = logical_summary["total"]
             if total <= 0:
@@ -9869,7 +9811,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     "get_rule_position_info: после builder очередь пуста, rule_id=%s, mode=%s, raw_rows=%s",
                     rule_id,
                     mode,
-                    len(rows),
+                    sum(physical.values()),
                 )
                 return empty_result
 
@@ -9886,7 +9828,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 "get_rule_position_info: rule_id=%s, mode=%s, raw_rows=%s, total=%s, completed=%s, current_position=%s",
                 rule_id,
                 mode,
-                len(rows),
+                sum(physical.values()),
                 total,
                 completed,
                 current_position,

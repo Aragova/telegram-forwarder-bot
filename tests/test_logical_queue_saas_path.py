@@ -277,3 +277,24 @@ def test_rollback_uses_latest_album_member_timestamp_not_queue_position():
     repo._rule = SimpleNamespace(mode="repost")
     result = repo.rollback_last_delivery(rule_id=30, admin_id=1)
     assert result["rolled_back_delivery_ids"] == [1, 2]
+
+
+def test_compact_logical_projection_matches_canonical_builder():
+    repo = _RepoForTests()
+    rows = [
+        _mk_row(1, post_id=11, message_id=20, status="sent", media_group_id="a", media_kind="video"),
+        _mk_row(2, post_id=12, message_id=21, status="pending"),
+        _mk_row(3, post_id=13, message_id=22, status="faulty", media_group_id="a", media_kind="video"),
+        _mk_row(4, post_id=14, message_id=23, status="processing", media_group_id="a", source_thread_id=9, media_kind="video"),
+        _mk_row(5, post_id=15, message_id=24, status="sent", media_kind="video"),
+    ]
+    for mode in ("repost", "video"):
+        full = repo._build_rule_logical_items_from_rows(1, rows, mode)
+        projected = (
+            {key: row[key] for key in ("status", "post_id", "source_channel",
+                                       "source_thread_id", "media_group_id", "content_json")}
+            for row in rows
+        )
+        compact = repo._build_rule_logical_items_from_rows(1, projected, mode, compact=True)
+        assert repo._summarize_rule_logical_items(compact) == repo._summarize_rule_logical_items(full)
+        assert all("content_json" not in item and "delivery_ids" not in item for item in compact)

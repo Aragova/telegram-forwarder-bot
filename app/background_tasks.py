@@ -7,6 +7,8 @@ from collections.abc import Awaitable
 from typing import Any
 from weakref import WeakSet
 
+from app.runtime_utils import create_background_task
+
 LOGGER = logging.getLogger("forwarder.background_tasks")
 
 # A task needs a strong reference until it finishes.
@@ -18,7 +20,7 @@ _TASK_LOCK = threading.Lock()
 
 def start_background_task(awaitable: Awaitable[Any], *, name: str, drain_only: bool = False) -> asyncio.Task[Any]:
     """Track a fire-and-forget task and log unexpected failures."""
-    task = asyncio.create_task(awaitable, name=name)
+    task = create_background_task(awaitable, name=name)
     with _TASK_LOCK:
         _RUNNING_TASKS.add(task)
         if drain_only:

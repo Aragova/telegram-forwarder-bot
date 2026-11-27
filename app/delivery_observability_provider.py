@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+from app.runtime_utils import run_db
 from inspect import isawaitable, iscoroutinefunction
 from typing import Any
 
@@ -20,7 +20,7 @@ class RepositoryDeliveryObservabilityProvider:
         if iscoroutinefunction(method):
             result = await method()
         else:
-            result = await asyncio.to_thread(method)
+            result = await run_db(method)
         if isawaitable(result):
             result = await result
         return tuple(normalize_delivery_rule_metrics(item) for item in (result or ()))

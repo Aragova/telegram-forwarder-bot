@@ -60,14 +60,11 @@ class PostgresClient:
         conn = getattr(self._local, "conn", None)
 
         if conn is not None:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT 1 AS ok")
-                    row = cur.fetchone()
-                    if row and row["ok"] == 1:
-                        return conn
-            except Exception:
-                pass
+            # libpq's local state check needs no SQL round trip. A connection
+            # lost while idle can still fail on the actual operation; never
+            # automatically replay a transaction with an unknown outcome.
+            if not conn.closed and not conn.broken:
+                return conn
             self.close_thread_connection()
 
         conn = psycopg.connect(
@@ -107,7 +104,9 @@ class PostgresClient:
                 try:
                     conn.rollback()
                 except Exception:
-                    pass
+                    # Do not reuse a connection whose transaction could not
+                    # be rolled back (e.g. after a network disconnect).
+                    self.close_thread_connection()
 
     def close_thread_connection(self) -> None:
         conn = getattr(self._local, "conn", None)

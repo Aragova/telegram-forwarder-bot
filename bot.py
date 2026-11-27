@@ -34,7 +34,10 @@ from aiogram.types import (
 )
 
 from app.config import settings
-from app.runtime_utils import wait_for_db_task
+from app.runtime_utils import (
+    UiDatabaseMiddleware, create_background_task, run_db as run_runtime_db,
+    shutdown_ui_db_executor, wait_for_db_task,
+)
 from app.video_emoji_validation import VideoEmojiValidator, format_validation_result, utf16_length
 from app.repository_models import utc_now_iso
 from app.rule_folder_handlers import register_rule_folder_handlers, consume_new_rule_folder, clear_new_rule_folder, clear_folder_input
@@ -321,7 +324,7 @@ def _schedule_rule_ui_task(task_key: str, coro) -> bool:
             coro.close()
         return False
 
-    task = asyncio.create_task(coro)
+    task = create_background_task(coro)
     rule_ui_tasks[task_key] = task
 
     def _cleanup(done_task: asyncio.Task) -> None:
@@ -388,13 +391,13 @@ def _cancel_dashboard_task(user_id: int) -> None:
 
 def _start_dashboard_task(user_id: int, message: Message) -> None:
     _cancel_dashboard_task(user_id)
-    dashboard_tasks[user_id] = asyncio.create_task(dashboard_worker(user_id, message))
+    dashboard_tasks[user_id] = create_background_task(dashboard_worker(user_id, message))
 
 async def run_db(callable_obj, *args, **kwargs):
     """
     Уводит sync DB/CPU работу из event loop в thread pool.
     """
-    return await asyncio.to_thread(callable_obj, *args, **kwargs)
+    return await run_runtime_db(callable_obj, *args, **kwargs)
 
 
 async def heartbeat_loop(role: str, repo: RepositoryProtocol):
@@ -4224,7 +4227,7 @@ def _build_rule_card_render_sync(rule_id: int, prefix_text: str | None = None) -
     }
 
 async def _build_rule_card_render_async(rule_id: int, prefix_text: str | None = None) -> dict | None:
-    return await asyncio.to_thread(_build_rule_card_render_sync, rule_id, prefix_text)
+    return await run_db(_build_rule_card_render_sync, rule_id, prefix_text)
 
 async def refresh_rule_card_by_ids(
     *,
@@ -9194,6 +9197,8 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+dp.message.outer_middleware(UiDatabaseMiddleware())
+dp.callback_query.outer_middleware(UiDatabaseMiddleware())
 dp.callback_query.outer_middleware(CallbackNavigationMiddleware(answer_callback_safe_once))
 _register_admin_handlers()
 _register_user_saas_handlers()
@@ -9260,4 +9265,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("👋 Бот остановлен")
     finally:
+        shutdown_ui_db_executor()
         db.close_all_connections()
