@@ -5501,7 +5501,10 @@ def build_rule_logs_inline_keyboard(rule_id: int, page: int, total_pages: int) -
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def build_faulty_inline_keyboard(page: int, total_pages: int, delivery_id: int | None = None) -> InlineKeyboardMarkup:
+def build_faulty_inline_keyboard(
+    page: int, total_pages: int, delivery_id: int | None = None,
+    *, rule_id: int | None = None,
+) -> InlineKeyboardMarkup:
     nav_row: list[InlineKeyboardButton] = []
 
     if total_pages > 1:
@@ -5522,11 +5525,12 @@ def build_faulty_inline_keyboard(page: int, total_pages: int, delivery_id: int |
     rows = []
 
     if delivery_id is not None:
+        if rule_id is not None:
+            rows.append([
+                InlineKeyboardButton(text="📂 Открыть правило", callback_data=f"rule_card:{rule_id}", style="primary"),
+            ])
         rows.append([
-            InlineKeyboardButton(text="✅ Взята в работу", callback_data=f"faulty_ack:{delivery_id}:{page}"),
-        ])
-        rows.append([
-            InlineKeyboardButton(text="🧹 Очистить", callback_data=f"faulty_clear:{delivery_id}:{page}"),
+            InlineKeyboardButton(text="🧹 Очистить ошибку", callback_data=f"faulty_clear:{delivery_id}:{page}"),
         ])
 
     if nav_row:
@@ -5621,6 +5625,7 @@ def build_faulty_pages(limit: int = 200) -> list[dict[str, Any]]:
         return [{
             "text": "✅ Проблемных доставок нет",
             "delivery_id": None,
+            "rule_id": None,
         }]
 
     rows = list(reversed(rows))
@@ -5641,11 +5646,6 @@ def build_faulty_pages(limit: int = 200) -> list[dict[str, Any]]:
         if created_at_text == "дата неизвестна":
             created_at_text = faulty_delivery_time_from_created_at(row["created_at"])
 
-        problem_state = db.get_problem_state(f"rule_faulty_{row['rule_id']}")
-        in_work_text = ""
-        if problem_state and int(problem_state.get("is_active") or 0) == 0:
-            in_work_text = "\n\n✅ <b>Взята в работу</b>"
-
         text = (
             f"<b>⚠️ ПРОБЛЕМНАЯ ДОСТАВКА</b>\n\n"
             f"<b>Правило #{row['rule_id']}</b> · {escape(status_label)}\n"
@@ -5655,12 +5655,12 @@ def build_faulty_pages(limit: int = 200) -> list[dict[str, Any]]:
             f"📌 <b>{escape(error_type)}</b>\n"
             f"Сообщение: <code>{row['message_id']}</code> · Попыток: {row['attempt_count']}\n\n"
             f"{error.html()}"
-            f"{in_work_text}"
         )
 
         pages.append({
             "text": text,
             "delivery_id": int(row["id"]),
+            "rule_id": int(row["rule_id"]),
         })
 
     return list(reversed(pages))
@@ -8499,7 +8499,7 @@ async def handle_faulty_page(callback: CallbackQuery):
         message=callback.message,
         text=current["text"],
         parse_mode="HTML",
-        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]),
+        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]),
     )
 
 @dp.callback_query(lambda c: c.data.startswith("faulty_refresh:"))
@@ -8532,46 +8532,16 @@ async def handle_faulty_refresh(callback: CallbackQuery):
             page,
             total_pages,
             current["delivery_id"],
+            rule_id=current["rule_id"],
         ),
     )
 
-@dp.callback_query(lambda c: c.data.startswith("faulty_ack:"))
+@dp.callback_query(lambda c: c.data and c.data.startswith("faulty_ack:"))
 async def handle_faulty_ack(callback: CallbackQuery):
+    # Old Telegram messages may still contain the retired button.
     if not await is_admin_callback(callback):
         return
-
-    try:
-        _, delivery_id_raw, page_raw = parse_callback_parts(callback.data, "faulty_ack", 3)
-        delivery_id = int(delivery_id_raw)
-        page = int(page_raw)
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-
-    row = await run_db(db.get_delivery, delivery_id)
-    if not row:
-        await answer_callback_safe(callback, "Этой проблемы уже нет", show_alert=True)
-        return
-
-    rule_id = int(row["rule_id"])
-
-    await run_db(db.resolve_problem, f"rule_faulty_{rule_id}")
-    await run_db(db.resolve_problem, f"target_dead_{rule_id}")
-    await run_db(db.resolve_problem, f"rule_worker_error_{rule_id}")
-
-    await answer_callback_safe_once(callback, "✅ Помечено как «взята в работу»")
-
-    pages = await run_db(build_faulty_pages, 200)
-    total_pages = len(pages)
-    page = clamp_page(page, total_pages)
-    current = pages[page]
-
-    await edit_message_text_safe(
-        message=callback.message,
-        text=current["text"],
-        parse_mode="HTML",
-        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]),
-    )
+    await answer_callback_safe(callback, "Кнопка устарела. Нажмите «Обновить».", show_alert=True)
 
 @dp.callback_query(lambda c: c.data.startswith("faulty_clear:"))
 async def handle_faulty_clear(callback: CallbackQuery):
@@ -8607,7 +8577,7 @@ async def handle_faulty_clear(callback: CallbackQuery):
         message=callback.message,
         text=current["text"],
         parse_mode="HTML",
-        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"]),
+        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]),
     )
 
 @dp.callback_query(lambda c: c.data == "faulty_back")

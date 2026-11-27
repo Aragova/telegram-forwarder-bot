@@ -77,3 +77,42 @@ def test_stuck_button_not_added_to_rule_card() -> None:
         next_section = bot_source.find("\ndef ", rule_card_start + 1)
         rule_card_source = bot_source[rule_card_start:next_section if next_section != -1 else len(bot_source)]
         assert "🧯 Зависшие задачи" not in rule_card_source
+
+
+def test_faulty_keyboard_opens_correct_rule_and_preserves_clear() -> None:
+    import ast
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    source = (ROOT / "bot.py").read_text(encoding="utf-8")
+    node = next(n for n in ast.parse(source).body
+                if isinstance(n, ast.FunctionDef) and n.name == "build_faulty_inline_keyboard")
+    namespace = {"InlineKeyboardButton": InlineKeyboardButton,
+                 "InlineKeyboardMarkup": InlineKeyboardMarkup}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    build = namespace["build_faulty_inline_keyboard"]
+    keyboard = build(1, 3, 12345, rule_id=208)
+    buttons = [button for row in keyboard.inline_keyboard for button in row]
+    assert buttons[0].text == "📂 Открыть правило"
+    assert buttons[0].callback_data == "rule_card:208"
+    assert buttons[1].text == "🧹 Очистить ошибку"
+    assert buttons[1].callback_data == "faulty_clear:12345:1"
+    assert not any((button.callback_data or "").startswith("faulty_ack:") for button in buttons)
+    empty = build(0, 1)
+    assert [button.callback_data for row in empty.inline_keyboard for button in row] == [
+        "faulty_refresh:0", "faulty_back",
+    ]
+
+
+def test_legacy_ack_is_read_only_and_requires_admin() -> None:
+    import ast
+
+    for path in ("bot.py", "app/admin_handlers/diagnostics.py"):
+        source = (ROOT / path).read_text(encoding="utf-8")
+        handlers = [n for n in ast.walk(ast.parse(source))
+                    if isinstance(n, ast.AsyncFunctionDef) and n.name == "handle_faulty_ack"]
+        assert len(handlers) == 1
+        body = ast.get_source_segment(source, handlers[0])
+        assert "is_admin_callback" in body
+        assert "Обновить" in body
+        assert "resolve_problem" not in body
+        assert "run_db" not in body

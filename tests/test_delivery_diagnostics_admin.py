@@ -113,5 +113,5 @@ def test_diagnostic_rule_label_is_escaped() -> None:
     rule = DeliveryRuleMetrics(rule_id="<b>1</b>", faulty_count=1)
     text = format_delivery_diagnostics_admin_text(_snapshot(
         status=DeliveryHealthStatus.WARNING, total_faulty=1, problem_rules=(rule,)))
-    assert "&lt;b&gt;1&lt;/b&gt;" in text
-    assert "<b>1</b>" not in text
+    assert "<b>1) Правило #&lt;b&gt;1&lt;/b&gt;</b>" in text
+    assert "Правило #<b>1</b>" not in text
