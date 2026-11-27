@@ -24,6 +24,8 @@ def test_retired_tracking_is_not_registered_or_recreated():
     for node in ast.walk(bot_tree):
         if isinstance(node, ast.ImportFrom):
             assert node.module not in RETIRED_MODULES
+            if node.module:
+                assert all(f"{node.module}.{alias.name}" not in RETIRED_MODULES for alias in node.names)
         elif isinstance(node, ast.Import):
             assert not any(alias.name in RETIRED_MODULES for alias in node.names)
         elif isinstance(node, ast.Subscript):
