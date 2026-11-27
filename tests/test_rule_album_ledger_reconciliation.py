@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -78,8 +79,12 @@ class Cursor:
         query = " ".join(str(sql).split())
         self.executed.append((query, args))
         self.rowcount = 1
-        if query.startswith("SELECT target_id, mode, tenant_id FROM routing"):
-            self.result = {"target_id": "-100456", "mode": "repost", "tenant_id": 1}
+        if query.startswith("SELECT target_id, mode, tenant_id") and "FROM routing" in query:
+            self.result = {
+                "target_id": "-100456", "mode": "repost", "tenant_id": 1,
+                "source_id": "-100123", "source_thread_id": None,
+                "target_thread_id": None, "is_active": False,
+            }
         elif "FROM delivery_attempts WHERE id =" in query:
             self.result = {
                 "id": 20, "status": self.attempt_status,
@@ -1089,12 +1094,18 @@ def test_faulty_recovery_requires_exact_ordered_media_identity():
     dst = {701: _message(701, grouped_id=60), 702: _message(702, grouped_id=60)}
     for message, media_id in zip([*src.values(), *dst.values()], [11, 12, 11, 12]):
         message.photo = SimpleNamespace(id=media_id)
+        message.date = datetime(2026, 9, 8, tzinfo=timezone.utc)
     assert validate_candidate(candidate, src, dst, exact_media=True) == "EXACT_MEDIA_OK"
     dst[701].photo, dst[702].photo = dst[702].photo, dst[701].photo
     assert validate_candidate(candidate, src, dst, exact_media=True) == "MEDIA_IDENTITY_MISMATCH"
     dst[701].photo, dst[702].photo = dst[702].photo, dst[701].photo
     src[101].grouped_id = 51
     assert validate_candidate(candidate, src, dst, exact_media=True) == "SOURCE_GROUP_MISMATCH"
+    src[102].grouped_id = 51
+    assert validate_candidate(candidate, src, dst, exact_media=True) == "SOURCE_GROUP_ID_MISMATCH"
+    src[101].grouped_id = src[102].grouped_id = 50
+    dst[701].date = None
+    assert validate_candidate(candidate, src, dst, exact_media=True) == "PUBLICATION_TIME_UNAVAILABLE"
 
 
 @pytest.mark.parametrize("fault", [None, "active", "wrong_target", "other_error",
@@ -1124,16 +1135,28 @@ def test_faulty_recovery_is_atomic_and_fenced(fault):
                 cursor.result[0]["sent_message_id"] = 701
     cursor.execute = execute
 
-    args = dict(recover_faulty=True,
+    published_at = datetime(2026, 9, 8, tzinfo=timezone.utc)
+    args = dict(recover_faulty=True, published_at=published_at,
                 expected_target_id="-100999" if fault == "wrong_target" else "-100456",
                 expected_delivery_ids=[4, 5, 6] if fault == "new_ids" else [1, 2, 3])
     if fault is None:
         assert _apply(repo, **args) == 3
         assert connection.commits == 1
-        writes = [q for q, _ in cursor.executed if "UPDATE deliveries SET status = 'sent'" in q]
-        assert len(writes) == 3 and all("status = 'faulty'" in q for q in writes)
+        writes = [(q, params) for q, params in cursor.executed
+                  if "UPDATE deliveries SET status = 'sent'" in q]
+        assert len(writes) == 3 and all("status = 'faulty'" in q for q, _ in writes)
+        assert all(params[0] == published_at.isoformat() for _, params in writes)
     else:
         with pytest.raises(RuntimeError):
             _apply(repo, **args)
         assert connection.commits == 0
         assert not any("UPDATE deliveries SET status = 'sent'" in q for q, _ in cursor.executed)
+
+
+@pytest.mark.parametrize("date", [None, datetime(2026, 9, 8), datetime(2099, 1, 1, tzinfo=timezone.utc)])
+def test_faulty_recovery_rejects_unknown_or_invalid_publication_time(date):
+    repo, cursor, connection = _repository()
+    with pytest.raises(ValueError, match="historical Telegram publication time"):
+        _apply(repo, recover_faulty=True, expected_target_id="-100456",
+               expected_delivery_ids=[1, 2, 3], published_at=date)
+    assert not cursor.executed and connection.commits == 0

@@ -7304,6 +7304,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         source_message_ids: list[int], target_message_ids: list[int],
         recover_faulty: bool = False, expected_target_id: str | None = None,
         expected_delivery_ids: list[int] | None = None,
+        published_at: datetime | None = None,
     ) -> int:
         """Atomically promote one *externally verified* complete album.
 
@@ -7327,6 +7328,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                                or len(expected_delivery_ids) != len(source_ids)
                                or len(set(expected_delivery_ids)) != len(source_ids)):
             raise ValueError("Faulty album recovery requires the audited route and delivery IDs")
+
+        if recover_faulty and (
+            not isinstance(published_at, datetime)
+            or published_at.utcoffset() is None
+            or published_at > datetime.now(timezone.utc)
+        ):
+            raise ValueError("Faulty album recovery requires a historical Telegram publication time")
 
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -7478,7 +7486,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         cur.execute(
                             """
                             UPDATE deliveries
-                            SET status = 'sent', sent_at = NOW(), error_text = NULL,
+                            SET status = 'sent', sent_at = %s, error_text = NULL,
                                 sent_message_id = %s, sent_message_ids_json = %s::jsonb,
                                 target_id_snapshot = %s,
                                 delivery_method = 'reconciled_verified_album_ledger'
@@ -7486,7 +7494,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                               AND error_text = 'album_member_set_changed_manual_review_no_resend'
                               AND sent_message_id IS NULL AND sent_message_ids_json IS NULL
                             """,
-                            (int(tid), _json_dumps(target_ids), target_id, int(did)),
+                            (published_at.isoformat(), int(tid), _json_dumps(target_ids), target_id, int(did)),
                         )
                         if cur.rowcount != 1:
                             raise RuntimeError("Faulty album row changed concurrently; rolled back")

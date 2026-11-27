@@ -145,7 +145,9 @@ the audit and add `--apply` to the same command. The transaction locks the rule,
 attempt and complete album, checks the route and exact delivery IDs, rejects
 existing old delivery anchors, competing attempts/receipts and unrelated errors,
 then marks only the selected faulty album sent. The original delivery-ID vector
-and the Telegram source IDs are recorded in audit_log. No schedule or other rule
+and the Telegram source IDs are recorded in audit_log. The restored deliveries retain the actual latest member publication time
+read from Telegram, not the repair time, so rollback chronology is preserved.
+Missing or invalid timestamps block recovery. No schedule or other rule
 is modified; resume the rule explicitly. An accepted old receipt alone is not
 proof of publication. A dry-run match is not a guarantee that apply will pass
 the database guards.

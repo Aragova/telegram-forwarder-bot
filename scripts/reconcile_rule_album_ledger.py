@@ -13,6 +13,7 @@ import sqlite3
 import sys
 import tempfile
 from collections import Counter, OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -93,9 +94,20 @@ def _media_identity(message) -> tuple[str, int] | None:
     for kind in ("photo", "document"):
         media = getattr(message, kind, None)
         media_id = getattr(media, "id", None)
-        if type(media_id) is int and media_id != 0:
+        if isinstance(media_id, int) and not isinstance(media_id, bool) and media_id != 0:
             return kind, media_id
     return None
+
+
+def _publication_time(candidate: dict, targets: dict) -> datetime | None:
+    dates = [getattr(targets.get(mid), "date", None) for mid in candidate["target_ids"]]
+    now = datetime.now(timezone.utc)
+    if not dates or any(
+        not isinstance(date, datetime) or date.utcoffset() is None or date > now
+        for date in dates
+    ):
+        return None
+    return max(dates).astimezone(timezone.utc)
 
 
 def validate_candidate(candidate: dict, sources: dict, targets: dict, *,
@@ -138,6 +150,8 @@ def validate_candidate(candidate: dict, sources: dict, targets: dict, *,
                 return "MEDIA_IDENTITY_MISMATCH"
             if (source.message or "") != (target.message or ""):
                 return "MEMBER_CAPTION_MISMATCH"
+        if _publication_time(candidate, targets) is None:
+            return "PUBLICATION_TIME_UNAVAILABLE"
         return "EXACT_MEDIA_OK"
     return "STRUCTURE_OK"
 
@@ -243,6 +257,7 @@ async def audit(args) -> None:
                             recover_faulty=bool(faulty_group),
                             expected_target_id=item["target_id"],
                             expected_delivery_ids=item["delivery_ids"],
+                            published_at=_publication_time(item, dest) if faulty_group else None,
                         )
                         outcome = f"RESTORED_{updated}"
                     except Exception as exc:
