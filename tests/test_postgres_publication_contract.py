@@ -1868,3 +1868,46 @@ def test_unstarted_job_cannot_be_released_by_expired_or_replaced_owner(repo):
     assert job["status"] == "retry" and job["locked_by"] is None
     assert job["attempts"] == before
     assert repo.get_delivery(ids[0])["status"] == "processing"
+
+
+
+def test_orphan_quarantine_requires_paused_rule_and_preserves_ledger(repo):
+    key, rule_id, ids, _, _, _ = seed(repo, uuid4().int % 10**12, count=3)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=TRUE WHERE id=%s", (rule_id,))
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1)["status"] == "rule_not_paused"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE WHERE id=%s", (rule_id,))
+    payload = {"rule_id": rule_id, "delivery_id": ids[0], "delivery_ids": ids}
+    job_id = repo.create_job("repost_album", payload, "light")
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1)["status"] == "job_can_resume"
+    assert repo.fail_job(job_id, "Лимит тарифа")
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1)["status"] == "job_can_resume"
+    assert repo.fail_job(job_id, "terminal failure")
+    result = repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1)
+    assert result == {"status": "quarantined", "updated_count": 3}
+    assert [repo.get_delivery(i)["status"] for i in ids] == ["faulty"] * 3
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "sending"
+    assert repo.get_job(job_id)["status"] == "failed"
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1)["status"] == "nothing_to_do"
+
+
+def test_orphan_quarantine_refuses_publication_evidence_and_partial_album(repo):
+    seeded = seed(repo, uuid4().int % 10**12)
+    _, rule_id, ids, _, _, _ = seeded
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE WHERE id=%s", (rule_id,))
+    assert register(repo, seeded, [888])
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1)["status"] == "publication_evidence"
+    assert repo.get_delivery(ids[0])["status"] == "processing"
+
+    _, second, members, _, _, _ = seed(repo, uuid4().int % 10**12, count=3)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE,mode='repost' WHERE id=%s", (second,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE id=%s", (members[-1],))
+    assert repo.quarantine_orphaned_processing_rule(second, admin_id=1)["status"] == "partial_album"
+    assert [repo.get_delivery(i)["status"] for i in members] == ["processing", "processing", "pending"]

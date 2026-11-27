@@ -1911,6 +1911,154 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         logger.warning("MANUAL_STALE_JOB_RECOVERY | admin_id=%s | job_ids=%s", admin_id, ids)
         return {"updated_count": len(ids), "job_ids": ids, "limit": safe_limit}
 
+    def get_orphaned_processing_rules(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        """Read-only diagnostic. Absence of a job is not evidence of no send."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT r.id AS rule_id, r.is_active
+                    FROM routing r
+                    WHERE r.rescan_owner_token IS NULL
+                      AND EXISTS (
+                          SELECT 1 FROM deliveries d
+                          WHERE d.rule_id=r.id AND d.status='processing'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM jobs j
+                          WHERE j.payload_json->>'rule_id'=r.id::text
+                            AND j.job_type=ANY(%s)
+                            AND j.status IN ('pending','leased','processing','retry')
+                      )
+                    ORDER BY r.id
+                    LIMIT %s
+                    """,
+                    (sorted(DELIVERY_JOB_TYPES), max(1, min(int(limit), 10))),
+                )
+                return [dict(row) for row in cur.fetchall() or []]
+
+    def quarantine_orphaned_processing_rule(self, rule_id: int, *, admin_id: int) -> dict[str, Any]:
+        """Explicit operator action, never a retry or evidence of a failed RPC.
+
+        The rule lock serializes this with the atomic scheduler, rescan and
+        scoped worker writes. Do not override billing recovery or receipts.
+        """
+        rule_id = int(rule_id)
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT is_active,rescan_owner_token,mode FROM routing WHERE id=%s FOR UPDATE",
+                    (rule_id,),
+                )
+                rule = cur.fetchone()
+                if not rule or rule["is_active"] or rule["rescan_owner_token"] is not None:
+                    return {"status": "rule_not_paused", "updated_count": 0}
+                # Deliberately conservative: every possible billing marker
+                # excludes the rule, even if billing recovery would later
+                # reject the particular failure for another reason.
+                cur.execute(
+                    """
+                    SELECT id FROM jobs
+                    WHERE payload_json->>'rule_id'=%s AND job_type=ANY(%s)
+                      AND COALESCE(payload_json->>'rescan_cancelled','false')<>'true'
+                      AND (
+                          status IN ('pending','leased','processing','retry')
+                          OR (status='failed' AND LOWER(COALESCE(error_text,'')) LIKE ANY(%s))
+                      )
+                    LIMIT 1 FOR UPDATE
+                    """,
+                    (str(rule_id), sorted(DELIVERY_JOB_TYPES),
+                     ["%лимит%", "%подписка неактивна%", "%subscription%", "%limit%"]),
+                )
+                if cur.fetchone():
+                    return {"status": "job_can_resume", "updated_count": 0}
+                cur.execute(
+                    """
+                    SELECT d.id FROM deliveries d
+                    WHERE d.rule_id=%s AND d.status='processing'
+                    ORDER BY d.id FOR UPDATE
+                    """,
+                    (rule_id,),
+                )
+                ids = [int(row["id"]) for row in cur.fetchall() or []]
+                if not ids:
+                    return {"status": "nothing_to_do", "updated_count": 0}
+                cur.execute(
+                    """
+                    SELECT 1 FROM telegram_publication_receipts
+                    WHERE rule_id=%s AND delivery_ids && %s::bigint[]
+                    LIMIT 1
+                    """,
+                    (rule_id, ids),
+                )
+                if cur.fetchone():
+                    return {"status": "publication_evidence", "updated_count": 0}
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM deliveries d JOIN posts p ON p.id=d.post_id
+                    WHERE d.rule_id=%s AND d.id=ANY(%s)
+                      AND (
+                          d.sent_at IS NOT NULL OR d.sent_message_id IS NOT NULL
+                          OR (d.sent_message_ids_json IS NOT NULL
+                              AND d.sent_message_ids_json <> '[]'::jsonb)
+                          OR EXISTS (
+                              SELECT 1 FROM delivery_attempts a
+                              WHERE a.rule_id=d.rule_id AND a.status='verified'
+                                AND a.idempotency_key NOT LIKE 'archived:%%'
+                                AND a.idempotency_key NOT LIKE '%%:rescan:%%'
+                                AND (
+                                    a.delivery_id=d.id
+                                    OR (a.operation_kind='album' AND (
+                                        a.source_message_ids_json @> jsonb_build_array(d.id)
+                                        OR (p.media_group_id IS NOT NULL AND starts_with(
+                                            a.idempotency_key,
+                                            'rule:' || d.rule_id::text || ':target:' || a.target_id
+                                            || ':media_group:' || p.media_group_id || ':album'
+                                        ))
+                                    ))
+                                )
+                          )
+                      )
+                    LIMIT 1
+                    """,
+                    (rule_id, ids),
+                )
+                if cur.fetchone():
+                    return {"status": "publication_evidence", "updated_count": 0}
+                # Never make a remaining pending member eligible for replay
+                # merely by removing the processing members of its album.
+                if str(rule["mode"] or "repost").lower() == "repost":
+                    cur.execute(
+                        """
+                        SELECT 1 FROM deliveries d JOIN posts p ON p.id=d.post_id
+                        JOIN posts sibling ON sibling.source_channel=p.source_channel
+                          AND sibling.source_thread_id IS NOT DISTINCT FROM p.source_thread_id
+                          AND sibling.media_group_id=p.media_group_id
+                        JOIN deliveries other ON other.post_id=sibling.id
+                          AND other.rule_id=d.rule_id AND other.status='pending'
+                        WHERE d.rule_id=%s AND d.id=ANY(%s) AND p.media_group_id IS NOT NULL
+                        LIMIT 1
+                        """,
+                        (rule_id, ids),
+                    )
+                    if cur.fetchone():
+                        return {"status": "partial_album", "updated_count": 0}
+                cur.execute(
+                    """
+                    UPDATE deliveries SET status='faulty',
+                        error_text='orphaned_processing_manual_review_no_resend'
+                    WHERE rule_id=%s AND id=ANY(%s) AND status='processing'
+                    RETURNING id
+                    """,
+                    (rule_id, ids),
+                )
+                quarantined = [int(row["id"]) for row in cur.fetchall() or []]
+            conn.commit()
+        logger.warning("ORPHAN_DELIVERY_QUARANTINE | rule_id=%s | admin_id=%s | delivery_ids=%s",
+                       rule_id, admin_id, quarantined)
+        return {"status": "quarantined", "updated_count": len(quarantined)}
+
     def reset_stuck_processing_deliveries_to_pending(
         self, *, older_than_seconds: int, limit: int = 50,
         rule_id: int | None = None, admin_id: int | None = None,
