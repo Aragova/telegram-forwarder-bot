@@ -170,7 +170,7 @@ job_workers_stop_event: asyncio.Event | None = None
 reaction_worker_task: asyncio.Task | None = None
 scheduler_runtime_task: asyncio.Task | None = None
 job_watchdog_task: asyncio.Task | None = None
-workers_runtime_enabled = True
+workers_runtime_enabled = False
 user_states: dict[int, dict[str, Any]] = {}
 saved_post_album_buffer = SavedPostAlbumCaptureBuffer(delay_seconds=1.2)
 dashboard_tasks: dict[int, asyncio.Task] = {}
@@ -8868,18 +8868,6 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
     else:
         ui_policy = None
 
-    try:
-        await bot.delete_webhook(drop_pending_updates=True, request_timeout=90)
-    except Exception as e:
-        logger.warning("Webhook skip (network issue): %s", e)
-    try:
-        await bot.set_my_commands(
-            DEFAULT_TELEGRAM_COMMANDS,
-            scope=BotCommandScopeDefault(),
-        )
-    except Exception as exc:
-        logger.warning("Не удалось установить команды бота: %s", exc)
-
     telethon_client = await create_telethon_client(publication_repository=db)
     reaction_clients = await create_reaction_clients()
     if admin_handlers_ctx is not None:
@@ -8911,6 +8899,22 @@ async def _init_sender_runtime(*, create_ui_policy: bool) -> None:
         reaction_clients=reaction_clients,
     )
 
+
+async def _prepare_polling_runtime() -> None:
+    """Настройка получения обновлений только для владельца polling."""
+    if bot is None:
+        raise RuntimeError("Bot API не инициализирован")
+    try:
+        await bot.delete_webhook(drop_pending_updates=False, request_timeout=90)
+    except Exception as e:
+        logger.warning("Webhook skip (network issue): %s", e)
+    try:
+        await bot.set_my_commands(
+            DEFAULT_TELEGRAM_COMMANDS,
+            scope=BotCommandScopeDefault(),
+        )
+    except Exception as exc:
+        logger.warning("Не удалось установить команды бота: %s", exc)
 
 
 def _start_channel_title_sync_runtime() -> None:
@@ -9088,6 +9092,7 @@ async def _start_bot_role() -> None:
     posting_active = False
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=True)
+    await _prepare_polling_runtime()
     start_background_task(heartbeat_loop("bot", db), name="bot-heartbeat")
     start_background_task(watchdog_loop(db), name="health-watchdog")
     _start_repost_campaign_runtime_tasks(role="bot")
@@ -9137,6 +9142,7 @@ async def _start_all_role() -> None:
     posting_active = False
     await _init_db_runtime()
     await _init_sender_runtime(create_ui_policy=True)
+    await _prepare_polling_runtime()
     start_background_task(heartbeat_loop("bot", db), name="bot-heartbeat")
     start_background_task(heartbeat_loop("scheduler", db), name="scheduler-heartbeat")
     start_background_task(heartbeat_loop("worker", db), name="worker-heartbeat")
@@ -9172,7 +9178,7 @@ async def _start_all_role() -> None:
 
 async def start_job_workers_runtime() -> None:
     global job_worker_tasks, job_workers_stop_event
-    if not sender_service:
+    if not workers_runtime_enabled or not sender_service:
         return
     if any(not task.done() for task in job_worker_tasks):
         return
