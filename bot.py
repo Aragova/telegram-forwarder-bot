@@ -4301,6 +4301,17 @@ async def refresh_input_prompt_by_ids(
 
     return "failed"
 
+async def notify_callback_error(callback: CallbackQuery, text: str) -> bool:
+    """Preserve an alert after ACK; enqueue it if the chat is rate limited."""
+    chat = getattr(getattr(callback, "message", None), "chat", None)
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None or getattr(chat, "type", None) != "private":
+        return False
+    if ui_policy is not None:
+        return ui_policy.notify_after_ack(chat_id=chat_id, text=text)
+    return bool(await send_message_safe(chat_id=chat_id, text=text))
+
+
 async def answer_callback_safe(
     callback: CallbackQuery,
     text: str | None = None,
@@ -4310,9 +4321,7 @@ async def answer_callback_safe(
 
     if getattr(callback, "_navigation_ack_sent", False):
         if text and show_alert:
-            chat_id = getattr(getattr(callback.message, "chat", None), "id", None)
-            if chat_id is not None:
-                return bool(await send_message_safe(chat_id=chat_id, text=text))
+            return await notify_callback_error(callback, text)
         return False
 
     if ui_policy is not None:
@@ -4968,8 +4977,8 @@ async def answer_callback_safe_once(
     show_alert: bool = False,
 ) -> bool:
     if getattr(callback, "_safe_answer_sent", False):
-        if getattr(callback, "_navigation_ack_sent", False) and text and show_alert:
-            return await answer_callback_safe(callback, text=text, show_alert=True)
+        if text and show_alert:
+            return await notify_callback_error(callback, text)
         return False
 
     ok = await answer_callback_safe(
@@ -6176,7 +6185,7 @@ async def handle_rule_card(callback: CallbackQuery):
 
     result = await refresh_rule_card_for_actor(callback, rule_id)
     if result not in {"updated", "not_modified", "resent"}:
-        await send_message_safe(chat_id=callback.message.chat.id, text="❌ Не удалось открыть карточку")
+        await answer_callback_safe_once(callback, "❌ Не удалось открыть карточку", show_alert=True)
 
 @dp.callback_query(lambda c: c.data == "rule_to_main_menu")
 async def handle_rule_to_main_menu(callback: CallbackQuery):
@@ -6542,7 +6551,7 @@ async def handle_rule_refresh(callback: CallbackQuery):
 
     result = await refresh_rule_card_for_actor(callback, rule_id)
     if result not in {"updated", "not_modified", "resent"}:
-        await send_message_safe(chat_id=callback.message.chat.id, text="❌ Не удалось обновить карточку")
+        await answer_callback_safe_once(callback, "❌ Не удалось обновить карточку", show_alert=True)
 
 @dp.callback_query(lambda c: c.data == "rule_to_list")
 async def handle_rule_to_list(callback: CallbackQuery):

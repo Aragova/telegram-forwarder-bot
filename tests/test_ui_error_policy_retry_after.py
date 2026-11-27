@@ -90,3 +90,63 @@ def test_ui_policy_restores_persistent_chat_lock(tmp_path):
     assert bot.send_message_calls == 0
     assert result.skipped is True
     assert result.reason == "chat_retry_after_active"
+
+
+def test_acknowledged_alert_waits_for_cooldown_and_coalesces(tmp_path):
+    from unittest.mock import AsyncMock
+
+    async def scenario():
+        bot = AsyncMock()
+        policy = UIErrorPolicy(bot, TelegramFloodLockStore(tmp_path / "alerts.json"))
+        policy._chat_retry_after_until["123"] = time.monotonic() + 0.05
+        assert policy.notify_after_ack(chat_id=123, text="Нет доступа")
+        assert policy.notify_after_ack(chat_id="123", text="Нет доступа")
+        assert policy.notify_after_ack(chat_id=123, text="Повторите попытку")
+        task = policy._alert_tasks["123"]
+        await asyncio.sleep(0)
+        bot.send_message.assert_not_awaited()
+        await asyncio.wait_for(task, timeout=2)
+        assert [c.kwargs["text"] for c in bot.send_message.await_args_list] == [
+            "Нет доступа", "Повторите попытку",
+        ]
+        assert not policy._alert_tasks and not policy._pending_alerts
+
+    asyncio.run(scenario())
+
+
+def test_deferred_alert_rechecks_new_retry_after(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    import app.ui_error_policy as module
+
+    monkeypatch.setattr(module, "RETRY_AFTER_SAFETY_SECONDS", 0)
+    async def scenario():
+        bot = AsyncMock()
+        bot.send_message.side_effect = [
+            TelegramRetryAfter(method=None, message="retry after", retry_after=0.03),
+            True,
+        ]
+        policy = UIErrorPolicy(bot, TelegramFloodLockStore(tmp_path / "alerts.json"))
+        assert policy.notify_after_ack(chat_id=123, text="Нет доступа")
+        await asyncio.wait_for(policy._alert_tasks["123"], timeout=2)
+        assert bot.send_message.await_count == 2
+        assert not policy._pending_alerts
+
+    asyncio.run(scenario())
+
+
+def test_deferred_alert_shutdown_cancels_pending_notification(tmp_path):
+    from unittest.mock import AsyncMock
+    from app.background_tasks import stop_background_tasks
+
+    async def scenario():
+        bot = AsyncMock()
+        policy = UIErrorPolicy(bot, TelegramFloodLockStore(tmp_path / "alerts.json"))
+        policy._chat_retry_after_until["123"] = time.monotonic() + 6402
+        assert policy.notify_after_ack(chat_id=123, text="Нет доступа")
+        task = policy._alert_tasks["123"]
+        await stop_background_tasks()
+        assert task.cancelled()
+        assert not policy._pending_alerts and not policy._alert_tasks
+        bot.send_message.assert_not_awaited()
+
+    asyncio.run(scenario())

@@ -6,6 +6,7 @@ No rule, queue, persistence, or scheduler logic lives in this module.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from html import escape
@@ -19,6 +20,7 @@ from app.ui_navigation import edit_locks, edit_result_status
 _RULE_CALLBACKS = frozenset({"open", "open_search", "pick", "fill_pick"})
 # Exactly one route button per row, even for short channel names.
 _LOGGER = logging.getLogger(__name__)
+RICH_EDIT_TIMEOUT_SECONDS = 15.0
 
 
 def rich_rule_list_enabled(*, admin: bool = False) -> bool:
@@ -174,10 +176,11 @@ async def try_edit_rich_catalog(
         try:
             url = bot.session.api.api_url(token=bot.token, method="editMessageText")
             payload = rich_edit_payload(chat_id=chat_id, message_id=message_id, html=html, footer=footer)
-            session = await (session_factory() if session_factory else bot.session.create_session())
-            async with session.post(url, json=payload) as response:
-                data = await response.json()
-                status_code = response.status
+            async with asyncio.timeout(RICH_EDIT_TIMEOUT_SECONDS):
+                session = await (session_factory() if session_factory else bot.session.create_session())
+                async with session.post(url, json=payload) as response:
+                    data = await response.json()
+                    status_code = response.status
             if data.get("ok") is True:
                 return True
             description = str(data.get("description") or "").lower()

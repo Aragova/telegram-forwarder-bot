@@ -290,3 +290,41 @@ def test_ui_edit_cache_is_invalidated_before_raw_rich_and_classic_fallback():
     policy.invalidate_edit_cache(chat_id=99, message_id=77)
     assert (99, 77) not in policy._last_edit_signature
     assert (99, 77) not in policy._last_edit_at
+
+
+def test_rich_timeout_releases_edit_lock_and_allows_classic_fallback(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from aiogram.types import InlineKeyboardMarkup
+    from app.telegram_flood_locks import TelegramFloodLockStore
+    from app.ui_error_policy import UIErrorPolicy
+    import app.rich_rule_buttons as module
+
+    monkeypatch.setattr(module, "RICH_EDIT_TIMEOUT_SECONDS", 0.01)
+
+    class StalledResponse:
+        async def __aenter__(self):
+            await asyncio.Event().wait()
+
+        async def __aexit__(self, *_):
+            return None
+
+    async def scenario():
+        bot = AsyncMock()
+        bot.token = "example"
+        bot.session = SimpleNamespace(api=SimpleNamespace(api_url=lambda **kw: "http://localhost/example"))
+        policy = UIErrorPolicy(bot, TelegramFloodLockStore(tmp_path / "locks.json"))
+        async def session_factory():
+            return SimpleNamespace(post=lambda *a, **kw: StalledResponse())
+
+        result = await asyncio.wait_for(try_edit_rich_catalog(
+            bot=bot, message=SimpleNamespace(chat=SimpleNamespace(id=123), message_id=42),
+            html="<p>Hi</p>", footer=InlineKeyboardMarkup(inline_keyboard=[]),
+            session_factory=session_factory, policy=policy,
+        ), timeout=1)
+        assert not result
+        classic = await asyncio.wait_for(policy.edit_text(
+            chat_id=123, message_id=42, text="Classic",
+        ), timeout=1)
+        assert classic.ok
+
+    asyncio.run(scenario())

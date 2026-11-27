@@ -8,6 +8,7 @@ from typing import Any
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
+from app.background_tasks import start_background_task
 from app.telegram_flood_locks import TelegramFloodLockStore
 from app.ui_navigation import edit_locks, message_key
 
@@ -38,6 +39,9 @@ class UIErrorPolicy:
 
     MESSAGE_EDIT_THROTTLE_SECONDS = 0.5
     EDIT_WAIT_BUDGET_SECONDS = 5.0
+    ALERT_MAX_CHATS = 256
+    ALERT_MAX_PER_CHAT = 16
+    ALERT_SEND_TIMEOUT_SECONDS = 15.0
 
     def __init__(
         self, bot, flood_lock_store: TelegramFloodLockStore | None = None
@@ -47,6 +51,8 @@ class UIErrorPolicy:
         self._chat_retry_after_until: dict[str, float] = {}
         self._last_edit_at: dict[tuple[int | str, int], float] = {}
         self._last_edit_signature: dict[tuple[int | str, int], tuple[Any, ...]] = {}
+        self._pending_alerts: dict[str, dict[str, None]] = {}
+        self._alert_tasks: dict[str, asyncio.Task] = {}
         self._load_persistent_chat_locks()
 
     # =========================================================
@@ -494,6 +500,69 @@ class UIErrorPolicy:
     # =========================================================
     # SEND
     # =========================================================
+
+    def notify_after_ack(self, *, chat_id: int | str, text: str) -> bool:
+        """Accept a private-chat alert for delivery without blocking its handler.
+
+        One tracked task per chat; duplicate pending texts coalesce. Flood
+        cooldowns are rechecked on every wake and every send. No delivery
+        promise is made across process shutdown.
+        """
+        key = str(chat_id)
+        pending = self._pending_alerts.get(key)
+        if pending is None:
+            if len(self._pending_alerts) >= self.ALERT_MAX_CHATS:
+                logger.warning("UI_ALERT_CAPACITY | chat_id=%s", key)
+                return False
+            pending = {}
+            self._pending_alerts[key] = pending
+        if text in pending:
+            return True
+        if len(pending) >= self.ALERT_MAX_PER_CHAT:
+            logger.warning("UI_ALERT_CHAT_CAPACITY | chat_id=%s", key)
+            return False
+        pending[text] = None
+        if key not in self._alert_tasks:
+            task = start_background_task(self._deliver_alerts(chat_id, key), name="ui-deferred-alert")
+            self._alert_tasks[key] = task
+            task.add_done_callback(lambda done: self._finish_alert_task(key, done))
+        return True
+
+    def _finish_alert_task(self, key: str, task: asyncio.Task) -> None:
+        if self._alert_tasks.get(key) is task:
+            self._alert_tasks.pop(key, None)
+            self._pending_alerts.pop(key, None)
+
+    async def _deliver_alerts(self, chat_id: int | str, key: str) -> None:
+        pending = self._pending_alerts[key]
+        try:
+            while pending:
+                cooldown = self._chat_cooldown_left(chat_id)
+                if cooldown > 0:
+                    await asyncio.sleep(cooldown)
+                    continue
+                text = next(iter(pending))
+                try:
+                    async with asyncio.timeout(self.ALERT_SEND_TIMEOUT_SECONDS):
+                        result = await self.send_message(chat_id=chat_id, text=text)
+                except TimeoutError:
+                    # Unknown send outcome: do not create a duplicate warning.
+                    logger.warning("UI_ALERT_TIMEOUT | chat_id=%s", key)
+                    pending.pop(text, None)
+                    continue
+                if result.reason in {"retry_after", "chat_retry_after_active"}:
+                    # Retry only when a positive cooldown was actually recorded.
+                    if self._chat_cooldown_left(chat_id) > 0:
+                        continue
+                if not result.ok:
+                    logger.warning("UI_ALERT_UNDELIVERED | chat_id=%s | reason=%s", key, result.reason)
+                pending.pop(text, None)
+        finally:
+            # Remove synchronously before returning, so a new alert cannot be
+            # appended to a finished task's queue before its done callback.
+            current = asyncio.current_task()
+            if current is not None:
+                self._finish_alert_task(key, current)
 
     async def send_message(
         self,

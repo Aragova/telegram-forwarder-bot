@@ -105,3 +105,22 @@ def test_cached_card_by_ids_always_attempts_render():
     })
     assert asyncio.run(render(chat_id=123, message_id=42, rule_id=1)) == "updated"
     edit.assert_awaited_once()
+
+
+@pytest.mark.parametrize("early", [True, False])
+def test_alert_after_any_ack_uses_deferred_notification(early):
+    notify = Mock(return_value=True)
+    ns = {
+        "CallbackQuery": object, "ui_policy": SimpleNamespace(notify_after_ack=notify),
+        "send_message_safe": AsyncMock(), "logger": logging.getLogger(__name__),
+    }
+    load_function("notify_callback_error", ns)
+    load_function("answer_callback_safe", ns)
+    once = load_function("answer_callback_safe_once", ns)
+    event = callback("rf:apply:1")
+    event._safe_answer_sent = True
+    event._navigation_ack_sent = early
+    assert asyncio.run(once(event, "Нет доступа", show_alert=True))
+    notify.assert_called_once_with(chat_id=123, text="Нет доступа")
+    assert not asyncio.run(once(event))
+    notify.assert_called_once()
