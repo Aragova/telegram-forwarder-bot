@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from app.postgres_repository import PostgresRepository
-from scripts.reconcile_rule_album_ledger import build_candidates, validate_candidate
+from scripts.reconcile_rule_album_ledger import (
+    _read_complete_album, build_candidates, validate_candidate,
+)
 
 
 def _row(did, mid, *, aid=20, status="accepted", ids=None):
@@ -1095,17 +1098,26 @@ def test_faulty_recovery_requires_exact_ordered_media_identity():
     for message, media_id in zip([*src.values(), *dst.values()], [11, 12, 11, 12]):
         message.photo = SimpleNamespace(id=media_id)
         message.date = datetime(2026, 9, 8, tzinfo=timezone.utc)
-    assert validate_candidate(candidate, src, dst, exact_media=True) == "EXACT_MEDIA_OK"
+    def verify(**changes):
+        params = dict(exact_media=True, observed_source_ids=[101, 102],
+                      observed_target_ids=[701, 702])
+        params.update(changes)
+        return validate_candidate(candidate, src, dst, **params)
+
+    assert verify() == "EXACT_MEDIA_OK"
+    assert verify(observed_source_ids=None) == "ALBUM_COMPLETENESS_UNAVAILABLE"
+    assert verify(observed_source_ids=[101, 102, 103]) == "SOURCE_ALBUM_MEMBERS_MISMATCH"
+    assert verify(observed_target_ids=[700, 701, 702]) == "TARGET_ALBUM_MEMBERS_MISMATCH"
     dst[701].photo, dst[702].photo = dst[702].photo, dst[701].photo
-    assert validate_candidate(candidate, src, dst, exact_media=True) == "MEDIA_IDENTITY_MISMATCH"
+    assert verify() == "MEDIA_IDENTITY_MISMATCH"
     dst[701].photo, dst[702].photo = dst[702].photo, dst[701].photo
     src[101].grouped_id = 51
-    assert validate_candidate(candidate, src, dst, exact_media=True) == "SOURCE_GROUP_MISMATCH"
+    assert verify() == "SOURCE_GROUP_MISMATCH"
     src[102].grouped_id = 51
-    assert validate_candidate(candidate, src, dst, exact_media=True) == "SOURCE_GROUP_ID_MISMATCH"
+    assert verify() == "SOURCE_GROUP_ID_MISMATCH"
     src[101].grouped_id = src[102].grouped_id = 50
     dst[701].date = None
-    assert validate_candidate(candidate, src, dst, exact_media=True) == "PUBLICATION_TIME_UNAVAILABLE"
+    assert verify() == "PUBLICATION_TIME_UNAVAILABLE"
 
 
 @pytest.mark.parametrize("fault", [None, "active", "wrong_target", "other_error",
@@ -1137,6 +1149,7 @@ def test_faulty_recovery_is_atomic_and_fenced(fault):
 
     published_at = datetime(2026, 9, 8, tzinfo=timezone.utc)
     args = dict(recover_faulty=True, published_at=published_at,
+                observed_source_ids=[101, 102, 103], observed_target_ids=[701, 702, 703],
                 expected_target_id="-100999" if fault == "wrong_target" else "-100456",
                 expected_delivery_ids=[4, 5, 6] if fault == "new_ids" else [1, 2, 3])
     if fault is None:
@@ -1160,3 +1173,104 @@ def test_faulty_recovery_rejects_unknown_or_invalid_publication_time(date):
         _apply(repo, recover_faulty=True, expected_target_id="-100456",
                expected_delivery_ids=[1, 2, 3], published_at=date)
     assert not cursor.executed and connection.commits == 0
+
+
+@pytest.mark.parametrize("source_ids,target_ids", [
+    (None, [701, 702, 703]), ([101, 102, 103], None),
+    ([101, 102, 103, 104], [701, 702, 703]),
+    ([101, 102, 103], [701, 702, 703, 704]),
+])
+def test_faulty_recovery_requires_complete_observed_groups(source_ids, target_ids):
+    repo, cursor, connection = _repository()
+    with pytest.raises(ValueError, match="complete observed Telegram groups"):
+        _apply(repo, recover_faulty=True, expected_target_id="-100456",
+               expected_delivery_ids=[1, 2, 3],
+               published_at=datetime(2026, 9, 8, tzinfo=timezone.utc),
+               observed_source_ids=source_ids, observed_target_ids=target_ids)
+    assert not cursor.executed and connection.commits == 0
+
+
+@pytest.mark.parametrize("target_ids", [[101, 102, 103], [103, 701, 702]])
+@pytest.mark.parametrize("recover_faulty", [False, True])
+def test_recovery_rejects_self_repost_overlap_before_mutation(target_ids, recover_faulty):
+    repo, cursor, connection = _repository()
+    original = cursor.execute
+
+    def execute(sql, args=None):
+        original(sql, args)
+        if "FROM routing" in str(sql):
+            cursor.result["target_id"] = "-100123"
+    cursor.execute = execute
+    with pytest.raises(RuntimeError, match="overlap"):
+        _apply(repo, target_message_ids=target_ids,
+               recover_faulty=recover_faulty, expected_target_id="-100123",
+               expected_delivery_ids=[1, 2, 3],
+               published_at=datetime(2026, 9, 8, tzinfo=timezone.utc),
+               observed_source_ids=[101, 102, 103], observed_target_ids=target_ids)
+    assert connection.commits == 0
+    assert not any("UPDATE " in q for q, _ in cursor.executed)
+
+
+def test_candidate_rejects_same_chat_overlap_but_allows_distinct_target_ids():
+    candidate = _faulty_candidate()
+    candidate["target_id"] = candidate["source_channel"]
+    candidate["target_ids"] = [101, 701]
+    src = {101: _message(101), 102: _message(102)}
+    dst = {101: _message(101), 701: _message(701)}
+    assert validate_candidate(candidate, src, dst) == "SELF_REPOST_ID_OVERLAP"
+    candidate["target_ids"] = [701, 702]
+    dst = {701: _message(701), 702: _message(702)}
+    assert validate_candidate(candidate, src, dst) == "STRUCTURE_OK"
+
+
+@pytest.mark.parametrize("extra, expected", [(None, [101, 102]), (103, [101, 102, 103]),
+                                            (900, [900])])
+def test_album_reader_detects_nearby_and_distant_missing_members(extra, expected):
+    history = {mid: _message(mid) for mid in [101, 102]}
+    if extra:
+        history[extra] = _message(extra)
+
+    class Client:
+        async def get_messages(self, entity, *, ids):
+            return [history.get(mid) for mid in ids]
+
+        async def iter_messages(self, entity, *, limit):
+            for mid in sorted(history, reverse=True):
+                yield history[mid]
+
+    actual = asyncio.run(_read_complete_album(
+        Client(), "peer", [101, 102], history, "TEST", 0,
+    ))
+    assert sorted(actual) == expected
+
+
+def test_album_reader_requires_exhausted_history_for_short_group(monkeypatch):
+    monkeypatch.setattr("scripts.reconcile_rule_album_ledger.ALBUM_HISTORY_LIMIT", 3)
+    history = {101: _message(101), 102: _message(102)}
+
+    class Client:
+        async def get_messages(self, entity, *, ids):
+            return [history.get(mid) for mid in ids]
+
+        async def iter_messages(self, entity, *, limit):
+            for mid in [201, 202, 203, 204]:
+                yield _message(mid, grouped_id=None)
+
+    assert asyncio.run(_read_complete_album(
+        Client(), "peer", [101, 102], history, "TEST", 0,
+    )) is None
+
+
+def test_album_reader_ten_members_need_no_full_history():
+    ids = list(range(101, 111))
+    history = {mid: _message(mid) for mid in ids}
+
+    class Client:
+        async def get_messages(self, entity, *, ids):
+            return [history.get(mid) for mid in ids]
+
+        def iter_messages(self, *_args, **_kwargs):
+            raise AssertionError("Full album must not scan history")
+
+    result = asyncio.run(_read_complete_album(Client(), "peer", ids, history, "TEST", 0))
+    assert sorted(result) == ids

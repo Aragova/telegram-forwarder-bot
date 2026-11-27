@@ -7305,6 +7305,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         recover_faulty: bool = False, expected_target_id: str | None = None,
         expected_delivery_ids: list[int] | None = None,
         published_at: datetime | None = None,
+        observed_source_ids: list[int] | None = None,
+        observed_target_ids: list[int] | None = None,
     ) -> int:
         """Atomically promote one *externally verified* complete album.
 
@@ -7336,6 +7338,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         ):
             raise ValueError("Faulty album recovery requires a historical Telegram publication time")
 
+        if recover_faulty and (
+            not 2 <= len(source_ids) <= 10
+            or observed_source_ids != source_ids
+            or observed_target_ids != sorted(target_ids)
+        ):
+            raise ValueError("Faulty album recovery requires complete observed Telegram groups")
+
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -7347,6 +7356,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 if not rule or str(rule["mode"]) != "repost":
                     raise RuntimeError("Rule missing or not in repost mode")
                 target_id = str(rule["target_id"])
+                if target_id == str(source_channel) and set(source_ids) & set(target_ids):
+                    raise RuntimeError("Source and target album IDs overlap in one chat")
                 if recover_faulty and (
                     rule["is_active"] or target_id != expected_target_id
                     or str(rule["source_id"]) != str(source_channel)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Audit/reconcile album receipts orphaned by historical full rescans.
 
-Default: read-only. Apply requires two explicit flags. Never sends messages.
+Default: read-only. Apply requires explicit recovery mode and flags. Never sends messages.
 No database mutations occur until each album has passed live MTProto checks.
 """
 from __future__ import annotations
@@ -111,11 +111,15 @@ def _publication_time(candidate: dict, targets: dict) -> datetime | None:
 
 
 def validate_candidate(candidate: dict, sources: dict, targets: dict, *,
-                       exact_media: bool = False) -> str:
+                       exact_media: bool = False,
+                       observed_source_ids: list[int] | None = None,
+                       observed_target_ids: list[int] | None = None) -> str:
     source_ids = candidate["source_ids"]
     target_ids = candidate["target_ids"]
     if len(source_ids) != len(target_ids):
         return "COUNT_MISMATCH"
+    if candidate["source_channel"] == candidate["target_id"] and set(source_ids) & set(target_ids):
+        return "SELF_REPOST_ID_OVERLAP"
     if any(mid not in sources for mid in source_ids):
         return "SOURCE_MISSING"
     if any(mid not in targets for mid in target_ids):
@@ -144,6 +148,12 @@ def validate_candidate(candidate: dict, sources: dict, targets: dict, *,
             for message in src
         ):
             return "SOURCE_GROUP_ID_MISMATCH"
+        if observed_source_ids is None or observed_target_ids is None:
+            return "ALBUM_COMPLETENESS_UNAVAILABLE"
+        if observed_source_ids != sorted(source_ids):
+            return "SOURCE_ALBUM_MEMBERS_MISMATCH"
+        if observed_target_ids != sorted(target_ids):
+            return "TARGET_ALBUM_MEMBERS_MISMATCH"
         for source, target in zip(src, dst):
             identity = _media_identity(source)
             if identity is None or identity != _media_identity(target):
@@ -183,6 +193,57 @@ async def _fetch(client, entity, ids: list[int], label: str, max_wait: int) -> d
         if offset + 90 < len(ids):
             await asyncio.sleep(5)
     return found
+
+
+# Telegram media groups are limited to ten members. A smaller matching
+# neighbourhood is not proof of completeness: other members may have gaps
+# in their message IDs. Only a fully exhausted, bounded peer scan can prove
+# the smaller group. Large histories fail closed rather than guessing.
+ALBUM_MAX_MEMBERS = 10
+ALBUM_NEIGHBOUR_MARGIN = 20
+ALBUM_MAX_ID_SPAN = 200
+ALBUM_HISTORY_LIMIT = 5000
+
+
+async def _read_complete_album(client, entity, ids: list[int], initial: dict,
+                               label: str, max_wait: int) -> dict | None:
+    if not 2 <= len(ids) <= ALBUM_MAX_MEMBERS or len(set(ids)) != len(ids):
+        return None
+    if any(mid not in initial for mid in ids):
+        return None
+    groups = {getattr(initial[mid], "grouped_id", None) for mid in ids}
+    if len(groups) != 1 or None in groups or 0 in groups:
+        return None
+    group = next(iter(groups))
+    if max(ids) - min(ids) > ALBUM_MAX_ID_SPAN:
+        return None
+    window = list(range(max(1, min(ids) - ALBUM_NEIGHBOUR_MARGIN),
+                        max(ids) + ALBUM_NEIGHBOUR_MARGIN + 1))
+    nearby = await _fetch(client, entity, window, label, max_wait)
+    members = {mid: msg for mid, msg in nearby.items()
+               if getattr(msg, "grouped_id", None) == group}
+    # Any discrepancy is already decisive. Ten matching members saturate
+    # the Telegram limit; no full history scan is needed.
+    if set(members) != set(ids) or len(members) == ALBUM_MAX_MEMBERS:
+        return members
+
+    async def scan_history() -> dict | None:
+        found = {}
+        count = 0
+        async for message in client.iter_messages(entity, limit=ALBUM_HISTORY_LIMIT + 1):
+            count += 1
+            if count > ALBUM_HISTORY_LIMIT:
+                return None
+            if getattr(message, "grouped_id", None) == group:
+                found[int(message.id)] = message
+                if int(message.id) not in ids:
+                    return found
+        return found
+
+    try:
+        return await asyncio.wait_for(scan_history(), timeout=120)
+    except (TimeoutError, FloodWaitError):
+        return None
 
 
 async def audit(args) -> None:
@@ -239,7 +300,25 @@ async def audit(args) -> None:
 
             counts = Counter()
             for item in candidates:
-                verdict = validate_candidate(item, sources, dest, exact_media=bool(faulty_group))
+                source_members = target_members = None
+                checked_sources, checked_targets = sources, dest
+                if faulty_group:
+                    source_group = await _read_complete_album(
+                        client, source_peer, item["source_ids"], sources, "SOURCE_ALBUM", args.max_flood_wait,
+                    )
+                    target_group = await _read_complete_album(
+                        client, target_peer, item["target_ids"], dest, "TARGET_ALBUM", args.max_flood_wait,
+                    )
+                    if source_group is not None:
+                        source_members = sorted(source_group)
+                        checked_sources = source_group
+                    if target_group is not None:
+                        target_members = sorted(target_group)
+                        checked_targets = target_group
+                verdict = validate_candidate(
+                    item, checked_sources, checked_targets, exact_media=bool(faulty_group),
+                    observed_source_ids=source_members, observed_target_ids=target_members,
+                )
                 counts[verdict] += 1
                 outcome = "DRY_RUN"
                 expected_verdict = "EXACT_MEDIA_OK" if faulty_group else "STRUCTURE_OK"
@@ -257,7 +336,9 @@ async def audit(args) -> None:
                             recover_faulty=bool(faulty_group),
                             expected_target_id=item["target_id"],
                             expected_delivery_ids=item["delivery_ids"],
-                            published_at=_publication_time(item, dest) if faulty_group else None,
+                            published_at=_publication_time(item, checked_targets) if faulty_group else None,
+                            observed_source_ids=source_members,
+                            observed_target_ids=target_members,
                         )
                         outcome = f"RESTORED_{updated}"
                     except Exception as exc:

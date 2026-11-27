@@ -151,3 +151,19 @@ Missing or invalid timestamps block recovery. No schedule or other rule
 is modified; resume the rule explicitly. An accepted old receipt alone is not
 proof of publication. A dry-run match is not a guarantee that apply will pass
 the database guards.
+
+
+### Complete membership and self-repost safeguards
+
+The exact-media recovery reads the message-ID neighbourhood of both albums.
+Ten matching members exhaust Telegram's album limit. For a smaller group,
+neighbourhood matching alone is insufficient: the script requires exhaustion
+of a bounded peer history scan (up to 5000 visible messages, 120 seconds).
+If the scan is incomplete, access is insufficient, or another group member is
+found, no recovery is applied. Groups whose saved IDs span more than 200
+message IDs are also refused. This conservative limit is for the operator
+recovery only, not the regular repost scheduler. Deleted/inaccessible messages
+cannot be reconstructed. Both independently observed member vectors must
+match the DB candidate before promotion. For a same-chat repost, any overlap
+between source and target message IDs is refused in both recovery modes;
+a genuine repost with distinct IDs is still allowed.
