@@ -723,12 +723,15 @@ def _load_rescan_handler(name, namespace):
 
     namespace.setdefault("maintain_rescan_lease", lease)
     namespace.setdefault("rescan_db", db_write)
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    namespace.setdefault("InlineKeyboardButton", InlineKeyboardButton)
+    namespace.setdefault("InlineKeyboardMarkup", InlineKeyboardMarkup)
     helpers = [n for n in tree.body
                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
                and n.name in {"_RescanReleaseFailed", "_finish_rule_rescan_with_retry",
                               "_report_rescan_release_failure", "_complete_rescan_job",
                               "_report_rescan_unknown", "_write_rescan_audit",
-                              "_run_rescan_rule_job", "_rule_rescan_scope"}
+                              "_run_rescan_rule_job", "_rule_rescan_scope", "_rescan_wait_keyboard"}
                and n is not node]
     exec(compile(ast.Module(body=[*helpers, node], type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace[name]
@@ -835,12 +838,13 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails(release):
         repo.log_rule_change.assert_not_called()
         assert "Появились новые записи" in show.await_args.kwargs["text"]
         assert "неизвестен" not in show.await_args.kwargs["text"]
+        assert [[b.callback_data for b in row] for row in show.await_args.kwargs["reply_markup"].inline_keyboard] == [["rule_card:94"]]
         return
     if release == "unknown":
         repo.finish_rule_rescan.assert_not_called()
         repo.log_rule_change.assert_not_called()
         assert "неизвестен" in show.await_args.kwargs["text"]
-        assert "reply_markup" not in show.await_args.kwargs
+        assert [[b.callback_data for b in row] for row in show.await_args.kwargs["reply_markup"].inline_keyboard] == [["rule_card:94"]]
         return
     repo.log_rule_change.assert_called_once()
     assert repo.finish_rule_rescan.call_count == (1 if release == "ok" else 2)
@@ -850,7 +854,7 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails(release):
     if release == "failed":
         assert "Очередь перестроена" in show.await_args.kwargs["text"]
         assert "не запускайте повторно" in show.await_args.kwargs["text"]
-        assert "reply_markup" not in show.await_args.kwargs
+        assert [[b.callback_data for b in row] for row in show.await_args.kwargs["reply_markup"].inline_keyboard] == [["rule_card:94"]]
         return
     assert "очередь начата заново" in show.await_args.kwargs["text"]
     assert "530" in show.await_args.kwargs["text"]
@@ -946,7 +950,7 @@ def test_keep_rescan_post_commit_failure_still_reports_success(failure):
         repo.finish_rule_rescan.assert_not_called()
         repo.log_rule_change.assert_not_called()
         assert "неизвестен" in show.await_args.kwargs["text"]
-        assert "reply_markup" not in show.await_args.kwargs
+        assert [[b.callback_data for b in row] for row in show.await_args.kwargs["reply_markup"].inline_keyboard] == [["rule_card:94"]]
         return
     repo.log_rule_change.assert_called_once()
     assert repo.finish_rule_rescan.call_count == (2 if failure.startswith("release") else 1)
@@ -956,7 +960,7 @@ def test_keep_rescan_post_commit_failure_still_reports_success(failure):
     repo.rebuild_rule_keep_position.assert_called_once()
     if failure == "release_failed":
         assert "Очередь перестроена" in show.await_args.kwargs["text"]
-        assert "reply_markup" not in show.await_args.kwargs
+        assert [[b.callback_data for b in row] for row in show.await_args.kwargs["reply_markup"].inline_keyboard] == [["rule_card:94"]]
         workers.assert_not_awaited()
         refresh.assert_not_awaited()
         return
