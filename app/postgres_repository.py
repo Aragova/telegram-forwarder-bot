@@ -4998,7 +4998,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                        AND rescan_owner_token IS NOT NULL
                        AND rescan_lease_until<=clock_timestamp()
                        AND (%s::text IS NULL OR rescan_operation->>'phase'=%s)
-                       ORDER BY rescan_lease_until,id LIMIT %s""",
+                       ORDER BY rescan_lease_until,id LIMIT %s FOR UPDATE SKIP LOCKED""",
                     (phase, phase, max(1, min(int(limit), 100))),
                 )
                 return [int(row["id"]) for row in cur.fetchall()]
