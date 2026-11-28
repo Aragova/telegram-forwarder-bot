@@ -5050,11 +5050,34 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     )
                     current = cur.fetchone()
                     if (not current or current["rescan_owner_token"] is not None
-                            or bool(current["is_active"]) != restored_active
+                            or (bool(current["is_active"]) and not restored_active)
                             or (queue_rebuilt and not current["rescan_queue_built"])):
                         raise RuntimeError(
                             "Владелец пересканирования изменился; нельзя менять статус правила"
                         )
+                    # A committed scope-changing release can safely leave the rule paused.
+                    restored_active = bool(current["is_active"])
+                elif operation is not None and int(operation["attempt"]) > 1:
+                    # The audit and release share the transaction: recovery cannot
+                    # lose its audit or create a duplicate on a lost commit reply.
+                    event_type = ("rule_rescan_recovered" if queue_rebuilt
+                                  else "rule_rescan_recovery_failed")
+                    new_value = ({"mode": operation["mode"], "phase": "rebuilt",
+                                  "is_active": restored_active} if queue_rebuilt
+                                 else {"mode": operation["mode"], "is_active": False})
+                    extra = {"attempt": operation["attempt"]}
+                    if not queue_rebuilt:
+                        extra["reason"] = "retry_exhausted"
+                    cur.execute(
+                        """INSERT INTO audit_log(
+                            created_at,event_type,rule_id,admin_id,source_id,source_thread_id,
+                            target_id,target_thread_id,new_value_json,extra_json,tenant_id
+                        ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (utc_now_iso(), event_type, int(rule_id), int(operation["actor_id"]),
+                         str(route["source_id"]), route["source_thread_id"],
+                         str(route["target_id"]), route["target_thread_id"],
+                         _json_dumps(new_value), _json_dumps(extra), route["tenant_id"]),
+                    )
             conn.commit()
         return restored_active
 
