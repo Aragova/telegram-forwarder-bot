@@ -8122,7 +8122,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             ))
             AND NOT EXISTS (
                 SELECT 1 FROM audit_log cleared
-                WHERE cleared.delivery_id=d.id AND cleared.event_type='faulty_log_cleared'
+                WHERE cleared.delivery_id = d.id
+                  AND cleared.event_type = 'faulty_log_cleared'
             )
         """
 
