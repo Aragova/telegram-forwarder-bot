@@ -24,16 +24,27 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             return
         await ctx.send_message_safe(chat_id=message.chat.id, text="⚠️ Раздел: Диагностика", reply_markup=ctx.get_diagnostics_menu())
 
+    async def faulty_payload(page):
+        try:
+            pages = await ctx.run_db(ctx.build_faulty_pages, 200)
+        except Exception as exc:
+            ctx.logger.warning("Диагностика проблемных доставок: %s | %s",
+                               type(exc).__name__, _safe_quarantine_traceback(exc))
+            return _diagnostic_unavailable_payload(f"faulty_refresh:{page}")
+        total_pages = len(pages)
+        page = ctx.clamp_page(page, total_pages)
+        current = pages[page]
+        return current["text"], ctx.build_faulty_inline_keyboard(
+            page, total_pages, current["delivery_id"], rule_id=current["rule_id"],
+        )
+
     @dp.message(lambda m: (m.text or "").strip() == "⚠️ Проблемные доставки")
     async def handle_faulty(message: Message):
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
         if not await ctx.is_admin(message):
             return
-        pages = await ctx.run_db(ctx.build_faulty_pages, 200)
-        page = 0
-        total_pages = len(pages)
-        current = pages[page]
-        await ctx.send_message_safe(chat_id=message.chat.id, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]))
+        text, markup = await faulty_payload(0)
+        await ctx.send_message_safe(chat_id=message.chat.id, text=text, parse_mode="HTML", reply_markup=markup)
 
 
     @dp.message(lambda m: (m.text or "").strip() in {"⚠️ Центр ошибок", "📊 Диагностика доставки"})
@@ -107,6 +118,18 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         await ctx.edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=markup)
 
 
+    async def orphan_payload(cursor, *, omit_empty=False):
+        try:
+            rows = await ctx.run_db(ctx.db.get_orphaned_processing_rules, limit=10, after_rule_id=cursor)
+        except Exception as exc:
+            ctx.logger.warning("Диагностика правил без задания: %s | %s",
+                               type(exc).__name__, _safe_quarantine_traceback(exc))
+            return _diagnostic_unavailable_payload(f"stuck_orphan_page:{cursor}")
+        if not rows and omit_empty:
+            return None
+        text = _format_orphan_recovery_instruction() if rows else "<b>🧯 Больше правил нет</b>"
+        return text, _orphan_page_keyboard(rows, cursor)
+
     @dp.message(lambda m: (m.text or "").strip() == "🧯 Зависшие задачи")
     async def handle_stuck_deliveries(message: Message):
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
@@ -114,11 +137,12 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             return
         text, markup = await stale_payload()
         await ctx.send_message_safe(chat_id=message.chat.id, text=text, parse_mode="HTML", reply_markup=markup)
-        orphans = await ctx.run_db(ctx.db.get_orphaned_processing_rules, limit=10)
-        if orphans:
+        orphan_view = await orphan_payload(0, omit_empty=True)
+        if orphan_view is not None:
+            text, markup = orphan_view
             await ctx.send_message_safe(
-                chat_id=message.chat.id, text=_format_orphan_recovery_instruction(),
-                parse_mode="HTML", reply_markup=_orphan_page_keyboard(orphans, 0),
+                chat_id=message.chat.id, text=text,
+                parse_mode="HTML", reply_markup=markup,
             )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("stuck_orphan_page:"))
@@ -130,11 +154,10 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
-        rows = await ctx.run_db(ctx.db.get_orphaned_processing_rules, limit=10, after_rule_id=cursor)
+        text, markup = await orphan_payload(cursor)
         await ctx.edit_message_text_safe(
-            message=callback.message,
-            text=_format_orphan_recovery_instruction() if rows else "<b>🧯 Больше правил нет</b>",
-            parse_mode="HTML", reply_markup=_orphan_page_keyboard(rows, cursor),
+            message=callback.message, text=text,
+            parse_mode="HTML", reply_markup=markup,
         )
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("stuck_orphan_request:"))
@@ -271,7 +294,14 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         )
 
     async def journal_payload(category, page):
-        pages = await ctx.run_db(ctx.build_system_journal_pages, 300, category=category)
+        try:
+            pages = await ctx.run_db(ctx.build_system_journal_pages, 300, category=category)
+        except Exception as exc:
+            ctx.logger.warning("Журнал событий: %s | %s",
+                               type(exc).__name__, _safe_quarantine_traceback(exc))
+            return _diagnostic_unavailable_payload(
+                f"syslog_refresh:{category}:{page}", back_callback="syslog_back",
+            )
         total = len(pages)
         page = ctx.clamp_page(page, total)
         current = pages[page]
@@ -339,11 +369,8 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
-        pages = await ctx.run_db(ctx.build_faulty_pages, 200)
-        total_pages = len(pages)
-        page = ctx.clamp_page(page, total_pages)
-        current = pages[page]
-        await ctx.edit_message_text_safe(message=callback.message, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]))
+        text, markup = await faulty_payload(page)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=markup)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("faulty_refresh:"))
     async def handle_faulty_refresh(callback: CallbackQuery):
@@ -356,11 +383,8 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
-        pages = await ctx.run_db(ctx.build_faulty_pages, 200)
-        total_pages = len(pages)
-        page = ctx.clamp_page(page, total_pages)
-        current = pages[page]
-        await ctx.edit_message_text_safe(message=callback.message, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]))
+        text, markup = await faulty_payload(page)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=markup)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("faulty_ack:"))
     async def handle_faulty_ack(callback: CallbackQuery):
@@ -385,11 +409,8 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             await ctx.answer_callback_safe(callback, "Нечего очищать", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback, "🧹 Ошибка очищена; история сохранена")
-        pages = await ctx.run_db(ctx.build_faulty_pages, 200)
-        total_pages = len(pages)
-        page = ctx.clamp_page(page, total_pages)
-        current = pages[page]
-        await ctx.edit_message_text_safe(message=callback.message, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]))
+        text, markup = await faulty_payload(page)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=markup)
 
     @dp.callback_query(lambda c: c.data == "faulty_back")
     async def handle_faulty_back(callback: CallbackQuery):
@@ -418,9 +439,12 @@ def _back_to_center():
     ])
 
 
-def _diagnostic_unavailable_payload(refresh_callback):
+def _diagnostic_unavailable_payload(refresh_callback, *, back_callback="diag_center"):
     buttons = [[InlineKeyboardButton(text="🔄 Обновить", callback_data=refresh_callback)]]
-    buttons.extend(_back_to_center().inline_keyboard)
+    if back_callback == "diag_center":
+        buttons.extend(_back_to_center().inline_keyboard)
+    else:
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)])
     return "⚪ <b>Данные недоступны</b>\n\nНе удалось получить данные. Попробуйте обновить.", InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

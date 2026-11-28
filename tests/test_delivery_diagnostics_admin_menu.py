@@ -243,3 +243,49 @@ def test_diagnostic_db_failure_preserves_retry_and_back_navigation():
                 for button in row] == [callback_data, "diag_center"]
     assert ctx.run_db.await_count == 3
     assert "private-db-error" not in str(ctx.logger.warning.call_args_list)
+
+
+def test_diagnostic_orphan_faulty_and_journal_read_failure_has_retry():
+    import asyncio
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from aiogram import Dispatcher
+    from aiogram.types import Chat, Message
+    from app.admin_handlers.diagnostics import register_admin_diagnostics_handlers
+
+    dp = Dispatcher()
+    ctx = SimpleNamespace(
+        is_admin_callback=AsyncMock(return_value=True),
+        answer_callback_safe_once=AsyncMock(),
+        answer_callback_safe=AsyncMock(),
+        run_db=AsyncMock(side_effect=RuntimeError("private-db-error")),
+        edit_message_text_safe=AsyncMock(),
+        logger=Mock(),
+        db=SimpleNamespace(get_orphaned_processing_rules=Mock()),
+        build_faulty_pages=Mock(),
+        build_system_journal_pages=Mock(),
+        parse_callback_parts=lambda data, prefix, count: data.split(":"),
+    )
+    register_admin_diagnostics_handlers(dp, ctx)
+    handlers = {handler.callback.__name__: handler.callback for handler in dp.callback_query.handlers}
+    message = Message(message_id=1, date=datetime.now(timezone.utc),
+                      chat=Chat(id=1, type="private"))
+    for name, callback_data, refresh, back in (
+        ("handle_stuck_orphan_page", "stuck_orphan_page:7", "stuck_orphan_page:7", "diag_center"),
+        ("handle_faulty_page", "faulty_page:3", "faulty_refresh:3", "diag_center"),
+        ("handle_faulty_refresh", "faulty_refresh:3", "faulty_refresh:3", "diag_center"),
+        ("handle_system_journal_navigation", "syslog_page:errors:2", "syslog_refresh:errors:2", "syslog_back"),
+    ):
+        asyncio.run(handlers[name](SimpleNamespace(data=callback_data, message=message)))
+        kwargs = ctx.edit_message_text_safe.call_args.kwargs
+        assert "Данные недоступны" in kwargs["text"]
+        assert "private-db-error" not in kwargs["text"]
+        assert [button.callback_data for row in kwargs["reply_markup"].inline_keyboard
+                for button in row] == [refresh, back]
+    assert ctx.run_db.await_count == 4
+    assert "private-db-error" not in str(ctx.logger.warning.call_args_list)
+    ctx.is_admin_callback.return_value = False
+    asyncio.run(handlers["handle_stuck_orphan_page"](
+        SimpleNamespace(data="stuck_orphan_page:7", message=message)))
+    assert ctx.run_db.await_count == 4
