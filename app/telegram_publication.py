@@ -444,6 +444,8 @@ def prepare_publication_inbox(client: Any, repository: Any):
             # or lock MTProto writes merely because PostgreSQL is slow.
             if len(buffer) < 1024:
                 buffer.append((peer, old, new))
+                if spool is None:
+                    client.publication_evidence_unpersisted = True
             if inbox is None or live_lock.locked() or (retry_task is not None and not retry_task.done()):
                 return
             try:
