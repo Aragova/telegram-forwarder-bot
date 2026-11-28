@@ -123,7 +123,7 @@ def test_all_role_keeps_bot_session_open_until_after_worker_drain():
     shutdown_start = source.index("async def _shutdown_runtime(")
     shutdown_end = source.index("async def _run_scheduler_role_loop()", shutdown_start)
     shutdown = source[shutdown_start:shutdown_end]
-    assert shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)") < shutdown.index("await bot.session.close()")
+    assert shutdown.index("lambda: stop_job_workers_runtime(wait_until_complete=True)") < shutdown.index("await bot.session.close()")
 
 
 
@@ -216,9 +216,9 @@ def test_shutdown_stops_scheduler_and_rescan_before_draining_workers():
     source = Path("bot.py").read_text(encoding="utf-8")
     shutdown = source[source.index("async def _shutdown_runtime("):
                       source.index("async def _run_scheduler_role_loop()")]
-    assert shutdown.index("await asyncio.gather(scheduler_runtime_task") < shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)")
-    assert shutdown.index("await asyncio.gather(rescan_recovery_task") < shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)")
-    assert shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)") < shutdown.index("await raw_telethon.disconnect()")
+    assert shutdown.index("await asyncio.gather(scheduler_runtime_task") < shutdown.index("lambda: stop_job_workers_runtime(wait_until_complete=True)")
+    assert shutdown.index("await asyncio.gather(rescan_recovery_task") < shutdown.index("lambda: stop_job_workers_runtime(wait_until_complete=True)")
+    assert shutdown.index("lambda: stop_job_workers_runtime(wait_until_complete=True)") < shutdown.index("await raw_telethon.disconnect()")
 
 
 def test_shutdown_job_lifecycle_joins_pending_cleanup_without_recancelling(monkeypatch):
@@ -254,4 +254,36 @@ def test_shutdown_job_lifecycle_joins_pending_cleanup_without_recancelling(monke
         assert finished.is_set() and lifecycle.live_count == 0
 
     monkeypatch.setattr(worker_shutdown, "_CANCEL_SETTLE_TIMEOUT_SEC", 0.01)
+    asyncio.run(scenario())
+
+
+def test_publication_flush_runs_before_stalled_drain_finishes():
+    import ast
+    from types import SimpleNamespace
+    from app.runtime_utils import wait_for_db_task
+
+    source = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    fn = next(n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "_drain_with_publication_flush")
+
+    async def scenario():
+        drained = asyncio.Event()
+        flushed = asyncio.Event()
+
+        async def flush():
+            flushed.set()
+
+        async def drain():
+            await flushed.wait()
+            assert not drained.is_set()
+            drained.set()
+
+        ns = {"asyncio": asyncio, "logger": logging.getLogger(__name__),
+              "telethon_client": SimpleNamespace(flush_publication_inbox=flush),
+              "wait_for_db_task": wait_for_db_task}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), "bot.py", "exec"), ns)
+        await asyncio.wait_for(ns["_drain_with_publication_flush"](drain), timeout=1)
+        assert flushed.is_set() and drained.is_set()
+        assert not any(t.get_name() == "publication-drain-flush" for t in asyncio.all_tasks())
+
     asyncio.run(scenario())
