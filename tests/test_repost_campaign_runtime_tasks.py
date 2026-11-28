@@ -402,11 +402,30 @@ def test_shutdown_requests_completion_before_closing_telegram_clients(with_publi
             await asyncio.wait_for(campaign_stopped.wait(), timeout=2)
             events.append("recovery_cleanup")
 
+        scan_entered = asyncio.Event()
+        scan_cancelled = asyncio.Event()
+
+        async def scan():
+            scan_entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                scan_cancelled.set()
+                await campaign_stopped.wait()
+                events.append("scan_cleanup")
+
+        ctx["rescan_recovery_job"] = asyncio.create_task(scan())
+        async def recovery_with_child():
+            await recovery()
+            assert scan_cancelled.is_set()
+            await asyncio.gather(ctx["rescan_recovery_job"], return_exceptions=True)
+
         ctx["scheduler_runtime_task"] = asyncio.create_task(scheduler())
-        ctx["rescan_recovery_task"] = asyncio.create_task(recovery())
+        ctx["rescan_recovery_task"] = asyncio.create_task(recovery_with_child())
         ctx["rescan_recovery_stop"] = recovery_stop
         await scheduler_entered.wait()
         await recovery_entered.wait()
+        await scan_entered.wait()
         return await ctx["_shutdown_runtime"](
             stop_workers_runtime=stop_workers, close_dashboard_tasks=True,
             close_telegram_clients=True, close_bot_session=True,
@@ -414,7 +433,7 @@ def test_shutdown_requests_completion_before_closing_telegram_clients(with_publi
 
     result = asyncio.run(scenario())
     assert result is True
-    for cleanup in ("scheduler_cleanup", "recovery_cleanup"):
+    for cleanup in ("scheduler_cleanup", "recovery_cleanup", "scan_cleanup"):
         assert events.index("campaign_stop") < events.index(cleanup)
         assert events.index(cleanup) < events.index("telethon_disconnect")
     assert events.count("campaign_stop") == 1
