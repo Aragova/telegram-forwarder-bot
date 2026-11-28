@@ -298,7 +298,7 @@ def test_bot_polling_preserves_session_until_campaign_shutdown():
     assert session_options[0].value is False
 
 
-@pytest.mark.parametrize("with_publication_flush,stop_workers", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("with_publication_flush,stop_workers", [(False, False), (False, True), (True, False), (True, True)])
 def test_shutdown_requests_completion_before_closing_telegram_clients(with_publication_flush, stop_workers):
     import ast
     from pathlib import Path
@@ -319,7 +319,13 @@ def test_shutdown_requests_completion_before_closing_telegram_clients(with_publi
 
     async def drain_workers(*, wait_until_complete):
         assert wait_until_complete is True
-        await asyncio.wait_for(flushed.wait(), timeout=2)
+        if with_publication_flush:
+            await asyncio.wait_for(flushed.wait(), timeout=2)
+        # Model a job worker stuck in cancellation cleanup. Campaigns must
+        # start their shutdown independently, before this worker can finish.
+        await asyncio.wait_for(campaign_stopped.wait(), timeout=2)
+        assert "telethon_disconnect" not in events
+        assert "bot_session_close" not in events
         events.append("workers_cleanup")
 
     async def drain_campaign(*, wait_until_complete):
@@ -382,7 +388,9 @@ def test_shutdown_requests_completion_before_closing_telegram_clients(with_publi
     assert result is True
     assert events.count("campaign_stop") == 1
     if stop_workers:
-        assert events.index("workers_cleanup") < events.index("campaign_stop")
+        assert events.index("campaign_stop") < events.index("workers_cleanup")
+        assert events.index("workers_cleanup") < events.index("telethon_disconnect")
+        assert events.index("workers_cleanup") < events.index("bot_session_close")
     if with_publication_flush:
         assert events.index("publication_flush") < events.index("campaign_stop")
         assert events.count("publication_flush") >= 2
