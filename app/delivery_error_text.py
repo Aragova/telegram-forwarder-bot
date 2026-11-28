@@ -127,6 +127,7 @@ _CODES = {
     "video_send_accepted_target_id_unresolved_non_retryable": _UNCERTAIN,
     "video_send_response_missing_non_retryable": _UNCERTAIN,
     "video_send_accepted_without_ids_non_retryable": _UNCERTAIN,
+    "orphaned_processing_manual_review_no_resend": _UNCERTAIN,
     "publication_receipt_missing_no_resend": _UNCERTAIN,
     "publication_receipt_expired_no_resend": _UNCERTAIN,
     "publication_sender_unavailable": _UNCERTAIN,

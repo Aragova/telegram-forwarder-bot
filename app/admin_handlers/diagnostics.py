@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+from time import monotonic
+from traceback import extract_tb
+from uuid import uuid4
+
 from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -9,6 +14,7 @@ from .context import AdminHandlersContext
 
 
 def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContext) -> None:
+    confirmations = _OrphanConfirmations()
     @dp.message(lambda m: m.text == "⚠️ Диагностика")
     async def handle_diagnostics_menu(message: Message):
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
@@ -55,6 +61,104 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         rows = await ctx.run_db(ctx.db.get_stuck_processing_deliveries, older_than_seconds=stale_seconds, limit=50)
         text = ctx.format_stuck_processing_deliveries_text(rows) if ctx.format_stuck_processing_deliveries_text else _format_stuck_processing_deliveries_text(rows)
         await ctx.send_message_safe(chat_id=message.chat.id, text=text, reply_markup=_build_stuck_processing_keyboard(bool(rows)))
+        orphans = await ctx.run_db(ctx.db.get_orphaned_processing_rules, limit=10)
+        if orphans:
+            await ctx.send_message_safe(
+                chat_id=message.chat.id, text=_format_orphan_recovery_instruction(),
+                parse_mode="HTML", reply_markup=_orphan_page_keyboard(orphans, 0),
+            )
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("stuck_orphan_page:"))
+    async def handle_stuck_orphan_page(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        cursor = _parse_orphan_rule_id(callback.data, allow_zero=True)
+        if cursor is None or not isinstance(callback.message, Message):
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        await ctx.answer_callback_safe_once(callback)
+        rows = await ctx.run_db(ctx.db.get_orphaned_processing_rules, limit=10, after_rule_id=cursor)
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=_format_orphan_recovery_instruction() if rows else "<b>🧯 Больше правил нет</b>",
+            parse_mode="HTML", reply_markup=_orphan_page_keyboard(rows, cursor),
+        )
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("stuck_orphan_request:"))
+    async def handle_stuck_orphan_request(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        rule_id = _parse_orphan_rule_id(callback.data)
+        if rule_id is None or callback.from_user is None or not isinstance(callback.message, Message):
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        await ctx.answer_callback_safe_once(callback)
+        ids = await ctx.run_db(ctx.db.get_orphan_processing_ids, rule_id)
+        if not ids or len(ids) > 100:
+            await ctx.edit_message_text_safe(
+                message=callback.message, parse_mode="HTML",
+                text="<b>🧯 Проверка</b>\n\nНет доставок или их больше 100. Обновите диагностику; для большой очереди нужна ручная сверка.",
+            )
+            return
+        token = confirmations.issue(callback, rule_id, ids)
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=_format_orphan_recovery_instruction(rule_id) + "\n\n<b>ID доставок</b>\n" + ", ".join(map(str, ids)),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Завершить без повтора", callback_data=f"stuck_orphan_confirm:{token}")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data=f"stuck_orphan_cancel:{token}")],
+            ]),
+        )
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("stuck_orphan_cancel:"))
+    async def handle_stuck_orphan_cancel(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if callback.from_user is None or not isinstance(callback.message, Message):
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        if confirmations.consume(callback) is None:
+            await ctx.answer_callback_safe(callback, "Подтверждение устарело. Откройте диагностику заново.", show_alert=True)
+            return
+        await ctx.answer_callback_safe_once(callback, "Отменено")
+        await ctx.edit_message_text_safe(message=callback.message, text="<b>🧯 Действие отменено</b>", parse_mode="HTML")
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("stuck_orphan_confirm:"))
+    async def handle_stuck_orphan_confirm(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        if callback.from_user is None or not isinstance(callback.message, Message):
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        snapshot = confirmations.consume(callback)
+        if snapshot is None:
+            await ctx.answer_callback_safe(callback, "Подтверждение устарело. Откройте диагностику заново.", show_alert=True)
+            return
+        rule_id, ids = snapshot
+        await ctx.answer_callback_safe_once(callback)
+        try:
+            result = await ctx.run_db(
+                ctx.db.quarantine_orphaned_processing_rule, rule_id,
+                admin_id=callback.from_user.id, expected_ids=ids,
+            )
+        except Exception as exc:
+            ctx.logger.warning(
+                "ORPHAN_QUARANTINE_UNKNOWN | rule_id=%s | error_type=%s | traceback=%s",
+                rule_id, type(exc).__name__, _safe_quarantine_traceback(exc),
+            )
+            message = "Результат неизвестен. Обновите диагностику и проверьте состояние правила."
+        else:
+            status = result.get("status")
+            if status == "quarantined":
+                message = f"Завершено проблемных доставок: {int(result.get('updated_count') or 0)}. История сохранена."
+            else:
+                message = _ORPHAN_STATUS_TEXT.get(status, "Действие не выполнено. Обновите диагностику.")
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=f"<b>🧯 Правило #{rule_id}</b>\n\n<b>Результат</b>\n{message}",
+            parse_mode="HTML",
+        )
 
     @dp.callback_query(lambda c: c.data == "stuck_reset_request")
     async def handle_stuck_reset_request(callback: CallbackQuery):
@@ -67,13 +171,19 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             return
         await ctx.answer_callback_safe_once(callback)
         text = (
-            "🧯 Возврат зависших задач в очередь\n\n"
-            f"Будет обработано не больше 50 задач. Сейчас найдено к возврату: {len(rows)}.\n\n"
-            "⚠️ Важно:\n"
-            "если задача зависла после фактической отправки в Telegram, возврат в очередь может привести к дублю.\n"
-            "Используйте только когда уверены, что задача действительно зависла."
+            "<b>🧯 Безопасное восстановление</b>\n\n"
+            "<b>Причина</b>\n"
+            f"Найдено доставок с устаревшими заданиями: {len(rows)}.\n\n"
+            "<b>Действие</b>\n"
+            "Подтвердите восстановление не более 50 заданий. "
+            "Устаревший heartbeat не доказывает остановку воркера: его задание может быть отозвано. "
+            "Статусы публикаций не сбрасываются. "
+            "Бот проверит сохранённые данные отправки."
         )
-        await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=_build_stuck_reset_confirm_keyboard())
+        await ctx.edit_message_text_safe(
+            message=callback.message, text=text, parse_mode="HTML",
+            reply_markup=_build_stuck_reset_confirm_keyboard(),
+        )
 
     @dp.callback_query(lambda c: c.data == "stuck_reset_confirm")
     async def handle_stuck_reset_confirm(callback: CallbackQuery):
@@ -81,7 +191,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             return
         stale_seconds = DeliveryObservabilityConfig().stale_processing_after_seconds
         result = await ctx.run_db(
-            ctx.db.reset_stuck_processing_deliveries_to_pending,
+            ctx.db.recover_stale_delivery_jobs,
             older_than_seconds=stale_seconds,
             limit=50,
             admin_id=callback.from_user.id if callback.from_user else None,
@@ -89,15 +199,23 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         await ctx.answer_callback_safe_once(callback, "Готово")
         updated = int(result.get("updated_count") or 0)
         remaining = await ctx.run_db(ctx.db.get_stuck_processing_deliveries, older_than_seconds=stale_seconds, limit=1)
-        tail = "\nОстались зависшие задачи — повторите действие при необходимости." if remaining else "\nЗависших задач больше не найдено."
-        await ctx.edit_message_text_safe(message=callback.message, text=f"🧯 Зависшие задачи\n\nВозвращено в очередь: {updated}.{tail}")
+        tail = "\nОстались устаревшие задания. Проверьте диагностику повторно." if remaining else "\nУстаревших заданий больше не найдено."
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text=f"<b>🧯 Зависшие задачи</b>\n\n<b>Результат</b>\nВосстановлено заданий: {updated}.{tail}",
+            parse_mode="HTML",
+        )
 
     @dp.callback_query(lambda c: c.data == "stuck_reset_cancel")
     async def handle_stuck_reset_cancel(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
             return
         await ctx.answer_callback_safe_once(callback, "Отменено")
-        await ctx.edit_message_text_safe(message=callback.message, text="🧯 Зависшие задачи\n\nДействие отменено. Возврат в очередь не выполнялся.")
+        await ctx.edit_message_text_safe(
+            message=callback.message,
+            text="<b>🧯 Зависшие задачи</b>\n\nДействие отменено. Возврат в очередь не выполнялся.",
+            parse_mode="HTML",
+        )
 
     @dp.message(lambda m: m.text == "📊 Журнал системы")
     async def handle_system_journal(message: Message):
@@ -285,8 +403,8 @@ def _format_stuck_processing_deliveries_text(rows) -> str:
         ])
     lines.extend([
         "",
-        "Вы можете вернуть зависшие задачи в очередь.",
-        "Это безопаснее, чем править базу руками, но если пост уже был фактически отправлен Telegram, возможен дубль.",
+        "Можно восстановить существующие задания с истёкшей арендой или устаревшим heartbeat.",
+        "Это не сбрасывает статусы публикаций и не разрешает повторную отправку без проверки.",
     ])
     return "\n".join(lines)[:4000]
 
@@ -294,8 +412,109 @@ def _format_stuck_processing_deliveries_text(rows) -> str:
 def _build_stuck_processing_keyboard(has_rows: bool) -> InlineKeyboardMarkup | None:
     if not has_rows:
         return None
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Вернуть зависшие в очередь", callback_data="stuck_reset_request")]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Восстановить задания", callback_data="stuck_reset_request")]])
 
 
 def _build_stuck_reset_confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Да, вернуть в очередь", callback_data="stuck_reset_confirm")], [InlineKeyboardButton(text="❌ Отмена", callback_data="stuck_reset_cancel")]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Восстановить", callback_data="stuck_reset_confirm")], [InlineKeyboardButton(text="❌ Отмена", callback_data="stuck_reset_cancel")]])
+
+
+
+_ORPHAN_STATUS_TEXT = {
+    "rule_not_paused": "Выключите правило и дождитесь завершения пересканирования.",
+    "job_can_resume": "Есть задание, которое ещё может выполняться или восстановиться после оплаты.",
+    "nothing_to_do": "Незавершённых доставок больше нет.",
+    "snapshot_changed": "Список доставок изменился. Откройте диагностику заново и подтвердите новый список.",
+    "publication_evidence": "Есть сохранённые данные о публикации. Нужна сверка получателя, а не сброс доставки.",
+    "partial_album": "Есть незавершённая часть альбома. Сверьте получатель и используйте пересканирование.",
+}
+
+
+def _parse_orphan_rule_id(data: str | None, *, allow_zero: bool = False) -> int | None:
+    try:
+        rule_id = int((data or "").split(":")[1])
+    except (IndexError, ValueError):
+        return None
+    return rule_id if int(not allow_zero) <= rule_id < 2**63 else None
+
+
+
+def _format_orphan_recovery_instruction(rule_id: int | None = None) -> str:
+    heading = "Доставки без активного задания" if rule_id is None else f"Правило #{int(rule_id)}"
+    return (
+        f"<b>🧯 {heading}</b>\n\n"
+        "<b>Причина</b>\n"
+        "Результат прежней отправки неизвестен, активное задание отсутствует.\n\n"
+        "<b>Что делать</b>\n"
+        "1. Выключите правило.\n"
+        "2. Дождитесь завершения прежней отправки и проверьте получатель.\n"
+        "3. Если результат неизвестен, подтвердите завершение без повтора.\n\n"
+        "История сохранится. Доставки без подтверждения будут отмечены как проблемные. "
+        "Бот не отправит их повторно."
+    )
+
+
+
+def _orphan_page_keyboard(rows, cursor: int) -> InlineKeyboardMarkup:
+    buttons = []
+    for row in rows:
+        rule_id = int(row["rule_id"])
+        active = row["is_active"]
+        buttons.append([InlineKeyboardButton(
+            text=f"Правило #{rule_id} — {'выключить' if active else 'проверить'}",
+            callback_data=f"rule_card:{rule_id}" if active else f"stuck_orphan_request:{rule_id}",
+        )])
+    navigation = []
+    if cursor:
+        navigation.append(InlineKeyboardButton(text="В начало", callback_data="stuck_orphan_page:0"))
+    if len(rows) == 10:
+        navigation.append(InlineKeyboardButton(text="Далее", callback_data=f"stuck_orphan_page:{int(rows[-1]['rule_id'])}"))
+    if navigation:
+        buttons.append(navigation)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+class _OrphanConfirmations:
+    """Process-local, one-use, bounded confirmation for the displayed IDs."""
+
+    def __init__(self):
+        self._items = {}
+
+    @staticmethod
+    def _scope(callback):
+        user = callback.from_user
+        message = callback.message
+        if user is None or message is None:
+            return None
+        return (user.id, message.chat.id, message.message_id)
+
+    def issue(self, callback, rule_id: int, ids: list[int]) -> str:
+        now = monotonic()
+        scope = self._scope(callback)
+        if scope is None:
+            raise ValueError("Confirmation requires operator and message")
+        self._items = {key: item for key, item in self._items.items()
+                       if item[0] > now and item[1] != scope}
+        if len(self._items) >= 128:
+            self._items.pop(next(iter(self._items)))
+        token = uuid4().hex
+        self._items[token] = (now + 300, scope, rule_id, tuple(ids))
+        return token
+
+    def consume(self, callback):
+        token = (callback.data or "").split(":", 1)[-1]
+        item = self._items.get(token)
+        if item is None or item[1] != self._scope(callback):
+            return None
+        self._items.pop(token)
+        if item[0] <= monotonic():
+            return None
+        return item[2], list(item[3])
+
+
+def _safe_quarantine_traceback(exc: Exception) -> str:
+    """Identify the failed operation without logging exception text or locals."""
+    frames = extract_tb(exc.__traceback__, limit=-16)
+    return " -> ".join(
+        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames
+    ) or "unavailable"

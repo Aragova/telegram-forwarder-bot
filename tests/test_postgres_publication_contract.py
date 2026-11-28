@@ -1792,3 +1792,209 @@ def test_tenant_live_status_matches_canonical_logical_counts(repo):
     assert totals["pending"] == sum(s["logical_pending"] for s in snapshots) == 2
     assert totals["faulty"] == sum(s["logical_faulty"] for s in snapshots) == 1
     assert totals["active_rules"] == 2
+
+
+def test_runtime_restart_and_manual_recovery_preserve_album_and_live_lease(repo):
+    key, rule_id, ids, _, _, _ = seed(repo, uuid4().int % 10**12, count=3)
+    payload = {"rule_id": rule_id, "delivery_id": ids[0], "delivery_ids": ids}
+    job_id = repo.create_job("repost_album", payload, "light")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE jobs SET status='processing',locked_by='live',
+                   updated_at=NOW(),created_at=NOW()-INTERVAL '30 days' WHERE id=%s""",
+                (job_id,),
+            )
+    restarted = PostgresRepository()
+    try:
+        assert restarted.reset_stuck_processing() == 0
+        assert restarted.get_stuck_processing_deliveries(
+            older_than_seconds=600, rule_id=rule_id,
+        ) == []
+        assert restarted.recover_stale_delivery_jobs(
+            older_than_seconds=600, rule_id=rule_id,
+        )["updated_count"] == 0
+        assert restarted.get_job(job_id)["locked_by"] == "live"
+        assert [restarted.get_delivery(i)["status"] for i in ids] == ["processing"] * 3
+
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET updated_at=NOW()-INTERVAL '11 minutes' WHERE id=%s",
+                    (job_id,),
+                )
+        found = restarted.get_stuck_processing_deliveries(
+            older_than_seconds=600, rule_id=rule_id,
+        )
+        assert {row["delivery_id"] for row in found} == set(ids)
+        result = restarted.recover_stale_delivery_jobs(older_than_seconds=600, rule_id=rule_id)
+        assert result["job_ids"] == [job_id]
+        assert not repo.heartbeat_job_processing(job_id, "live")
+        job = restarted.get_job(job_id)
+        assert job["status"] == "retry" and job["locked_by"] is None
+        assert job["payload_json"] == payload
+        assert restarted.get_delivery_attempt_by_idempotency_key(key)["status"] == "sending"
+        assert [restarted.get_delivery(i)["status"] for i in ids] == ["processing"] * 3
+        assert restarted.recover_stale_delivery_jobs(
+            older_than_seconds=600, rule_id=rule_id,
+        )["updated_count"] == 0
+    finally:
+        restarted.client.close_all_connections()
+
+
+def test_unstarted_job_cannot_be_released_by_expired_or_replaced_owner(repo):
+    _, rule_id, ids, _, _, _ = seed(repo, uuid4().int % 10**12)
+    job_id = repo.create_job("repost_single", {"rule_id": rule_id, "delivery_id": ids[0]}, "light")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE jobs SET status='leased',locked_by='old',
+                   lease_until=NOW()-INTERVAL '1 second' WHERE id=%s""",
+                (job_id,),
+            )
+    assert not repo.mark_job_processing(job_id, "old")
+    assert not repo.finalize_leased_job(job_id, "old", "defer", "shutdown")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE jobs SET locked_by='new',
+                   lease_until=NOW()+INTERVAL '30 seconds' WHERE id=%s""",
+                (job_id,),
+            )
+    assert not repo.finalize_leased_job(job_id, "old", "fail", "stale")
+    before = repo.get_job(job_id)["attempts"]
+    assert repo.finalize_leased_job(job_id, "new", "defer", "shutdown")
+    job = repo.get_job(job_id)
+    assert job["status"] == "retry" and job["locked_by"] is None
+    assert job["attempts"] == before
+    assert repo.get_delivery(ids[0])["status"] == "processing"
+
+
+
+def test_orphan_quarantine_requires_paused_rule_and_preserves_ledger(repo):
+    key, rule_id, ids, _, _, _ = seed(repo, uuid4().int % 10**12, count=3)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=TRUE WHERE id=%s", (rule_id,))
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1, expected_ids=ids)["status"] == "rule_not_paused"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE WHERE id=%s", (rule_id,))
+    payload = {"rule_id": rule_id, "delivery_id": ids[0], "delivery_ids": ids}
+    job_id = repo.create_job("repost_album", payload, "light")
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1, expected_ids=ids)["status"] == "job_can_resume"
+    assert repo.fail_job(job_id, "Лимит тарифа")
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1, expected_ids=ids)["status"] == "job_can_resume"
+    assert repo.fail_job(job_id, "terminal failure")
+    result = repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1, expected_ids=ids)
+    assert result == {"status": "quarantined", "updated_count": 3}
+    assert [repo.get_delivery(i)["status"] for i in ids] == ["faulty"] * 3
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "sending"
+    assert repo.get_job(job_id)["status"] == "failed"
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1, expected_ids=ids)["status"] == "nothing_to_do"
+
+
+def test_orphan_quarantine_refuses_publication_evidence_and_partial_album(repo):
+    seeded = seed(repo, uuid4().int % 10**12)
+    _, rule_id, ids, _, _, _ = seeded
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE WHERE id=%s", (rule_id,))
+    assert register(repo, seeded, [888])
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1, expected_ids=ids)["status"] == "publication_evidence"
+    assert repo.get_delivery(ids[0])["status"] == "processing"
+
+    _, second, members, _, _, _ = seed(repo, uuid4().int % 10**12, count=3)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE,mode='repost' WHERE id=%s", (second,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE id=%s", (members[-1],))
+    assert repo.quarantine_orphaned_processing_rule(second, admin_id=1, expected_ids=members[:-1])["status"] == "partial_album"
+    assert [repo.get_delivery(i)["status"] for i in members] == ["processing", "processing", "pending"]
+
+
+
+@pytest.mark.parametrize("string_ids", [False, True])
+def test_orphan_quarantine_preserves_verified_album_regardless_of_vector_type(repo, string_ids):
+    key, rule_id, ids, source_ids, _, target = seed(repo, uuid4().int % 10**12, count=3)
+    assert repo.mark_delivery_attempt_accepted(key, sent_message_ids=[501, 502, 503],
+                                               telegram_method="copy_album")
+    assert repo.mark_delivery_attempt_verified(key, sent_message_ids=[501, 502, 503])
+    repo.mark_delivery_sent_with_target_message(ids[0], sent_message_id=501,
+        sent_message_ids=[501, 502, 503], target_id=target, delivery_method="copy_album")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE WHERE id=%s", (rule_id,))
+    source_ids = list(range(max(ids) + 10000, max(ids) + 10003))
+    assert not set(source_ids) & set(ids)
+    expected_ids = [str(value) for value in source_ids] if string_ids else source_ids
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            for delivery_id, source_id in zip(ids, source_ids):
+                cur.execute("UPDATE posts SET message_id=%s WHERE id=(SELECT post_id FROM deliveries WHERE id=%s)",
+                            (source_id, delivery_id))
+            cur.execute("UPDATE delivery_attempts SET source_message_ids_json=%s::jsonb WHERE idempotency_key=%s",
+                        (json.dumps(expected_ids), key))
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["source_message_ids_json"] == expected_ids
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1, expected_ids=ids[1:])["status"] == "publication_evidence"
+    assert [repo.get_delivery(i)["status"] for i in ids] == ["sent", "processing", "processing"]
+
+
+
+def test_orphan_snapshot_change_and_late_album_are_fenced(repo):
+    from app.repository_models import utc_now_iso
+    _, rule_id, ids, _, source, _ = seed(repo, uuid4().int % 10**12, count=3)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE,mode='repost' WHERE id=%s", (rule_id,))
+            cur.execute("SELECT p.media_group_id FROM posts p JOIN deliveries d ON d.post_id=p.id WHERE d.id=%s", (ids[0],))
+            group = cur.fetchone()["media_group_id"]
+    assert repo.get_orphan_processing_ids(rule_id) == ids
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1, expected_ids=ids[:-1])["status"] == "snapshot_changed"
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1, expected_ids=ids)["status"] == "quarantined"
+    repo.save_post(2001, source, None, {"media_kind": "video"}, group)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=TRUE,next_run_at=%s WHERE id=%s", (utc_now_iso(), rule_id))
+    assert repo.take_due_delivery_and_create_job(rule_id, utc_now_iso()) is None
+    assert repo.take_due_delivery(rule_id, utc_now_iso()) is None
+    repo.save_post(2002, source, None, {"media_kind": "video"})
+    assert repo.take_due_delivery_and_create_job(rule_id, utc_now_iso()) is not None
+
+
+def test_orphan_verified_other_album_cannot_block_by_id_collision(repo):
+    key, rule_id, ids, _, source, target = seed(repo, uuid4().int % 10**12, count=3)
+    assert repo.mark_delivery_attempt_accepted(key, sent_message_ids=[601, 602, 603], telegram_method="copy_album")
+    assert repo.mark_delivery_attempt_verified(key, sent_message_ids=[601, 602, 603])
+    for did in ids:
+        repo.mark_delivery_sent_with_target_message(did, sent_message_id=601, sent_message_ids=[601, 602, 603],
+                                                    target_id=target, delivery_method="copy_album")
+    repo.save_post(max(ids)+10000, source, None, {"media_kind":"video"}, "unrelated")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=FALSE WHERE id=%s", (rule_id,))
+            cur.execute("UPDATE deliveries SET status='processing' WHERE rule_id=%s AND status='pending' RETURNING id", (rule_id,))
+            other = cur.fetchone()["id"]
+            cur.execute("UPDATE delivery_attempts SET source_message_ids_json=%s::jsonb WHERE idempotency_key=%s",
+                        (json.dumps([other, str(other), max(ids)+10000]), key))
+    assert repo.quarantine_orphaned_processing_rule(rule_id, admin_id=1, expected_ids=[other])["status"] == "quarantined"
+
+
+def test_expired_unstarted_lease_does_not_consume_attempt_and_defer_delays(repo):
+    _, rule_id, ids, _, _, _ = seed(repo, uuid4().int % 10**12)
+    job_id = repo.create_job("repost_single", {"rule_id":rule_id,"delivery_id":ids[0]}, "light")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE jobs SET status='leased',locked_by='old',lease_until=NOW()-INTERVAL '1 second' WHERE id=%s", (job_id,))
+    before = repo.get_job(job_id)["attempts"]
+    repo.requeue_expired_leases()
+    assert repo.get_job(job_id)["attempts"] == before
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE jobs SET status='leased',locked_by='new',lease_until=NOW()+INTERVAL '30 seconds',run_at=NOW()-INTERVAL '1 second' WHERE id=%s", (job_id,))
+    assert repo.finalize_leased_job(job_id, "new", "defer", "test", 60)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT run_at > NOW()+INTERVAL '30 seconds' AS delayed FROM jobs WHERE id=%s", (job_id,))
+            assert cur.fetchone()["delayed"]
+    assert repo.get_job(job_id)["attempts"] == before

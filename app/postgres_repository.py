@@ -1785,149 +1785,316 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
 
     def reset_stuck_processing(self) -> int:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE deliveries
-                    SET status = 'pending'
-                    WHERE status = 'processing'
-                    """
-                )
-                count = cur.rowcount
-            conn.commit()
-            return int(count or 0)
+        """Compatibility only: never reopen all processing deliveries.
 
+        A processing delivery can have a live job or a durable Telegram
+        receipt. Recovery belongs to the existing job/receipt state machine.
+        """
+        logger.warning("LEGACY_PROCESSING_RESET_DISABLED | action=preserve_delivery_state")
+        return 0
+
+
+    @staticmethod
+    def _stale_delivery_job_predicate() -> str:
+        # Fixed SQL shared by diagnostics and the confirmed recovery action.
+        # A job's creation time is not a liveness signal.
+        return """
+            j.job_type IN ('repost_single','repost_album','video_download',
+                           'video_process','video_send','video_delivery')
+            AND COALESCE(j.payload_json->>'rescan_cancelled','false') <> 'true'
+            AND (
+                (j.status = 'processing'
+                 AND j.updated_at < NOW() - make_interval(secs => %s))
+                OR (j.status = 'leased' AND j.lease_until < NOW())
+            )
+        """
+
+    @staticmethod
+    def _delivery_job_membership_predicate() -> str:
+        # Compare text IDs without casts: historical malformed JSON must
+        # neither break diagnostics nor authorize a different delivery.
+        return """
+            j.payload_json->>'rule_id' = d.rule_id::text
+            AND (
+                j.payload_json->>'delivery_id' = d.id::text
+                OR EXISTS (
+                    SELECT 1 FROM jsonb_array_elements_text(
+                        CASE WHEN jsonb_typeof(j.payload_json->'delivery_ids') = 'array'
+                             THEN j.payload_json->'delivery_ids' ELSE '[]'::jsonb END
+                    ) AS member(id)
+                    WHERE member.id = d.id::text
+                )
+            )
+        """
 
     def get_stuck_processing_deliveries(
-        self,
-        *,
-        older_than_seconds: int,
-        limit: int = 50,
+        self, *, older_than_seconds: int, limit: int = 50,
         rule_id: int | None = None,
     ) -> list[dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 50))
-        safe_seconds = max(1, int(older_than_seconds))
-        params: list[Any] = [safe_seconds]
-        rule_filter = ""
-        if rule_id is not None:
-            rule_filter = "AND d.rule_id = %s"
-            params.append(int(rule_id))
-        params.append(safe_limit)
+        safe_seconds = max(600, int(older_than_seconds))
+        stale = self._stale_delivery_job_predicate()
+        membership = self._delivery_job_membership_predicate()
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT
-                        d.id AS delivery_id,
-                        d.rule_id,
-                        d.post_id,
-                        r.source_id,
-                        r.target_id,
-                        EXTRACT(EPOCH FROM (NOW() - processing_clock.processing_job_created_at)) AS age_seconds,
-                        processing_clock.processing_job_created_at AS created_at,
-                        d.error_text
+                    SELECT d.id AS delivery_id, d.rule_id, d.post_id,
+                           r.source_id, r.target_id, d.error_text,
+                           EXTRACT(EPOCH FROM (NOW() - clock.stale_since)) AS age_seconds,
+                           clock.stale_since AS created_at
                     FROM deliveries d
                     JOIN routing r ON r.id = d.rule_id
                     JOIN LATERAL (
-                        SELECT MIN(j.created_at) AS processing_job_created_at
+                        SELECT MIN(CASE WHEN j.status='leased' THEN j.lease_until
+                                        ELSE j.updated_at END) AS stale_since
                         FROM jobs j
-                        WHERE j.status IN ('pending', 'leased', 'processing', 'retry')
-                          AND (
-                              (
-                                  (j.payload_json ->> 'delivery_id') ~ '^[0-9]+$'
-                                  AND (j.payload_json ->> 'delivery_id')::bigint = d.id
-                              )
-                              OR EXISTS (
-                                  SELECT 1
-                                  FROM jsonb_array_elements_text(COALESCE(j.payload_json -> 'delivery_ids', '[]'::jsonb)) AS delivery_ids(value)
-                                  WHERE delivery_ids.value ~ '^[0-9]+$'
-                                    AND delivery_ids.value::bigint = d.id
-                              )
-                          )
-                    ) AS processing_clock ON TRUE
-                    WHERE d.status = 'processing'
-                      AND processing_clock.processing_job_created_at IS NOT NULL
-                      AND processing_clock.processing_job_created_at < NOW() - make_interval(secs => %s)
-                      {rule_filter}
-                    ORDER BY processing_clock.processing_job_created_at ASC, d.id ASC
+                        WHERE {stale} AND {membership}
+                    ) AS clock ON clock.stale_since IS NOT NULL
+                    WHERE d.status='processing'
+                      AND r.rescan_owner_token IS NULL
+                      AND (%s::bigint IS NULL OR d.rule_id=%s)
+                    ORDER BY clock.stale_since, d.id
                     LIMIT %s
                     """,
-                    tuple(params),
+                    (safe_seconds, rule_id, rule_id, safe_limit),
                 )
                 rows = cur.fetchall() or []
         return [dict(row) for row in rows]
 
-    def reset_stuck_processing_deliveries_to_pending(
-        self,
-        *,
-        older_than_seconds: int,
-        limit: int = 50,
-        rule_id: int | None = None,
-        admin_id: int | None = None,
+    def recover_stale_delivery_jobs(
+        self, *, older_than_seconds: int, limit: int = 50,
+        rule_id: int | None = None, admin_id: int | None = None,
     ) -> dict[str, Any]:
+        """Requeue only existing stale jobs. Never reopen deliveries or receipts.
+
+        Like the watchdog, only stale processing consumes an attempt.
+        An expired unstarted lease does not. The original job
+        payload preserves album membership, video stage and publication key.
+        """
         safe_limit = max(1, min(int(limit), 50))
-        safe_seconds = max(1, int(older_than_seconds))
-        params: list[Any] = [safe_seconds]
-        rule_filter = ""
-        if rule_id is not None:
-            rule_filter = "AND d.rule_id = %s"
-            params.append(int(rule_id))
-        params.append(safe_limit)
+        safe_seconds = max(600, int(older_than_seconds))
+        stale = self._stale_delivery_job_predicate()
+        membership = self._delivery_job_membership_predicate()
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
                     WITH candidates AS (
-                        SELECT d.id
-                        FROM deliveries d
-                        JOIN LATERAL (
-                            SELECT MIN(j.created_at) AS processing_job_created_at
-                            FROM jobs j
-                            WHERE j.status IN ('pending', 'leased', 'processing', 'retry')
-                              AND (
-                                  (
-                                      (j.payload_json ->> 'delivery_id') ~ '^[0-9]+$'
-                                      AND (j.payload_json ->> 'delivery_id')::bigint = d.id
-                                  )
-                                  OR EXISTS (
-                                      SELECT 1
-                                      FROM jsonb_array_elements_text(COALESCE(j.payload_json -> 'delivery_ids', '[]'::jsonb)) AS delivery_ids(value)
-                                      WHERE delivery_ids.value ~ '^[0-9]+$'
-                                        AND delivery_ids.value::bigint = d.id
-                                  )
-                              )
-                        ) AS processing_clock ON TRUE
-                        WHERE d.status = 'processing'
-                          AND processing_clock.processing_job_created_at IS NOT NULL
-                          AND processing_clock.processing_job_created_at < NOW() - make_interval(secs => %s)
-                          AND d.sent_at IS NULL
-                          AND d.sent_message_id IS NULL
-                          AND (d.sent_message_ids_json IS NULL OR d.sent_message_ids_json = '[]'::jsonb)
-                          {rule_filter}
-                        ORDER BY processing_clock.processing_job_created_at ASC, d.id ASC
+                        SELECT j.id
+                        FROM jobs j
+                        WHERE {stale}
+                          AND EXISTS (
+                              SELECT 1 FROM deliveries d
+                              JOIN routing r ON r.id=d.rule_id
+                              WHERE d.status='processing'
+                                AND r.rescan_owner_token IS NULL
+                                AND (%s::bigint IS NULL OR d.rule_id=%s)
+                                AND {membership}
+                          )
+                        ORDER BY j.updated_at, j.id
                         LIMIT %s
+                        FOR UPDATE OF j SKIP LOCKED
                     )
-                    UPDATE deliveries d
-                    SET status = 'pending',
-                        error_text = NULL
+                    UPDATE jobs j
+                    SET status='retry',
+                        attempts=attempts + CASE WHEN j.status='processing' THEN 1 ELSE 0 END,
+                        run_at=NOW() + INTERVAL '15 seconds',
+                        locked_by=NULL, lease_until=NULL, updated_at=NOW(),
+                        error_text='Watchdog: ручное восстановление устаревшей задачи'
                     FROM candidates
-                    WHERE d.id = candidates.id
-                      AND d.status = 'processing'
-                    RETURNING d.id
+                    WHERE j.id=candidates.id AND {stale}
+                    RETURNING j.id
                     """,
-                    tuple(params),
+                    (safe_seconds, rule_id, rule_id, safe_limit, safe_seconds),
                 )
-                rows = cur.fetchall() or []
-                delivery_ids = [int(row["id"]) for row in rows]
+                ids = [int(row["id"]) for row in cur.fetchall() or []]
             conn.commit()
-        logger.warning(
-            "manual_stuck_processing_reset: admin_id=%s reset_count=%s delivery_ids=%s",
-            admin_id,
-            len(delivery_ids),
-            delivery_ids,
+        logger.warning("MANUAL_STALE_JOB_RECOVERY | admin_id=%s | job_ids=%s", admin_id, ids)
+        return {"updated_count": len(ids), "job_ids": ids, "limit": safe_limit}
+
+    def get_orphaned_processing_rules(self, *, limit: int = 10, after_rule_id: int = 0) -> list[dict[str, Any]]:
+        """Read-only diagnostic. Absence of a job is not evidence of no send."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT r.id AS rule_id, r.is_active
+                    FROM routing r
+                    WHERE r.rescan_owner_token IS NULL
+                      AND r.id > %s
+                      AND EXISTS (
+                          SELECT 1 FROM deliveries d
+                          WHERE d.rule_id=r.id AND d.status='processing'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM jobs j
+                          WHERE j.payload_json->>'rule_id'=r.id::text
+                            AND j.job_type=ANY(%s)
+                            AND j.status IN ('pending','leased','processing','retry')
+                      )
+                    ORDER BY r.id
+                    LIMIT %s
+                    """,
+                    (max(0, int(after_rule_id)), sorted(DELIVERY_JOB_TYPES), max(1, min(int(limit), 10))),
+                )
+                return [dict(row) for row in cur.fetchall() or []]
+
+    def get_orphan_processing_ids(self, rule_id: int) -> list[int]:
+        """Bounded preview; never authorize a subset of an oversized rule."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id FROM deliveries WHERE rule_id=%s AND status='processing'
+                       ORDER BY id LIMIT 101""", (int(rule_id),),
+                )
+                return [int(row["id"]) for row in cur.fetchall() or []]
+
+    def quarantine_orphaned_processing_rule(
+        self, rule_id: int, *, admin_id: int, expected_ids: list[int],
+    ) -> dict[str, Any]:
+        """Explicit operator action, never a retry or evidence of a failed RPC.
+
+        The rule lock serializes this with the atomic scheduler, rescan and
+        scoped worker writes. Do not override billing recovery or receipts.
+        """
+        rule_id = int(rule_id)
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT is_active,rescan_owner_token,mode FROM routing WHERE id=%s FOR UPDATE",
+                    (rule_id,),
+                )
+                rule = cur.fetchone()
+                if not rule or rule["is_active"] or rule["rescan_owner_token"] is not None:
+                    return {"status": "rule_not_paused", "updated_count": 0}
+                # Deliberately conservative: every possible billing marker
+                # excludes the rule, even if billing recovery would later
+                # reject the particular failure for another reason.
+                cur.execute(
+                    """
+                    SELECT id FROM jobs
+                    WHERE payload_json->>'rule_id'=%s AND job_type=ANY(%s)
+                      AND COALESCE(payload_json->>'rescan_cancelled','false')<>'true'
+                      AND (
+                          status IN ('pending','leased','processing','retry')
+                          OR (status='failed' AND LOWER(COALESCE(error_text,'')) LIKE ANY(%s))
+                      )
+                    LIMIT 1 FOR UPDATE
+                    """,
+                    (str(rule_id), sorted(DELIVERY_JOB_TYPES),
+                     ["%лимит%", "%подписка неактивна%", "%subscription%", "%limit%"]),
+                )
+                if cur.fetchone():
+                    return {"status": "job_can_resume", "updated_count": 0}
+                cur.execute(
+                    """
+                    SELECT d.id FROM deliveries d
+                    WHERE d.rule_id=%s AND d.status='processing'
+                    ORDER BY d.id FOR UPDATE
+                    """,
+                    (rule_id,),
+                )
+                ids = [int(row["id"]) for row in cur.fetchall() or []]
+                if not ids:
+                    return {"status": "nothing_to_do", "updated_count": 0}
+                if len(ids) > 100 or ids != sorted(set(expected_ids)):
+                    return {"status": "snapshot_changed", "updated_count": 0}
+                cur.execute(
+                    """
+                    SELECT 1 FROM telegram_publication_receipts
+                    WHERE rule_id=%s AND delivery_ids && %s::bigint[]
+                    LIMIT 1
+                    """,
+                    (rule_id, ids),
+                )
+                if cur.fetchone():
+                    return {"status": "publication_evidence", "updated_count": 0}
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM deliveries d JOIN posts p ON p.id=d.post_id
+                    WHERE d.rule_id=%s AND d.id=ANY(%s)
+                      AND (
+                          d.sent_at IS NOT NULL OR d.sent_message_id IS NOT NULL
+                          OR (d.sent_message_ids_json IS NOT NULL
+                              AND d.sent_message_ids_json <> '[]'::jsonb)
+                          OR EXISTS (
+                              SELECT 1 FROM delivery_attempts a
+                              WHERE a.rule_id=d.rule_id AND a.status='verified'
+                                AND a.idempotency_key NOT LIKE 'archived:%%'
+                                AND a.idempotency_key NOT LIKE '%%:rescan:%%'
+                                AND (
+                                    a.delivery_id=d.id
+                                    OR (a.operation_kind='album' AND p.media_group_id IS NOT NULL AND (
+                                        -- A verified sibling protects the whole logical album.
+                                        -- Never compare bare IDs across namespaces.
+                                        EXISTS (
+                                            SELECT 1 FROM deliveries anchor
+                                            JOIN posts ap ON ap.id=anchor.post_id
+                                            WHERE anchor.id=a.delivery_id AND anchor.rule_id=d.rule_id
+                                              AND ap.source_channel=p.source_channel
+                                              AND ap.source_thread_id IS NOT DISTINCT FROM p.source_thread_id
+                                              AND ap.media_group_id=p.media_group_id
+                                        )
+                                        OR a.idempotency_key =
+                                            'rule:' || d.rule_id::text || ':target:' || a.target_id
+                                            || ':media_group:' || p.media_group_id || ':album'
+                                        OR strpos(a.idempotency_key,
+                                            'rule:' || d.rule_id::text || ':target:' || a.target_id
+                                            || ':media_group:' || p.media_group_id || ':album:members:') = 1
+                                    ))
+                                )
+                          )
+                      )
+                    LIMIT 1
+                    """,
+                    (rule_id, ids),
+                )
+                if cur.fetchone():
+                    return {"status": "publication_evidence", "updated_count": 0}
+                # Never make a remaining pending member eligible for replay
+                # merely by removing the processing members of its album.
+                if str(rule["mode"] or "repost").lower() == "repost":
+                    cur.execute(
+                        """
+                        SELECT 1 FROM deliveries d JOIN posts p ON p.id=d.post_id
+                        JOIN posts sibling ON sibling.source_channel=p.source_channel
+                          AND sibling.source_thread_id IS NOT DISTINCT FROM p.source_thread_id
+                          AND sibling.media_group_id=p.media_group_id
+                        JOIN deliveries other ON other.post_id=sibling.id
+                          AND other.rule_id=d.rule_id AND other.status='pending'
+                        WHERE d.rule_id=%s AND d.id=ANY(%s) AND p.media_group_id IS NOT NULL
+                        LIMIT 1
+                        """,
+                        (rule_id, ids),
+                    )
+                    if cur.fetchone():
+                        return {"status": "partial_album", "updated_count": 0}
+                cur.execute(
+                    """
+                    UPDATE deliveries SET status='faulty',
+                        error_text='orphaned_processing_manual_review_no_resend'
+                    WHERE rule_id=%s AND id=ANY(%s) AND status='processing'
+                    RETURNING id
+                    """,
+                    (rule_id, ids),
+                )
+                quarantined = [int(row["id"]) for row in cur.fetchall() or []]
+            conn.commit()
+        logger.warning("ORPHAN_DELIVERY_QUARANTINE | rule_id=%s | admin_id=%s | delivery_ids=%s",
+                       rule_id, admin_id, quarantined)
+        return {"status": "quarantined", "updated_count": len(quarantined)}
+
+    def reset_stuck_processing_deliveries_to_pending(
+        self, *, older_than_seconds: int, limit: int = 50,
+        rule_id: int | None = None, admin_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Compatibility entry point; no direct delivery reset is allowed."""
+        return self.recover_stale_delivery_jobs(
+            older_than_seconds=older_than_seconds, limit=limit,
+            rule_id=rule_id, admin_id=admin_id,
         )
-        return {"updated_count": len(delivery_ids), "delivery_ids": delivery_ids, "limit": safe_limit}
 
     # =========================================================
     # SAAS REACTIONS FOUNDATION
@@ -5880,7 +6047,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         FROM deliveries d_sent
                         JOIN posts p_sent ON p_sent.id = d_sent.post_id
                         WHERE d_sent.rule_id = d.rule_id
-                            AND d_sent.status = 'sent'
+                            AND (d_sent.status = 'sent' OR (d_sent.status = 'faulty'
+                                 AND d_sent.error_text = 'orphaned_processing_manual_review_no_resend'))
                             AND p.media_group_id IS NOT NULL
                             AND p_sent.source_channel = p.source_channel
                             AND (
@@ -6144,7 +6312,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             FROM deliveries d_sent
                             JOIN posts p_sent ON p_sent.id = d_sent.post_id
                             WHERE d_sent.rule_id = d.rule_id
-                              AND d_sent.status = 'sent'
+                              AND (d_sent.status = 'sent' OR (d_sent.status = 'faulty'
+                                   AND d_sent.error_text = 'orphaned_processing_manual_review_no_resend'))
                               AND p.media_group_id IS NOT NULL
                               AND p_sent.source_channel = p.source_channel
                               AND (
@@ -8341,12 +8510,44 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     WHERE id = %s
                       AND status = 'leased'
                       AND locked_by = %s
+                      AND lease_until > NOW()
                     """,
                     (int(job_id), worker_id),
                 )
                 ok = cur.rowcount > 0
             conn.commit()
             return ok
+
+    def finalize_leased_job(
+        self, job_id: int, worker_id: str, action: str,
+        error_text: str, delay_seconds: int = 1,
+    ) -> bool:
+        """Release an unstarted lease only if this exact owner still holds it."""
+        if action not in {"defer", "retry", "fail"}:
+            raise ValueError(f"Unsupported leased job action: {action}")
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = %s, attempts = attempts + %s,
+                        run_at = CASE WHEN %s = 'retry'
+                                      THEN NOW() + make_interval(secs => %s)
+                                      ELSE run_at END,
+                        locked_by = NULL, lease_until = NULL,
+                        error_text = %s, updated_at = NOW()
+                    WHERE id = %s AND status = 'leased' AND locked_by = %s
+                      AND lease_until > NOW()
+                      AND COALESCE(payload_json->>'rescan_cancelled','false')<>'true'
+                    """,
+                    ("failed" if action == "fail" else "retry",
+                     int(action != "defer"), "failed" if action == "fail" else "retry",
+                     max(1, int(delay_seconds)), (error_text or "")[:1000],
+                     int(job_id), str(worker_id)),
+                )
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
 
     def heartbeat_job_processing(self, job_id: int, worker_id: str) -> bool:
         """Refresh liveness only for the execution that still owns the processing job."""
@@ -8757,13 +8958,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         return [dict(r) for r in rows]
 
     def requeue_expired_leases(self, delay_seconds: int = 15) -> int:
+        """An expired, unstarted lease does not consume an execution attempt."""
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE jobs
                     SET status = 'retry',
-                        attempts = attempts + 1,
                         run_at = NOW() + make_interval(secs => %s),
                         locked_by = NULL,
                         lease_until = NULL,
