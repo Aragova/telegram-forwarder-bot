@@ -23,9 +23,12 @@ async def maintain_rescan_lease(repo, run_db, rule_id: int, owner_token: str):
 
     async def heartbeat():
         while not stopping.is_set():
-            await asyncio.sleep(_HEARTBEAT_INTERVAL_SEC)
-            if stopping.is_set():
+            try:
+                await asyncio.wait_for(stopping.wait(), timeout=_HEARTBEAT_INTERVAL_SEC)
                 return
+            except TimeoutError:
+                if stopping.is_set():
+                    return
             try:
                 renewed = await rescan_db(run_db, repo.renew_rule_rescan, rule_id, owner_token)
             except Exception:
