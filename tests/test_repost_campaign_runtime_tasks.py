@@ -371,6 +371,7 @@ def test_shutdown_requests_completion_before_closing_telegram_clients(with_publi
         "rule_ui_tasks": {},
         "job_watchdog_task": None,
         "reaction_worker_task": None,
+        "reaction_worker_stop": None,
         "sender_service": SimpleNamespace(video_processor=SimpleNamespace(
             shutdown=lambda: record("processor_cleanup"),
         )),
@@ -411,7 +412,7 @@ def test_shutdown_requests_completion_before_closing_telegram_clients(with_publi
                 await asyncio.Event().wait()
             finally:
                 scan_cancelled.set()
-                await campaign_stopped.wait()
+                await asyncio.wait_for(campaign_stopped.wait(), timeout=2)
                 events.append("scan_cleanup")
 
         ctx["rescan_recovery_job"] = asyncio.create_task(scan())
