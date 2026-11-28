@@ -655,3 +655,23 @@ def test_catalog_pre_paginated_counts_and_callbacks():
     assert "📊 22 · 🟢 17 · ⏸ 5" in text
     assert "rf:open:201:-1:2" in callbacks(kb)
     assert "rf:list:-1:1" in callbacks(kb)
+
+
+def test_rich_rule_card_fixed_and_interval_exact_layout():
+    import bot
+    row = {
+        "id": 4, "source_id": "-1001", "source_title": "Тайная",
+        "source_thread_id": 59887, "target_id": "-1002", "target_title": "Light Dante",
+        "is_active": True, "mode": "repost", "processing": 0, "faulty": 0, "pending": 26,
+        "logical_pending": 26, "logical_completed": 273, "logical_total": 299,
+        "logical_current_position": 274, "next_run_at": None,
+        "interval": 7200, "schedule_mode": "fixed", "fixed_times_json": '["17:30","21:00"]',
+    }
+    text = bot.build_rule_card_text(row)
+    assert "🟢 Работает · Репост · Фикс. график" in text
+    assert "⏰ График отправки: <b>17:30, 21:00</b>\n\n📦 Очередь: <b>26</b>" in text
+    assert "⏳ Обработка: <b>0</b>\n✅ Отправлено: <b>273</b>\n⚠️ Ошибки: <b>0</b>\n📍 Позиция: <b>274 / 299</b>" in text
+    assert "Подпись" not in text and "ПУБЛИКАЦИИ" not in text
+    interval = bot.build_rule_card_text({**row, "schedule_mode": "interval"})
+    assert "🟢 Работает · Репост · Интервал [2 ч.]" in interval
+    assert "График отправки:" not in interval

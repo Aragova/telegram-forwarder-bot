@@ -5344,12 +5344,26 @@ def paginate_html_blocks(
 def build_system_journal_pages(limit: int = 300, *, category: str = "all") -> list[dict[str, Any]]:
     rows = db.get_recent_audit(limit=limit, category=category)
     if not rows:
-        return [{"text": "<b>📊 ЖУРНАЛ СОБЫТИЙ</b>\n\nСобытий не найдено.", "rule_id": None}]
-    return [
-        {"text": "<b>📊 ЖУРНАЛ СОБЫТИЙ</b>\n\n" + build_audit_event_block_html(row, include_rule=True),
-         "rule_id": row["rule_id"]}
-        for row in rows
-    ]
+        return [{"text": "<b>📊 ЖУРНАЛ СОБЫТИЙ</b>\n\nСобытий не найдено.", "rule_ids": []}]
+    header = "<b>📊 ЖУРНАЛ СОБЫТИЙ</b>"
+    pages = []
+    blocks = []
+    rule_ids = set()
+    for row in rows:
+        block = build_audit_event_block_html(row, include_rule=True)
+        if len(block.encode("utf-16-le")) // 2 > 3500:
+            # Never cut escaped HTML midway; the rule log remains available.
+            block = block.split("\n", 1)[0] + "\n… Подробности в логах правила."
+        candidate = "\n\n".join([header, *blocks, block])
+        if blocks and (len(blocks) >= 5 or len(candidate.encode("utf-16-le")) // 2 > 3900):
+            pages.append({"text": "\n\n".join([header, *blocks]), "rule_ids": sorted(rule_ids)})
+            blocks, rule_ids = [], set()
+        blocks.append(block)
+        if row["rule_id"] is not None:
+            rule_ids.add(int(row["rule_id"]))
+    if blocks:
+        pages.append({"text": "\n\n".join([header, *blocks]), "rule_ids": sorted(rule_ids)})
+    return pages
 
 
 def build_rule_log_pages(rule_id: int, limit: int = 200) -> list[str]:
@@ -5385,7 +5399,7 @@ def parse_callback_parts(data: str, expected_prefix: str, expected_len: int) -> 
     return parts
 
 def build_system_journal_inline_keyboard(
-    page: int, total_pages: int, *, category: str = "all", rule_id: int | None = None,
+    page: int, total_pages: int, *, category: str = "all", rule_ids: list[int] | None = None,
 ) -> InlineKeyboardMarkup:
     filters = (("Все", "all"), ("Ошибки", "errors"),
                ("Публикации", "publications"), ("Действия", "admin"))
@@ -5395,8 +5409,8 @@ def build_system_journal_inline_keyboard(
             [InlineKeyboardButton(text=("✓ " if category == key else "") + title,
                                  callback_data=f"syslog_filter:{key}")
              for title, key in filters[2:]]]
-    if rule_id is not None:
-        rows.append([InlineKeyboardButton(text="📂 Открыть правило", callback_data=f"rule_card:{rule_id}")])
+    for rule_id in rule_ids or []:
+        rows.append([InlineKeyboardButton(text=f"📂 Правило #{rule_id}", callback_data=f"rule_card:{rule_id}")])
     if total_pages > 1:
         nav = []
         if page:
@@ -5605,7 +5619,9 @@ def build_faulty_pages(limit: int = 200) -> list[dict[str, Any]]:
 
 def classify_faulty_row(row) -> tuple[str, str]:
     try:
-        created_dt = datetime.fromisoformat(row["created_at"])
+        created_dt = datetime.fromisoformat(str(row["fault_created_at"] or row["created_at"]))
+        if created_dt.tzinfo is None:
+            created_dt = created_dt.replace(tzinfo=timezone.utc)
         now_dt = datetime.now(timezone.utc)
         age_minutes = (now_dt - created_dt).total_seconds() / 60
     except Exception:

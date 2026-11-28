@@ -265,7 +265,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         page = ctx.clamp_page(page, total)
         current = pages[page]
         return current["text"], ctx.build_system_journal_inline_keyboard(
-            page, total, category=category, rule_id=current["rule_id"],
+            page, total, category=category, rule_ids=current["rule_ids"],
         )
 
     @dp.message(lambda m: (m.text or "").strip() in {"📊 Журнал событий", "📊 Журнал системы"})
@@ -426,7 +426,8 @@ def _center_payload(counts):
         value = "—" if counts is None else str(int(counts[key]))
         lines.append(f"{title}: <b>{value}</b>")
         buttons.append([InlineKeyboardButton(text=f"{title} ({value})", callback_data=callback)])
-    lines.extend(["", "Доставки считаются по записям, задания — по ID, осиротевшие — по правилам.",
+    lines.extend(["", "Доставки считаются по записям (список последних 200), задания — по ID.",
+                  "Доставки без задания сгруппированы по правилам.",
                   "Ограничения — по активным областям Telegram; не число задержанных постов."])
     buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="diag_center")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -483,14 +484,18 @@ def _format_stuck_processing_deliveries_text(rows) -> str:
     lines = ["<b>🧯 Зависшие задания</b>", "", f"Записей на экране: <b>{len(rows)}</b> (до 50)"]
     if not rows:
         lines.extend(["", "Устаревшие задания не найдены."])
-    for row in rows:
-        lines.append(f"• Правило #{int(row['rule_id'])} · доставка {int(row['delivery_id'])} · {_duration_ru(row['age_seconds'])}")
-    lines.extend([
+    tail = [
         "",
         "Можно восстановить существующие задания с истёкшей арендой или устаревшим heartbeat.",
         "Это не сбрасывает статусы публикаций и не разрешает повторную отправку без проверки.",
-    ])
-    return "\n".join(lines)
+    ]
+    for row in rows:
+        line = f"• Правило #{int(row['rule_id'])} · доставка {int(row['delivery_id'])} · {_duration_ru(row['age_seconds'])}"
+        if len("\n".join([*lines, line, "… Остальные доступны по кнопкам правил.", *tail]).encode("utf-16-le")) // 2 > 4000:
+            lines.append("… Остальные доступны по кнопкам правил.")
+            break
+        lines.append(line)
+    return "\n".join([*lines, *tail])
 
 
 def _build_stuck_processing_keyboard(rows) -> InlineKeyboardMarkup:
