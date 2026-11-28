@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -3747,6 +3748,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         post_id: int,
         source_channel: str,
         source_thread_id: int | None,
+        *,
+        exclude_rule_id: int | None = None,
     ) -> None:
         with conn.cursor() as cur:
             if source_thread_id is None:
@@ -3774,6 +3777,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             message_id = self._get_post_message_id_conn(conn, post_id)
             now_iso = utc_now_iso()
             for rule in rules:
+                if exclude_rule_id is not None and int(rule["id"]) == exclude_rule_id:
+                    # The rescan transaction alone may replace its own queue.
+                    continue
                 if self._is_self_target_echo_post_for_rule_conn(
                     conn,
                     rule_id=int(rule["id"]),
@@ -4308,9 +4314,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             ),
                         )
                     if inserted or not preserve_existing_deliveries:
-                        self._create_deliveries_for_post_conn(
-                            conn, post_id, str(source_channel), source_thread_id,
-                        )
+                        if rescan_owner is None:
+                            self._create_deliveries_for_post_conn(
+                                conn, post_id, str(source_channel), source_thread_id,
+                            )
+                        else:
+                            self._create_deliveries_for_post_conn(
+                                conn, post_id, str(source_channel), source_thread_id,
+                                exclude_rule_id=rescan_owner[0],
+                            )
 
             conn.commit()
             return count
@@ -5013,6 +5025,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         if not owner_token:
             raise ValueError("Missing rescan owner")
         restored_active = bool(was_active)
+        release_key = hashlib.sha256(str(owner_token).encode()).hexdigest()
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -5049,23 +5062,40 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         "FROM routing WHERE id=%s FOR UPDATE", (int(rule_id),),
                     )
                     current = cur.fetchone()
-                    if (not current or current["rescan_owner_token"] is not None
-                            or (bool(current["is_active"]) and not restored_active)
-                            or (queue_rebuilt and not current["rescan_queue_built"])):
+                    if not current or current["rescan_owner_token"] is not None:
                         raise RuntimeError(
                             "Владелец пересканирования изменился; нельзя менять статус правила"
                         )
-                    # A committed scope-changing release can safely leave the rule paused.
-                    restored_active = bool(current["is_active"])
-                elif operation is not None and int(operation["attempt"]) > 1:
-                    # The audit and release share the transaction: recovery cannot
-                    # lose its audit or create a duplicate on a lost commit reply.
-                    event_type = ("rule_rescan_recovered" if queue_rebuilt
-                                  else "rule_rescan_recovery_failed")
+                    cur.execute(
+                        """SELECT (new_value_json::jsonb->>'is_active')::boolean AS restored_active
+                           FROM audit_log WHERE rule_id=%s
+                           AND event_type IN ('rule_rescan_release','rule_rescan_recovered',
+                                              'rule_rescan_recovery_failed')
+                           AND extra_json::jsonb->>'release_key'=%s
+                           AND (extra_json::jsonb->>'queue_rebuilt')::boolean=%s
+                           ORDER BY id DESC LIMIT 1""",
+                        (int(rule_id), release_key, bool(queue_rebuilt)),
+                    )
+                    receipt = cur.fetchone()
+                    if receipt is not None:
+                        restored_active = bool(receipt["restored_active"])
+                    elif (bool(current["is_active"]) != restored_active
+                          or (queue_rebuilt and not current["rescan_queue_built"])):
+                        raise RuntimeError(
+                            "Владелец пересканирования изменился; нельзя менять статус правила"
+                        )
+                elif operation is not None:
+                    # A durable release receipt shares the transaction with the owner
+                    # release, including the actual status of a changed route.
+                    event_type = "rule_rescan_release"
+                    if int(operation["attempt"]) > 1:
+                        event_type = ("rule_rescan_recovered" if queue_rebuilt
+                                      else "rule_rescan_recovery_failed")
                     new_value = ({"mode": operation["mode"], "phase": "rebuilt",
                                   "is_active": restored_active} if queue_rebuilt
                                  else {"mode": operation["mode"], "is_active": False})
-                    extra = {"attempt": operation["attempt"]}
+                    extra = {"attempt": operation["attempt"], "release_key": release_key,
+                             "queue_rebuilt": bool(queue_rebuilt)}
                     if not queue_rebuilt:
                         extra["reason"] = "retry_exhausted"
                     cur.execute(
