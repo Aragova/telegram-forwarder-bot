@@ -680,6 +680,7 @@ def _rule_rescan_scope(rule) -> tuple:
 async def _run_rescan_rule_job(
     *, rule_id: int, fresh: bool = False, admin_id: int = 0,
     chat_id: int = 0, message_id: int = 0, recovery: bool = False,
+    recovery_phase: str | None = None,
 ) -> None:
     """Both UI modes and the recovery loop use the same durable operation."""
     owner_token = None
@@ -690,7 +691,8 @@ async def _run_rescan_rule_job(
     try:
         rule = None
         if recovery:
-            claimed = await rescan_db(run_db, db.claim_interrupted_rule_rescan, rule_id)
+            claim_kwargs = {"phase": recovery_phase} if recovery_phase else {}
+            claimed = await rescan_db(run_db, db.claim_interrupted_rule_rescan, rule_id, **claim_kwargs)
             if claimed is None:
                 return
             owner_token, operation = claimed
@@ -810,6 +812,7 @@ async def _run_rescan_rule_job(
         # response, owner, or transient parser failure is resolved by a fresh
         # DB claim after the lease expires, not by clearing a possibly live lock.
         if isinstance(exc, RescanBlocked):
+            commit_pending = False  # Deterministic transaction rejection, not a lost commit.
             logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
         else:
             logger.exception("RESCAN_FAILED | rule_id=%s | automatic_recovery=%s",
@@ -824,7 +827,8 @@ async def _run_rescan_rule_job(
             await _show_rule_processing_screen(
                 chat_id=chat_id, message_id=message_id,
                 text=f"⚠️ Пересканирование правила #{rule_id} прервано.\n\n"
-                     "Правило остановлено до автоматического восстановления.",
+                     "Правило остановлено до автоматического восстановления."
+                     + (f"\nПричина: {str(exc)[:300]}" if isinstance(exc, RescanBlocked) else ""),
             )
         else:
             await _show_rule_processing_screen(
@@ -856,31 +860,42 @@ async def _run_rescan_rule_job(
 
 
 async def _rescan_recovery_loop(stop_event: asyncio.Event) -> None:
-    """Recover expired DB leases, with an immediate shutdown wake-up."""
+    """Release committed queues independently of the single history reader."""
     global rescan_recovery_job
-    while not stop_event.is_set() and runtime_ownership.can_poll:
-        try:
-            for rule_id in await run_db(db.list_expired_rule_rescans):
+    try:
+        while not stop_event.is_set() and runtime_ownership.can_poll:
+            try:
+                # A rebuilt operation only needs a DB claim/release. Never
+                # let a long Telegram history read hold these rules paused.
+                for rule_id in await run_db(db.list_expired_rule_rescans, phase="rebuilt"):
+                    if stop_event.is_set() or not runtime_ownership.can_poll:
+                        return
+                    await _run_rescan_rule_job(rule_id=rule_id, recovery=True, recovery_phase="rebuilt")
                 if stop_event.is_set() or not runtime_ownership.can_poll:
                     return
-                # A fenced-out scan may cancel its own task, never the
-                # recovery supervisor itself.
-                rescan_recovery_job = create_background_task(
-                    _run_rescan_rule_job(rule_id=rule_id, recovery=True),
-                    name=f"rescan-recover:{rule_id}",
-                )
-                try:
+                if rescan_recovery_job is not None and rescan_recovery_job.done():
                     await asyncio.gather(rescan_recovery_job, return_exceptions=True)
-                finally:
                     rescan_recovery_job = None
-        except Exception:
-            logger.exception("RESCAN_RECOVERY_LOOP_FAILED")
-        # Expiry is a database-clock deadline, not a local notification.
-        # Keep the bounded periodic check, but wake immediately on shutdown.
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=15)
-        except TimeoutError:
-            pass
+                if rescan_recovery_job is None:
+                    pending = await run_db(db.list_expired_rule_rescans, phase="scanning", limit=1)
+                    if pending and not stop_event.is_set() and runtime_ownership.can_poll:
+                        rescan_recovery_job = create_background_task(
+                            _run_rescan_rule_job(rule_id=pending[0], recovery=True, recovery_phase="scanning"),
+                            name=f"rescan-recover:{pending[0]}",
+                        )
+            except Exception:
+                logger.exception("RESCAN_RECOVERY_LOOP_FAILED")
+            # DB-clock lease expiry requires periodic inspection.
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=15)
+            except TimeoutError:
+                pass
+    finally:
+        if rescan_recovery_job is not None:
+            if not rescan_recovery_job.done():
+                rescan_recovery_job.cancel()
+            await asyncio.gather(rescan_recovery_job, return_exceptions=True)
+            rescan_recovery_job = None
 
 
 def _start_rescan_recovery_runtime() -> None:
@@ -8648,8 +8663,6 @@ async def _shutdown_runtime(
     if rescan_recovery_task is not None:
         if rescan_recovery_stop is not None:
             rescan_recovery_stop.set()
-        if rescan_recovery_job is not None and not rescan_recovery_job.done():
-            rescan_recovery_job.cancel()
         await asyncio.gather(rescan_recovery_task, return_exceptions=True)
         rescan_recovery_task = None
         rescan_recovery_stop = None
@@ -8658,11 +8671,21 @@ async def _shutdown_runtime(
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def drain_consumers():
+        nonlocal repost_campaign_runtime_tasks_local
+        if stop_workers_runtime:
+            await stop_job_workers_runtime(wait_until_complete=True)
+        if repost_campaign_runtime_tasks_local is not None:
+            await repost_campaign_runtime_tasks_local.stop(wait_until_complete=True)
+            repost_campaign_runtime_tasks_local = None
+
+    # Keep one flusher alive across both drains. A slow journal write must
+    # not delay the start of campaign shutdown after the worker drain.
+    repost_campaign_runtime_tasks_local = repost_campaign_runtime_tasks
+    await _drain_with_publication_flush(drain_consumers)
+    repost_campaign_runtime_tasks = repost_campaign_runtime_tasks_local
     workers_drain_complete = True
-    if stop_workers_runtime:
-        await _drain_with_publication_flush(
-            lambda: stop_job_workers_runtime(wait_until_complete=True),
-        )
+    campaign_drain_complete = True
 
     if close_dashboard_tasks:
         tasks = list(dashboard_tasks.values())
@@ -8675,13 +8698,6 @@ async def _shutdown_runtime(
         channel_title_sync_task.cancel()
         await asyncio.gather(channel_title_sync_task, return_exceptions=True)
         channel_title_sync_task = None
-
-    campaign_drain_complete = True
-    if repost_campaign_runtime_tasks is not None:
-        await _drain_with_publication_flush(
-            lambda: repost_campaign_runtime_tasks.stop(wait_until_complete=True),
-        )
-        repost_campaign_runtime_tasks = None
 
     resource_drain_complete = workers_drain_complete and campaign_drain_complete
 

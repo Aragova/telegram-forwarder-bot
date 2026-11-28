@@ -3089,7 +3089,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     cur.execute(
                         """
                         UPDATE routing
-                        SET next_run_at = %s
+                        SET next_run_at = %s, rescan_operation=NULL
                         WHERE id = %s
                         """,
                         (next_retry_iso_str, rule_id),
@@ -4672,8 +4672,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE routing SET is_active = %s WHERE id = %s AND rescan_owner_token IS NULL",
-                    (bool(is_active), rule_id),
+                    "UPDATE routing SET is_active = %s, "
+                    "rescan_operation=CASE WHEN %s THEN NULL ELSE rescan_operation END "
+                    "WHERE id = %s AND rescan_owner_token IS NULL",
+                    (bool(is_active), bool(is_active), rule_id),
                 )
                 updated = cur.rowcount > 0
 
@@ -4700,7 +4702,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 cur.execute(
                     """
                     UPDATE routing
-                    SET is_active = TRUE
+                    SET is_active = TRUE, rescan_operation=NULL
                     WHERE id = %s AND rescan_owner_token IS NULL
                     RETURNING id, source_id, source_thread_id, rescan_queue_built
                     """,
@@ -4923,7 +4925,14 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     # Use the same logical queue cursor as the interactive scan,
                     # before the parser can discover older messages.
                     before = None
-                    if not fresh:
+                    retry = rule.get("rescan_operation")
+                    if (not fresh and not was_active and retry
+                            and retry.get("phase") == "retry_pending"
+                            and retry.get("mode") == "keep"
+                            and tuple(retry["scope"]) == self._rescan_scope(rule)
+                            and retry["tenant_id"] == rule["tenant_id"]):
+                        before = retry["before_message_id"]
+                    elif not fresh:
                         before = self._rule_first_pending_message_id(cur, rule_id, rule["mode"])
                         if before is None:
                             cur.execute(
@@ -4974,7 +4983,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 row = cur.fetchone()
                 return dict(row["rescan_operation"]) if row and row["rescan_operation"] else None
 
-    def list_expired_rule_rescans(self, limit: int = 20) -> list[int]:
+    def list_expired_rule_rescans(self, limit: int = 20, *, phase: str | None = None) -> list[int]:
         """Inspect only durable interrupted operations, never ordinary rules."""
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -4982,12 +4991,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     """SELECT id FROM routing WHERE rescan_operation IS NOT NULL
                        AND rescan_owner_token IS NOT NULL
                        AND rescan_lease_until<=clock_timestamp()
+                       AND (%s::text IS NULL OR rescan_operation->>'phase'=%s)
                        ORDER BY rescan_lease_until,id LIMIT %s""",
-                    (max(1, min(int(limit), 100)),),
+                    (phase, phase, max(1, min(int(limit), 100))),
                 )
                 return [int(row["id"]) for row in cur.fetchall()]
 
-    def claim_interrupted_rule_rescan(self, rule_id: int) -> tuple[str, dict] | None:
+    def claim_interrupted_rule_rescan(self, rule_id: int, *, phase: str | None = None) -> tuple[str, dict] | None:
         """Rotate the fencing token; a previous owner cannot save or rebuild."""
         token = uuid.uuid4().hex
         with self.connect() as conn:
@@ -5000,7 +5010,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                        WHERE id=%s AND rescan_operation IS NOT NULL
                          AND rescan_owner_token IS NOT NULL
                          AND rescan_lease_until<=clock_timestamp()
-                       RETURNING rescan_operation""", (token, int(rule_id)),
+                         AND (%s::text IS NULL OR rescan_operation->>'phase'=%s)
+                       RETURNING rescan_operation""", (token, int(rule_id), phase, phase),
                 )
                 row = cur.fetchone()
                 return (token, dict(row["rescan_operation"])) if row else None
@@ -5058,15 +5069,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
                 if cur.rowcount != 1:
                     cur.execute(
-                        "SELECT rescan_owner_token,is_active,rescan_queue_built "
-                        "FROM routing WHERE id=%s FOR UPDATE", (int(rule_id),),
-                    )
-                    current = cur.fetchone()
-                    if not current or current["rescan_owner_token"] is not None:
-                        raise RuntimeError(
-                            "Владелец пересканирования изменился; нельзя менять статус правила"
-                        )
-                    cur.execute(
                         """SELECT (new_value_json::jsonb->>'is_active')::boolean AS restored_active
                            FROM audit_log WHERE rule_id=%s
                            AND event_type IN ('rule_rescan_release','rule_rescan_recovered',
@@ -5077,33 +5079,45 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         (int(rule_id), release_key, bool(queue_rebuilt)),
                     )
                     receipt = cur.fetchone()
-                    if receipt is not None:
-                        restored_active = bool(receipt["restored_active"])
-                    elif (bool(current["is_active"]) != restored_active
-                          or (queue_rebuilt and not current["rescan_queue_built"])):
+                    if receipt is None:
                         raise RuntimeError(
                             "Владелец пересканирования изменился; нельзя менять статус правила"
                         )
-                elif operation is not None:
-                    # A durable release receipt shares the transaction with the owner
-                    # release, including the actual status of a changed route.
+                    restored_active = bool(receipt["restored_active"])
+                else:
+                    # Every release, including the low-level contract, has an
+                    # exact token receipt. Current routing flags prove nothing.
                     event_type = "rule_rescan_release"
-                    if int(operation["attempt"]) > 1:
+                    attempt = int(operation["attempt"]) if operation else 0
+                    if attempt > 1:
                         event_type = ("rule_rescan_recovered" if queue_rebuilt
                                       else "rule_rescan_recovery_failed")
-                    new_value = ({"mode": operation["mode"], "phase": "rebuilt",
-                                  "is_active": restored_active} if queue_rebuilt
-                                 else {"mode": operation["mode"], "is_active": False})
-                    extra = {"attempt": operation["attempt"], "release_key": release_key,
+                    new_value = {"is_active": restored_active}
+                    extra = {"attempt": attempt, "release_key": release_key,
                              "queue_rebuilt": bool(queue_rebuilt)}
-                    if not queue_rebuilt:
-                        extra["reason"] = "retry_exhausted"
+                    if operation is not None:
+                        new_value["mode"] = operation["mode"]
+                        if queue_rebuilt:
+                            new_value["phase"] = "rebuilt"
+                        else:
+                            extra["reason"] = "retry_exhausted"
+                            # Keep the original cursor across manual retries even
+                            # if another rule has inserted older deliveries.
+                            if (operation["mode"] == "keep"
+                                    and tuple(operation["scope"]) == self._rescan_scope(route)
+                                    and operation["tenant_id"] == route["tenant_id"]):
+                                retry = {**operation, "phase": "retry_pending"}
+                                cur.execute(
+                                    "UPDATE routing SET rescan_operation=%s::jsonb WHERE id=%s",
+                                    (_json_dumps(retry), int(rule_id)),
+                                )
                     cur.execute(
                         """INSERT INTO audit_log(
                             created_at,event_type,rule_id,admin_id,source_id,source_thread_id,
                             target_id,target_thread_id,new_value_json,extra_json,tenant_id
                         ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                        (utc_now_iso(), event_type, int(rule_id), int(operation["actor_id"]),
+                        (utc_now_iso(), event_type, int(rule_id),
+                         int(operation["actor_id"]) if operation else None,
                          str(route["source_id"]), route["source_thread_id"],
                          str(route["target_id"]), route["target_thread_id"],
                          _json_dumps(new_value), _json_dumps(extra), route["tenant_id"]),
@@ -5473,6 +5487,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     raise RuntimeError("Есть незавершённая публикация или реакция")
                 cur.execute("DELETE FROM deliveries WHERE rule_id = %s", (rule_id,))
                 count = int(cur.rowcount or 0)
+                cur.execute("UPDATE routing SET rescan_operation=NULL WHERE id=%s", (rule_id,))
             conn.commit()
             return count
 
@@ -5931,10 +5946,12 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 cur.execute(
                     """
                     UPDATE routing
-                    SET mode = %s
+                    SET mode = %s, rescan_operation=CASE
+                        WHEN rescan_owner_token IS NULL AND mode IS DISTINCT FROM %s THEN NULL
+                        ELSE rescan_operation END
                     WHERE id = %s
                     """,
-                    (mode, rule_id),
+                    (mode, mode, rule_id),
                 )
                 updated = cur.rowcount > 0
             conn.commit()
@@ -10169,7 +10186,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     cur.execute(
                         """
                         UPDATE routing
-                        SET next_run_at = %s
+                        SET next_run_at = %s, rescan_operation=NULL
                         WHERE id = %s
                         """,
                         (now_iso, rule_id),

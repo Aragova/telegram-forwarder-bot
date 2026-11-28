@@ -85,7 +85,8 @@ def test_recovery_stop_event_wakes_supervisor_without_waiting_for_period():
             return []
         ns = {"asyncio": asyncio, "runtime_ownership": SimpleNamespace(can_poll=True),
               "db": SimpleNamespace(list_expired_rule_rescans=Mock()),
-              "run_db": AsyncMock(side_effect=read), "logger": logging.getLogger(__name__)}
+              "run_db": AsyncMock(side_effect=read), "logger": logging.getLogger(__name__),
+              "rescan_recovery_job": None}
         exec(compile(ast.Module(body=[fn], type_ignores=[]), "bot.py", "exec"), ns)
         supervisor = asyncio.create_task(ns["_rescan_recovery_loop"](stop))
         await entered.wait()
