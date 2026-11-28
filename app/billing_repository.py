@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from math import isfinite
 
 from app.repository_models import utc_now_iso
 from app.repository_split_base import RepositorySplitBase
@@ -39,6 +40,8 @@ class BillingRepository(RepositorySplitBase):
         code = str(tariff_code or "").lower()
         period = int(period_months)
         if code not in {"basic", "pro"} or period not in {1, 3, 6, 12}:
+            return False
+        if not isfinite(new_price) or not 0 < new_price <= 100000:
             return False
         old_price = self.get_billing_usd_prices().get(code, {}).get(period)
         self.create_billing_event(
@@ -98,6 +101,15 @@ class BillingRepository(RepositorySplitBase):
         if kind_code not in {"stars", "crypto"} or code not in {"basic", "pro"} or period not in {1, 3, 6, 12}:
             return False
         if not isinstance(value, dict):
+            return False
+        raw_amount = value.get("amount", value.get("stars", value.get("value")))
+        try:
+            amount = float(raw_amount)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not isfinite(amount) or not 0 < amount <= 10000000:
+            return False
+        if kind_code == "stars" and not amount.is_integer():
             return False
         old_value = self.get_billing_fixed_prices(kind_code).get(code, {}).get(period)
         self.create_billing_event(
@@ -201,6 +213,8 @@ class BillingRepository(RepositorySplitBase):
     def set_billing_exchange_rate(self, *, currency: str, new_value: float, admin_id: int | None = None) -> bool:
         code = str(currency or "").upper()
         if code not in {"RUB", "EUR", "UAH"}:
+            return False
+        if not isfinite(new_value) or not 0 < new_value <= 100000:
             return False
         old_value = self.get_billing_exchange_rates().get(f"USD_TO_{code}")
         self.create_billing_event(

@@ -65,6 +65,21 @@ def _log_top_time_auto_postponed(repo, *, rule, pause: dict, resume_at: str, nex
 _last_usage_reset_day: str | None = None
 
 
+def _video_tenant_throttled(repo, fairness_service, tenant_id, system_mode):
+    if hasattr(repo, "get_tenant_heavy_admission_counts"):
+        counts = repo.get_tenant_heavy_admission_counts(tenant_id)
+        pending, processing, retry = (int(counts.get(key) or 0) for key in ("pending", "processing", "retry"))
+    else:
+        pending = int((repo.get_tenant_job_counts(queue="heavy") if hasattr(repo, "get_tenant_job_counts") else {}).get(tenant_id) or 0)
+        processing = int((repo.get_tenant_processing_counts(queue="heavy") if hasattr(repo, "get_tenant_processing_counts") else {}).get(tenant_id) or 0)
+        retry = int((repo.get_tenant_retry_counts(queue="heavy") if hasattr(repo, "get_tenant_retry_counts") else {}).get(tenant_id) or 0)
+    return fairness_service.should_throttle_tenant(
+        tenant_id=tenant_id, system_mode=system_mode, queue="heavy",
+        tenant_pending=pending, tenant_processing=processing,
+        tenant_retry=retry, tenant_heavy_pending=pending,
+    )
+
+
 async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = True) -> dict[str, int]:
     if not enabled:
         return {"created": 0, "duplicates": 0, "checked_rules": 0}
@@ -118,14 +133,14 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
         if not due:
             continue
 
-        decision = top_time_guard.build_guard_decision(rule, at_iso=due_iso)
+        decision = await asyncio.to_thread(top_time_guard.build_guard_decision, rule, at_iso=due_iso)
         if decision.get("blocked") is True:
             resume_at = decision.get("resume_at")
             if resume_at:
                 next_run_at = _top_time_resume_next_run_iso(str(resume_at))
                 await asyncio.to_thread(repo.update_rule_next_run_at, int(rule.id), next_run_at)
-                _log_top_time_auto_postponed(
-                    repo,
+                await asyncio.to_thread(
+                    _log_top_time_auto_postponed, repo,
                     rule=rule,
                     pause=decision.get("pause") or {},
                     resume_at=str(resume_at),
@@ -133,9 +148,11 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
                 )
             continue
 
-        tenant_id = int(due.get("tenant_id") or getattr(repo, "get_rule_tenant_id", lambda _x: 1)(int(rule.id)) or 1)
+        tenant_id = int(due.get("tenant_id") or await asyncio.to_thread(
+            getattr(repo, "get_rule_tenant_id", lambda _x: 1), int(rule.id),
+        ) or 1)
 
-        can_enqueue, enqueue_reason = limit_service.can_enqueue_job(tenant_id)
+        can_enqueue, enqueue_reason = await asyncio.to_thread(limit_service.can_enqueue_job, tenant_id)
         if not can_enqueue:
             logger.warning(
                 "Scheduler пропустил публикацию: лимит тарифа tenant_id=%s reason=%s",
@@ -143,10 +160,10 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
                 enqueue_reason or "unknown",
             )
             if hasattr(repo, "create_billing_event"):
-                sub = subscription_service.get_active_subscription(int(tenant_id)) or {}
-                usage_today = usage_service.get_today_usage(int(tenant_id)) or {}
-                repo.create_billing_event(
-                    int(tenant_id),
+                sub = await asyncio.to_thread(subscription_service.get_active_subscription, int(tenant_id)) or {}
+                usage_today = await asyncio.to_thread(usage_service.get_today_usage, int(tenant_id)) or {}
+                await asyncio.to_thread(
+                    repo.create_billing_event, int(tenant_id),
                     "subscription_blocked_action" if str(enqueue_reason or "").strip().lower() == "подписка неактивна" else "limit_job_blocked",
                     event_source="scheduler_runtime",
                     metadata={
@@ -164,24 +181,12 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
 
         delivery_id = int(due["delivery_id"])
 
-        queue_name = "heavy" if rule_mode == "video" else "light"
-        pending_by_tenant = repo.get_tenant_job_counts(queue=queue_name) if hasattr(repo, "get_tenant_job_counts") else {}
-        processing_by_tenant = repo.get_tenant_processing_counts(queue=queue_name) if hasattr(repo, "get_tenant_processing_counts") else {}
-        retry_by_tenant = repo.get_tenant_retry_counts(queue=queue_name) if hasattr(repo, "get_tenant_retry_counts") else {}
-        heavy_pending_by_tenant = repo.get_tenant_job_counts(queue="heavy") if hasattr(repo, "get_tenant_job_counts") else {}
-
-        tenant_is_throttled = fairness_service.should_throttle_tenant(
-            tenant_id=tenant_id,
-            system_mode=(load.mode if rule_mode == "video" else "normal"),
-            queue=queue_name,
-            tenant_pending=int(pending_by_tenant.get(tenant_id) or 0),
-            tenant_processing=int(processing_by_tenant.get(tenant_id) or 0),
-            tenant_retry=int(retry_by_tenant.get(tenant_id) or 0),
-            tenant_heavy_pending=int(heavy_pending_by_tenant.get(tenant_id) or 0),
-        )
-        if tenant_is_throttled and rule_mode == "video":
-            logger.warning("Scheduler временно ограничил tenant #%s: превышена нагрузка", tenant_id)
-            continue
+        # Only video rules can be deferred by this check, and normal mode
+        # always allows them. Preserve per-tenant backpressure in degraded mode.
+        if rule_mode == "video" and str(load.mode or "normal").strip().lower() != "normal":
+            if await asyncio.to_thread(_video_tenant_throttled, repo, fairness_service, tenant_id, load.mode):
+                logger.warning("Scheduler временно ограничил tenant #%s: превышена нагрузка", tenant_id)
+                continue
 
         job_id: int | None = None
         if hasattr(repo, "take_due_delivery_and_create_job"):

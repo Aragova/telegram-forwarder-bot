@@ -8808,6 +8808,22 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 counts[status] = int(row.get("cnt") or 0)
         return counts
 
+    def get_tenant_heavy_admission_counts(self, tenant_id: int) -> dict[str, int]:
+        """Current heavy backpressure counts for one tenant in a single query."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    SELECT
+                        COUNT(*) FILTER (WHERE j.status IN ('pending','retry')) AS pending,
+                        COUNT(*) FILTER (WHERE j.status IN ('leased','processing')) AS processing,
+                        COUNT(*) FILTER (WHERE j.status='retry') AS retry
+                    FROM jobs j
+                    WHERE j.queue='heavy' AND {_JOB_TENANT_SQL}=%s
+                      AND j.status IN ('pending','retry','leased','processing')
+                    """, (int(tenant_id),))
+                row = cur.fetchone()
+        return {key: int(row[key] or 0) for key in ("pending", "processing", "retry")}
+
     def get_tenant_job_counts(self, queue: str | None = None) -> dict[int, int]:
         queue_name = str(queue or "").strip().lower()
         use_queue_filter = queue_name in {"light", "heavy"}
