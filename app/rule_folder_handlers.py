@@ -13,6 +13,7 @@ from typing import Any
 from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 
+from app.keyboards import format_rule_channel_choice
 from app.rule_folders_repository import normalize_folder_name
 from app.ui_navigation import ack_navigation, callback_locks, is_navigation
 from app.rich_rule_buttons import (
@@ -679,7 +680,7 @@ def register_rule_folder_handlers(dp: Dispatcher, ctx: Any) -> None:
                     ctx.user_states[user_id] = {"action": "pick_rule_source", "sources": choices}
                     keyboard = ReplyKeyboardMarkup(
                         keyboard=[
-                            [KeyboardButton(text=f"📤 {i}. {s.title}")]
+                            [KeyboardButton(text=f"📤 {i}. {format_rule_channel_choice(s.title, s.thread_id)}")]
                             for i, s in enumerate(choices, 1)
                         ] + [[KeyboardButton(text="❌ Отмена")]],
                         resize_keyboard=True,

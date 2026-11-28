@@ -54,6 +54,7 @@ from app.transport_policy import (
     build_sender_telethon_policy,
 )
 from app.keyboards import (
+    format_rule_channel_choice,
     get_cancel_keyboard,
     get_channel_type_keyboard,
     get_channels_menu,
@@ -7981,7 +7982,7 @@ async def handle_add_rule(message: Message):
     if not is_admin_user(user_id):
         await reply_message_safe(message, "Создание правила доступно через inline-кнопку «➕ Добавить правило» в разделе «⚙️ Мои правила».", reply_markup=ReplyKeyboardRemove())
         return
-    keyboard = [[KeyboardButton(text=f"📤 {i}. {s.title}{f' (тема {s.thread_id})' if s.thread_id else ''}")] for i, s in enumerate(sources, 1)]
+    keyboard = [[KeyboardButton(text=f"📤 {i}. {format_rule_channel_choice(s.title, s.thread_id)}")] for i, s in enumerate(sources, 1)]
     keyboard.append([KeyboardButton(text="❌ Отмена")])
     user_states[message.from_user.id] = {"action": "pick_rule_source", "sources": sources}
     await reply_message_safe(message, "Выберите источник", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True))
@@ -8004,7 +8005,7 @@ async def handle_pick_rule_source(message: Message):
         await reply_message_safe(message, "Нет получателей", reply_markup=get_main_menu())
         reset_user_state(message.from_user.id)
         return
-    keyboard = [[KeyboardButton(text=f"📥 {j}. {t.title}{f' (тема {t.thread_id})' if t.thread_id else ''}")] for j, t in enumerate(targets, 1)]
+    keyboard = [[KeyboardButton(text=f"📥 {j}. {format_rule_channel_choice(t.title, t.thread_id)}")] for j, t in enumerate(targets, 1)]
     keyboard.append([KeyboardButton(text="❌ Отмена")])
     state["action"] = "pick_rule_target"
     state["choice"] = {"source_id": choice.channel_id, "source_thread_id": choice.thread_id}
@@ -8130,7 +8131,7 @@ async def handle_user_rule_pick_source_callback(callback: CallbackQuery):
     state["choice"] = {"source_id": choice.channel_id, "source_thread_id": choice.thread_id}
     state["targets"] = targets
     rows = [
-        [InlineKeyboardButton(text=f"📥 {i}. {t.title}{f' (тема {t.thread_id})' if t.thread_id else ''}", callback_data=f"user_rule_pick_target:{i - 1}")]
+        [InlineKeyboardButton(text=f"📥 {i}. {format_rule_channel_choice(t.title, t.thread_id)}", callback_data=f"user_rule_pick_target:{i - 1}")]
         for i, t in enumerate(targets, 1)
     ]
     rows.append([InlineKeyboardButton(text="➕ Добавить получатель", callback_data="user_targets_add")])

@@ -3,6 +3,11 @@ from __future__ import annotations
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 
+def format_rule_channel_choice(title: str, thread_id: int | None) -> str:
+    """Display a channel or identify a specific forum topic in rule pickers."""
+    return f"{title} · ID темы: {thread_id}" if thread_id else title
+
+
 def _kb(
     rows: list[list[str]],
     placeholder: str | None = None,
