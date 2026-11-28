@@ -560,6 +560,12 @@ async def _finish_rule_rescan_with_retry(rule_id: int, *, was_active: bool,
             await asyncio.sleep(1.0)
 
 
+def _rescan_wait_keyboard(rule_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")
+    ]])
+
+
 async def _report_rescan_release_failure(*, rule_id: int, chat_id: int,
                                           message_id: int, scan_complete: bool) -> None:
     logger.exception("RESCAN_RELEASE_FAILED | rule_id=%s | rebuilt=%s", rule_id, scan_complete)
@@ -571,6 +577,7 @@ async def _report_rescan_release_failure(*, rule_id: int, chat_id: int,
         text=(f"⚠️ Правило #{rule_id}. {status}\n"
               "Не удалось подтвердить восстановление статуса правила. "
               "Продолжение проверит автоматическое восстановление; не запускайте повторно."),
+        reply_markup=_rescan_wait_keyboard(rule_id),
     )
 
 
@@ -629,6 +636,7 @@ async def _report_rescan_unknown(*, rule_id: int, chat_id: int, message_id: int)
         chat_id=chat_id, message_id=message_id,
         text=(f"⚠️ Правило #{rule_id}. Результат перестройки очереди неизвестен.\n"
               "Правило остановлено. Автоматическое восстановление проверит результат; не запускайте повторно."),
+        reply_markup=_rescan_wait_keyboard(rule_id),
     )
 
 
@@ -829,6 +837,7 @@ async def _run_rescan_rule_job(
                 text=f"⚠️ Пересканирование правила #{rule_id} прервано.\n\n"
                      "Правило остановлено до автоматического восстановления."
                      + (f"\nПричина: {str(exc)[:300]}" if isinstance(exc, RescanBlocked) else ""),
+                reply_markup=_rescan_wait_keyboard(rule_id),
             )
         else:
             await _show_rule_processing_screen(
@@ -7206,9 +7215,9 @@ async def handle_enable_rule_callback(callback: CallbackQuery):
         )
     else:
         await answer_callback_safe_once(callback, "❌ Не удалось включить правило", show_alert=True)
-        await edit_message_text_safe(
-            message=callback.message,
-            text="❌ Не удалось включить правило",
+        await refresh_rule_card_for_actor(
+            callback, rule_id,
+            prefix_text="❌ Правило не включено. Если пересканирование прервано, завершите его через существующее меню пересканирования.",
         )
 
 @dp.callback_query(lambda c: c.data.startswith("delete_rule:") or c.data.startswith("user_rule_delete:") or c.data.startswith("delete_rule_execute:"))
