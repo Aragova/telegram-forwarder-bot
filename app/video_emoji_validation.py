@@ -20,7 +20,10 @@ from telethon import functions, types, utils
 from telethon.errors import DocumentInvalidError, FloodWaitError, SlowModeWaitError
 
 from .runtime_utils import run_db, wait_for_db_task
-from .send_intent import DiagnosticPublicationState, current_publication_intent, diagnostic_rpc_scope
+from .send_intent import (
+    DiagnosticPublicationState, current_publication_intent, diagnostic_rpc_scope,
+    unwrap_publication_request,
+)
 from .subprocess_safety import communicate_safely
 from .transport_policy import TransportRateLimited
 
@@ -233,7 +236,8 @@ class _ProbeSession:
         except DocumentInvalidError as exc:
             # A rejection in some other RPC is not evidence against an emoji.
             if (self.fence.uncertain
-                    or not isinstance(getattr(exc, "request", None), functions.messages.SendMediaRequest)):
+                    or not isinstance(unwrap_publication_request(getattr(exc, "request", None)),
+                                      functions.messages.SendMediaRequest)):
                 raise
             return False
         if not self.fence.uncertain:

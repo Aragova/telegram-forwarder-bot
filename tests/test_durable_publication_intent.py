@@ -396,3 +396,109 @@ def test_diagnostic_preflight_runs_at_publication_boundary_without_fencing_rejec
             assert len(client.calls) == 1
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("album", [False, True])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_custom_emoji_rejection_reuses_media_and_preserves_text(album, wrapped):
+    from telethon.errors import DocumentInvalidError
+
+    class DistinctIdsRepository(MemoryRepository):
+        def get_or_create_mtproto_random_ids(self, key, ordinal, fingerprint, count):
+            entry = self.ids.setdefault(
+                (key, ordinal), (fingerprint, list(range(100 + ordinal * 10, 100 + ordinal * 10 + count)))
+            )
+            assert entry[0] == fingerprint
+            return entry[1]
+
+    class RejectOnce(RawTelethon):
+        async def __call__(self, request, ordered=False, flood_sleep_threshold=None):
+            members = request.multi_media if album else [request]
+            self.calls.append([
+                (m.message, tuple(m.entities or []), m.media, m.random_id)
+                for m in members
+            ])
+            if len(self.calls) == 1:
+                rejected = functions.InvokeWithoutUpdatesRequest(request) if wrapped else request
+                raise DocumentInvalidError(request=rejected)
+            return object()
+
+    async def scenario():
+        repo = DistinctIdsRepository()
+        client = publication_client_class(RejectOnce)()
+        emoji = types.MessageEntityCustomEmoji(offset=0, length=1, document_id=5420163708674384414)
+        bold = types.MessageEntityBold(offset=1, length=3)
+        media = types.InputMediaDocument(id=types.InputDocument(id=1, access_hash=2, file_reference=b"ref"))
+        if album:
+            request = functions.messages.SendMultiMediaRequest(
+                peer=types.InputPeerChannel(9, 10),
+                multi_media=[
+                    types.InputSingleMedia(media=media, message="➕abc", entities=[emoji, bold]),
+                    types.InputSingleMedia(media=media, message="def", entities=[types.MessageEntityItalic(0, 3)]),
+                ],
+            )
+        else:
+            request = functions.messages.SendMediaRequest(
+                peer=types.InputPeerChannel(9, 10), media=media,
+                message="➕abc", entities=[emoji, bold],
+            )
+        intent = PublicationIntent(repo, "emoji-fallback")
+        with publication_scope(intent):
+            await client(request)
+            assert intent.blocked and intent.possible_write and not intent.uncertain
+            with pytest.raises(PublicationAlreadyAttempted):
+                await client(request)
+        assert len(client.calls) == 2
+        first, second = client.calls
+        assert first[0][0] == second[0][0] == "➕abc"
+        assert first[0][1] == (emoji, bold)
+        assert second[0][1] == (bold,)
+        assert first[0][2] is second[0][2] is media
+        assert first[0][3] != second[0][3]
+        if album:
+            assert first[1][:3] == second[1][:3]
+            assert first[1][3] != second[1][3]
+        assert len(repo.ids) == 2
+        assert repo.ids[("emoji-fallback", 0)][0] != repo.ids[("emoji-fallback", 1)][0]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["timeout", "unrelated", "no_emoji", "twice", "diagnostic", "fallback_timeout"])
+def test_custom_emoji_fallback_is_bounded_and_fail_closed(failure):
+    from app.send_intent import DiagnosticPublicationState, diagnostic_rpc_scope
+    from telethon.errors import DocumentInvalidError
+
+    class Rejecting(RawTelethon):
+        async def __call__(self, request, ordered=False, flood_sleep_threshold=None):
+            self.calls.append(request)
+            if failure == "timeout" or (failure == "fallback_timeout" and len(self.calls) == 2):
+                raise TimeoutError("response lost")
+            rejected = functions.updates.GetStateRequest() if failure == "unrelated" else request
+            raise DocumentInvalidError(request=rejected)
+
+    async def scenario():
+        client = publication_client_class(Rejecting)()
+        request = functions.messages.SendMediaRequest(
+            peer=types.InputPeerChannel(9, 10), media=types.InputMediaEmpty(), message="➕",
+            entities=[] if failure == "no_emoji" else [
+                types.MessageEntityCustomEmoji(offset=0, length=1, document_id=1),
+            ],
+        )
+        intent = PublicationIntent(MemoryRepository(), "failure")
+        if failure == "diagnostic":
+            state = DiagnosticPublicationState()
+            with diagnostic_rpc_scope(state), pytest.raises(DocumentInvalidError):
+                await client(request)
+            assert not state.uncertain
+        else:
+            error = TimeoutError if failure in {"timeout", "fallback_timeout"} else DocumentInvalidError
+            with publication_scope(intent), pytest.raises(error):
+                await client(request)
+            if failure in {"timeout", "fallback_timeout"}:
+                assert intent.blocked and intent.uncertain
+                with publication_scope(intent), pytest.raises(PublicationAlreadyAttempted):
+                    await client(request)
+        assert len(client.calls) == (2 if failure in {"twice", "fallback_timeout"} else 1)
+
+    asyncio.run(scenario())
