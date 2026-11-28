@@ -2418,8 +2418,15 @@ def test_durable_rescan_serializes_schedule_and_rejects_pre_lock_confirmation(re
             cur.execute("UPDATE routing SET next_run_at=%s WHERE id=%s",
                         ("2026-11-29T13:00:00+00:00", rule_id))
     assert repo.issue_rule_rescan_confirmation(rule_id, 1, "before-lock")
-    _, legacy = repo.begin_rule_rescan(rule_id)
+    _, local = repo.begin_rule_rescan(rule_id)
     assert not repo.consume_rule_rescan_confirmation(rule_id, 1, "before-lock")
+    # Simulate a lock left by the previous binary, not a live local owner.
+    legacy = uuid4().hex
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET rescan_owner_token=%s WHERE id=%s AND rescan_owner_token=%s",
+                        (legacy, rule_id, local))
+            assert cur.rowcount == 1
     _, owner = repo.begin_rule_rescan(rule_id, actor_id=1,
                                       expected_scope=(source, None, target, None, "repost"))
     assert owner != legacy
