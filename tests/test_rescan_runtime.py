@@ -80,7 +80,7 @@ def test_recovery_stop_event_wakes_supervisor_without_waiting_for_period():
     async def scenario():
         entered = asyncio.Event()
         stop = asyncio.Event()
-        async def read(*args):
+        async def read(*args, **kwargs):
             entered.set()
             return []
         ns = {"asyncio": asyncio, "runtime_ownership": SimpleNamespace(can_poll=True),

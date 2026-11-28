@@ -616,7 +616,7 @@ async def _verify_rescan_live_arrivals(rule_id: int, rule, watermark: int,
 
 async def _write_rescan_audit(rule_id: int, admin_id: int, audit: dict) -> None:
     try:
-        await run_db(db.log_rule_change, rule_id=rule_id, admin_id=admin_id, **audit)
+        await rescan_db(run_db, db.log_rule_change, rule_id=rule_id, admin_id=admin_id, **audit)
     except Exception:
         logger.exception("RESCAN_AUDIT_FAILED | rule_id=%s", rule_id)
 
