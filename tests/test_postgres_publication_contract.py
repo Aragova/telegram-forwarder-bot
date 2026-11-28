@@ -2387,7 +2387,19 @@ def test_durable_rescan_recovery_fences_old_owner_and_committed_phase(repo, fres
 
 def test_legacy_rescan_is_not_auto_replayed_and_existing_button_can_replace_owner(repo):
     _, rule_id, _, _, source, target = seed(repo, uuid4().int % 10**10)
-    _, legacy = repo.begin_rule_rescan(rule_id, fresh=True)
+    from app.rescan_safety import RescanBlocked
+
+    # A low-level call in the current binary is still a real owner.
+    _, local = repo.begin_rule_rescan(rule_id, fresh=True)
+    with pytest.raises(RescanBlocked, match="уже выполняется"):
+        repo.begin_rule_rescan(rule_id, actor_id=1)
+    # Simulate the persisted token left by an old, fully stopped binary.
+    legacy = uuid4().hex
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET rescan_owner_token=%s WHERE id=%s AND rescan_owner_token=%s",
+                        (legacy, rule_id, local))
+            assert cur.rowcount == 1
     assert repo.claim_interrupted_rule_rescan(rule_id) is None
     assert rule_id not in repo.list_expired_rule_rescans(limit=100)
     assert repo.issue_rule_rescan_confirmation(rule_id, 1, "legacy-confirm")
@@ -2544,6 +2556,9 @@ def test_failed_rescan_requires_verified_rebuild_before_activation(repo, fresh):
     assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=token) is False
     assert not repo.set_rule_active(rule_id, True)
     assert not repo.activate_rule_with_backfill(rule_id)
+    from app.rescan_safety import RescanBlocked
+    with pytest.raises(RescanBlocked, match="существующее меню"):
+        repo.begin_rule_rescan(rule_id)
     assert repo.update_rule_mode(rule_id, "video")
     assert repo.update_rule_mode(rule_id, "repost")
     assert not repo.activate_rule_with_backfill(rule_id)
