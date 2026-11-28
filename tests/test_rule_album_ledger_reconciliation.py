@@ -403,7 +403,9 @@ def test_rescan_revokes_jobs_already_in_flight():
 def test_rescan_second_owner_rejected_across_modes():
     repo, cursor, conn = _rescan_repo()
     was_active, owner = repo.begin_rule_rescan(214)
-    assert was_active is True and len(owner) == 32
+    assert was_active is True and owner.startswith("local:")
+    assert len(owner.removeprefix("local:")) == 32
+    assert all(c in "0123456789abcdef" for c in owner.removeprefix("local:"))
     assert cursor.owner == owner and cursor.active is False
     with pytest.raises(RuntimeError, match="уже выполняется"):
         repo.begin_rule_rescan(214)
