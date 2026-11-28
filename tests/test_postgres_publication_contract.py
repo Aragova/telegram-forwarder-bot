@@ -2520,3 +2520,70 @@ def test_exact_release_receipt_survives_new_owner_and_rejects_revoked_token(repo
     assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=third) is False
     with pytest.raises(RuntimeError, match="Владелец"):
         repo.finish_rule_rescan(rule_id, was_active=False, owner_token=second)
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+def test_failed_rescan_requires_verified_rebuild_before_activation(repo, fresh):
+    key, rule_id, _, source_ids, source, target = seed(repo, uuid4().int % 10**10)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+            cur.execute("UPDATE routing SET rescan_queue_built=TRUE,is_active=TRUE WHERE id=%s", (rule_id,))
+    scope = (source, None, target, None, "repost")
+    _, token = repo.begin_rule_rescan(rule_id, fresh=fresh, actor_id=1, expected_scope=scope)
+    old, new = source_ids[0] - 1, source_ids[0] + 1
+    repo.save_post_batch(
+        [(old, source, None, {"media_kind": "text"}, None),
+         (new, source, None, {"media_kind": "text"}, None)],
+        preserve_existing_deliveries=True, rescan_owner=(rule_id, token),
+    )
+    for _ in range(3):
+        _expire_rescan_lease(repo, rule_id)
+        token, _ = repo.claim_interrupted_rule_rescan(rule_id, phase="scanning")
+    assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=token) is False
+    assert not repo.set_rule_active(rule_id, True)
+    assert not repo.activate_rule_with_backfill(rule_id)
+    assert repo.update_rule_mode(rule_id, "video")
+    assert repo.update_rule_mode(rule_id, "repost")
+    assert not repo.activate_rule_with_backfill(rule_id)
+    assert rule_id not in repo.list_expired_rule_rescans(limit=100)
+
+    # Existing keep action reads Telegram again. The older cached message
+    # is absent from Telegram and must never be resurrected by activation.
+    was_active, token = repo.begin_rule_rescan(rule_id, actor_id=1, expected_scope=scope)
+    op = repo.get_rule_rescan_operation(rule_id, token)
+    assert was_active is False
+    repo.rebuild_rule_keep_position(
+        rule_id, owner_token=token, before_message_id=op["before_message_id"],
+        allowed_message_ids={*source_ids, new},
+        include_newer_than_message_id=op["watermark"], expected_scope=scope,
+    )
+    assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=token, queue_rebuilt=True) is False
+    assert repo.activate_rule_with_backfill(rule_id)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT p.message_id FROM deliveries d JOIN posts p ON p.id=d.post_id
+                           WHERE d.rule_id=%s AND d.status='pending'""", (rule_id,))
+            assert {row["message_id"] for row in cur.fetchall()} == {*source_ids, new}
+
+
+def test_recovery_claim_skips_locked_route(repo):
+    _, rule_id, _, _, _, _ = seed(repo, uuid4().int % 10**10)
+    _, token = repo.begin_rule_rescan(rule_id, actor_id=1)
+    _expire_rescan_lease(repo, rule_id)
+
+    def claim():
+        try:
+            return repo.claim_interrupted_rule_rescan(rule_id, phase="scanning")
+        finally:
+            repo.client.close_thread_connection()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM routing WHERE id=%s FOR UPDATE", (rule_id,))
+                # A blocked route must not stall the supervisor.
+                assert pool.submit(claim).result(timeout=3) is None
+        claimed = pool.submit(claim).result(timeout=3)
+    assert claimed is not None and claimed[0] != token
